@@ -12,23 +12,30 @@ export interface ProviderCheckResult {
   code?: string;
 }
 
-export interface ProviderMemoryFile {
-  sourcePath: string;
+export interface ProviderFileMaterialization {
+  sourcePath?: string;
   targetPath: string;
   content?: string;
+}
+
+export interface ProviderDirectorySync {
+  sourcePath: string;
+  targetPath: string;
 }
 
 export interface PrepareSessionContext {
   projectRoot: string;
   dataDir: string;
   groupFolder: string;
+  groupDir: string;
   isMain: boolean;
   sessionId?: string;
 }
 
 export interface PreparedSession {
   providerStateDir: string;
-  memoryFiles: ProviderMemoryFile[];
+  files: ProviderFileMaterialization[];
+  directorySyncs?: ProviderDirectorySync[];
   metadata?: Record<string, unknown>;
 }
 
@@ -40,8 +47,10 @@ export interface ProviderMount {
 
 export interface BuildContainerSpecContext {
   projectRoot: string;
+  dataDir: string;
   groupFolder: string;
   isMain: boolean;
+  preparedSession: PreparedSession;
 }
 
 export interface ProviderContainerSpec {
@@ -63,9 +72,15 @@ export interface RuntimeInvocationContext {
 }
 
 export interface ProviderRuntimeInput {
-  providerId: string;
+  prompt: string;
   sessionId?: string;
-  payload?: Record<string, unknown>;
+  groupFolder: string;
+  chatJid: string;
+  isMain: boolean;
+  isScheduledTask?: boolean;
+  assistantName?: string;
+  script?: string;
+  providerData?: Record<string, unknown>;
 }
 
 export interface RemoteControlContext {

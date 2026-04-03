@@ -222,10 +222,13 @@ describe.sequential('container agent runner global memory', () => {
       const result = await runRunner(
         ['--import', 'tsx', '--loader', runtimeWorkspace.loaderPath, runnerEntryPoint],
         {
-          prompt: 'Use the shared context.',
-          groupFolder: 'test-group',
-          chatJid: 'test@g.us',
-          isMain: false,
+          providerId: 'claude-code',
+          runtimeInput: {
+            prompt: 'Use the shared context.',
+            groupFolder: 'test-group',
+            chatJid: 'test@g.us',
+            isMain: false,
+          },
         },
         {
           ...process.env,

@@ -2,7 +2,12 @@ import { ChildProcess } from 'child_process';
 import { CronExpressionParser } from 'cron-parser';
 import fs from 'fs';
 
-import { ASSISTANT_NAME, SCHEDULER_POLL_INTERVAL, TIMEZONE } from './config.js';
+import {
+  ASSISTANT_NAME,
+  COMPATIBILITY_AGENT_PROVIDER,
+  SCHEDULER_POLL_INTERVAL,
+  TIMEZONE,
+} from './config.js';
 import {
   ContainerOutput,
   runContainerAgent,
@@ -13,6 +18,7 @@ import {
   getDueTasks,
   getTaskById,
   logTaskRun,
+  setSession,
   updateTask,
   updateTaskAfterRun,
 } from './db.js';
@@ -73,6 +79,10 @@ export interface SchedulerDependencies {
     groupFolder: string,
   ) => void;
   sendMessage: (jid: string, text: string) => Promise<void>;
+}
+
+function getGroupProviderId(group: RegisteredGroup): string {
+  return group.providerId || COMPATIBILITY_AGENT_PROVIDER;
 }
 
 async function runTask(
@@ -152,6 +162,7 @@ async function runTask(
 
   // For group context mode, use the group's current session
   const sessions = deps.getSessions();
+  const providerId = getGroupProviderId(group);
   const sessionId =
     task.context_mode === 'group' ? sessions[task.group_folder] : undefined;
 
@@ -185,6 +196,10 @@ async function runTask(
       (proc, containerName) =>
         deps.onProcess(task.chat_jid, proc, containerName, task.group_folder),
       async (streamedOutput: ContainerOutput) => {
+        if (streamedOutput.newSessionId) {
+          sessions[task.group_folder] = streamedOutput.newSessionId;
+          setSession(task.group_folder, streamedOutput.newSessionId, providerId);
+        }
         if (streamedOutput.result) {
           result = streamedOutput.result;
           // Forward result to user (sendMessage handles formatting)
@@ -205,9 +220,15 @@ async function runTask(
 
     if (output.status === 'error') {
       error = output.error || 'Unknown error';
-    } else if (output.result) {
-      // Result was already forwarded to the user via the streaming callback above
-      result = output.result;
+    } else {
+      if (output.newSessionId) {
+        sessions[task.group_folder] = output.newSessionId;
+        setSession(task.group_folder, output.newSessionId, providerId);
+      }
+      if (output.result) {
+        // Result was already forwarded to the user via the streaming callback above
+        result = output.result;
+      }
     }
 
     logger.info(

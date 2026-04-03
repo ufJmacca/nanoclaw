@@ -23,7 +23,7 @@ function createTestProvider(id: string): AgentProvider {
     prepareSession() {
       return {
         providerStateDir: `/tmp/${id}`,
-        memoryFiles: [],
+        files: [],
       };
     },
     buildContainerSpec() {
@@ -34,7 +34,10 @@ function createTestProvider(id: string): AgentProvider {
     },
     serializeRuntimeInput() {
       return {
-        providerId: id,
+        prompt: `prompt-${id}`,
+        groupFolder: `group-${id}`,
+        chatJid: `${id}@g.us`,
+        isMain: false,
       };
     },
   };
