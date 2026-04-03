@@ -11,7 +11,8 @@ import {
   listManagedMemoryFiles,
   seedGroupMemoryFiles,
 } from '../src/agent/memory.ts';
-import { STORE_DIR } from '../src/config.ts';
+import { createProviderRegistry } from '../src/agent/provider-registry.ts';
+import { DEFAULT_AGENT_PROVIDER, STORE_DIR } from '../src/config.ts';
 import { initDatabase, setRegisteredGroup } from '../src/db.ts';
 import { isValidGroupFolder } from '../src/group-folder.ts';
 import { logger } from '../src/logger.ts';
@@ -23,6 +24,7 @@ interface RegisterArgs {
   trigger: string;
   folder: string;
   channel: string;
+  provider: string;
   requiresTrigger: boolean;
   isMain: boolean;
   assistantName: string;
@@ -35,6 +37,7 @@ function parseArgs(args: string[]): RegisterArgs {
     trigger: '',
     folder: '',
     channel: 'whatsapp', // backward-compat: pre-refactor installs omit --channel
+    provider: DEFAULT_AGENT_PROVIDER,
     requiresTrigger: true,
     isMain: false,
     assistantName: 'Andy',
@@ -56,6 +59,9 @@ function parseArgs(args: string[]): RegisterArgs {
         break;
       case '--channel':
         result.channel = (args[++i] || '').toLowerCase();
+        break;
+      case '--provider':
+        result.provider = (args[++i] || '').trim().toLowerCase();
         break;
       case '--no-trigger-required':
         result.requiresTrigger = false;
@@ -94,6 +100,20 @@ export async function run(args: string[]): Promise<void> {
     process.exit(4);
   }
 
+  try {
+    createProviderRegistry().getProvider(parsed.provider);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    emitStatus('REGISTER_CHANNEL', {
+      STATUS: 'failed',
+      ERROR: 'invalid_provider',
+      PROVIDER: parsed.provider,
+      REASON: reason,
+      LOG: 'logs/setup.log',
+    });
+    process.exit(4);
+  }
+
   logger.info(parsed, 'Registering channel');
 
   // Ensure data and store directories exist (store/ may not exist on
@@ -111,6 +131,7 @@ export async function run(args: string[]): Promise<void> {
     added_at: new Date().toISOString(),
     requiresTrigger: parsed.requiresTrigger,
     isMain: parsed.isMain,
+    providerId: parsed.provider,
   });
 
   logger.info('Wrote registration to SQLite');
@@ -213,6 +234,7 @@ export async function run(args: string[]): Promise<void> {
     NAME: parsed.name,
     FOLDER: parsed.folder,
     CHANNEL: parsed.channel,
+    PROVIDER: parsed.provider,
     TRIGGER: parsed.trigger,
     REQUIRES_TRIGGER: parsed.requiresTrigger,
     ASSISTANT_NAME: parsed.assistantName,
