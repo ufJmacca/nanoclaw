@@ -1,18 +1,25 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import type { RegisteredGroup } from './types.js';
+import type { NewMessage, RegisteredGroup } from './types.js';
 
 const {
   deleteSession,
   ensureAgent,
+  findChannel,
   getAllRegisteredGroups,
+  getChannelFactory,
+  getRegisteredChannelNames,
   getSession,
+  restoreRemoteControl,
   runContainerAgent,
   setRegisteredGroup,
   setSession,
+  startRemoteControl,
+  stopRemoteControl,
   writeGroupsSnapshot,
   writeTasksSnapshot,
 } = vi.hoisted(() => ({
@@ -20,11 +27,17 @@ const {
   ensureAgent: vi
     .fn()
     .mockResolvedValue({ name: 'test', identifier: 'test', created: true }),
+  findChannel: vi.fn(),
   getAllRegisteredGroups: vi.fn(() => ({})),
+  getChannelFactory: vi.fn(),
+  getRegisteredChannelNames: vi.fn(() => []),
   getSession: vi.fn(() => undefined),
+  restoreRemoteControl: vi.fn(),
   runContainerAgent: vi.fn(),
   setRegisteredGroup: vi.fn(),
   setSession: vi.fn(),
+  startRemoteControl: vi.fn(),
+  stopRemoteControl: vi.fn(),
   writeGroupsSnapshot: vi.fn(),
   writeTasksSnapshot: vi.fn(),
 }));
@@ -38,8 +51,8 @@ vi.mock('@onecli-sh/sdk', () => ({
 vi.mock('./channels/index.js', () => ({}));
 
 vi.mock('./channels/registry.js', () => ({
-  getChannelFactory: vi.fn(),
-  getRegisteredChannelNames: vi.fn(() => []),
+  getChannelFactory,
+  getRegisteredChannelNames,
 }));
 
 vi.mock('./container-runner.js', () => ({
@@ -90,15 +103,15 @@ vi.mock('./ipc.js', () => ({
 
 vi.mock('./router.js', () => ({
   escapeXml: vi.fn((value: string) => value),
-  findChannel: vi.fn(),
+  findChannel,
   formatMessages: vi.fn(() => ''),
   formatOutbound: vi.fn((value: string) => value),
 }));
 
 vi.mock('./remote-control.js', () => ({
-  restoreRemoteControl: vi.fn(),
-  startRemoteControl: vi.fn(),
-  stopRemoteControl: vi.fn(),
+  restoreRemoteControl,
+  startRemoteControl,
+  stopRemoteControl,
 }));
 
 vi.mock('./sender-allowlist.js', () => ({
@@ -123,6 +136,8 @@ vi.mock('./logger.js', () => ({
 }));
 
 const ORIGINAL_CWD = process.cwd();
+const ORIGINAL_ARGV_1 = process.argv[1];
+const INDEX_MODULE_PATH = fileURLToPath(new URL('./index.ts', import.meta.url));
 
 function createTempRepo(): string {
   const repoDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-index-test-'));
@@ -160,6 +175,16 @@ async function loadIndexModule(repoDir: string) {
   return import('./index.js');
 }
 
+function resetIndexRuntimeMocks(): void {
+  findChannel.mockReset();
+  getChannelFactory.mockReset();
+  getRegisteredChannelNames.mockReset();
+  getRegisteredChannelNames.mockReturnValue([]);
+  restoreRemoteControl.mockReset();
+  startRemoteControl.mockReset();
+  stopRemoteControl.mockReset();
+}
+
 describe('startup group registration memory seeding', () => {
   afterEach(() => {
     process.chdir(ORIGINAL_CWD);
@@ -175,6 +200,7 @@ describe('startup group registration memory seeding', () => {
     setSession.mockReset();
     writeGroupsSnapshot.mockReset();
     writeTasksSnapshot.mockReset();
+    resetIndexRuntimeMocks();
   });
 
   it('seeds new groups from canonical global AGENT.md and renders CLAUDE.md from it', async () => {
@@ -342,6 +368,7 @@ describe('provider-scoped runtime sessions', () => {
     setSession.mockReset();
     writeGroupsSnapshot.mockReset();
     writeTasksSnapshot.mockReset();
+    resetIndexRuntimeMocks();
   });
 
   it('uses the current provider session after a provider switch at runtime', async () => {
@@ -460,5 +487,85 @@ describe('provider-scoped runtime sessions', () => {
       'codex-group',
       'claude-code',
     );
+  });
+});
+
+describe('provider-scoped remote control commands', () => {
+  afterEach(() => {
+    process.chdir(ORIGINAL_CWD);
+    process.argv[1] = ORIGINAL_ARGV_1;
+    vi.resetModules();
+    getAllRegisteredGroups.mockReset();
+    getAllRegisteredGroups.mockReturnValue({});
+    resetIndexRuntimeMocks();
+    vi.restoreAllMocks();
+  });
+
+  it('returns the Codex unsupported message on the real /remote-control command path', async () => {
+    // Arrange
+    const repoDir = createTempRepo();
+    const mainGroup: RegisteredGroup = {
+      name: 'Main',
+      folder: 'main',
+      trigger: '@Andy',
+      added_at: '2026-04-03T00:00:00.000Z',
+      isMain: true,
+      providerId: 'codex',
+    };
+    const sendMessage = vi.fn(async () => {});
+    const channel = {
+      name: 'test',
+      connect: vi.fn(async () => {}),
+      sendMessage,
+      isConnected: vi.fn(() => true),
+      ownsJid: vi.fn((jid: string) => jid === 'main@g.us'),
+      disconnect: vi.fn(async () => {}),
+    };
+    let channelOpts:
+      | {
+          onMessage: (chatJid: string, msg: NewMessage) => void;
+        }
+      | undefined;
+    getAllRegisteredGroups.mockReturnValue({ 'main@g.us': mainGroup });
+    getRegisteredChannelNames.mockReturnValue(['test']);
+    getChannelFactory.mockImplementation(
+      () =>
+        (opts: { onMessage: (chatJid: string, msg: NewMessage) => void }) => {
+          channelOpts = opts;
+          return channel;
+        },
+    );
+    findChannel.mockImplementation((_channels: unknown[], jid: string) =>
+      jid === 'main@g.us' ? channel : undefined,
+    );
+    startRemoteControl.mockResolvedValue({
+      ok: true,
+      url: 'https://claude.ai/code?bridge=should-not-run',
+    });
+    vi.spyOn(globalThis, 'setTimeout').mockImplementation(() => 0 as any);
+    vi.spyOn(globalThis, 'clearTimeout').mockImplementation(() => undefined);
+    process.argv[1] = INDEX_MODULE_PATH;
+
+    // Act
+    await loadIndexModule(repoDir);
+    expect(channelOpts).toBeDefined();
+    channelOpts?.onMessage('main@g.us', {
+      id: 'msg-1',
+      chat_jid: 'main@g.us',
+      sender: 'alice',
+      sender_name: 'Alice',
+      content: '/remote-control',
+      timestamp: '2026-04-03T00:00:00.000Z',
+    });
+    await vi.waitFor(() => {
+      expect(sendMessage).toHaveBeenCalledWith(
+        'main@g.us',
+        'Codex does not support remote control in NanoClaw v1.',
+      );
+    });
+
+    // Assert
+    expect(startRemoteControl).not.toHaveBeenCalled();
+    expect(sendMessage).toHaveBeenCalledTimes(1);
   });
 });
