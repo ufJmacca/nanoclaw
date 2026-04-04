@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   CANONICAL_MEMORY_FILE,
+  finalizeLegacyCanonicalMemoryOnce,
   LEGACY_CLAUDE_MEMORY_FILE,
   getGlobalMemoryPolicy,
   reconcileCompatibilityMemory,
@@ -168,6 +169,43 @@ describe('memory helper', () => {
     expect(reconciliation.status).toBe('skipped');
     expect(fs.readFileSync(canonicalPath, 'utf-8')).toBe(
       '# Canonical Global\n',
+    );
+  });
+
+  it('promotes legacy CLAUDE.md into AGENT.md once during shared template migration', () => {
+    // Arrange
+    const groupDir = createTempDir();
+    tempDirs.push(groupDir);
+    const canonicalPath = writeMemoryFile(
+      groupDir,
+      CANONICAL_MEMORY_FILE,
+      '# New Global Template\n',
+    );
+    const compatibilityPath = writeMemoryFile(
+      groupDir,
+      LEGACY_CLAUDE_MEMORY_FILE,
+      '# Existing Global Memory\n',
+    );
+
+    // Act
+    const firstMigration = finalizeLegacyCanonicalMemoryOnce({
+      targetDir: groupDir,
+    });
+    fs.writeFileSync(compatibilityPath, '# Later Compatibility Edit\n');
+    const secondMigration = finalizeLegacyCanonicalMemoryOnce({
+      targetDir: groupDir,
+    });
+
+    // Assert
+    expect(firstMigration.status).toBe('migrated');
+    expect(firstMigration.reason).toBe('legacy-promoted');
+    expect(fs.readFileSync(canonicalPath, 'utf-8')).toBe(
+      '# Existing Global Memory\n',
+    );
+    expect(secondMigration.status).toBe('skipped');
+    expect(secondMigration.reason).toBe('already-finalized');
+    expect(fs.readFileSync(canonicalPath, 'utf-8')).toBe(
+      '# Existing Global Memory\n',
     );
   });
 

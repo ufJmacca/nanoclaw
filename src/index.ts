@@ -19,7 +19,10 @@ import {
   getChannelFactory,
   getRegisteredChannelNames,
 } from './channels/registry.js';
-import { seedGroupMemoryFiles } from './agent/memory.js';
+import {
+  finalizeLegacyCanonicalMemoryOnce,
+  seedGroupMemoryFiles,
+} from './agent/memory.js';
 import {
   ContainerOutput,
   runContainerAgent,
@@ -178,9 +181,43 @@ function ensureGroupMemoryFilesReady(
   }
 }
 
+function ensureSharedMemoryTemplatesReady(): void {
+  const globalDir = path.join(GROUPS_DIR, 'global');
+  const seededMemory = seedGroupMemoryFiles({
+    targetDir: globalDir,
+    templateDir: globalDir,
+  });
+
+  for (const file of [seededMemory.canonical, seededMemory.compatibility]) {
+    if (!file.created) {
+      continue;
+    }
+
+    logger.info(
+      { file: file.path, seededFrom: file.seededFrom },
+      'Created shared memory file during startup preparation',
+    );
+  }
+
+  const migration = finalizeLegacyCanonicalMemoryOnce({
+    targetDir: globalDir,
+  });
+  if (migration.status === 'migrated') {
+    logger.info(
+      {
+        canonicalPath: migration.canonicalPath,
+        compatibilityPath: migration.compatibilityPath,
+      },
+      'Promoted legacy global CLAUDE.md into canonical AGENT.md',
+    );
+  }
+}
+
 function restoreRegisteredGroupsOnStartup(
   groups: Record<string, RegisteredGroup>,
 ): void {
+  ensureSharedMemoryTemplatesReady();
+
   for (const [jid, group] of Object.entries(groups)) {
     let groupDir: string;
     try {

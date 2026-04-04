@@ -64,6 +64,28 @@ export interface ReconcileCompatibilityMemoryResult {
   warning?: string;
 }
 
+export interface FinalizeLegacyCanonicalMemoryOptions {
+  targetDir: string;
+  compatibilityFileName?: string;
+  markerFileName?: string;
+}
+
+export interface FinalizeLegacyCanonicalMemoryResult {
+  status: 'migrated' | 'skipped';
+  reason:
+    | 'already-finalized'
+    | 'missing-canonical'
+    | 'missing-compatibility'
+    | 'identical'
+    | 'legacy-promoted';
+  canonicalPath: string;
+  compatibilityPath: string;
+  markerPath: string;
+}
+
+const LEGACY_CANONICAL_MEMORY_MARKER_FILE =
+  '.canonical-memory-migration-v1.json';
+
 function buildCanonicalDescriptor(targetDir: string): MemoryFileDescriptor {
   const canonicalPath = path.join(targetDir, CANONICAL_MEMORY_FILE);
   return {
@@ -267,6 +289,94 @@ export function getGlobalMemoryPolicy(
       CANONICAL_MEMORY_FILE,
     ),
     allowCompatibilitySyncBack: false,
+  };
+}
+
+function writeLegacyCanonicalMarker(
+  markerPath: string,
+  reason: FinalizeLegacyCanonicalMemoryResult['reason'],
+): void {
+  fs.mkdirSync(path.dirname(markerPath), { recursive: true });
+  fs.writeFileSync(
+    markerPath,
+    JSON.stringify(
+      {
+        finalizedAt: new Date().toISOString(),
+        reason,
+      },
+      null,
+      2,
+    ) + '\n',
+  );
+}
+
+export function finalizeLegacyCanonicalMemoryOnce(
+  options: FinalizeLegacyCanonicalMemoryOptions,
+): FinalizeLegacyCanonicalMemoryResult {
+  const compatibilityFileName =
+    options.compatibilityFileName || LEGACY_CLAUDE_MEMORY_FILE;
+  const markerPath = path.join(
+    options.targetDir,
+    options.markerFileName || LEGACY_CANONICAL_MEMORY_MARKER_FILE,
+  );
+  const layout = resolveMemoryLayout(options.targetDir, compatibilityFileName);
+
+  if (fs.existsSync(markerPath)) {
+    return {
+      status: 'skipped',
+      reason: 'already-finalized',
+      canonicalPath: layout.canonical.path,
+      compatibilityPath: layout.compatibility.path,
+      markerPath,
+    };
+  }
+
+  if (!layout.canonical.exists) {
+    return {
+      status: 'skipped',
+      reason: 'missing-canonical',
+      canonicalPath: layout.canonical.path,
+      compatibilityPath: layout.compatibility.path,
+      markerPath,
+    };
+  }
+
+  if (!layout.compatibility.exists) {
+    writeLegacyCanonicalMarker(markerPath, 'missing-compatibility');
+    return {
+      status: 'skipped',
+      reason: 'missing-compatibility',
+      canonicalPath: layout.canonical.path,
+      compatibilityPath: layout.compatibility.path,
+      markerPath,
+    };
+  }
+
+  const canonicalContent = fs.readFileSync(layout.canonical.path, 'utf-8');
+  const compatibilityContent = fs.readFileSync(
+    layout.compatibility.path,
+    'utf-8',
+  );
+
+  if (canonicalContent === compatibilityContent) {
+    writeLegacyCanonicalMarker(markerPath, 'identical');
+    return {
+      status: 'skipped',
+      reason: 'identical',
+      canonicalPath: layout.canonical.path,
+      compatibilityPath: layout.compatibility.path,
+      markerPath,
+    };
+  }
+
+  fs.writeFileSync(layout.canonical.path, compatibilityContent);
+  writeLegacyCanonicalMarker(markerPath, 'legacy-promoted');
+  return {
+    status: 'migrated',
+    reason: 'legacy-promoted',
+    canonicalPath: layout.canonical.path,
+    compatibilityPath: layout.compatibility.path,
+    markerPath,
   };
 }
 
