@@ -21,11 +21,6 @@ interface RunnerResult {
   stderr: string;
 }
 
-interface LinkedWorkspacePath {
-  fixedPath: string;
-  backupPath: string | null;
-}
-
 const tempRoots: string[] = [];
 
 function createRuntimeWorkspace() {
@@ -53,38 +48,6 @@ function createRuntimeWorkspace() {
     capturePath: path.join(root, 'captured-query-options.json'),
     loaderPath: path.join(root, 'mock-claude-sdk-loader.mjs'),
   };
-}
-
-function linkWorkspacePath(
-  root: string,
-  workspaceName: string,
-  targetPath: string,
-): LinkedWorkspacePath {
-  const fixedPath = path.join('/workspace', workspaceName);
-  const backupPath = fs.existsSync(fixedPath)
-    ? path.join(root, `${workspaceName}.backup`)
-    : null;
-
-  if (backupPath) {
-    fs.renameSync(fixedPath, backupPath);
-  }
-
-  fs.symlinkSync(targetPath, fixedPath, 'dir');
-
-  return {
-    fixedPath,
-    backupPath,
-  };
-}
-
-function restoreWorkspacePath(linkedPath: LinkedWorkspacePath): void {
-  if (fs.existsSync(linkedPath.fixedPath)) {
-    fs.unlinkSync(linkedPath.fixedPath);
-  }
-
-  if (linkedPath.backupPath) {
-    fs.renameSync(linkedPath.backupPath, linkedPath.fixedPath);
-  }
 }
 
 function writeMockSdkLoader(
@@ -199,71 +162,48 @@ describe.sequential('container agent runner global memory', () => {
     fs.writeFileSync(compatibilityPath, '# Legacy Compatibility\n');
     writeMockSdkLoader(runtimeWorkspace.loaderPath, compatibilityPath);
 
-    const linkedPaths = [
-      linkWorkspacePath(
-        runtimeWorkspace.root,
-        'global',
-        runtimeWorkspace.globalDir,
-      ),
-      linkWorkspacePath(
-        runtimeWorkspace.root,
-        'group',
-        runtimeWorkspace.groupDir,
-      ),
-      linkWorkspacePath(
-        runtimeWorkspace.root,
-        'extra',
-        runtimeWorkspace.extraDir,
-      ),
-    ];
+    // Act
+    const result = await runRunner(
+      [
+        '--import',
+        'tsx',
+        '--loader',
+        runtimeWorkspace.loaderPath,
+        runnerEntryPoint,
+      ],
+      {
+        prompt: 'Use the shared context.',
+        groupFolder: 'test-group',
+        chatJid: 'test@g.us',
+        isMain: false,
+      },
+      {
+        ...process.env,
+        NANOCLAW_IPC_DIR: runtimeWorkspace.ipcDir,
+        NANOCLAW_WORKSPACE_ROOT: runtimeWorkspace.root,
+        TEST_CAPTURE_PATH: runtimeWorkspace.capturePath,
+      },
+    );
+    const capturedQuery = JSON.parse(
+      fs.readFileSync(runtimeWorkspace.capturePath, 'utf-8'),
+    ) as {
+      cwd: string;
+      systemPrompt: { append: string; preset: string; type: string } | null;
+    };
 
-    try {
-      // Act
-      const result = await runRunner(
-        [
-          '--import',
-          'tsx',
-          '--loader',
-          runtimeWorkspace.loaderPath,
-          runnerEntryPoint,
-        ],
-        {
-          prompt: 'Use the shared context.',
-          groupFolder: 'test-group',
-          chatJid: 'test@g.us',
-          isMain: false,
-        },
-        {
-          ...process.env,
-          NANOCLAW_IPC_DIR: runtimeWorkspace.ipcDir,
-          TEST_CAPTURE_PATH: runtimeWorkspace.capturePath,
-        },
-      );
-      const capturedQuery = JSON.parse(
-        fs.readFileSync(runtimeWorkspace.capturePath, 'utf-8'),
-      ) as {
-        cwd: string;
-        systemPrompt: { append: string; preset: string; type: string } | null;
-      };
-
-      // Assert
-      expect(result.code).toBe(0);
-      expect(capturedQuery.cwd).toBe('/workspace/group');
-      expect(capturedQuery.systemPrompt).toEqual({
-        type: 'preset',
-        preset: 'claude_code',
-        append: '# Canonical Global\n',
-      });
-      expect(fs.readFileSync(canonicalPath, 'utf-8')).toBe(
-        '# Canonical Global\n',
-      );
-      expect(fs.readFileSync(compatibilityPath, 'utf-8')).toBe(
-        '# Provider Compatibility Edit\n',
-      );
-    } finally {
-      for (const linkedPath of linkedPaths.reverse()) {
-        restoreWorkspacePath(linkedPath);
-      }
-    }
+    // Assert
+    expect(result.code).toBe(0);
+    expect(capturedQuery.cwd).toBe(runtimeWorkspace.groupDir);
+    expect(capturedQuery.systemPrompt).toEqual({
+      type: 'preset',
+      preset: 'claude_code',
+      append: '# Canonical Global\n',
+    });
+    expect(fs.readFileSync(canonicalPath, 'utf-8')).toBe(
+      '# Canonical Global\n',
+    );
+    expect(fs.readFileSync(compatibilityPath, 'utf-8')).toBe(
+      '# Provider Compatibility Edit\n',
+    );
   });
 });
