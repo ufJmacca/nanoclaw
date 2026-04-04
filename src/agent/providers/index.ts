@@ -10,6 +10,7 @@ import type {
 function createPreparedSession(
   providerStateDirName: string,
   ctx: PrepareSessionContext,
+  fallbackProviderStateDirNames: string[] = [],
 ) {
   return {
     providerStateDir: path.join(
@@ -17,6 +18,9 @@ function createPreparedSession(
       'sessions',
       ctx.groupFolder,
       providerStateDirName,
+    ),
+    fallbackProviderStateDirs: fallbackProviderStateDirNames.map((dirName) =>
+      path.join(ctx.dataDir, 'sessions', ctx.groupFolder, dirName),
     ),
     memoryFiles: [],
   };
@@ -55,7 +59,9 @@ function createBuiltInProvider(
       return [];
     },
     prepareSession(ctx) {
-      return createPreparedSession(id, ctx);
+      const fallbackProviderStateDirNames =
+        id === 'claude-code' ? ['.claude'] : [];
+      return createPreparedSession(id, ctx, fallbackProviderStateDirNames);
     },
     buildContainerSpec() {
       return {

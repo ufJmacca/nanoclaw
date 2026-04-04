@@ -28,6 +28,7 @@ export interface PrepareSessionContext {
 
 export interface PreparedSession {
   providerStateDir: string;
+  fallbackProviderStateDirs?: string[];
   memoryFiles: ProviderMemoryFile[];
   metadata?: Record<string, unknown>;
 }
