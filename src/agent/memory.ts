@@ -91,8 +91,14 @@ const LEGACY_CANONICAL_MEMORY_MARKER_FILE =
 export const DEFAULT_GLOBAL_MEMORY_TEMPLATE_FINGERPRINT =
   '44f4028d333e5b940485b12749dc8030460c6181105c12d71f7866589f7f1334';
 
+function normalizeMemoryContent(content: string): string {
+  return content.replace(/\r\n/g, '\n');
+}
+
 function fingerprintMemoryContent(content: string): string {
-  return createHash('sha256').update(content).digest('hex');
+  return createHash('sha256')
+    .update(normalizeMemoryContent(content))
+    .digest('hex');
 }
 
 function buildCanonicalDescriptor(targetDir: string): MemoryFileDescriptor {
@@ -367,7 +373,10 @@ export function finalizeLegacyCanonicalMemoryOnce(
     'utf-8',
   );
 
-  if (canonicalContent === compatibilityContent) {
+  if (
+    normalizeMemoryContent(canonicalContent) ===
+    normalizeMemoryContent(compatibilityContent)
+  ) {
     writeLegacyCanonicalMarker(markerPath, 'identical');
     return {
       status: 'skipped',

@@ -220,6 +220,37 @@ describe('memory helper', () => {
     );
   });
 
+  it('treats a CRLF template checkout as stock canonical memory during migration', () => {
+    // Arrange
+    const groupDir = createTempDir();
+    tempDirs.push(groupDir);
+    const bundledTemplate = readBundledGlobalTemplate().replace(/\n/g, '\r\n');
+    const canonicalPath = writeMemoryFile(
+      groupDir,
+      CANONICAL_MEMORY_FILE,
+      bundledTemplate,
+    );
+
+    writeMemoryFile(
+      groupDir,
+      LEGACY_CLAUDE_MEMORY_FILE,
+      '# Existing Global Memory\n',
+    );
+
+    // Act
+    const migration = finalizeLegacyCanonicalMemoryOnce({
+      targetDir: groupDir,
+      canonicalTemplateFingerprint: DEFAULT_GLOBAL_MEMORY_TEMPLATE_FINGERPRINT,
+    });
+
+    // Assert
+    expect(migration.status).toBe('migrated');
+    expect(migration.reason).toBe('legacy-promoted');
+    expect(fs.readFileSync(canonicalPath, 'utf-8')).toBe(
+      '# Existing Global Memory\n',
+    );
+  });
+
   it('preserves customized AGENT.md when legacy CLAUDE.md differs during migration', () => {
     // Arrange
     const groupDir = createTempDir();
