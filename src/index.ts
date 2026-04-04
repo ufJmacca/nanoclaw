@@ -20,6 +20,7 @@ import {
   getRegisteredChannelNames,
 } from './channels/registry.js';
 import {
+  DEFAULT_GLOBAL_MEMORY_TEMPLATE_FINGERPRINT,
   finalizeLegacyCanonicalMemoryOnce,
   seedGroupMemoryFiles,
 } from './agent/memory.js';
@@ -201,6 +202,7 @@ function ensureSharedMemoryTemplatesReady(): void {
 
   const migration = finalizeLegacyCanonicalMemoryOnce({
     targetDir: globalDir,
+    canonicalTemplateFingerprint: DEFAULT_GLOBAL_MEMORY_TEMPLATE_FINGERPRINT,
   });
   if (migration.status === 'migrated') {
     logger.info(

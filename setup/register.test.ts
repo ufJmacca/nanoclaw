@@ -281,6 +281,13 @@ describe('register run memory seeding', () => {
   const originalCwd = process.cwd();
   const tempDirs: string[] = [];
 
+  function readBundledGlobalTemplate(): string {
+    return fs.readFileSync(
+      path.join(originalCwd, 'groups', 'global', 'AGENT.md'),
+      'utf-8',
+    );
+  }
+
   function createTempRepo(): string {
     const repoDir = fs.mkdtempSync(
       path.join(os.tmpdir(), 'nanoclaw-register-test-'),
@@ -372,12 +379,7 @@ describe('register run memory seeding', () => {
   it('promotes legacy global CLAUDE.md before seeding a new non-main group', async () => {
     // Arrange
     const repoDir = createTempRepo();
-    writeGroupFile(
-      repoDir,
-      'global',
-      'AGENT.md',
-      '# New Canonical Template\n\nFresh install default.\n',
-    );
+    writeGroupFile(repoDir, 'global', 'AGENT.md', readBundledGlobalTemplate());
     writeGroupFile(
       repoDir,
       'global',

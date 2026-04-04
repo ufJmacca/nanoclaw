@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   CANONICAL_MEMORY_FILE,
+  DEFAULT_GLOBAL_MEMORY_TEMPLATE_FINGERPRINT,
   finalizeLegacyCanonicalMemoryOnce,
   LEGACY_CLAUDE_MEMORY_FILE,
   getGlobalMemoryPolicy,
@@ -25,6 +26,13 @@ function writeMemoryFile(
   const filePath = path.join(dir, fileName);
   fs.writeFileSync(filePath, content);
   return filePath;
+}
+
+function readBundledGlobalTemplate(): string {
+  return fs.readFileSync(
+    path.resolve(process.cwd(), 'groups', 'global', CANONICAL_MEMORY_FILE),
+    'utf-8',
+  );
 }
 
 describe('memory helper', () => {
@@ -176,10 +184,11 @@ describe('memory helper', () => {
     // Arrange
     const groupDir = createTempDir();
     tempDirs.push(groupDir);
+    const bundledTemplate = readBundledGlobalTemplate();
     const canonicalPath = writeMemoryFile(
       groupDir,
       CANONICAL_MEMORY_FILE,
-      '# New Global Template\n',
+      bundledTemplate,
     );
     const compatibilityPath = writeMemoryFile(
       groupDir,
@@ -190,10 +199,12 @@ describe('memory helper', () => {
     // Act
     const firstMigration = finalizeLegacyCanonicalMemoryOnce({
       targetDir: groupDir,
+      canonicalTemplateFingerprint: DEFAULT_GLOBAL_MEMORY_TEMPLATE_FINGERPRINT,
     });
     fs.writeFileSync(compatibilityPath, '# Later Compatibility Edit\n');
     const secondMigration = finalizeLegacyCanonicalMemoryOnce({
       targetDir: groupDir,
+      canonicalTemplateFingerprint: DEFAULT_GLOBAL_MEMORY_TEMPLATE_FINGERPRINT,
     });
 
     // Assert
@@ -207,6 +218,44 @@ describe('memory helper', () => {
     expect(fs.readFileSync(canonicalPath, 'utf-8')).toBe(
       '# Existing Global Memory\n',
     );
+  });
+
+  it('preserves customized AGENT.md when legacy CLAUDE.md differs during migration', () => {
+    // Arrange
+    const groupDir = createTempDir();
+    tempDirs.push(groupDir);
+    const canonicalPath = writeMemoryFile(
+      groupDir,
+      CANONICAL_MEMORY_FILE,
+      '# User Canonical Memory\n',
+    );
+    const compatibilityPath = writeMemoryFile(
+      groupDir,
+      LEGACY_CLAUDE_MEMORY_FILE,
+      '# Existing Global Memory\n',
+    );
+
+    // Act
+    const migration = finalizeLegacyCanonicalMemoryOnce({
+      targetDir: groupDir,
+      canonicalTemplateFingerprint: DEFAULT_GLOBAL_MEMORY_TEMPLATE_FINGERPRINT,
+    });
+    const secondMigration = finalizeLegacyCanonicalMemoryOnce({
+      targetDir: groupDir,
+      canonicalTemplateFingerprint: DEFAULT_GLOBAL_MEMORY_TEMPLATE_FINGERPRINT,
+    });
+
+    // Assert
+    expect(migration.status).toBe('skipped');
+    expect(migration.reason).toBe('canonical-preserved');
+    expect(fs.readFileSync(canonicalPath, 'utf-8')).toBe(
+      '# User Canonical Memory\n',
+    );
+    expect(fs.readFileSync(compatibilityPath, 'utf-8')).toBe(
+      '# Existing Global Memory\n',
+    );
+    expect(secondMigration.status).toBe('skipped');
+    expect(secondMigration.reason).toBe('already-finalized');
   });
 
   it('emits a warning when compatibility sync-back is requested without canonical memory', () => {

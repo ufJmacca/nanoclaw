@@ -8,6 +8,7 @@ import fs from 'fs';
 import path from 'path';
 
 import {
+  DEFAULT_GLOBAL_MEMORY_TEMPLATE_FINGERPRINT,
   finalizeLegacyCanonicalMemoryOnce,
   listManagedMemoryFiles,
   seedGroupMemoryFiles,
@@ -151,6 +152,7 @@ export async function run(args: string[]): Promise<void> {
 
     const globalMigration = finalizeLegacyCanonicalMemoryOnce({
       targetDir: globalDir,
+      canonicalTemplateFingerprint: DEFAULT_GLOBAL_MEMORY_TEMPLATE_FINGERPRINT,
     });
     if (globalMigration.status === 'migrated') {
       logger.info(

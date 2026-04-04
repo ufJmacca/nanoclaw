@@ -106,6 +106,13 @@ vi.mock('./logger.js', () => ({
 
 const ORIGINAL_CWD = process.cwd();
 
+function readBundledGlobalTemplate(): string {
+  return fs.readFileSync(
+    path.join(ORIGINAL_CWD, 'groups', 'global', 'AGENT.md'),
+    'utf-8',
+  );
+}
+
 function createTempRepo(): string {
   const repoDir = fs.mkdtempSync(
     path.join(os.tmpdir(), 'nanoclaw-index-test-'),
@@ -306,7 +313,7 @@ describe('startup group registration memory seeding', () => {
   it('promotes legacy global CLAUDE.md into AGENT.md once during startup recovery', async () => {
     // Arrange
     const repoDir = createTempRepo();
-    writeGroupFile(repoDir, 'global', 'AGENT.md', '# New Canonical Template\n');
+    writeGroupFile(repoDir, 'global', 'AGENT.md', readBundledGlobalTemplate());
     writeGroupFile(
       repoDir,
       'global',

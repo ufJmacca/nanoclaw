@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { createHash } from 'crypto';
 
 export const CANONICAL_MEMORY_FILE = 'AGENT.md';
 export const LEGACY_CLAUDE_MEMORY_FILE = 'CLAUDE.md';
@@ -68,6 +69,7 @@ export interface FinalizeLegacyCanonicalMemoryOptions {
   targetDir: string;
   compatibilityFileName?: string;
   markerFileName?: string;
+  canonicalTemplateFingerprint?: string;
 }
 
 export interface FinalizeLegacyCanonicalMemoryResult {
@@ -76,6 +78,7 @@ export interface FinalizeLegacyCanonicalMemoryResult {
     | 'already-finalized'
     | 'missing-canonical'
     | 'missing-compatibility'
+    | 'canonical-preserved'
     | 'identical'
     | 'legacy-promoted';
   canonicalPath: string;
@@ -85,6 +88,12 @@ export interface FinalizeLegacyCanonicalMemoryResult {
 
 const LEGACY_CANONICAL_MEMORY_MARKER_FILE =
   '.canonical-memory-migration-v1.json';
+export const DEFAULT_GLOBAL_MEMORY_TEMPLATE_FINGERPRINT =
+  '44f4028d333e5b940485b12749dc8030460c6181105c12d71f7866589f7f1334';
+
+function fingerprintMemoryContent(content: string): string {
+  return createHash('sha256').update(content).digest('hex');
+}
 
 function buildCanonicalDescriptor(targetDir: string): MemoryFileDescriptor {
   const canonicalPath = path.join(targetDir, CANONICAL_MEMORY_FILE);
@@ -363,6 +372,21 @@ export function finalizeLegacyCanonicalMemoryOnce(
     return {
       status: 'skipped',
       reason: 'identical',
+      canonicalPath: layout.canonical.path,
+      compatibilityPath: layout.compatibility.path,
+      markerPath,
+    };
+  }
+
+  if (
+    !options.canonicalTemplateFingerprint ||
+    fingerprintMemoryContent(canonicalContent) !==
+      options.canonicalTemplateFingerprint
+  ) {
+    writeLegacyCanonicalMarker(markerPath, 'canonical-preserved');
+    return {
+      status: 'skipped',
+      reason: 'canonical-preserved',
       canonicalPath: layout.canonical.path,
       compatibilityPath: layout.compatibility.path,
       markerPath,
