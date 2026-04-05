@@ -198,7 +198,11 @@ async function runTask(
       async (streamedOutput: ContainerOutput) => {
         if (streamedOutput.newSessionId) {
           sessions[task.group_folder] = streamedOutput.newSessionId;
-          setSession(task.group_folder, streamedOutput.newSessionId, providerId);
+          setSession(
+            task.group_folder,
+            streamedOutput.newSessionId,
+            providerId,
+          );
         }
         if (streamedOutput.result) {
           result = streamedOutput.result;
@@ -208,7 +212,8 @@ async function runTask(
         }
         if (streamedOutput.status === 'success') {
           deps.queue.notifyIdle(task.chat_jid);
-          scheduleClose(); // Close promptly even when result is null (e.g. IPC-only tasks)
+          scheduleClose(); // Close promptly even when result is null
+          // (e.g. IPC-only tasks)
         }
         if (streamedOutput.status === 'error') {
           error = streamedOutput.error || 'Unknown error';
@@ -226,7 +231,8 @@ async function runTask(
         setSession(task.group_folder, output.newSessionId, providerId);
       }
       if (output.result) {
-        // Result was already forwarded to the user via the streaming callback above
+        // Result was already forwarded to the user via the
+        // streaming callback above
         result = output.result;
       }
     }

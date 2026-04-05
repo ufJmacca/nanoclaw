@@ -5,10 +5,7 @@ import path from 'path';
 import { PassThrough } from 'stream';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type {
-  AgentProvider,
-  PreparedSession,
-} from './agent/provider-types.js';
+import type { AgentProvider, PreparedSession } from './agent/provider-types.js';
 import type { RegisteredGroup } from './types.js';
 
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
@@ -347,20 +344,20 @@ describe('container runner provider plumbing', () => {
         },
       },
     });
-    expect(
-      fs.readFileSync(path.join(groupDir, 'AGENTS.md'), 'utf-8'),
-    ).toBe('# Canonical Agent\n');
+    expect(fs.readFileSync(path.join(groupDir, 'AGENTS.md'), 'utf-8')).toBe(
+      '# Canonical Agent\n',
+    );
     expect(
       fs.readFileSync(path.join(providerStateDir, 'settings.json'), 'utf-8'),
     ).toContain('"provider": "codex"');
     expect(
-      fs.existsSync(path.join(providerStateDir, 'skills', 'status', 'SKILL.md')),
+      fs.existsSync(
+        path.join(providerStateDir, 'skills', 'status', 'SKILL.md'),
+      ),
     ).toBe(true);
     expect(fs.existsSync(path.join(copiedRunnerDir, 'providers'))).toBe(true);
     expect(spawnArgs).toContain(`CODEX_HOME=/home/node/.codex`);
-    expect(spawnArgs).toContain(
-      `${providerStateDir}:/home/node/.codex`,
-    );
+    expect(spawnArgs).toContain(`${providerStateDir}:/home/node/.codex`);
     expect(spawnArgs).toContain(`${copiedRunnerDir}:/app/src`);
   });
 
@@ -537,11 +534,7 @@ describe('container runner provider plumbing', () => {
     },
   ])(
     'rejects escaped $name before spawning the container',
-    async ({
-      buildPreparedSession,
-      expectedError,
-      setupOutsideRoot,
-    }) => {
+    async ({ buildPreparedSession, expectedError, setupOutsideRoot }) => {
       // Arrange
       const groupDir = path.join(groupsDir, 'test-group');
       fs.mkdirSync(groupDir, { recursive: true });
