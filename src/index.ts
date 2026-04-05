@@ -25,6 +25,7 @@ import {
   DEFAULT_MAIN_MEMORY_TEMPLATE_FINGERPRINT,
   seedGroupMemoryFiles,
 } from './agent/memory.js';
+import { createProviderRegistry } from './agent/provider-registry.js';
 import { createSessionStore } from './agent/session-store.js';
 import {
   ContainerOutput,
@@ -94,9 +95,37 @@ function createRuntimeSessionStore() {
 }
 
 let sessionStore = createRuntimeSessionStore();
+const providerRegistry = createProviderRegistry();
 
 function getGroupProviderId(group: RegisteredGroup): string {
   return group.providerId || COMPATIBILITY_AGENT_PROVIDER;
+}
+
+async function getUnsupportedRemoteControlMessage(
+  group: RegisteredGroup,
+): Promise<string | null> {
+  const provider = providerRegistry.getProvider(getGroupProviderId(group));
+
+  if (provider.capabilities.remoteControl) {
+    return null;
+  }
+
+  if (provider.startRemoteControl) {
+    const result = await provider.startRemoteControl({
+      groupFolder: group.folder,
+      projectRoot: process.cwd(),
+      env: process.env,
+    });
+
+    if (result.status === 'unsupported') {
+      return (
+        result.message ||
+        `${provider.displayName} does not support remote control in NanoClaw v1.`
+      );
+    }
+  }
+
+  return `${provider.displayName} does not support remote control in NanoClaw v1.`;
 }
 
 function ensureOneCLIAgent(jid: string, group: RegisteredGroup): void {
@@ -750,6 +779,12 @@ async function main(): Promise<void> {
 
     const channel = findChannel(channels, chatJid);
     if (!channel) return;
+
+    const unsupportedMessage = await getUnsupportedRemoteControlMessage(group);
+    if (unsupportedMessage) {
+      await channel.sendMessage(chatJid, unsupportedMessage);
+      return;
+    }
 
     if (command === '/remote-control') {
       const result = await startRemoteControl(

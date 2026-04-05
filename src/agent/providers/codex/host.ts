@@ -32,8 +32,8 @@ export function createCodexProvider(): AgentProvider {
       persistentSessions: true,
       projectMemory: true,
       remoteControl: false,
-      agentTeams: true,
-      providerSkills: true,
+      agentTeams: false,
+      providerSkills: false,
     },
     validateHost() {
       return [];
@@ -52,12 +52,6 @@ export function createCodexProvider(): AgentProvider {
           {
             sourcePath: path.join(ctx.groupDir, 'AGENT.md'),
             targetPath: path.join(ctx.groupDir, 'AGENTS.md'),
-          },
-        ],
-        directorySyncs: [
-          {
-            sourcePath: path.join(ctx.projectRoot, 'container', 'skills'),
-            targetPath: path.join(providerStateDir, 'skills'),
           },
         ],
       };
@@ -79,6 +73,12 @@ export function createCodexProvider(): AgentProvider {
     },
     serializeRuntimeInput(ctx) {
       return createRuntimeInput(ctx);
+    },
+    async startRemoteControl() {
+      return {
+        status: 'unsupported',
+        message: 'Codex does not support remote control in NanoClaw v1.',
+      };
     },
   };
 }

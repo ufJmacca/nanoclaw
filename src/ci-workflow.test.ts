@@ -55,6 +55,31 @@ describe('ci workflow', () => {
     expect(scripts.test).toBe('npm run build && node --test test/*.test.js');
   });
 
+  it('installs both built-in provider runtimes into the shared agent image', () => {
+    // Arrange
+    const dockerfile = readRepoFile('container', 'Dockerfile').replace(
+      /\s+/g,
+      ' ',
+    );
+    const agentRunnerPackage = JSON.parse(
+      readRepoFile('container', 'agent-runner', 'package.json'),
+    ) as {
+      dependencies?: Record<string, string>;
+    };
+
+    // Act
+    const dependencies = agentRunnerPackage.dependencies ?? {};
+
+    // Assert
+    expect(dependencies).toMatchObject({
+      '@anthropic-ai/claude-agent-sdk': expect.any(String),
+      '@openai/codex': expect.any(String),
+    });
+    expect(dockerfile).toContain('COPY agent-runner/package*.json ./');
+    expect(dockerfile).toContain('RUN npm install');
+    expect(dockerfile).toContain('ENV PATH=/app/node_modules/.bin:$PATH');
+  });
+
   it('keeps a real smoke test around the built runner entrypoint', () => {
     // Arrange
     const smokeTest = readRepoFile(
