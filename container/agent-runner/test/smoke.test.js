@@ -61,12 +61,15 @@ test('agent runner exits cleanly when a scheduled task script suppresses wake-up
   const originalIpcDir = process.env.NANOCLAW_IPC_DIR;
   process.env.NANOCLAW_IPC_DIR = ipcDir;
   const input = {
-    prompt: 'Check whether anything needs to be sent.',
-    groupFolder: 'smoke-group',
-    chatJid: 'smoke@g.us',
-    isMain: false,
-    isScheduledTask: true,
-    script: 'printf \'{"wakeAgent":false}\\n\'',
+    providerId: 'claude-code',
+    runtimeInput: {
+      prompt: 'Check whether anything needs to be sent.',
+      groupFolder: 'smoke-group',
+      chatJid: 'smoke@g.us',
+      isMain: false,
+      isScheduledTask: true,
+      script: 'printf \'{"wakeAgent":false}\\n\'',
+    },
   };
 
   try {

@@ -7,9 +7,15 @@ export interface ProviderCapabilities {
 }
 
 export interface ProviderRuntimeInput {
-  providerId: string;
+  prompt: string;
   sessionId?: string;
-  payload?: Record<string, unknown>;
+  groupFolder: string;
+  chatJid: string;
+  isMain: boolean;
+  isScheduledTask?: boolean;
+  assistantName?: string;
+  script?: string;
+  providerData?: Record<string, unknown>;
 }
 
 export interface PrepareWorkspaceContext {
@@ -17,11 +23,12 @@ export interface PrepareWorkspaceContext {
   workspaceDir: string;
   globalMemoryDir?: string;
   sessionId?: string;
+  runtimeInput: ProviderRuntimeInput;
 }
 
 export interface PreparedWorkspace {
-  memoryFiles: Array<{
-    sourcePath: string;
+  files: Array<{
+    sourcePath?: string;
     targetPath: string;
     content?: string;
   }>;
@@ -35,15 +42,30 @@ export type AgentEvent =
   | { type: 'error'; message: string }
   | { type: 'provider_state'; state: Record<string, unknown> };
 
+export interface ContainerInput {
+  providerId: string;
+  runtimeInput: ProviderRuntimeInput;
+}
+
+export interface ContainerOutput {
+  status: 'success' | 'error';
+  result: string | null;
+  newSessionId?: string;
+  error?: string;
+}
+
 export interface ContainerProviderContext {
   input: ProviderRuntimeInput;
   abortSignal: AbortSignal;
+  mcpServerPath: string;
+  preparedWorkspace: PreparedWorkspace;
 }
 
 export interface ContainerAgentProvider {
   id: string;
   displayName: string;
   capabilities: ProviderCapabilities;
+  providerHomeDir: string;
   prepareWorkspace(
     ctx: PrepareWorkspaceContext,
   ): PreparedWorkspace | Promise<PreparedWorkspace>;

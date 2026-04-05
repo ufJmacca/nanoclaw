@@ -7,6 +7,7 @@ import fs from 'fs';
 import path from 'path';
 
 import {
+  COMPATIBILITY_AGENT_PROVIDER,
   CONTAINER_IMAGE,
   CONTAINER_MAX_OUTPUT_SIZE,
   CONTAINER_TIMEOUT,
@@ -25,6 +26,15 @@ import {
   stopContainer,
 } from './container-runtime.js';
 import { OneCLI } from '@onecli-sh/sdk';
+import { createProviderRegistry } from './agent/provider-registry.js';
+import type {
+  AgentProvider,
+  PreparedSession,
+  ProviderContainerSpec,
+  ProviderDirectorySync,
+  ProviderFileMaterialization,
+  ProviderRuntimeInput,
+} from './agent/provider-types.js';
 import { validateAdditionalMounts } from './mount-security.js';
 import { RegisteredGroup } from './types.js';
 
@@ -34,7 +44,7 @@ const onecli = new OneCLI({ url: ONECLI_URL });
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
 const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
 
-export interface ContainerInput {
+export interface ContainerInvocation {
   prompt: string;
   sessionId?: string;
   groupFolder: string;
@@ -43,6 +53,11 @@ export interface ContainerInput {
   isScheduledTask?: boolean;
   assistantName?: string;
   script?: string;
+}
+
+export interface ContainerInput {
+  providerId: string;
+  runtimeInput: ProviderRuntimeInput;
 }
 
 export interface ContainerOutput {
@@ -58,13 +73,239 @@ interface VolumeMount {
   readonly: boolean;
 }
 
+interface PreparedProviderContainer {
+  providerId: string;
+  provider: AgentProvider;
+  preparedSession: PreparedSession;
+  containerSpec: ProviderContainerSpec;
+  containerInput: ContainerInput;
+  groupDir: string;
+  groupIpcDir: string;
+  groupAgentRunnerDir: string;
+}
+
+function isPathWithinRoot(root: string, candidate: string): boolean {
+  const relativePath = path.relative(root, candidate);
+  return !relativePath.startsWith('..') && !path.isAbsolute(relativePath);
+}
+
+function ensurePathWithinRoot(
+  root: string,
+  candidate: string,
+  errorMessage: string,
+): string {
+  const resolvedPath = path.resolve(candidate);
+
+  if (!isPathWithinRoot(root, resolvedPath)) {
+    throw new Error(errorMessage);
+  }
+
+  return resolvedPath;
+}
+
+function ensurePathWithinRoots(
+  roots: string[],
+  candidate: string,
+  errorMessage: string,
+): string {
+  const resolvedPath = path.resolve(candidate);
+
+  for (const root of roots) {
+    if (isPathWithinRoot(root, resolvedPath)) {
+      return resolvedPath;
+    }
+  }
+
+  throw new Error(errorMessage);
+}
+
+function materializeProviderFile(
+  file: ProviderFileMaterialization,
+  sourceRoots: string[],
+  targetRoots: string[],
+): void {
+  const targetPath = ensurePathWithinRoots(
+    targetRoots,
+    file.targetPath,
+    'Provider file target must stay within the group workspace or provider session namespace',
+  );
+
+  fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+
+  if (file.onlyIfMissing && fs.existsSync(targetPath)) {
+    return;
+  }
+
+  if (file.content != null) {
+    fs.writeFileSync(targetPath, file.content);
+    return;
+  }
+
+  if (!file.sourcePath) {
+    return;
+  }
+
+  const sourcePath = ensurePathWithinRoots(
+    sourceRoots,
+    file.sourcePath,
+    'Provider file source must stay within approved roots',
+  );
+
+  if (!fs.existsSync(sourcePath)) {
+    return;
+  }
+
+  fs.copyFileSync(sourcePath, targetPath);
+}
+
+function syncProviderDirectory(
+  directorySync: ProviderDirectorySync,
+  sourceRoots: string[],
+  targetRoots: string[],
+): void {
+  const sourcePath = ensurePathWithinRoots(
+    sourceRoots,
+    directorySync.sourcePath,
+    'Provider directory source must stay within approved roots',
+  );
+  const targetPath = ensurePathWithinRoots(
+    targetRoots,
+    directorySync.targetPath,
+    'Provider directory target must stay within the group workspace or provider session namespace',
+  );
+
+  if (!fs.existsSync(sourcePath)) {
+    return;
+  }
+
+  fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+  fs.cpSync(sourcePath, targetPath, { recursive: true });
+}
+
+function syncAgentRunnerSource(
+  projectRoot: string,
+  groupFolder: string,
+): string {
+  const agentRunnerSrc = path.join(
+    projectRoot,
+    'container',
+    'agent-runner',
+    'src',
+  );
+  const groupAgentRunnerDir = path.join(
+    DATA_DIR,
+    'sessions',
+    groupFolder,
+    'agent-runner-src',
+  );
+
+  if (fs.existsSync(agentRunnerSrc)) {
+    const srcIndex = path.join(agentRunnerSrc, 'index.ts');
+    const cachedIndex = path.join(groupAgentRunnerDir, 'index.ts');
+    const needsCopy =
+      !fs.existsSync(groupAgentRunnerDir) ||
+      !fs.existsSync(cachedIndex) ||
+      (fs.existsSync(srcIndex) &&
+        fs.statSync(srcIndex).mtimeMs > fs.statSync(cachedIndex).mtimeMs);
+
+    if (needsCopy) {
+      fs.cpSync(agentRunnerSrc, groupAgentRunnerDir, { recursive: true });
+    }
+  }
+
+  return groupAgentRunnerDir;
+}
+
+function prepareProviderContainer(
+  group: RegisteredGroup,
+  input: ContainerInvocation,
+): PreparedProviderContainer {
+  const projectRoot = process.cwd();
+  const groupDir = resolveGroupFolderPath(group.folder);
+  const providerId = group.providerId || COMPATIBILITY_AGENT_PROVIDER;
+  const provider = createProviderRegistry().getProvider(providerId);
+  const providerNamespaceRoot = path.join(
+    DATA_DIR,
+    'sessions',
+    group.folder,
+    providerId,
+  );
+  const preparedSession = provider.prepareSession({
+    projectRoot,
+    dataDir: DATA_DIR,
+    groupFolder: group.folder,
+    groupDir,
+    isMain: input.isMain,
+    sessionId: input.sessionId,
+  });
+
+  preparedSession.providerStateDir = ensurePathWithinRoot(
+    providerNamespaceRoot,
+    preparedSession.providerStateDir,
+    'Provider session state dir must stay within the provider session namespace',
+  );
+  fs.mkdirSync(preparedSession.providerStateDir, { recursive: true });
+
+  const fileTargetRoots = [groupDir, preparedSession.providerStateDir];
+  const fileSourceRoots = [
+    projectRoot,
+    groupDir,
+    preparedSession.providerStateDir,
+  ];
+
+  for (const file of preparedSession.files) {
+    materializeProviderFile(file, fileSourceRoots, fileTargetRoots);
+  }
+
+  for (const directorySync of preparedSession.directorySyncs || []) {
+    syncProviderDirectory(directorySync, fileSourceRoots, fileTargetRoots);
+  }
+
+  const containerSpec = provider.buildContainerSpec({
+    projectRoot,
+    dataDir: DATA_DIR,
+    groupFolder: group.folder,
+    isMain: input.isMain,
+    preparedSession,
+  });
+
+  const groupIpcDir = resolveGroupIpcPath(group.folder);
+  const groupAgentRunnerDir = syncAgentRunnerSource(projectRoot, group.folder);
+  const containerInput: ContainerInput = {
+    providerId,
+    runtimeInput: provider.serializeRuntimeInput({
+      prompt: input.prompt,
+      sessionId: input.sessionId,
+      groupFolder: group.folder,
+      chatJid: input.chatJid,
+      isMain: input.isMain,
+      isScheduledTask: input.isScheduledTask,
+      assistantName: input.assistantName,
+      script: input.script,
+      providerOptions: group.providerOptions,
+    }),
+  };
+
+  return {
+    providerId,
+    provider,
+    preparedSession,
+    containerSpec,
+    containerInput,
+    groupDir,
+    groupIpcDir,
+    groupAgentRunnerDir,
+  };
+}
+
 function buildVolumeMounts(
   group: RegisteredGroup,
   isMain: boolean,
+  preparedProvider: PreparedProviderContainer,
 ): VolumeMount[] {
   const mounts: VolumeMount[] = [];
   const projectRoot = process.cwd();
-  const groupDir = resolveGroupFolderPath(group.folder);
+  const groupDir = preparedProvider.groupDir;
 
   if (isMain) {
     // Main gets the project root read-only. Writable paths the agent needs
@@ -115,59 +356,9 @@ function buildVolumeMounts(
     }
   }
 
-  // Per-group Claude sessions directory (isolated from other groups)
-  // Each group gets their own .claude/ to prevent cross-group session access
-  const groupSessionsDir = path.join(
-    DATA_DIR,
-    'sessions',
-    group.folder,
-    '.claude',
-  );
-  fs.mkdirSync(groupSessionsDir, { recursive: true });
-  const settingsFile = path.join(groupSessionsDir, 'settings.json');
-  if (!fs.existsSync(settingsFile)) {
-    fs.writeFileSync(
-      settingsFile,
-      JSON.stringify(
-        {
-          env: {
-            // Enable agent swarms (subagent orchestration)
-            // https://code.claude.com/docs/en/agent-teams#orchestrate-teams-of-claude-code-sessions
-            CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
-            // Load CLAUDE.md from additional mounted directories
-            // https://code.claude.com/docs/en/memory#load-memory-from-additional-directories
-            CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1',
-            // Enable Claude's memory feature (persists user preferences between sessions)
-            // https://code.claude.com/docs/en/memory#manage-auto-memory
-            CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0',
-          },
-        },
-        null,
-        2,
-      ) + '\n',
-    );
-  }
-
-  // Sync skills from container/skills/ into each group's .claude/skills/
-  const skillsSrc = path.join(process.cwd(), 'container', 'skills');
-  const skillsDst = path.join(groupSessionsDir, 'skills');
-  if (fs.existsSync(skillsSrc)) {
-    for (const skillDir of fs.readdirSync(skillsSrc)) {
-      const srcDir = path.join(skillsSrc, skillDir);
-      if (!fs.statSync(srcDir).isDirectory()) continue;
-      const dstDir = path.join(skillsDst, skillDir);
-      fs.cpSync(srcDir, dstDir, { recursive: true });
-    }
-  }
-  mounts.push({
-    hostPath: groupSessionsDir,
-    containerPath: '/home/node/.claude',
-    readonly: false,
-  });
-
   // Per-group IPC namespace: each group gets its own IPC directory
   // This prevents cross-group privilege escalation via IPC
-  const groupIpcDir = resolveGroupIpcPath(group.folder);
+  const groupIpcDir = preparedProvider.groupIpcDir;
   fs.mkdirSync(path.join(groupIpcDir, 'messages'), { recursive: true });
   fs.mkdirSync(path.join(groupIpcDir, 'tasks'), { recursive: true });
   fs.mkdirSync(path.join(groupIpcDir, 'input'), { recursive: true });
@@ -177,38 +368,27 @@ function buildVolumeMounts(
     readonly: false,
   });
 
-  // Copy agent-runner source into a per-group writable location so agents
-  // can customize it (add tools, change behavior) without affecting other
-  // groups. Recompiled on container startup via entrypoint.sh.
-  const agentRunnerSrc = path.join(
-    projectRoot,
-    'container',
-    'agent-runner',
-    'src',
-  );
-  const groupAgentRunnerDir = path.join(
-    DATA_DIR,
-    'sessions',
-    group.folder,
-    'agent-runner-src',
-  );
-  if (fs.existsSync(agentRunnerSrc)) {
-    const srcIndex = path.join(agentRunnerSrc, 'index.ts');
-    const cachedIndex = path.join(groupAgentRunnerDir, 'index.ts');
-    const needsCopy =
-      !fs.existsSync(groupAgentRunnerDir) ||
-      !fs.existsSync(cachedIndex) ||
-      (fs.existsSync(srcIndex) &&
-        fs.statSync(srcIndex).mtimeMs > fs.statSync(cachedIndex).mtimeMs);
-    if (needsCopy) {
-      fs.cpSync(agentRunnerSrc, groupAgentRunnerDir, { recursive: true });
-    }
-  }
   mounts.push({
-    hostPath: groupAgentRunnerDir,
+    hostPath: preparedProvider.groupAgentRunnerDir,
     containerPath: '/app/src',
     readonly: false,
   });
+
+  const providerMountRoots = [
+    groupDir,
+    preparedProvider.preparedSession.providerStateDir,
+  ];
+  for (const providerMount of preparedProvider.containerSpec.mounts) {
+    mounts.push({
+      hostPath: ensurePathWithinRoots(
+        providerMountRoots,
+        providerMount.hostPath,
+        'Provider mount host path must stay within the group workspace or provider session namespace',
+      ),
+      containerPath: providerMount.containerPath,
+      readonly: providerMount.readonly,
+    });
+  }
 
   // Additional mounts validated against external allowlist (tamper-proof from containers)
   if (group.containerConfig?.additionalMounts) {
@@ -226,12 +406,21 @@ function buildVolumeMounts(
 async function buildContainerArgs(
   mounts: VolumeMount[],
   containerName: string,
+  providerEnv: Record<string, string>,
+  workdir: string | undefined,
   agentIdentifier?: string,
 ): Promise<string[]> {
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
 
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
+  for (const [envName, envValue] of Object.entries(providerEnv)) {
+    args.push('-e', `${envName}=${envValue}`);
+  }
+
+  if (workdir) {
+    args.push('-w', workdir);
+  }
 
   // OneCLI gateway handles credential injection — containers never see real secrets.
   // The gateway intercepts HTTPS traffic and injects API keys or OAuth tokens.
@@ -276,7 +465,7 @@ async function buildContainerArgs(
 
 export async function runContainerAgent(
   group: RegisteredGroup,
-  input: ContainerInput,
+  input: ContainerInvocation,
   onProcess: (proc: ChildProcess, containerName: string) => void,
   onOutput?: (output: ContainerOutput) => Promise<void>,
 ): Promise<ContainerOutput> {
@@ -285,7 +474,8 @@ export async function runContainerAgent(
   const groupDir = resolveGroupFolderPath(group.folder);
   fs.mkdirSync(groupDir, { recursive: true });
 
-  const mounts = buildVolumeMounts(group, input.isMain);
+  const preparedProvider = prepareProviderContainer(group, input);
+  const mounts = buildVolumeMounts(group, input.isMain, preparedProvider);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
   // Main group uses the default OneCLI agent; others use their own agent.
@@ -295,6 +485,8 @@ export async function runContainerAgent(
   const containerArgs = await buildContainerArgs(
     mounts,
     containerName,
+    preparedProvider.containerSpec.env,
+    preparedProvider.containerSpec.workdir,
     agentIdentifier,
   );
 
@@ -317,6 +509,7 @@ export async function runContainerAgent(
       containerName,
       mountCount: mounts.length,
       isMain: input.isMain,
+      providerId: preparedProvider.providerId,
     },
     'Spawning container agent',
   );
@@ -336,7 +529,7 @@ export async function runContainerAgent(
     let stdoutTruncated = false;
     let stderrTruncated = false;
 
-    container.stdin.write(JSON.stringify(input));
+    container.stdin.write(JSON.stringify(preparedProvider.containerInput));
     container.stdin.end();
 
     // Streaming output: parse OUTPUT_START/END marker pairs as they arrive
@@ -511,6 +704,7 @@ export async function runContainerAgent(
         `Timestamp: ${new Date().toISOString()}`,
         `Group: ${group.name}`,
         `IsMain: ${input.isMain}`,
+        `Provider: ${preparedProvider.providerId}`,
         `Duration: ${duration}ms`,
         `Exit Code: ${code}`,
         `Stdout Truncated: ${stdoutTruncated}`,
@@ -525,12 +719,16 @@ export async function runContainerAgent(
         // Full input is only included at verbose level to avoid
         // persisting user conversation content on every non-zero exit.
         if (isVerbose) {
-          logLines.push(`=== Input ===`, JSON.stringify(input, null, 2), ``);
+          logLines.push(
+            `=== Input ===`,
+            JSON.stringify(preparedProvider.containerInput, null, 2),
+            ``,
+          );
         } else {
           logLines.push(
             `=== Input Summary ===`,
-            `Prompt length: ${input.prompt.length} chars`,
-            `Session ID: ${input.sessionId || 'new'}`,
+            `Prompt length: ${preparedProvider.containerInput.runtimeInput.prompt.length} chars`,
+            `Session ID: ${preparedProvider.containerInput.runtimeInput.sessionId || 'new'}`,
             ``,
           );
         }
@@ -555,8 +753,8 @@ export async function runContainerAgent(
       } else {
         logLines.push(
           `=== Input Summary ===`,
-          `Prompt length: ${input.prompt.length} chars`,
-          `Session ID: ${input.sessionId || 'new'}`,
+          `Prompt length: ${preparedProvider.containerInput.runtimeInput.prompt.length} chars`,
+          `Session ID: ${preparedProvider.containerInput.runtimeInput.sessionId || 'new'}`,
           ``,
           `=== Mounts ===`,
           mounts

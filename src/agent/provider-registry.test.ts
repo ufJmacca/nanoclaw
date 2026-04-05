@@ -23,7 +23,7 @@ function createTestProvider(id: string): AgentProvider {
     prepareSession() {
       return {
         providerStateDir: `/tmp/${id}`,
-        memoryFiles: [],
+        files: [],
       };
     },
     buildContainerSpec() {
@@ -34,7 +34,10 @@ function createTestProvider(id: string): AgentProvider {
     },
     serializeRuntimeInput() {
       return {
-        providerId: id,
+        prompt: `prompt-${id}`,
+        groupFolder: `group-${id}`,
+        chatJid: `${id}@g.us`,
+        isMain: false,
       };
     },
   };
@@ -64,6 +67,7 @@ describe('provider registry', () => {
       projectRoot: '/repo',
       dataDir: '/repo/data',
       groupFolder: 'whatsapp_main',
+      groupDir: '/repo/groups/whatsapp_main',
       isMain: true,
     });
 
@@ -74,6 +78,30 @@ describe('provider registry', () => {
     expect(preparedSession.fallbackProviderStateDirs).toEqual([
       '/repo/data/sessions/whatsapp_main/.claude',
     ]);
+  });
+
+  it('seeds claude settings only when the provider settings file is missing', () => {
+    // Arrange
+    const registry = createProviderRegistry();
+    const claudeProvider = registry.getProvider('claude-code');
+
+    // Act
+    const preparedSession = claudeProvider.prepareSession({
+      projectRoot: '/repo',
+      dataDir: '/repo/data',
+      groupFolder: 'whatsapp_main',
+      groupDir: '/repo/groups/whatsapp_main',
+      isMain: true,
+    });
+    const settingsFile = preparedSession.files.find(
+      (file) =>
+        file.targetPath ===
+        '/repo/data/sessions/whatsapp_main/claude-code/settings.json',
+    );
+
+    // Assert
+    expect(settingsFile).toBeDefined();
+    expect(settingsFile?.onlyIfMissing).toBe(true);
   });
 
   it('rejects duplicate provider registration', () => {

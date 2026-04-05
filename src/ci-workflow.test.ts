@@ -40,7 +40,7 @@ describe('ci workflow', () => {
     ]);
   });
 
-  it('pins the agent runner to the explicit smoke-test command', () => {
+  it('pins the agent runner to the explicit package test command', () => {
     // Arrange
     const packagePath = ['container', 'agent-runner', 'package.json'];
     const agentRunnerPackage = JSON.parse(readRepoFile(...packagePath)) as {
@@ -52,9 +52,7 @@ describe('ci workflow', () => {
 
     // Assert
     expect(scripts.build).toBe('tsc');
-    expect(scripts.test).toBe(
-      'npm run build && node --test test/smoke.test.js',
-    );
+    expect(scripts.test).toBe('npm run build && node --test test/*.test.js');
   });
 
   it('keeps a real smoke test around the built runner entrypoint', () => {

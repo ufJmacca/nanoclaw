@@ -5,6 +5,7 @@ import { OneCLI } from '@onecli-sh/sdk';
 
 import {
   ASSISTANT_NAME,
+  COMPATIBILITY_AGENT_PROVIDER,
   DEFAULT_TRIGGER,
   getTriggerPattern,
   GROUPS_DIR,
@@ -37,12 +38,12 @@ import {
 import {
   getAllChats,
   getAllRegisteredGroups,
-  getAllSessions,
   deleteSession,
   getAllTasks,
   getLastBotMessageTimestamp,
   getMessagesSince,
   getNewMessages,
+  getSession,
   getRouterState,
   initDatabase,
   setRegisteredGroup,
@@ -84,6 +85,10 @@ const queue = new GroupQueue();
 
 const onecli = new OneCLI({ url: ONECLI_URL });
 
+function getGroupProviderId(group: RegisteredGroup): string {
+  return group.providerId || COMPATIBILITY_AGENT_PROVIDER;
+}
+
 function ensureOneCLIAgent(jid: string, group: RegisteredGroup): void {
   if (group.isMain) return;
   const identifier = group.folder.toLowerCase().replace(/_/g, '-');
@@ -112,8 +117,14 @@ function loadState(): void {
     logger.warn('Corrupted last_agent_timestamp in DB, resetting');
     lastAgentTimestamp = {};
   }
-  sessions = getAllSessions();
   registeredGroups = getAllRegisteredGroups();
+  sessions = {};
+  for (const group of Object.values(registeredGroups)) {
+    const sessionId = getSession(group.folder, getGroupProviderId(group));
+    if (sessionId) {
+      sessions[group.folder] = sessionId;
+    }
+  }
   logger.info(
     { groupCount: Object.keys(registeredGroups).length },
     'State loaded',
@@ -454,6 +465,7 @@ async function runAgent(
   onOutput?: (output: ContainerOutput) => Promise<void>,
 ): Promise<'success' | 'error'> {
   const isMain = group.isMain === true;
+  const providerId = getGroupProviderId(group);
   const sessionId = sessions[group.folder];
 
   // Update tasks snapshot for container to read (filtered by group)
@@ -487,7 +499,7 @@ async function runAgent(
     ? async (output: ContainerOutput) => {
         if (output.newSessionId) {
           sessions[group.folder] = output.newSessionId;
-          setSession(group.folder, output.newSessionId);
+          setSession(group.folder, output.newSessionId, providerId);
         }
         await onOutput(output);
       }
@@ -511,7 +523,7 @@ async function runAgent(
 
     if (output.newSessionId) {
       sessions[group.folder] = output.newSessionId;
-      setSession(group.folder, output.newSessionId);
+      setSession(group.folder, output.newSessionId, providerId);
     }
 
     if (output.status === 'error') {
@@ -532,7 +544,7 @@ async function runAgent(
           'Stale session detected — clearing for next retry',
         );
         delete sessions[group.folder];
-        deleteSession(group.folder);
+        deleteSession(group.folder, providerId);
       }
 
       logger.error(
