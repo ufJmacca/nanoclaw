@@ -1,4 +1,7 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import fs from 'fs';
+import https from 'https';
+
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const commandHandlers = new Map<string, (ctx: any) => unknown>();
 const eventHandlers = new Map<string, (ctx: any) => unknown>();
@@ -81,6 +84,11 @@ async function loadTelegramRegistry() {
 }
 
 describe('telegram channel', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
   beforeEach(() => {
     commandHandlers.clear();
     eventHandlers.clear();
@@ -257,15 +265,19 @@ describe('telegram channel', () => {
     await Promise.resolve();
 
     expect(onMessage).toHaveBeenCalledTimes(2);
+    const attachmentEvent = onMessage.mock.calls[1][1];
     expect(onMessage).toHaveBeenNthCalledWith(
       2,
       'tg:123456789',
       expect.objectContaining({
-        id: '88',
+        id: '88:attachment',
         content:
           '[Document: report.pdf] (/workspace/group/attachments/report_88.pdf) Quarterly report',
       }),
     );
+    expect(
+      attachmentEvent.timestamp > onMessage.mock.calls[0][1].timestamp,
+    ).toBe(true);
   });
 
   it('uses a message-specific filename when downloading documents', async () => {
@@ -307,5 +319,85 @@ describe('telegram channel', () => {
       'telegram_main',
       'report_99.pdf',
     );
+  });
+
+  it('captures media chat metadata before registration gating', async () => {
+    process.env.TELEGRAM_BOT_TOKEN = 'test-token';
+
+    const onMessage = vi.fn();
+    const onChatMetadata = vi.fn();
+
+    const { getChannelFactory } = await loadTelegramRegistry();
+    const channel = getChannelFactory('telegram')!({
+      onMessage,
+      onChatMetadata,
+      registeredGroups: () => ({}),
+    });
+
+    await channel!.connect();
+
+    const handler = eventHandlers.get('message:document');
+    expect(handler).toBeTypeOf('function');
+
+    handler!({
+      chat: { id: 123456789, type: 'private' },
+      from: { id: 55, first_name: 'Jon' },
+      message: {
+        date: 1712419200,
+        message_id: 101,
+        document: {
+          file_id: 'doc-file-3',
+          file_name: 'report.pdf',
+        },
+      },
+    });
+
+    expect(onChatMetadata).toHaveBeenCalledWith(
+      'tg:123456789',
+      '2024-04-06T16:00:00.000Z',
+      'Jon',
+      'telegram',
+      false,
+    );
+    expect(onMessage).not.toHaveBeenCalled();
+  });
+
+  it('downloads files with the configured Telegram fetch settings', async () => {
+    process.env.TELEGRAM_BOT_TOKEN = 'test-token';
+
+    const { getChannelFactory } = await loadTelegramRegistry();
+    const channel = getChannelFactory('telegram')!({
+      onMessage: vi.fn(),
+      onChatMetadata: vi.fn(),
+      registeredGroups: () => ({
+        'tg:123456789': baseGroup(),
+      }),
+    });
+
+    await channel!.connect();
+
+    getFileMock.mockResolvedValue({ file_path: 'documents/report.pdf' });
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer,
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    vi.spyOn(fs, 'mkdirSync').mockImplementation(() => undefined as any);
+    vi.spyOn(fs, 'writeFileSync').mockImplementation(() => undefined);
+
+    const filePath = await (channel as any).downloadFile(
+      'doc-file-4',
+      'telegram_main',
+      'report_102.pdf',
+    );
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://api.telegram.org/file/bottest-token/documents/report.pdf',
+      expect.objectContaining({
+        agent: https.globalAgent,
+        compress: true,
+      }),
+    );
+    expect(filePath).toBe('/workspace/group/attachments/report_102.pdf');
   });
 });

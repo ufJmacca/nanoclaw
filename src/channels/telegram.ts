@@ -22,6 +22,11 @@ interface TelegramChannelOpts {
   registeredGroups: () => Record<string, RegisteredGroup>;
 }
 
+const TELEGRAM_FETCH_CONFIG = {
+  agent: https.globalAgent,
+  compress: true,
+};
+
 function buildUniqueAttachmentFilename(
   filename: string,
   messageId: string,
@@ -85,7 +90,7 @@ export class TelegramChannel implements Channel {
       const destPath = path.join(attachDir, finalName);
 
       const fileUrl = `https://api.telegram.org/file/bot${this.botToken}/${file.file_path}`;
-      const resp = await fetch(fileUrl);
+      const resp = await fetch(fileUrl, TELEGRAM_FETCH_CONFIG as RequestInit);
       if (!resp.ok) {
         logger.warn(
           { fileId, status: resp.status },
@@ -108,7 +113,7 @@ export class TelegramChannel implements Channel {
   async connect(): Promise<void> {
     this.bot = new Bot(this.botToken, {
       client: {
-        baseFetchConfig: { agent: https.globalAgent, compress: true },
+        baseFetchConfig: TELEGRAM_FETCH_CONFIG,
       },
     });
 
@@ -221,7 +226,7 @@ export class TelegramChannel implements Channel {
 
     const storeMedia = (
       ctx: {
-        chat: { id: number | string; type: string };
+        chat: { id: number | string; type: string; title?: string };
         from?: { id?: number | string; first_name?: string; username?: string };
         message: {
           date: number;
@@ -239,15 +244,14 @@ export class TelegramChannel implements Channel {
       opts?: { fileId?: string; filename?: string },
     ) => {
       const chatJid = `tg:${ctx.chat.id}`;
-      const group = this.opts.registeredGroups()[chatJid];
-      if (!group) return;
-
       const timestamp = new Date(ctx.message.date * 1000).toISOString();
       const senderName =
         ctx.from?.first_name ||
         ctx.from?.username ||
         ctx.from?.id?.toString() ||
         'Unknown';
+      const chatName =
+        ctx.chat.type === 'private' ? senderName : ctx.chat.title || chatJid;
       const caption = ctx.message.caption ? ` ${ctx.message.caption}` : '';
       const messageId = ctx.message.message_id.toString();
 
@@ -256,19 +260,25 @@ export class TelegramChannel implements Channel {
       this.opts.onChatMetadata(
         chatJid,
         timestamp,
-        undefined,
+        chatName,
         'telegram',
         isGroup,
       );
 
-      const deliver = (content: string) => {
+      const group = this.opts.registeredGroups()[chatJid];
+      if (!group) return;
+
+      const deliver = (
+        content: string,
+        deliveryOpts?: { id?: string; timestamp?: string },
+      ) => {
         this.opts.onMessage(chatJid, {
-          id: messageId,
+          id: deliveryOpts?.id || messageId,
           chat_jid: chatJid,
           sender: ctx.from?.id?.toString() || '',
           sender_name: senderName,
           content,
-          timestamp,
+          timestamp: deliveryOpts?.timestamp || timestamp,
           is_from_me: false,
         });
       };
@@ -280,13 +290,19 @@ export class TelegramChannel implements Channel {
           opts.filename ||
           `${placeholder.replace(/[\[\] ]/g, '').toLowerCase()}_${messageId}`;
 
-        // Re-store the same message id after the download completes so the
-        // attachments path is available in history without risking a lost
-        // media message if the download lags behind newer inbound rows.
+        // Persist a follow-up event after the download completes so the
+        // attachment path reaches downstream processing without risking a
+        // lost media message if the download lags behind newer inbound rows.
         void this.downloadFile(opts.fileId, group.folder, filename).then(
           (filePath) => {
             if (filePath) {
-              deliver(`${placeholder} (${filePath})${caption}`);
+              const downloadTimestamp = new Date(
+                Math.max(Date.now(), Date.parse(timestamp) + 1),
+              ).toISOString();
+              deliver(`${placeholder} (${filePath})${caption}`, {
+                id: `${messageId}:attachment`,
+                timestamp: downloadTimestamp,
+              });
             }
           },
         );
