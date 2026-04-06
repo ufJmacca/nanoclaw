@@ -60,7 +60,9 @@ function createRuntimeWorkspace(): RuntimeWorkspace {
   };
 }
 
-function createWorkspaceEnv(runtimeWorkspace: RuntimeWorkspace): NodeJS.ProcessEnv {
+function createWorkspaceEnv(
+  runtimeWorkspace: RuntimeWorkspace,
+): NodeJS.ProcessEnv {
   return {
     ...process.env,
     NANOCLAW_WORKSPACE_GROUP_DIR: runtimeWorkspace.groupDir,

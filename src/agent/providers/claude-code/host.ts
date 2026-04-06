@@ -105,11 +105,7 @@ export function createClaudeCodeProvider(): AgentProvider {
         'ANTHROPIC_API_KEY',
       ]);
       const hasCredential =
-        hasConfiguredCredential(
-          env,
-          envFileKeys,
-          'CLAUDE_CODE_OAUTH_TOKEN',
-        ) ||
+        hasConfiguredCredential(env, envFileKeys, 'CLAUDE_CODE_OAUTH_TOKEN') ||
         hasConfiguredCredential(env, envFileKeys, 'ANTHROPIC_API_KEY');
 
       if (hasCredential) {
@@ -143,7 +139,10 @@ export function createClaudeCodeProvider(): AgentProvider {
             targetPath: path.join(ctx.groupDir, 'CLAUDE.md'),
           },
           {
-            targetPath: path.join(sessionRoot.providerStateDir, 'settings.json'),
+            targetPath: path.join(
+              sessionRoot.providerStateDir,
+              'settings.json',
+            ),
             content: `${CLAUDE_SETTINGS}\n`,
           },
         ],

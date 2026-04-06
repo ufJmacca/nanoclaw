@@ -6,9 +6,15 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { createProviderRegistry } from '../../provider-registry.js';
 
 describe('codex host provider', () => {
+  const originalCodexAuthFile = process.env.CODEX_AUTH_FILE;
   const tempRoots: string[] = [];
 
   afterEach(() => {
+    if (originalCodexAuthFile === undefined) {
+      delete process.env.CODEX_AUTH_FILE;
+    } else {
+      process.env.CODEX_AUTH_FILE = originalCodexAuthFile;
+    }
     while (tempRoots.length > 0) {
       const tempRoot = tempRoots.pop();
       if (tempRoot) {
@@ -27,7 +33,11 @@ describe('codex host provider', () => {
     const projectRoot = process.cwd();
     const dataDir = path.join(tempRoot, 'data');
     const groupDir = path.join(tempRoot, 'groups', 'test-group');
+    const authFile = path.join(tempRoot, 'codex-auth', 'auth.json');
     fs.mkdirSync(groupDir, { recursive: true });
+    fs.mkdirSync(path.dirname(authFile), { recursive: true });
+    fs.writeFileSync(authFile, '{"auth":"chatgpt"}\n');
+    process.env.CODEX_AUTH_FILE = authFile;
     const provider = createProviderRegistry().getProvider('codex');
 
     // Act
@@ -62,6 +72,16 @@ describe('codex host provider', () => {
         sourcePath: path.join(groupDir, 'AGENT.md'),
         targetPath: path.join(groupDir, 'AGENTS.md'),
       },
+      {
+        sourcePath: authFile,
+        targetPath: path.join(
+          dataDir,
+          'sessions',
+          'test-group',
+          'codex',
+          'auth.json',
+        ),
+      },
     ]);
     expect(preparedSession.directorySyncs).toBeUndefined();
     expect(containerSpec).toEqual({
@@ -79,6 +99,50 @@ describe('codex host provider', () => {
     });
   });
 
+  it('syncs refreshed auth.json back to the configured CODEX_AUTH_FILE after a run', async () => {
+    // Arrange
+    const tempRoot = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'nanoclaw-codex-host-provider-'),
+    );
+    tempRoots.push(tempRoot);
+
+    const projectRoot = process.cwd();
+    const dataDir = path.join(tempRoot, 'data');
+    const groupDir = path.join(tempRoot, 'groups', 'test-group');
+    const authFile = path.join(tempRoot, 'codex-auth', 'auth.json');
+    fs.mkdirSync(groupDir, { recursive: true });
+    fs.mkdirSync(path.dirname(authFile), { recursive: true });
+    fs.writeFileSync(authFile, '{"refresh":"before"}\n');
+    process.env.CODEX_AUTH_FILE = authFile;
+
+    const provider = createProviderRegistry().getProvider('codex');
+    const preparedSession = provider.prepareSession({
+      projectRoot,
+      dataDir,
+      groupFolder: 'test-group',
+      groupDir,
+      isMain: false,
+    });
+    fs.mkdirSync(preparedSession.providerStateDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(preparedSession.providerStateDir, 'auth.json'),
+      '{"refresh":"after"}\n',
+    );
+
+    // Act
+    await provider.finalizeSession?.({
+      projectRoot,
+      dataDir,
+      groupFolder: 'test-group',
+      groupDir,
+      isMain: false,
+      preparedSession,
+    });
+
+    // Assert
+    expect(fs.readFileSync(authFile, 'utf8')).toBe('{"refresh":"after"}\n');
+  });
+
   it('returns an explicit unsupported result for remote control', async () => {
     // Arrange
     const provider = createProviderRegistry().getProvider('codex');
@@ -88,6 +152,8 @@ describe('codex host provider', () => {
       groupFolder: 'test-group',
       projectRoot: '/workspace/project',
       env: process.env,
+      sender: 'alice',
+      chatJid: 'test@g.us',
     });
 
     // Assert

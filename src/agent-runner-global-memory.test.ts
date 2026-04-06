@@ -60,7 +60,9 @@ function createRuntimeWorkspace(): RuntimeWorkspace {
   };
 }
 
-function createWorkspaceEnv(runtimeWorkspace: RuntimeWorkspace): NodeJS.ProcessEnv {
+function createWorkspaceEnv(
+  runtimeWorkspace: RuntimeWorkspace,
+): NodeJS.ProcessEnv {
   return {
     ...process.env,
     NANOCLAW_WORKSPACE_GROUP_DIR: runtimeWorkspace.groupDir,
@@ -184,7 +186,13 @@ describe.sequential('container agent runner global memory', () => {
 
     // Act
     const result = await runRunner(
-      ['--import', 'tsx', '--loader', runtimeWorkspace.loaderPath, runnerEntryPoint],
+      [
+        '--import',
+        'tsx',
+        '--loader',
+        runtimeWorkspace.loaderPath,
+        runnerEntryPoint,
+      ],
       {
         providerId: 'claude-code',
         runtimeInput: {
@@ -215,7 +223,9 @@ describe.sequential('container agent runner global memory', () => {
       preset: 'claude_code',
       append: '# Canonical Global\n',
     });
-    expect(fs.readFileSync(canonicalPath, 'utf-8')).toBe('# Canonical Global\n');
+    expect(fs.readFileSync(canonicalPath, 'utf-8')).toBe(
+      '# Canonical Global\n',
+    );
     expect(fs.readFileSync(compatibilityPath, 'utf-8')).toBe(
       '# Provider Compatibility Edit\n',
     );

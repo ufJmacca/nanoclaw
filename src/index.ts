@@ -54,10 +54,7 @@ import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { startIpcWatcher } from './ipc.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
-import {
-  restoreRemoteControl,
-  stopRemoteControl,
-} from './remote-control.js';
+import { restoreRemoteControl, stopRemoteControl } from './remote-control.js';
 import {
   isSenderAllowed,
   isTriggerAllowed,
@@ -128,7 +125,11 @@ function loadState(): void {
   sessionStore = createRuntimeSessionStore();
   for (const group of Object.values(registeredGroups)) {
     const providerId = getGroupProviderId(group);
-    sessionStore.hydrate(group.folder, providerId, getSession(group.folder, providerId));
+    sessionStore.hydrate(
+      group.folder,
+      providerId,
+      getSession(group.folder, providerId),
+    );
   }
   logger.info(
     { groupCount: Object.keys(registeredGroups).length },
@@ -702,7 +703,10 @@ async function main(): Promise<void> {
     const provider = providerRegistry.getProvider(providerId);
 
     if (command === '/remote-control') {
-      if (!provider.capabilities.remoteControl || !provider.startRemoteControl) {
+      if (
+        !provider.capabilities.remoteControl ||
+        !provider.startRemoteControl
+      ) {
         await channel.sendMessage(
           chatJid,
           `${provider.displayName} does not support remote control in NanoClaw v1.`,

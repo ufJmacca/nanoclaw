@@ -5,10 +5,7 @@ import path from 'path';
 import { PassThrough } from 'stream';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type {
-  AgentProvider,
-  PreparedSession,
-} from './agent/provider-types.js';
+import type { AgentProvider, PreparedSession } from './agent/provider-types.js';
 import type { RegisteredGroup } from './types.js';
 
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
@@ -347,21 +344,118 @@ describe('container runner provider plumbing', () => {
         },
       },
     });
-    expect(
-      fs.readFileSync(path.join(groupDir, 'AGENTS.md'), 'utf-8'),
-    ).toBe('# Canonical Agent\n');
+    expect(fs.readFileSync(path.join(groupDir, 'AGENTS.md'), 'utf-8')).toBe(
+      '# Canonical Agent\n',
+    );
     expect(
       fs.readFileSync(path.join(providerStateDir, 'settings.json'), 'utf-8'),
     ).toContain('"provider": "codex"');
     expect(
-      fs.existsSync(path.join(providerStateDir, 'skills', 'status', 'SKILL.md')),
+      fs.existsSync(
+        path.join(providerStateDir, 'skills', 'status', 'SKILL.md'),
+      ),
     ).toBe(true);
     expect(fs.existsSync(path.join(copiedRunnerDir, 'providers'))).toBe(true);
     expect(spawnArgs).toContain(`CODEX_HOME=/home/node/.codex`);
-    expect(spawnArgs).toContain(
-      `${providerStateDir}:/home/node/.codex`,
-    );
+    expect(spawnArgs).toContain(`${providerStateDir}:/home/node/.codex`);
     expect(spawnArgs).toContain(`${copiedRunnerDir}:/app/src`);
+  });
+
+  it('runs provider session finalization after the container exits', async () => {
+    // Arrange
+    const groupDir = path.join(groupsDir, 'test-group');
+    fs.mkdirSync(groupDir, { recursive: true });
+    const providerStateDir = path.join(
+      dataDir,
+      'sessions',
+      'test-group',
+      'codex',
+    );
+    const finalizeSession = vi.fn();
+    const provider: AgentProvider = {
+      id: 'codex',
+      displayName: 'Codex',
+      capabilities: {
+        persistentSessions: true,
+        projectMemory: true,
+        remoteControl: false,
+        agentTeams: false,
+        providerSkills: false,
+      },
+      validateHost() {
+        return [];
+      },
+      prepareSession() {
+        return {
+          providerStateDir,
+          files: [],
+        };
+      },
+      buildContainerSpec() {
+        return {
+          mounts: [],
+          env: {},
+          workdir: '/workspace/group',
+        };
+      },
+      serializeRuntimeInput(ctx) {
+        return {
+          prompt: ctx.prompt,
+          sessionId: ctx.sessionId,
+          groupFolder: ctx.groupFolder,
+          chatJid: ctx.chatJid,
+          isMain: ctx.isMain,
+        };
+      },
+      finalizeSession,
+    };
+    const fakeProc = createFakeProcess();
+    const { runContainerAgent } = await loadSubject(
+      provider,
+      dataDir,
+      groupsDir,
+      fakeProc,
+    );
+
+    // Act
+    const resultPromise = runContainerAgent(
+      createProviderGroup(),
+      {
+        prompt: 'Ship the provider slice.',
+        groupFolder: 'test-group',
+        chatJid: 'test@g.us',
+        isMain: false,
+      },
+      () => {},
+    );
+
+    await new Promise((resolve) => setImmediate(resolve));
+    emitOutputMarker(fakeProc, {
+      status: 'success',
+      result: 'done',
+      newSessionId: 'session-123',
+    });
+    fakeProc.emit('close', 0);
+
+    const result = await resultPromise;
+
+    // Assert
+    expect(result).toEqual({
+      status: 'success',
+      result: 'done',
+      newSessionId: 'session-123',
+    });
+    expect(finalizeSession).toHaveBeenCalledWith({
+      projectRoot: process.cwd(),
+      dataDir,
+      groupFolder: 'test-group',
+      groupDir,
+      isMain: false,
+      preparedSession: {
+        providerStateDir,
+        files: [],
+      },
+    });
   });
 
   it('rejects provider mounts that escape the current group workspace or provider session namespace', async () => {
@@ -537,11 +631,7 @@ describe('container runner provider plumbing', () => {
     },
   ])(
     'rejects escaped $name before spawning the container',
-    async ({
-      buildPreparedSession,
-      expectedError,
-      setupOutsideRoot,
-    }) => {
+    async ({ buildPreparedSession, expectedError, setupOutsideRoot }) => {
       // Arrange
       const groupDir = path.join(groupsDir, 'test-group');
       fs.mkdirSync(groupDir, { recursive: true });

@@ -54,6 +54,15 @@ export interface BuildContainerSpecContext {
   preparedSession: PreparedSession;
 }
 
+export interface FinalizeSessionContext {
+  projectRoot: string;
+  dataDir: string;
+  groupFolder: string;
+  groupDir: string;
+  isMain: boolean;
+  preparedSession: PreparedSession;
+}
+
 export interface ProviderContainerSpec {
   mounts: ProviderMount[];
   env: Record<string, string>;
@@ -108,11 +117,8 @@ export interface AgentProvider {
   ): ProviderCheckResult[];
   prepareSession(ctx: PrepareSessionContext): PreparedSession;
   buildContainerSpec(ctx: BuildContainerSpecContext): ProviderContainerSpec;
-  serializeRuntimeInput(
-    ctx: RuntimeInvocationContext,
-  ): ProviderRuntimeInput;
-  startRemoteControl?(
-    ctx: RemoteControlContext,
-  ): Promise<RemoteControlResult>;
+  serializeRuntimeInput(ctx: RuntimeInvocationContext): ProviderRuntimeInput;
+  finalizeSession?(ctx: FinalizeSessionContext): void | Promise<void>;
+  startRemoteControl?(ctx: RemoteControlContext): Promise<RemoteControlResult>;
   stopRemoteControl?(): Promise<void>;
 }

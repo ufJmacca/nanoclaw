@@ -84,6 +84,24 @@ interface PreparedProviderContainer {
   groupAgentRunnerDir: string;
 }
 
+async function finalizePreparedProviderSession(
+  preparedProvider: PreparedProviderContainer,
+  input: ContainerInvocation,
+): Promise<void> {
+  if (!preparedProvider.provider.finalizeSession) {
+    return;
+  }
+
+  await preparedProvider.provider.finalizeSession({
+    projectRoot: process.cwd(),
+    dataDir: DATA_DIR,
+    groupFolder: input.groupFolder,
+    groupDir: preparedProvider.groupDir,
+    isMain: input.isMain,
+    preparedSession: preparedProvider.preparedSession,
+  });
+}
+
 function isPathWithinRoot(root: string, candidate: string): boolean {
   const relativePath = path.relative(root, candidate);
   return !relativePath.startsWith('..') && !path.isAbsolute(relativePath);
@@ -504,6 +522,24 @@ export async function runContainerAgent(
   fs.mkdirSync(logsDir, { recursive: true });
 
   return new Promise((resolve) => {
+    const resolveWithFinalization = (result: ContainerOutput) => {
+      Promise.resolve()
+        .then(() => finalizePreparedProviderSession(preparedProvider, input))
+        .catch((error) => {
+          logger.warn(
+            {
+              group: group.name,
+              providerId: preparedProvider.providerId,
+              error,
+            },
+            'Provider session finalization failed',
+          );
+        })
+        .finally(() => {
+          resolve(result);
+        });
+    };
+
     const container = spawn(CONTAINER_RUNTIME_BIN, containerArgs, {
       stdio: ['pipe', 'pipe', 'pipe'],
     });
@@ -658,7 +694,7 @@ export async function runContainerAgent(
             'Container timed out after output (idle cleanup)',
           );
           outputChain.then(() => {
-            resolve({
+            resolveWithFinalization({
               status: 'success',
               result: null,
               newSessionId,
@@ -672,7 +708,7 @@ export async function runContainerAgent(
           'Container timed out with no output',
         );
 
-        resolve({
+        resolveWithFinalization({
           status: 'error',
           result: null,
           error: `Container timed out after ${configTimeout}ms`,
@@ -766,7 +802,7 @@ export async function runContainerAgent(
           'Container exited with error',
         );
 
-        resolve({
+        resolveWithFinalization({
           status: 'error',
           result: null,
           error: `Container exited with code ${code}: ${stderr.slice(-200)}`,
@@ -781,7 +817,7 @@ export async function runContainerAgent(
             { group: group.name, duration, newSessionId },
             'Container completed (streaming mode)',
           );
-          resolve({
+          resolveWithFinalization({
             status: 'success',
             result: null,
             newSessionId,
@@ -819,7 +855,7 @@ export async function runContainerAgent(
           'Container completed',
         );
 
-        resolve(output);
+        resolveWithFinalization(output);
       } catch (err) {
         logger.error(
           {
@@ -831,7 +867,7 @@ export async function runContainerAgent(
           'Failed to parse container output',
         );
 
-        resolve({
+        resolveWithFinalization({
           status: 'error',
           result: null,
           error: `Failed to parse container output: ${err instanceof Error ? err.message : String(err)}`,
@@ -845,7 +881,7 @@ export async function runContainerAgent(
         { group: group.name, containerName, error: err },
         'Container spawn error',
       );
-      resolve({
+      resolveWithFinalization({
         status: 'error',
         result: null,
         error: `Container spawn error: ${err.message}`,

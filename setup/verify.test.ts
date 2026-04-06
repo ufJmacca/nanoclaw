@@ -7,6 +7,7 @@ import Database from 'better-sqlite3';
 
 const {
   emitStatus,
+  execFileSyncMock,
   execSyncMock,
   getPlatform,
   getServiceManager,
@@ -14,6 +15,7 @@ const {
   isRoot,
 } = vi.hoisted(() => ({
   emitStatus: vi.fn(),
+  execFileSyncMock: vi.fn(),
   execSyncMock: vi.fn(),
   getPlatform: vi.fn(() => 'linux'),
   getServiceManager: vi.fn(() => 'none'),
@@ -22,6 +24,7 @@ const {
 }));
 
 vi.mock('child_process', () => ({
+  execFileSync: (...args: unknown[]) => execFileSyncMock(...args),
   execSync: (...args: unknown[]) => execSyncMock(...args),
 }));
 
@@ -121,6 +124,13 @@ describe('verify provider readiness', () => {
     }
   }
 
+  function seedCodexAuth(homeDir: string, contents = '{"auth":"chatgpt"}\n'): string {
+    const authFile = path.join(homeDir, '.codex', 'auth.json');
+    fs.mkdirSync(path.dirname(authFile), { recursive: true });
+    fs.writeFileSync(authFile, contents);
+    return authFile;
+  }
+
   async function runVerify(repoDir: string): Promise<Record<string, string>> {
     process.chdir(repoDir);
     vi.resetModules();
@@ -137,6 +147,7 @@ describe('verify provider readiness', () => {
       process.env.HOME = originalHome;
     }
     emitStatus.mockReset();
+    execFileSyncMock.mockReset();
     execSyncMock.mockReset();
     getPlatform.mockReset();
     getPlatform.mockReturnValue('linux');
@@ -160,11 +171,11 @@ describe('verify provider readiness', () => {
     // Arrange
     const { repoDir, homeDir } = createTempRepo();
     process.env.HOME = homeDir;
+    seedCodexAuth(homeDir);
     fs.writeFileSync(
       path.join(repoDir, '.env'),
       [
         'ANTHROPIC_API_KEY=anthropic-test',
-        'OPENAI_API_KEY=openai-test',
         'TELEGRAM_BOT_TOKEN=telegram-test',
       ].join('\n') + '\n',
     );
@@ -179,6 +190,7 @@ describe('verify provider readiness', () => {
       }
       throw new Error(`Unexpected command: ${command}`);
     });
+    execFileSyncMock.mockReturnValue('Logged in using ChatGPT\n');
 
     // Act
     const status = await runVerify(repoDir);
@@ -217,6 +229,7 @@ describe('verify provider readiness', () => {
     // Arrange
     const { repoDir, homeDir } = createTempRepo();
     process.env.HOME = homeDir;
+    seedCodexAuth(homeDir);
     fs.writeFileSync(
       path.join(repoDir, '.env'),
       [
@@ -235,6 +248,7 @@ describe('verify provider readiness', () => {
       }
       throw new Error(`Unexpected command: ${command}`);
     });
+    execFileSyncMock.mockReturnValue('Logged in using ChatGPT\n');
     const originalProviderEnv = Object.fromEntries(
       providerEnvKeys.map((key) => [key, process.env[key]]),
     ) as Record<(typeof providerEnvKeys)[number], string | undefined>;
@@ -249,6 +263,10 @@ describe('verify provider readiness', () => {
       const providers = JSON.parse(status.PROVIDERS) as Array<{
         id: string;
         ready: boolean;
+        checks: Array<{
+          code?: string;
+          status: string;
+        }>;
       }>;
 
       // Assert
@@ -263,6 +281,12 @@ describe('verify provider readiness', () => {
           expect.objectContaining({
             id: 'codex',
             ready: true,
+            checks: expect.arrayContaining([
+              expect.objectContaining({
+                code: 'api_keys_ignored',
+                status: 'warning',
+              }),
+            ]),
           }),
         ]),
       );
@@ -300,6 +324,7 @@ describe('verify provider readiness', () => {
       }
       throw new Error(`Unexpected command: ${command}`);
     });
+    execFileSyncMock.mockReturnValue('Not logged in\n');
     vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
 
     // Act

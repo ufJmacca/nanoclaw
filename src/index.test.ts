@@ -39,8 +39,11 @@ const {
   findChannel: vi.fn(),
   getAllRegisteredGroups: vi.fn(() => ({})),
   getChannelFactory: vi.fn(),
-  getRegisteredChannelNames: vi.fn(() => []),
-  getSession: vi.fn(() => undefined),
+  getRegisteredChannelNames: vi.fn(() => [] as string[]),
+  getSession: vi.fn(
+    (_groupFolder?: string, _providerId?: string) =>
+      undefined as string | undefined,
+  ),
   providerHookStartRemoteControl: vi.fn(),
   providerRegistryGetProvider: vi.fn(),
   restoreRemoteControl: vi.fn(),
@@ -186,7 +189,9 @@ const ORIGINAL_ARGV_1 = process.argv[1];
 const INDEX_MODULE_PATH = fileURLToPath(new URL('./index.ts', import.meta.url));
 
 function createTempRepo(): string {
-  const repoDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-index-test-'));
+  const repoDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'nanoclaw-index-test-'),
+  );
   fs.mkdirSync(path.join(repoDir, 'groups', 'main'), { recursive: true });
   fs.mkdirSync(path.join(repoDir, 'groups', 'global'), { recursive: true });
   return repoDir;
@@ -437,7 +442,7 @@ describe('provider-scoped runtime sessions', () => {
     };
     getAllRegisteredGroups.mockReturnValue({ 'codex@g.us': startupGroup });
     getSession.mockImplementation(
-      (groupFolder: string, providerId: string | undefined) => {
+      (groupFolder: string | undefined, providerId: string | undefined) => {
         if (groupFolder !== 'codex-group') {
           return undefined;
         }
@@ -504,7 +509,7 @@ describe('provider-scoped runtime sessions', () => {
     };
     getAllRegisteredGroups.mockReturnValue({ 'codex@g.us': group });
     getSession.mockImplementation(
-      (groupFolder: string, providerId: string | undefined) => {
+      (groupFolder: string | undefined, providerId: string | undefined) => {
         if (groupFolder !== 'codex-group') {
           return undefined;
         }
@@ -524,9 +529,8 @@ describe('provider-scoped runtime sessions', () => {
     });
 
     // Act
-    const { _loadStateForTest, _runAgentForTest } = await loadIndexModule(
-      repoDir,
-    );
+    const { _loadStateForTest, _runAgentForTest } =
+      await loadIndexModule(repoDir);
     _loadStateForTest();
     const result = await _runAgentForTest(group, 'Run', 'codex@g.us');
 
@@ -731,7 +735,13 @@ describe('provider-scoped remote control commands', () => {
       },
       validateHost: vi.fn(() => []),
       prepareSession: vi.fn(() => ({
-        providerStateDir: path.join(repoDir, 'data', 'sessions', 'main', 'claude-code'),
+        providerStateDir: path.join(
+          repoDir,
+          'data',
+          'sessions',
+          'main',
+          'claude-code',
+        ),
         files: [],
       })),
       buildContainerSpec: vi.fn(() => ({
