@@ -154,8 +154,35 @@ describe('telegram channel', () => {
     });
 
     expect(reply).toHaveBeenCalledWith(
-      'Chat ID: `tg:123456789`\nName: Jon\nType: private',
-      { parse_mode: 'Markdown' },
+      'Chat ID: tg:123456789\nName: Jon\nType: private',
+    );
+  });
+
+  it('sends /chatid as plain text for markdown-heavy group names', async () => {
+    process.env.TELEGRAM_BOT_TOKEN = 'test-token';
+
+    const { getChannelFactory } = await loadTelegramRegistry();
+    const channel = getChannelFactory('telegram')!({
+      onMessage: vi.fn(),
+      onChatMetadata: vi.fn(),
+      registeredGroups: () => ({}),
+    });
+
+    await channel!.connect();
+
+    const reply = vi.fn();
+    await commandHandlers.get('chatid')!({
+      chat: {
+        id: -100987654321,
+        type: 'supergroup',
+        title: 'Ops_[Oncall](1)',
+      },
+      from: { first_name: 'Jon' },
+      reply,
+    });
+
+    expect(reply).toHaveBeenCalledWith(
+      'Chat ID: tg:-100987654321\nName: Ops_[Oncall](1)\nType: supergroup',
     );
   });
 

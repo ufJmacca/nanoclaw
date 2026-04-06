@@ -137,8 +137,7 @@ export class TelegramChannel implements Channel {
           : (ctx.chat as { title?: string }).title || 'Unknown';
 
       ctx.reply(
-        `Chat ID: \`tg:${chatId}\`\nName: ${chatName}\nType: ${chatType}`,
-        { parse_mode: 'Markdown' },
+        `Chat ID: tg:${chatId}\nName: ${chatName}\nType: ${chatType}`,
       );
     });
 

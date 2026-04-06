@@ -169,10 +169,7 @@ function saveState(): void {
 }
 
 function getLatestThreadId(messages: NewMessage[]): string | undefined {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i].thread_id) return messages[i].thread_id;
-  }
-  return undefined;
+  return messages[messages.length - 1]?.thread_id;
 }
 
 function updateReplyThreadContext(
@@ -602,6 +599,13 @@ export async function _runAgentForTest(
   chatJid: string,
 ): Promise<'success' | 'error'> {
   return runAgent(group, prompt, chatJid);
+}
+
+/** @internal - exported for testing */
+export function _getLatestThreadIdForTest(
+  messages: NewMessage[],
+): string | undefined {
+  return getLatestThreadId(messages);
 }
 
 async function startMessageLoop(): Promise<void> {

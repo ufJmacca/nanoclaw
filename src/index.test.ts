@@ -622,6 +622,43 @@ describe('provider-scoped runtime sessions', () => {
   });
 });
 
+describe('thread reply context', () => {
+  afterEach(() => {
+    process.chdir(ORIGINAL_CWD);
+    vi.resetModules();
+    getAllRegisteredGroups.mockReset();
+    getAllRegisteredGroups.mockReturnValue({});
+    resetIndexRuntimeMocks();
+  });
+
+  it('clears stale topic context when the latest message is unthreaded', async () => {
+    const repoDir = createTempRepo();
+    const { _getLatestThreadIdForTest } = await loadIndexModule(repoDir);
+
+    expect(
+      _getLatestThreadIdForTest([
+        {
+          id: 'm1',
+          chat_jid: 'tg:123',
+          sender: 'alice',
+          sender_name: 'Alice',
+          content: 'topic message',
+          timestamp: '2026-04-07T00:00:00.000Z',
+          thread_id: '777',
+        },
+        {
+          id: 'm2',
+          chat_jid: 'tg:123',
+          sender: 'alice',
+          sender_name: 'Alice',
+          content: 'main chat message',
+          timestamp: '2026-04-07T00:00:01.000Z',
+        },
+      ]),
+    ).toBeUndefined();
+  });
+});
+
 describe('provider-scoped remote control commands', () => {
   afterEach(() => {
     process.chdir(ORIGINAL_CWD);
