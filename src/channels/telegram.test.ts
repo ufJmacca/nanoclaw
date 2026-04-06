@@ -48,6 +48,14 @@ class FakeBot {
   }
 }
 
+function createDeferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
+
 vi.mock('grammy', () => ({
   Api: class {},
   Bot: FakeBot,
@@ -194,6 +202,110 @@ describe('telegram channel', () => {
         thread_id: '999',
         is_from_me: false,
       }),
+    );
+  });
+
+  it('stores document messages before the attachment download finishes', async () => {
+    process.env.TELEGRAM_BOT_TOKEN = 'test-token';
+
+    const onMessage = vi.fn();
+
+    const { getChannelFactory } = await loadTelegramRegistry();
+    const channel = getChannelFactory('telegram')!({
+      onMessage,
+      onChatMetadata: vi.fn(),
+      registeredGroups: () => ({
+        'tg:123456789': baseGroup(),
+      }),
+    });
+
+    await channel!.connect();
+
+    const handler = eventHandlers.get('message:document');
+    expect(handler).toBeTypeOf('function');
+
+    const download = createDeferred<string | null>();
+    vi.spyOn(channel as any, 'downloadFile').mockReturnValue(download.promise);
+
+    handler!({
+      chat: { id: 123456789, type: 'private' },
+      from: { id: 55, first_name: 'Jon' },
+      message: {
+        date: 1712419200,
+        message_id: 88,
+        caption: 'Quarterly report',
+        document: {
+          file_id: 'doc-file-1',
+          file_name: 'report.pdf',
+        },
+      },
+    });
+
+    expect(onMessage).toHaveBeenCalledTimes(1);
+    expect(onMessage).toHaveBeenNthCalledWith(
+      1,
+      'tg:123456789',
+      expect.objectContaining({
+        id: '88',
+        content: '[Document: report.pdf] Quarterly report',
+        timestamp: '2024-04-06T16:00:00.000Z',
+      }),
+    );
+
+    download.resolve('/workspace/group/attachments/report_88.pdf');
+    await download.promise;
+    await Promise.resolve();
+
+    expect(onMessage).toHaveBeenCalledTimes(2);
+    expect(onMessage).toHaveBeenNthCalledWith(
+      2,
+      'tg:123456789',
+      expect.objectContaining({
+        id: '88',
+        content:
+          '[Document: report.pdf] (/workspace/group/attachments/report_88.pdf) Quarterly report',
+      }),
+    );
+  });
+
+  it('uses a message-specific filename when downloading documents', async () => {
+    process.env.TELEGRAM_BOT_TOKEN = 'test-token';
+
+    const { getChannelFactory } = await loadTelegramRegistry();
+    const channel = getChannelFactory('telegram')!({
+      onMessage: vi.fn(),
+      onChatMetadata: vi.fn(),
+      registeredGroups: () => ({
+        'tg:123456789': baseGroup(),
+      }),
+    });
+
+    await channel!.connect();
+
+    const handler = eventHandlers.get('message:document');
+    expect(handler).toBeTypeOf('function');
+
+    const downloadSpy = vi
+      .spyOn(channel as any, 'downloadFile')
+      .mockResolvedValue(null);
+
+    handler!({
+      chat: { id: 123456789, type: 'private' },
+      from: { id: 55, first_name: 'Jon' },
+      message: {
+        date: 1712419200,
+        message_id: 99,
+        document: {
+          file_id: 'doc-file-2',
+          file_name: 'report.pdf',
+        },
+      },
+    });
+
+    expect(downloadSpy).toHaveBeenCalledWith(
+      'doc-file-2',
+      'telegram_main',
+      'report_99.pdf',
     );
   });
 });

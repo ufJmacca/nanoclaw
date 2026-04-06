@@ -22,6 +22,15 @@ interface TelegramChannelOpts {
   registeredGroups: () => Record<string, RegisteredGroup>;
 }
 
+function buildUniqueAttachmentFilename(
+  filename: string,
+  messageId: string,
+): string {
+  const ext = path.extname(filename);
+  const base = ext ? filename.slice(0, -ext.length) : filename;
+  return `${base || 'file'}_${messageId}${ext}`;
+}
+
 async function sendTelegramMessage(
   api: { sendMessage: Api['sendMessage'] },
   chatId: string | number,
@@ -240,6 +249,7 @@ export class TelegramChannel implements Channel {
         ctx.from?.id?.toString() ||
         'Unknown';
       const caption = ctx.message.caption ? ` ${ctx.message.caption}` : '';
+      const messageId = ctx.message.message_id.toString();
 
       const isGroup =
         ctx.chat.type === 'group' || ctx.chat.type === 'supergroup';
@@ -253,7 +263,7 @@ export class TelegramChannel implements Channel {
 
       const deliver = (content: string) => {
         this.opts.onMessage(chatJid, {
-          id: ctx.message.message_id.toString(),
+          id: messageId,
           chat_jid: chatJid,
           sender: ctx.from?.id?.toString() || '',
           sender_name: senderName,
@@ -263,24 +273,24 @@ export class TelegramChannel implements Channel {
         });
       };
 
+      deliver(`${placeholder}${caption}`);
+
       if (opts?.fileId) {
-        const msgId = ctx.message.message_id.toString();
         const filename =
           opts.filename ||
-          `${placeholder.replace(/[\[\] ]/g, '').toLowerCase()}_${msgId}`;
-        this.downloadFile(opts.fileId, group.folder, filename).then(
+          `${placeholder.replace(/[\[\] ]/g, '').toLowerCase()}_${messageId}`;
+
+        // Re-store the same message id after the download completes so the
+        // attachments path is available in history without risking a lost
+        // media message if the download lags behind newer inbound rows.
+        void this.downloadFile(opts.fileId, group.folder, filename).then(
           (filePath) => {
             if (filePath) {
               deliver(`${placeholder} (${filePath})${caption}`);
-            } else {
-              deliver(`${placeholder}${caption}`);
             }
           },
         );
-        return;
       }
-
-      deliver(`${placeholder}${caption}`);
     };
 
     this.bot.on('message:photo', (ctx) => {
@@ -304,16 +314,25 @@ export class TelegramChannel implements Channel {
       });
     });
     this.bot.on('message:audio', (ctx) => {
-      const name =
-        ctx.message.audio?.file_name || `audio_${ctx.message.message_id}`;
+      const messageId = ctx.message.message_id.toString();
+      const name = ctx.message.audio?.file_name
+        ? buildUniqueAttachmentFilename(ctx.message.audio.file_name, messageId)
+        : `audio_${messageId}`;
       storeMedia(ctx, '[Audio]', {
         fileId: ctx.message.audio?.file_id,
         filename: name,
       });
     });
     this.bot.on('message:document', (ctx) => {
-      const name = ctx.message.document?.file_name || 'file';
-      storeMedia(ctx, `[Document: ${name}]`, {
+      const messageId = ctx.message.message_id.toString();
+      const displayName = ctx.message.document?.file_name || 'file';
+      const name = ctx.message.document?.file_name
+        ? buildUniqueAttachmentFilename(
+            ctx.message.document.file_name,
+            messageId,
+          )
+        : `file_${messageId}`;
+      storeMedia(ctx, `[Document: ${displayName}]`, {
         fileId: ctx.message.document?.file_id,
         filename: name,
       });
