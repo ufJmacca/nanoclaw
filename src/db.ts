@@ -132,6 +132,10 @@ function createSchema(database: Database.Database): void {
       timestamp TEXT,
       is_from_me INTEGER,
       is_bot_message INTEGER DEFAULT 0,
+      thread_id TEXT,
+      reply_to_message_id TEXT,
+      reply_to_message_content TEXT,
+      reply_to_sender_name TEXT,
       PRIMARY KEY (id, chat_jid),
       FOREIGN KEY (chat_jid) REFERENCES chats(jid)
     );
@@ -219,6 +223,19 @@ function createSchema(database: Database.Database): void {
       .run(`${ASSISTANT_NAME}:%`);
   } catch {
     /* column already exists */
+  }
+
+  for (const column of [
+    'thread_id TEXT',
+    'reply_to_message_id TEXT',
+    'reply_to_message_content TEXT',
+    'reply_to_sender_name TEXT',
+  ]) {
+    try {
+      database.exec(`ALTER TABLE messages ADD COLUMN ${column}`);
+    } catch {
+      /* column already exists */
+    }
   }
 
   // Add is_main column if it doesn't exist (migration for existing DBs)
@@ -391,7 +408,20 @@ export function setLastGroupSync(): void {
  */
 export function storeMessage(msg: NewMessage): void {
   db.prepare(
-    `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO messages (
+      id,
+      chat_jid,
+      sender,
+      sender_name,
+      content,
+      timestamp,
+      is_from_me,
+      is_bot_message,
+      thread_id,
+      reply_to_message_id,
+      reply_to_message_content,
+      reply_to_sender_name
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     msg.id,
     msg.chat_jid,
@@ -401,6 +431,10 @@ export function storeMessage(msg: NewMessage): void {
     msg.timestamp,
     msg.is_from_me ? 1 : 0,
     msg.is_bot_message ? 1 : 0,
+    msg.thread_id || null,
+    msg.reply_to_message_id || null,
+    msg.reply_to_message_content || null,
+    msg.reply_to_sender_name || null,
   );
 }
 
@@ -416,9 +450,26 @@ export function storeMessageDirect(msg: {
   timestamp: string;
   is_from_me: boolean;
   is_bot_message?: boolean;
+  thread_id?: string;
+  reply_to_message_id?: string;
+  reply_to_message_content?: string;
+  reply_to_sender_name?: string;
 }): void {
   db.prepare(
-    `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO messages (
+      id,
+      chat_jid,
+      sender,
+      sender_name,
+      content,
+      timestamp,
+      is_from_me,
+      is_bot_message,
+      thread_id,
+      reply_to_message_id,
+      reply_to_message_content,
+      reply_to_sender_name
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     msg.id,
     msg.chat_jid,
@@ -428,6 +479,10 @@ export function storeMessageDirect(msg: {
     msg.timestamp,
     msg.is_from_me ? 1 : 0,
     msg.is_bot_message ? 1 : 0,
+    msg.thread_id || null,
+    msg.reply_to_message_id || null,
+    msg.reply_to_message_content || null,
+    msg.reply_to_sender_name || null,
   );
 }
 
@@ -445,7 +500,18 @@ export function getNewMessages(
   // Subquery takes the N most recent, outer query re-sorts chronologically.
   const sql = `
     SELECT * FROM (
-      SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me
+      SELECT
+        id,
+        chat_jid,
+        sender,
+        sender_name,
+        content,
+        timestamp,
+        is_from_me,
+        thread_id,
+        reply_to_message_id,
+        reply_to_message_content,
+        reply_to_sender_name
       FROM messages
       WHERE timestamp > ? AND chat_jid IN (${placeholders})
         AND is_bot_message = 0 AND content NOT LIKE ?
@@ -479,7 +545,18 @@ export function getMessagesSince(
   // Subquery takes the N most recent, outer query re-sorts chronologically.
   const sql = `
     SELECT * FROM (
-      SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me
+      SELECT
+        id,
+        chat_jid,
+        sender,
+        sender_name,
+        content,
+        timestamp,
+        is_from_me,
+        thread_id,
+        reply_to_message_id,
+        reply_to_message_content,
+        reply_to_sender_name
       FROM messages
       WHERE chat_jid = ? AND timestamp > ?
         AND is_bot_message = 0 AND content NOT LIKE ?

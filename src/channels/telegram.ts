@@ -247,6 +247,7 @@ export class TelegramChannel implements Channel {
         message: {
           date: number;
           message_id: number;
+          message_thread_id?: number;
           caption?: string;
           photo?: Array<{ file_id: string }>;
           video?: { file_id?: string };
@@ -254,6 +255,12 @@ export class TelegramChannel implements Channel {
           audio?: { file_id?: string; file_name?: string };
           document?: { file_id?: string; file_name?: string };
           sticker?: { emoji?: string };
+          reply_to_message?: {
+            message_id?: number;
+            text?: string;
+            caption?: string;
+            from?: { id?: number | string; first_name?: string; username?: string };
+          };
         };
       },
       placeholder: string,
@@ -270,6 +277,16 @@ export class TelegramChannel implements Channel {
         ctx.chat.type === 'private' ? senderName : ctx.chat.title || chatJid;
       const caption = ctx.message.caption ? ` ${ctx.message.caption}` : '';
       const messageId = ctx.message.message_id.toString();
+      const threadId = ctx.message.message_thread_id?.toString();
+      const replyTo = ctx.message.reply_to_message;
+      const replyToMessageId = replyTo?.message_id?.toString();
+      const replyToContent = replyTo?.text || replyTo?.caption;
+      const replyToSenderName = replyTo
+        ? replyTo.from?.first_name ||
+          replyTo.from?.username ||
+          replyTo.from?.id?.toString() ||
+          'Unknown'
+        : undefined;
 
       const isGroup =
         ctx.chat.type === 'group' || ctx.chat.type === 'supergroup';
@@ -296,6 +313,10 @@ export class TelegramChannel implements Channel {
           content,
           timestamp: deliveryOpts?.timestamp || timestamp,
           is_from_me: false,
+          thread_id: threadId,
+          reply_to_message_id: replyToMessageId,
+          reply_to_message_content: replyToContent,
+          reply_to_sender_name: replyToSenderName,
         });
       };
 

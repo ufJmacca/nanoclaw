@@ -75,6 +75,7 @@ export { escapeXml, formatMessages } from './router.js';
 let lastTimestamp = '';
 let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
+let replyThreadIdByChat: Record<string, string | undefined> = {};
 let messageLoopRunning = false;
 
 const channels: Channel[] = [];
@@ -165,6 +166,26 @@ function getOrRecoverCursor(chatJid: string): string {
 function saveState(): void {
   setRouterState('last_timestamp', lastTimestamp);
   setRouterState('last_agent_timestamp', JSON.stringify(lastAgentTimestamp));
+}
+
+function getLatestThreadId(messages: NewMessage[]): string | undefined {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].thread_id) return messages[i].thread_id;
+  }
+  return undefined;
+}
+
+function updateReplyThreadContext(
+  chatJid: string,
+  messages: NewMessage[],
+): string | undefined {
+  const threadId = getLatestThreadId(messages);
+  if (threadId) {
+    replyThreadIdByChat[chatJid] = threadId;
+  } else {
+    delete replyThreadIdByChat[chatJid];
+  }
+  return threadId;
 }
 
 function rewriteAssistantNameInMemoryFile(filePath: string): void {
@@ -384,6 +405,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   }
 
   const prompt = formatMessages(missedMessages, TIMEZONE);
+  updateReplyThreadContext(chatJid, missedMessages);
 
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
@@ -426,7 +448,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
       logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
       if (text) {
-        await channel.sendMessage(chatJid, text);
+        await channel.sendMessage(chatJid, text, replyThreadIdByChat[chatJid]);
         outputSentToUser = true;
       }
       // Only reset idle timer on actual results, not session-update markers (result: null)
@@ -656,6 +678,7 @@ async function startMessageLoop(): Promise<void> {
           );
           const messagesToSend =
             allPending.length > 0 ? allPending : groupMessages;
+          updateReplyThreadContext(chatJid, messagesToSend);
           const formatted = formatMessages(messagesToSend, TIMEZONE);
 
           if (queue.sendMessage(chatJid, formatted)) {
@@ -760,6 +783,7 @@ async function main(): Promise<void> {
         await channel.sendMessage(
           chatJid,
           `${provider.displayName} does not support remote control in NanoClaw v1.`,
+          msg.thread_id,
         );
         return;
       }
@@ -772,25 +796,31 @@ async function main(): Promise<void> {
         chatJid,
       });
       if (result.status === 'started' && result.url) {
-        await channel.sendMessage(chatJid, result.url);
+        await channel.sendMessage(chatJid, result.url, msg.thread_id);
       } else if (result.status === 'unsupported') {
         await channel.sendMessage(
           chatJid,
           result.message ||
             `${provider.displayName} does not support remote control in NanoClaw v1.`,
+          msg.thread_id,
         );
       } else {
         await channel.sendMessage(
           chatJid,
           `Remote Control failed: ${result.message || 'unknown error'}`,
+          msg.thread_id,
         );
       }
     } else {
       const result = stopRemoteControl(chatJid, providerId);
       if (result.ok) {
-        await channel.sendMessage(chatJid, 'Remote Control session ended.');
+        await channel.sendMessage(
+          chatJid,
+          'Remote Control session ended.',
+          msg.thread_id,
+        );
       } else {
-        await channel.sendMessage(chatJid, result.error);
+        await channel.sendMessage(chatJid, result.error, msg.thread_id);
       }
     }
   }
@@ -823,6 +853,13 @@ async function main(): Promise<void> {
           return;
         }
       }
+
+      if (msg.thread_id) {
+        replyThreadIdByChat[chatJid] = msg.thread_id;
+      } else {
+        delete replyThreadIdByChat[chatJid];
+      }
+
       storeMessage(msg);
 
       if (msg.id.endsWith(':attachment')) {
@@ -831,6 +868,7 @@ async function main(): Promise<void> {
           return;
         }
 
+        updateReplyThreadContext(chatJid, [msg]);
         const formatted = formatMessages([msg], TIMEZONE);
         if (queue.sendMessage(chatJid, formatted)) {
           lastAgentTimestamp[chatJid] = msg.timestamp;
@@ -881,21 +919,21 @@ async function main(): Promise<void> {
     queue,
     onProcess: (groupJid, proc, containerName, groupFolder) =>
       queue.registerProcess(groupJid, proc, containerName, groupFolder),
-    sendMessage: async (jid, rawText) => {
+    sendMessage: async (jid, rawText, threadId) => {
       const channel = findChannel(channels, jid);
       if (!channel) {
         logger.warn({ jid }, 'No channel owns JID, cannot send message');
         return;
       }
       const text = formatOutbound(rawText);
-      if (text) await channel.sendMessage(jid, text);
+      if (text) await channel.sendMessage(jid, text, threadId);
     },
   });
   startIpcWatcher({
-    sendMessage: (jid, text) => {
+    sendMessage: (jid, text, threadId) => {
       const channel = findChannel(channels, jid);
       if (!channel) throw new Error(`No channel for JID: ${jid}`);
-      return channel.sendMessage(jid, text);
+      return channel.sendMessage(jid, text, threadId);
     },
     registeredGroups: () => registeredGroups,
     registerGroup,

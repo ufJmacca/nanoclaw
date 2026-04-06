@@ -324,7 +324,13 @@ describe('telegram channel', () => {
       message: {
         date: 1712419200,
         message_id: 88,
+        message_thread_id: 777,
         caption: 'Quarterly report',
+        reply_to_message: {
+          message_id: 40,
+          caption: 'Previous report',
+          from: { id: 66, first_name: 'Alice' },
+        },
         document: {
           file_id: 'doc-file-1',
           file_name: 'report.pdf',
@@ -340,6 +346,10 @@ describe('telegram channel', () => {
         id: '88',
         content: '[Document: report.pdf] Quarterly report',
         timestamp: '2024-04-06T16:00:00.000Z',
+        thread_id: '777',
+        reply_to_message_id: '40',
+        reply_to_message_content: 'Previous report',
+        reply_to_sender_name: 'Alice',
       }),
     );
 
@@ -356,6 +366,10 @@ describe('telegram channel', () => {
         id: '88:attachment',
         content:
           '[Document: report.pdf] (/workspace/group/attachments/report_88.pdf) Quarterly report',
+        thread_id: '777',
+        reply_to_message_id: '40',
+        reply_to_message_content: 'Previous report',
+        reply_to_sender_name: 'Alice',
       }),
     );
     expect(
@@ -401,6 +415,31 @@ describe('telegram channel', () => {
       'doc-file-2',
       'telegram_main',
       'report_99.pdf',
+    );
+  });
+
+  it('routes outbound Telegram replies into the provided thread', async () => {
+    process.env.TELEGRAM_BOT_TOKEN = 'test-token';
+
+    const { getChannelFactory } = await loadTelegramRegistry();
+    const channel = getChannelFactory('telegram')!({
+      onMessage: vi.fn(),
+      onChatMetadata: vi.fn(),
+      registeredGroups: () => ({
+        'tg:123456789': baseGroup(),
+      }),
+    });
+
+    await channel!.connect();
+    await channel!.sendMessage('tg:123456789', 'hello thread', '999');
+
+    expect(sendMessageMock).toHaveBeenCalledWith(
+      '123456789',
+      'hello thread',
+      expect.objectContaining({
+        message_thread_id: 999,
+        parse_mode: 'Markdown',
+      }),
     );
   });
 

@@ -688,11 +688,13 @@ describe('provider-scoped remote control commands', () => {
       sender_name: 'Alice',
       content: '/remote-control',
       timestamp: '2026-04-03T00:00:00.000Z',
+      thread_id: '123',
     });
     await vi.waitFor(() => {
       expect(sendMessage).toHaveBeenCalledWith(
         'main@g.us',
         'Codex does not support remote control in NanoClaw v1.',
+        '123',
       );
     });
 
@@ -847,11 +849,13 @@ describe('provider-scoped remote control commands', () => {
       sender_name: 'Alice',
       content: '/remote-control',
       timestamp: '2026-04-03T00:00:00.000Z',
+      thread_id: '456',
     });
     await vi.waitFor(() => {
       expect(sendMessage).toHaveBeenCalledWith(
         'main@g.us',
         'https://claude.ai/code?bridge=delegated',
+        '456',
       );
     });
 
