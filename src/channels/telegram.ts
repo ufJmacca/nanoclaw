@@ -36,6 +36,17 @@ function buildUniqueAttachmentFilename(
   return `${base || 'file'}_${messageId}${ext}`;
 }
 
+function buildAttachmentFollowupTimestamp(timestamp: string): string {
+  return new Date(Date.parse(timestamp) + 1).toISOString();
+}
+
+function normalizeTelegramCommand(text: string, botUsername: string): string {
+  return text.replace(
+    new RegExp(`^(/[^@\\s]+)@${botUsername}(?=\\s|$)`, 'i'),
+    '$1',
+  );
+}
+
 async function sendTelegramMessage(
   api: { sendMessage: Api['sendMessage'] },
   chatId: string | number,
@@ -144,7 +155,8 @@ export class TelegramChannel implements Channel {
       }
 
       const chatJid = `tg:${ctx.chat.id}`;
-      let content = ctx.message.text;
+      const botUsername = ctx.me.username.toLowerCase();
+      let content = normalizeTelegramCommand(ctx.message.text, botUsername);
       const timestamp = new Date(ctx.message.date * 1000).toISOString();
       const senderName =
         ctx.from?.first_name ||
@@ -170,7 +182,6 @@ export class TelegramChannel implements Channel {
           ? senderName
           : (ctx.chat as { title?: string }).title || chatJid;
 
-      const botUsername = ctx.me.username.toLowerCase();
       const entities = ctx.message.entities || [];
       const isBotMentioned = entities.some((entity) => {
         if (entity.type !== 'mention') {
@@ -296,12 +307,9 @@ export class TelegramChannel implements Channel {
         void this.downloadFile(opts.fileId, group.folder, filename).then(
           (filePath) => {
             if (filePath) {
-              const downloadTimestamp = new Date(
-                Math.max(Date.now(), Date.parse(timestamp) + 1),
-              ).toISOString();
               deliver(`${placeholder} (${filePath})${caption}`, {
                 id: `${messageId}:attachment`,
-                timestamp: downloadTimestamp,
+                timestamp: buildAttachmentFollowupTimestamp(timestamp),
               });
             }
           },
