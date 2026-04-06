@@ -384,6 +384,27 @@ describe('getNewMessages', () => {
     expect(messages[0].content).toBe('g1 msg2');
   });
 
+  it('ignores attachment follow-up rows when polling new messages', () => {
+    store({
+      id: 'a4:attachment',
+      chat_jid: 'group1@g.us',
+      sender: 'user@s.whatsapp.net',
+      sender_name: 'User',
+      content: '[Document] (/workspace/group/attachments/report.pdf)',
+      timestamp: '2024-01-01T00:00:05.000Z',
+    });
+
+    const { messages, newTimestamp } = getNewMessages(
+      ['group1@g.us', 'group2@g.us'],
+      '2024-01-01T00:00:00.000Z',
+      'Andy',
+    );
+
+    expect(messages).toHaveLength(3);
+    expect(messages.map((message) => message.id)).toEqual(['a1', 'a2', 'a4']);
+    expect(newTimestamp).toBe('2024-01-01T00:00:04.000Z');
+  });
+
   it('returns empty for no registered groups', () => {
     const { messages, newTimestamp } = getNewMessages([], '', 'Andy');
     expect(messages).toHaveLength(0);

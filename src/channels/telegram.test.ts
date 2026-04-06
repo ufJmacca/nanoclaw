@@ -213,6 +213,49 @@ describe('telegram channel', () => {
     );
   });
 
+  it('rewrites bot mentions using the group-specific trigger', async () => {
+    process.env.TELEGRAM_BOT_TOKEN = 'test-token';
+
+    const onMessage = vi.fn();
+
+    const { getChannelFactory } = await loadTelegramRegistry();
+    const channel = getChannelFactory('telegram')!({
+      onMessage,
+      onChatMetadata: vi.fn(),
+      registeredGroups: () => ({
+        'tg:123456789': {
+          ...baseGroup(),
+          trigger: '@Boss',
+        },
+      }),
+    });
+
+    await channel!.connect();
+
+    const handler = eventHandlers.get('message:text');
+    expect(handler).toBeTypeOf('function');
+
+    await handler!({
+      chat: { id: 123456789, type: 'private' },
+      from: { id: 55, first_name: 'Jon' },
+      me: { username: 'andy_bot' },
+      message: {
+        text: 'hello @andy_bot',
+        date: 1712419200,
+        message_id: 79,
+        entities: [{ type: 'mention', offset: 6, length: 9 }],
+      },
+    });
+
+    expect(onMessage).toHaveBeenCalledWith(
+      'tg:123456789',
+      expect.objectContaining({
+        id: '79',
+        content: '@Boss hello @andy_bot',
+      }),
+    );
+  });
+
   it('normalizes remote-control commands that include the Telegram bot suffix', async () => {
     process.env.TELEGRAM_BOT_TOKEN = 'test-token';
 
@@ -315,7 +358,9 @@ describe('telegram channel', () => {
           '[Document: report.pdf] (/workspace/group/attachments/report_88.pdf) Quarterly report',
       }),
     );
-    expect(attachmentEvent.timestamp).toBe('2024-04-06T16:00:00.001Z');
+    expect(attachmentEvent.timestamp > onMessage.mock.calls[0][1].timestamp).toBe(
+      true,
+    );
   });
 
   it('uses a message-specific filename when downloading documents', async () => {

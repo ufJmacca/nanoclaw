@@ -4,7 +4,11 @@ import path from 'path';
 
 import { Api, Bot } from 'grammy';
 
-import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
+import {
+  ASSISTANT_NAME,
+  TRIGGER_PATTERN,
+  getTriggerPattern,
+} from '../config.js';
 import { readEnvFile } from '../env.js';
 import { resolveGroupFolderPath } from '../group-folder.js';
 import { logger } from '../logger.js';
@@ -34,10 +38,6 @@ function buildUniqueAttachmentFilename(
   const ext = path.extname(filename);
   const base = ext ? filename.slice(0, -ext.length) : filename;
   return `${base || 'file'}_${messageId}${ext}`;
-}
-
-function buildAttachmentFollowupTimestamp(timestamp: string): string {
-  return new Date(Date.parse(timestamp) + 1).toISOString();
 }
 
 function normalizeTelegramCommand(text: string, botUsername: string): string {
@@ -192,9 +192,6 @@ export class TelegramChannel implements Channel {
           .toLowerCase();
         return mentionText === `@${botUsername}`;
       });
-      if (isBotMentioned && !TRIGGER_PATTERN.test(content)) {
-        content = `@${ASSISTANT_NAME} ${content}`;
-      }
 
       const isGroup =
         ctx.chat.type === 'group' || ctx.chat.type === 'supergroup';
@@ -207,6 +204,14 @@ export class TelegramChannel implements Channel {
       );
 
       const group = this.opts.registeredGroups()[chatJid];
+      const mentionTriggerPattern = group
+        ? getTriggerPattern(group.trigger)
+        : TRIGGER_PATTERN;
+      const mentionPrefix = group?.trigger || `@${ASSISTANT_NAME}`;
+      if (isBotMentioned && !mentionTriggerPattern.test(content)) {
+        content = `${mentionPrefix} ${content}`;
+      }
+
       if (!group) {
         logger.debug(
           { chatJid, chatName },
@@ -309,7 +314,7 @@ export class TelegramChannel implements Channel {
             if (filePath) {
               deliver(`${placeholder} (${filePath})${caption}`, {
                 id: `${messageId}:attachment`,
-                timestamp: buildAttachmentFollowupTimestamp(timestamp),
+                timestamp: new Date().toISOString(),
               });
             }
           },

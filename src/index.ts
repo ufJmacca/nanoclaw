@@ -824,6 +824,24 @@ async function main(): Promise<void> {
         }
       }
       storeMessage(msg);
+
+      if (msg.id.endsWith(':attachment')) {
+        const group = registeredGroups[chatJid];
+        if (!group) {
+          return;
+        }
+
+        const formatted = formatMessages([msg], TIMEZONE);
+        if (queue.sendMessage(chatJid, formatted)) {
+          lastAgentTimestamp[chatJid] = msg.timestamp;
+          saveState();
+          return;
+        }
+
+        if (group.isMain === true || group.requiresTrigger === false) {
+          queue.enqueueMessageCheck(chatJid);
+        }
+      }
     },
     onChatMetadata: (
       chatJid: string,
