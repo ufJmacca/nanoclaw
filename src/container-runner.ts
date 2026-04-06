@@ -269,6 +269,7 @@ function prepareProviderContainer(
     projectRoot,
     groupDir,
     preparedSession.providerStateDir,
+    ...(preparedSession.allowedSourceRoots || []),
   ];
 
   for (const file of preparedSession.files) {

@@ -160,6 +160,7 @@ export function createCodexProvider(): AgentProvider {
         },
       ];
 
+      const allowedSourceRoots: string[] = [];
       const metadata: Record<string, unknown> = {};
 
       if (fs.existsSync(authSourceFile)) {
@@ -167,11 +168,13 @@ export function createCodexProvider(): AgentProvider {
           sourcePath: authSourceFile,
           targetPath: path.join(providerStateDir, AUTH_CACHE_FILENAME),
         });
+        allowedSourceRoots.push(path.dirname(authSourceFile));
         metadata[AUTH_SOURCE_METADATA_KEY] = authSourceFile;
       }
 
       return {
         providerStateDir,
+        allowedSourceRoots,
         files,
         metadata,
       };

@@ -83,6 +83,9 @@ describe('codex host provider', () => {
         ),
       },
     ]);
+    expect(preparedSession.allowedSourceRoots).toEqual([
+      path.dirname(authFile),
+    ]);
     expect(preparedSession.directorySyncs).toBeUndefined();
     expect(containerSpec).toEqual({
       mounts: [

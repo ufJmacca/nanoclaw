@@ -517,6 +517,66 @@ describe('container runner provider plumbing', () => {
     );
   });
 
+  it('materializes provider files from explicitly allowed external source roots', async () => {
+    // Arrange
+    const groupDir = path.join(groupsDir, 'test-group');
+    const externalAuthRoot = path.join(tempRoot, 'external-auth');
+    fs.mkdirSync(groupDir, { recursive: true });
+    fs.mkdirSync(externalAuthRoot, { recursive: true });
+
+    const providerStateDir = path.join(
+      dataDir,
+      'sessions',
+      'test-group',
+      'codex',
+    );
+    const authSourceFile = path.join(externalAuthRoot, 'auth.json');
+    fs.writeFileSync(authSourceFile, '{"auth":"chatgpt"}\n');
+
+    const provider = createPreparedSessionProvider({
+      providerStateDir,
+      allowedSourceRoots: [externalAuthRoot],
+      files: [
+        {
+          sourcePath: authSourceFile,
+          targetPath: path.join(providerStateDir, 'auth.json'),
+        },
+      ],
+    });
+    const fakeProc = createFakeProcess();
+    const { runContainerAgent } = await loadSubject(
+      provider,
+      dataDir,
+      groupsDir,
+      fakeProc,
+    );
+
+    // Act
+    const resultPromise = runContainerAgent(
+      createProviderGroup(),
+      {
+        prompt: 'Ship the provider slice.',
+        groupFolder: 'test-group',
+        chatJid: 'test@g.us',
+        isMain: false,
+      },
+      () => {},
+    );
+
+    await new Promise((resolve) => setImmediate(resolve));
+    emitOutputMarker(fakeProc, {
+      status: 'success',
+      result: null,
+    });
+    fakeProc.emit('close', 0);
+    await resultPromise;
+
+    // Assert
+    expect(
+      fs.readFileSync(path.join(providerStateDir, 'auth.json'), 'utf-8'),
+    ).toBe('{"auth":"chatgpt"}\n');
+  });
+
   it('preserves the cached agent runner source when the project copy is unchanged', async () => {
     // Arrange
     const groupDir = path.join(groupsDir, 'test-group');

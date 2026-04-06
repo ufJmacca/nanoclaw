@@ -36,6 +36,7 @@ export interface PrepareSessionContext {
 export interface PreparedSession {
   providerStateDir: string;
   allowedStateRoots?: string[];
+  allowedSourceRoots?: string[];
   files: ProviderFileMaterialization[];
   directorySyncs?: ProviderDirectorySync[];
   fallbackProviderStateDirs?: string[];
