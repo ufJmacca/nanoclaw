@@ -358,9 +358,9 @@ describe('telegram channel', () => {
           '[Document: report.pdf] (/workspace/group/attachments/report_88.pdf) Quarterly report',
       }),
     );
-    expect(attachmentEvent.timestamp > onMessage.mock.calls[0][1].timestamp).toBe(
-      true,
-    );
+    expect(
+      attachmentEvent.timestamp > onMessage.mock.calls[0][1].timestamp,
+    ).toBe(true);
   });
 
   it('uses a message-specific filename when downloading documents', async () => {
