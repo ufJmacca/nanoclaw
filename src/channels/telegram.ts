@@ -136,9 +136,7 @@ export class TelegramChannel implements Channel {
           ? ctx.from?.first_name || 'Private'
           : (ctx.chat as { title?: string }).title || 'Unknown';
 
-      ctx.reply(
-        `Chat ID: tg:${chatId}\nName: ${chatName}\nType: ${chatType}`,
-      );
+      ctx.reply(`Chat ID: tg:${chatId}\nName: ${chatName}\nType: ${chatType}`);
     });
 
     this.bot.command('ping', (ctx) => {
