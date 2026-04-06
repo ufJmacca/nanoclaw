@@ -259,7 +259,11 @@ export class TelegramChannel implements Channel {
             message_id?: number;
             text?: string;
             caption?: string;
-            from?: { id?: number | string; first_name?: string; username?: string };
+            from?: {
+              id?: number | string;
+              first_name?: string;
+              username?: string;
+            };
           };
         };
       },
