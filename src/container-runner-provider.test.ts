@@ -458,7 +458,7 @@ describe('container runner provider plumbing', () => {
     });
   });
 
-  it('does not run provider session finalization after an error result', async () => {
+  it('runs provider session finalization after an error result', async () => {
     // Arrange
     const groupDir = path.join(groupsDir, 'test-group');
     fs.mkdirSync(groupDir, { recursive: true });
@@ -542,7 +542,17 @@ describe('container runner provider plumbing', () => {
       result: null,
       error: 'provider failed',
     });
-    expect(finalizeSession).not.toHaveBeenCalled();
+    expect(finalizeSession).toHaveBeenCalledWith({
+      projectRoot: process.cwd(),
+      dataDir,
+      groupFolder: 'test-group',
+      groupDir,
+      isMain: false,
+      preparedSession: {
+        providerStateDir,
+        files: [],
+      },
+    });
   });
 
   it('preserves provider files that are marked onlyIfMissing', async () => {

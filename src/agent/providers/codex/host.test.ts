@@ -7,13 +7,45 @@ import { createProviderRegistry } from '../../provider-registry.js';
 
 describe('codex host provider', () => {
   const originalCodexAuthFile = process.env.CODEX_AUTH_FILE;
+  const originalPath = process.env.PATH;
   const tempRoots: string[] = [];
+
+  function installFakeCodexCli(
+    tempRoot: string,
+    statusesByAuthContents: Record<string, { status: number; text: string }>,
+  ): void {
+    const binDir = path.join(tempRoot, 'bin');
+    const scriptPath = path.join(binDir, 'codex');
+    fs.mkdirSync(binDir, { recursive: true });
+    fs.writeFileSync(
+      scriptPath,
+      `#!/usr/bin/env node
+const fs = require('fs');
+const path = require('path');
+
+const authFile = path.join(process.env.CODEX_HOME || '', 'auth.json');
+const content = fs.existsSync(authFile) ? fs.readFileSync(authFile, 'utf8') : '';
+const statuses = ${JSON.stringify(statusesByAuthContents)};
+const status = statuses[content] || { status: 1, text: 'Not logged in' };
+process.stderr.write(status.text + '\\n');
+process.exit(status.status);
+`,
+      { mode: 0o755 },
+    );
+
+    process.env.PATH = `${binDir}:${originalPath ?? ''}`;
+  }
 
   afterEach(() => {
     if (originalCodexAuthFile === undefined) {
       delete process.env.CODEX_AUTH_FILE;
     } else {
       process.env.CODEX_AUTH_FILE = originalCodexAuthFile;
+    }
+    if (originalPath === undefined) {
+      delete process.env.PATH;
+    } else {
+      process.env.PATH = originalPath;
     }
     while (tempRoots.length > 0) {
       const tempRoot = tempRoots.pop();
@@ -116,6 +148,12 @@ describe('codex host provider', () => {
     fs.mkdirSync(groupDir, { recursive: true });
     fs.mkdirSync(path.dirname(authFile), { recursive: true });
     fs.writeFileSync(authFile, '{"refresh":"before"}\n');
+    installFakeCodexCli(tempRoot, {
+      '{"refresh":"after"}\n': {
+        status: 0,
+        text: 'Logged in using ChatGPT',
+      },
+    });
     process.env.CODEX_AUTH_FILE = authFile;
 
     const provider = createProviderRegistry().getProvider('codex');
@@ -160,6 +198,12 @@ describe('codex host provider', () => {
     fs.mkdirSync(groupDir, { recursive: true });
     fs.mkdirSync(path.dirname(authFile), { recursive: true });
     fs.writeFileSync(authFile, '{"refresh":"before"}\n');
+    installFakeCodexCli(tempRoot, {
+      '{"refresh":"stale-session"}\n': {
+        status: 0,
+        text: 'Logged in using ChatGPT',
+      },
+    });
     process.env.CODEX_AUTH_FILE = authFile;
 
     const provider = createProviderRegistry().getProvider('codex');
@@ -189,6 +233,56 @@ describe('codex host provider', () => {
 
     // Assert
     expect(fs.readFileSync(authFile, 'utf8')).toBe('{"refresh":"newer"}\n');
+  });
+
+  it('does not sync an invalid refreshed auth.json back to the configured CODEX_AUTH_FILE', async () => {
+    // Arrange
+    const tempRoot = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'nanoclaw-codex-host-provider-'),
+    );
+    tempRoots.push(tempRoot);
+
+    const projectRoot = process.cwd();
+    const dataDir = path.join(tempRoot, 'data');
+    const groupDir = path.join(tempRoot, 'groups', 'test-group');
+    const authFile = path.join(tempRoot, 'codex-auth', 'auth.json');
+    fs.mkdirSync(groupDir, { recursive: true });
+    fs.mkdirSync(path.dirname(authFile), { recursive: true });
+    fs.writeFileSync(authFile, '{"refresh":"before"}\n');
+    installFakeCodexCli(tempRoot, {
+      '{"refresh":"invalid"}\n': {
+        status: 1,
+        text: 'Not logged in',
+      },
+    });
+    process.env.CODEX_AUTH_FILE = authFile;
+
+    const provider = createProviderRegistry().getProvider('codex');
+    const preparedSession = provider.prepareSession({
+      projectRoot,
+      dataDir,
+      groupFolder: 'test-group',
+      groupDir,
+      isMain: false,
+    });
+    fs.mkdirSync(preparedSession.providerStateDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(preparedSession.providerStateDir, 'auth.json'),
+      '{"refresh":"invalid"}\n',
+    );
+
+    // Act
+    await provider.finalizeSession?.({
+      projectRoot,
+      dataDir,
+      groupFolder: 'test-group',
+      groupDir,
+      isMain: false,
+      preparedSession,
+    });
+
+    // Assert
+    expect(fs.readFileSync(authFile, 'utf8')).toBe('{"refresh":"before"}\n');
   });
 
   it('clears stale provider auth cache when the configured source auth file is missing', () => {

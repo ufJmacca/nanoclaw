@@ -2,7 +2,11 @@ import { createHash } from 'crypto';
 import fs from 'fs';
 import path from 'path';
 
-import { inspectCodexAuth, resolveCodexAuthFile } from '../../../codex-auth.js';
+import {
+  inspectCodexAuth,
+  inspectCodexAuthFile,
+  resolveCodexAuthFile,
+} from '../../../codex-auth.js';
 import { readEnvFileAt } from '../../../env.js';
 import type {
   AgentProvider,
@@ -243,6 +247,14 @@ export function createCodexProvider(): AgentProvider {
       }
 
       if (fingerprintContents(existingContents) !== authSourceHash) {
+        return;
+      }
+
+      const refreshedInspection = inspectCodexAuthFile(
+        process.env,
+        refreshedAuthFile,
+      );
+      if (refreshedInspection.loginMethod !== 'chatgpt') {
         return;
       }
 

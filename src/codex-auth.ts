@@ -49,10 +49,17 @@ export function inspectCodexAuth(
   const authFilePath = resolveCodexAuthFile(env, projectRoot);
 
   if (fs.existsSync(authFilePath)) {
-    return inspectFileBackedCodexAuth(env, authFilePath);
+    return inspectCodexAuthFile(env, authFilePath);
   }
 
   return inspectAmbientCodexAuth(env, authFilePath);
+}
+
+export function inspectCodexAuthFile(
+  env: NodeJS.ProcessEnv,
+  authFilePath: string,
+): CodexAuthInspection {
+  return inspectFileBackedCodexAuth(env, authFilePath);
 }
 
 function inspectFileBackedCodexAuth(

@@ -538,11 +538,6 @@ export async function runContainerAgent(
 
   return new Promise((resolve) => {
     const resolveWithFinalization = (result: ContainerOutput) => {
-      if (result.status !== 'success') {
-        resolve(result);
-        return;
-      }
-
       Promise.resolve()
         .then(() => finalizePreparedProviderSession(preparedProvider, input))
         .catch((error) => {
