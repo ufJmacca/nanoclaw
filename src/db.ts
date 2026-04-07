@@ -499,8 +499,21 @@ export function getNewMessages(
   // prefix as a backstop for messages written before the migration ran.
   // Subquery takes the N most recent, outer query re-sorts chronologically.
   const sql = `
-    SELECT * FROM (
+    SELECT
+      id,
+      chat_jid,
+      sender,
+      sender_name,
+      content,
+      timestamp,
+      is_from_me,
+      thread_id,
+      reply_to_message_id,
+      reply_to_message_content,
+      reply_to_sender_name
+    FROM (
       SELECT
+        rowid AS _rowid,
         id,
         chat_jid,
         sender,
@@ -517,9 +530,9 @@ export function getNewMessages(
         AND is_bot_message = 0 AND content NOT LIKE ?
         AND id NOT LIKE '%:attachment'
         AND content != '' AND content IS NOT NULL
-      ORDER BY timestamp DESC
+      ORDER BY timestamp DESC, rowid DESC
       LIMIT ?
-    ) ORDER BY timestamp
+    ) ORDER BY timestamp, _rowid
   `;
 
   const rows = db
@@ -544,8 +557,21 @@ export function getMessagesSince(
   // prefix as a backstop for messages written before the migration ran.
   // Subquery takes the N most recent, outer query re-sorts chronologically.
   const sql = `
-    SELECT * FROM (
+    SELECT
+      id,
+      chat_jid,
+      sender,
+      sender_name,
+      content,
+      timestamp,
+      is_from_me,
+      thread_id,
+      reply_to_message_id,
+      reply_to_message_content,
+      reply_to_sender_name
+    FROM (
       SELECT
+        rowid AS _rowid,
         id,
         chat_jid,
         sender,
@@ -561,9 +587,9 @@ export function getMessagesSince(
       WHERE chat_jid = ? AND timestamp > ?
         AND is_bot_message = 0 AND content NOT LIKE ?
         AND content != '' AND content IS NOT NULL
-      ORDER BY timestamp DESC
+      ORDER BY timestamp DESC, rowid DESC
       LIMIT ?
-    ) ORDER BY timestamp
+    ) ORDER BY timestamp, _rowid
   `;
   return db
     .prepare(sql)

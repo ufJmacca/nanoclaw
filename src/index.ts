@@ -81,6 +81,11 @@ let pendingAttachmentIdsByChat: Record<string, Record<string, string>> = {};
 let deliveredAttachmentIdsByChat: Record<string, Record<string, string>> = {};
 let messageLoopRunning = false;
 
+const ROUTER_STATE_LAST_TIMESTAMP = 'last_timestamp';
+const ROUTER_STATE_LAST_AGENT_TIMESTAMP = 'last_agent_timestamp';
+const ROUTER_STATE_DELIVERED_ATTACHMENTS =
+  'delivered_attachment_ids_by_chat';
+
 const channels: Channel[] = [];
 const queue = new GroupQueue();
 
@@ -121,14 +126,24 @@ function ensureOneCLIAgent(jid: string, group: RegisteredGroup): void {
 }
 
 function loadState(): void {
-  lastTimestamp = getRouterState('last_timestamp') || '';
-  const agentTs = getRouterState('last_agent_timestamp');
+  lastTimestamp = getRouterState(ROUTER_STATE_LAST_TIMESTAMP) || '';
+  const agentTs = getRouterState(ROUTER_STATE_LAST_AGENT_TIMESTAMP);
   try {
     lastAgentTimestamp = agentTs ? JSON.parse(agentTs) : {};
   } catch {
     logger.warn('Corrupted last_agent_timestamp in DB, resetting');
     lastAgentTimestamp = {};
   }
+  const deliveredAttachments = getRouterState(ROUTER_STATE_DELIVERED_ATTACHMENTS);
+  try {
+    deliveredAttachmentIdsByChat = deliveredAttachments
+      ? JSON.parse(deliveredAttachments)
+      : {};
+  } catch {
+    logger.warn('Corrupted delivered attachment state in DB, resetting');
+    deliveredAttachmentIdsByChat = {};
+  }
+  pendingAttachmentIdsByChat = {};
   registeredGroups = getAllRegisteredGroups();
   sessionStore = createRuntimeSessionStore();
   for (const group of Object.values(registeredGroups)) {
@@ -167,12 +182,47 @@ function getOrRecoverCursor(chatJid: string): string {
 }
 
 function saveState(): void {
-  setRouterState('last_timestamp', lastTimestamp);
-  setRouterState('last_agent_timestamp', JSON.stringify(lastAgentTimestamp));
+  for (const chatJid of Object.keys(deliveredAttachmentIdsByChat)) {
+    pruneDeliveredAttachments(chatJid);
+  }
+  setRouterState(ROUTER_STATE_LAST_TIMESTAMP, lastTimestamp);
+  setRouterState(
+    ROUTER_STATE_LAST_AGENT_TIMESTAMP,
+    JSON.stringify(lastAgentTimestamp),
+  );
+  setRouterState(
+    ROUTER_STATE_DELIVERED_ATTACHMENTS,
+    JSON.stringify(deliveredAttachmentIdsByChat),
+  );
+}
+
+function compareMessageIds(aId: string, bId: string): number {
+  const aNumericPrefix = /^(\d+)/.exec(aId)?.[1];
+  const bNumericPrefix = /^(\d+)/.exec(bId)?.[1];
+  if (aNumericPrefix && bNumericPrefix && aNumericPrefix !== bNumericPrefix) {
+    return Number(aNumericPrefix) - Number(bNumericPrefix);
+  }
+
+  return aId.localeCompare(bId, undefined, { numeric: true });
+}
+
+function compareMessageChronology(a: NewMessage, b: NewMessage): number {
+  const timestampOrder = a.timestamp.localeCompare(b.timestamp);
+  if (timestampOrder !== 0) {
+    return timestampOrder;
+  }
+
+  return compareMessageIds(a.id, b.id);
 }
 
 function getLatestThreadId(messages: NewMessage[]): string | undefined {
-  return messages[messages.length - 1]?.thread_id;
+  return messages.reduce<NewMessage | undefined>((latest, message) => {
+    if (!latest) {
+      return message;
+    }
+
+    return compareMessageChronology(message, latest) >= 0 ? message : latest;
+  }, undefined)?.thread_id;
 }
 
 function updateReplyThreadContext(
@@ -252,7 +302,6 @@ function pruneTrackedAttachments(
 }
 
 function pruneDeliveredAttachments(chatJid: string): void {
-  pruneTrackedAttachments(chatJid, pendingAttachmentIdsByChat);
   pruneTrackedAttachments(chatJid, deliveredAttachmentIdsByChat);
 }
 
@@ -288,6 +337,7 @@ function filterDeliveredAttachments(
   chatJid: string,
   messages: NewMessage[],
 ): NewMessage[] {
+  pruneTrackedAttachments(chatJid, pendingAttachmentIdsByChat);
   pruneDeliveredAttachments(chatJid);
   const pending = pendingAttachmentIdsByChat[chatJid];
   const delivered = deliveredAttachmentIdsByChat[chatJid];
@@ -597,6 +647,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       activeReplyThreadId = undefined;
       awaitingNextTurnThreadId = true;
       promotePendingAttachments(chatJid);
+      saveState();
       queue.notifyIdle(chatJid);
     }
 

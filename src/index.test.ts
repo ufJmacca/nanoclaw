@@ -17,6 +17,7 @@ const {
   getAllRegisteredGroups,
   getChannelFactory,
   getMessagesSince,
+  getRouterState,
   getRegisteredChannelNames,
   getSession,
   groupQueueIsIdleWaiting,
@@ -49,6 +50,7 @@ const {
   getAllRegisteredGroups: vi.fn(() => ({})),
   getChannelFactory: vi.fn(),
   getMessagesSince: vi.fn(() => [] as NewMessage[]),
+  getRouterState: vi.fn((_key: string) => ''),
   providerHookStartRemoteControl: vi.fn(),
   providerRegistryGetProvider: vi.fn(),
   groupQueueIsIdleWaiting: vi.fn(() => false),
@@ -140,8 +142,8 @@ vi.mock('./db.js', () => ({
   getLastBotMessageTimestamp: vi.fn(() => ''),
   getMessagesSince,
   getNewMessages: vi.fn(() => ({ messages: [], newTimestamp: '' })),
+  getRouterState,
   getSession,
-  getRouterState: vi.fn(() => ''),
   initDatabase: vi.fn(),
   setRegisteredGroup,
   setRouterState,
@@ -265,6 +267,8 @@ function resetIndexRuntimeMocks(): void {
   getChannelFactory.mockReset();
   getMessagesSince.mockReset();
   getMessagesSince.mockReturnValue([]);
+  getRouterState.mockReset();
+  getRouterState.mockReturnValue('');
   getRegisteredChannelNames.mockReset();
   getRegisteredChannelNames.mockReturnValue([]);
   groupQueueEnqueueMessageCheck.mockReset();
@@ -682,6 +686,33 @@ describe('thread reply context', () => {
           sender_name: 'Alice',
           content: 'main chat message',
           timestamp: '2026-04-07T00:00:01.000Z',
+        },
+      ]),
+    ).toBeUndefined();
+  });
+
+  it('uses a deterministic message-id tie-breaker when timestamps collide', async () => {
+    const repoDir = createTempRepo();
+    const { _getLatestThreadIdForTest } = await loadIndexModule(repoDir);
+
+    expect(
+      _getLatestThreadIdForTest([
+        {
+          id: '11',
+          chat_jid: 'tg:123',
+          sender: 'alice',
+          sender_name: 'Alice',
+          content: 'later main chat message',
+          timestamp: '2026-04-07T00:00:00.000Z',
+        },
+        {
+          id: '10',
+          chat_jid: 'tg:123',
+          sender: 'alice',
+          sender_name: 'Alice',
+          content: 'earlier threaded message',
+          timestamp: '2026-04-07T00:00:00.000Z',
+          thread_id: '777',
         },
       ]),
     ).toBeUndefined();
@@ -1351,6 +1382,113 @@ describe('attachment follow-up routing', () => {
       expect.any(Function),
       expect.any(Function),
     );
+  });
+
+  it('does not replay delivered attachment follow-ups after restart', async () => {
+    const repoDir = createTempRepo();
+    const mainGroup: RegisteredGroup = {
+      name: 'Main',
+      folder: 'main',
+      trigger: '@Andy',
+      added_at: '2026-04-03T00:00:00.000Z',
+      isMain: true,
+      requiresTrigger: false,
+      providerId: 'codex',
+    };
+    const channel = {
+      name: 'test',
+      connect: vi.fn(async () => {}),
+      sendMessage: vi.fn(async () => {}),
+      isConnected: vi.fn(() => true),
+      ownsJid: vi.fn((jid: string) => jid === 'main@g.us'),
+      disconnect: vi.fn(async () => {}),
+      setTyping: vi.fn(async () => {}),
+    };
+    const routerState: Record<string, string> = {};
+    let channelOpts:
+      | {
+          onMessage: (chatJid: string, msg: NewMessage) => void;
+        }
+      | undefined;
+    let phase: 'initial' | 'restart' = 'initial';
+
+    const initialMessage: NewMessage = {
+      id: 'm1',
+      chat_jid: 'main@g.us',
+      sender: 'bob',
+      sender_name: 'Bob',
+      content: 'start run',
+      timestamp: '2026-04-07T00:00:00.000Z',
+    };
+    const attachmentMessage: NewMessage = {
+      id: '88:attachment',
+      chat_jid: 'main@g.us',
+      sender: 'alice',
+      sender_name: 'Alice',
+      content:
+        '[Document: report.pdf] (/workspace/group/attachments/report_88.pdf)',
+      timestamp: '2026-04-07T00:00:10.000Z',
+      thread_id: '777',
+    };
+
+    getAllRegisteredGroups.mockReturnValue({ 'main@g.us': mainGroup });
+    getRegisteredChannelNames.mockReturnValue(['test']);
+    getChannelFactory.mockImplementation(
+      () =>
+        (opts: { onMessage: (chatJid: string, msg: NewMessage) => void }) => {
+          channelOpts = opts;
+          return channel;
+        },
+    );
+    findChannel.mockImplementation((_channels: unknown[], jid: string) =>
+      jid === 'main@g.us' ? channel : undefined,
+    );
+    getRouterState.mockImplementation((key: string) => routerState[key] ?? '');
+    setRouterState.mockImplementation((key: string, value: string) => {
+      routerState[key] = value;
+    });
+    getMessagesSince.mockImplementation(() =>
+      phase === 'initial'
+        ? ([initialMessage] as NewMessage[])
+        : ([attachmentMessage] as NewMessage[]),
+    );
+    groupQueueSendMessage.mockReturnValue(true);
+    runContainerAgent.mockImplementationOnce(async (_group, _request, _proc, onOutput) => {
+      channelOpts?.onMessage('main@g.us', attachmentMessage);
+      await onOutput?.({ status: 'success', result: null });
+      return { status: 'success', result: null };
+    });
+    vi.spyOn(globalThis, 'setTimeout').mockImplementation(() => 0 as any);
+    vi.spyOn(globalThis, 'clearTimeout').mockImplementation(() => undefined);
+    process.argv[1] = INDEX_MODULE_PATH;
+
+    await loadIndexModule(repoDir);
+    expect(channelOpts).toBeDefined();
+
+    const processMessages = groupQueueSetProcessMessagesFn.mock.calls[0][0] as (
+      chatJid: string,
+    ) => Promise<boolean>;
+
+    const firstResult = await processMessages('main@g.us');
+    expect(firstResult).toBe(true);
+    expect(routerState['delivered_attachment_ids_by_chat']).toContain(
+      '88:attachment',
+    );
+
+    phase = 'restart';
+    groupQueueSendMessage.mockReset();
+    groupQueueSendMessage.mockReturnValue(false);
+    groupQueueSetProcessMessagesFn.mockReset();
+    runContainerAgent.mockReset();
+
+    await loadIndexModule(repoDir);
+
+    const restartedProcessMessages = groupQueueSetProcessMessagesFn.mock
+      .calls[0][0] as (chatJid: string) => Promise<boolean>;
+    const secondResult = await restartedProcessMessages('main@g.us');
+
+    expect(secondResult).toBe(true);
+    expect(runContainerAgent).not.toHaveBeenCalled();
   });
 });
 

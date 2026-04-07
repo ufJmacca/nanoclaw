@@ -591,6 +591,47 @@ describe('message query LIMIT', () => {
     expect(messages[1].timestamp > messages[0].timestamp).toBe(true);
   });
 
+  it('keeps same-timestamp messages in insertion order', () => {
+    store({
+      id: '11',
+      chat_jid: 'group@g.us',
+      sender: '123@s.whatsapp.net',
+      sender_name: 'Alice',
+      content: 'same-time first insert',
+      timestamp: '2024-01-01T00:01:00.000Z',
+    });
+    store({
+      id: '10',
+      chat_jid: 'group@g.us',
+      sender: '123@s.whatsapp.net',
+      sender_name: 'Alice',
+      content: 'same-time second insert',
+      timestamp: '2024-01-01T00:01:00.000Z',
+    });
+
+    const messages = getMessagesSince(
+      'group@g.us',
+      '2024-01-01T00:00:59.000Z',
+      'Andy',
+      10,
+    );
+    const { messages: newMessages } = getNewMessages(
+      ['group@g.us'],
+      '2024-01-01T00:00:59.000Z',
+      'Andy',
+      10,
+    );
+
+    expect(messages.slice(-2).map((message) => message.id)).toEqual([
+      '11',
+      '10',
+    ]);
+    expect(newMessages.slice(-2).map((message) => message.id)).toEqual([
+      '11',
+      '10',
+    ]);
+  });
+
   it('returns all messages when count is under the limit', () => {
     const { messages } = getNewMessages(
       ['group@g.us'],
