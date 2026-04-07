@@ -983,7 +983,8 @@ describe('attachment follow-up routing', () => {
       chat_jid: 'main@g.us',
       sender: 'alice',
       sender_name: 'Alice',
-      content: '[Document: report.pdf] (/workspace/group/attachments/report_88.pdf)',
+      content:
+        '[Document: report.pdf] (/workspace/group/attachments/report_88.pdf)',
       timestamp: '2026-04-07T00:00:10.000Z',
       thread_id: '777',
     });
