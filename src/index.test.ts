@@ -1065,6 +1065,67 @@ describe('attachment follow-up routing', () => {
     expect(groupQueueSendMessage).toHaveBeenCalledOnce();
     expect(groupQueueEnqueueMessageCheck).toHaveBeenCalledWith('workers@g.us');
   });
+
+  it('does not pipe non-trigger attachment follow-ups into active trigger-gated groups', async () => {
+    const repoDir = createTempRepo();
+    const workerGroup: RegisteredGroup = {
+      name: 'Workers',
+      folder: 'workers',
+      trigger: '@Andy',
+      added_at: '2026-04-03T00:00:00.000Z',
+      isMain: false,
+      requiresTrigger: true,
+      providerId: 'codex',
+    };
+    const channel = {
+      name: 'test',
+      connect: vi.fn(async () => {}),
+      sendMessage: vi.fn(async () => {}),
+      isConnected: vi.fn(() => true),
+      ownsJid: vi.fn((jid: string) => jid === 'workers@g.us'),
+      disconnect: vi.fn(async () => {}),
+    };
+    let channelOpts:
+      | {
+          onMessage: (chatJid: string, msg: NewMessage) => void;
+        }
+      | undefined;
+
+    getAllRegisteredGroups.mockReturnValue({ 'workers@g.us': workerGroup });
+    getRegisteredChannelNames.mockReturnValue(['test']);
+    getChannelFactory.mockImplementation(
+      () =>
+        (opts: { onMessage: (chatJid: string, msg: NewMessage) => void }) => {
+          channelOpts = opts;
+          return channel;
+        },
+    );
+    findChannel.mockImplementation((_channels: unknown[], jid: string) =>
+      jid === 'workers@g.us' ? channel : undefined,
+    );
+    groupQueueSendMessage.mockReturnValue(true);
+    vi.spyOn(globalThis, 'setTimeout').mockImplementation(() => 0 as any);
+    vi.spyOn(globalThis, 'clearTimeout').mockImplementation(() => undefined);
+    process.argv[1] = INDEX_MODULE_PATH;
+
+    await loadIndexModule(repoDir);
+    expect(channelOpts).toBeDefined();
+
+    channelOpts?.onMessage('workers@g.us', {
+      id: '100:attachment',
+      chat_jid: 'workers@g.us',
+      sender: 'alice',
+      sender_name: 'Alice',
+      content:
+        '[Document: report.pdf] (/workspace/group/attachments/report_100.pdf)',
+      timestamp: '2026-04-07T00:00:30.000Z',
+      thread_id: '888',
+    });
+
+    expect(storeMessage).toHaveBeenCalledOnce();
+    expect(groupQueueSendMessage).not.toHaveBeenCalled();
+    expect(groupQueueEnqueueMessageCheck).toHaveBeenCalledWith('workers@g.us');
+  });
 });
 
 describe('threaded streaming replies', () => {
