@@ -18,6 +18,7 @@ const {
   getMessagesSince,
   getRegisteredChannelNames,
   getSession,
+  groupQueueIsIdleWaiting,
   groupQueueEnqueueMessageCheck,
   groupQueueSendMessage,
   groupQueueSetProcessMessagesFn,
@@ -48,6 +49,7 @@ const {
   getMessagesSince: vi.fn(() => [] as NewMessage[]),
   providerHookStartRemoteControl: vi.fn(),
   providerRegistryGetProvider: vi.fn(),
+  groupQueueIsIdleWaiting: vi.fn(() => false),
   groupQueueEnqueueMessageCheck: vi.fn(),
   groupQueueSendMessage: vi.fn(() => false),
   groupQueueSetProcessMessagesFn: vi.fn(),
@@ -150,6 +152,7 @@ vi.mock('./group-queue.js', () => ({
   GroupQueue: class {
     closeStdin = vi.fn();
     enqueueMessageCheck = groupQueueEnqueueMessageCheck;
+    isIdleWaiting = groupQueueIsIdleWaiting;
     notifyIdle = vi.fn();
     registerProcess = vi.fn();
     sendMessage = groupQueueSendMessage;
@@ -261,6 +264,8 @@ function resetIndexRuntimeMocks(): void {
   getRegisteredChannelNames.mockReset();
   getRegisteredChannelNames.mockReturnValue([]);
   groupQueueEnqueueMessageCheck.mockReset();
+  groupQueueIsIdleWaiting.mockReset();
+  groupQueueIsIdleWaiting.mockReturnValue(false);
   groupQueueSendMessage.mockReset();
   groupQueueSendMessage.mockReturnValue(false);
   groupQueueSetProcessMessagesFn.mockReset();
@@ -1163,6 +1168,109 @@ describe('threaded streaming replies', () => {
       'main@g.us',
       'second chunk',
       '777',
+    );
+  });
+
+  it('refreshes the reply thread between streamed query turns', async () => {
+    const repoDir = createTempRepo();
+    const mainGroup: RegisteredGroup = {
+      name: 'Main',
+      folder: 'main',
+      trigger: '@Andy',
+      added_at: '2026-04-03T00:00:00.000Z',
+      isMain: true,
+      requiresTrigger: false,
+      providerId: 'claude-code',
+    };
+    const sendMessage = vi.fn(async () => {});
+    const channel = {
+      name: 'test',
+      connect: vi.fn(async () => {}),
+      sendMessage,
+      isConnected: vi.fn(() => true),
+      ownsJid: vi.fn((jid: string) => jid === 'main@g.us'),
+      disconnect: vi.fn(async () => {}),
+      setTyping: vi.fn(async () => {}),
+    };
+    let channelOpts:
+      | {
+          onMessage: (chatJid: string, msg: NewMessage) => void;
+        }
+      | undefined;
+    let idleWaiting = false;
+
+    getAllRegisteredGroups.mockReturnValue({ 'main@g.us': mainGroup });
+    getRegisteredChannelNames.mockReturnValue(['test']);
+    getChannelFactory.mockImplementation(
+      () =>
+        (opts: { onMessage: (chatJid: string, msg: NewMessage) => void }) => {
+          channelOpts = opts;
+          return channel;
+        },
+    );
+    findChannel.mockImplementation((_channels: unknown[], jid: string) =>
+      jid === 'main@g.us' ? channel : undefined,
+    );
+    groupQueueSendMessage.mockImplementation(() => {
+      idleWaiting = false;
+      return true;
+    });
+    groupQueueIsIdleWaiting.mockImplementation(() => idleWaiting);
+    getMessagesSince.mockReturnValue([
+      {
+        id: 'm1',
+        chat_jid: 'main@g.us',
+        sender: 'alice',
+        sender_name: 'Alice',
+        content: 'topic request',
+        timestamp: '2026-04-07T00:00:00.000Z',
+        thread_id: '777',
+      },
+    ] as NewMessage[]);
+    runContainerAgent.mockImplementation(
+      async (_group, _invocation, _onProcess, onResult) => {
+        await onResult({ status: 'success', result: 'first turn' });
+        await onResult({ status: 'success', result: null });
+        idleWaiting = true;
+        channelOpts?.onMessage('main@g.us', {
+          id: 'm2',
+          chat_jid: 'main@g.us',
+          sender: 'bob',
+          sender_name: 'Bob',
+          content: 'second topic follow-up',
+          timestamp: '2026-04-07T00:00:01.000Z',
+          thread_id: '888',
+        });
+        await onResult({ status: 'success', result: 'second turn' });
+        await onResult({ status: 'success', result: null });
+        return { status: 'success', result: null };
+      },
+    );
+    vi.spyOn(globalThis, 'setTimeout').mockImplementation(() => 0 as any);
+    vi.spyOn(globalThis, 'clearTimeout').mockImplementation(() => undefined);
+    process.argv[1] = INDEX_MODULE_PATH;
+
+    await loadIndexModule(repoDir);
+    expect(groupQueueSetProcessMessagesFn).toHaveBeenCalled();
+    expect(channelOpts).toBeDefined();
+
+    const processMessages = groupQueueSetProcessMessagesFn.mock.calls[0][0] as (
+      chatJid: string,
+    ) => Promise<boolean>;
+    const result = await processMessages('main@g.us');
+
+    expect(result).toBe(true);
+    expect(sendMessage).toHaveBeenNthCalledWith(
+      1,
+      'main@g.us',
+      'first turn',
+      '777',
+    );
+    expect(sendMessage).toHaveBeenNthCalledWith(
+      2,
+      'main@g.us',
+      'second turn',
+      '888',
     );
   });
 });

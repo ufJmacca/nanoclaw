@@ -153,6 +153,10 @@ export class GroupQueue {
     }
   }
 
+  isIdleWaiting(groupJid: string): boolean {
+    return this.getGroup(groupJid).idleWaiting;
+  }
+
   /**
    * Send a follow-up message to the active container via IPC file.
    * Returns true if the message was written, false if no active container.

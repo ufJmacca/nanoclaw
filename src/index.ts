@@ -76,6 +76,7 @@ let lastTimestamp = '';
 let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
 let replyThreadIdByChat: Record<string, string | undefined> = {};
+let queuedReplyThreadIdByChat: Record<string, string | null> = {};
 let messageLoopRunning = false;
 
 const channels: Channel[] = [];
@@ -183,6 +184,48 @@ function updateReplyThreadContext(
     delete replyThreadIdByChat[chatJid];
   }
   return threadId;
+}
+
+function queueReplyThreadContext(
+  chatJid: string,
+  threadId: string | undefined,
+): void {
+  queuedReplyThreadIdByChat[chatJid] = threadId ?? null;
+}
+
+function consumeQueuedReplyThreadContext(
+  chatJid: string,
+): string | undefined {
+  if (
+    Object.prototype.hasOwnProperty.call(queuedReplyThreadIdByChat, chatJid)
+  ) {
+    const threadId = queuedReplyThreadIdByChat[chatJid];
+    delete queuedReplyThreadIdByChat[chatJid];
+    return threadId ?? undefined;
+  }
+
+  return replyThreadIdByChat[chatJid];
+}
+
+function clearQueuedReplyThreadContext(chatJid: string): void {
+  delete queuedReplyThreadIdByChat[chatJid];
+}
+
+function sendMessageToActiveContainer(
+  chatJid: string,
+  text: string,
+  threadId: string | undefined,
+): boolean {
+  const wasIdle = queue.isIdleWaiting(chatJid);
+  if (!queue.sendMessage(chatJid, text)) {
+    return false;
+  }
+
+  if (wasIdle) {
+    queueReplyThreadContext(chatJid, threadId);
+  }
+
+  return true;
 }
 
 function rewriteAssistantNameInMemoryFile(filePath: string): void {
@@ -403,6 +446,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   const prompt = formatMessages(missedMessages, TIMEZONE);
   const replyThreadId = updateReplyThreadContext(chatJid, missedMessages);
+  clearQueuedReplyThreadContext(chatJid);
 
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
@@ -433,10 +477,22 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   await channel.setTyping?.(chatJid, true);
   let hadError = false;
   let outputSentToUser = false;
+  let activeReplyThreadId = replyThreadId;
+  let awaitingNextTurnThreadId = false;
+
+  const captureReplyThreadForTurn = () => {
+    if (!awaitingNextTurnThreadId) {
+      return;
+    }
+
+    activeReplyThreadId = consumeQueuedReplyThreadContext(chatJid);
+    awaitingNextTurnThreadId = false;
+  };
 
   const output = await runAgent(group, prompt, chatJid, async (result) => {
     // Streaming output callback — called for each agent result
     if (result.result) {
+      captureReplyThreadForTurn();
       const raw =
         typeof result.result === 'string'
           ? result.result
@@ -445,14 +501,17 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
       logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
       if (text) {
-        await channel.sendMessage(chatJid, text, replyThreadId);
+        await channel.sendMessage(chatJid, text, activeReplyThreadId);
         outputSentToUser = true;
       }
       // Only reset idle timer on actual results, not session-update markers (result: null)
       resetIdleTimer();
     }
 
-    if (result.status === 'success') {
+    if (result.status === 'success' && result.result === null) {
+      captureReplyThreadForTurn();
+      activeReplyThreadId = undefined;
+      awaitingNextTurnThreadId = true;
       queue.notifyIdle(chatJid);
     }
 
@@ -465,6 +524,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   if (idleTimer) clearTimeout(idleTimer);
 
   if (output === 'error' || hadError) {
+    clearQueuedReplyThreadContext(chatJid);
     // If we already sent output to the user, don't roll back the cursor —
     // the user got their response and re-processing would send duplicates.
     if (outputSentToUser) {
@@ -484,6 +544,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     return false;
   }
 
+  clearQueuedReplyThreadContext(chatJid);
   return true;
 }
 
@@ -685,7 +746,13 @@ async function startMessageLoop(): Promise<void> {
           updateReplyThreadContext(chatJid, messagesToSend);
           const formatted = formatMessages(messagesToSend, TIMEZONE);
 
-          if (queue.sendMessage(chatJid, formatted)) {
+          if (
+            sendMessageToActiveContainer(
+              chatJid,
+              formatted,
+              getLatestThreadId(messagesToSend),
+            )
+          ) {
             logger.debug(
               { chatJid, count: messagesToSend.length },
               'Piped messages to active container',
@@ -874,7 +941,9 @@ async function main(): Promise<void> {
 
         updateReplyThreadContext(chatJid, [msg]);
         const formatted = formatMessages([msg], TIMEZONE);
-        if (queue.sendMessage(chatJid, formatted)) {
+        if (
+          sendMessageToActiveContainer(chatJid, formatted, msg.thread_id)
+        ) {
           return;
         }
 
