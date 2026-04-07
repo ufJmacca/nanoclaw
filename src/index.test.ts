@@ -13,6 +13,7 @@ const {
   deleteSession,
   ensureAgent,
   findChannel,
+  formatMessagesMock,
   getAllRegisteredGroups,
   getChannelFactory,
   getMessagesSince,
@@ -44,6 +45,7 @@ const {
     .fn()
     .mockResolvedValue({ name: 'test', identifier: 'test', created: true }),
   findChannel: vi.fn(),
+  formatMessagesMock: vi.fn((..._args: unknown[]) => ''),
   getAllRegisteredGroups: vi.fn(() => ({})),
   getChannelFactory: vi.fn(),
   getMessagesSince: vi.fn(() => [] as NewMessage[]),
@@ -168,7 +170,7 @@ vi.mock('./ipc.js', () => ({
 vi.mock('./router.js', () => ({
   escapeXml: vi.fn((value: string) => value),
   findChannel,
-  formatMessages: vi.fn(() => ''),
+  formatMessages: formatMessagesMock,
   formatOutbound: vi.fn((value: string) => value),
 }));
 
@@ -258,6 +260,8 @@ async function loadIndexModule(repoDir: string) {
 function resetIndexRuntimeMocks(): void {
   customProviderRegistryState.provider = undefined;
   findChannel.mockReset();
+  formatMessagesMock.mockReset();
+  formatMessagesMock.mockReturnValue('');
   getChannelFactory.mockReset();
   getMessagesSince.mockReset();
   getMessagesSince.mockReturnValue([]);
@@ -1125,6 +1129,114 @@ describe('attachment follow-up routing', () => {
     expect(storeMessage).toHaveBeenCalledOnce();
     expect(groupQueueSendMessage).not.toHaveBeenCalled();
     expect(groupQueueEnqueueMessageCheck).toHaveBeenCalledWith('workers@g.us');
+  });
+
+  it('does not re-include attachment follow-ups already piped to an active container', async () => {
+    const repoDir = createTempRepo();
+    const mainGroup: RegisteredGroup = {
+      name: 'Main',
+      folder: 'main',
+      trigger: '@Andy',
+      added_at: '2026-04-03T00:00:00.000Z',
+      isMain: true,
+      requiresTrigger: false,
+      providerId: 'codex',
+    };
+    const channel = {
+      name: 'test',
+      connect: vi.fn(async () => {}),
+      sendMessage: vi.fn(async () => {}),
+      isConnected: vi.fn(() => true),
+      ownsJid: vi.fn((jid: string) => jid === 'main@g.us'),
+      disconnect: vi.fn(async () => {}),
+      setTyping: vi.fn(async () => {}),
+    };
+    let channelOpts:
+      | {
+          onMessage: (chatJid: string, msg: NewMessage) => void;
+        }
+      | undefined;
+    let containerActive = true;
+
+    getAllRegisteredGroups.mockReturnValue({ 'main@g.us': mainGroup });
+    getRegisteredChannelNames.mockReturnValue(['test']);
+    getChannelFactory.mockImplementation(
+      () =>
+        (opts: { onMessage: (chatJid: string, msg: NewMessage) => void }) => {
+          channelOpts = opts;
+          return channel;
+        },
+    );
+    findChannel.mockImplementation((_channels: unknown[], jid: string) =>
+      jid === 'main@g.us' ? channel : undefined,
+    );
+    groupQueueSendMessage.mockImplementation(() => containerActive);
+    formatMessagesMock.mockImplementation((messages: unknown) =>
+      (messages as NewMessage[]).map((message) => message.id).join(','),
+    );
+    getMessagesSince.mockReturnValue([
+      {
+        id: '88:attachment',
+        chat_jid: 'main@g.us',
+        sender: 'alice',
+        sender_name: 'Alice',
+        content:
+          '[Document: report.pdf] (/workspace/group/attachments/report_88.pdf)',
+        timestamp: '2026-04-07T00:00:10.000Z',
+      },
+      {
+        id: 'm2',
+        chat_jid: 'main@g.us',
+        sender: 'bob',
+        sender_name: 'Bob',
+        content: 'follow-up message',
+        timestamp: '2026-04-07T00:00:11.000Z',
+      },
+    ] as NewMessage[]);
+    runContainerAgent.mockResolvedValue({ status: 'success', result: null });
+    vi.spyOn(globalThis, 'setTimeout').mockImplementation(() => 0 as any);
+    vi.spyOn(globalThis, 'clearTimeout').mockImplementation(() => undefined);
+    process.argv[1] = INDEX_MODULE_PATH;
+
+    await loadIndexModule(repoDir);
+    expect(channelOpts).toBeDefined();
+
+    channelOpts?.onMessage('main@g.us', {
+      id: '88:attachment',
+      chat_jid: 'main@g.us',
+      sender: 'alice',
+      sender_name: 'Alice',
+      content:
+        '[Document: report.pdf] (/workspace/group/attachments/report_88.pdf)',
+      timestamp: '2026-04-07T00:00:10.000Z',
+      thread_id: '777',
+    });
+
+    expect(groupQueueSendMessage).toHaveBeenCalledOnce();
+
+    containerActive = false;
+    const processMessages = groupQueueSetProcessMessagesFn.mock.calls[0][0] as (
+      chatJid: string,
+    ) => Promise<boolean>;
+    const result = await processMessages('main@g.us');
+
+    expect(result).toBe(true);
+    expect(formatMessagesMock).toHaveBeenLastCalledWith(
+      [
+        expect.objectContaining({
+          id: 'm2',
+        }),
+      ],
+      expect.any(String),
+    );
+    expect(runContainerAgent).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.objectContaining({
+        prompt: 'm2',
+      }),
+      expect.any(Function),
+      expect.any(Function),
+    );
   });
 });
 

@@ -77,6 +77,7 @@ let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
 let replyThreadIdByChat: Record<string, string | undefined> = {};
 let queuedReplyThreadIdByChat: Record<string, string | null> = {};
+let deliveredAttachmentIdsByChat: Record<string, Record<string, string>> = {};
 let messageLoopRunning = false;
 
 const channels: Channel[] = [];
@@ -226,6 +227,48 @@ function consumeQueuedReplyThreadContext(chatJid: string): string | undefined {
 
 function clearQueuedReplyThreadContext(chatJid: string): void {
   delete queuedReplyThreadIdByChat[chatJid];
+}
+
+function pruneDeliveredAttachments(chatJid: string): void {
+  const delivered = deliveredAttachmentIdsByChat[chatJid];
+  if (!delivered) {
+    return;
+  }
+
+  const cursor = lastAgentTimestamp[chatJid] || '';
+  for (const [messageId, timestamp] of Object.entries(delivered)) {
+    if (timestamp <= cursor) {
+      delete delivered[messageId];
+    }
+  }
+
+  if (Object.keys(delivered).length === 0) {
+    delete deliveredAttachmentIdsByChat[chatJid];
+  }
+}
+
+function rememberDeliveredAttachment(chatJid: string, msg: NewMessage): void {
+  if (!msg.id.endsWith(':attachment')) {
+    return;
+  }
+
+  deliveredAttachmentIdsByChat[chatJid] = {
+    ...(deliveredAttachmentIdsByChat[chatJid] || {}),
+    [msg.id]: msg.timestamp,
+  };
+}
+
+function filterDeliveredAttachments(
+  chatJid: string,
+  messages: NewMessage[],
+): NewMessage[] {
+  pruneDeliveredAttachments(chatJid);
+  const delivered = deliveredAttachmentIdsByChat[chatJid];
+  if (!delivered) {
+    return messages;
+  }
+
+  return messages.filter((message) => !delivered[message.id]);
 }
 
 function sendMessageToActiveContainer(
@@ -440,11 +483,14 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   const isMainGroup = group.isMain === true;
 
-  const missedMessages = getMessagesSince(
+  const missedMessages = filterDeliveredAttachments(
     chatJid,
-    getOrRecoverCursor(chatJid),
-    ASSISTANT_NAME,
-    MAX_MESSAGES_PER_PROMPT,
+    getMessagesSince(
+      chatJid,
+      getOrRecoverCursor(chatJid),
+      ASSISTANT_NAME,
+      MAX_MESSAGES_PER_PROMPT,
+    ),
   );
 
   if (missedMessages.length === 0) return true;
@@ -733,11 +779,14 @@ async function startMessageLoop(): Promise<void> {
 
           // Pull all messages since lastAgentTimestamp so non-trigger
           // context that accumulated between triggers is included.
-          const allPending = getMessagesSince(
+          const allPending = filterDeliveredAttachments(
             chatJid,
-            getOrRecoverCursor(chatJid),
-            ASSISTANT_NAME,
-            MAX_MESSAGES_PER_PROMPT,
+            getMessagesSince(
+              chatJid,
+              getOrRecoverCursor(chatJid),
+              ASSISTANT_NAME,
+              MAX_MESSAGES_PER_PROMPT,
+            ),
           );
           const messagesToSend =
             allPending.length > 0 ? allPending : groupMessages;
@@ -783,11 +832,14 @@ async function startMessageLoop(): Promise<void> {
  */
 function recoverPendingMessages(): void {
   for (const [chatJid, group] of Object.entries(registeredGroups)) {
-    const pending = getMessagesSince(
+    const pending = filterDeliveredAttachments(
       chatJid,
-      getOrRecoverCursor(chatJid),
-      ASSISTANT_NAME,
-      MAX_MESSAGES_PER_PROMPT,
+      getMessagesSince(
+        chatJid,
+        getOrRecoverCursor(chatJid),
+        ASSISTANT_NAME,
+        MAX_MESSAGES_PER_PROMPT,
+      ),
     );
     if (pending.length > 0) {
       logger.info(
@@ -941,6 +993,7 @@ async function main(): Promise<void> {
           updateReplyThreadContext(chatJid, [msg]);
           const formatted = formatMessages([msg], TIMEZONE);
           if (sendMessageToActiveContainer(chatJid, formatted, msg.thread_id)) {
+            rememberDeliveredAttachment(chatJid, msg);
             return;
           }
         }
