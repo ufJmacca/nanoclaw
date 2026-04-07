@@ -34,6 +34,7 @@ const TELEGRAM_FETCH_CONFIG = {
   compress: true,
 };
 const DEFAULT_TELEGRAM_CONNECT_TIMEOUT_MS = 10_000;
+const MAX_TELEGRAM_FILE_REDIRECTS = 5;
 
 function resolveTelegramConnectTimeoutMs(rawValue?: string): number {
   if (!rawValue) {
@@ -117,6 +118,96 @@ export class TelegramChannel implements Channel {
     this.connectTimeoutMs = connectTimeoutMs;
   }
 
+  private async fetchTelegramFileBuffer(
+    fileUrl: string,
+    fileId: string,
+    redirectsRemaining = MAX_TELEGRAM_FILE_REDIRECTS,
+  ): Promise<Buffer | null> {
+    return new Promise<Buffer | null>((resolve, reject) => {
+      const request = https.get(
+        fileUrl,
+        {
+          agent: TELEGRAM_FETCH_CONFIG.agent,
+          family: 4,
+        },
+        (response) => {
+          const statusCode = response.statusCode;
+          if (statusCode && statusCode >= 300 && statusCode < 400) {
+            const location = response.headers.location;
+            response.resume?.();
+
+            if (!location || redirectsRemaining <= 0) {
+              logger.warn(
+                { fileId, status: statusCode, location, redirectsRemaining },
+                'Telegram file download redirect failed',
+              );
+              resolve(null);
+              return;
+            }
+
+            let redirectedUrl: URL;
+            try {
+              redirectedUrl = new URL(location, fileUrl);
+            } catch (err) {
+              logger.warn(
+                { fileId, status: statusCode, location, err },
+                'Telegram file download redirect URL was invalid',
+              );
+              resolve(null);
+              return;
+            }
+
+            if (redirectedUrl.protocol !== 'https:') {
+              logger.warn(
+                {
+                  fileId,
+                  status: statusCode,
+                  location: redirectedUrl.toString(),
+                },
+                'Telegram file download redirect used an unsupported protocol',
+              );
+              resolve(null);
+              return;
+            }
+
+            void this.fetchTelegramFileBuffer(
+              redirectedUrl.toString(),
+              fileId,
+              redirectsRemaining - 1,
+            ).then(resolve, reject);
+            return;
+          }
+
+          if (!statusCode || statusCode < 200 || statusCode >= 300) {
+            response.resume?.();
+            logger.warn(
+              { fileId, status: statusCode },
+              'Telegram file download failed',
+            );
+            resolve(null);
+            return;
+          }
+
+          const chunks: Buffer[] = [];
+          response.on('data', (chunk: Buffer | string) => {
+            chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : chunk);
+          });
+          response.on('end', () => resolve(Buffer.concat(chunks)));
+          response.on('error', reject);
+        },
+      );
+
+      request.setTimeout(this.connectTimeoutMs, () => {
+        request.destroy(
+          new Error(
+            `Telegram file download timed out after ${this.connectTimeoutMs}ms`,
+          ),
+        );
+      });
+      request.on('error', reject);
+    });
+  }
+
   private async downloadFile(
     fileId: string,
     groupFolder: string,
@@ -142,48 +233,7 @@ export class TelegramChannel implements Channel {
       const destPath = path.join(attachDir, finalName);
 
       const fileUrl = `https://api.telegram.org/file/bot${this.botToken}/${file.file_path}`;
-      const buffer = await new Promise<Buffer | null>((resolve, reject) => {
-        const request = https.get(
-          fileUrl,
-          {
-            agent: TELEGRAM_FETCH_CONFIG.agent,
-            family: 4,
-          },
-          (response) => {
-            if (
-              !response.statusCode ||
-              response.statusCode < 200 ||
-              response.statusCode >= 300
-            ) {
-              response.resume?.();
-              logger.warn(
-                { fileId, status: response.statusCode },
-                'Telegram file download failed',
-              );
-              resolve(null);
-              return;
-            }
-
-            const chunks: Buffer[] = [];
-            response.on('data', (chunk: Buffer | string) => {
-              chunks.push(
-                typeof chunk === 'string' ? Buffer.from(chunk) : chunk,
-              );
-            });
-            response.on('end', () => resolve(Buffer.concat(chunks)));
-            response.on('error', reject);
-          },
-        );
-
-        request.setTimeout(this.connectTimeoutMs, () => {
-          request.destroy(
-            new Error(
-              `Telegram file download timed out after ${this.connectTimeoutMs}ms`,
-            ),
-          );
-        });
-        request.on('error', reject);
-      });
+      const buffer = await this.fetchTelegramFileBuffer(fileUrl, fileId);
       if (!buffer) {
         return null;
       }

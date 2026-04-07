@@ -786,7 +786,85 @@ describe('telegram channel', () => {
     expect(filePath).toBeNull();
   });
 
-  it('returns null when the IPv4 Telegram download transport gets redirected', async () => {
+  it('follows redirected Telegram file downloads over IPv4', async () => {
+    process.env.TELEGRAM_BOT_TOKEN = 'test-token';
+
+    const { getChannelFactory } = await loadTelegramRegistry();
+    const channel = getChannelFactory('telegram')!({
+      onMessage: vi.fn(),
+      onChatMetadata: vi.fn(),
+      registeredGroups: () => ({
+        'tg:123456789': baseGroup(),
+      }),
+    });
+
+    await channel!.connect();
+
+    getFileMock.mockResolvedValue({ file_path: 'documents/report.pdf' });
+    vi.spyOn(fs, 'mkdirSync').mockImplementation(() => undefined as any);
+    vi.spyOn(fs, 'writeFileSync').mockImplementation(() => undefined);
+    const getMock = vi.spyOn(https, 'get').mockImplementation(((
+      url,
+      _options,
+      callback,
+    ) => {
+      const response = new EventEmitter() as EventEmitter & {
+        statusCode?: number;
+        resume?: () => void;
+        headers?: Record<string, string>;
+      };
+      response.resume = vi.fn();
+      if (String(url).includes('api.telegram.org/file/')) {
+        response.statusCode = 302;
+        response.headers = {
+          location: 'https://cdn.telegram.example/documents/report.pdf',
+        };
+        queueMicrotask(() => {
+          callback?.(response as any);
+        });
+      } else {
+        response.statusCode = 200;
+        response.headers = {};
+        queueMicrotask(() => {
+          callback?.(response as any);
+          response.emit('data', Buffer.from([4, 5, 6]));
+          response.emit('end');
+        });
+      }
+
+      return {
+        on: vi.fn().mockReturnThis(),
+        setTimeout: vi.fn().mockReturnThis(),
+        destroy: vi.fn(),
+      } as any;
+    }) as typeof https.get);
+
+    const filePath = await (channel as any).downloadFile(
+      'doc-file-4',
+      'telegram_main',
+      'report_102.pdf',
+    );
+
+    expect(getMock).toHaveBeenNthCalledWith(
+      1,
+      'https://api.telegram.org/file/bottest-token/documents/report.pdf',
+      expect.objectContaining({
+        family: 4,
+      }),
+      expect.any(Function),
+    );
+    expect(getMock).toHaveBeenNthCalledWith(
+      2,
+      'https://cdn.telegram.example/documents/report.pdf',
+      expect.objectContaining({
+        family: 4,
+      }),
+      expect.any(Function),
+    );
+    expect(filePath).toBe('/workspace/group/attachments/report_102.pdf');
+  });
+
+  it('returns null when a Telegram file redirect uses a non-https URL', async () => {
     process.env.TELEGRAM_BOT_TOKEN = 'test-token';
 
     const { getChannelFactory } = await loadTelegramRegistry();
@@ -805,9 +883,13 @@ describe('telegram channel', () => {
       const response = new EventEmitter() as EventEmitter & {
         statusCode?: number;
         resume?: () => void;
+        headers?: Record<string, string>;
       };
       response.statusCode = 302;
       response.resume = vi.fn();
+      response.headers = {
+        location: 'http://insecure.telegram.example/documents/report.pdf',
+      };
       queueMicrotask(() => {
         callback?.(response as any);
       });
