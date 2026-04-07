@@ -1050,16 +1050,15 @@ describe('attachment follow-up routing', () => {
       chat_jid: 'workers@g.us',
       sender: 'alice',
       sender_name: 'Alice',
-      content: '@Andy [Document: report.pdf] (/workspace/group/attachments/report_99.pdf)',
+      content:
+        '@Andy [Document: report.pdf] (/workspace/group/attachments/report_99.pdf)',
       timestamp: '2026-04-07T00:00:20.000Z',
       thread_id: '888',
     });
 
     expect(storeMessage).toHaveBeenCalledOnce();
     expect(groupQueueSendMessage).toHaveBeenCalledOnce();
-    expect(groupQueueEnqueueMessageCheck).toHaveBeenCalledWith(
-      'workers@g.us',
-    );
+    expect(groupQueueEnqueueMessageCheck).toHaveBeenCalledWith('workers@g.us');
   });
 });
 
