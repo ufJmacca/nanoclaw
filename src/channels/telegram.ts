@@ -27,10 +27,33 @@ interface TelegramChannelOpts {
 }
 
 const TELEGRAM_FETCH_CONFIG = {
-  agent: https.globalAgent,
+  agent: new https.Agent({
+    keepAlive: true,
+    family: 4,
+  }),
   compress: true,
 };
-const TELEGRAM_CONNECT_TIMEOUT_MS = 10_000;
+const DEFAULT_TELEGRAM_CONNECT_TIMEOUT_MS = 10_000;
+
+function resolveTelegramConnectTimeoutMs(rawValue?: string): number {
+  if (!rawValue) {
+    return DEFAULT_TELEGRAM_CONNECT_TIMEOUT_MS;
+  }
+
+  const timeoutMs = Number.parseInt(rawValue, 10);
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    logger.warn(
+      {
+        value: rawValue,
+        defaultTimeoutMs: DEFAULT_TELEGRAM_CONNECT_TIMEOUT_MS,
+      },
+      'Invalid TELEGRAM_CONNECT_TIMEOUT_MS, using default',
+    );
+    return DEFAULT_TELEGRAM_CONNECT_TIMEOUT_MS;
+  }
+
+  return timeoutMs;
+}
 
 function buildUniqueAttachmentFilename(
   filename: string,
@@ -82,10 +105,16 @@ export class TelegramChannel implements Channel {
   private botUsername = '';
   private readonly opts: TelegramChannelOpts;
   private readonly botToken: string;
+  private readonly connectTimeoutMs: number;
 
-  constructor(botToken: string, opts: TelegramChannelOpts) {
+  constructor(
+    botToken: string,
+    opts: TelegramChannelOpts,
+    connectTimeoutMs = DEFAULT_TELEGRAM_CONNECT_TIMEOUT_MS,
+  ) {
     this.botToken = botToken;
     this.opts = opts;
+    this.connectTimeoutMs = connectTimeoutMs;
   }
 
   private async downloadFile(
@@ -113,16 +142,48 @@ export class TelegramChannel implements Channel {
       const destPath = path.join(attachDir, finalName);
 
       const fileUrl = `https://api.telegram.org/file/bot${this.botToken}/${file.file_path}`;
-      const resp = await fetch(fileUrl, TELEGRAM_FETCH_CONFIG as RequestInit);
-      if (!resp.ok) {
-        logger.warn(
-          { fileId, status: resp.status },
-          'Telegram file download failed',
+      const buffer = await new Promise<Buffer | null>((resolve, reject) => {
+        const request = https.get(
+          fileUrl,
+          {
+            agent: TELEGRAM_FETCH_CONFIG.agent,
+            family: 4,
+          },
+          (response) => {
+            if (!response.statusCode || response.statusCode >= 400) {
+              response.resume?.();
+              logger.warn(
+                { fileId, status: response.statusCode },
+                'Telegram file download failed',
+              );
+              resolve(null);
+              return;
+            }
+
+            const chunks: Buffer[] = [];
+            response.on('data', (chunk: Buffer | string) => {
+              chunks.push(
+                typeof chunk === 'string' ? Buffer.from(chunk) : chunk,
+              );
+            });
+            response.on('end', () => resolve(Buffer.concat(chunks)));
+            response.on('error', reject);
+          },
         );
+
+        request.setTimeout(this.connectTimeoutMs, () => {
+          request.destroy(
+            new Error(
+              `Telegram file download timed out after ${this.connectTimeoutMs}ms`,
+            ),
+          );
+        });
+        request.on('error', reject);
+      });
+      if (!buffer) {
         return null;
       }
 
-      const buffer = Buffer.from(await resp.arrayBuffer());
       fs.writeFileSync(destPath, buffer);
 
       logger.info({ fileId, dest: destPath }, 'Telegram file downloaded');
@@ -451,10 +512,10 @@ export class TelegramChannel implements Channel {
       const connectTimeout = setTimeout(() => {
         finishReject(
           new Error(
-            `Telegram bot start timed out after ${TELEGRAM_CONNECT_TIMEOUT_MS}ms`,
+            `Telegram bot start timed out after ${this.connectTimeoutMs}ms`,
           ),
         );
-      }, TELEGRAM_CONNECT_TIMEOUT_MS);
+      }, this.connectTimeoutMs);
 
       void Promise.resolve()
         .then(() =>
@@ -543,12 +604,19 @@ export class TelegramChannel implements Channel {
 }
 
 registerChannel('telegram', (opts: ChannelOpts) => {
-  const envVars = readEnvFile(['TELEGRAM_BOT_TOKEN']);
+  const envVars = readEnvFile([
+    'TELEGRAM_BOT_TOKEN',
+    'TELEGRAM_CONNECT_TIMEOUT_MS',
+  ]);
   const token =
     process.env.TELEGRAM_BOT_TOKEN || envVars.TELEGRAM_BOT_TOKEN || '';
+  const connectTimeoutMs = resolveTelegramConnectTimeoutMs(
+    process.env.TELEGRAM_CONNECT_TIMEOUT_MS ||
+      envVars.TELEGRAM_CONNECT_TIMEOUT_MS,
+  );
   if (!token) {
     logger.warn('Telegram: TELEGRAM_BOT_TOKEN not set');
     return null;
   }
-  return new TelegramChannel(token, opts);
+  return new TelegramChannel(token, opts, connectTimeoutMs);
 });
