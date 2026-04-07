@@ -1619,6 +1619,118 @@ describe('attachment follow-up routing', () => {
       expect.any(Function),
     );
   });
+
+  it('refetches beyond the prompt limit when delivered attachments fill the window', async () => {
+    const repoDir = createTempRepo();
+    const mainGroup: RegisteredGroup = {
+      name: 'Main',
+      folder: 'main',
+      trigger: '@Andy',
+      added_at: '2026-04-03T00:00:00.000Z',
+      isMain: true,
+      requiresTrigger: false,
+      providerId: 'codex',
+    };
+    const channel = {
+      name: 'test',
+      connect: vi.fn(async () => {}),
+      sendMessage: vi.fn(async () => {}),
+      isConnected: vi.fn(() => true),
+      ownsJid: vi.fn((jid: string) => jid === 'main@g.us'),
+      disconnect: vi.fn(async () => {}),
+      setTyping: vi.fn(async () => {}),
+    };
+    const deliveredAttachments = Array.from({ length: 10 }, (_, index) => ({
+      id: `${index + 1}:attachment`,
+      chat_jid: 'main@g.us',
+      sender: 'alice',
+      sender_name: 'Alice',
+      content: `[Document: report-${index + 1}.pdf] (/workspace/group/attachments/report-${index + 1}.pdf)`,
+      timestamp: `2026-04-07T00:00:${String(index + 1).padStart(2, '0')}.000Z`,
+    })) satisfies NewMessage[];
+    const realMessage: NewMessage = {
+      id: 'm1',
+      chat_jid: 'main@g.us',
+      sender: 'bob',
+      sender_name: 'Bob',
+      content: 'real pending message',
+      timestamp: '2026-04-07T00:00:00.500Z',
+    };
+
+    getAllRegisteredGroups.mockReturnValue({ 'main@g.us': mainGroup });
+    getRegisteredChannelNames.mockReturnValue(['test']);
+    getChannelFactory.mockImplementation(
+      () =>
+        (_opts: { onMessage: (chatJid: string, msg: NewMessage) => void }) =>
+          channel,
+    );
+    findChannel.mockImplementation((_channels: unknown[], jid: string) =>
+      jid === 'main@g.us' ? channel : undefined,
+    );
+    getRouterState.mockImplementation((key: string) =>
+      key === 'delivered_attachment_ids_by_chat'
+        ? JSON.stringify({
+            'main@g.us': Object.fromEntries(
+              deliveredAttachments.map((message) => [
+                message.id,
+                message.timestamp,
+              ]),
+            ),
+          })
+        : '',
+    );
+    getMessagesSince.mockImplementation(((
+      _chatJid: string,
+      _sinceTimestamp: string,
+      _botPrefix: string,
+      limit = 200,
+    ) =>
+      limit <= 10
+        ? deliveredAttachments
+        : ([realMessage, ...deliveredAttachments] as NewMessage[])) as any);
+    formatMessagesMock.mockImplementation((messages: unknown) =>
+      (messages as NewMessage[]).map((message) => message.id).join(','),
+    );
+    runContainerAgent.mockResolvedValue({
+      status: 'success',
+      result: null,
+    });
+    vi.spyOn(globalThis, 'setTimeout').mockImplementation(() => 0 as any);
+    vi.spyOn(globalThis, 'clearTimeout').mockImplementation(() => undefined);
+    process.argv[1] = INDEX_MODULE_PATH;
+
+    await loadIndexModule(repoDir);
+    getMessagesSince.mockClear();
+
+    const processMessages = groupQueueSetProcessMessagesFn.mock.calls[0][0] as (
+      chatJid: string,
+    ) => Promise<boolean>;
+    const result = await processMessages('main@g.us');
+
+    expect(result).toBe(true);
+    expect(getMessagesSince).toHaveBeenNthCalledWith(
+      1,
+      'main@g.us',
+      '',
+      'Andy',
+      10,
+    );
+    expect(getMessagesSince).toHaveBeenNthCalledWith(
+      2,
+      'main@g.us',
+      '',
+      'Andy',
+      20,
+    );
+    expect(runContainerAgent).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.objectContaining({
+        prompt: 'm1',
+      }),
+      expect.any(Function),
+      expect.any(Function),
+    );
+  });
 });
 
 describe('threaded streaming replies', () => {

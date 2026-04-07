@@ -352,6 +352,30 @@ function filterDeliveredAttachments(
   );
 }
 
+function getUndeliveredMessagesSince(
+  chatJid: string,
+  sinceTimestamp: string,
+  limit: number,
+): NewMessage[] {
+  let fetchLimit = limit;
+
+  while (true) {
+    const messages = getMessagesSince(
+      chatJid,
+      sinceTimestamp,
+      ASSISTANT_NAME,
+      fetchLimit,
+    );
+    const filtered = filterDeliveredAttachments(chatJid, messages);
+
+    if (filtered.length >= limit || messages.length < fetchLimit) {
+      return filtered.slice(-limit);
+    }
+
+    fetchLimit += limit;
+  }
+}
+
 function sendMessageToActiveContainer(
   chatJid: string,
   text: string,
@@ -564,14 +588,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   const isMainGroup = group.isMain === true;
 
-  const missedMessages = filterDeliveredAttachments(
+  const missedMessages = getUndeliveredMessagesSince(
     chatJid,
-    getMessagesSince(
-      chatJid,
-      getOrRecoverCursor(chatJid),
-      ASSISTANT_NAME,
-      MAX_MESSAGES_PER_PROMPT,
-    ),
+    getOrRecoverCursor(chatJid),
+    MAX_MESSAGES_PER_PROMPT,
   );
 
   if (missedMessages.length === 0) return true;
@@ -866,14 +886,10 @@ async function startMessageLoop(): Promise<void> {
 
           // Pull all messages since lastAgentTimestamp so non-trigger
           // context that accumulated between triggers is included.
-          const allPending = filterDeliveredAttachments(
+          const allPending = getUndeliveredMessagesSince(
             chatJid,
-            getMessagesSince(
-              chatJid,
-              getOrRecoverCursor(chatJid),
-              ASSISTANT_NAME,
-              MAX_MESSAGES_PER_PROMPT,
-            ),
+            getOrRecoverCursor(chatJid),
+            MAX_MESSAGES_PER_PROMPT,
           );
           const messagesToSend =
             allPending.length > 0 ? allPending : groupMessages;
@@ -919,14 +935,10 @@ async function startMessageLoop(): Promise<void> {
  */
 function recoverPendingMessages(): void {
   for (const [chatJid, group] of Object.entries(registeredGroups)) {
-    const pending = filterDeliveredAttachments(
+    const pending = getUndeliveredMessagesSince(
       chatJid,
-      getMessagesSince(
-        chatJid,
-        getOrRecoverCursor(chatJid),
-        ASSISTANT_NAME,
-        MAX_MESSAGES_PER_PROMPT,
-      ),
+      getOrRecoverCursor(chatJid),
+      MAX_MESSAGES_PER_PROMPT,
     );
     if (pending.length > 0) {
       logger.info(
