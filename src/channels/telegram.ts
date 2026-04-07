@@ -30,6 +30,7 @@ const TELEGRAM_FETCH_CONFIG = {
   agent: https.globalAgent,
   compress: true,
 };
+const TELEGRAM_CONNECT_TIMEOUT_MS = 10_000;
 
 function buildUniqueAttachmentFilename(
   filename: string,
@@ -428,21 +429,53 @@ export class TelegramChannel implements Channel {
       logger.error({ err: err.message }, 'Telegram bot error');
     });
 
-    return new Promise<void>((resolve) => {
-      this.bot!.start({
-        onStart: (botInfo) => {
-          this.botUsername = botInfo.username.toLowerCase();
-          logger.info(
-            { username: botInfo.username, id: botInfo.id },
-            'Telegram bot connected',
-          );
-          console.log(`\n  Telegram bot: @${botInfo.username}`);
-          console.log(
-            "  Send /chatid to the bot to get a chat's registration ID\n",
-          );
-          resolve();
-        },
-      });
+    return new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const finishResolve = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(connectTimeout);
+        resolve();
+      };
+      const finishReject = (error: unknown) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(connectTimeout);
+        try {
+          this.bot?.stop();
+        } catch {
+          /* ignore shutdown cleanup failures */
+        }
+        reject(
+          error instanceof Error ? error : new Error(String(error)),
+        );
+      };
+      const connectTimeout = setTimeout(() => {
+        finishReject(
+          new Error(
+            `Telegram bot start timed out after ${TELEGRAM_CONNECT_TIMEOUT_MS}ms`,
+          ),
+        );
+      }, TELEGRAM_CONNECT_TIMEOUT_MS);
+
+      void Promise.resolve()
+        .then(() =>
+          this.bot!.start({
+            onStart: (botInfo) => {
+              this.botUsername = botInfo.username.toLowerCase();
+              logger.info(
+                { username: botInfo.username, id: botInfo.id },
+                'Telegram bot connected',
+              );
+              console.log(`\n  Telegram bot: @${botInfo.username}`);
+              console.log(
+                "  Send /chatid to the bot to get a chat's registration ID\n",
+              );
+              finishResolve();
+            },
+          }),
+        )
+        .catch(finishReject);
     });
   }
 

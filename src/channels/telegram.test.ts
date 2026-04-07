@@ -10,6 +10,8 @@ const sendChatActionMock = vi.fn();
 const getFileMock = vi.fn();
 const startMock = vi.fn();
 const stopMock = vi.fn();
+let autoStartBot = true;
+let startResult: Promise<void> | void = undefined;
 
 class FakeBot {
   public readonly api = {
@@ -43,7 +45,10 @@ class FakeBot {
     onStart?: (botInfo: { username: string; id: number }) => void;
   }) {
     startMock(opts);
-    opts?.onStart?.({ username: 'andy_bot', id: 42 });
+    if (autoStartBot) {
+      opts?.onStart?.({ username: 'andy_bot', id: 42 });
+    }
+    return startResult;
   }
 
   stop() {
@@ -87,6 +92,7 @@ describe('telegram channel', () => {
   afterEach(() => {
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+    vi.useRealTimers();
   });
 
   beforeEach(() => {
@@ -97,6 +103,8 @@ describe('telegram channel', () => {
     getFileMock.mockReset();
     startMock.mockReset();
     stopMock.mockReset();
+    autoStartBot = true;
+    startResult = undefined;
     delete process.env.TELEGRAM_BOT_TOKEN;
   });
 
@@ -156,6 +164,29 @@ describe('telegram channel', () => {
     expect(reply).toHaveBeenCalledWith(
       'Chat ID: tg:123456789\nName: Jon\nType: private',
     );
+  });
+
+  it('rejects connect when Telegram polling never starts', async () => {
+    process.env.TELEGRAM_BOT_TOKEN = 'test-token';
+    autoStartBot = false;
+    startResult = new Promise<void>(() => {});
+    vi.useFakeTimers();
+
+    const { getChannelFactory } = await loadTelegramRegistry();
+    const channel = getChannelFactory('telegram')!({
+      onMessage: vi.fn(),
+      onChatMetadata: vi.fn(),
+      registeredGroups: () => ({}),
+    });
+
+    const connectPromise = channel!.connect();
+    const rejection = expect(connectPromise).rejects.toThrow(
+      'Telegram bot start timed out after 10000ms',
+    );
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    await rejection;
+    expect(stopMock).toHaveBeenCalledOnce();
   });
 
   it('sends /chatid as plain text for markdown-heavy group names', async () => {

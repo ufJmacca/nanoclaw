@@ -77,6 +77,7 @@ let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
 let replyThreadIdByChat: Record<string, string | undefined> = {};
 let queuedReplyThreadIdByChat: Record<string, string | null> = {};
+let pendingAttachmentIdsByChat: Record<string, Record<string, string>> = {};
 let deliveredAttachmentIdsByChat: Record<string, Record<string, string>> = {};
 let messageLoopRunning = false;
 
@@ -229,33 +230,58 @@ function clearQueuedReplyThreadContext(chatJid: string): void {
   delete queuedReplyThreadIdByChat[chatJid];
 }
 
-function pruneDeliveredAttachments(chatJid: string): void {
-  const delivered = deliveredAttachmentIdsByChat[chatJid];
-  if (!delivered) {
+function pruneTrackedAttachments(
+  chatJid: string,
+  trackedAttachmentIdsByChat: Record<string, Record<string, string>>,
+): void {
+  const tracked = trackedAttachmentIdsByChat[chatJid];
+  if (!tracked) {
     return;
   }
 
   const cursor = lastAgentTimestamp[chatJid] || '';
-  for (const [messageId, timestamp] of Object.entries(delivered)) {
+  for (const [messageId, timestamp] of Object.entries(tracked)) {
     if (timestamp <= cursor) {
-      delete delivered[messageId];
+      delete tracked[messageId];
     }
   }
 
-  if (Object.keys(delivered).length === 0) {
-    delete deliveredAttachmentIdsByChat[chatJid];
+  if (Object.keys(tracked).length === 0) {
+    delete trackedAttachmentIdsByChat[chatJid];
   }
 }
 
-function rememberDeliveredAttachment(chatJid: string, msg: NewMessage): void {
+function pruneDeliveredAttachments(chatJid: string): void {
+  pruneTrackedAttachments(chatJid, pendingAttachmentIdsByChat);
+  pruneTrackedAttachments(chatJid, deliveredAttachmentIdsByChat);
+}
+
+function rememberPendingAttachment(chatJid: string, msg: NewMessage): void {
   if (!msg.id.endsWith(':attachment')) {
+    return;
+  }
+
+  pendingAttachmentIdsByChat[chatJid] = {
+    ...(pendingAttachmentIdsByChat[chatJid] || {}),
+    [msg.id]: msg.timestamp,
+  };
+}
+
+function clearPendingAttachments(chatJid: string): void {
+  delete pendingAttachmentIdsByChat[chatJid];
+}
+
+function promotePendingAttachments(chatJid: string): void {
+  const pending = pendingAttachmentIdsByChat[chatJid];
+  if (!pending) {
     return;
   }
 
   deliveredAttachmentIdsByChat[chatJid] = {
     ...(deliveredAttachmentIdsByChat[chatJid] || {}),
-    [msg.id]: msg.timestamp,
+    ...pending,
   };
+  delete pendingAttachmentIdsByChat[chatJid];
 }
 
 function filterDeliveredAttachments(
@@ -263,12 +289,15 @@ function filterDeliveredAttachments(
   messages: NewMessage[],
 ): NewMessage[] {
   pruneDeliveredAttachments(chatJid);
+  const pending = pendingAttachmentIdsByChat[chatJid];
   const delivered = deliveredAttachmentIdsByChat[chatJid];
-  if (!delivered) {
+  if (!pending && !delivered) {
     return messages;
   }
 
-  return messages.filter((message) => !delivered[message.id]);
+  return messages.filter(
+    (message) => !pending?.[message.id] && !delivered?.[message.id],
+  );
 }
 
 function sendMessageToActiveContainer(
@@ -567,11 +596,13 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       captureReplyThreadForTurn();
       activeReplyThreadId = undefined;
       awaitingNextTurnThreadId = true;
+      promotePendingAttachments(chatJid);
       queue.notifyIdle(chatJid);
     }
 
     if (result.status === 'error') {
       hadError = true;
+      clearPendingAttachments(chatJid);
     }
   });
 
@@ -580,6 +611,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   if (output === 'error' || hadError) {
     clearQueuedReplyThreadContext(chatJid);
+    clearPendingAttachments(chatJid);
     // If we already sent output to the user, don't roll back the cursor —
     // the user got their response and re-processing would send duplicates.
     if (outputSentToUser) {
@@ -993,7 +1025,7 @@ async function main(): Promise<void> {
           updateReplyThreadContext(chatJid, [msg]);
           const formatted = formatMessages([msg], TIMEZONE);
           if (sendMessageToActiveContainer(chatJid, formatted, msg.thread_id)) {
-            rememberDeliveredAttachment(chatJid, msg);
+            rememberPendingAttachment(chatJid, msg);
             return;
           }
         }
