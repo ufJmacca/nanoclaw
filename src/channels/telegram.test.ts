@@ -785,4 +785,46 @@ describe('telegram channel', () => {
 
     expect(filePath).toBeNull();
   });
+
+  it('returns null when the IPv4 Telegram download transport gets redirected', async () => {
+    process.env.TELEGRAM_BOT_TOKEN = 'test-token';
+
+    const { getChannelFactory } = await loadTelegramRegistry();
+    const channel = getChannelFactory('telegram')!({
+      onMessage: vi.fn(),
+      onChatMetadata: vi.fn(),
+      registeredGroups: () => ({
+        'tg:123456789': baseGroup(),
+      }),
+    });
+
+    await channel!.connect();
+
+    getFileMock.mockResolvedValue({ file_path: 'documents/report.pdf' });
+    vi.spyOn(https, 'get').mockImplementation(((_url, _options, callback) => {
+      const response = new EventEmitter() as EventEmitter & {
+        statusCode?: number;
+        resume?: () => void;
+      };
+      response.statusCode = 302;
+      response.resume = vi.fn();
+      queueMicrotask(() => {
+        callback?.(response as any);
+      });
+
+      return {
+        on: vi.fn().mockReturnThis(),
+        setTimeout: vi.fn().mockReturnThis(),
+        destroy: vi.fn(),
+      } as any;
+    }) as typeof https.get);
+
+    const filePath = await (channel as any).downloadFile(
+      'doc-file-4',
+      'telegram_main',
+      'report_102.pdf',
+    );
+
+    expect(filePath).toBeNull();
+  });
 });

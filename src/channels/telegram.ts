@@ -150,7 +150,11 @@ export class TelegramChannel implements Channel {
             family: 4,
           },
           (response) => {
-            if (!response.statusCode || response.statusCode >= 400) {
+            if (
+              !response.statusCode ||
+              response.statusCode < 200 ||
+              response.statusCode >= 300
+            ) {
               response.resume?.();
               logger.warn(
                 { fileId, status: response.statusCode },
