@@ -1453,11 +1453,13 @@ describe('attachment follow-up routing', () => {
         : ([attachmentMessage] as NewMessage[]),
     );
     groupQueueSendMessage.mockReturnValue(true);
-    runContainerAgent.mockImplementationOnce(async (_group, _request, _proc, onOutput) => {
-      channelOpts?.onMessage('main@g.us', attachmentMessage);
-      await onOutput?.({ status: 'success', result: null });
-      return { status: 'success', result: null };
-    });
+    runContainerAgent.mockImplementationOnce(
+      async (_group, _request, _proc, onOutput) => {
+        channelOpts?.onMessage('main@g.us', attachmentMessage);
+        await onOutput?.({ status: 'success', result: null });
+        return { status: 'success', result: null };
+      },
+    );
     vi.spyOn(globalThis, 'setTimeout').mockImplementation(() => 0 as any);
     vi.spyOn(globalThis, 'clearTimeout').mockImplementation(() => undefined);
     process.argv[1] = INDEX_MODULE_PATH;
