@@ -197,33 +197,8 @@ function saveState(): void {
   );
 }
 
-function compareMessageIds(aId: string, bId: string): number {
-  const aNumericPrefix = /^(\d+)/.exec(aId)?.[1];
-  const bNumericPrefix = /^(\d+)/.exec(bId)?.[1];
-  if (aNumericPrefix && bNumericPrefix && aNumericPrefix !== bNumericPrefix) {
-    return Number(aNumericPrefix) - Number(bNumericPrefix);
-  }
-
-  return aId.localeCompare(bId, undefined, { numeric: true });
-}
-
-function compareMessageChronology(a: NewMessage, b: NewMessage): number {
-  const timestampOrder = a.timestamp.localeCompare(b.timestamp);
-  if (timestampOrder !== 0) {
-    return timestampOrder;
-  }
-
-  return compareMessageIds(a.id, b.id);
-}
-
 function getLatestThreadId(messages: NewMessage[]): string | undefined {
-  return messages.reduce<NewMessage | undefined>((latest, message) => {
-    if (!latest) {
-      return message;
-    }
-
-    return compareMessageChronology(message, latest) >= 0 ? message : latest;
-  }, undefined)?.thread_id;
+  return messages[messages.length - 1]?.thread_id;
 }
 
 function updateReplyThreadContext(

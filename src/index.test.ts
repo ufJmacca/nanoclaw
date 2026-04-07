@@ -691,7 +691,7 @@ describe('thread reply context', () => {
     ).toBeUndefined();
   });
 
-  it('uses a deterministic message-id tie-breaker when timestamps collide', async () => {
+  it('uses the fetched row order when timestamps collide', async () => {
     const repoDir = createTempRepo();
     const { _getLatestThreadIdForTest } = await loadIndexModule(repoDir);
 
@@ -715,7 +715,7 @@ describe('thread reply context', () => {
           thread_id: '777',
         },
       ]),
-    ).toBeUndefined();
+    ).toBe('777');
   });
 });
 
