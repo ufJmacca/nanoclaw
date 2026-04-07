@@ -446,9 +446,7 @@ export class TelegramChannel implements Channel {
         } catch {
           /* ignore shutdown cleanup failures */
         }
-        reject(
-          error instanceof Error ? error : new Error(String(error)),
-        );
+        reject(error instanceof Error ? error : new Error(String(error)));
       };
       const connectTimeout = setTimeout(() => {
         finishReject(
