@@ -23,6 +23,7 @@ const originalEnv = {
   NANOCLAW_CODEX_HOME_DIR: process.env.NANOCLAW_CODEX_HOME_DIR,
   NANOCLAW_CODEX_BIN: process.env.NANOCLAW_CODEX_BIN,
   NANOCLAW_CODEX_RECORD_FILE: process.env.NANOCLAW_CODEX_RECORD_FILE,
+  NANOCLAW_CODEX_STDOUT_EVENTS: process.env.NANOCLAW_CODEX_STDOUT_EVENTS,
   NANOCLAW_CODEX_EMIT_THREAD_STARTED:
     process.env.NANOCLAW_CODEX_EMIT_THREAD_STARTED,
   NANOCLAW_CODEX_RESULT_TEXT: process.env.NANOCLAW_CODEX_RESULT_TEXT,
@@ -61,6 +62,14 @@ const record = {
 };
 fs.writeFileSync(recordPath, JSON.stringify(record, null, 2));
 
+if (process.env.NANOCLAW_CODEX_STDOUT_EVENTS) {
+  const events = JSON.parse(process.env.NANOCLAW_CODEX_STDOUT_EVENTS);
+  for (const event of events) {
+    console.log(JSON.stringify(event));
+  }
+  process.exit(0);
+}
+
 if (process.env.NANOCLAW_CODEX_EMIT_THREAD_STARTED === '1') {
   console.log(JSON.stringify({ type: 'thread.started', thread_id: 'codex-session-next' }));
 }
@@ -98,6 +107,9 @@ function resetFixture({
   fs.mkdirSync(sharedGlobalDir, { recursive: true });
   fs.mkdirSync(sharedCodexHomeDir, { recursive: true });
   fs.writeFileSync(path.join(sharedGroupDir, 'AGENTS.md'), groupAgents);
+  delete process.env.NANOCLAW_CODEX_STDOUT_EVENTS;
+  delete process.env.NANOCLAW_CODEX_EMIT_THREAD_STARTED;
+  delete process.env.NANOCLAW_CODEX_RESULT_TEXT;
   if (globalAgents != null) {
     fs.writeFileSync(path.join(sharedGlobalDir, 'AGENT.md'), globalAgents);
   }
@@ -246,4 +258,247 @@ test('built-in Codex provider resumes an existing conversation with the same dis
   assert.equal(record.config.includes('model_instructions_file'), false);
   assert.match(record.config, /forced_login_method = "chatgpt"/);
   assert.match(record.config, /cli_auth_credentials_store = "file"/);
+});
+
+test('built-in Codex provider emits only the completed agent message when Codex streams updates first', async () => {
+  // Arrange
+  resetFixture();
+  process.env.NANOCLAW_CODEX_STDOUT_EVENTS = JSON.stringify([
+    { type: 'thread.started', thread_id: 'codex-session-next' },
+    {
+      type: 'item.updated',
+      item: {
+        id: 'item_1',
+        type: 'agent_message',
+        text: 'draft reply',
+      },
+    },
+    {
+      type: 'item.completed',
+      item: {
+        id: 'item_1',
+        type: 'agent_message',
+        text: 'final reply',
+      },
+    },
+    {
+      type: 'turn.completed',
+      usage: {
+        input_tokens: 1,
+        cached_input_tokens: 0,
+        output_tokens: 1,
+      },
+    },
+  ]);
+
+  const { dispatchProviderInput } = await loadRunnerModule();
+
+  // Act
+  const outputs = await collectOutputs(
+    dispatchProviderInput(
+      {
+        providerId: 'codex',
+        runtimeInput: {
+          prompt: 'Answer once.',
+          groupFolder: 'codex-group',
+          chatJid: 'codex@g.us',
+          isMain: false,
+        },
+      },
+      {
+        mcpServerPath: '/app/dist/ipc-mcp-stdio.js',
+      },
+    ),
+  );
+
+  // Assert
+  assert.deepEqual(outputs, [
+    {
+      status: 'success',
+      result: 'final reply',
+      newSessionId: 'codex-session-next',
+    },
+  ]);
+});
+
+test('built-in Codex provider collapses multiple agent_message updates into one final result', async () => {
+  // Arrange
+  resetFixture();
+  process.env.NANOCLAW_CODEX_STDOUT_EVENTS = JSON.stringify([
+    {
+      type: 'item.updated',
+      item: {
+        id: 'item_1',
+        type: 'agent_message',
+        text: 'draft reply',
+      },
+    },
+    {
+      type: 'item.updated',
+      item: {
+        id: 'item_1',
+        type: 'agent_message',
+        text: 'better draft reply',
+      },
+    },
+    {
+      type: 'item.completed',
+      item: {
+        id: 'item_1',
+        type: 'agent_message',
+        text: 'final reply',
+      },
+    },
+    {
+      type: 'turn.completed',
+      usage: {
+        input_tokens: 1,
+        cached_input_tokens: 0,
+        output_tokens: 1,
+      },
+    },
+  ]);
+
+  const { dispatchProviderInput } = await loadRunnerModule();
+
+  // Act
+  const outputs = await collectOutputs(
+    dispatchProviderInput(
+      {
+        providerId: 'codex',
+        runtimeInput: {
+          prompt: 'Continue the existing task.',
+          sessionId: 'codex-session-existing',
+          groupFolder: 'codex-group',
+          chatJid: 'codex@g.us',
+          isMain: true,
+        },
+      },
+      {
+        mcpServerPath: '/app/dist/ipc-mcp-stdio.js',
+      },
+    ),
+  );
+
+  // Assert
+  assert.deepEqual(outputs, [
+    {
+      status: 'success',
+      result: 'final reply',
+      newSessionId: 'codex-session-existing',
+    },
+  ]);
+});
+
+test('built-in Codex provider reports a failed turn without emitting a streamed draft reply', async () => {
+  // Arrange
+  resetFixture();
+  process.env.NANOCLAW_CODEX_STDOUT_EVENTS = JSON.stringify([
+    {
+      type: 'item.updated',
+      item: {
+        id: 'item_1',
+        type: 'agent_message',
+        text: 'draft reply',
+      },
+    },
+    {
+      type: 'turn.failed',
+      error: {
+        message: 'Codex reported failure',
+      },
+    },
+  ]);
+
+  const { dispatchProviderInput } = await loadRunnerModule();
+
+  // Act
+  const outputs = await collectOutputs(
+    dispatchProviderInput(
+      {
+        providerId: 'codex',
+        runtimeInput: {
+          prompt: 'Continue the existing task.',
+          sessionId: 'codex-session-existing',
+          groupFolder: 'codex-group',
+          chatJid: 'codex@g.us',
+          isMain: true,
+        },
+      },
+      {
+        mcpServerPath: '/app/dist/ipc-mcp-stdio.js',
+      },
+    ),
+  );
+
+  // Assert
+  assert.deepEqual(outputs, [
+    {
+      status: 'error',
+      result: null,
+      newSessionId: 'codex-session-existing',
+      error: 'Codex reported failure',
+    },
+  ]);
+});
+
+test('built-in Codex provider falls back to the last streamed agent_message update when no completion event arrives', async () => {
+  // Arrange
+  resetFixture();
+  process.env.NANOCLAW_CODEX_STDOUT_EVENTS = JSON.stringify([
+    { type: 'thread.started', thread_id: 'codex-session-next' },
+    {
+      type: 'item.updated',
+      item: {
+        id: 'item_1',
+        type: 'agent_message',
+        text: 'draft reply',
+      },
+    },
+    {
+      type: 'item.updated',
+      item: {
+        id: 'item_1',
+        type: 'agent_message',
+        text: 'latest draft reply',
+      },
+    },
+    {
+      type: 'turn.completed',
+      usage: {
+        input_tokens: 1,
+        cached_input_tokens: 0,
+        output_tokens: 1,
+      },
+    },
+  ]);
+
+  const { dispatchProviderInput } = await loadRunnerModule();
+
+  // Act
+  const outputs = await collectOutputs(
+    dispatchProviderInput(
+      {
+        providerId: 'codex',
+        runtimeInput: {
+          prompt: 'Answer once.',
+          groupFolder: 'codex-group',
+          chatJid: 'codex@g.us',
+          isMain: false,
+        },
+      },
+      {
+        mcpServerPath: '/app/dist/ipc-mcp-stdio.js',
+      },
+    ),
+  );
+
+  // Assert
+  assert.deepEqual(outputs, [
+    {
+      status: 'success',
+      result: 'latest draft reply',
+      newSessionId: 'codex-session-next',
+    },
+  ]);
 });
