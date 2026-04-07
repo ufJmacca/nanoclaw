@@ -152,10 +152,13 @@ function parseCodexEvents(stdout: string): {
   events: AgentEvent[];
   sawResult: boolean;
   sawError: boolean;
+  fallbackResultText: string | null;
 } {
   const events: AgentEvent[] = [];
   let sawResult = false;
   let sawError = false;
+  let fallbackResultText: string | null = null;
+  const completedAgentMessageIds = new Set<string>();
 
   for (const rawLine of stdout.split('\n')) {
     const line = rawLine.trim();
@@ -190,13 +193,30 @@ function parseCodexEvents(stdout: string): {
       typeof parsed.item === 'object' &&
       parsed.item !== null
     ) {
-      const item = parsed.item as { type?: unknown; text?: unknown };
+      const item = parsed.item as {
+        id?: unknown;
+        type?: unknown;
+        text?: unknown;
+      };
       if (item.type === 'agent_message' && typeof item.text === 'string') {
-        sawResult = true;
-        events.push({
-          type: 'result',
-          text: item.text,
-        });
+        if (parsed.type === 'item.completed') {
+          const itemId =
+            typeof item.id === 'string' ? item.id : null;
+          if (itemId && completedAgentMessageIds.has(itemId)) {
+            continue;
+          }
+          if (itemId) {
+            completedAgentMessageIds.add(itemId);
+          }
+          sawResult = true;
+          fallbackResultText = null;
+          events.push({
+            type: 'result',
+            text: item.text,
+          });
+        } else {
+          fallbackResultText = item.text;
+        }
       }
       continue;
     }
@@ -229,6 +249,7 @@ function parseCodexEvents(stdout: string): {
     events,
     sawResult,
     sawError,
+    fallbackResultText,
   };
 }
 
@@ -261,7 +282,8 @@ export const codexProvider: ContainerAgentProvider = {
         buildCodexArgs(ctx.input, prompt),
         ctx.abortSignal,
       );
-      const { events, sawResult, sawError } = parseCodexEvents(stdout);
+      const { events, sawResult, sawError, fallbackResultText } =
+        parseCodexEvents(stdout);
 
       for (const event of events) {
         yield event;
@@ -284,6 +306,14 @@ export const codexProvider: ContainerAgentProvider = {
           type: 'error',
           message:
             stderr.trim() || `Codex exited with status ${exitCode}.`,
+        };
+        return;
+      }
+
+      if (!sawResult && fallbackResultText !== null) {
+        yield {
+          type: 'result',
+          text: fallbackResultText,
         };
         return;
       }
