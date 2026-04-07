@@ -717,6 +717,34 @@ describe('thread reply context', () => {
       ]),
     ).toBe('777');
   });
+
+  it('ignores delayed attachment follow-ups when newer real messages exist', async () => {
+    const repoDir = createTempRepo();
+    const { _getLatestThreadIdForTest } = await loadIndexModule(repoDir);
+
+    expect(
+      _getLatestThreadIdForTest([
+        {
+          id: 'm2',
+          chat_jid: 'tg:123',
+          sender: 'alice',
+          sender_name: 'Alice',
+          content: 'newer main chat message',
+          timestamp: '2026-04-07T00:00:11.000Z',
+        },
+        {
+          id: '88:attachment',
+          chat_jid: 'tg:123',
+          sender: 'alice',
+          sender_name: 'Alice',
+          content:
+            '[Document: report.pdf] (/workspace/group/attachments/report_88.pdf)',
+          timestamp: '2026-04-07T00:01:00.000Z',
+          thread_id: '777',
+        },
+      ]),
+    ).toBeUndefined();
+  });
 });
 
 describe('provider-scoped remote control commands', () => {

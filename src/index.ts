@@ -198,7 +198,12 @@ function saveState(): void {
 }
 
 function getLatestThreadId(messages: NewMessage[]): string | undefined {
-  return messages[messages.length - 1]?.thread_id;
+  const latestMessageForThread =
+    [...messages]
+      .reverse()
+      .find((message) => !message.id.endsWith(':attachment')) ||
+    messages[messages.length - 1];
+  return latestMessageForThread?.thread_id;
 }
 
 function updateReplyThreadContext(
