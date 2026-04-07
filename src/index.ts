@@ -875,8 +875,6 @@ async function main(): Promise<void> {
         updateReplyThreadContext(chatJid, [msg]);
         const formatted = formatMessages([msg], TIMEZONE);
         if (queue.sendMessage(chatJid, formatted)) {
-          lastAgentTimestamp[chatJid] = msg.timestamp;
-          saveState();
           return;
         }
 

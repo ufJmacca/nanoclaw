@@ -276,7 +276,7 @@ export class TelegramChannel implements Channel {
         'Unknown';
       const chatName =
         ctx.chat.type === 'private' ? senderName : ctx.chat.title || chatJid;
-      const caption = ctx.message.caption ? ` ${ctx.message.caption}` : '';
+      const caption = ctx.message.caption?.trim();
       const messageId = ctx.message.message_id.toString();
       const threadId = ctx.message.message_thread_id?.toString();
       const replyTo = ctx.message.reply_to_message;
@@ -302,6 +302,14 @@ export class TelegramChannel implements Channel {
       const group = this.opts.registeredGroups()[chatJid];
       if (!group) return;
 
+      const triggerPattern = getTriggerPattern(group.trigger);
+      const formatMediaContent = (base: string): string => {
+        if (!caption) return base;
+        return triggerPattern.test(caption)
+          ? `${caption} ${base}`
+          : `${base} ${caption}`;
+      };
+
       const deliver = (
         content: string,
         deliveryOpts?: { id?: string; timestamp?: string },
@@ -321,7 +329,7 @@ export class TelegramChannel implements Channel {
         });
       };
 
-      deliver(`${placeholder}${caption}`);
+      deliver(formatMediaContent(placeholder));
 
       if (opts?.fileId) {
         const filename =
@@ -334,7 +342,7 @@ export class TelegramChannel implements Channel {
         void this.downloadFile(opts.fileId, group.folder, filename).then(
           (filePath) => {
             if (filePath) {
-              deliver(`${placeholder} (${filePath})${caption}`, {
+              deliver(formatMediaContent(`${placeholder} (${filePath})`), {
                 id: `${messageId}:attachment`,
                 timestamp: new Date().toISOString(),
               });

@@ -404,6 +404,54 @@ describe('telegram channel', () => {
     ).toBe(true);
   });
 
+  it('keeps trigger-prefixed captions at the start of media content', async () => {
+    process.env.TELEGRAM_BOT_TOKEN = 'test-token';
+
+    const onMessage = vi.fn();
+
+    const { getChannelFactory } = await loadTelegramRegistry();
+    const channel = getChannelFactory('telegram')!({
+      onMessage,
+      onChatMetadata: vi.fn(),
+      registeredGroups: () => ({
+        'tg:123456789': {
+          ...baseGroup(),
+          isMain: false,
+          requiresTrigger: true,
+        },
+      }),
+    });
+
+    await channel!.connect();
+
+    const handler = eventHandlers.get('message:document');
+    expect(handler).toBeTypeOf('function');
+
+    vi.spyOn(channel as any, 'downloadFile').mockResolvedValue(null);
+
+    handler!({
+      chat: { id: 123456789, type: 'private' },
+      from: { id: 55, first_name: 'Jon' },
+      message: {
+        date: 1712419200,
+        message_id: 89,
+        caption: '@Andy summarize this',
+        document: {
+          file_id: 'doc-file-trigger',
+          file_name: 'report.pdf',
+        },
+      },
+    });
+
+    expect(onMessage).toHaveBeenCalledWith(
+      'tg:123456789',
+      expect.objectContaining({
+        id: '89',
+        content: '@Andy summarize this [Document: report.pdf]',
+      }),
+    );
+  });
+
   it('uses a message-specific filename when downloading documents', async () => {
     process.env.TELEGRAM_BOT_TOKEN = 'test-token';
 
