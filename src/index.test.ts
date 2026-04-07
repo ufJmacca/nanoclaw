@@ -15,10 +15,12 @@ const {
   findChannel,
   getAllRegisteredGroups,
   getChannelFactory,
+  getMessagesSince,
   getRegisteredChannelNames,
   getSession,
   groupQueueEnqueueMessageCheck,
   groupQueueSendMessage,
+  groupQueueSetProcessMessagesFn,
   providerHookStartRemoteControl,
   providerRegistryGetProvider,
   restoreRemoteControl,
@@ -43,10 +45,12 @@ const {
   findChannel: vi.fn(),
   getAllRegisteredGroups: vi.fn(() => ({})),
   getChannelFactory: vi.fn(),
+  getMessagesSince: vi.fn(() => [] as NewMessage[]),
   providerHookStartRemoteControl: vi.fn(),
   providerRegistryGetProvider: vi.fn(),
   groupQueueEnqueueMessageCheck: vi.fn(),
   groupQueueSendMessage: vi.fn(() => false),
+  groupQueueSetProcessMessagesFn: vi.fn(),
   restoreRemoteControl: vi.fn(),
   getRegisteredChannelNames: vi.fn((): string[] => []),
   getSession: vi.fn(
@@ -130,7 +134,7 @@ vi.mock('./db.js', () => ({
   getAllSessions: vi.fn(() => ({})),
   getAllTasks: vi.fn(() => []),
   getLastBotMessageTimestamp: vi.fn(() => ''),
-  getMessagesSince: vi.fn(() => []),
+  getMessagesSince,
   getNewMessages: vi.fn(() => ({ messages: [], newTimestamp: '' })),
   getSession,
   getRouterState: vi.fn(() => ''),
@@ -149,7 +153,7 @@ vi.mock('./group-queue.js', () => ({
     notifyIdle = vi.fn();
     registerProcess = vi.fn();
     sendMessage = groupQueueSendMessage;
-    setProcessMessagesFn = vi.fn();
+    setProcessMessagesFn = groupQueueSetProcessMessagesFn;
     shutdown = vi.fn(async () => {});
   },
 }));
@@ -252,11 +256,14 @@ function resetIndexRuntimeMocks(): void {
   customProviderRegistryState.provider = undefined;
   findChannel.mockReset();
   getChannelFactory.mockReset();
+  getMessagesSince.mockReset();
+  getMessagesSince.mockReturnValue([]);
   getRegisteredChannelNames.mockReset();
   getRegisteredChannelNames.mockReturnValue([]);
   groupQueueEnqueueMessageCheck.mockReset();
   groupQueueSendMessage.mockReset();
   groupQueueSendMessage.mockReturnValue(false);
+  groupQueueSetProcessMessagesFn.mockReset();
   providerHookStartRemoteControl.mockReset();
   providerRegistryGetProvider.mockReset();
   startClaudeProviderRemoteControl.mockReset();
@@ -992,5 +999,171 @@ describe('attachment follow-up routing', () => {
     expect(storeMessage).toHaveBeenCalledOnce();
     expect(groupQueueSendMessage).toHaveBeenCalledOnce();
     expect(setRouterState).not.toHaveBeenCalled();
+  });
+
+  it('enqueues attachment follow-ups for trigger-gated groups when no container is active', async () => {
+    const repoDir = createTempRepo();
+    const workerGroup: RegisteredGroup = {
+      name: 'Workers',
+      folder: 'workers',
+      trigger: '@Andy',
+      added_at: '2026-04-03T00:00:00.000Z',
+      isMain: false,
+      requiresTrigger: true,
+      providerId: 'codex',
+    };
+    const channel = {
+      name: 'test',
+      connect: vi.fn(async () => {}),
+      sendMessage: vi.fn(async () => {}),
+      isConnected: vi.fn(() => true),
+      ownsJid: vi.fn((jid: string) => jid === 'workers@g.us'),
+      disconnect: vi.fn(async () => {}),
+    };
+    let channelOpts:
+      | {
+          onMessage: (chatJid: string, msg: NewMessage) => void;
+        }
+      | undefined;
+
+    getAllRegisteredGroups.mockReturnValue({ 'workers@g.us': workerGroup });
+    getRegisteredChannelNames.mockReturnValue(['test']);
+    getChannelFactory.mockImplementation(
+      () =>
+        (opts: { onMessage: (chatJid: string, msg: NewMessage) => void }) => {
+          channelOpts = opts;
+          return channel;
+        },
+    );
+    findChannel.mockImplementation((_channels: unknown[], jid: string) =>
+      jid === 'workers@g.us' ? channel : undefined,
+    );
+    vi.spyOn(globalThis, 'setTimeout').mockImplementation(() => 0 as any);
+    vi.spyOn(globalThis, 'clearTimeout').mockImplementation(() => undefined);
+    process.argv[1] = INDEX_MODULE_PATH;
+
+    await loadIndexModule(repoDir);
+    expect(channelOpts).toBeDefined();
+
+    channelOpts?.onMessage('workers@g.us', {
+      id: '99:attachment',
+      chat_jid: 'workers@g.us',
+      sender: 'alice',
+      sender_name: 'Alice',
+      content: '@Andy [Document: report.pdf] (/workspace/group/attachments/report_99.pdf)',
+      timestamp: '2026-04-07T00:00:20.000Z',
+      thread_id: '888',
+    });
+
+    expect(storeMessage).toHaveBeenCalledOnce();
+    expect(groupQueueSendMessage).toHaveBeenCalledOnce();
+    expect(groupQueueEnqueueMessageCheck).toHaveBeenCalledWith(
+      'workers@g.us',
+    );
+  });
+});
+
+describe('threaded streaming replies', () => {
+  afterEach(() => {
+    process.chdir(ORIGINAL_CWD);
+    process.argv[1] = ORIGINAL_ARGV_1;
+    vi.resetModules();
+    getAllRegisteredGroups.mockReset();
+    getAllRegisteredGroups.mockReturnValue({});
+    resetIndexRuntimeMocks();
+    vi.restoreAllMocks();
+  });
+
+  it('keeps all streamed chunks in the original thread even if later messages update chat state', async () => {
+    const repoDir = createTempRepo();
+    const mainGroup: RegisteredGroup = {
+      name: 'Main',
+      folder: 'main',
+      trigger: '@Andy',
+      added_at: '2026-04-03T00:00:00.000Z',
+      isMain: true,
+      requiresTrigger: false,
+      providerId: 'codex',
+    };
+    const sendMessage = vi.fn(async () => {});
+    const channel = {
+      name: 'test',
+      connect: vi.fn(async () => {}),
+      sendMessage,
+      isConnected: vi.fn(() => true),
+      ownsJid: vi.fn((jid: string) => jid === 'main@g.us'),
+      disconnect: vi.fn(async () => {}),
+      setTyping: vi.fn(async () => {}),
+    };
+    let channelOpts:
+      | {
+          onMessage: (chatJid: string, msg: NewMessage) => void;
+        }
+      | undefined;
+
+    getAllRegisteredGroups.mockReturnValue({ 'main@g.us': mainGroup });
+    getRegisteredChannelNames.mockReturnValue(['test']);
+    getChannelFactory.mockImplementation(
+      () =>
+        (opts: { onMessage: (chatJid: string, msg: NewMessage) => void }) => {
+          channelOpts = opts;
+          return channel;
+        },
+    );
+    findChannel.mockImplementation((_channels: unknown[], jid: string) =>
+      jid === 'main@g.us' ? channel : undefined,
+    );
+    getMessagesSince.mockReturnValue([
+      {
+        id: 'm1',
+        chat_jid: 'main@g.us',
+        sender: 'alice',
+        sender_name: 'Alice',
+        content: 'topic request',
+        timestamp: '2026-04-07T00:00:00.000Z',
+        thread_id: '777',
+      },
+    ] as NewMessage[]);
+    runContainerAgent.mockImplementation(
+      async (_group, _invocation, _onProcess, onResult) => {
+        await onResult({ result: 'first chunk' });
+        channelOpts?.onMessage('main@g.us', {
+          id: 'm2',
+          chat_jid: 'main@g.us',
+          sender: 'bob',
+          sender_name: 'Bob',
+          content: 'main chat follow-up',
+          timestamp: '2026-04-07T00:00:01.000Z',
+        });
+        await onResult({ result: 'second chunk' });
+        return { status: 'success', result: null };
+      },
+    );
+    vi.spyOn(globalThis, 'setTimeout').mockImplementation(() => 0 as any);
+    vi.spyOn(globalThis, 'clearTimeout').mockImplementation(() => undefined);
+    process.argv[1] = INDEX_MODULE_PATH;
+
+    await loadIndexModule(repoDir);
+    expect(groupQueueSetProcessMessagesFn).toHaveBeenCalled();
+    expect(channelOpts).toBeDefined();
+
+    const processMessages = groupQueueSetProcessMessagesFn.mock.calls[0][0] as (
+      chatJid: string,
+    ) => Promise<boolean>;
+    const result = await processMessages('main@g.us');
+
+    expect(result).toBe(true);
+    expect(sendMessage).toHaveBeenNthCalledWith(
+      1,
+      'main@g.us',
+      'first chunk',
+      '777',
+    );
+    expect(sendMessage).toHaveBeenNthCalledWith(
+      2,
+      'main@g.us',
+      'second chunk',
+      '777',
+    );
   });
 });
