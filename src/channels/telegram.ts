@@ -47,6 +47,16 @@ function normalizeTelegramCommand(text: string, botUsername: string): string {
   );
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function hasTelegramBotMention(text: string, botUsername: string): boolean {
+  return new RegExp(`(^|[^\\w])@${escapeRegExp(botUsername)}\\b`, 'i').test(
+    text,
+  );
+}
+
 async function sendTelegramMessage(
   api: { sendMessage: Api['sendMessage'] },
   chatId: string | number,
@@ -68,6 +78,7 @@ export class TelegramChannel implements Channel {
   name = 'telegram';
 
   private bot: Bot | null = null;
+  private botUsername = '';
   private readonly opts: TelegramChannelOpts;
   private readonly botToken: string;
 
@@ -241,6 +252,7 @@ export class TelegramChannel implements Channel {
       ctx: {
         chat: { id: number | string; type: string; title?: string };
         from?: { id?: number | string; first_name?: string; username?: string };
+        me?: { username?: string };
         message: {
           date: number;
           message_id: number;
@@ -302,12 +314,21 @@ export class TelegramChannel implements Channel {
       const group = this.opts.registeredGroups()[chatJid];
       if (!group) return;
 
+      const botUsername = ctx.me?.username?.toLowerCase() || this.botUsername;
       const triggerPattern = getTriggerPattern(group.trigger);
+      const mentionPrefix = group.trigger || `@${ASSISTANT_NAME}`;
+      const normalizedCaption =
+        caption &&
+        botUsername &&
+        hasTelegramBotMention(caption, botUsername) &&
+        !triggerPattern.test(caption)
+          ? `${mentionPrefix} ${caption}`
+          : caption;
       const formatMediaContent = (base: string): string => {
-        if (!caption) return base;
-        return triggerPattern.test(caption)
-          ? `${caption} ${base}`
-          : `${base} ${caption}`;
+        if (!normalizedCaption) return base;
+        return triggerPattern.test(normalizedCaption)
+          ? `${normalizedCaption} ${base}`
+          : `${base} ${normalizedCaption}`;
       };
 
       const deliver = (
@@ -410,6 +431,7 @@ export class TelegramChannel implements Channel {
     return new Promise<void>((resolve) => {
       this.bot!.start({
         onStart: (botInfo) => {
+          this.botUsername = botInfo.username.toLowerCase();
           logger.info(
             { username: botInfo.username, id: botInfo.id },
             'Telegram bot connected',
