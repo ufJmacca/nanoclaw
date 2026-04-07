@@ -83,8 +83,7 @@ let messageLoopRunning = false;
 
 const ROUTER_STATE_LAST_TIMESTAMP = 'last_timestamp';
 const ROUTER_STATE_LAST_AGENT_TIMESTAMP = 'last_agent_timestamp';
-const ROUTER_STATE_DELIVERED_ATTACHMENTS =
-  'delivered_attachment_ids_by_chat';
+const ROUTER_STATE_DELIVERED_ATTACHMENTS = 'delivered_attachment_ids_by_chat';
 
 const channels: Channel[] = [];
 const queue = new GroupQueue();
@@ -134,7 +133,9 @@ function loadState(): void {
     logger.warn('Corrupted last_agent_timestamp in DB, resetting');
     lastAgentTimestamp = {};
   }
-  const deliveredAttachments = getRouterState(ROUTER_STATE_DELIVERED_ATTACHMENTS);
+  const deliveredAttachments = getRouterState(
+    ROUTER_STATE_DELIVERED_ATTACHMENTS,
+  );
   try {
     deliveredAttachmentIdsByChat = deliveredAttachments
       ? JSON.parse(deliveredAttachments)
@@ -331,6 +332,7 @@ function promotePendingAttachments(chatJid: string): void {
     ...pending,
   };
   delete pendingAttachmentIdsByChat[chatJid];
+  saveState();
 }
 
 function filterDeliveredAttachments(
@@ -647,7 +649,6 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       activeReplyThreadId = undefined;
       awaitingNextTurnThreadId = true;
       promotePendingAttachments(chatJid);
-      saveState();
       queue.notifyIdle(chatJid);
     }
 
