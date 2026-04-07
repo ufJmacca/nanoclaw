@@ -75,7 +75,15 @@ export { escapeXml, formatMessages } from './router.js';
 let lastTimestamp = '';
 let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
+let replyThreadIdByChat: Record<string, string | undefined> = {};
+let queuedReplyThreadIdByChat: Record<string, string | null> = {};
+let pendingAttachmentIdsByChat: Record<string, Record<string, string>> = {};
+let deliveredAttachmentIdsByChat: Record<string, Record<string, string>> = {};
 let messageLoopRunning = false;
+
+const ROUTER_STATE_LAST_TIMESTAMP = 'last_timestamp';
+const ROUTER_STATE_LAST_AGENT_TIMESTAMP = 'last_agent_timestamp';
+const ROUTER_STATE_DELIVERED_ATTACHMENTS = 'delivered_attachment_ids_by_chat';
 
 const channels: Channel[] = [];
 const queue = new GroupQueue();
@@ -117,14 +125,26 @@ function ensureOneCLIAgent(jid: string, group: RegisteredGroup): void {
 }
 
 function loadState(): void {
-  lastTimestamp = getRouterState('last_timestamp') || '';
-  const agentTs = getRouterState('last_agent_timestamp');
+  lastTimestamp = getRouterState(ROUTER_STATE_LAST_TIMESTAMP) || '';
+  const agentTs = getRouterState(ROUTER_STATE_LAST_AGENT_TIMESTAMP);
   try {
     lastAgentTimestamp = agentTs ? JSON.parse(agentTs) : {};
   } catch {
     logger.warn('Corrupted last_agent_timestamp in DB, resetting');
     lastAgentTimestamp = {};
   }
+  const deliveredAttachments = getRouterState(
+    ROUTER_STATE_DELIVERED_ATTACHMENTS,
+  );
+  try {
+    deliveredAttachmentIdsByChat = deliveredAttachments
+      ? JSON.parse(deliveredAttachments)
+      : {};
+  } catch {
+    logger.warn('Corrupted delivered attachment state in DB, resetting');
+    deliveredAttachmentIdsByChat = {};
+  }
+  pendingAttachmentIdsByChat = {};
   registeredGroups = getAllRegisteredGroups();
   sessionStore = createRuntimeSessionStore();
   for (const group of Object.values(registeredGroups)) {
@@ -163,8 +183,194 @@ function getOrRecoverCursor(chatJid: string): string {
 }
 
 function saveState(): void {
-  setRouterState('last_timestamp', lastTimestamp);
-  setRouterState('last_agent_timestamp', JSON.stringify(lastAgentTimestamp));
+  for (const chatJid of Object.keys(deliveredAttachmentIdsByChat)) {
+    pruneDeliveredAttachments(chatJid);
+  }
+  setRouterState(ROUTER_STATE_LAST_TIMESTAMP, lastTimestamp);
+  setRouterState(
+    ROUTER_STATE_LAST_AGENT_TIMESTAMP,
+    JSON.stringify(lastAgentTimestamp),
+  );
+  setRouterState(
+    ROUTER_STATE_DELIVERED_ATTACHMENTS,
+    JSON.stringify(deliveredAttachmentIdsByChat),
+  );
+}
+
+function getLatestThreadId(messages: NewMessage[]): string | undefined {
+  const latestMessageForThread =
+    [...messages]
+      .reverse()
+      .find((message) => !message.id.endsWith(':attachment')) ||
+    messages[messages.length - 1];
+  return latestMessageForThread?.thread_id;
+}
+
+function updateReplyThreadContext(
+  chatJid: string,
+  messages: NewMessage[],
+): string | undefined {
+  const threadId = getLatestThreadId(messages);
+  if (threadId) {
+    replyThreadIdByChat[chatJid] = threadId;
+  } else {
+    delete replyThreadIdByChat[chatJid];
+  }
+  return threadId;
+}
+
+function shouldWakeGroupForMessages(
+  chatJid: string,
+  group: RegisteredGroup,
+  messages: NewMessage[],
+): boolean {
+  if (group.isMain === true || group.requiresTrigger === false) {
+    return true;
+  }
+
+  const triggerPattern = getTriggerPattern(group.trigger);
+  const allowlistCfg = loadSenderAllowlist();
+  return messages.some(
+    (message) =>
+      triggerPattern.test(message.content.trim()) &&
+      (message.is_from_me ||
+        isTriggerAllowed(chatJid, message.sender, allowlistCfg)),
+  );
+}
+
+function queueReplyThreadContext(
+  chatJid: string,
+  threadId: string | undefined,
+): void {
+  queuedReplyThreadIdByChat[chatJid] = threadId ?? null;
+}
+
+function consumeQueuedReplyThreadContext(chatJid: string): string | undefined {
+  if (
+    Object.prototype.hasOwnProperty.call(queuedReplyThreadIdByChat, chatJid)
+  ) {
+    const threadId = queuedReplyThreadIdByChat[chatJid];
+    delete queuedReplyThreadIdByChat[chatJid];
+    return threadId ?? undefined;
+  }
+
+  return replyThreadIdByChat[chatJid];
+}
+
+function clearQueuedReplyThreadContext(chatJid: string): void {
+  delete queuedReplyThreadIdByChat[chatJid];
+}
+
+function pruneTrackedAttachments(
+  chatJid: string,
+  trackedAttachmentIdsByChat: Record<string, Record<string, string>>,
+): void {
+  const tracked = trackedAttachmentIdsByChat[chatJid];
+  if (!tracked) {
+    return;
+  }
+
+  const cursor = lastAgentTimestamp[chatJid] || '';
+  for (const [messageId, timestamp] of Object.entries(tracked)) {
+    if (timestamp <= cursor) {
+      delete tracked[messageId];
+    }
+  }
+
+  if (Object.keys(tracked).length === 0) {
+    delete trackedAttachmentIdsByChat[chatJid];
+  }
+}
+
+function pruneDeliveredAttachments(chatJid: string): void {
+  pruneTrackedAttachments(chatJid, deliveredAttachmentIdsByChat);
+}
+
+function rememberPendingAttachment(chatJid: string, msg: NewMessage): void {
+  if (!msg.id.endsWith(':attachment')) {
+    return;
+  }
+
+  pendingAttachmentIdsByChat[chatJid] = {
+    ...(pendingAttachmentIdsByChat[chatJid] || {}),
+    [msg.id]: msg.timestamp,
+  };
+}
+
+function clearPendingAttachments(chatJid: string): void {
+  delete pendingAttachmentIdsByChat[chatJid];
+}
+
+function promotePendingAttachments(chatJid: string): void {
+  const pending = pendingAttachmentIdsByChat[chatJid];
+  if (!pending) {
+    return;
+  }
+
+  deliveredAttachmentIdsByChat[chatJid] = {
+    ...(deliveredAttachmentIdsByChat[chatJid] || {}),
+    ...pending,
+  };
+  delete pendingAttachmentIdsByChat[chatJid];
+  saveState();
+}
+
+function filterDeliveredAttachments(
+  chatJid: string,
+  messages: NewMessage[],
+): NewMessage[] {
+  pruneTrackedAttachments(chatJid, pendingAttachmentIdsByChat);
+  pruneDeliveredAttachments(chatJid);
+  const pending = pendingAttachmentIdsByChat[chatJid];
+  const delivered = deliveredAttachmentIdsByChat[chatJid];
+  if (!pending && !delivered) {
+    return messages;
+  }
+
+  return messages.filter(
+    (message) => !pending?.[message.id] && !delivered?.[message.id],
+  );
+}
+
+function getUndeliveredMessagesSince(
+  chatJid: string,
+  sinceTimestamp: string,
+  limit: number,
+): NewMessage[] {
+  let fetchLimit = limit;
+
+  while (true) {
+    const messages = getMessagesSince(
+      chatJid,
+      sinceTimestamp,
+      ASSISTANT_NAME,
+      fetchLimit,
+    );
+    const filtered = filterDeliveredAttachments(chatJid, messages);
+
+    if (filtered.length >= limit || messages.length < fetchLimit) {
+      return filtered.slice(-limit);
+    }
+
+    fetchLimit += limit;
+  }
+}
+
+function sendMessageToActiveContainer(
+  chatJid: string,
+  text: string,
+  threadId: string | undefined,
+): boolean {
+  const wasIdle = queue.isIdleWaiting(chatJid);
+  if (!queue.sendMessage(chatJid, text)) {
+    return false;
+  }
+
+  if (wasIdle) {
+    queueReplyThreadContext(chatJid, threadId);
+  }
+
+  return true;
 }
 
 function rewriteAssistantNameInMemoryFile(filePath: string): void {
@@ -362,28 +568,21 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   const isMainGroup = group.isMain === true;
 
-  const missedMessages = getMessagesSince(
+  const missedMessages = getUndeliveredMessagesSince(
     chatJid,
     getOrRecoverCursor(chatJid),
-    ASSISTANT_NAME,
     MAX_MESSAGES_PER_PROMPT,
   );
 
   if (missedMessages.length === 0) return true;
 
-  // For non-main groups, check if trigger is required and present
-  if (!isMainGroup && group.requiresTrigger !== false) {
-    const triggerPattern = getTriggerPattern(group.trigger);
-    const allowlistCfg = loadSenderAllowlist();
-    const hasTrigger = missedMessages.some(
-      (m) =>
-        triggerPattern.test(m.content.trim()) &&
-        (m.is_from_me || isTriggerAllowed(chatJid, m.sender, allowlistCfg)),
-    );
-    if (!hasTrigger) return true;
+  if (!shouldWakeGroupForMessages(chatJid, group, missedMessages)) {
+    return true;
   }
 
   const prompt = formatMessages(missedMessages, TIMEZONE);
+  const replyThreadId = updateReplyThreadContext(chatJid, missedMessages);
+  clearQueuedReplyThreadContext(chatJid);
 
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
@@ -414,10 +613,22 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   await channel.setTyping?.(chatJid, true);
   let hadError = false;
   let outputSentToUser = false;
+  let activeReplyThreadId = replyThreadId;
+  let awaitingNextTurnThreadId = false;
+
+  const captureReplyThreadForTurn = () => {
+    if (!awaitingNextTurnThreadId) {
+      return;
+    }
+
+    activeReplyThreadId = consumeQueuedReplyThreadContext(chatJid);
+    awaitingNextTurnThreadId = false;
+  };
 
   const output = await runAgent(group, prompt, chatJid, async (result) => {
     // Streaming output callback — called for each agent result
     if (result.result) {
+      captureReplyThreadForTurn();
       const raw =
         typeof result.result === 'string'
           ? result.result
@@ -426,19 +637,23 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
       logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
       if (text) {
-        await channel.sendMessage(chatJid, text);
+        await channel.sendMessage(chatJid, text, activeReplyThreadId);
         outputSentToUser = true;
       }
       // Only reset idle timer on actual results, not session-update markers (result: null)
       resetIdleTimer();
     }
 
-    if (result.status === 'success') {
+    if (result.status === 'success' && result.result === null) {
+      captureReplyThreadForTurn();
+      activeReplyThreadId = undefined;
+      awaitingNextTurnThreadId = true;
       queue.notifyIdle(chatJid);
     }
 
     if (result.status === 'error') {
       hadError = true;
+      clearPendingAttachments(chatJid);
     }
   });
 
@@ -446,6 +661,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   if (idleTimer) clearTimeout(idleTimer);
 
   if (output === 'error' || hadError) {
+    clearQueuedReplyThreadContext(chatJid);
+    clearPendingAttachments(chatJid);
     // If we already sent output to the user, don't roll back the cursor —
     // the user got their response and re-processing would send duplicates.
     if (outputSentToUser) {
@@ -465,6 +682,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     return false;
   }
 
+  promotePendingAttachments(chatJid);
+  clearQueuedReplyThreadContext(chatJid);
   return true;
 }
 
@@ -582,6 +801,13 @@ export async function _runAgentForTest(
   return runAgent(group, prompt, chatJid);
 }
 
+/** @internal - exported for testing */
+export function _getLatestThreadIdForTest(
+  messages: NewMessage[],
+): string | undefined {
+  return getLatestThreadId(messages);
+}
+
 async function startMessageLoop(): Promise<void> {
   if (messageLoopRunning) {
     logger.debug('Message loop already running, skipping duplicate start');
@@ -628,37 +854,32 @@ async function startMessageLoop(): Promise<void> {
             continue;
           }
 
-          const isMainGroup = group.isMain === true;
-          const needsTrigger = !isMainGroup && group.requiresTrigger !== false;
-
           // For non-main groups, only act on trigger messages.
           // Non-trigger messages accumulate in DB and get pulled as
           // context when a trigger eventually arrives.
-          if (needsTrigger) {
-            const triggerPattern = getTriggerPattern(group.trigger);
-            const allowlistCfg = loadSenderAllowlist();
-            const hasTrigger = groupMessages.some(
-              (m) =>
-                triggerPattern.test(m.content.trim()) &&
-                (m.is_from_me ||
-                  isTriggerAllowed(chatJid, m.sender, allowlistCfg)),
-            );
-            if (!hasTrigger) continue;
+          if (!shouldWakeGroupForMessages(chatJid, group, groupMessages)) {
+            continue;
           }
 
           // Pull all messages since lastAgentTimestamp so non-trigger
           // context that accumulated between triggers is included.
-          const allPending = getMessagesSince(
+          const allPending = getUndeliveredMessagesSince(
             chatJid,
             getOrRecoverCursor(chatJid),
-            ASSISTANT_NAME,
             MAX_MESSAGES_PER_PROMPT,
           );
           const messagesToSend =
             allPending.length > 0 ? allPending : groupMessages;
+          updateReplyThreadContext(chatJid, messagesToSend);
           const formatted = formatMessages(messagesToSend, TIMEZONE);
 
-          if (queue.sendMessage(chatJid, formatted)) {
+          if (
+            sendMessageToActiveContainer(
+              chatJid,
+              formatted,
+              getLatestThreadId(messagesToSend),
+            )
+          ) {
             logger.debug(
               { chatJid, count: messagesToSend.length },
               'Piped messages to active container',
@@ -691,10 +912,9 @@ async function startMessageLoop(): Promise<void> {
  */
 function recoverPendingMessages(): void {
   for (const [chatJid, group] of Object.entries(registeredGroups)) {
-    const pending = getMessagesSince(
+    const pending = getUndeliveredMessagesSince(
       chatJid,
       getOrRecoverCursor(chatJid),
-      ASSISTANT_NAME,
       MAX_MESSAGES_PER_PROMPT,
     );
     if (pending.length > 0) {
@@ -760,6 +980,7 @@ async function main(): Promise<void> {
         await channel.sendMessage(
           chatJid,
           `${provider.displayName} does not support remote control in NanoClaw v1.`,
+          msg.thread_id,
         );
         return;
       }
@@ -772,25 +993,31 @@ async function main(): Promise<void> {
         chatJid,
       });
       if (result.status === 'started' && result.url) {
-        await channel.sendMessage(chatJid, result.url);
+        await channel.sendMessage(chatJid, result.url, msg.thread_id);
       } else if (result.status === 'unsupported') {
         await channel.sendMessage(
           chatJid,
           result.message ||
             `${provider.displayName} does not support remote control in NanoClaw v1.`,
+          msg.thread_id,
         );
       } else {
         await channel.sendMessage(
           chatJid,
           `Remote Control failed: ${result.message || 'unknown error'}`,
+          msg.thread_id,
         );
       }
     } else {
       const result = stopRemoteControl(chatJid, providerId);
       if (result.ok) {
-        await channel.sendMessage(chatJid, 'Remote Control session ended.');
+        await channel.sendMessage(
+          chatJid,
+          'Remote Control session ended.',
+          msg.thread_id,
+        );
       } else {
-        await channel.sendMessage(chatJid, result.error);
+        await channel.sendMessage(chatJid, result.error, msg.thread_id);
       }
     }
   }
@@ -823,7 +1050,32 @@ async function main(): Promise<void> {
           return;
         }
       }
+
+      if (msg.thread_id) {
+        replyThreadIdByChat[chatJid] = msg.thread_id;
+      } else {
+        delete replyThreadIdByChat[chatJid];
+      }
+
       storeMessage(msg);
+
+      if (msg.id.endsWith(':attachment')) {
+        const group = registeredGroups[chatJid];
+        if (!group) {
+          return;
+        }
+
+        if (shouldWakeGroupForMessages(chatJid, group, [msg])) {
+          updateReplyThreadContext(chatJid, [msg]);
+          const formatted = formatMessages([msg], TIMEZONE);
+          if (sendMessageToActiveContainer(chatJid, formatted, msg.thread_id)) {
+            rememberPendingAttachment(chatJid, msg);
+            return;
+          }
+        }
+
+        queue.enqueueMessageCheck(chatJid);
+      }
     },
     onChatMetadata: (
       chatJid: string,
@@ -863,21 +1115,21 @@ async function main(): Promise<void> {
     queue,
     onProcess: (groupJid, proc, containerName, groupFolder) =>
       queue.registerProcess(groupJid, proc, containerName, groupFolder),
-    sendMessage: async (jid, rawText) => {
+    sendMessage: async (jid, rawText, threadId) => {
       const channel = findChannel(channels, jid);
       if (!channel) {
         logger.warn({ jid }, 'No channel owns JID, cannot send message');
         return;
       }
       const text = formatOutbound(rawText);
-      if (text) await channel.sendMessage(jid, text);
+      if (text) await channel.sendMessage(jid, text, threadId);
     },
   });
   startIpcWatcher({
-    sendMessage: (jid, text) => {
+    sendMessage: (jid, text, threadId) => {
       const channel = findChannel(channels, jid);
       if (!channel) throw new Error(`No channel for JID: ${jid}`);
-      return channel.sendMessage(jid, text);
+      return channel.sendMessage(jid, text, threadId);
     },
     registeredGroups: () => registeredGroups,
     registerGroup,

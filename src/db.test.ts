@@ -35,6 +35,10 @@ function store(overrides: {
   content: string;
   timestamp: string;
   is_from_me?: boolean;
+  thread_id?: string;
+  reply_to_message_id?: string;
+  reply_to_message_content?: string;
+  reply_to_sender_name?: string;
 }) {
   storeMessage({
     id: overrides.id,
@@ -44,6 +48,10 @@ function store(overrides: {
     content: overrides.content,
     timestamp: overrides.timestamp,
     is_from_me: overrides.is_from_me ?? false,
+    thread_id: overrides.thread_id,
+    reply_to_message_id: overrides.reply_to_message_id,
+    reply_to_message_content: overrides.reply_to_message_content,
+    reply_to_sender_name: overrides.reply_to_sender_name,
   });
 }
 
@@ -72,6 +80,37 @@ describe('storeMessage', () => {
     expect(messages[0].sender).toBe('123@s.whatsapp.net');
     expect(messages[0].sender_name).toBe('Alice');
     expect(messages[0].content).toBe('hello world');
+  });
+
+  it('round-trips thread and reply context', () => {
+    storeChatMetadata('group@g.us', '2024-01-01T00:00:00.000Z');
+
+    store({
+      id: 'msg-threaded',
+      chat_jid: 'group@g.us',
+      sender: '123@s.whatsapp.net',
+      sender_name: 'Alice',
+      content: 'threaded hello',
+      timestamp: '2024-01-01T00:00:01.000Z',
+      thread_id: '42',
+      reply_to_message_id: '41',
+      reply_to_message_content: 'previous',
+      reply_to_sender_name: 'Bob',
+    });
+
+    const messages = getMessagesSince(
+      'group@g.us',
+      '2024-01-01T00:00:00.000Z',
+      'Andy',
+    );
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({
+      thread_id: '42',
+      reply_to_message_id: '41',
+      reply_to_message_content: 'previous',
+      reply_to_sender_name: 'Bob',
+    });
   });
 
   it('filters out empty content', () => {
@@ -384,6 +423,27 @@ describe('getNewMessages', () => {
     expect(messages[0].content).toBe('g1 msg2');
   });
 
+  it('ignores attachment follow-up rows when polling new messages', () => {
+    store({
+      id: 'a4:attachment',
+      chat_jid: 'group1@g.us',
+      sender: 'user@s.whatsapp.net',
+      sender_name: 'User',
+      content: '[Document] (/workspace/group/attachments/report.pdf)',
+      timestamp: '2024-01-01T00:00:05.000Z',
+    });
+
+    const { messages, newTimestamp } = getNewMessages(
+      ['group1@g.us', 'group2@g.us'],
+      '2024-01-01T00:00:00.000Z',
+      'Andy',
+    );
+
+    expect(messages).toHaveLength(3);
+    expect(messages.map((message) => message.id)).toEqual(['a1', 'a2', 'a4']);
+    expect(newTimestamp).toBe('2024-01-01T00:00:04.000Z');
+  });
+
   it('returns empty for no registered groups', () => {
     const { messages, newTimestamp } = getNewMessages([], '', 'Andy');
     expect(messages).toHaveLength(0);
@@ -529,6 +589,47 @@ describe('message query LIMIT', () => {
     expect(messages[0].content).toBe('message 8');
     expect(messages[2].content).toBe('message 10');
     expect(messages[1].timestamp > messages[0].timestamp).toBe(true);
+  });
+
+  it('keeps same-timestamp messages in insertion order', () => {
+    store({
+      id: '11',
+      chat_jid: 'group@g.us',
+      sender: '123@s.whatsapp.net',
+      sender_name: 'Alice',
+      content: 'same-time first insert',
+      timestamp: '2024-01-01T00:01:00.000Z',
+    });
+    store({
+      id: '10',
+      chat_jid: 'group@g.us',
+      sender: '123@s.whatsapp.net',
+      sender_name: 'Alice',
+      content: 'same-time second insert',
+      timestamp: '2024-01-01T00:01:00.000Z',
+    });
+
+    const messages = getMessagesSince(
+      'group@g.us',
+      '2024-01-01T00:00:59.000Z',
+      'Andy',
+      10,
+    );
+    const { messages: newMessages } = getNewMessages(
+      ['group@g.us'],
+      '2024-01-01T00:00:59.000Z',
+      'Andy',
+      10,
+    );
+
+    expect(messages.slice(-2).map((message) => message.id)).toEqual([
+      '11',
+      '10',
+    ]);
+    expect(newMessages.slice(-2).map((message) => message.id)).toEqual([
+      '11',
+      '10',
+    ]);
   });
 
   it('returns all messages when count is under the limit', () => {
