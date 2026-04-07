@@ -1492,6 +1492,130 @@ describe('attachment follow-up routing', () => {
     expect(secondResult).toBe(true);
     expect(runContainerAgent).not.toHaveBeenCalled();
   });
+
+  it('promotes piped attachments on successful streamed results without a null turn marker', async () => {
+    const repoDir = createTempRepo();
+    const mainGroup: RegisteredGroup = {
+      name: 'Main',
+      folder: 'main',
+      trigger: '@Andy',
+      added_at: '2026-04-03T00:00:00.000Z',
+      isMain: true,
+      requiresTrigger: false,
+      providerId: 'codex',
+    };
+    const channel = {
+      name: 'test',
+      connect: vi.fn(async () => {}),
+      sendMessage: vi.fn(async () => {}),
+      isConnected: vi.fn(() => true),
+      ownsJid: vi.fn((jid: string) => jid === 'main@g.us'),
+      disconnect: vi.fn(async () => {}),
+      setTyping: vi.fn(async () => {}),
+    };
+    let channelOpts:
+      | {
+          onMessage: (chatJid: string, msg: NewMessage) => void;
+        }
+      | undefined;
+    let phase: 'initial' | 'next' = 'initial';
+
+    const attachmentMessage: NewMessage = {
+      id: '88:attachment',
+      chat_jid: 'main@g.us',
+      sender: 'alice',
+      sender_name: 'Alice',
+      content:
+        '[Document: report.pdf] (/workspace/group/attachments/report_88.pdf)',
+      timestamp: '2026-04-07T00:00:10.000Z',
+      thread_id: '777',
+    };
+
+    getAllRegisteredGroups.mockReturnValue({ 'main@g.us': mainGroup });
+    getRegisteredChannelNames.mockReturnValue(['test']);
+    getChannelFactory.mockImplementation(
+      () =>
+        (opts: { onMessage: (chatJid: string, msg: NewMessage) => void }) => {
+          channelOpts = opts;
+          return channel;
+        },
+    );
+    findChannel.mockImplementation((_channels: unknown[], jid: string) =>
+      jid === 'main@g.us' ? channel : undefined,
+    );
+    groupQueueSendMessage.mockReturnValue(true);
+    formatMessagesMock.mockImplementation((messages: unknown) =>
+      (messages as NewMessage[]).map((message) => message.id).join(','),
+    );
+    getMessagesSince.mockImplementation(() =>
+      phase === 'initial'
+        ? ([
+            {
+              id: 'm1',
+              chat_jid: 'main@g.us',
+              sender: 'bob',
+              sender_name: 'Bob',
+              content: 'start run',
+              timestamp: '2026-04-07T00:00:00.000Z',
+            },
+          ] as NewMessage[])
+        : ([
+            attachmentMessage,
+            {
+              id: 'm2',
+              chat_jid: 'main@g.us',
+              sender: 'bob',
+              sender_name: 'Bob',
+              content: 'follow-up message',
+              timestamp: '2026-04-07T00:00:11.000Z',
+            },
+          ] as NewMessage[]),
+    );
+    runContainerAgent.mockImplementationOnce(
+      async (_group, _request, _proc, onOutput) => {
+        channelOpts?.onMessage('main@g.us', attachmentMessage);
+        await onOutput?.({ status: 'success', result: 'codex reply' });
+        return { status: 'success', result: 'codex reply' };
+      },
+    );
+    runContainerAgent.mockResolvedValueOnce({ status: 'success', result: null });
+    vi.spyOn(globalThis, 'setTimeout').mockImplementation(() => 0 as any);
+    vi.spyOn(globalThis, 'clearTimeout').mockImplementation(() => undefined);
+    process.argv[1] = INDEX_MODULE_PATH;
+
+    await loadIndexModule(repoDir);
+    expect(channelOpts).toBeDefined();
+
+    const processMessages = groupQueueSetProcessMessagesFn.mock.calls[0][0] as (
+      chatJid: string,
+    ) => Promise<boolean>;
+
+    const firstResult = await processMessages('main@g.us');
+    expect(firstResult).toBe(true);
+    expect(groupQueueSendMessage).toHaveBeenCalledOnce();
+
+    phase = 'next';
+    groupQueueSendMessage.mockReturnValue(false);
+
+    const secondResult = await processMessages('main@g.us');
+    expect(secondResult).toBe(true);
+    expect(formatMessagesMock).toHaveBeenLastCalledWith(
+      [
+        expect.objectContaining({
+          id: 'm2',
+        }),
+      ],
+      expect.any(String),
+    );
+    expect(runContainerAgent).toHaveBeenLastCalledWith(
+      expect.any(Object),
+      expect.objectContaining({
+        prompt: 'm2',
+      }),
+      expect.any(Function),
+      expect.any(Function),
+    );
+  });
 });
 
 describe('threaded streaming replies', () => {

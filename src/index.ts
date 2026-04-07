@@ -627,6 +627,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   const output = await runAgent(group, prompt, chatJid, async (result) => {
     // Streaming output callback — called for each agent result
+    if (result.status === 'success') {
+      promotePendingAttachments(chatJid);
+    }
+
     if (result.result) {
       captureReplyThreadForTurn();
       const raw =
@@ -648,7 +652,6 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       captureReplyThreadForTurn();
       activeReplyThreadId = undefined;
       awaitingNextTurnThreadId = true;
-      promotePendingAttachments(chatJid);
       queue.notifyIdle(chatJid);
     }
 
