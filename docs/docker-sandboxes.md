@@ -203,6 +203,8 @@ npm run build
 # Configure .env
 cat > .env << EOF
 TELEGRAM_BOT_TOKEN=<your-token-from-botfather>
+# Optional: increase this if Telegram startup is slow on your host
+TELEGRAM_CONNECT_TIMEOUT_MS=30000
 ASSISTANT_NAME=nanoclaw
 ANTHROPIC_API_KEY=proxy-managed
 EOF

@@ -1,10 +1,12 @@
 import fs from 'fs';
 import https from 'https';
+import { EventEmitter } from 'events';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const commandHandlers = new Map<string, (ctx: any) => unknown>();
 const eventHandlers = new Map<string, (ctx: any) => unknown>();
+const botInstances: FakeBot[] = [];
 const sendMessageMock = vi.fn();
 const sendChatActionMock = vi.fn();
 const getFileMock = vi.fn();
@@ -25,7 +27,9 @@ class FakeBot {
   constructor(
     public readonly token: string,
     public readonly options: Record<string, unknown>,
-  ) {}
+  ) {
+    botInstances.push(this);
+  }
 
   command(name: string, handler: (ctx: any) => unknown) {
     commandHandlers.set(name, handler);
@@ -98,6 +102,7 @@ describe('telegram channel', () => {
   beforeEach(() => {
     commandHandlers.clear();
     eventHandlers.clear();
+    botInstances.length = 0;
     sendMessageMock.mockReset();
     sendChatActionMock.mockReset();
     getFileMock.mockReset();
@@ -106,6 +111,7 @@ describe('telegram channel', () => {
     autoStartBot = true;
     startResult = undefined;
     delete process.env.TELEGRAM_BOT_TOKEN;
+    delete process.env.TELEGRAM_CONNECT_TIMEOUT_MS;
   });
 
   it('registers a factory that returns null when TELEGRAM_BOT_TOKEN is missing', async () => {
@@ -152,6 +158,19 @@ describe('telegram channel', () => {
     await channel!.connect();
 
     expect(startMock).toHaveBeenCalledOnce();
+    expect(botInstances[0]?.options).toEqual(
+      expect.objectContaining({
+        client: expect.objectContaining({
+          baseFetchConfig: expect.objectContaining({
+            agent: expect.objectContaining({
+              options: expect.objectContaining({
+                family: 4,
+              }),
+            }),
+          }),
+        }),
+      }),
+    );
     expect(commandHandlers.has('chatid')).toBe(true);
 
     const reply = vi.fn();
@@ -184,6 +203,30 @@ describe('telegram channel', () => {
       'Telegram bot start timed out after 10000ms',
     );
     await vi.advanceTimersByTimeAsync(10_000);
+
+    await rejection;
+    expect(stopMock).toHaveBeenCalledOnce();
+  });
+
+  it('uses TELEGRAM_CONNECT_TIMEOUT_MS when set', async () => {
+    process.env.TELEGRAM_BOT_TOKEN = 'test-token';
+    process.env.TELEGRAM_CONNECT_TIMEOUT_MS = '250';
+    autoStartBot = false;
+    startResult = new Promise<void>(() => {});
+    vi.useFakeTimers();
+
+    const { getChannelFactory } = await loadTelegramRegistry();
+    const channel = getChannelFactory('telegram')!({
+      onMessage: vi.fn(),
+      onChatMetadata: vi.fn(),
+      registeredGroups: () => ({}),
+    });
+
+    const connectPromise = channel!.connect();
+    const rejection = expect(connectPromise).rejects.toThrow(
+      'Telegram bot start timed out after 250ms',
+    );
+    await vi.advanceTimersByTimeAsync(250);
 
     await rejection;
     expect(stopMock).toHaveBeenCalledOnce();
@@ -639,7 +682,7 @@ describe('telegram channel', () => {
     expect(onMessage).not.toHaveBeenCalled();
   });
 
-  it('downloads files with the configured Telegram fetch settings', async () => {
+  it('downloads files with the configured Telegram IPv4 transport', async () => {
     process.env.TELEGRAM_BOT_TOKEN = 'test-token';
 
     const { getChannelFactory } = await loadTelegramRegistry();
@@ -654,11 +697,29 @@ describe('telegram channel', () => {
     await channel!.connect();
 
     getFileMock.mockResolvedValue({ file_path: 'documents/report.pdf' });
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer,
-    });
-    vi.stubGlobal('fetch', fetchMock);
+    const getMock = vi.spyOn(https, 'get').mockImplementation(((
+      _url,
+      options,
+      callback,
+    ) => {
+      const response = new EventEmitter() as EventEmitter & {
+        statusCode?: number;
+        resume?: () => void;
+      };
+      response.statusCode = 200;
+      response.resume = vi.fn();
+      queueMicrotask(() => {
+        callback?.(response as any);
+        response.emit('data', Buffer.from([1, 2, 3]));
+        response.emit('end');
+      });
+
+      return {
+        on: vi.fn().mockReturnThis(),
+        setTimeout: vi.fn().mockReturnThis(),
+        destroy: vi.fn(),
+      } as any;
+    }) as typeof https.get);
     vi.spyOn(fs, 'mkdirSync').mockImplementation(() => undefined as any);
     vi.spyOn(fs, 'writeFileSync').mockImplementation(() => undefined);
 
@@ -668,13 +729,102 @@ describe('telegram channel', () => {
       'report_102.pdf',
     );
 
-    expect(fetchMock).toHaveBeenCalledWith(
+    expect(getMock).toHaveBeenCalledWith(
       'https://api.telegram.org/file/bottest-token/documents/report.pdf',
       expect.objectContaining({
-        agent: https.globalAgent,
-        compress: true,
+        agent: expect.objectContaining({
+          options: expect.objectContaining({
+            family: 4,
+          }),
+        }),
+        family: 4,
       }),
+      expect.any(Function),
     );
     expect(filePath).toBe('/workspace/group/attachments/report_102.pdf');
+  });
+
+  it('returns null when the IPv4 Telegram download transport gets an HTTP error', async () => {
+    process.env.TELEGRAM_BOT_TOKEN = 'test-token';
+
+    const { getChannelFactory } = await loadTelegramRegistry();
+    const channel = getChannelFactory('telegram')!({
+      onMessage: vi.fn(),
+      onChatMetadata: vi.fn(),
+      registeredGroups: () => ({
+        'tg:123456789': baseGroup(),
+      }),
+    });
+
+    await channel!.connect();
+
+    getFileMock.mockResolvedValue({ file_path: 'documents/report.pdf' });
+    vi.spyOn(https, 'get').mockImplementation(((_url, _options, callback) => {
+      const response = new EventEmitter() as EventEmitter & {
+        statusCode?: number;
+        resume?: () => void;
+      };
+      response.statusCode = 502;
+      response.resume = vi.fn();
+      queueMicrotask(() => {
+        callback?.(response as any);
+      });
+
+      return {
+        on: vi.fn().mockReturnThis(),
+        setTimeout: vi.fn().mockReturnThis(),
+        destroy: vi.fn(),
+      } as any;
+    }) as typeof https.get);
+
+    const filePath = await (channel as any).downloadFile(
+      'doc-file-4',
+      'telegram_main',
+      'report_102.pdf',
+    );
+
+    expect(filePath).toBeNull();
+  });
+
+  it('returns null when the IPv4 Telegram download transport gets redirected', async () => {
+    process.env.TELEGRAM_BOT_TOKEN = 'test-token';
+
+    const { getChannelFactory } = await loadTelegramRegistry();
+    const channel = getChannelFactory('telegram')!({
+      onMessage: vi.fn(),
+      onChatMetadata: vi.fn(),
+      registeredGroups: () => ({
+        'tg:123456789': baseGroup(),
+      }),
+    });
+
+    await channel!.connect();
+
+    getFileMock.mockResolvedValue({ file_path: 'documents/report.pdf' });
+    vi.spyOn(https, 'get').mockImplementation(((_url, _options, callback) => {
+      const response = new EventEmitter() as EventEmitter & {
+        statusCode?: number;
+        resume?: () => void;
+      };
+      response.statusCode = 302;
+      response.resume = vi.fn();
+      queueMicrotask(() => {
+        callback?.(response as any);
+      });
+
+      return {
+        on: vi.fn().mockReturnThis(),
+        setTimeout: vi.fn().mockReturnThis(),
+        destroy: vi.fn(),
+      } as any;
+    }) as typeof https.get);
+
+    const filePath = await (channel as any).downloadFile(
+      'doc-file-4',
+      'telegram_main',
+      'report_102.pdf',
+    );
+
+    expect(filePath).toBeNull();
   });
 });
