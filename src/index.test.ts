@@ -1578,7 +1578,10 @@ describe('attachment follow-up routing', () => {
         return { status: 'success', result: 'codex reply' };
       },
     );
-    runContainerAgent.mockResolvedValueOnce({ status: 'success', result: null });
+    runContainerAgent.mockResolvedValueOnce({
+      status: 'success',
+      result: null,
+    });
     vi.spyOn(globalThis, 'setTimeout').mockImplementation(() => 0 as any);
     vi.spyOn(globalThis, 'clearTimeout').mockImplementation(() => undefined);
     process.argv[1] = INDEX_MODULE_PATH;
