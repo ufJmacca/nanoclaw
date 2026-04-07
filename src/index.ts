@@ -193,9 +193,7 @@ function queueReplyThreadContext(
   queuedReplyThreadIdByChat[chatJid] = threadId ?? null;
 }
 
-function consumeQueuedReplyThreadContext(
-  chatJid: string,
-): string | undefined {
+function consumeQueuedReplyThreadContext(chatJid: string): string | undefined {
   if (
     Object.prototype.hasOwnProperty.call(queuedReplyThreadIdByChat, chatJid)
   ) {
@@ -941,9 +939,7 @@ async function main(): Promise<void> {
 
         updateReplyThreadContext(chatJid, [msg]);
         const formatted = formatMessages([msg], TIMEZONE);
-        if (
-          sendMessageToActiveContainer(chatJid, formatted, msg.thread_id)
-        ) {
+        if (sendMessageToActiveContainer(chatJid, formatted, msg.thread_id)) {
           return;
         }
 
