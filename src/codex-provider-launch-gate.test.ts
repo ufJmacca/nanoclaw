@@ -10,13 +10,13 @@ const launchGatePath = path.join(
   'docs',
   'CODEX_PROVIDER_SKILLS_LAUNCH_GATE.md',
 );
-const sliceArtifactDir = path.join(
+// Commit a stable reviewer-bundle snapshot so CI does not depend on
+// developer-local `.ai-native/runs/...` artifacts.
+const launchGateFixtureDir = path.join(
   repoRoot,
-  '.ai-native',
-  'runs',
-  '20260408T020624697377Z-prd-codex-provider-skills',
-  'slices',
-  'CPS-03',
+  'src',
+  '__fixtures__',
+  'codex-provider-launch-gate',
 );
 const codexSmokeSkillName = 'cps03-launch-gate-smoke-skill';
 const smokePrompt =
@@ -37,16 +37,16 @@ type SmokeInput = {
   };
 };
 
-function artifactPath(...segments: string[]): string {
-  return path.join(sliceArtifactDir, ...segments);
+function fixturePath(...segments: string[]): string {
+  return path.join(launchGateFixtureDir, ...segments);
 }
 
 function readRepoFile(...segments: string[]): string {
   return readFileSync(path.join(repoRoot, ...segments), 'utf8');
 }
 
-function readArtifact(...segments: string[]): string {
-  return readFileSync(artifactPath(...segments), 'utf8').replace(/\r\n/g, '\n');
+function readFixture(...segments: string[]): string {
+  return readFileSync(fixturePath(...segments), 'utf8').replace(/\r\n/g, '\n');
 }
 
 function listArtifactFiles(rootDir: string, relativeDir = ''): string[] {
@@ -72,7 +72,9 @@ function readInstalledCodexVersion(): string {
     packageLock.dependencies?.['@openai/codex']?.version;
 
   if (!version) {
-    throw new Error('Expected container/agent-runner package-lock to pin @openai/codex');
+    throw new Error(
+      'Expected container/agent-runner package-lock to pin @openai/codex',
+    );
   }
 
   return version;
@@ -82,7 +84,9 @@ function extractVersion(versionArtifact: string): string {
   const match = versionArtifact.match(/codex-cli (\d+\.\d+\.\d+)/);
 
   if (!match) {
-    throw new Error('Expected smoke codex-version artifact to include codex-cli <semver>');
+    throw new Error(
+      'Expected smoke codex-version artifact to include codex-cli <semver>',
+    );
   }
 
   return match[1];
@@ -91,19 +95,19 @@ function extractVersion(versionArtifact: string): string {
 describe('Codex provider launch gate', () => {
   it('records the raw smoke artifacts proving real Codex skill discovery for the providerSkills launch', () => {
     // Arrange
-    const transcriptPath = artifactPath('smoke-test-transcript.md');
-    const containerOutputPath = artifactPath('smoke', 'container-output.log');
-    const codexVersionPath = artifactPath('smoke', 'codex-version.txt');
-    const inputPath = artifactPath('smoke', 'input.json');
-    const configPath = artifactPath('smoke', 'codex-home-after', 'config.toml');
+    const transcriptPath = fixturePath('smoke-test-transcript.md');
+    const containerOutputPath = fixturePath('smoke', 'container-output.log');
+    const codexVersionPath = fixturePath('smoke', 'codex-version.txt');
+    const inputPath = fixturePath('smoke', 'input.json');
+    const configPath = fixturePath('smoke', 'codex-home-after', 'config.toml');
     const installedCodexVersion = readInstalledCodexVersion();
 
     // Act
-    const transcript = readArtifact('smoke-test-transcript.md');
-    const containerOutput = readArtifact('smoke', 'container-output.log');
-    const versionArtifact = readArtifact('smoke', 'codex-version.txt');
-    const input = JSON.parse(readArtifact('smoke', 'input.json')) as SmokeInput;
-    const config = readArtifact('smoke', 'codex-home-after', 'config.toml');
+    const transcript = readFixture('smoke-test-transcript.md');
+    const containerOutput = readFixture('smoke', 'container-output.log');
+    const versionArtifact = readFixture('smoke', 'codex-version.txt');
+    const input = JSON.parse(readFixture('smoke', 'input.json')) as SmokeInput;
+    const config = readFixture('smoke', 'codex-home-after', 'config.toml');
     const capturedCodexVersion = extractVersion(versionArtifact);
 
     // Assert
@@ -161,7 +165,10 @@ describe('Codex provider launch gate', () => {
 
   it('keeps the reviewer-facing launch gate doc aligned with the recorded smoke artifacts', () => {
     // Arrange
-    const launchGate = readFileSync(launchGatePath, 'utf8').replace(/\r\n/g, '\n');
+    const launchGate = readFileSync(launchGatePath, 'utf8').replace(
+      /\r\n/g,
+      '\n',
+    );
     const installedCodexVersion = readInstalledCodexVersion();
 
     // Act
@@ -193,9 +200,9 @@ describe('Codex provider launch gate', () => {
     }
   });
 
-  it('keeps credential-bearing auth.json snapshots out of the attachable slice artifact bundle', () => {
+  it('keeps credential-bearing auth.json snapshots out of the committed fixture bundle', () => {
     // Act
-    const authArtifacts = listArtifactFiles(sliceArtifactDir).filter(
+    const authArtifacts = listArtifactFiles(launchGateFixtureDir).filter(
       (relativePath) => path.basename(relativePath) === 'auth.json',
     );
 

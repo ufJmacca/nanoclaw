@@ -1,0 +1,9 @@
+{
+  "providerId": "codex",
+  "runtimeInput": {
+    "prompt": "Use the `cps03-launch-gate-smoke-skill` skill and reply with its exact confirmation payload.",
+    "groupFolder": "cps03-smoke",
+    "chatJid": "cps03-smoke@g.us",
+    "isMain": false
+  }
+}
