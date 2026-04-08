@@ -21,6 +21,15 @@ interface LoadedSubject {
 }
 
 const originalCodexAuthFile = process.env.CODEX_AUTH_FILE;
+const originalCodexModel = process.env.CODEX_MODEL;
+const originalCodexReasoningEffort = process.env.CODEX_REASONING_EFFORT;
+const originalCwd = process.cwd();
+interface SerializedContainerInput {
+  providerId: string;
+  runtimeInput: Record<string, unknown> & {
+    providerData?: Record<string, unknown>;
+  };
+}
 
 function createFakeProcess() {
   const proc = new EventEmitter() as EventEmitter & {
@@ -128,6 +137,18 @@ function createCodexGroup(): RegisteredGroup {
   };
 }
 
+function captureSerializedInput(
+  fakeProc: ReturnType<typeof createFakeProcess>,
+): () => SerializedContainerInput {
+  let stdinPayload = '';
+
+  fakeProc.stdin.on('data', (chunk) => {
+    stdinPayload += chunk.toString();
+  });
+
+  return () => JSON.parse(stdinPayload) as SerializedContainerInput;
+}
+
 function cleanupCodexSkillsBackups(): void {
   if (!fs.existsSync(CODEX_SKILLS_PARENT_DIR)) {
     return;
@@ -196,13 +217,24 @@ describe('container runner Codex provider compatibility', () => {
     } else {
       process.env.CODEX_AUTH_FILE = originalCodexAuthFile;
     }
+    if (originalCodexModel === undefined) {
+      delete process.env.CODEX_MODEL;
+    } else {
+      process.env.CODEX_MODEL = originalCodexModel;
+    }
+    if (originalCodexReasoningEffort === undefined) {
+      delete process.env.CODEX_REASONING_EFFORT;
+    } else {
+      process.env.CODEX_REASONING_EFFORT = originalCodexReasoningEffort;
+    }
+    process.chdir(originalCwd);
     cleanupCodexSkillsBackups();
     vi.clearAllMocks();
     vi.resetModules();
     fs.rmSync(tempRoot, { recursive: true, force: true });
   });
 
-  it('copies repo Codex skills into the group workspace while preserving AGENTS and the Codex home mount', async () => {
+  it('copies repo Codex skills into the group workspace while preserving AGENTS, the Codex home mount, and env-resolved providerData', async () => {
     // Arrange
     const group = createCodexGroup();
     const groupDir = path.join(groupsDir, group.folder);
@@ -229,12 +261,15 @@ describe('container runner Codex provider compatibility', () => {
       'SKILL.md',
     );
     const fakeProc = createFakeProcess();
+    const readSerializedInput = captureSerializedInput(fakeProc);
 
     fs.mkdirSync(groupDir, { recursive: true });
     fs.writeFileSync(path.join(groupDir, 'AGENT.md'), '# Canonical Agent\n');
     fs.mkdirSync(path.dirname(authFile), { recursive: true });
     fs.writeFileSync(authFile, '{"auth":"chatgpt"}\n');
     process.env.CODEX_AUTH_FILE = authFile;
+    process.env.CODEX_MODEL = 'gpt-5-codex-env';
+    process.env.CODEX_REASONING_EFFORT = 'high';
     fs.mkdirSync(sourceSkillDir, { recursive: true });
     fs.writeFileSync(
       path.join(sourceSkillDir, 'SKILL.md'),
@@ -278,8 +313,31 @@ describe('container runner Codex provider compatibility', () => {
       );
 
       await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledTimes(1));
+      await vi.waitFor(() =>
+        expect(readSerializedInput().runtimeInput.providerData).toEqual({
+          model: 'gpt-5-codex-env',
+          reasoningEffort: 'high',
+        }),
+      );
 
       // Assert
+      expect(readSerializedInput()).toEqual({
+        providerId: 'codex',
+        runtimeInput: {
+          prompt: 'Ship the Codex provider slice.',
+          groupFolder: group.folder,
+          chatJid: 'test@g.us',
+          isMain: false,
+          isScheduledTask: false,
+          providerData: {
+            model: 'gpt-5-codex-env',
+            reasoningEffort: 'high',
+          },
+        },
+      });
+      expect(readSerializedInput().runtimeInput).not.toHaveProperty(
+        'providerOptions',
+      );
       expect(
         fs.readFileSync(path.join(providerStateDir, 'auth.json'), 'utf-8'),
       ).toBe('{"auth":"chatgpt"}\n');
@@ -299,6 +357,168 @@ describe('container runner Codex provider compatibility', () => {
     } finally {
       fs.rmSync(sourceSkillDir, { recursive: true, force: true });
     }
+  });
+
+  it('normalizes legacy Codex provider options before writing runtime input to the container', async () => {
+    // Arrange
+    const group: RegisteredGroup = {
+      ...createCodexGroup(),
+      providerOptions: {
+        profile: 'gpt-5-codex-legacy',
+        reasoning: 'medium',
+        ignored: 'value',
+      },
+    };
+    const groupDir = path.join(groupsDir, group.folder);
+    const authFile = path.join(tempRoot, 'codex-auth', 'auth.json');
+    const fakeProc = createFakeProcess();
+    const readSerializedInput = captureSerializedInput(fakeProc);
+
+    fs.mkdirSync(groupDir, { recursive: true });
+    fs.writeFileSync(path.join(groupDir, 'AGENT.md'), '# Canonical Agent\n');
+    fs.mkdirSync(path.dirname(authFile), { recursive: true });
+    fs.writeFileSync(authFile, '{"auth":"chatgpt"}\n');
+    process.env.CODEX_AUTH_FILE = authFile;
+
+    const { runContainerAgent, spawnMock } = await loadSubject(
+      dataDir,
+      groupsDir,
+      fakeProc,
+    );
+
+    // Act
+    const runPromise = runContainerAgent(
+      group,
+      {
+        prompt: 'Normalize legacy provider options.',
+        groupFolder: group.folder,
+        chatJid: 'test@g.us',
+        isMain: false,
+      },
+      () => {},
+    );
+
+    await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() =>
+      expect(readSerializedInput().runtimeInput.providerData).toEqual({
+        model: 'gpt-5-codex-legacy',
+        reasoningEffort: 'medium',
+      }),
+    );
+    emitOutputMarker(fakeProc, {
+      status: 'success',
+      result: 'normalized',
+      newSessionId: 'session-normalized',
+    });
+    fakeProc.emit('close', 0);
+
+    const result = await runPromise;
+
+    // Assert
+    expect(result).toEqual({
+      status: 'success',
+      result: 'normalized',
+      newSessionId: 'session-normalized',
+    });
+    expect(readSerializedInput()).toEqual({
+      providerId: 'codex',
+      runtimeInput: {
+        prompt: 'Normalize legacy provider options.',
+        groupFolder: group.folder,
+        chatJid: 'test@g.us',
+        isMain: false,
+        isScheduledTask: false,
+        providerData: {
+          model: 'gpt-5-codex-legacy',
+          reasoningEffort: 'medium',
+        },
+      },
+    });
+    expect(readSerializedInput().runtimeInput).not.toHaveProperty(
+      'providerOptions',
+    );
+    expect(readSerializedInput().runtimeInput.providerData).not.toHaveProperty(
+      'profile',
+    );
+    expect(readSerializedInput().runtimeInput.providerData).not.toHaveProperty(
+      'reasoning',
+    );
+  });
+
+  it('omits providerData from container runtime input when no Codex runtime config resolves', async () => {
+    // Arrange
+    const group = createCodexGroup();
+    const groupDir = path.join(groupsDir, group.folder);
+    const authFile = path.join(tempRoot, 'codex-auth', 'auth.json');
+    const isolatedProjectRoot = path.join(tempRoot, 'isolated-project-root');
+    const fakeProc = createFakeProcess();
+    const readSerializedInput = captureSerializedInput(fakeProc);
+
+    fs.mkdirSync(groupDir, { recursive: true });
+    fs.writeFileSync(path.join(groupDir, 'AGENT.md'), '# Canonical Agent\n');
+    fs.mkdirSync(path.dirname(authFile), { recursive: true });
+    fs.mkdirSync(isolatedProjectRoot, { recursive: true });
+    fs.writeFileSync(authFile, '{"auth":"chatgpt"}\n');
+    process.env.CODEX_AUTH_FILE = authFile;
+    delete process.env.CODEX_MODEL;
+    delete process.env.CODEX_REASONING_EFFORT;
+    process.chdir(isolatedProjectRoot);
+
+    const { runContainerAgent, spawnMock } = await loadSubject(
+      dataDir,
+      groupsDir,
+      fakeProc,
+    );
+
+    // Act
+    const runPromise = runContainerAgent(
+      group,
+      {
+        prompt: 'Launch without Codex runtime config.',
+        groupFolder: group.folder,
+        chatJid: 'test@g.us',
+        isMain: false,
+      },
+      () => {},
+    );
+
+    await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() =>
+      expect(readSerializedInput().runtimeInput.prompt).toBe(
+        'Launch without Codex runtime config.',
+      ),
+    );
+    emitOutputMarker(fakeProc, {
+      status: 'success',
+      result: 'no-provider-data',
+      newSessionId: 'session-no-provider-data',
+    });
+    fakeProc.emit('close', 0);
+
+    const result = await runPromise;
+
+    // Assert
+    expect(result).toEqual({
+      status: 'success',
+      result: 'no-provider-data',
+      newSessionId: 'session-no-provider-data',
+    });
+    expect(readSerializedInput()).toEqual({
+      providerId: 'codex',
+      runtimeInput: {
+        prompt: 'Launch without Codex runtime config.',
+        groupFolder: group.folder,
+        chatJid: 'test@g.us',
+        isMain: false,
+        isScheduledTask: false,
+      },
+    });
+    expect(readSerializedInput().runtimeInput).not.toHaveProperty(
+      'providerData',
+    );
+    expect(readSerializedInput().runtimeInput).not.toHaveProperty(
+      'providerOptions',
+    );
   });
 
   it.each(['missing', 'empty'] as const)(
