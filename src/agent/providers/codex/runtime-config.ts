@@ -102,9 +102,7 @@ function parseReasoningEffort(value: unknown): CodexReasoningEffort {
   throw invalidReasoningEffortError(value);
 }
 
-function isCodexReasoningEffort(
-  value: string,
-): value is CodexReasoningEffort {
+function isCodexReasoningEffort(value: string): value is CodexReasoningEffort {
   return CODEX_REASONING_EFFORTS.includes(value as CodexReasoningEffort);
 }
 
