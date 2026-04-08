@@ -55,7 +55,7 @@ process.exit(status.status);
     }
   });
 
-  it('prepares Codex AGENTS memory, a namespaced session home, and v1 capability flags', () => {
+  it('prepares Codex AGENTS memory, auth staging, workspace skill sync, and v1 capability flags', () => {
     // Arrange
     const tempRoot = fs.mkdtempSync(
       path.join(os.tmpdir(), 'nanoclaw-codex-host-provider-'),
@@ -118,7 +118,18 @@ process.exit(status.status);
     expect(preparedSession.allowedSourceRoots).toEqual([
       path.dirname(authFile),
     ]);
-    expect(preparedSession.directorySyncs).toBeUndefined();
+    expect(preparedSession.metadata).toMatchObject({
+      codexAuthSourceFile: authFile,
+    });
+    expect(preparedSession.metadata?.codexAuthSourceHash).toMatch(
+      /^[0-9a-f]{64}$/,
+    );
+    expect(preparedSession.directorySyncs).toEqual([
+      {
+        sourcePath: path.join(projectRoot, 'container', 'codex-skills'),
+        targetPath: path.join(groupDir, '.agents', 'skills'),
+      },
+    ]);
     expect(containerSpec).toEqual({
       mounts: [
         {

@@ -200,6 +200,12 @@ export function createCodexProvider(): AgentProvider {
         providerStateDir,
         allowedSourceRoots,
         files,
+        directorySyncs: [
+          {
+            sourcePath: path.join(ctx.projectRoot, 'container', 'codex-skills'),
+            targetPath: path.join(ctx.groupDir, '.agents', 'skills'),
+          },
+        ],
         metadata,
       };
     },
