@@ -1,0 +1,14 @@
+forced_login_method = "chatgpt"
+cli_auth_credentials_store = "file"
+
+[mcp_servers.nanoclaw]
+command = "node"
+args = ["/tmp/dist/ipc-mcp-stdio.js"]
+
+[mcp_servers.nanoclaw.env]
+NANOCLAW_CHAT_JID = "cps03-smoke@g.us"
+NANOCLAW_GROUP_FOLDER = "cps03-smoke"
+NANOCLAW_IS_MAIN = "0"
+
+[plugins."github@openai-curated"]
+enabled = true
