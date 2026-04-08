@@ -6,9 +6,54 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { createProviderRegistry } from '../../provider-registry.js';
 
 describe('codex host provider', () => {
-  const originalCodexAuthFile = process.env.CODEX_AUTH_FILE;
-  const originalPath = process.env.PATH;
+  const ORIGINAL_ENV = { ...process.env };
+  const originalCwd = process.cwd();
   const tempRoots: string[] = [];
+
+  function restoreProcessEnv(): void {
+    for (const key of Object.keys(process.env)) {
+      if (!(key in ORIGINAL_ENV)) {
+        delete process.env[key];
+      }
+    }
+
+    for (const [key, value] of Object.entries(ORIGINAL_ENV)) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
+
+  function createTempRepo(envFileContent?: string): string {
+    const tempRoot = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'nanoclaw-codex-host-provider-'),
+    );
+    tempRoots.push(tempRoot);
+
+    if (envFileContent) {
+      fs.writeFileSync(path.join(tempRoot, '.env'), envFileContent);
+    }
+
+    return tempRoot;
+  }
+
+  function createRuntimeInvocationContext(
+    providerOptions?: Record<string, unknown>,
+  ) {
+    return {
+      prompt: 'Solve the task',
+      sessionId: 'session-123',
+      groupFolder: 'test-group',
+      chatJid: 'test@g.us',
+      isMain: false,
+      isScheduledTask: false,
+      assistantName: 'Codex',
+      script: 'echo test',
+      providerOptions,
+    };
+  }
 
   function installFakeCodexCli(
     tempRoot: string,
@@ -33,20 +78,12 @@ process.exit(status.status);
       { mode: 0o755 },
     );
 
-    process.env.PATH = `${binDir}:${originalPath ?? ''}`;
+    process.env.PATH = `${binDir}:${ORIGINAL_ENV.PATH ?? ''}`;
   }
 
   afterEach(() => {
-    if (originalCodexAuthFile === undefined) {
-      delete process.env.CODEX_AUTH_FILE;
-    } else {
-      process.env.CODEX_AUTH_FILE = originalCodexAuthFile;
-    }
-    if (originalPath === undefined) {
-      delete process.env.PATH;
-    } else {
-      process.env.PATH = originalPath;
-    }
+    restoreProcessEnv();
+    process.chdir(originalCwd);
     while (tempRoots.length > 0) {
       const tempRoot = tempRoots.pop();
       if (tempRoot) {
@@ -394,6 +431,161 @@ process.exit(status.status);
       },
     ]);
     expect(fs.existsSync(path.join(providerStateDir, 'auth.json'))).toBe(false);
+  });
+
+  it('adds a readiness error when CODEX_REASONING_EFFORT is invalid in project env', () => {
+    // Arrange
+    const tempRoot = createTempRepo('CODEX_REASONING_EFFORT=turbo\n');
+    const authFile = path.join(tempRoot, 'codex-auth', 'auth.json');
+    fs.mkdirSync(path.dirname(authFile), { recursive: true });
+    fs.writeFileSync(authFile, '{"auth":"chatgpt"}\n');
+    installFakeCodexCli(tempRoot, {
+      '{"auth":"chatgpt"}\n': {
+        status: 0,
+        text: 'Logged in using ChatGPT',
+      },
+    });
+    process.env.CODEX_AUTH_FILE = authFile;
+    const provider = createProviderRegistry().getProvider('codex');
+
+    // Act
+    const checks = provider.validateHost(process.env, tempRoot);
+
+    // Assert
+    expect(checks).toContainEqual({
+      status: 'error',
+      code: 'runtime_config_invalid',
+      message:
+        'Codex runtime configuration is invalid: Invalid Codex reasoning effort "turbo". Expected one of: low, medium, high, xhigh.',
+    });
+  });
+
+  it('serializes only canonical providerData when canonical provider options are set', () => {
+    // Arrange
+    const tempRoot = createTempRepo(
+      ['CODEX_MODEL=gpt-env', 'CODEX_REASONING_EFFORT=medium'].join('\n'),
+    );
+    process.chdir(tempRoot);
+    const provider = createProviderRegistry().getProvider('codex');
+
+    // Act
+    const runtimeInput = provider.serializeRuntimeInput(
+      createRuntimeInvocationContext({
+        model: 'gpt-canonical',
+        profile: 'gpt-legacy',
+        reasoningEffort: 'low',
+        reasoning: 'high',
+        ignored: 'value',
+      }),
+    );
+
+    // Assert
+    expect(runtimeInput).toEqual({
+      prompt: 'Solve the task',
+      sessionId: 'session-123',
+      groupFolder: 'test-group',
+      chatJid: 'test@g.us',
+      isMain: false,
+      isScheduledTask: false,
+      assistantName: 'Codex',
+      script: 'echo test',
+      providerData: {
+        model: 'gpt-canonical',
+        reasoningEffort: 'low',
+      },
+    });
+  });
+
+  it('lets provider options override env defaults while normalizing legacy aliases', () => {
+    // Arrange
+    const tempRoot = createTempRepo(
+      ['CODEX_MODEL=gpt-env', 'CODEX_REASONING_EFFORT=high'].join('\n'),
+    );
+    process.chdir(tempRoot);
+    const provider = createProviderRegistry().getProvider('codex');
+
+    // Act
+    const runtimeInput = provider.serializeRuntimeInput(
+      createRuntimeInvocationContext({
+        profile: 'gpt-legacy',
+        reasoning: 'medium',
+      }),
+    );
+
+    // Assert
+    expect(runtimeInput.providerData).toEqual({
+      model: 'gpt-legacy',
+      reasoningEffort: 'medium',
+    });
+  });
+
+  it('resolves project defaults from process.cwd without widening the runtime context', () => {
+    // Arrange
+    const tempRoot = createTempRepo(
+      ['CODEX_MODEL=gpt-dotenv', 'CODEX_REASONING_EFFORT=high'].join('\n'),
+    );
+    delete process.env.CODEX_MODEL;
+    delete process.env.CODEX_REASONING_EFFORT;
+    process.chdir(tempRoot);
+    const provider = createProviderRegistry().getProvider('codex');
+
+    // Act
+    const runtimeInput = provider.serializeRuntimeInput(
+      createRuntimeInvocationContext(),
+    );
+
+    // Assert
+    expect(runtimeInput.providerData).toEqual({
+      model: 'gpt-dotenv',
+      reasoningEffort: 'high',
+    });
+  });
+
+  it('omits providerData when neither env defaults nor provider options resolve', () => {
+    // Arrange
+    const tempRoot = createTempRepo();
+    delete process.env.CODEX_MODEL;
+    delete process.env.CODEX_REASONING_EFFORT;
+    process.chdir(tempRoot);
+    const provider = createProviderRegistry().getProvider('codex');
+
+    // Act
+    const runtimeInput = provider.serializeRuntimeInput(
+      createRuntimeInvocationContext(),
+    );
+
+    // Assert
+    expect(runtimeInput).toEqual({
+      prompt: 'Solve the task',
+      sessionId: 'session-123',
+      groupFolder: 'test-group',
+      chatJid: 'test@g.us',
+      isMain: false,
+      isScheduledTask: false,
+      assistantName: 'Codex',
+      script: 'echo test',
+    });
+    expect('providerData' in runtimeInput).toBe(false);
+  });
+
+  it('fails before container launch when provider-option reasoning is invalid', () => {
+    // Arrange
+    const tempRoot = createTempRepo();
+    process.chdir(tempRoot);
+    const provider = createProviderRegistry().getProvider('codex');
+
+    // Act
+    const serializeRuntimeInput = () =>
+      provider.serializeRuntimeInput(
+        createRuntimeInvocationContext({
+          reasoning: 'turbo',
+        }),
+      );
+
+    // Assert
+    expect(serializeRuntimeInput).toThrowError(
+      'Invalid Codex reasoning effort "turbo". Expected one of: low, medium, high, xhigh.',
+    );
   });
 
   it('returns an explicit unsupported result for remote control', async () => {
