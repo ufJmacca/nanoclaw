@@ -46,6 +46,6 @@ skill_path=/workspace/group/.agents/skills/cps03-launch-gate-smoke-skill/SKILL.m
 Reviewer launch decision:
 
 - [x] Smoke-test artifact recorded with the exact run date, runtime boundary, installed Codex version, prompt, and observed discovery evidence.
-- [ ] Flip Codex host and container capability surfaces from `providerSkills: false` to `providerSkills: true` in a follow-up change after reviewer approval.
+- [x] Flip Codex host and container capability surfaces from `providerSkills: false` to `providerSkills: true` in a follow-up change after reviewer approval.
 
-Until that explicit follow-up lands, keep `providerSkills: false`.
+Reviewer approval complete: set `providerSkills: true` in both the host and container Codex capability surfaces.

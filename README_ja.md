@@ -99,7 +99,7 @@ claude
 
 NanoClawのコアはグループごとにプロバイダーを選択します。セッション状態は`data/sessions/<group>/claude-code/`や`data/sessions/<group>/codex/`のようなプロバイダー単位のディレクトリに分離されます。
 
-同梱のコンテナスキルとagent teamsはNanoClaw v1ではClaude専用です。`codex`はチャット、スケジュール、メモリをサポートしますが、remote control・agent teams・provider skillsは未対応として明示的に扱われます。
+同梱の`container/skills/`はNanoClaw v1ではClaude専用です。`codex`は`container/codex-skills/`を各グループの`.agents/skills/`へ同期するprovider skillsに加えて、チャット、スケジュール、メモリをサポートします。remote controlとagent teamsは未対応です。
 
 ## 使い方
 

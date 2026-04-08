@@ -126,7 +126,8 @@ A personal AI assistant accessible via messaging, with minimal custom code and p
 ### Provider Capability Boundaries
 - `claude-code` supports remote control, agent teams, and bundled provider skills
 - `codex` supports core chat, scheduling, sessions, and memory flows
-- Bundled `container/skills/` content and agent teams remain Claude-only in v1
+- `codex` supports bundled provider skills from `container/codex-skills/`, synced into each group workspace at `.agents/skills/`.
+- Bundled `container/skills/` content remains Claude-only in v1, and remote control plus agent teams remain unsupported for `codex`
 - Providers cannot widen mount policy, IPC authorization, or other core security boundaries
 
 ---

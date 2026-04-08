@@ -6,7 +6,7 @@ Personal AI assistant. See [README.md](README.md) for philosophy and setup. See 
 
 Single Node.js process with skill-based channel system. Channels (WhatsApp, Telegram, Slack, Discord, Gmail) are skills that self-register at startup. Messages route to provider runtimes running in containers (Linux VMs). Each group has isolated filesystem and memory.
 
-AGENT.md is the canonical group memory file. Bundled `container/skills/` content is synced only for `claude-code` in v1.
+AGENT.md is the canonical group memory file. Bundled `container/skills/` content is synced only for `claude-code`, while Codex syncs `container/codex-skills/` into each group workspace at `.agents/skills/`.
 
 ## Key Files
 
@@ -23,6 +23,7 @@ AGENT.md is the canonical group memory file. Bundled `container/skills/` content
 | `groups/{name}/AGENT.md` | Canonical per-group memory (isolated) |
 | `groups/{name}/CLAUDE.md` | Claude compatibility memory rendered from `AGENT.md` |
 | `container/skills/` | Skills loaded inside Claude provider containers (browser, status, formatting) |
+| `container/codex-skills/` | Bundled Codex provider skills synced into each group's `.agents/skills/` workspace |
 
 ## Secrets / Credentials / Proxy (OneCLI)
 

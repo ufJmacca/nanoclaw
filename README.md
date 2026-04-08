@@ -82,7 +82,7 @@ AGENT.md is the canonical memory file. CLAUDE.md remains a compatibility file fo
 
 NanoClaw's core runtime chooses a provider per group. Session state is isolated under provider-scoped directories such as `data/sessions/<group>/claude-code/` and `data/sessions/<group>/codex/`.
 
-Bundled container skills and agent teams are Claude-only in NanoClaw v1. Codex keeps chat, scheduling, and memory support but reports remote control, agent teams, and provider skills as unsupported.
+Bundled `container/skills/` container skills and agent teams are Claude-only in NanoClaw v1. Codex syncs bundled provider skills from `container/codex-skills/` into each group workspace at `.agents/skills/`, while remote control and agent teams remain unsupported.
 
 ## Usage
 

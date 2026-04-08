@@ -18,15 +18,12 @@ const localizedCodexCapabilityRegressionPatterns = {
   ja: [
     /`codex`[^。\n]{0,80}remote control[^。\n]{0,20}(?:サポートします|対応します|利用できます)/u,
     /`codex`[^。\n]{0,80}agent teams[^。\n]{0,20}(?:サポートします|対応します|利用できます)/u,
-    /`codex`[^。\n]{0,80}provider skills[^。\n]{0,20}(?:サポートします|対応します|利用できます)/u,
   ],
   zh: [
     /`codex`[^。\n]{0,80}(?:支持|可用|可使用)[^。\n]{0,20}remote control/u,
     /`codex`[^。\n]{0,80}(?:支持|可用|可使用)[^。\n]{0,20}agent teams/u,
-    /`codex`[^。\n]{0,80}(?:支持|可用|可使用)[^。\n]{0,20}provider skills/u,
     /`codex`[^。\n]{0,80}remote control[^。\n]{0,20}(?<!不)(?<!未)支持/u,
     /`codex`[^。\n]{0,80}agent teams[^。\n]{0,20}(?<!不)(?<!未)支持/u,
-    /`codex`[^。\n]{0,80}provider skills[^。\n]{0,20}(?<!不)(?<!未)支持/u,
   ],
 } as const;
 
@@ -104,7 +101,7 @@ describe('provider documentation audit', () => {
         requiredSnippets: [
           '`AGENT.md`が正本のメモリファイルで、`CLAUDE.md`は`claude-code`向けの互換ファイルです。共有グローバルメモリを書き込めるのはメインチャットだけです。',
           'NanoClawのコアはグループごとにプロバイダーを選択します。セッション状態は`data/sessions/<group>/claude-code/`や`data/sessions/<group>/codex/`のようなプロバイダー単位のディレクトリに分離されます。',
-          '同梱のコンテナスキルとagent teamsはNanoClaw v1ではClaude専用です。`codex`はチャット、スケジュール、メモリをサポートしますが、remote control・agent teams・provider skillsは未対応として明示的に扱われます。',
+          '同梱の`container/skills/`はNanoClaw v1ではClaude専用です。`codex`は`container/codex-skills/`を各グループの`.agents/skills/`へ同期するprovider skillsに加えて、チャット、スケジュール、メモリをサポートします。remote controlとagent teamsは未対応です。',
         ],
       },
       {
@@ -112,7 +109,7 @@ describe('provider documentation audit', () => {
         requiredSnippets: [
           '`AGENT.md` 是规范的记忆文件，`CLAUDE.md` 则是给 `claude-code` 使用的兼容文件。只有主聊天可以写入共享的全局记忆。',
           'NanoClaw 会按群组选择提供商。会话状态会隔离在 `data/sessions/<group>/claude-code/` 或 `data/sessions/<group>/codex/` 这样的提供商作用域目录中。',
-          '内置容器技能和 agent teams 在 NanoClaw v1 中仍然只支持 Claude。`codex` 保留聊天、调度和记忆能力，但会把 remote control、agent teams 和 provider skills 明确报告为不支持。',
+          '内置的 `container/skills/` 在 NanoClaw v1 中仍然只给 Claude 使用。`codex` 支持把 `container/codex-skills/` 同步到每个群组的 `.agents/skills/` 作为 provider skills，并保留聊天、调度和记忆能力。remote control 和 agent teams 仍然不支持。',
         ],
       },
       {
@@ -122,7 +119,7 @@ describe('provider documentation audit', () => {
           'CLAUDE.md remains a compatibility file for Claude Code.',
           'data/sessions/{group}/{providerId}/',
           'Only the main group can sync global memory changes back into `AGENT.md`.',
-          'Bundled `container/skills/` content is synced only for `claude-code` in v1.',
+          '`claude-code` syncs bundled `container/skills/` content, while `codex` syncs `container/codex-skills/` into each group workspace at `.agents/skills/`.',
           '7. Router invokes the active provider runtime:',
           '8. Provider processes message:',
           "| `@Assistant [message]` | `@Andy what's the weather?` | Talk to the active provider |",
@@ -139,6 +136,7 @@ describe('provider documentation audit', () => {
           'Tasks execute the active provider runtime in containerized group context',
           '`claude-code`',
           '`codex`',
+          '`codex` supports bundled provider skills from `container/codex-skills/`, synced into each group workspace at `.agents/skills/`.',
         ],
       },
     ];
@@ -158,36 +156,36 @@ describe('provider documentation audit', () => {
       {
         filePath: ['README.md'],
         requiredSnippets: [
-          'Bundled container skills and agent teams are Claude-only in NanoClaw v1.',
-          'Codex keeps chat, scheduling, and memory support but reports remote control, agent teams, and provider skills as unsupported.',
+          'Bundled `container/skills/` container skills and agent teams are Claude-only in NanoClaw v1.',
+          'Codex syncs bundled provider skills from `container/codex-skills/` into each group workspace at `.agents/skills/`, while remote control and agent teams remain unsupported.',
         ],
       },
       {
         filePath: ['container', 'skills', 'status', 'SKILL.md'],
         requiredSnippets: [
-          'Claude-only in NanoClaw v1',
-          'If the active provider is Codex, report bundled container skills, remote control, and agent teams as unsupported.',
+          'Claude-only slash-command skill in NanoClaw v1',
+          'If the active provider is Codex, do not offer `/status` from `container/skills/`; instead explain that Codex bundled provider skills come from `container/codex-skills/` synced into `.agents/skills/`, while remote control and agent teams remain unsupported.',
         ],
       },
       {
         filePath: ['container', 'skills', 'capabilities', 'SKILL.md'],
         requiredSnippets: [
-          'Claude-only in NanoClaw v1',
-          'If the active provider is Codex, report bundled container skills, remote control, and agent teams as unsupported.',
+          'Claude-only slash-command skill in NanoClaw v1',
+          'If the active provider is Codex, do not offer `/capabilities` from `container/skills/`; instead explain that Codex bundled provider skills come from `container/codex-skills/` synced into `.agents/skills/`, while remote control and agent teams remain unsupported.',
         ],
       },
       {
         filePath: ['CONTRIBUTING.md'],
         requiredSnippets: [
-          'Container skills remain Claude-only in v1.',
-          'Codex does not load bundled provider skills or agent teams yet.',
+          'Container skills remain Claude-only runtime helpers in v1.',
+          'Codex bundled provider skills live under `container/codex-skills/<name>/` and sync into each group workspace at `.agents/skills/<name>/`. Codex agent teams remain unsupported.',
         ],
       },
       {
         filePath: ['CLAUDE.md'],
         requiredSnippets: [
           'AGENT.md is the canonical group memory file.',
-          'Bundled `container/skills/` content is synced only for `claude-code` in v1.',
+          'Bundled `container/skills/` content is synced only for `claude-code`, while Codex syncs `container/codex-skills/` into each group workspace at `.agents/skills/`.',
         ],
       },
     ];
@@ -211,7 +209,7 @@ describe('provider documentation audit', () => {
           '`data/sessions/<group>/.claude/`',
           'Codex supports remote control.',
           'Codex supports agent teams.',
-          'Codex supports provider skills.',
+          'Codex keeps chat, scheduling, and memory support but reports remote control, agent teams, and provider skills as unsupported.',
         ],
       },
       {
@@ -241,7 +239,6 @@ describe('provider documentation audit', () => {
           '`data/sessions/{group}/.claude/`',
           '`codex` supports remote control',
           '`codex` supports agent teams',
-          '`codex` supports provider skills',
         ],
         forbiddenPatterns: [...specGenericClaudeRuntimeRegressionPatterns],
       },
@@ -252,7 +249,6 @@ describe('provider documentation audit', () => {
           '`data/sessions/{group}/.claude/`',
           '`codex` supports remote control',
           '`codex` supports agent teams',
-          '`codex` supports provider skills',
         ],
         forbiddenPatterns: [
           ...requirementsCoreProviderNeutralRegressionPatterns,
@@ -276,6 +272,7 @@ describe('provider documentation audit', () => {
         filePath: ['CONTRIBUTING.md'],
         forbiddenSnippets: [
           "They are synced into each group's `.claude/skills/` directory when a container starts.",
+          'Codex does not load bundled provider skills or agent teams yet.',
         ],
       },
       {

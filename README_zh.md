@@ -66,7 +66,7 @@ claude
 
 NanoClaw 会按群组选择提供商。会话状态会隔离在 `data/sessions/<group>/claude-code/` 或 `data/sessions/<group>/codex/` 这样的提供商作用域目录中。
 
-内置容器技能和 agent teams 在 NanoClaw v1 中仍然只支持 Claude。`codex` 保留聊天、调度和记忆能力，但会把 remote control、agent teams 和 provider skills 明确报告为不支持。
+内置的 `container/skills/` 在 NanoClaw v1 中仍然只给 Claude 使用。`codex` 支持把 `container/codex-skills/` 同步到每个群组的 `.agents/skills/` 作为 provider skills，并保留聊天、调度和记忆能力。remote control 和 agent teams 仍然不支持。
 
 ## 使用方法
 

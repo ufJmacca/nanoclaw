@@ -452,7 +452,7 @@ NanoClaw uses a hierarchical memory system with provider-neutral canonical memor
 2. **Provider materialization**
    - `claude-code` reads a rendered `CLAUDE.md` compatibility file
    - `codex` reads a rendered `AGENTS.md` compatibility file
-   - Bundled `container/skills/` content is synced only for `claude-code` in v1.
+   - `claude-code` syncs bundled `container/skills/` content, while `codex` syncs `container/codex-skills/` into each group workspace at `.agents/skills/`.
 
 3. **Writing memory**
    - When a user says "remember this", the durable write target is the group's `AGENT.md`

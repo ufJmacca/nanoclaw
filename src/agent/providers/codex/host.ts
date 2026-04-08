@@ -99,7 +99,7 @@ export function createCodexProvider(): AgentProvider {
       projectMemory: true,
       remoteControl: false,
       agentTeams: false,
-      providerSkills: false,
+      providerSkills: true,
     },
     validateHost(env, projectRoot) {
       const inspection = inspectCodexAuth(env, projectRoot);

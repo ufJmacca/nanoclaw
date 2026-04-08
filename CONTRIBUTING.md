@@ -82,9 +82,11 @@ Workflows and guides with no code changes. The SKILL.md is the entire skill — 
 
 Skills that run inside the agent container, not on the host. These teach the container agent how to use tools, format output, or perform tasks. In v1, the `claude-code` provider syncs them into the active group's `.claude/skills/` directory when a compatible container starts.
 
-Container skills remain Claude-only in v1. Codex does not load bundled provider skills or agent teams yet.
+Container skills remain Claude-only runtime helpers in v1. Codex bundled provider skills live under `container/codex-skills/<name>/` and sync into each group workspace at `.agents/skills/<name>/`. Codex agent teams remain unsupported.
 
 **Location:** `container/skills/<name>/`
+
+**Codex bundled provider skill location:** `container/codex-skills/<name>/`
 
 **Examples:** `agent-browser` (web browsing), `capabilities` (/capabilities command), `status` (/status command), `slack-formatting` (Slack mrkdwn syntax)
 
