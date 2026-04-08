@@ -8,6 +8,10 @@ import {
   resolveCodexAuthFile,
 } from '../../../codex-auth.js';
 import { readEnvFileAt } from '../../../env.js';
+import {
+  resolveCodexRuntimeConfig,
+  type CodexProviderRuntimeConfig,
+} from './runtime-config.js';
 import type {
   AgentProvider,
   PreparedSession,
@@ -23,8 +27,9 @@ const AUTH_SOURCE_HASH_METADATA_KEY = 'codexAuthSourceHash';
 
 function createRuntimeInput(
   ctx: RuntimeInvocationContext,
+  providerData?: CodexProviderRuntimeConfig,
 ): ProviderRuntimeInput {
-  return {
+  const runtimeInput: ProviderRuntimeInput = {
     prompt: ctx.prompt,
     sessionId: ctx.sessionId,
     groupFolder: ctx.groupFolder,
@@ -33,8 +38,30 @@ function createRuntimeInput(
     isScheduledTask: ctx.isScheduledTask ?? false,
     assistantName: ctx.assistantName,
     script: ctx.script,
-    providerData: ctx.providerOptions,
   };
+
+  if (providerData) {
+    runtimeInput.providerData = createProviderDataRecord(providerData);
+  }
+
+  return runtimeInput;
+}
+
+function createProviderDataRecord(
+  providerData: CodexProviderRuntimeConfig,
+): NonNullable<ProviderRuntimeInput['providerData']> {
+  const runtimeProviderData: NonNullable<ProviderRuntimeInput['providerData']> =
+    {};
+
+  if (providerData.model) {
+    runtimeProviderData.model = providerData.model;
+  }
+
+  if (providerData.reasoningEffort) {
+    runtimeProviderData.reasoningEffort = providerData.reasoningEffort;
+  }
+
+  return runtimeProviderData;
 }
 
 function hasConfiguredCredential(
@@ -88,6 +115,10 @@ function getAuthSourceHash(
 
 function fingerprintContents(contents: Buffer): string {
   return createHash('sha256').update(contents).digest('hex');
+}
+
+function getRuntimeConfigErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 export function createCodexProvider(): AgentProvider {
@@ -161,6 +192,16 @@ export function createCodexProvider(): AgentProvider {
         });
       }
 
+      try {
+        resolveCodexRuntimeConfig(projectRoot, undefined, env);
+      } catch (error) {
+        checks.push({
+          status: 'error',
+          code: 'runtime_config_invalid',
+          message: `Codex runtime configuration is invalid: ${getRuntimeConfigErrorMessage(error)}`,
+        });
+      }
+
       return checks;
     },
     prepareSession(ctx) {
@@ -225,7 +266,13 @@ export function createCodexProvider(): AgentProvider {
       };
     },
     serializeRuntimeInput(ctx) {
-      return createRuntimeInput(ctx);
+      const providerData = resolveCodexRuntimeConfig(
+        process.cwd(),
+        ctx.providerOptions,
+        process.env,
+      );
+
+      return createRuntimeInput(ctx, providerData);
     },
     finalizeSession(ctx) {
       const authSourceFile = getAuthSourceFile(ctx.preparedSession);
