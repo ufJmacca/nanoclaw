@@ -247,21 +247,23 @@ describe('container runner Codex provider compatibility', () => {
         groupsDir,
         fakeProc,
       );
-      spawnMock.mockImplementation((runtimeBin: string, runtimeArgs: string[]) => {
-        // Assert the compatibility artifacts are materialized before container start.
-        expect(runtimeBin).toBe('docker');
-        expect(fs.readFileSync(path.join(groupDir, 'AGENTS.md'), 'utf-8')).toBe(
-          '# Canonical Agent\n',
-        );
-        expect(fs.readFileSync(syncedSkillFile, 'utf-8')).toBe(
-          '# Runtime Compatibility Skill\n',
-        );
-        expect(fs.existsSync(providerSkillFile)).toBe(false);
-        expect(runtimeArgs).toContain(
-          `${providerStateDir}:/home/node/.codex`,
-        );
-        return fakeProc;
-      });
+      spawnMock.mockImplementation(
+        (runtimeBin: string, runtimeArgs: string[]) => {
+          // Assert the compatibility artifacts are materialized before container start.
+          expect(runtimeBin).toBe('docker');
+          expect(
+            fs.readFileSync(path.join(groupDir, 'AGENTS.md'), 'utf-8'),
+          ).toBe('# Canonical Agent\n');
+          expect(fs.readFileSync(syncedSkillFile, 'utf-8')).toBe(
+            '# Runtime Compatibility Skill\n',
+          );
+          expect(fs.existsSync(providerSkillFile)).toBe(false);
+          expect(runtimeArgs).toContain(
+            `${providerStateDir}:/home/node/.codex`,
+          );
+          return fakeProc;
+        },
+      );
 
       // Act
       const runPromise = runContainerAgent(
