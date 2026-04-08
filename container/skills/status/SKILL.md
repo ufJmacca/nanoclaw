@@ -7,9 +7,9 @@ description: Quick read-only health check — session context, workspace mounts,
 
 Generate a quick read-only status report of the current agent environment.
 
-These bundled container skills are Claude-only in NanoClaw v1. If the active provider is Codex, report bundled container skills, remote control, and agent teams as unsupported.
+These instructions describe a Claude-only slash-command skill in NanoClaw v1. If the active provider is Codex, do not offer `/status` from `container/skills/`; instead explain that Codex bundled provider skills come from `container/codex-skills/` synced into `.agents/skills/`, while remote control and agent teams remain unsupported.
 
-Claude-only in NanoClaw v1 means this skill should only produce a full report when the runtime has the Claude compatibility layer available.
+Claude-only slash-command skill in NanoClaw v1 means this skill should only produce a full report when the runtime has the Claude compatibility layer available.
 
 **Main-channel check:** Only the main channel has `/workspace/project` mounted. Run:
 

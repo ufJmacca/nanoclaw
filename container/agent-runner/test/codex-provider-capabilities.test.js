@@ -8,15 +8,21 @@ const codexProviderModuleUrl = pathToFileURL(
   path.join(packageRoot, 'dist', 'providers', 'codex.js'),
 ).href;
 
-test('built-in Codex provider keeps provider skills disabled until the launch gate flips', async () => {
+test('built-in Codex provider exposes launched capabilities without enabling remote control or agent teams', async () => {
   // Arrange
   const { codexProvider } = await import(
     `${codexProviderModuleUrl}?t=${Date.now()}-${Math.random()}`
   );
 
   // Act
-  const providerSkills = codexProvider.capabilities.providerSkills;
+  const capabilities = codexProvider.capabilities;
 
   // Assert
-  assert.equal(providerSkills, false);
+  assert.deepEqual(capabilities, {
+    persistentSessions: true,
+    projectMemory: true,
+    remoteControl: false,
+    agentTeams: false,
+    providerSkills: true,
+  });
 });

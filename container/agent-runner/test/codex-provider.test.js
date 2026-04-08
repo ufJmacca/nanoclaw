@@ -9,6 +9,9 @@ const packageRoot = path.resolve(import.meta.dirname, '..');
 const runnerModuleUrl = pathToFileURL(
   path.join(packageRoot, 'dist', 'index.js'),
 ).href;
+const codexProviderModuleUrl = pathToFileURL(
+  path.join(packageRoot, 'dist', 'providers', 'codex.js'),
+).href;
 const sharedTempRoot = fs.mkdtempSync(
   path.join(os.tmpdir(), 'nanoclaw-agent-runner-codex-'),
 );
@@ -39,6 +42,10 @@ async function collectOutputs(iterable) {
 
 async function loadRunnerModule() {
   return import(`${runnerModuleUrl}?t=${Date.now()}-${Math.random()}`);
+}
+
+async function loadCodexProviderModule() {
+  return import(`${codexProviderModuleUrl}?t=${Date.now()}-${Math.random()}`);
 }
 
 function writeFakeCodexBinary(scriptPath) {
@@ -143,6 +150,7 @@ test('built-in Codex provider starts a new conversation with AGENTS memory, glob
   process.env.NANOCLAW_CODEX_RESULT_TEXT = 'codex scheduled result';
 
   const { dispatchProviderInput } = await loadRunnerModule();
+  const { codexProvider } = await loadCodexProviderModule();
 
   // Act
   const outputs = await collectOutputs(
@@ -165,6 +173,13 @@ test('built-in Codex provider starts a new conversation with AGENTS memory, glob
   const record = JSON.parse(fs.readFileSync(sharedRecordPath, 'utf8'));
 
   // Assert
+  assert.deepEqual(codexProvider.capabilities, {
+    persistentSessions: true,
+    projectMemory: true,
+    remoteControl: false,
+    agentTeams: false,
+    providerSkills: true,
+  });
   assert.deepEqual(outputs, [
     {
       status: 'success',

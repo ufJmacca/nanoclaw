@@ -55,7 +55,7 @@ process.exit(status.status);
     }
   });
 
-  it('prepares Codex AGENTS memory, auth staging, workspace skill sync, and v1 capability flags', () => {
+  it('prepares Codex AGENTS memory, auth staging, workspace skill sync, and launched capability flags', () => {
     // Arrange
     const tempRoot = fs.mkdtempSync(
       path.join(os.tmpdir(), 'nanoclaw-codex-host-provider-'),
@@ -94,7 +94,7 @@ process.exit(status.status);
       projectMemory: true,
       remoteControl: false,
       agentTeams: false,
-      providerSkills: false,
+      providerSkills: true,
     });
     expect(preparedSession.providerStateDir).toBe(
       path.join(dataDir, 'sessions', 'test-group', 'codex'),

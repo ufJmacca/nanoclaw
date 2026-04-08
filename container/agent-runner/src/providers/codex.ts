@@ -261,7 +261,7 @@ export const codexProvider: ContainerAgentProvider = {
     projectMemory: true,
     remoteControl: false,
     agentTeams: false,
-    providerSkills: false,
+    providerSkills: true,
   },
   providerHomeDir: PROVIDER_HOME_DIR,
   prepareWorkspace() {

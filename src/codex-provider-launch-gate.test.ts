@@ -89,7 +89,7 @@ function extractVersion(versionArtifact: string): string {
 }
 
 describe('Codex provider launch gate', () => {
-  it('records the raw smoke artifacts proving real Codex skill discovery before any providerSkills flip', () => {
+  it('records the raw smoke artifacts proving real Codex skill discovery for the providerSkills launch', () => {
     // Arrange
     const transcriptPath = artifactPath('smoke-test-transcript.md');
     const containerOutputPath = artifactPath('smoke', 'container-output.log');
@@ -184,7 +184,7 @@ describe('Codex provider launch gate', () => {
       'CPS03_SKILL_CONFIRMED',
       'Attachable reviewer bundle intentionally excludes credential-bearing `auth.json` cache snapshots.',
       'Reviewer launch decision:',
-      'keep `providerSkills: false`',
+      'set `providerSkills: true` in both the host and container Codex capability surfaces.',
     ];
 
     // Assert
