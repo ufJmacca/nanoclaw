@@ -208,7 +208,8 @@ describe('provider documentation audit', () => {
           '# Optional built-in Codex runtime tuning. Leave these commented to keep the',
           '# bundled provider defaults.',
           '# CODEX_MODEL=gpt-5-codex',
-          '# CODEX_REASONING_EFFORT=high # low | medium | high | xhigh',
+          '# CODEX_REASONING_EFFORT=high',
+          '# Allowed values: low | medium | high | xhigh',
         ],
         forbiddenPatterns: [
           /^CODEX_MODEL=.*$/mu,
