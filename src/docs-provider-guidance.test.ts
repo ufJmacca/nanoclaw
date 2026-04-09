@@ -199,6 +199,51 @@ describe('provider documentation audit', () => {
     expect(files).toHaveLength(5);
   });
 
+  it('documents Codex runtime tuning defaults, validation, and precedence', () => {
+    // Arrange
+    const files = [
+      {
+        filePath: ['.env.example'],
+        requiredSnippets: [
+          '# Optional built-in Codex runtime tuning. Leave these commented to keep the',
+          '# bundled provider defaults.',
+          '# CODEX_MODEL=gpt-5-codex',
+          '# CODEX_REASONING_EFFORT=high',
+          '# Allowed values: low | medium | high | xhigh',
+        ],
+        forbiddenPatterns: [
+          /^CODEX_MODEL=.*$/mu,
+          /^CODEX_REASONING_EFFORT=.*$/mu,
+        ],
+      },
+      {
+        filePath: ['README.md'],
+        requiredSnippets: [
+          'Optional built-in `codex` runtime defaults can be set in `.env` with `CODEX_MODEL` and `CODEX_REASONING_EFFORT`.',
+          '`CODEX_REASONING_EFFORT` accepts `low`, `medium`, `high`, or `xhigh`.',
+          'Per-group `providerOptions` override project-wide Codex `.env` defaults.',
+        ],
+      },
+      {
+        filePath: ['docs', 'SPEC.md'],
+        requiredSnippets: [
+          'NanoClaw expects a file-backed ChatGPT login cache at `~/.codex/auth.json` by default',
+          '`CODEX_MODEL` and `CODEX_REASONING_EFFORT` are optional project-level defaults for the built-in `codex` provider.',
+          'Allowed `CODEX_REASONING_EFFORT` values: `low`, `medium`, `high`, `xhigh`.',
+          'Per-group `providerOptions` override project-level Codex `.env` defaults.',
+        ],
+      },
+    ];
+
+    // Act
+    for (const file of files) {
+      expectFileToMatchAudit(file);
+    }
+
+    // Assert
+    expect(files).toHaveLength(3);
+  });
+
   it('rejects stale Claude-era claims outside explicit migration allowlists', () => {
     // Arrange
     const files: AuditCase[] = [

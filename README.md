@@ -84,6 +84,16 @@ NanoClaw's core runtime chooses a provider per group. Session state is isolated 
 
 Bundled `container/skills/` container skills and agent teams are Claude-only in NanoClaw v1. Codex syncs bundled provider skills from `container/codex-skills/` into each group workspace at `.agents/skills/`, while remote control and agent teams remain unsupported.
 
+Optional built-in `codex` runtime defaults can be set in `.env` with `CODEX_MODEL` and `CODEX_REASONING_EFFORT`.
+
+```bash
+# Optional: keep commented to preserve the bundled Codex defaults
+CODEX_MODEL=gpt-5-codex
+CODEX_REASONING_EFFORT=high
+```
+
+`CODEX_REASONING_EFFORT` accepts `low`, `medium`, `high`, or `xhigh`. Per-group `providerOptions` override project-wide Codex `.env` defaults. The built-in `codex` provider still authenticates through `codex login`, with `CODEX_AUTH_FILE` available as an optional auth-cache override.
+
 ## Usage
 
 Talk to your assistant with the trigger word (default: `@Andy`):

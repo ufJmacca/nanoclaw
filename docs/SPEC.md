@@ -403,7 +403,13 @@ ANTHROPIC_API_KEY=sk-ant-api03-...
 ```bash
 # Optional override if your auth cache lives somewhere else:
 CODEX_AUTH_FILE=/absolute/path/to/auth.json
+
+# Optional runtime defaults for the built-in codex provider:
+CODEX_MODEL=gpt-5-codex
+CODEX_REASONING_EFFORT=high
 ```
+
+`CODEX_MODEL` and `CODEX_REASONING_EFFORT` are optional project-level defaults for the built-in `codex` provider. Allowed `CODEX_REASONING_EFFORT` values: `low`, `medium`, `high`, `xhigh`. Per-group `providerOptions` override project-level Codex `.env` defaults.
 
 Run `codex login` or `codex login --device-auth` in the same environment where NanoClaw runs. NanoClaw expects a file-backed ChatGPT login cache at `~/.codex/auth.json` by default, and does not use `OPENAI_API_KEY` or `CODEX_API_KEY` for the built-in Codex provider.
 
