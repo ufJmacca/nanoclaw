@@ -48,6 +48,51 @@ async function loadCodexProviderModule() {
   return import(`${codexProviderModuleUrl}?t=${Date.now()}-${Math.random()}`);
 }
 
+function expectedCodexConfig({
+  model,
+  reasoningEffort,
+  instructionsPath,
+  isMain = false,
+  chatJid = 'codex@g.us',
+  groupFolder = 'codex-group',
+  mcpServerPath = '/app/dist/ipc-mcp-stdio.js',
+}) {
+  const lines = [
+    'forced_login_method = "chatgpt"',
+    'cli_auth_credentials_store = "file"',
+  ];
+
+  if (model) {
+    lines.push(`model = ${JSON.stringify(model)}`);
+  }
+
+  if (reasoningEffort) {
+    lines.push(
+      `model_reasoning_effort = ${JSON.stringify(reasoningEffort)}`,
+    );
+  }
+
+  lines.push('');
+
+  if (instructionsPath) {
+    lines.push(
+      `model_instructions_file = ${JSON.stringify(instructionsPath)}`,
+    );
+    lines.push('');
+  }
+
+  lines.push('[mcp_servers.nanoclaw]');
+  lines.push(`command = ${JSON.stringify('node')}`);
+  lines.push(`args = [${JSON.stringify(mcpServerPath)}]`);
+  lines.push('');
+  lines.push('[mcp_servers.nanoclaw.env]');
+  lines.push(`NANOCLAW_CHAT_JID = ${JSON.stringify(chatJid)}`);
+  lines.push(`NANOCLAW_GROUP_FOLDER = ${JSON.stringify(groupFolder)}`);
+  lines.push(`NANOCLAW_IS_MAIN = ${JSON.stringify(isMain ? '1' : '0')}`);
+
+  return `${lines.join('\n')}\n`;
+}
+
 function writeFakeCodexBinary(scriptPath) {
   fs.writeFileSync(
     scriptPath,
@@ -163,6 +208,10 @@ test('built-in Codex provider starts a new conversation with AGENTS memory, glob
           chatJid: 'codex@g.us',
           isMain: false,
           isScheduledTask: true,
+          providerData: {
+            model: 'gpt-5-codex',
+            reasoningEffort: 'high',
+          },
         },
       },
       {
@@ -193,34 +242,23 @@ test('built-in Codex provider starts a new conversation with AGENTS memory, glob
     record.groupAgents,
     '# Group Memory\nUse the group instructions.\n',
   );
-  assert.deepEqual(record.argv.slice(0, 6), [
+  assert.deepEqual(record.argv, [
     'exec',
     '--json',
     '--skip-git-repo-check',
     '--dangerously-bypass-approvals-and-sandbox',
     '--add-dir',
     sharedGlobalDir,
+    '[SCHEDULED TASK - The following message was sent automatically and is not coming directly from the user or group.]\n\nRun the scheduled task.',
   ]);
-  assert.match(
-    record.argv.at(-1),
-    /^\[SCHEDULED TASK - The following message was sent automatically and is not coming directly from the user or group\.\]\n\nRun the scheduled task\.$/,
-  );
-  assert.match(
+  assert.equal(
     record.config,
-    new RegExp(
-      `model_instructions_file = ${JSON.stringify(
-        path.join(sharedGlobalDir, 'AGENT.md'),
-      ).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`,
-    ),
+    expectedCodexConfig({
+      model: 'gpt-5-codex',
+      reasoningEffort: 'high',
+      instructionsPath: path.join(sharedGlobalDir, 'AGENT.md'),
+    }),
   );
-  assert.match(record.config, /forced_login_method = "chatgpt"/);
-  assert.match(record.config, /cli_auth_credentials_store = "file"/);
-  assert.match(record.config, /\[mcp_servers\.nanoclaw\]/);
-  assert.match(record.config, /command = "node"/);
-  assert.match(record.config, /args = \["\/app\/dist\/ipc-mcp-stdio\.js"\]/);
-  assert.match(record.config, /NANOCLAW_CHAT_JID = "codex@g\.us"/);
-  assert.match(record.config, /NANOCLAW_GROUP_FOLDER = "codex-group"/);
-  assert.match(record.config, /NANOCLAW_IS_MAIN = "0"/);
 });
 
 test('built-in Codex provider resumes an existing conversation with the same dispatcher path', async () => {
@@ -244,6 +282,10 @@ test('built-in Codex provider resumes an existing conversation with the same dis
           groupFolder: 'codex-group',
           chatJid: 'codex@g.us',
           isMain: true,
+          providerData: {
+            model: 'gpt-5-codex-resume',
+            reasoningEffort: 'medium',
+          },
         },
       },
       {
@@ -261,18 +303,105 @@ test('built-in Codex provider resumes an existing conversation with the same dis
       newSessionId: 'codex-session-existing',
     },
   ]);
-  assert.deepEqual(record.argv.slice(0, 5), [
+  assert.deepEqual(record.argv, [
     'exec',
     'resume',
     '--json',
     '--skip-git-repo-check',
     '--dangerously-bypass-approvals-and-sandbox',
+    'codex-session-existing',
+    'Continue the existing task.',
   ]);
-  assert.equal(record.argv.at(-2), 'codex-session-existing');
-  assert.equal(record.argv.at(-1), 'Continue the existing task.');
-  assert.equal(record.config.includes('model_instructions_file'), false);
-  assert.match(record.config, /forced_login_method = "chatgpt"/);
-  assert.match(record.config, /cli_auth_credentials_store = "file"/);
+  assert.equal(
+    record.config,
+    expectedCodexConfig({
+      model: 'gpt-5-codex-resume',
+      reasoningEffort: 'medium',
+      isMain: true,
+    }),
+  );
+});
+
+test('built-in Codex provider keeps the default config byte-for-byte unchanged when canonical runtime data is absent', async () => {
+  // Arrange
+  resetFixture({
+    groupAgents: '# Group Memory\n',
+  });
+  process.env.NANOCLAW_CODEX_RESULT_TEXT = 'codex default result';
+
+  const { dispatchProviderInput } = await loadRunnerModule();
+
+  // Act
+  const outputs = await collectOutputs(
+    dispatchProviderInput(
+      {
+        providerId: 'codex',
+        runtimeInput: {
+          prompt: 'Use the default config.',
+          groupFolder: 'codex-group',
+          chatJid: 'codex@g.us',
+          isMain: true,
+          providerData: {
+            profile: 'legacy-model-should-be-ignored',
+            reasoning: 'high',
+          },
+        },
+      },
+      {
+        mcpServerPath: '/app/dist/ipc-mcp-stdio.js',
+      },
+    ),
+  );
+  const record = JSON.parse(fs.readFileSync(sharedRecordPath, 'utf8'));
+
+  // Assert
+  assert.deepEqual(outputs, [
+    {
+      status: 'success',
+      result: 'codex default result',
+      newSessionId: undefined,
+    },
+  ]);
+  assert.equal(record.config, expectedCodexConfig({ isMain: true }));
+});
+
+test('built-in Codex provider rejects malformed canonical reasoning data before writing config.toml', async () => {
+  // Arrange
+  resetFixture({
+    groupAgents: '# Group Memory\n',
+  });
+  const configPath = path.join(sharedCodexHomeDir, 'config.toml');
+  const { dispatchProviderInput } = await loadRunnerModule();
+
+  // Act
+  const outputsPromise = collectOutputs(
+    dispatchProviderInput(
+      {
+        providerId: 'codex',
+        runtimeInput: {
+          prompt: 'Reject invalid runtime data.',
+          groupFolder: 'codex-group',
+          chatJid: 'codex@g.us',
+          isMain: true,
+          providerData: {
+            model: 'gpt-5-codex',
+            reasoningEffort: 'turbo',
+          },
+        },
+      },
+      {
+        mcpServerPath: '/app/dist/ipc-mcp-stdio.js',
+      },
+    ),
+  );
+
+  // Assert
+  await assert.rejects(
+    outputsPromise,
+    /Invalid Codex reasoning effort "turbo"\. Expected one of: low, medium, high, xhigh\./,
+  );
+  assert.equal(fs.existsSync(configPath), false);
+  assert.equal(fs.existsSync(sharedRecordPath), false);
 });
 
 test('built-in Codex provider emits only the completed agent message when Codex streams updates first', async () => {

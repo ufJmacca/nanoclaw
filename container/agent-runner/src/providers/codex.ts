@@ -19,9 +19,97 @@ const CODEX_BIN = process.env.NANOCLAW_CODEX_BIN || 'codex';
 const CODEX_CONFIG_FILE = 'config.toml';
 const SCHEDULED_TASK_PREFIX =
   '[SCHEDULED TASK - The following message was sent automatically and is not coming directly from the user or group.]\n\n';
+const CODEX_REASONING_EFFORTS = [
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+] as const;
+
+type CodexReasoningEffort = (typeof CODEX_REASONING_EFFORTS)[number];
+
+interface CodexRuntimeConfig {
+  model?: string;
+  reasoningEffort?: CodexReasoningEffort;
+}
 
 function tomlString(value: string): string {
   return JSON.stringify(value);
+}
+
+function parseCodexRuntimeConfig(
+  providerData: ProviderRuntimeInput['providerData'],
+): CodexRuntimeConfig | undefined {
+  if (!providerData || typeof providerData !== 'object') {
+    return undefined;
+  }
+
+  const model = parseConfiguredModel(providerData.model);
+  const reasoningEffort = parseReasoningEffort(
+    providerData.reasoningEffort,
+  );
+
+  if (!model && !reasoningEffort) {
+    return undefined;
+  }
+
+  const runtimeConfig: CodexRuntimeConfig = {};
+
+  if (model) {
+    runtimeConfig.model = model;
+  }
+
+  if (reasoningEffort) {
+    runtimeConfig.reasoningEffort = reasoningEffort;
+  }
+
+  return runtimeConfig;
+}
+
+function parseConfiguredModel(value: unknown): string | undefined {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+
+  const trimmedValue = value.trim();
+  return trimmedValue.length > 0 ? trimmedValue : undefined;
+}
+
+function parseReasoningEffort(
+  value: unknown,
+): CodexReasoningEffort | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+
+  if (typeof value !== 'string') {
+    throw invalidReasoningEffortError(value);
+  }
+
+  const trimmedValue = value.trim();
+  if (trimmedValue.length === 0) {
+    return undefined;
+  }
+
+  if (isCodexReasoningEffort(trimmedValue)) {
+    return trimmedValue;
+  }
+
+  throw invalidReasoningEffortError(value);
+}
+
+function isCodexReasoningEffort(
+  value: string,
+): value is CodexReasoningEffort {
+  return CODEX_REASONING_EFFORTS.includes(value as CodexReasoningEffort);
+}
+
+function invalidReasoningEffortError(value: unknown): Error {
+  return new Error(
+    `Invalid Codex reasoning effort "${String(
+      value,
+    )}". Expected one of: ${CODEX_REASONING_EFFORTS.join(', ')}.`,
+  );
 }
 
 function globalMemoryPath(): string | null {
@@ -44,9 +132,23 @@ function buildCodexConfig(
 ): string {
   const lines: string[] = [];
   const instructionsPath = input.isMain ? null : globalMemoryPath();
+  const runtimeConfig = parseCodexRuntimeConfig(input.providerData);
 
   lines.push('forced_login_method = "chatgpt"');
   lines.push('cli_auth_credentials_store = "file"');
+
+  if (runtimeConfig?.model) {
+    lines.push(`model = ${tomlString(runtimeConfig.model)}`);
+  }
+
+  if (runtimeConfig?.reasoningEffort) {
+    lines.push(
+      `model_reasoning_effort = ${tomlString(
+        runtimeConfig.reasoningEffort,
+      )}`,
+    );
+  }
+
   lines.push('');
 
   if (instructionsPath) {
