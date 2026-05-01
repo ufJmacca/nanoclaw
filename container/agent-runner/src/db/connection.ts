@@ -26,23 +26,26 @@ const DEFAULT_HEARTBEAT_PATH = '/workspace/.heartbeat';
 
 let _inbound: Database | null = null;
 let _outbound: Database | null = null;
+let _inboundPath: string = DEFAULT_INBOUND_PATH;
+let _outboundPath: string = DEFAULT_OUTBOUND_PATH;
 let _heartbeatPath: string = DEFAULT_HEARTBEAT_PATH;
+let _testSessionDir: string | null = null;
 
 /**
- * Avoid all cached db reads; open inbound.db read-only with mmap and page cache disabled. 
- * 
+ * Avoid all cached db reads; open inbound.db read-only with mmap and page cache disabled.
+ *
  * Use this (not getInboundDb) for readers that need to see host-written rows
  * promptly — e.g. messages_in polling. Caller must .close() the returned
  * connection (try/finally).
  *
  * Needed for mounts where host writes don't reliably invalidate
  * SQLite's caches: virtiofs (Colima, Lima, Podman Machine, Apple
- * Container), NFS. 
- * 
+ * Container), NFS.
+ *
  * Cost is microseconds per query, so safe for universal use.
  */
 export function openInboundDb(): Database {
-  const db = new Database(DEFAULT_INBOUND_PATH, { readonly: true });
+  const db = new Database(_inboundPath, { readonly: true });
   db.exec('PRAGMA busy_timeout = 5000');
   db.exec('PRAGMA mmap_size = 0');
   return db;
@@ -56,7 +59,7 @@ export function openInboundDb(): Database {
  */
 export function getInboundDb(): Database {
   if (!_inbound) {
-    _inbound = new Database(DEFAULT_INBOUND_PATH, { readonly: true });
+    _inbound = new Database(_inboundPath, { readonly: _testSessionDir === null });
     _inbound.exec('PRAGMA busy_timeout = 5000');
     _inbound.exec('PRAGMA mmap_size = 0');
   }
@@ -66,7 +69,7 @@ export function getInboundDb(): Database {
 /** Outbound DB — container owns this file (sole writer). */
 export function getOutboundDb(): Database {
   if (!_outbound) {
-    _outbound = new Database(DEFAULT_OUTBOUND_PATH);
+    _outbound = new Database(_outboundPath);
     _outbound.exec('PRAGMA journal_mode = DELETE');
     _outbound.exec('PRAGMA busy_timeout = 5000');
     _outbound.exec('PRAGMA foreign_keys = ON');
@@ -168,9 +171,16 @@ export function clearStaleProcessingAcks(): void {
   getOutboundDb().prepare("DELETE FROM processing_ack WHERE status = 'processing'").run();
 }
 
-/** For tests — creates in-memory DBs with the session schemas. */
+/** For tests — creates temporary file-backed DBs with the session schemas. */
 export function initTestSessionDb(): { inbound: Database; outbound: Database } {
-  _inbound = new Database(':memory:');
+  closeSessionDb();
+
+  _testSessionDir = fs.mkdtempSync('/tmp/nanoclaw-agent-runner-');
+  _inboundPath = `${_testSessionDir}/inbound.db`;
+  _outboundPath = `${_testSessionDir}/outbound.db`;
+  _heartbeatPath = `${_testSessionDir}/.heartbeat`;
+
+  _inbound = new Database(_inboundPath);
   _inbound.exec('PRAGMA foreign_keys = ON');
   _inbound.exec(`
     CREATE TABLE messages_in (
@@ -205,7 +215,7 @@ export function initTestSessionDb(): { inbound: Database; outbound: Database } {
     );
   `);
 
-  _outbound = new Database(':memory:');
+  _outbound = new Database(_outboundPath);
   _outbound.exec('PRAGMA foreign_keys = ON');
   _outbound.exec(`
     CREATE TABLE messages_out (
@@ -248,6 +258,19 @@ export function closeSessionDb(): void {
   _inbound = null;
   _outbound?.close();
   _outbound = null;
+
+  if (_testSessionDir) {
+    try {
+      fs.rmSync(_testSessionDir, { recursive: true, force: true });
+    } catch {
+      // Best effort cleanup for tests.
+    }
+  }
+
+  _testSessionDir = null;
+  _inboundPath = DEFAULT_INBOUND_PATH;
+  _outboundPath = DEFAULT_OUTBOUND_PATH;
+  _heartbeatPath = DEFAULT_HEARTBEAT_PATH;
 }
 
 /**
