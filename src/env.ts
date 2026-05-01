@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import { logger } from './logger.js';
+import { log } from './log.js';
 
 /**
  * Parse the .env file and return values for the requested keys.
@@ -14,33 +14,10 @@ export function readEnvFile(keys: string[]): Record<string, string> {
   try {
     content = fs.readFileSync(envFile, 'utf-8');
   } catch (err) {
-    logger.debug({ err }, '.env file not found, using defaults');
+    log.debug('.env file not found, using defaults', { err });
     return {};
   }
 
-  return parseEnvContent(content, keys);
-}
-
-export function readEnvFileAt(
-  rootDir: string,
-  keys: string[],
-): Record<string, string> {
-  const envFile = path.join(rootDir, '.env');
-  let content: string;
-  try {
-    content = fs.readFileSync(envFile, 'utf-8');
-  } catch (err) {
-    logger.debug({ err }, '.env file not found, using defaults');
-    return {};
-  }
-
-  return parseEnvContent(content, keys);
-}
-
-function parseEnvContent(
-  content: string,
-  keys: string[],
-): Record<string, string> {
   const result: Record<string, string> = {};
   const wanted = new Set(keys);
 
@@ -54,8 +31,7 @@ function parseEnvContent(
     let value = trimmed.slice(eqIdx + 1).trim();
     if (
       value.length >= 2 &&
-      ((value.startsWith('"') && value.endsWith('"')) ||
-        (value.startsWith("'") && value.endsWith("'")))
+      ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'")))
     ) {
       value = value.slice(1, -1);
     }

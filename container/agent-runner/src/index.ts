@@ -1,339 +1,107 @@
 /**
- * NanoClaw Agent Runner
- * Runs inside a container, receives config via stdin, outputs result to stdout.
+ * NanoClaw Agent Runner v2
+ *
+ * Runs inside a container. All IO goes through the session DB.
+ * No stdin, no stdout markers, no IPC files.
+ *
+ * Config is read from /workspace/agent/container.json (mounted RO).
+ * Only TZ and OneCLI networking vars come from env.
+ *
+ * Mount structure:
+ *   /workspace/
+ *     inbound.db        ← host-owned session DB (container reads only)
+ *     outbound.db       ← container-owned session DB
+ *     .heartbeat        ← container touches for liveness detection
+ *     outbox/           ← outbound files
+ *     agent/            ← agent group folder (CLAUDE.md, container.json, working files)
+ *       container.json  ← per-group config (RO nested mount)
+ *     global/           ← shared global memory (RO)
+ *   /app/src/           ← shared agent-runner source (RO)
+ *   /app/skills/        ← shared skills (RO)
+ *   /home/node/.claude/ ← Claude SDK state + skill symlinks (RW)
  */
 
-import { execFile } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
-import { createContainerProviderRegistry } from './providers/index.js';
-import type {
-  ContainerAgentProvider,
-  ContainerInput,
-  ContainerOutput,
-  ProviderRuntimeInput,
-} from './provider-types.js';
+import { loadConfig } from './config.js';
+import { buildSystemPromptAddendum } from './destinations.js';
+// Providers barrel — each enabled provider self-registers on import.
+// Provider skills append imports to providers/index.ts.
+import './providers/index.js';
+import { createProvider, type ProviderName } from './providers/factory.js';
+import { runPollLoop } from './poll-loop.js';
 
-const WORKSPACE_ROOT = process.env.NANOCLAW_WORKSPACE_ROOT || '/workspace';
-const GROUP_DIR = path.join(WORKSPACE_ROOT, 'group');
-const GLOBAL_DIR = path.join(WORKSPACE_ROOT, 'global');
-const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
-const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
-const SCRIPT_TIMEOUT_MS = 30_000;
-
-interface ScriptResult {
-  wakeAgent: boolean;
-  data?: unknown;
+function log(msg: string): void {
+  console.error(`[agent-runner] ${msg}`);
 }
 
-interface DispatchOptions {
-  providers?: Iterable<ContainerAgentProvider>;
-  mcpServerPath?: string;
-}
+const CWD = '/workspace/agent';
 
-async function readStdin(): Promise<string> {
-  return new Promise((resolve, reject) => {
-    let data = '';
-    process.stdin.setEncoding('utf8');
-    process.stdin.on('data', (chunk) => {
-      data += chunk;
-    });
-    process.stdin.on('end', () => resolve(data));
-    process.stdin.on('error', reject);
-  });
-}
+async function main(): Promise<void> {
+  const config = loadConfig();
+  const providerName = config.provider.toLowerCase() as ProviderName;
 
-function writeOutput(output: ContainerOutput): void {
-  console.log(OUTPUT_START_MARKER);
-  console.log(JSON.stringify(output));
-  console.log(OUTPUT_END_MARKER);
-}
+  log(`Starting v2 agent-runner (provider: ${providerName})`);
 
-function log(message: string): void {
-  console.error(`[agent-runner] ${message}`);
-}
+  // Runtime-generated system-prompt addendum: agent identity (name) plus
+  // the live destinations map. Everything else (capabilities, per-module
+  // instructions, per-channel formatting) is loaded by Claude Code from
+  // /workspace/agent/CLAUDE.md — the composed entry imports the shared
+  // base (/app/CLAUDE.md) and each enabled module's fragment. Per-group
+  // memory lives in /workspace/agent/CLAUDE.local.md (auto-loaded).
+  const instructions = buildSystemPromptAddendum(config.assistantName || undefined);
 
-function isPathWithinRoot(root: string, candidate: string): boolean {
-  const relativePath = path.relative(root, candidate);
-  return !relativePath.startsWith('..') && !path.isAbsolute(relativePath);
-}
-
-function ensurePathWithinRoots(
-  roots: string[],
-  candidate: string,
-  errorMessage: string,
-): string {
-  const resolvedPath = path.resolve(candidate);
-
-  for (const root of roots) {
-    if (isPathWithinRoot(root, resolvedPath)) {
-      return resolvedPath;
+  // Discover additional directories mounted at /workspace/extra/*
+  const additionalDirectories: string[] = [];
+  const extraBase = '/workspace/extra';
+  if (fs.existsSync(extraBase)) {
+    for (const entry of fs.readdirSync(extraBase)) {
+      const fullPath = path.join(extraBase, entry);
+      if (fs.statSync(fullPath).isDirectory()) {
+        additionalDirectories.push(fullPath);
+      }
+    }
+    if (additionalDirectories.length > 0) {
+      log(`Additional directories: ${additionalDirectories.join(', ')}`);
     }
   }
 
-  throw new Error(errorMessage);
-}
-
-function materializeWorkspaceFiles(
-  providerId: string,
-  allowedRoots: string[],
-  files: Array<{
-    sourcePath?: string;
-    targetPath: string;
-    content?: string;
-  }>,
-): void {
-  for (const file of files) {
-    const targetPath = ensurePathWithinRoots(
-      allowedRoots,
-      file.targetPath,
-      `Provider "${providerId}" tried to write outside the mounted workspace`,
-    );
-    fs.mkdirSync(path.dirname(targetPath), { recursive: true });
-
-    if (file.content != null) {
-      fs.writeFileSync(targetPath, file.content);
-      continue;
-    }
-
-    if (!file.sourcePath) {
-      continue;
-    }
-
-    const sourcePath = ensurePathWithinRoots(
-      allowedRoots,
-      file.sourcePath,
-      `Provider "${providerId}" tried to read outside the mounted workspace`,
-    );
-
-    if (!fs.existsSync(sourcePath)) {
-      continue;
-    }
-
-    fs.copyFileSync(sourcePath, targetPath);
-  }
-}
-
-function defaultMcpServerPath(): string {
+  // MCP server path — bun runs TS directly; no tsc build step in-image.
   const __dirname = path.dirname(fileURLToPath(import.meta.url));
-  return path.join(__dirname, 'ipc-mcp-stdio.js');
-}
+  const mcpServerPath = path.join(__dirname, 'mcp-tools', 'index.ts');
 
-export async function* dispatchProviderInput(
-  containerInput: ContainerInput,
-  options: DispatchOptions = {},
-): AsyncGenerator<ContainerOutput> {
-  const registry = createContainerProviderRegistry(options.providers);
-  const provider = registry.getProvider(containerInput.providerId);
-  const workspaceDir = GROUP_DIR;
-  const globalMemoryDir = containerInput.runtimeInput.isMain
-    ? undefined
-    : GLOBAL_DIR;
-  const preparedWorkspace = await provider.prepareWorkspace({
-    providerHomeDir: provider.providerHomeDir,
-    workspaceDir,
-    globalMemoryDir,
-    sessionId: containerInput.runtimeInput.sessionId,
-    runtimeInput: containerInput.runtimeInput,
-  });
-
-  materializeWorkspaceFiles(
-    provider.id,
-    [
-      workspaceDir,
-      provider.providerHomeDir,
-      ...(globalMemoryDir ? [globalMemoryDir] : []),
-    ],
-    preparedWorkspace.files,
-  );
-
-  let sessionId = containerInput.runtimeInput.sessionId;
-  const abortController = new AbortController();
-  const eventStream = await provider.run({
-    input: containerInput.runtimeInput,
-    abortSignal: abortController.signal,
-    mcpServerPath: options.mcpServerPath || defaultMcpServerPath(),
-    preparedWorkspace,
-  });
-
-  for await (const event of eventStream) {
-    switch (event.type) {
-      case 'session_started':
-        sessionId = event.sessionId;
-        break;
-      case 'result':
-        yield {
-          status: 'success',
-          result: event.text,
-          newSessionId: sessionId,
-        };
-        break;
-      case 'error':
-        yield {
-          status: 'error',
-          result: null,
-          newSessionId: sessionId,
-          error: event.message,
-        };
-        break;
-      case 'warning':
-        log(`Provider warning (${provider.id}): ${event.message}`);
-        break;
-      case 'provider_state':
-        log(`Provider state (${provider.id}): ${JSON.stringify(event.state)}`);
-        break;
-    }
-  }
-}
-
-async function runScript(script: string): Promise<ScriptResult | null> {
-  const scriptPath = '/tmp/task-script.sh';
-  fs.writeFileSync(scriptPath, script, { mode: 0o755 });
-
-  return new Promise((resolve) => {
-    execFile(
-      'bash',
-      [scriptPath],
-      {
-        timeout: SCRIPT_TIMEOUT_MS,
-        maxBuffer: 1024 * 1024,
-        env: process.env,
-      },
-      (error, stdout, stderr) => {
-        if (stderr) {
-          log(`Script stderr: ${stderr.slice(0, 500)}`);
-        }
-
-        if (error) {
-          log(`Script error: ${error.message}`);
-          resolve(null);
-          return;
-        }
-
-        const lines = stdout.trim().split('\n');
-        const lastLine = lines[lines.length - 1];
-        if (!lastLine) {
-          log('Script produced no output');
-          resolve(null);
-          return;
-        }
-
-        try {
-          const result = JSON.parse(lastLine);
-          if (typeof result.wakeAgent !== 'boolean') {
-            log(
-              `Script output missing wakeAgent boolean: ${lastLine.slice(0, 200)}`,
-            );
-            resolve(null);
-            return;
-          }
-          resolve(result as ScriptResult);
-        } catch {
-          log(`Script output is not valid JSON: ${lastLine.slice(0, 200)}`);
-          resolve(null);
-        }
-      },
-    );
-  });
-}
-
-function prepareRuntimeInput(
-  runtimeInput: ProviderRuntimeInput,
-  scriptResult: ScriptResult | null,
-): ProviderRuntimeInput | null {
-  const nextRuntimeInput: ProviderRuntimeInput = {
-    ...runtimeInput,
+  // Build MCP servers config: nanoclaw built-in + any from container.json
+  const mcpServers: Record<string, { command: string; args: string[]; env: Record<string, string> }> = {
+    nanoclaw: {
+      command: 'bun',
+      args: ['run', mcpServerPath],
+      env: {},
+    },
   };
 
-  if (!runtimeInput.script || !runtimeInput.isScheduledTask) {
-    return nextRuntimeInput;
+  for (const [name, serverConfig] of Object.entries(config.mcpServers)) {
+    mcpServers[name] = serverConfig;
+    log(`Additional MCP server: ${name} (${serverConfig.command})`);
   }
 
-  if (!scriptResult || !scriptResult.wakeAgent) {
-    const reason = scriptResult ? 'wakeAgent=false' : 'script error/no output';
-    log(`Script decided not to wake agent: ${reason}`);
-    return null;
-  }
+  const provider = createProvider(providerName, {
+    assistantName: config.assistantName || undefined,
+    mcpServers,
+    env: { ...process.env },
+    additionalDirectories: additionalDirectories.length > 0 ? additionalDirectories : undefined,
+  });
 
-  log('Script wakeAgent=true, enriching prompt with data');
-  nextRuntimeInput.prompt =
-    `[SCHEDULED TASK]\n\nScript output:\n${JSON.stringify(scriptResult.data, null, 2)}\n\nInstructions:\n` +
-    runtimeInput.prompt;
-  return nextRuntimeInput;
+  await runPollLoop({
+    provider,
+    providerName,
+    cwd: CWD,
+    systemContext: { instructions },
+  });
 }
 
-export async function main(): Promise<void> {
-  let containerInput: ContainerInput;
-
-  try {
-    const stdinData = await readStdin();
-    containerInput = JSON.parse(stdinData);
-    try {
-      fs.unlinkSync('/tmp/input.json');
-    } catch {
-      /* ignore */
-    }
-    log(`Received input for provider: ${containerInput.providerId}`);
-  } catch (error) {
-    writeOutput({
-      status: 'error',
-      result: null,
-      error: `Failed to parse input: ${error instanceof Error ? error.message : String(error)}`,
-    });
-    process.exit(1);
-    return;
-  }
-
-  try {
-    const scriptResult = await runScriptIfNeeded(containerInput.runtimeInput);
-    const preparedRuntimeInput = prepareRuntimeInput(
-      containerInput.runtimeInput,
-      scriptResult,
-    );
-
-    if (!preparedRuntimeInput) {
-      writeOutput({
-        status: 'success',
-        result: null,
-      });
-      return;
-    }
-
-    for await (const output of dispatchProviderInput({
-      providerId: containerInput.providerId,
-      runtimeInput: preparedRuntimeInput,
-    })) {
-      writeOutput(output);
-    }
-  } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    log(`Agent error: ${errorMessage}`);
-    writeOutput({
-      status: 'error',
-      result: null,
-      newSessionId: containerInput.runtimeInput.sessionId,
-      error: errorMessage,
-    });
-    process.exit(1);
-  }
-}
-
-async function runScriptIfNeeded(
-  runtimeInput: ProviderRuntimeInput,
-): Promise<ScriptResult | null> {
-  if (!runtimeInput.script || !runtimeInput.isScheduledTask) {
-    return null;
-  }
-
-  log('Running task script...');
-  return runScript(runtimeInput.script);
-}
-
-const currentFilePath = fileURLToPath(import.meta.url);
-const invokedPath = process.argv[1] ? path.resolve(process.argv[1]) : null;
-
-if (invokedPath === currentFilePath) {
-  void main();
-}
+main().catch((err) => {
+  log(`Fatal error: ${err instanceof Error ? err.message : String(err)}`);
+  process.exit(1);
+});
