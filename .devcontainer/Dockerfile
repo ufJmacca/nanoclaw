@@ -7,7 +7,8 @@ ENV UV_LINK_MODE=copy
 ENV CODEX_HOME=/home/vscode/.codex
 ENV NPM_CONFIG_CACHE=/home/vscode/.npm
 ENV UV_INSTALL_DIR=/usr/local/bin
-ENV PATH=/home/vscode/.local/bin:${PATH}
+ENV BUN_INSTALL=/usr/local/bun
+ENV PATH=/home/vscode/.local/bin:/usr/local/bun/bin:${PATH}
 
 COPY --from=docker_cli /usr/local/bin/docker /usr/local/bin/docker-real
 COPY --from=docker_cli /usr/local/libexec/docker/cli-plugins/ /usr/local/libexec/docker/cli-plugins/
@@ -27,10 +28,14 @@ RUN apt-get update \
         python3-venv \
         ripgrep \
         sudo \
+        unzip \
         xdg-utils \
     && rm -rf /var/lib/apt/lists/*
 
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+
+RUN curl -fsSL https://bun.sh/install | bash -s "bun-v1.3.12" \
+    && ln -sf /usr/local/bun/bin/bun /usr/local/bin/bun
 
 RUN printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' '' 'if [ "$(id -u)" -eq 0 ]; then' '  exec /usr/local/bin/docker-real "$@"' 'fi' '' 'exec sudo -n /usr/local/bin/docker-real "$@"' > /usr/local/bin/docker \
     && chmod 0755 /usr/local/bin/docker \

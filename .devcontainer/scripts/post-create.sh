@@ -17,6 +17,7 @@ declare -a REQUIRED_DIRS=(
 )
 
 declare -a REQUIRED_COMMANDS=(
+  "bun"
   "claude"
   "docker"
   "git"
@@ -68,6 +69,26 @@ install_npm_workspace() {
   (
     cd "${workspace_dir}"
     npm ci
+  )
+}
+
+install_bun_workspace() {
+  local workspace_dir="$1"
+  local label="$2"
+
+  if [[ ! -f "${workspace_dir}/package.json" ]]; then
+    return 0
+  fi
+
+  if [[ ! -f "${workspace_dir}/bun.lock" ]]; then
+    echo "[skip] ${label} bun install (no bun.lock)"
+    return 0
+  fi
+
+  echo "[installing] ${label} dependencies with bun"
+  (
+    cd "${workspace_dir}"
+    bun install --frozen-lockfile
   )
 }
 
@@ -178,6 +199,13 @@ if command -v npm >/dev/null 2>&1; then
 else
   echo "[missing] npm"
   echo "npm is required to install workspace dependencies. Rebuild the devcontainer so the Node feature is applied." >&2
+fi
+
+if command -v bun >/dev/null 2>&1; then
+  install_bun_workspace "/workspace/container/agent-runner" "agent-runner"
+else
+  echo "[missing] bun"
+  echo "bun is required to install agent-runner dependencies. Rebuild the devcontainer so .devcontainer/Dockerfile changes are applied." >&2
 fi
 
 exit "${missing}"
