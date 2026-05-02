@@ -37,10 +37,9 @@ function getDelay(attempt: number): number {
 }
 
 export function resetCircuitBreaker(): void {
-  try {
-    fs.unlinkSync(CB_PATH);
-    log.info('Circuit breaker reset on clean shutdown');
-  } catch {}
+  if (!fs.existsSync(CB_PATH)) return;
+  fs.unlinkSync(CB_PATH);
+  log.info('Circuit breaker reset on clean shutdown');
 }
 
 export async function enforceStartupBackoff(): Promise<void> {

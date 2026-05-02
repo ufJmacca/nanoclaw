@@ -12,6 +12,7 @@ import { grantRole, hasAnyOwner } from '../modules/permissions/db/user-roles.js'
 import { upsertUser } from '../modules/permissions/db/users.js';
 import { createChatSdkBridge, type ReplyContext } from './chat-sdk-bridge.js';
 import { sanitizeTelegramLegacyMarkdown } from './telegram-markdown-sanitize.js';
+import { deliverTelegramOutbound } from './telegram-outbound.js';
 import { registerChannelAdapter } from './channel-registry.js';
 import type { ChannelAdapter, ChannelSetup, InboundMessage } from './adapter.js';
 import { tryConsume } from './telegram-pairing.js';
@@ -242,6 +243,16 @@ registerChannelAdapter('telegram', {
           onInbound: createPairingInterceptor(botUsernamePromise, hostConfig.onInbound, token),
         };
         return withRetry(() => bridge.setup(intercepted), 'bridge.setup');
+      },
+      async deliver(platformId, threadId, message) {
+        return deliverTelegramOutbound({
+          bridge,
+          token,
+          platformId,
+          threadId,
+          message,
+          sanitizeCaption: sanitizeTelegramLegacyMarkdown,
+        });
       },
     };
     return wrapped;
