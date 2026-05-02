@@ -1,6 +1,33 @@
-import { describe, expect, it } from 'vitest';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import { afterEach, describe, expect, it } from 'vitest';
 
-import { resolveProviderName } from './container-runner.js';
+import { resolveProviderName, syncContainerSkillSymlinks } from './container-runner.js';
+import type { ContainerConfig } from './container-config.js';
+
+const tmpDirs: string[] = [];
+
+function tempDir(): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-skills-'));
+  tmpDirs.push(dir);
+  return dir;
+}
+
+function testConfig(skills: string[] | 'all'): ContainerConfig {
+  return {
+    mcpServers: {},
+    packages: { apt: [], npm: [] },
+    additionalMounts: [],
+    skills,
+  };
+}
+
+afterEach(() => {
+  for (const dir of tmpDirs.splice(0)) {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 describe('resolveProviderName', () => {
   it('prefers session over group and container.json', () => {
@@ -28,5 +55,29 @@ describe('resolveProviderName', () => {
   it('treats empty string as unset (falls through)', () => {
     expect(resolveProviderName('', 'codex', null)).toBe('codex');
     expect(resolveProviderName(null, '', 'opencode')).toBe('opencode');
+  });
+});
+
+describe('syncContainerSkillSymlinks', () => {
+  it('adds selected container skills and preserves non-symlink provider entries', () => {
+    const skillsDir = tempDir();
+    fs.mkdirSync(path.join(skillsDir, '.system'));
+    fs.symlinkSync('/app/skills/old-skill', path.join(skillsDir, 'old-skill'));
+
+    syncContainerSkillSymlinks(skillsDir, testConfig(['welcome', 'frontend-engineer']));
+
+    expect(fs.existsSync(path.join(skillsDir, '.system'))).toBe(true);
+    expect(fs.existsSync(path.join(skillsDir, 'old-skill'))).toBe(false);
+    expect(fs.readlinkSync(path.join(skillsDir, 'welcome'))).toBe('/app/skills/welcome');
+    expect(fs.readlinkSync(path.join(skillsDir, 'frontend-engineer'))).toBe('/app/skills/frontend-engineer');
+  });
+
+  it('repairs stale selected skill symlinks', () => {
+    const skillsDir = tempDir();
+    fs.symlinkSync('/wrong/target', path.join(skillsDir, 'welcome'));
+
+    syncContainerSkillSymlinks(skillsDir, testConfig(['welcome']));
+
+    expect(fs.readlinkSync(path.join(skillsDir, 'welcome'))).toBe('/app/skills/welcome');
   });
 });

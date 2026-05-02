@@ -350,9 +350,13 @@ export function openInboundDb(agentGroupId: string, sessionId: string): Database
   return db;
 }
 
-/** Open the outbound DB for a session (host reads only). */
-export function openOutboundDb(agentGroupId: string, sessionId: string): Database.Database {
-  return openOutboundDbRaw(outboundDbPath(agentGroupId, sessionId));
+/** Open the outbound DB for a session. Host callers read by default. */
+export function openOutboundDb(
+  agentGroupId: string,
+  sessionId: string,
+  opts: { readonly?: boolean } = {},
+): Database.Database {
+  return openOutboundDbRaw(outboundDbPath(agentGroupId, sessionId), opts);
 }
 
 /**
@@ -372,7 +376,7 @@ export function writeOutboundDirect(
     content: string;
   },
 ): void {
-  const db = openOutboundDb(agentGroupId, sessionId);
+  const db = openOutboundDb(agentGroupId, sessionId, { readonly: false });
   try {
     db.prepare(
       `INSERT OR IGNORE INTO messages_out (id, seq, timestamp, kind, platform_id, channel_type, thread_id, content)

@@ -19,7 +19,7 @@ import {
   ONECLI_URL,
   TIMEZONE,
 } from './config.js';
-import { readContainerConfig, writeContainerConfig } from './container-config.js';
+import { readContainerConfig, writeContainerConfig, type ContainerConfig } from './container-config.js';
 import { CONTAINER_RUNTIME_BIN, hostGatewayArgs, readonlyMountArgs, stopContainer } from './container-runtime.js';
 import { composeGroupClaudeMd } from './claude-md-compose.js';
 import { getAgentGroup } from './db/agent-groups.js';
@@ -132,7 +132,7 @@ async function spawnContainer(session: Session): Promise<void> {
   // buildMounts and buildContainerArgs so side effects (mkdir, etc.) fire once.
   const { provider, contribution } = resolveProviderContribution(session, agentGroup, containerConfig);
 
-  const mounts = buildMounts(agentGroup, session, containerConfig, contribution);
+  const mounts = buildMounts(agentGroup, session, containerConfig, provider, contribution);
   const containerName = `nanoclaw-v2-${agentGroup.folder}-${Date.now()}`;
   // OneCLI agent identifier is always the agent group id — stable across
   // sessions and reversible via getAgentGroup() for approval routing.
@@ -225,7 +225,7 @@ export function resolveProviderName(
 function resolveProviderContribution(
   session: Session,
   agentGroup: AgentGroup,
-  containerConfig: import('./container-config.js').ContainerConfig,
+  containerConfig: ContainerConfig,
 ): { provider: string; contribution: ProviderContainerContribution } {
   const provider = resolveProviderName(session.agent_provider, agentGroup.agent_provider, containerConfig.provider);
   const fn = getProviderContainerConfig(provider);
@@ -242,10 +242,12 @@ function resolveProviderContribution(
 function buildMounts(
   agentGroup: AgentGroup,
   session: Session,
-  containerConfig: import('./container-config.js').ContainerConfig,
+  containerConfig: ContainerConfig,
+  provider: string,
   providerContribution: ProviderContainerContribution,
 ): VolumeMount[] {
   const projectRoot = process.cwd();
+  const sessDir = sessionDir(agentGroup.id, session.id);
 
   // Per-group filesystem state lives forever after first creation. Init is
   // idempotent: it only writes paths that don't already exist, so this call
@@ -254,14 +256,16 @@ function buildMounts(
 
   // Sync skill symlinks based on container.json selection before mounting.
   const claudeDir = path.join(DATA_DIR, 'v2-sessions', agentGroup.id, '.claude-shared');
-  syncSkillSymlinks(claudeDir, containerConfig);
+  syncContainerSkillSymlinks(path.join(claudeDir, 'skills'), containerConfig);
+  if (provider === 'codex') {
+    syncContainerSkillSymlinks(path.join(sessDir, 'codex', 'skills'), containerConfig);
+  }
 
   // Compose CLAUDE.md fresh every spawn from the shared base, enabled skill
   // fragments, and MCP server instructions. See `claude-md-compose.ts`.
   composeGroupClaudeMd(agentGroup);
 
   const mounts: VolumeMount[] = [];
-  const sessDir = sessionDir(agentGroup.id, session.id);
   const groupDir = path.resolve(GROUPS_DIR, agentGroup.folder);
 
   // Session folder at /workspace (contains inbound.db, outbound.db, outbox/, .claude/)
@@ -334,36 +338,36 @@ function buildMounts(
   return mounts;
 }
 
+export function selectedContainerSkills(containerConfig: ContainerConfig): string[] {
+  const projectRoot = process.cwd();
+  const sharedSkillsDir = path.join(projectRoot, 'container', 'skills');
+  if (containerConfig.skills !== 'all') return containerConfig.skills;
+
+  // Recompute from shared dir — newly-added upstream skills appear automatically
+  return fs.existsSync(sharedSkillsDir)
+    ? fs.readdirSync(sharedSkillsDir).filter((e) => {
+        try {
+          return fs.statSync(path.join(sharedSkillsDir, e)).isDirectory();
+        } catch {
+          return false;
+        }
+      })
+    : [];
+}
+
 /**
- * Sync skill symlinks in .claude-shared/skills/ to match the container.json
- * selection. Each symlink points to a container path (/app/skills/<name>)
- * so it's dangling on the host but valid inside the container.
+ * Sync a provider's skill directory to the selected container skills.
+ *
+ * Symlink targets are container paths (`/app/skills/<name>`), so they look
+ * dangling on the host but resolve after `/app/skills` is mounted. Non-symlink
+ * entries are preserved; this keeps Codex's built-in `.system` directory.
  */
-function syncSkillSymlinks(claudeDir: string, containerConfig: import('./container-config.js').ContainerConfig): void {
-  const skillsDir = path.join(claudeDir, 'skills');
+export function syncContainerSkillSymlinks(skillsDir: string, containerConfig: ContainerConfig): void {
   if (!fs.existsSync(skillsDir)) {
     fs.mkdirSync(skillsDir, { recursive: true });
   }
 
-  // Determine desired skill set
-  const projectRoot = process.cwd();
-  const sharedSkillsDir = path.join(projectRoot, 'container', 'skills');
-  let desired: string[];
-  if (containerConfig.skills === 'all') {
-    // Recompute from shared dir — newly-added upstream skills appear automatically
-    desired = fs.existsSync(sharedSkillsDir)
-      ? fs.readdirSync(sharedSkillsDir).filter((e) => {
-          try {
-            return fs.statSync(path.join(sharedSkillsDir, e)).isDirectory();
-          } catch {
-            return false;
-          }
-        })
-      : [];
-  } else {
-    desired = containerConfig.skills;
-  }
-
+  const desired = selectedContainerSkills(containerConfig);
   const desiredSet = new Set(desired);
 
   // Remove symlinks not in the desired set
@@ -380,18 +384,22 @@ function syncSkillSymlinks(claudeDir: string, containerConfig: import('./contain
     }
   }
 
-  // Create symlinks for desired skills (container path targets)
+  // Create or repair symlinks for desired skills (container path targets)
   for (const skill of desired) {
     const linkPath = path.join(skillsDir, skill);
-    let exists = false;
+    const target = `/app/skills/${skill}`;
     try {
-      fs.lstatSync(linkPath);
-      exists = true;
+      const stat = fs.lstatSync(linkPath);
+      if (stat.isSymbolicLink()) {
+        if (fs.readlinkSync(linkPath) !== target) {
+          fs.unlinkSync(linkPath);
+          fs.symlinkSync(target, linkPath);
+        }
+      } else {
+        log.warn('Skill entry exists and is not a symlink; leaving it unchanged', { skill, path: linkPath });
+      }
     } catch {
-      /* missing */
-    }
-    if (!exists) {
-      fs.symlinkSync(`/app/skills/${skill}`, linkPath);
+      fs.symlinkSync(target, linkPath);
     }
   }
 }
@@ -402,10 +410,7 @@ function syncSkillSymlinks(claudeDir: string, containerConfig: import('./contain
  * change (e.g. group rename). Only writes if values differ to avoid
  * unnecessary file churn.
  */
-function ensureRuntimeFields(
-  containerConfig: import('./container-config.js').ContainerConfig,
-  agentGroup: AgentGroup,
-): void {
+function ensureRuntimeFields(containerConfig: ContainerConfig, agentGroup: AgentGroup): void {
   let dirty = false;
   if (containerConfig.agentGroupId !== agentGroup.id) {
     containerConfig.agentGroupId = agentGroup.id;
@@ -428,7 +433,7 @@ async function buildContainerArgs(
   mounts: VolumeMount[],
   containerName: string,
   agentGroup: AgentGroup,
-  containerConfig: import('./container-config.js').ContainerConfig,
+  containerConfig: ContainerConfig,
   provider: string,
   providerContribution: ProviderContainerContribution,
   agentIdentifier?: string,
