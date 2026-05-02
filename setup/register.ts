@@ -1,54 +1,64 @@
 /**
- * Step: register — Write channel registration config, create group folders.
+ * Step: register — Create v2 entities (agent group, messaging group, wiring).
  *
- * Accepts --channel to specify the messaging platform (whatsapp, telegram, slack, discord).
- * Uses parameterized SQL queries to prevent injection.
+ * Writes to the v2 central DB (data/v2.db) — NOT the v1 store/messages.db.
+ * Creates: agent_group, messaging_group, messaging_group_agents.
  */
 import fs from 'fs';
 import path from 'path';
 
+import { DATA_DIR } from '../src/config.js';
+import { initDb } from '../src/db/connection.js';
+import { runMigrations } from '../src/db/migrations/index.js';
+import { createAgentGroup, getAgentGroupByFolder } from '../src/db/agent-groups.js';
 import {
-  DEFAULT_GLOBAL_MEMORY_TEMPLATE_FINGERPRINT,
-  DEFAULT_MAIN_MEMORY_TEMPLATE_FINGERPRINT,
-  listManagedMemoryFiles,
-  seedGroupMemoryFiles,
-} from '../src/agent/memory.ts';
-import { createProviderRegistry } from '../src/agent/provider-registry.ts';
-import { DEFAULT_AGENT_PROVIDER, STORE_DIR } from '../src/config.ts';
-import { initDatabase, setRegisteredGroup } from '../src/db.ts';
-import { isValidGroupFolder } from '../src/group-folder.ts';
-import { logger } from '../src/logger.ts';
-import { emitStatus } from './status.ts';
+  createMessagingGroup,
+  createMessagingGroupAgent,
+  getMessagingGroupByPlatform,
+  getMessagingGroupAgentByPair,
+} from '../src/db/messaging-groups.js';
+import { isValidGroupFolder } from '../src/group-folder.js';
+import { initGroupFilesystem } from '../src/group-init.js';
+import { log } from '../src/log.js';
+import { namespacedPlatformId } from '../src/platform-id.js';
+import { resolveSession, writeSessionMessage } from '../src/session-manager.js';
+import { emitStatus } from './status.js';
 
 interface RegisterArgs {
-  jid: string;
+  /** Platform-specific channel/group ID (Discord channel ID, Slack channel, etc.) */
+  platformId: string;
+  /** Human-readable name for the messaging group */
   name: string;
+  /** Trigger pattern (regex or keyword) */
   trigger: string;
+  /** Agent group folder name */
   folder: string;
+  /** Channel type (discord, slack, telegram, etc.) */
   channel: string;
-  provider: string;
+  /** Whether messages require the trigger pattern to activate */
   requiresTrigger: boolean;
-  isMain: boolean;
+  /** Display name for the assistant */
   assistantName: string;
+  /** Session mode: 'shared' (one session per channel) or 'per-thread' */
+  sessionMode: string;
 }
 
 function parseArgs(args: string[]): RegisterArgs {
   const result: RegisterArgs = {
-    jid: '',
+    platformId: '',
     name: '',
     trigger: '',
     folder: '',
-    channel: 'whatsapp', // backward-compat: pre-refactor installs omit --channel
-    provider: DEFAULT_AGENT_PROVIDER,
-    requiresTrigger: true,
-    isMain: false,
+    channel: 'discord',
+    requiresTrigger: false,
     assistantName: 'Andy',
+    sessionMode: 'shared',
   };
 
   for (let i = 0; i < args.length; i++) {
     switch (args[i]) {
-      case '--jid':
-        result.jid = args[++i] || '';
+      case '--platform-id':
+        result.platformId = args[++i] || '';
         break;
       case '--name':
         result.name = args[++i] || '';
@@ -62,17 +72,14 @@ function parseArgs(args: string[]): RegisterArgs {
       case '--channel':
         result.channel = (args[++i] || '').toLowerCase();
         break;
-      case '--provider':
-        result.provider = (args[++i] || '').trim().toLowerCase();
-        break;
       case '--no-trigger-required':
         result.requiresTrigger = false;
         break;
-      case '--is-main':
-        result.isMain = true;
-        break;
       case '--assistant-name':
         result.assistantName = args[++i] || 'Andy';
+        break;
+      case '--session-mode':
+        result.sessionMode = args[++i] || 'shared';
         break;
     }
   }
@@ -80,11 +87,15 @@ function parseArgs(args: string[]): RegisterArgs {
   return result;
 }
 
+function generateId(prefix: string): string {
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
 export async function run(args: string[]): Promise<void> {
   const projectRoot = process.cwd();
   const parsed = parseArgs(args);
 
-  if (!parsed.jid || !parsed.name || !parsed.trigger || !parsed.folder) {
+  if (!parsed.platformId || !parsed.name || !parsed.folder) {
     emitStatus('REGISTER_CHANNEL', {
       STATUS: 'failed',
       ERROR: 'missing_required_args',
@@ -102,163 +113,118 @@ export async function run(args: string[]): Promise<void> {
     process.exit(4);
   }
 
-  try {
-    createProviderRegistry().getProvider(parsed.provider);
-  } catch (error) {
-    const reason = error instanceof Error ? error.message : String(error);
-    emitStatus('REGISTER_CHANNEL', {
-      STATUS: 'failed',
-      ERROR: 'invalid_provider',
-      PROVIDER: parsed.provider,
-      REASON: reason,
-      LOG: 'logs/setup.log',
-    });
-    process.exit(4);
-  }
+  // Normalize platform_id to the same shape the adapter will emit at runtime,
+  // so the router's (channel_type, platform_id) lookup matches what we store.
+  // Chat SDK adapters prefix, native adapters (WhatsApp/iMessage/Signal) don't.
+  parsed.platformId = namespacedPlatformId(parsed.channel, parsed.platformId);
 
-  logger.info(parsed, 'Registering channel');
+  log.info('Registering channel', parsed);
 
-  // Ensure data and store directories exist (store/ may not exist on
-  // fresh installs that skip WhatsApp auth, which normally creates it)
+  // Init v2 central DB
   fs.mkdirSync(path.join(projectRoot, 'data'), { recursive: true });
-  fs.mkdirSync(STORE_DIR, { recursive: true });
+  const dbPath = path.join(DATA_DIR, 'v2.db');
+  const db = initDb(dbPath);
+  runMigrations(db);
 
-  // Initialize database (creates schema + runs migrations)
-  initDatabase();
-
-  setRegisteredGroup(parsed.jid, {
-    name: parsed.name,
-    folder: parsed.folder,
-    trigger: parsed.trigger,
-    added_at: new Date().toISOString(),
-    requiresTrigger: parsed.requiresTrigger,
-    isMain: parsed.isMain,
-    providerId: parsed.provider,
-  });
-
-  logger.info('Wrote registration to SQLite');
-
-  // Create group folders
-  const groupDir = path.join(projectRoot, 'groups', parsed.folder);
-  fs.mkdirSync(path.join(groupDir, 'logs'), {
-    recursive: true,
-  });
-
-  const globalDir = path.join(projectRoot, 'groups', 'global');
-  const globalSeededMemory = seedGroupMemoryFiles({
-    targetDir: globalDir,
-    templateDir: globalDir,
-    canonicalTemplateFingerprint: DEFAULT_GLOBAL_MEMORY_TEMPLATE_FINGERPRINT,
-  });
-
-  if (globalSeededMemory.canonical.created) {
-    logger.info(
-      {
-        file: globalSeededMemory.canonical.path,
-        seededFrom: globalSeededMemory.canonical.seededFrom,
-      },
-      'Prepared canonical global memory before group registration',
-    );
-  }
-
-  if (globalSeededMemory.compatibility.created) {
-    logger.info(
-      {
-        file: globalSeededMemory.compatibility.path,
-        seededFrom: globalSeededMemory.compatibility.seededFrom,
-      },
-      'Prepared compatibility global memory before group registration',
-    );
-  }
-
-  if (globalSeededMemory.migration?.status === 'migrated') {
-    logger.info(
-      {
-        canonicalPath: globalSeededMemory.migration.canonicalPath,
-        compatibilityPath: globalSeededMemory.migration.compatibilityPath,
-      },
-      'Promoted legacy global CLAUDE.md before group registration',
-    );
-  }
-
-  const templateDir = parsed.isMain
-    ? path.join(projectRoot, 'groups', 'main')
-    : path.join(projectRoot, 'groups', 'global');
-  const seededMemory = seedGroupMemoryFiles({
-    targetDir: groupDir,
-    templateDir,
-    canonicalTemplateFingerprint: parsed.isMain
-      ? DEFAULT_MAIN_MEMORY_TEMPLATE_FINGERPRINT
-      : undefined,
-  });
-
-  if (seededMemory.canonical.created) {
-    logger.info(
-      {
-        file: seededMemory.canonical.path,
-        seededFrom: seededMemory.canonical.seededFrom,
-      },
-      'Created AGENT.md canonical memory',
-    );
-  }
-
-  if (seededMemory.compatibility.created) {
-    logger.info(
-      {
-        file: seededMemory.compatibility.path,
-        seededFrom: seededMemory.compatibility.seededFrom,
-      },
-      'Created CLAUDE.md compatibility memory',
-    );
-  }
-
-  if (seededMemory.migration?.status === 'migrated') {
-    logger.info(
-      {
-        canonicalPath: seededMemory.migration.canonicalPath,
-        compatibilityPath: seededMemory.migration.compatibilityPath,
-      },
-      'Promoted legacy CLAUDE.md into canonical AGENT.md during registration',
-    );
-  }
-
-  // Preserve customized memory files by only seeding missing files.
-  // Current runtime flows still read CLAUDE.md, so we materialize that as a
-  // compatibility file from the canonical AGENT.md when needed.
-  const groupClaudeMdPath = path.join(groupDir, 'CLAUDE.md');
-  const groupAgentMdPath = path.join(groupDir, 'AGENT.md');
-  logger.debug(
-    {
+  // 1. Create or find agent group
+  let agentGroup = getAgentGroupByFolder(parsed.folder);
+  if (!agentGroup) {
+    const agId = generateId('ag');
+    createAgentGroup({
+      id: agId,
+      name: parsed.assistantName,
       folder: parsed.folder,
-      agentExists: fs.existsSync(groupAgentMdPath),
-      claudeExists: fs.existsSync(groupClaudeMdPath),
-    },
-    'Group memory files ready',
-  );
+      agent_provider: null,
+      created_at: new Date().toISOString(),
+    });
+    agentGroup = getAgentGroupByFolder(parsed.folder)!;
+    log.info('Created agent group', { id: agId, folder: parsed.folder });
+  }
+  initGroupFilesystem(agentGroup);
 
-  // Update assistant name in canonical and compatibility memory files if
-  // different from the default.
+  // 2. Create or find messaging group
+  let messagingGroup = getMessagingGroupByPlatform(parsed.channel, parsed.platformId);
+  if (!messagingGroup) {
+    const mgId = generateId('mg');
+    createMessagingGroup({
+      id: mgId,
+      channel_type: parsed.channel,
+      platform_id: parsed.platformId,
+      name: parsed.name,
+      is_group: 1,
+      unknown_sender_policy: 'strict',
+      created_at: new Date().toISOString(),
+    });
+    messagingGroup = getMessagingGroupByPlatform(parsed.channel, parsed.platformId)!;
+    log.info('Created messaging group', { id: mgId, channel: parsed.channel, platformId: parsed.platformId });
+  }
+
+  // 3. Wire agent to messaging group — createMessagingGroupAgent auto-creates
+  // the companion agent_destinations row so delivery's ACL admits this target.
+  let newlyWired = false;
+  const existing = getMessagingGroupAgentByPair(messagingGroup.id, agentGroup.id);
+  if (!existing) {
+    newlyWired = true;
+    const mgaId = generateId('mga');
+    // Mirrors scripts/init-first-agent.ts:wireIfMissing so both setup paths
+    // create rows with the same shape. Groups default to 'mention' (bot only
+    // responds when addressed); DMs default to 'pattern'/'.' (respond to
+    // every message). An explicit --trigger overrides the pattern regex.
+    const isGroup = messagingGroup.is_group === 1;
+    const engageMode: 'pattern' | 'mention' = isGroup && !parsed.trigger ? 'mention' : 'pattern';
+    const engagePattern: string | null = engageMode === 'pattern' ? parsed.trigger || '.' : null;
+    createMessagingGroupAgent({
+      id: mgaId,
+      messaging_group_id: messagingGroup.id,
+      agent_group_id: agentGroup.id,
+      engage_mode: engageMode,
+      engage_pattern: engagePattern,
+      sender_scope: 'all',
+      ignored_message_policy: 'drop',
+      session_mode: parsed.sessionMode as 'shared' | 'per-thread' | 'agent-shared',
+      priority: 0,
+      created_at: new Date().toISOString(),
+    });
+    log.info('Wired agent to messaging group', {
+      mgaId,
+      agentGroup: agentGroup.id,
+      messagingGroup: messagingGroup.id,
+    });
+  }
+
+  // 4. Send onboarding message — only on first wiring, not re-registration
+  if (newlyWired) {
+    const { session } = resolveSession(agentGroup.id, messagingGroup.id, null, parsed.sessionMode as 'shared' | 'per-thread' | 'agent-shared');
+    writeSessionMessage(agentGroup.id, session.id, {
+      id: generateId('onboard'),
+      kind: 'task',
+      timestamp: new Date().toISOString(),
+      platformId: parsed.platformId,
+      channelType: parsed.channel,
+      content: JSON.stringify({
+        prompt: `A new ${parsed.channel} channel has been connected. Run /welcome to introduce yourself to the user.`,
+      }),
+    });
+    log.info('Onboarding message written', { sessionId: session.id, channel: parsed.channel });
+  }
+
+  // 5. Update assistant name in CLAUDE.md files if different from default
   let nameUpdated = false;
   if (parsed.assistantName !== 'Andy') {
-    logger.info(
-      { from: 'Andy', to: parsed.assistantName },
-      'Updating assistant name',
-    );
+    log.info('Updating assistant name', { from: 'Andy', to: parsed.assistantName });
 
     const groupsDir = path.join(projectRoot, 'groups');
     const mdFiles = fs
       .readdirSync(groupsDir)
-      .flatMap((entry) => listManagedMemoryFiles(path.join(groupsDir, entry)));
+      .map((d) => path.join(groupsDir, d, 'CLAUDE.md'))
+      .filter((f) => fs.existsSync(f));
 
     for (const mdFile of mdFiles) {
       let content = fs.readFileSync(mdFile, 'utf-8');
       content = content.replace(/^# Andy$/m, `# ${parsed.assistantName}`);
-      content = content.replace(
-        /You are Andy/g,
-        `You are ${parsed.assistantName}`,
-      );
+      content = content.replace(/You are Andy/g, `You are ${parsed.assistantName}`);
       fs.writeFileSync(mdFile, content);
-      logger.info({ file: mdFile }, 'Updated memory file');
+      log.info('Updated CLAUDE.md', { file: mdFile });
     }
 
     // Update .env
@@ -266,10 +232,7 @@ export async function run(args: string[]): Promise<void> {
     if (fs.existsSync(envFile)) {
       let envContent = fs.readFileSync(envFile, 'utf-8');
       if (envContent.includes('ASSISTANT_NAME=')) {
-        envContent = envContent.replace(
-          /^ASSISTANT_NAME=.*$/m,
-          `ASSISTANT_NAME="${parsed.assistantName}"`,
-        );
+        envContent = envContent.replace(/^ASSISTANT_NAME=.*$/m, `ASSISTANT_NAME="${parsed.assistantName}"`);
       } else {
         envContent += `\nASSISTANT_NAME="${parsed.assistantName}"`;
       }
@@ -277,19 +240,19 @@ export async function run(args: string[]): Promise<void> {
     } else {
       fs.writeFileSync(envFile, `ASSISTANT_NAME="${parsed.assistantName}"\n`);
     }
-    logger.info('Set ASSISTANT_NAME in .env');
+    log.info('Set ASSISTANT_NAME in .env');
     nameUpdated = true;
   }
 
   emitStatus('REGISTER_CHANNEL', {
-    JID: parsed.jid,
+    PLATFORM_ID: parsed.platformId,
     NAME: parsed.name,
     FOLDER: parsed.folder,
     CHANNEL: parsed.channel,
-    PROVIDER: parsed.provider,
     TRIGGER: parsed.trigger,
     REQUIRES_TRIGGER: parsed.requiresTrigger,
     ASSISTANT_NAME: parsed.assistantName,
+    SESSION_MODE: parsed.sessionMode,
     NAME_UPDATED: nameUpdated,
     STATUS: 'success',
     LOG: 'logs/setup.log',
