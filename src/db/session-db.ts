@@ -25,9 +25,12 @@ export function openInboundDb(dbPath: string): Database.Database {
   return db;
 }
 
-/** Open the outbound DB for a session (host reads only). */
-export function openOutboundDb(dbPath: string): Database.Database {
-  const db = new Database(dbPath, { readonly: true });
+/** Open the outbound DB for a session. Host callers read by default. */
+export function openOutboundDb(
+  dbPath: string,
+  opts: { readonly?: boolean } = {},
+): Database.Database {
+  const db = new Database(dbPath, { readonly: opts.readonly ?? true });
   db.pragma('busy_timeout = 5000');
   return db;
 }

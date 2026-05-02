@@ -3,6 +3,8 @@ import path from 'path';
 
 import { getLaunchdLabel } from '../src/install-slug.js';
 
+const NODE_OPTIONS = '--no-network-family-autoselection';
+
 /**
  * Tests for service configuration generation.
  *
@@ -40,6 +42,8 @@ function generatePlist(
         <string>/usr/local/bin:/usr/bin:/bin:${homeDir}/.local/bin</string>
         <key>HOME</key>
         <string>${homeDir}</string>
+        <key>NODE_OPTIONS</key>
+        <string>${NODE_OPTIONS}</string>
     </dict>
     <key>StandardOutPath</key>
     <string>${projectRoot}/logs/nanoclaw.log</string>
@@ -68,6 +72,7 @@ RestartSec=5
 KillMode=process
 Environment=HOME=${homeDir}
 Environment=PATH=/usr/local/bin:/usr/bin:/bin:${homeDir}/.local/bin
+Environment=NODE_OPTIONS=${NODE_OPTIONS}
 StandardOutput=append:${projectRoot}/logs/nanoclaw.log
 StandardError=append:${projectRoot}/logs/nanoclaw.error.log
 
@@ -109,6 +114,16 @@ describe('plist generation', () => {
     );
     expect(plist).toContain('nanoclaw.log');
     expect(plist).toContain('nanoclaw.error.log');
+  });
+
+  it('disables Node network family autoselection', () => {
+    const plist = generatePlist(
+      '/usr/local/bin/node',
+      '/home/user/nanoclaw',
+      '/home/user',
+    );
+    expect(plist).toContain('<key>NODE_OPTIONS</key>');
+    expect(plist).toContain(`<string>${NODE_OPTIONS}</string>`);
   });
 });
 
@@ -165,6 +180,16 @@ describe('systemd unit generation', () => {
       'ExecStart=/usr/bin/node /srv/nanoclaw/dist/index.js',
     );
   });
+
+  it('disables Node network family autoselection', () => {
+    const unit = generateSystemdUnit(
+      '/usr/bin/node',
+      '/home/user/nanoclaw',
+      '/home/user',
+      false,
+    );
+    expect(unit).toContain(`Environment=NODE_OPTIONS=${NODE_OPTIONS}`);
+  });
 });
 
 describe('WSL nohup fallback', () => {
@@ -177,6 +202,7 @@ describe('WSL nohup fallback', () => {
     const wrapper = `#!/bin/bash
 set -euo pipefail
 cd ${JSON.stringify(projectRoot)}
+export NODE_OPTIONS=${JSON.stringify(NODE_OPTIONS)}
 nohup ${JSON.stringify(nodePath)} ${JSON.stringify(projectRoot)}/dist/index.js >> ${JSON.stringify(projectRoot)}/logs/nanoclaw.log 2>> ${JSON.stringify(projectRoot)}/logs/nanoclaw.error.log &
 echo $! > ${JSON.stringify(pidFile)}`;
 
@@ -184,5 +210,6 @@ echo $! > ${JSON.stringify(pidFile)}`;
     expect(wrapper).toContain('nohup');
     expect(wrapper).toContain(nodePath);
     expect(wrapper).toContain('nanoclaw.pid');
+    expect(wrapper).toContain(`export NODE_OPTIONS=${JSON.stringify(NODE_OPTIONS)}`);
   });
 });

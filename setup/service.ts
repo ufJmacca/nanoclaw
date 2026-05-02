@@ -23,6 +23,8 @@ import {
 } from './platform.js';
 import { emitStatus } from './status.js';
 
+const NODE_OPTIONS = '--no-network-family-autoselection';
+
 export async function run(_args: string[]): Promise<void> {
   const projectRoot = process.cwd();
   const platform = getPlatform();
@@ -123,6 +125,8 @@ function setupLaunchd(
         <string>/usr/local/bin:/usr/bin:/bin:${homeDir}/.local/bin</string>
         <key>HOME</key>
         <string>${homeDir}</string>
+        <key>NODE_OPTIONS</key>
+        <string>${NODE_OPTIONS}</string>
     </dict>
     <key>StandardOutPath</key>
     <string>${projectRoot}/logs/nanoclaw.log</string>
@@ -285,6 +289,7 @@ RestartSec=5
 KillMode=process
 Environment=HOME=${homeDir}
 Environment=PATH=/usr/local/bin:/usr/bin:/bin:${homeDir}/.local/bin
+Environment=NODE_OPTIONS=${NODE_OPTIONS}
 StandardOutput=append:${projectRoot}/logs/nanoclaw.log
 StandardError=append:${projectRoot}/logs/nanoclaw.error.log
 
@@ -406,6 +411,7 @@ function setupNohupFallback(
     'set -euo pipefail',
     '',
     `cd ${JSON.stringify(projectRoot)}`,
+    `export NODE_OPTIONS=${JSON.stringify(NODE_OPTIONS)}`,
     '',
     '# Stop existing instance if running',
     `if [ -f ${JSON.stringify(pidFile)} ]; then`,

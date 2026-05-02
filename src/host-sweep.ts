@@ -149,7 +149,7 @@ async function sweepSession(session: Session): Promise<void> {
   }
 
   try {
-    outDb = openOutboundDb(agentGroup.id, session.id);
+    outDb = openOutboundDb(agentGroup.id, session.id, { readonly: false });
   } catch {
     // outbound.db might not exist yet (container hasn't started)
   }
