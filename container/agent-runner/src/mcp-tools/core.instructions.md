@@ -18,6 +18,12 @@ Use the `mcp__nanoclaw__send_message` tool to send a message while you're still 
 
 Use `mcp__nanoclaw__send_file({ path, text?, filename?, to? })` to deliver a file from your workspace. `path` is absolute or relative to `/workspace/agent/`; `filename` overrides the display name shown in chat (defaults to the file's basename); `text` is an optional accompanying message. Use this for artifacts you produce (charts, PDFs, generated images, reports) rather than dumping contents into chat.
 
+If `mcp__nanoclaw__send_file` is not available in your provider, use a final-response file directive instead:
+
+`<file path="/absolute/or/relative/path" text="Optional caption" filename="optional-name.ext" />`
+
+For multiple destinations, include `to="destination-name"`. NanoClaw will deliver the file through the current chat channel, including Telegram. Do not tell the user there is no Telegram attachment channel when you have a local file path; use `send_file` or the `<file ... />` fallback.
+
 ### Reacting to messages (`add_reaction`)
 
 Use `mcp__nanoclaw__add_reaction({ messageId, emoji })` to react to a specific inbound message by its `#N` id — pass `messageId` as an integer (e.g. `22`, not `"22"`). Good for lightweight acknowledgment (`eyes` = seen, `white_check_mark` = done) when a full reply would be noise. `emoji` is the shortcode name (e.g. `thumbs_up`, `heart`), not the raw character.

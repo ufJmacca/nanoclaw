@@ -6,12 +6,8 @@
  * translates name → routing tuple. Permission enforcement happens on
  * the host side in delivery.ts via the agent_destinations table.
  */
-import fs from 'fs';
-import path from 'path';
-
-import { findByName, getAllDestinations } from '../destinations.js';
 import { getMessageIdBySeq, getRoutingBySeq, writeMessageOut } from '../db/messages-out.js';
-import { getSessionRouting } from '../db/session-routing.js';
+import { queueFileMessage, resolveRouting } from '../outbound-files.js';
 import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
 
@@ -29,70 +25,6 @@ function ok(text: string) {
 
 function err(text: string) {
   return { content: [{ type: 'text' as const, text: `Error: ${text}` }], isError: true };
-}
-
-function destinationList(): string {
-  const all = getAllDestinations();
-  if (all.length === 0) return '(none)';
-  return all.map((d) => d.name).join(', ');
-}
-
-/**
- * Resolve a destination name to routing fields.
- *
- * If `to` is omitted, use the session's default reply routing (channel +
- * thread the conversation is in) — the agent replies in place.
- *
- * If `to` is specified, look up the named destination. If it resolves to
- * the same channel the session is bound to, the session's thread_id is
- * preserved so replies land in the correct thread. Otherwise thread_id
- * is null (a cross-destination send starts a new conversation).
- */
-function resolveRouting(
-  to: string | undefined,
-):
-  | { channel_type: string; platform_id: string; thread_id: string | null; resolvedName: string }
-  | { error: string } {
-  if (!to) {
-    // Default: reply to whatever thread/channel this session is bound to.
-    const session = getSessionRouting();
-    if (session.channel_type && session.platform_id) {
-      return {
-        channel_type: session.channel_type,
-        platform_id: session.platform_id,
-        thread_id: session.thread_id,
-        resolvedName: '(current conversation)',
-      };
-    }
-    // No session routing (e.g., agent-shared or internal-only agent) —
-    // fall back to the legacy single-destination shortcut.
-    const all = getAllDestinations();
-    if (all.length === 0) return { error: 'No destinations configured.' };
-    if (all.length > 1) {
-      return {
-        error: `You have multiple destinations — specify "to". Options: ${all.map((d) => d.name).join(', ')}`,
-      };
-    }
-    to = all[0].name;
-  }
-  const dest = findByName(to);
-  if (!dest) return { error: `Unknown destination "${to}". Known: ${destinationList()}` };
-  if (dest.type === 'channel') {
-    // If the destination is the same channel the session is bound to,
-    // preserve the thread_id so replies land in the correct thread.
-    const session = getSessionRouting();
-    const threadId =
-      session.channel_type === dest.channelType && session.platform_id === dest.platformId
-        ? session.thread_id
-        : null;
-    return {
-      channel_type: dest.channelType!,
-      platform_id: dest.platformId!,
-      thread_id: threadId,
-      resolvedName: to,
-    };
-  }
-  return { channel_type: 'agent', platform_id: dest.agentGroupId!, thread_id: null, resolvedName: to };
 }
 
 export const sendMessage: McpToolDefinition = {
@@ -147,33 +79,16 @@ export const sendFile: McpToolDefinition = {
     },
   },
   async handler(args) {
-    const filePath = args.path as string;
-    if (!filePath) return err('path is required');
-
-    const routing = resolveRouting(args.to as string | undefined);
-    if ('error' in routing) return err(routing.error);
-
-    const resolvedPath = path.isAbsolute(filePath) ? filePath : path.resolve('/workspace/agent', filePath);
-    if (!fs.existsSync(resolvedPath)) return err(`File not found: ${filePath}`);
-
-    const id = generateId();
-    const filename = (args.filename as string) || path.basename(resolvedPath);
-
-    const outboxDir = path.join('/workspace/outbox', id);
-    fs.mkdirSync(outboxDir, { recursive: true });
-    fs.copyFileSync(resolvedPath, path.join(outboxDir, filename));
-
-    writeMessageOut({
-      id,
-      kind: 'chat',
-      platform_id: routing.platform_id,
-      channel_type: routing.channel_type,
-      thread_id: routing.thread_id,
-      content: JSON.stringify({ text: (args.text as string) || '', files: [filename] }),
+    const result = queueFileMessage({
+      path: args.path as string,
+      text: args.text as string | undefined,
+      filename: args.filename as string | undefined,
+      to: args.to as string | undefined,
     });
+    if ('error' in result) return err(result.error);
 
-    log(`send_file: ${id} → ${routing.resolvedName} (${filename})`);
-    return ok(`File sent to ${routing.resolvedName} (id: ${id}, filename: ${filename})`);
+    log(`send_file: ${result.id} → ${result.resolvedName} (${result.filename})`);
+    return ok(`File sent to ${result.resolvedName} (id: ${result.id}, filename: ${result.filename})`);
   },
 };
 

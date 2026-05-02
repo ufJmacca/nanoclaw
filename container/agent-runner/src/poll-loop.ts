@@ -8,6 +8,7 @@ import {
   setContinuation,
 } from './db/session-state.js';
 import { formatMessages, extractRouting, categorizeMessage, isClearCommand, stripInternalTags, type RoutingContext } from './formatter.js';
+import { queueFileMessage } from './outbound-files.js';
 import type { AgentProvider, AgentQuery, ProviderEvent } from './providers/types.js';
 
 const POLL_INTERVAL_MS = 1000;
@@ -389,11 +390,14 @@ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
  * This preserves the simple case of one user on one channel — the agent
  * doesn't need to know about wrapping syntax at all.
  */
-function dispatchResultText(text: string, routing: RoutingContext): void {
+export function dispatchResultText(text: string, routing: RoutingContext): void {
   const MESSAGE_RE = /<message\s+to="([^"]+)"\s*>([\s\S]*?)<\/message>/g;
 
+  const fileDispatch = dispatchFileDirectives(text, routing);
+  text = fileDispatch.text;
+
   let match: RegExpExecArray | null;
-  let sent = 0;
+  let sent = fileDispatch.sent;
   let lastIndex = 0;
   const scratchpadParts: string[] = [];
 
@@ -451,6 +455,83 @@ function dispatchResultText(text: string, routing: RoutingContext): void {
   if (sent === 0 && text.trim()) {
     log(`WARNING: agent output had no <message to="..."> blocks — nothing was sent`);
   }
+}
+
+function dispatchFileDirectives(text: string, routing: RoutingContext): { text: string; sent: number } {
+  const FILE_RE = /<file\b([^>]*?)\/>|<file\b([^>]*?)>([\s\S]*?)<\/file>/g;
+  let match: RegExpExecArray | null;
+  let sent = 0;
+  let lastIndex = 0;
+  const cleanedParts: string[] = [];
+
+  while ((match = FILE_RE.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      cleanedParts.push(text.slice(lastIndex, match.index));
+    }
+    lastIndex = FILE_RE.lastIndex;
+
+    const attrs = parseTagAttributes(match[1] ?? match[2] ?? '');
+    const filePath = attrs.path;
+    if (!filePath) {
+      log('File directive missing path, dropping block');
+      cleanedParts.push('[dropped file: missing path]');
+      continue;
+    }
+
+    const caption = attrs.text ?? (match[3] ? stripInternalTags(match[3].trim()) : '');
+    const result = queueFileMessage({
+      path: filePath,
+      text: caption,
+      filename: attrs.filename,
+      to: attrs.to,
+      inReplyTo: routing.inReplyTo,
+      defaultRouting:
+        routing.channelType && routing.platformId
+          ? {
+              channel_type: routing.channelType,
+              platform_id: routing.platformId,
+              thread_id: routing.threadId,
+              resolvedName: '(current conversation)',
+            }
+          : undefined,
+    });
+
+    if ('error' in result) {
+      log(`File directive failed: ${result.error}`);
+      cleanedParts.push(`[dropped file: ${result.error}]`);
+      continue;
+    }
+
+    log(`file directive: ${result.id} → ${result.resolvedName} (${result.filename})`);
+    sent++;
+  }
+
+  if (lastIndex < text.length) {
+    cleanedParts.push(text.slice(lastIndex));
+  }
+
+  return { text: cleanedParts.join(''), sent };
+}
+
+function parseTagAttributes(raw: string): Record<string, string> {
+  const attrs: Record<string, string> = {};
+  const ATTR_RE = /([A-Za-z_][\w:-]*)\s*=\s*(?:"([^"]*)"|'([^']*)')/g;
+  let match: RegExpExecArray | null;
+
+  while ((match = ATTR_RE.exec(raw)) !== null) {
+    attrs[match[1]] = decodeXmlEntities(match[2] ?? match[3] ?? '');
+  }
+
+  return attrs;
+}
+
+function decodeXmlEntities(value: string): string {
+  return value
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&gt;/g, '>')
+    .replace(/&lt;/g, '<')
+    .replace(/&amp;/g, '&');
 }
 
 function sendToDestination(dest: DestinationEntry, body: string, routing: RoutingContext): void {
