@@ -1,9 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
+import fs from 'fs';
+import path from 'path';
 
 import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from './db/connection.js';
 import { getPendingMessages, markCompleted } from './db/messages-in.js';
 import { getUndeliveredMessages } from './db/messages-out.js';
 import { formatMessages, extractRouting } from './formatter.js';
+import { dispatchResultText } from './poll-loop.js';
 import { MockProvider } from './providers/mock.js';
 
 beforeEach(() => {
@@ -11,6 +14,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  delete process.env.NANOCLAW_AGENT_DIR;
+  delete process.env.NANOCLAW_OUTBOX_DIR;
   closeSessionDb();
 });
 
@@ -144,6 +149,33 @@ describe('routing', () => {
     expect(routing.channelType).toBe('discord');
     expect(routing.threadId).toBe('thread-456');
     expect(routing.inReplyTo).toBe('m1');
+  });
+});
+
+describe('final-response file directives', () => {
+  it('queues a file attachment for delivery through the current channel', () => {
+    const tempDir = fs.mkdtempSync('/tmp/nanoclaw-file-directive-');
+    const sourcePath = path.join(tempDir, 'chart.png');
+    const outboxDir = path.join(tempDir, 'outbox');
+    fs.writeFileSync(sourcePath, 'fake-png');
+    process.env.NANOCLAW_OUTBOX_DIR = outboxDir;
+
+    dispatchResultText('<file path="' + sourcePath + '" text="Here is the chart." filename="report.png" />', {
+      platformId: 'telegram:123',
+      channelType: 'telegram',
+      threadId: null,
+      inReplyTo: 'inbound-1',
+    });
+
+    const [outbound] = getUndeliveredMessages();
+    expect(outbound.platform_id).toBe('telegram:123');
+    expect(outbound.channel_type).toBe('telegram');
+    expect(outbound.in_reply_to).toBe('inbound-1');
+
+    const content = JSON.parse(outbound.content);
+    expect(content.text).toBe('Here is the chart.');
+    expect(content.files).toEqual(['report.png']);
+    expect(fs.existsSync(path.join(outboxDir, outbound.id, 'report.png'))).toBe(true);
   });
 });
 

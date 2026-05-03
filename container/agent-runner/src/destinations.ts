@@ -114,6 +114,8 @@ function buildDestinationsSection(): string {
       'To mark something as scratchpad (logged but not sent), wrap it in `<internal>...</internal>`.',
       '',
       'To send a message mid-response (e.g., an acknowledgment before a long task), call the `send_message` MCP tool.',
+      '',
+      'To attach a file in your final response, use `send_file`. If that tool is unavailable, write `<file path="..." text="optional caption" />` in your final response.',
     ].join('\n');
   }
 
@@ -130,6 +132,10 @@ function buildDestinationsSection(): string {
   lines.push('');
   lines.push(
     'To send a message mid-response (e.g., an acknowledgment before a long task), call the `send_message` MCP tool with the `to` parameter set to a destination name.',
+  );
+  lines.push('');
+  lines.push(
+    'To attach a file in your final response, use `send_file`. If that tool is unavailable, write `<file to="name" path="..." text="optional caption" />`.',
   );
   return lines.join('\n');
 }
