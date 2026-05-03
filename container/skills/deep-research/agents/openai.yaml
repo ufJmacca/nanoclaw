@@ -1,0 +1,7 @@
+interface:
+  display_name: "Deep Research"
+  short_description: "Delegate, synthesize, and ship reports"
+  default_prompt: "Use $deep-research to break this topic into sub-questions, delegate research to sub-agents, and return a polished HTML or PDF report."
+
+policy:
+  allow_implicit_invocation: true
