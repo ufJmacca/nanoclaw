@@ -19,6 +19,14 @@ const DEFAULT_SETTINGS_JSON =
     2,
   ) + '\n';
 
+const GITHUB_GITCONFIG = `[user]
+  name = NanoClaw
+  email = nanoclaw@example.local
+
+[credential "https://github.com"]
+  helper = "!f() { echo username=x-access-token; echo password=placeholder; }; f"
+`;
+
 /**
  * Initialize the on-disk filesystem state for an agent group. Idempotent —
  * every step is gated on the target not already existing, so re-running on
@@ -58,6 +66,16 @@ export function initGroupFilesystem(group: AgentGroup, opts?: { instructions?: s
   // read and write this file directly.
   if (initContainerConfig(group.folder)) {
     initialized.push('container.json');
+  }
+
+  // groups/<folder>/.gitconfig — mounted at /workspace/agent/.gitconfig and
+  // selected via GIT_CONFIG_GLOBAL. It intentionally contains only placeholder
+  // credentials; OneCLI replaces outbound GitHub auth headers outside the
+  // container.
+  const gitconfigFile = path.join(groupDir, '.gitconfig');
+  if (!fs.existsSync(gitconfigFile)) {
+    fs.writeFileSync(gitconfigFile, GITHUB_GITCONFIG);
+    initialized.push('.gitconfig');
   }
 
   // 2. data/v2-sessions/<id>/.claude-shared/ — Claude state + per-group skills
