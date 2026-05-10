@@ -443,6 +443,11 @@ async function buildContainerArgs(
   // Environment — only vars read by code we don't own.
   // Everything NanoClaw-specific is in container.json (read by runner at startup).
   args.push('-e', `TZ=${TIMEZONE}`);
+  args.push('-e', 'GH_TOKEN=placeholder');
+  args.push('-e', 'GITHUB_TOKEN=placeholder');
+  args.push('-e', 'GH_PROMPT_DISABLED=1');
+  args.push('-e', 'GIT_TERMINAL_PROMPT=0');
+  args.push('-e', 'GIT_CONFIG_GLOBAL=/workspace/agent/.gitconfig');
 
   // Provider-contributed env vars (e.g. XDG_DATA_HOME, OPENCODE_*, NO_PROXY).
   if (providerContribution.env) {
