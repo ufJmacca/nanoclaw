@@ -6,8 +6,9 @@ import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from '
 import { getPendingMessages, markCompleted } from './db/messages-in.js';
 import { getUndeliveredMessages } from './db/messages-out.js';
 import { formatMessages, extractRouting } from './formatter.js';
-import { dispatchResultText } from './poll-loop.js';
+import { dispatchResultText, processQuery } from './poll-loop.js';
 import { MockProvider } from './providers/mock.js';
+import type { AgentQuery, ProviderEvent } from './providers/types.js';
 
 beforeEach(() => {
   initTestSessionDb();
@@ -179,6 +180,67 @@ describe('final-response file directives', () => {
   });
 });
 
+describe('provider progress delivery', () => {
+  it('writes progress events to the originating Telegram channel before the final response', async () => {
+    const query = fakeQuery([
+      { type: 'progress', message: 'Reading the repository and checking tests.' },
+      { type: 'result', text: 'Done.' },
+    ]);
+
+    await processQuery(
+      query,
+      { platformId: 'telegram:123', channelType: 'telegram', threadId: null, inReplyTo: 'inbound-1' },
+      ['inbound-1'],
+      'mock',
+    );
+
+    const out = outboundBySeq();
+    expect(out).toHaveLength(2);
+    expect(out.map((msg) => JSON.parse(msg.content).text)).toEqual([
+      'Reading the repository and checking tests.',
+      'Done.',
+    ]);
+    expect(out.map((msg) => msg.channel_type)).toEqual(['telegram', 'telegram']);
+    expect(out.map((msg) => msg.platform_id)).toEqual(['telegram:123', 'telegram:123']);
+  });
+
+  it('does not send a final response that only repeats already delivered progress', async () => {
+    const query = fakeQuery([
+      { type: 'progress', message: 'Reading the repository and checking tests.' },
+      { type: 'result', text: 'Reading the repository and checking tests.' },
+    ]);
+
+    await processQuery(
+      query,
+      { platformId: 'telegram:123', channelType: 'telegram', threadId: null, inReplyTo: 'inbound-1' },
+      ['inbound-1'],
+      'mock',
+    );
+
+    const out = outboundBySeq();
+    expect(out).toHaveLength(1);
+    expect(JSON.parse(out[0]!.content).text).toBe('Reading the repository and checking tests.');
+  });
+
+  it('keeps progress events off non-Telegram channels', async () => {
+    const query = fakeQuery([
+      { type: 'progress', message: 'Checking the implementation.' },
+      { type: 'result', text: 'Done.' },
+    ]);
+
+    await processQuery(
+      query,
+      { platformId: 'discord:123', channelType: 'discord', threadId: 'thread-1', inReplyTo: 'inbound-1' },
+      ['inbound-1'],
+      'mock',
+    );
+
+    const out = outboundBySeq();
+    expect(out).toHaveLength(1);
+    expect(JSON.parse(out[0]!.content).text).toBe('Done.');
+  });
+});
+
 describe('mock provider', () => {
   it('should produce init + result events', async () => {
     const provider = new MockProvider({}, (prompt) => `Echo: ${prompt}`);
@@ -223,6 +285,29 @@ describe('mock provider', () => {
     expect(results[1].text).toBe('Re: Second');
   });
 });
+
+function fakeQuery(events: ProviderEvent[]): AgentQuery {
+  return {
+    push() {
+      /* unused */
+    },
+    end() {
+      /* unused */
+    },
+    abort() {
+      /* unused */
+    },
+    events: {
+      async *[Symbol.asyncIterator]() {
+        for (const event of events) yield event;
+      },
+    },
+  };
+}
+
+function outboundBySeq() {
+  return getUndeliveredMessages().sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
+}
 
 describe('end-to-end with mock provider', () => {
   it('should read messages_in, process with mock provider, write messages_out', async () => {
