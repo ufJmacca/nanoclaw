@@ -2,12 +2,15 @@ import { findByName, getAllDestinations, type DestinationEntry } from './destina
 import { getPendingMessages, markProcessing, markCompleted, type MessageInRow } from './db/messages-in.js';
 import { writeMessageOut } from './db/messages-out.js';
 import { touchHeartbeat, clearStaleProcessingAcks } from './db/connection.js';
+import { clearContinuation, migrateLegacyContinuation, setContinuation } from './db/session-state.js';
 import {
-  clearContinuation,
-  migrateLegacyContinuation,
-  setContinuation,
-} from './db/session-state.js';
-import { formatMessages, extractRouting, categorizeMessage, isClearCommand, stripInternalTags, type RoutingContext } from './formatter.js';
+  formatMessages,
+  extractRouting,
+  categorizeMessage,
+  isClearCommand,
+  stripInternalTags,
+  type RoutingContext,
+} from './formatter.js';
 import { queueFileMessage } from './outbound-files.js';
 import type { AgentProvider, AgentQuery, ProviderEvent } from './providers/types.js';
 
@@ -246,7 +249,7 @@ interface QueryResult {
   continuation?: string;
 }
 
-async function processQuery(
+export async function processQuery(
   query: AgentQuery,
   routing: RoutingContext,
   initialBatchIds: string[],
@@ -254,6 +257,7 @@ async function processQuery(
 ): Promise<QueryResult> {
   let queryContinuation: string | undefined;
   let done = false;
+  const deliveredProgress: string[] = [];
 
   // Concurrent polling: push follow-ups into the active query as they arrive.
   // We do NOT force-end the stream on silence — keeping the query open is
@@ -349,8 +353,11 @@ async function processQuery(
         // at all — either way the turn is finished.
         markCompleted(initialBatchIds);
         if (event.text) {
-          dispatchResultText(event.text, routing);
+          dispatchResultText(stripDeliveredProgressResult(event.text, deliveredProgress), routing);
         }
+      } else if (event.type === 'progress') {
+        const sent = dispatchProgressText(event.message, routing);
+        if (sent) deliveredProgress.push(sent);
       }
     }
   } finally {
@@ -370,12 +377,52 @@ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
       log(`Result: ${event.text ? event.text.slice(0, 200) : '(empty)'}`);
       break;
     case 'error':
-      log(`Error: ${event.message} (retryable: ${event.retryable}${event.classification ? `, ${event.classification}` : ''})`);
+      log(
+        `Error: ${event.message} (retryable: ${event.retryable}${event.classification ? `, ${event.classification}` : ''})`,
+      );
       break;
     case 'progress':
       log(`Progress: ${event.message}`);
       break;
   }
+}
+
+export function dispatchProgressText(text: string, routing: RoutingContext): string | null {
+  // Keep the behavior scoped to the Telegram channel uplift. Other channels
+  // continue to receive final answers and explicit send_message output only.
+  if (routing.channelType !== 'telegram' || !routing.platformId) return null;
+
+  const cleaned = stripInternalTags(text);
+  if (!cleaned) return null;
+
+  writeMessageOut({
+    id: generateId(),
+    in_reply_to: routing.inReplyTo,
+    kind: 'chat',
+    platform_id: routing.platformId,
+    channel_type: routing.channelType,
+    thread_id: routing.threadId,
+    content: JSON.stringify({ text: cleaned }),
+  });
+
+  return cleaned;
+}
+
+function stripDeliveredProgressResult(text: string, deliveredProgress: string[]): string {
+  if (deliveredProgress.length === 0) return text;
+
+  const visibleResult = normalizeProgressForDedupe(stripInternalTags(text));
+  if (!visibleResult) return text;
+
+  const delivered = deliveredProgress.map((progress) => normalizeProgressForDedupe(progress));
+  if (delivered.includes(visibleResult)) return '';
+  if (normalizeProgressForDedupe(deliveredProgress.join('\n\n')) === visibleResult) return '';
+
+  return text;
+}
+
+function normalizeProgressForDedupe(text: string): string {
+  return text.replace(/\s+/g, ' ').trim();
 }
 
 /**
