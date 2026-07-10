@@ -32,6 +32,7 @@ import { log } from './log.js';
 import { resolveSession, writeSessionMessage, writeOutboundDirect } from './session-manager.js';
 import { wakeContainer } from './container-runner.js';
 import { getSession } from './db/sessions.js';
+import { validateMattermostRoutingBoundary } from './channels/mattermost-subscription.js';
 import type { AgentGroup, MessagingGroup, MessagingGroupAgent } from './types.js';
 import type { ChannelAdapter, InboundEvent, ThreadSessionPolicy } from './channels/adapter.js';
 
@@ -228,6 +229,36 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
     agentCount = found.agentCount;
   }
 
+  // Mattermost channel-to-agent identity is a strict security boundary.
+  // Reject missing or malformed canonical subscriptions before generic
+  // approval, sender resolution, session creation, or container invocation.
+  let strictMattermostWiring: MessagingGroupAgent | null = null;
+  const mattermostBoundary = validateMattermostRoutingBoundary(mg);
+  if (mattermostBoundary.strict) {
+    if (!mattermostBoundary.valid) {
+      recordDroppedMessage({
+        channel_type: event.channelType,
+        platform_id: event.platformId,
+        user_id: null,
+        sender_name: null,
+        reason: `invalid_mattermost_subscription:${mattermostBoundary.reason}`,
+        messaging_group_id: mg.id,
+        agent_group_id: null,
+      });
+      log.warn('Mattermost message rejected by strict subscription boundary', {
+        messagingGroupId: mg.id,
+        reason: mattermostBoundary.reason,
+      });
+      return;
+    }
+    // Use the exact topology snapshot that passed validation. Reloading fan-
+    // out later would create a check/use gap in which another writer could
+    // add a second agent after validation but before invocation.
+    mg = mattermostBoundary.value.messagingGroup;
+    strictMattermostWiring = mattermostBoundary.value.wiring;
+    agentCount = 1;
+  }
+
   // 1b. No wirings — either silent drop (plain chatter / denied channel) or
   //     escalate to owner for channel-registration approval.
   if (agentCount === 0) {
@@ -276,7 +307,7 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
 
   // 3. Fetch wired agents in full (we already know the count is > 0; now
   //    we need their actual rows for fan-out).
-  const agents = getMessagingGroupAgents(mg.id);
+  const agents = strictMattermostWiring ? [strictMattermostWiring] : getMessagingGroupAgents(mg.id);
 
   // 4. Fan-out: evaluate each wired agent independently against engage_mode,
   //    sender_scope, and access gate. An agent that engages gets its own

@@ -45,6 +45,7 @@
  *   - Delivery adapter missing.
  */
 import { normalizeOptions, type NormalizedOption, type RawOption } from '../../channels/ask-question.js';
+import { excludeMattermostOwnedAgentGroups } from '../../channels/mattermost-subscription.js';
 import { createAgentGroup, getAgentGroup, getAgentGroupByFolder, getAllAgentGroups } from '../../db/agent-groups.js';
 import { getChannelAdapter } from '../../channels/channel-registry.js';
 import { getMessagingGroup, updateMessagingGroup } from '../../db/messaging-groups.js';
@@ -133,7 +134,7 @@ export async function requestChannelApproval(input: RequestChannelApprovalInput)
     return;
   }
 
-  const agentGroups = getAllAgentGroups();
+  const agentGroups = excludeMattermostOwnedAgentGroups(getAllAgentGroups());
   if (agentGroups.length === 0) {
     log.warn('Channel registration skipped — no agent groups configured. Run /init-first-agent.', {
       messagingGroupId,

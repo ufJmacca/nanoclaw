@@ -8,6 +8,7 @@ import fs from 'fs';
 import path from 'path';
 
 import { DATA_DIR } from '../src/config.js';
+import { isMattermostOwnedAgentGroup } from '../src/channels/mattermost-subscription.js';
 import { initDb } from '../src/db/connection.js';
 import { runMigrations } from '../src/db/migrations/index.js';
 import { createAgentGroup, getAgentGroupByFolder } from '../src/db/agent-groups.js';
@@ -41,6 +42,18 @@ interface RegisterArgs {
   assistantName: string;
   /** Session mode: 'shared' (one session per channel) or 'per-thread' */
   sessionMode: string;
+}
+
+export function assertGenericChannelRegistrationAllowed(channelType: string): void {
+  if (channelType === 'mattermost') {
+    throw new Error('Mattermost requires strict channel subscription');
+  }
+}
+
+export function assertGenericAgentGroupRegistrationAllowed(agentGroupId: string): void {
+  if (isMattermostOwnedAgentGroup(agentGroupId)) {
+    throw new Error('Mattermost-owned agent groups cannot be reused by generic registration');
+  }
 }
 
 function parseArgs(args: string[]): RegisterArgs {
@@ -94,6 +107,7 @@ function generateId(prefix: string): string {
 export async function run(args: string[]): Promise<void> {
   const projectRoot = process.cwd();
   const parsed = parseArgs(args);
+  assertGenericChannelRegistrationAllowed(parsed.channel);
 
   if (!parsed.platformId || !parsed.name || !parsed.folder) {
     emitStatus('REGISTER_CHANNEL', {
@@ -128,6 +142,7 @@ export async function run(args: string[]): Promise<void> {
 
   // 1. Create or find agent group
   let agentGroup = getAgentGroupByFolder(parsed.folder);
+  if (agentGroup) assertGenericAgentGroupRegistrationAllowed(agentGroup.id);
   if (!agentGroup) {
     const agId = generateId('ag');
     createAgentGroup({
@@ -194,7 +209,12 @@ export async function run(args: string[]): Promise<void> {
 
   // 4. Send onboarding message — only on first wiring, not re-registration
   if (newlyWired) {
-    const { session } = resolveSession(agentGroup.id, messagingGroup.id, null, parsed.sessionMode as 'shared' | 'per-thread' | 'agent-shared');
+    const { session } = resolveSession(
+      agentGroup.id,
+      messagingGroup.id,
+      null,
+      parsed.sessionMode as 'shared' | 'per-thread' | 'agent-shared',
+    );
     writeSessionMessage(agentGroup.id, session.id, {
       id: generateId('onboard'),
       kind: 'task',

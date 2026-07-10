@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 
 import Database from 'better-sqlite3';
@@ -25,6 +26,7 @@ import {
   createAgentGroup,
   createMessagingGroup,
   createMessagingGroupAgent,
+  getDb,
   initTestDb,
   runMigrations,
 } from './db/index.js';
@@ -38,35 +40,55 @@ function now(): string {
   return new Date().toISOString();
 }
 
+function mattermostFixture(channel: 'a' | 'b') {
+  const channelId = `channel-${channel}`;
+  const digest = createHash('sha256').update(`primary\0${channelId}`).digest('hex').slice(0, 24);
+  return {
+    channelId,
+    messagingGroupId: `mg-mattermost-${channel}`,
+    agentGroupId: `ag-mattermost-${digest}`,
+    folder: `mattermost-${digest}`,
+    wiringId: `mga-mattermost-${digest}`,
+  };
+}
+
 function seedMattermostChannel(channel: 'a' | 'b' = 'a'): void {
+  const fixture = mattermostFixture(channel);
   createAgentGroup({
-    id: `ag-mattermost-${channel}`,
+    id: fixture.agentGroupId,
     name: `Mattermost ${channel.toUpperCase()}`,
-    folder: `mattermost-${channel}`,
+    folder: fixture.folder,
     agent_provider: null,
     created_at: now(),
   });
   createMessagingGroup({
-    id: `mg-mattermost-${channel}`,
+    id: fixture.messagingGroupId,
     channel_type: 'mattermost',
-    platform_id: `mattermost:primary:channel-${channel}`,
+    platform_id: `mattermost:primary:${fixture.channelId}`,
     name: `Channel ${channel.toUpperCase()}`,
     is_group: 1,
-    unknown_sender_policy: 'public',
+    unknown_sender_policy: 'strict',
     created_at: now(),
   });
   createMessagingGroupAgent({
-    id: `mga-mattermost-${channel}`,
-    messaging_group_id: `mg-mattermost-${channel}`,
-    agent_group_id: `ag-mattermost-${channel}`,
+    id: fixture.wiringId,
+    messaging_group_id: fixture.messagingGroupId,
+    agent_group_id: fixture.agentGroupId,
     engage_mode: 'pattern',
     engage_pattern: '.',
-    sender_scope: 'all',
+    sender_scope: 'known',
     ignored_message_policy: 'drop',
     session_mode: 'shared',
     priority: 0,
     created_at: now(),
   });
+  getDb()
+    .prepare(
+      `INSERT INTO mattermost_subscriptions (
+         instance_key, channel_id, messaging_group_id, agent_group_id, wiring_id, status, created_at
+       ) VALUES (?, ?, ?, ?, ?, 'active', ?)`,
+    )
+    .run('primary', fixture.channelId, fixture.messagingGroupId, fixture.agentGroupId, fixture.wiringId, now());
 }
 
 function seedTelegramChannel(): void {
@@ -145,7 +167,7 @@ describe('Mattermost thread/session policy', () => {
     await routeInbound(mattermostEvent('root-message', null));
     await routeInbound(mattermostEvent('thread-reply', 'root-post-id'));
 
-    const sessions = getSessionsByAgentGroup('ag-mattermost-a');
+    const sessions = getSessionsByAgentGroup(mattermostFixture('a').agentGroupId);
     expect(sessions).toHaveLength(1);
     expect(sessions[0].thread_id).toBeNull();
   });
@@ -153,8 +175,9 @@ describe('Mattermost thread/session policy', () => {
   it('keeps root_id as per-message delivery metadata in the shared session', async () => {
     await routeInbound(mattermostEvent('thread-reply', 'root-post-id'));
 
-    const [session] = getSessionsByAgentGroup('ag-mattermost-a');
-    const db = new Database(inboundDbPath('ag-mattermost-a', session.id));
+    const { agentGroupId } = mattermostFixture('a');
+    const [session] = getSessionsByAgentGroup(agentGroupId);
+    const db = new Database(inboundDbPath(agentGroupId, session.id));
     const row = db.prepare('SELECT thread_id FROM messages_in LIMIT 1').get() as {
       thread_id: string | null;
     };
@@ -169,8 +192,8 @@ describe('Mattermost thread/session policy', () => {
     await routeInbound(mattermostEvent('channel-a-message', null, 'a'));
     await routeInbound(mattermostEvent('channel-b-message', null, 'b'));
 
-    const [sessionA] = getSessionsByAgentGroup('ag-mattermost-a');
-    const [sessionB] = getSessionsByAgentGroup('ag-mattermost-b');
+    const [sessionA] = getSessionsByAgentGroup(mattermostFixture('a').agentGroupId);
+    const [sessionB] = getSessionsByAgentGroup(mattermostFixture('b').agentGroupId);
     expect(sessionA.id).not.toBe(sessionB.id);
     expect(sessionA.messaging_group_id).toBe('mg-mattermost-a');
     expect(sessionB.messaging_group_id).toBe('mg-mattermost-b');
@@ -182,7 +205,7 @@ describe('Mattermost thread/session policy', () => {
     await routeInbound(mattermostEvent('legacy-root', null));
     await routeInbound(mattermostEvent('legacy-thread', 'root-post-id'));
 
-    const sessions = getSessionsByAgentGroup('ag-mattermost-a');
+    const sessions = getSessionsByAgentGroup(mattermostFixture('a').agentGroupId);
     expect(sessions).toHaveLength(2);
     expect(sessions.map((session) => session.thread_id)).toEqual(expect.arrayContaining([null, 'root-post-id']));
   });
