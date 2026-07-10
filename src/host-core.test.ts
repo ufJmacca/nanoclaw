@@ -135,6 +135,196 @@ describe('session manager', () => {
     expect(readOutboxFiles('ag-1', 'sess-test', 'msg-1', ['safe-name.txt'])).toBeUndefined();
   });
 
+  it('should reject an outbox root symlink redirected into another session', () => {
+    initSessionFolder('ag-1', 'sess-a');
+    initSessionFolder('ag-1', 'sess-b');
+    const outboxA = path.join(sessionDir('ag-1', 'sess-a'), 'outbox');
+    const outboxB = path.join(sessionDir('ag-1', 'sess-b'), 'outbox');
+    const foreignMessageDir = path.join(outboxB, 'msg-foreign');
+    fs.mkdirSync(foreignMessageDir, { recursive: true });
+    fs.writeFileSync(path.join(foreignMessageDir, 'secret.txt'), 'FOREIGN_SESSION_ATTACHMENT');
+    fs.rmSync(outboxA, { recursive: true });
+    fs.symlinkSync(outboxB, outboxA, 'dir');
+
+    expect(readOutboxFiles('ag-1', 'sess-a', 'msg-foreign', ['secret.txt'])).toBeUndefined();
+  });
+
+  it('should keep an outbox read on its opened directory when the container swaps the root', () => {
+    initSessionFolder('ag-1', 'sess-a');
+    initSessionFolder('ag-1', 'sess-b');
+    const outboxA = path.join(sessionDir('ag-1', 'sess-a'), 'outbox');
+    const outboxB = path.join(sessionDir('ag-1', 'sess-b'), 'outbox');
+    const ownedMessageDir = path.join(outboxA, 'msg-race');
+    const foreignMessageDir = path.join(outboxB, 'msg-race');
+    const ownedFile = path.join(ownedMessageDir, 'result.txt');
+    fs.mkdirSync(ownedMessageDir, { recursive: true });
+    fs.mkdirSync(foreignMessageDir, { recursive: true });
+    fs.writeFileSync(ownedFile, 'OWNED_ATTACHMENT');
+    fs.writeFileSync(path.join(foreignMessageDir, 'result.txt'), 'FOREIGN_ATTACHMENT');
+
+    const originalReadFileSync = fs.readFileSync;
+    let swapped = false;
+    const readSpy = vi.spyOn(fs, 'readFileSync').mockImplementation(((
+      candidate: string | Buffer | URL | number,
+      ...args: unknown[]
+    ) => {
+      if (!swapped && (typeof candidate === 'number' || path.resolve(String(candidate)) === ownedFile)) {
+        swapped = true;
+        fs.renameSync(outboxA, `${outboxA}-opened`);
+        fs.symlinkSync(outboxB, outboxA, 'dir');
+      }
+      return Reflect.apply(originalReadFileSync, fs, [candidate, ...args]);
+    }) as typeof fs.readFileSync);
+
+    try {
+      const files = readOutboxFiles('ag-1', 'sess-a', 'msg-race', ['result.txt']);
+      expect(files?.[0]?.data.toString()).toBe('OWNED_ATTACHMENT');
+    } finally {
+      readSpy.mockRestore();
+    }
+    expect(swapped).toBe(true);
+  });
+
+  it('should pin the outbox message directory before opening an attachment file', () => {
+    initSessionFolder('ag-1', 'sess-a');
+    initSessionFolder('ag-1', 'sess-b');
+    const outboxA = path.join(sessionDir('ag-1', 'sess-a'), 'outbox');
+    const outboxB = path.join(sessionDir('ag-1', 'sess-b'), 'outbox');
+    const ownedMessageDir = path.join(outboxA, 'msg-open-race');
+    const foreignMessageDir = path.join(outboxB, 'msg-open-race');
+    fs.mkdirSync(ownedMessageDir, { recursive: true });
+    fs.mkdirSync(foreignMessageDir, { recursive: true });
+    fs.writeFileSync(path.join(ownedMessageDir, 'result.txt'), 'OWNED_ATTACHMENT');
+    fs.writeFileSync(path.join(foreignMessageDir, 'result.txt'), 'FOREIGN_ATTACHMENT');
+
+    const originalOpenSync = fs.openSync;
+    let swapped = false;
+    const openSpy = vi.spyOn(fs, 'openSync').mockImplementation(((candidate: fs.PathLike, ...args: unknown[]) => {
+      if (!swapped && String(candidate).endsWith('/result.txt')) {
+        swapped = true;
+        fs.renameSync(outboxA, `${outboxA}-opened`);
+        fs.symlinkSync(outboxB, outboxA, 'dir');
+      }
+      return Reflect.apply(originalOpenSync, fs, [candidate, ...args]);
+    }) as typeof fs.openSync);
+
+    try {
+      const files = readOutboxFiles('ag-1', 'sess-a', 'msg-open-race', ['result.txt']);
+      expect(files?.[0]?.data.toString()).toBe('OWNED_ATTACHMENT');
+    } finally {
+      openSpy.mockRestore();
+    }
+    expect(swapped).toBe(true);
+  });
+
+  it('should fail explicitly when stable descriptor-relative traversal is unavailable', () => {
+    initSessionFolder('ag-1', 'sess-test');
+    const messageDir = path.join(sessionDir('ag-1', 'sess-test'), 'outbox', 'msg-1');
+    fs.mkdirSync(messageDir, { recursive: true });
+    fs.writeFileSync(path.join(messageDir, 'result.txt'), 'OWNED_ATTACHMENT');
+
+    const originalOpenSync = fs.openSync;
+    const openSpy = vi.spyOn(fs, 'openSync').mockImplementation(((candidate: fs.PathLike, ...args: unknown[]) => {
+      if (String(candidate).startsWith('/proc/self/fd/') || String(candidate).startsWith('/dev/fd/')) {
+        const err = new Error('descriptor traversal unavailable') as NodeJS.ErrnoException;
+        err.code = 'ENOTDIR';
+        throw err;
+      }
+      return Reflect.apply(originalOpenSync, fs, [candidate, ...args]);
+    }) as typeof fs.openSync);
+
+    try {
+      expect(() => readOutboxFiles('ag-1', 'sess-test', 'msg-1', ['result.txt'])).toThrow(
+        'Secure descriptor-relative filesystem access is unavailable',
+      );
+    } finally {
+      openSpy.mockRestore();
+    }
+  });
+
+  it('should not clear another session through a redirected outbox root', () => {
+    initSessionFolder('ag-1', 'sess-a');
+    initSessionFolder('ag-1', 'sess-b');
+    const outboxA = path.join(sessionDir('ag-1', 'sess-a'), 'outbox');
+    const outboxB = path.join(sessionDir('ag-1', 'sess-b'), 'outbox');
+    const foreignMessageDir = path.join(outboxB, 'msg-foreign');
+    const foreignFile = path.join(foreignMessageDir, 'keep.txt');
+    fs.mkdirSync(foreignMessageDir, { recursive: true });
+    fs.writeFileSync(foreignFile, 'KEEP_FOREIGN_FILE');
+    fs.rmSync(outboxA, { recursive: true });
+    fs.symlinkSync(outboxB, outboxA, 'dir');
+
+    clearOutbox('ag-1', 'sess-a', 'msg-foreign');
+
+    expect(fs.readFileSync(foreignFile, 'utf8')).toBe('KEEP_FOREIGN_FILE');
+  });
+
+  it('should keep outbox cleanup on its opened directory when the container swaps the root', () => {
+    initSessionFolder('ag-1', 'sess-a');
+    initSessionFolder('ag-1', 'sess-b');
+    const outboxA = path.join(sessionDir('ag-1', 'sess-a'), 'outbox');
+    const outboxB = path.join(sessionDir('ag-1', 'sess-b'), 'outbox');
+    const ownedMessageDir = path.join(outboxA, 'msg-race');
+    const foreignMessageDir = path.join(outboxB, 'msg-race');
+    const foreignFile = path.join(foreignMessageDir, 'keep.txt');
+    fs.mkdirSync(ownedMessageDir, { recursive: true });
+    fs.writeFileSync(path.join(ownedMessageDir, 'remove.txt'), 'REMOVE_OWNED_FILE');
+    fs.mkdirSync(foreignMessageDir, { recursive: true });
+    fs.writeFileSync(foreignFile, 'KEEP_FOREIGN_FILE');
+
+    const originalRmSync = fs.rmSync;
+    let swapped = false;
+    const rmSpy = vi.spyOn(fs, 'rmSync').mockImplementation((candidate, options) => {
+      if (!swapped) {
+        swapped = true;
+        fs.renameSync(outboxA, `${outboxA}-opened`);
+        fs.symlinkSync(outboxB, outboxA, 'dir');
+      }
+      return originalRmSync(candidate, options);
+    });
+
+    try {
+      clearOutbox('ag-1', 'sess-a', 'msg-race');
+    } finally {
+      rmSpy.mockRestore();
+    }
+    expect(swapped).toBe(true);
+    expect(fs.readFileSync(foreignFile, 'utf8')).toBe('KEEP_FOREIGN_FILE');
+  });
+
+  it('should pin the outbox root before quarantining a cleanup directory', () => {
+    initSessionFolder('ag-1', 'sess-a');
+    initSessionFolder('ag-1', 'sess-b');
+    const outboxA = path.join(sessionDir('ag-1', 'sess-a'), 'outbox');
+    const outboxB = path.join(sessionDir('ag-1', 'sess-b'), 'outbox');
+    const ownedMessageDir = path.join(outboxA, 'msg-rename-race');
+    const foreignMessageDir = path.join(outboxB, 'msg-rename-race');
+    const foreignFile = path.join(foreignMessageDir, 'keep.txt');
+    fs.mkdirSync(ownedMessageDir, { recursive: true });
+    fs.writeFileSync(path.join(ownedMessageDir, 'remove.txt'), 'REMOVE_OWNED_FILE');
+    fs.mkdirSync(foreignMessageDir, { recursive: true });
+    fs.writeFileSync(foreignFile, 'KEEP_FOREIGN_FILE');
+
+    const originalRenameSync = fs.renameSync;
+    let swapped = false;
+    const renameSpy = vi.spyOn(fs, 'renameSync').mockImplementation((oldPath, newPath) => {
+      if (!swapped) {
+        swapped = true;
+        originalRenameSync(outboxA, `${outboxA}-opened`);
+        fs.symlinkSync(outboxB, outboxA, 'dir');
+      }
+      return originalRenameSync(oldPath, newPath);
+    });
+
+    try {
+      clearOutbox('ag-1', 'sess-a', 'msg-rename-race');
+    } finally {
+      renameSpy.mockRestore();
+    }
+    expect(swapped).toBe(true);
+    expect(fs.readFileSync(foreignFile, 'utf8')).toBe('KEEP_FOREIGN_FILE');
+  });
+
   it('should not recursively delete outside the outbox for unsafe message ids', () => {
     initSessionFolder('ag-1', 'sess-test');
     const victimDir = path.join(TEST_DIR, 'victim-dir');
@@ -185,6 +375,102 @@ describe('session manager', () => {
     });
 
     expect(fs.existsSync(path.join(evilTarget, 'photo.png'))).toBe(false);
+  });
+
+  it('should reject an inbox root symlink redirected outside its owned session', () => {
+    const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
+    const inboxRoot = path.join(sessionDir('ag-1', session.id), 'inbox');
+    const foreignInbox = path.join(TEST_DIR, 'foreign-session-inbox');
+    fs.mkdirSync(foreignInbox, { recursive: true });
+    fs.symlinkSync(foreignInbox, inboxRoot, 'dir');
+
+    writeSessionMessage('ag-1', session.id, {
+      id: 'msg-root-symlink',
+      kind: 'chat',
+      timestamp: now(),
+      content: JSON.stringify({
+        text: 'must remain owned',
+        attachments: [{ name: 'photo.png', data: Buffer.from('PNGBYTES').toString('base64'), size: 8 }],
+      }),
+    });
+
+    expect(fs.existsSync(path.join(foreignInbox, 'msg-root-symlink', 'photo.png'))).toBe(false);
+  });
+
+  it('should keep an inbox write on its opened directory when the container swaps the root', () => {
+    const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
+    const inboxRoot = path.join(sessionDir('ag-1', session.id), 'inbox');
+    const foreignInbox = path.join(TEST_DIR, 'foreign-racing-inbox');
+    fs.mkdirSync(path.join(foreignInbox, 'msg-race'), { recursive: true });
+
+    const originalWriteFileSync = fs.writeFileSync;
+    let swapped = false;
+    const writeSpy = vi.spyOn(fs, 'writeFileSync').mockImplementation(((
+      candidate: string | Buffer | URL | number,
+      data: string | NodeJS.ArrayBufferView,
+      ...args: unknown[]
+    ) => {
+      if (!swapped && (typeof candidate === 'number' || String(candidate).endsWith('/msg-race/photo.png'))) {
+        swapped = true;
+        fs.renameSync(inboxRoot, `${inboxRoot}-opened`);
+        fs.symlinkSync(foreignInbox, inboxRoot, 'dir');
+      }
+      return Reflect.apply(originalWriteFileSync, fs, [candidate, data, ...args]);
+    }) as typeof fs.writeFileSync);
+
+    try {
+      writeSessionMessage('ag-1', session.id, {
+        id: 'msg-race',
+        kind: 'chat',
+        timestamp: now(),
+        content: JSON.stringify({
+          text: 'must stay on the opened inbox',
+          attachments: [{ name: 'photo.png', data: Buffer.from('OWNED_BYTES').toString('base64'), size: 11 }],
+        }),
+      });
+    } finally {
+      writeSpy.mockRestore();
+    }
+
+    expect(swapped).toBe(true);
+    expect(fs.existsSync(path.join(foreignInbox, 'msg-race', 'photo.png'))).toBe(false);
+    expect(fs.readFileSync(path.join(`${inboxRoot}-opened`, 'msg-race', 'photo.png'), 'utf8')).toBe('OWNED_BYTES');
+  });
+
+  it('should pin the inbox message directory before opening an attachment file', () => {
+    const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
+    const inboxRoot = path.join(sessionDir('ag-1', session.id), 'inbox');
+    const foreignInbox = path.join(TEST_DIR, 'foreign-open-racing-inbox');
+    fs.mkdirSync(path.join(foreignInbox, 'msg-open-race'), { recursive: true });
+
+    const originalOpenSync = fs.openSync;
+    let swapped = false;
+    const openSpy = vi.spyOn(fs, 'openSync').mockImplementation(((candidate: fs.PathLike, ...args: unknown[]) => {
+      if (!swapped && String(candidate).endsWith('/photo.png')) {
+        swapped = true;
+        fs.renameSync(inboxRoot, `${inboxRoot}-opened`);
+        fs.symlinkSync(foreignInbox, inboxRoot, 'dir');
+      }
+      return Reflect.apply(originalOpenSync, fs, [candidate, ...args]);
+    }) as typeof fs.openSync);
+
+    try {
+      writeSessionMessage('ag-1', session.id, {
+        id: 'msg-open-race',
+        kind: 'chat',
+        timestamp: now(),
+        content: JSON.stringify({
+          text: 'must stay on the pinned inbox',
+          attachments: [{ name: 'photo.png', data: Buffer.from('OWNED_BYTES').toString('base64'), size: 11 }],
+        }),
+      });
+    } finally {
+      openSpy.mockRestore();
+    }
+
+    expect(swapped).toBe(true);
+    expect(fs.existsSync(path.join(foreignInbox, 'msg-open-race', 'photo.png'))).toBe(false);
+    expect(fs.readFileSync(path.join(`${inboxRoot}-opened`, 'msg-open-race', 'photo.png'), 'utf8')).toBe('OWNED_BYTES');
   });
 
   it('should refuse to follow a pre-existing symlink at the inbound attachment path', () => {
@@ -249,6 +535,19 @@ describe('session manager', () => {
     const expected = path.join(sessionDir('ag-1', session.id), 'inbox', 'msg-ok', 'photo.png');
     expect(fs.existsSync(expected)).toBe(true);
     expect(fs.readFileSync(expected, 'utf-8')).toBe('PNGBYTES');
+  });
+
+  it('should not create inbox artifacts for a message without attachment data', () => {
+    const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
+
+    writeSessionMessage('ag-1', session.id, {
+      id: 'msg-no-attachment-data',
+      kind: 'chat',
+      timestamp: now(),
+      content: JSON.stringify({ text: 'plain message', attachments: [] }),
+    });
+
+    expect(fs.existsSync(path.join(sessionDir('ag-1', session.id), 'inbox'))).toBe(false);
   });
 
   it('should resolve distinct thread ids to one existing session in shared mode', () => {

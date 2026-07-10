@@ -457,6 +457,19 @@ async function deliverToAgent(
   threadSessionPolicy: ThreadSessionPolicy,
   wake: boolean,
 ): Promise<void> {
+  if (
+    mg.channel_type === 'mattermost' &&
+    event.replyTo &&
+    (event.replyTo.channelType !== mg.channel_type ||
+      event.replyTo.platformId !== mg.platform_id ||
+      event.replyTo.threadId !== event.threadId)
+  ) {
+    log.warn('Mattermost reply address rejected outside its canonical inbound route', {
+      messagingGroupId: mg.id,
+    });
+    return;
+  }
+
   const effectiveSessionMode = resolveEffectiveSessionMode(agent.session_mode, mg.is_group !== 0, threadSessionPolicy);
 
   const { session, created } = resolveSession(agent.agent_group_id, mg.id, event.threadId, effectiveSessionMode);

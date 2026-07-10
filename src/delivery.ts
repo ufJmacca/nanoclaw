@@ -9,6 +9,10 @@
  */
 import type Database from 'better-sqlite3';
 
+import {
+  validateMattermostSessionForExecution,
+  type MattermostSessionExecutionBoundary,
+} from './channels/mattermost-subscription.js';
 import { getRunningSessions, getActiveSessions, createPendingQuestion } from './db/sessions.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { getDb, hasTable } from './db/connection.js';
@@ -163,6 +167,15 @@ export async function deliverSessionMessages(session: Session): Promise<void> {
 }
 
 async function drainSession(session: Session): Promise<void> {
+  const mattermostBoundary = validateMattermostSessionForExecution(session);
+  if (mattermostBoundary.strict && !mattermostBoundary.valid) {
+    log.warn('Skipping invalid Mattermost execution session during delivery', {
+      sessionId: session.id,
+      reason: mattermostBoundary.reason,
+    });
+    return;
+  }
+
   const agentGroup = getAgentGroup(session.agent_group_id);
   if (!agentGroup) return;
 
@@ -190,7 +203,7 @@ async function drainSession(session: Session): Promise<void> {
 
     for (const msg of undelivered) {
       try {
-        const platformMsgId = await deliverMessage(msg, session, inDb);
+        const platformMsgId = await deliverMessage(msg, session, inDb, mattermostBoundary);
         markDelivered(inDb, msg.id, platformMsgId ?? null);
         deliveryAttempts.delete(msg.id);
 
@@ -243,6 +256,7 @@ async function deliverMessage(
   },
   session: Session,
   inDb: Database.Database,
+  mattermostBoundary: MattermostSessionExecutionBoundary,
 ): Promise<string | undefined> {
   if (!deliveryAdapter) {
     log.warn('No delivery adapter configured, dropping message', { id: msg.id });
@@ -268,6 +282,25 @@ async function deliverMessage(
     const { routeAgentMessage } = await import('./modules/agent-to-agent/agent-route.js');
     await routeAgentMessage(msg, session);
     return;
+  }
+
+  if (mattermostBoundary.strict) {
+    if (!mattermostBoundary.valid) throw new Error('Invalid Mattermost delivery session');
+    const canonicalPlatformId = mattermostBoundary.value.messagingGroup.platform_id;
+    if (msg.channel_type !== 'mattermost' || msg.platform_id !== canonicalPlatformId) {
+      throw new Error('Invalid Mattermost outbound channel route');
+    }
+    if (msg.thread_id !== null) {
+      const observedRoot = inDb
+        .prepare(
+          `SELECT 1
+             FROM messages_in
+            WHERE channel_type = 'mattermost' AND platform_id = ? AND thread_id = ?
+            LIMIT 1`,
+        )
+        .get(canonicalPlatformId, msg.thread_id);
+      if (!observedRoot) throw new Error('Invalid Mattermost outbound root');
+    }
   }
 
   // Permission check: the source agent must be allowed to deliver to this
