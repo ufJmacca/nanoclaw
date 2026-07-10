@@ -1052,7 +1052,7 @@ Phase status: complete; pull request ready for review.
 
 ## Phase 6 — Container and context isolation proof
 
-Phase status: in progress.
+Phase status: complete; pull request ready for review.
 
 ### Slice 6.0: immutable active-container execution identity
 
@@ -1318,3 +1318,6 @@ Phase status: in progress.
 - Operational note: attachment isolation requires descriptor-relative child traversal. Linux `/proc/self/fd` is exercised by this gate. Other supported hosts are capability-checked against `/proc/self/fd` and `/dev/fd`; if neither works, attachment IO fails explicitly instead of falling back to a check-then-use path.
 - Residual risk: `better-sqlite3` does not expose SQLite's no-follow open flag, so database artifact validation remains a pre-open identity check. The running container sees host-owned `inbound.db` through a nested read-only bind, and all tested symlink/hardlink/sidecar states fail closed; the container-owned outbound database retains a narrow leaf-swap window for future native/openat hardening.
 - Isolation impact: A/B/Telegram marker, workspace, mount, session, routing, credential, attachment, and execution boundaries remain disjoint even under malformed topology, provider mutation, root replacement, and deterministic filesystem races covered by this phase.
+- Pull request: [#43 — Phase 6: prove Mattermost container and context isolation](https://github.com/ufJmacca/nanoclaw/pull/43), base `codex/mattermost-05-strict-subscriptions`, head `codex/mattermost-06-isolation`.
+- GitHub checks: the available `label` check passed in 3 seconds ([run 29131018921](https://github.com/ufJmacca/nanoclaw/actions/runs/29131018921)); the code CI workflow did not trigger because it is configured only for pull requests targeting `main`, so no code-CI pass is claimed.
+- Phase status: complete; the full local gate, independent release audit, and every available GitHub check passed; pull request ready for review.
