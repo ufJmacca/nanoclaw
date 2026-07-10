@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { DATA_DIR } from '../config.js';
+import { DATA_DIR, GROUPS_DIR } from '../config.js';
 import { createAgentGroup, getAgentGroup } from '../db/agent-groups.js';
 import { getDb } from '../db/connection.js';
 import {
@@ -17,7 +17,7 @@ import {
 } from '../db/messaging-groups.js';
 import { initGroupFilesystem } from '../group-init.js';
 import { resolveGroupFolderPath } from '../group-folder.js';
-import type { AgentGroup, MessagingGroup, MessagingGroupAgent } from '../types.js';
+import type { AgentGroup, MessagingGroup, MessagingGroupAgent, Session } from '../types.js';
 
 const SAFE_IDENTITY_COMPONENT = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
@@ -80,6 +80,24 @@ export type MattermostSubscriptionValidation =
   | { valid: false; reason: MattermostSubscriptionInvalidReason };
 
 export type MattermostRoutingBoundary = { strict: false } | ({ strict: true } & MattermostSubscriptionValidation);
+
+export type MattermostSessionExecutionBoundary =
+  | { strict: false }
+  | ({ strict: true } & (
+      | { valid: true; value: MattermostSubscriptionResult }
+      | {
+          valid: false;
+          reason:
+            | MattermostSubscriptionInvalidReason
+            | 'session_identity_mismatch'
+            | 'session_record_mismatch'
+            | 'unsafe_session_identity'
+            | 'unsafe_session_path'
+            | 'duplicate_active_session'
+            | 'threaded_session'
+            | 'inactive_session';
+        }
+    ));
 
 export function subscribeMattermostChannelStrict(input: MattermostSubscriptionInput): MattermostSubscriptionResult {
   if (
@@ -304,6 +322,46 @@ function subscriptionDigest(instanceKey: string, channelId: string): string {
   return createHash('sha256').update(`${instanceKey}\0${channelId}`).digest('hex').slice(0, 24);
 }
 
+function isExpectedFilesystemBoundaryError(err: unknown): err is NodeJS.ErrnoException {
+  return (
+    err instanceof Error &&
+    'code' in err &&
+    typeof err.code === 'string' &&
+    ['EACCES', 'EINVAL', 'ELOOP', 'ENOENT', 'ENOTDIR', 'EPERM'].includes(err.code)
+  );
+}
+
+function isSafeOwnedDirectory(root: string, candidate: string): boolean {
+  try {
+    const resolvedRoot = path.resolve(root);
+    const resolvedCandidate = path.resolve(candidate);
+    const relative = path.relative(resolvedRoot, resolvedCandidate);
+    if (relative === '' || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+      return false;
+    }
+
+    let cursor = resolvedRoot;
+    for (const component of relative.split(path.sep)) {
+      cursor = path.join(cursor, component);
+      const stat = fs.lstatSync(cursor);
+      if (stat.isSymbolicLink()) return false;
+    }
+
+    const canonicalRoot = fs.realpathSync(resolvedRoot);
+    const canonicalCandidate = fs.realpathSync(resolvedCandidate);
+    const canonicalRelative = path.relative(canonicalRoot, canonicalCandidate);
+    return (
+      fs.statSync(canonicalCandidate).isDirectory() &&
+      canonicalRelative !== '..' &&
+      !canonicalRelative.startsWith(`..${path.sep}`) &&
+      !path.isAbsolute(canonicalRelative)
+    );
+  } catch (err) {
+    if (isExpectedFilesystemBoundaryError(err)) return false;
+    throw err;
+  }
+}
+
 export function validateMattermostSubscriptionForRouting(
   messagingGroup: MessagingGroup,
 ): MattermostSubscriptionValidation {
@@ -320,16 +378,29 @@ export function validateMattermostRoutingBoundary(messagingGroup: MessagingGroup
     .get(messagingGroup.id) as MattermostSubscriptionRow | undefined;
   if (direct) return { strict: true, ...validateMattermostSubscriptionRow(direct) };
 
-  const reusedAgent = getDb()
+  const reusedMattermostAgent = getDb()
     .prepare(
-      `SELECT ms.*
-         FROM mattermost_subscriptions ms
-         JOIN messaging_group_agents mga ON mga.agent_group_id = ms.agent_group_id
-        WHERE mga.messaging_group_id = ?
+      `SELECT 1
+         FROM messaging_group_agents current_wiring
+        WHERE current_wiring.messaging_group_id = ?
+          AND (
+            EXISTS (
+              SELECT 1 FROM mattermost_subscriptions ms
+               WHERE ms.agent_group_id = current_wiring.agent_group_id
+            )
+            OR EXISTS (
+              SELECT 1
+                FROM messaging_group_agents other_wiring
+                JOIN messaging_groups other_group ON other_group.id = other_wiring.messaging_group_id
+               WHERE other_wiring.agent_group_id = current_wiring.agent_group_id
+                 AND other_wiring.messaging_group_id <> current_wiring.messaging_group_id
+                 AND other_group.channel_type = 'mattermost'
+            )
+          )
         LIMIT 1`,
     )
-    .get(messagingGroup.id) as MattermostSubscriptionRow | undefined;
-  if (reusedAgent) {
+    .get(messagingGroup.id);
+  if (reusedMattermostAgent) {
     return { strict: true, valid: false, reason: 'cross_channel_agent_reuse' };
   }
   if (messagingGroup.channel_type === 'mattermost') {
@@ -338,10 +409,123 @@ export function validateMattermostRoutingBoundary(messagingGroup: MessagingGroup
   return { strict: false };
 }
 
+export function validateMattermostSessionForExecution(session: Session): MattermostSessionExecutionBoundary {
+  const byAgent = getDb()
+    .prepare('SELECT * FROM mattermost_subscriptions WHERE agent_group_id = ?')
+    .get(session.agent_group_id) as MattermostSubscriptionRow | undefined;
+  const byMessagingGroup = session.messaging_group_id
+    ? (getDb()
+        .prepare('SELECT * FROM mattermost_subscriptions WHERE messaging_group_id = ?')
+        .get(session.messaging_group_id) as MattermostSubscriptionRow | undefined)
+    : undefined;
+
+  if (!byAgent && !byMessagingGroup) {
+    const referencedMessagingGroup = session.messaging_group_id
+      ? getMessagingGroup(session.messaging_group_id)
+      : undefined;
+    if (
+      referencedMessagingGroup?.channel_type === 'mattermost' ||
+      isMattermostOwnedAgentGroup(session.agent_group_id)
+    ) {
+      return { strict: true, valid: false, reason: 'missing_subscription' };
+    }
+    return { strict: false };
+  }
+  if (
+    !byAgent ||
+    !byMessagingGroup ||
+    byAgent.instance_key !== byMessagingGroup.instance_key ||
+    byAgent.channel_id !== byMessagingGroup.channel_id ||
+    session.agent_group_id !== byAgent.agent_group_id ||
+    session.messaging_group_id !== byAgent.messaging_group_id
+  ) {
+    return { strict: true, valid: false, reason: 'session_identity_mismatch' };
+  }
+  if (!isValidSubscriptionIdentityComponent(session.id)) {
+    return { strict: true, valid: false, reason: 'unsafe_session_identity' };
+  }
+  if (session.thread_id !== null) return { strict: true, valid: false, reason: 'threaded_session' };
+  if (session.status !== 'active') return { strict: true, valid: false, reason: 'inactive_session' };
+  const storedSession = getDb()
+    .prepare('SELECT agent_group_id, messaging_group_id, thread_id, agent_provider, status FROM sessions WHERE id = ?')
+    .get(session.id) as
+    | Pick<Session, 'agent_group_id' | 'messaging_group_id' | 'thread_id' | 'agent_provider' | 'status'>
+    | undefined;
+  if (
+    !storedSession ||
+    storedSession.agent_group_id !== session.agent_group_id ||
+    storedSession.messaging_group_id !== session.messaging_group_id ||
+    storedSession.thread_id !== session.thread_id ||
+    storedSession.agent_provider !== session.agent_provider ||
+    storedSession.status !== session.status
+  ) {
+    return { strict: true, valid: false, reason: 'session_record_mismatch' };
+  }
+  const activeBoundarySessions = getDb()
+    .prepare(
+      `SELECT COUNT(*) AS count
+         FROM (
+           SELECT id FROM sessions WHERE status = 'active' AND agent_group_id = ?
+           UNION
+           SELECT id FROM sessions WHERE status = 'active' AND messaging_group_id = ?
+         )`,
+    )
+    .get(session.agent_group_id, session.messaging_group_id) as { count: number };
+  if (activeBoundarySessions.count !== 1) {
+    return { strict: true, valid: false, reason: 'duplicate_active_session' };
+  }
+
+  const subscription = validateMattermostSubscriptionRow(byAgent);
+  if (!subscription.valid) return { strict: true, ...subscription };
+  const groupDir = resolveGroupFolderPath(subscription.value.agentGroup.folder);
+  const sessionStateRoot = path.join(DATA_DIR, 'v2-sessions');
+  const agentStateDir = path.join(sessionStateRoot, session.agent_group_id);
+  const ownedSessionDir = path.join(agentStateDir, session.id);
+  if (
+    !isSafeOwnedDirectory(GROUPS_DIR, groupDir) ||
+    !isSafeOwnedDirectory(sessionStateRoot, agentStateDir) ||
+    !isSafeOwnedDirectory(agentStateDir, ownedSessionDir)
+  ) {
+    return { strict: true, valid: false, reason: 'unsafe_session_path' };
+  }
+  return { strict: true, ...subscription };
+}
+
 export function isMattermostOwnedAgentGroup(agentGroupId: string): boolean {
   return Boolean(
-    getDb().prepare('SELECT 1 FROM mattermost_subscriptions WHERE agent_group_id = ? LIMIT 1').get(agentGroupId),
+    getDb()
+      .prepare(
+        `SELECT 1 FROM mattermost_subscriptions WHERE agent_group_id = ?
+         UNION ALL
+         SELECT 1
+           FROM messaging_group_agents mga
+           JOIN messaging_groups mg ON mg.id = mga.messaging_group_id
+          WHERE mga.agent_group_id = ? AND mg.channel_type = 'mattermost'
+          LIMIT 1`,
+      )
+      .get(agentGroupId, agentGroupId),
   );
+}
+
+export interface MattermostOwnedFilesystemIdentity {
+  agentGroupId: string;
+  folder: string;
+}
+
+export function listMattermostOwnedFilesystemIdentities(): MattermostOwnedFilesystemIdentity[] {
+  return getDb()
+    .prepare(
+      `SELECT ag.id AS agentGroupId, ag.folder
+         FROM agent_groups ag
+         JOIN mattermost_subscriptions ms ON ms.agent_group_id = ag.id
+       UNION
+       SELECT ag.id AS agentGroupId, ag.folder
+         FROM agent_groups ag
+         JOIN messaging_group_agents mga ON mga.agent_group_id = ag.id
+         JOIN messaging_groups mg ON mg.id = mga.messaging_group_id
+        WHERE mg.channel_type = 'mattermost'`,
+    )
+    .all() as MattermostOwnedFilesystemIdentity[];
 }
 
 export function excludeMattermostOwnedAgentGroups(agentGroups: AgentGroup[]): AgentGroup[] {
