@@ -60,7 +60,7 @@ let nextRequestId = 1;
 interface JsonRpcRequest {
   id: number;
   method: string;
-  params: Record<string, unknown>;
+  params?: Record<string, unknown>;
 }
 
 export interface JsonRpcResponse {
@@ -82,8 +82,86 @@ export interface JsonRpcServerRequest {
 
 type JsonRpcMessage = JsonRpcResponse | JsonRpcNotification | JsonRpcServerRequest;
 
-function makeRequest(method: string, params: Record<string, unknown>): JsonRpcRequest {
-  return { id: nextRequestId++, method, params };
+export interface DynamicToolFunctionSpec {
+  type: 'function';
+  name: string;
+  description: string;
+  inputSchema: JsonValue;
+  deferLoading?: boolean;
+}
+
+export interface DynamicToolNamespaceSpec {
+  type: 'namespace';
+  name: string;
+  description: string;
+  tools: DynamicToolFunctionSpec[];
+}
+
+export type DynamicToolSpec = DynamicToolFunctionSpec | DynamicToolNamespaceSpec;
+
+type JsonValue = number | string | boolean | null | JsonValue[] | { [key: string]: JsonValue | undefined };
+
+interface McpToolInventoryEntry {
+  name?: string;
+  description?: string;
+  inputSchema?: unknown;
+}
+
+interface McpServerStatus {
+  name?: string;
+  tools?: Record<string, McpToolInventoryEntry>;
+}
+
+interface McpServerStatusListResponse {
+  data?: McpServerStatus[];
+  nextCursor?: string | null;
+}
+
+interface McpServerToolCallResponse {
+  content?: unknown[];
+  structuredContent?: unknown;
+  isError?: boolean;
+  _meta?: unknown;
+}
+
+interface DynamicToolCallParams {
+  threadId?: string;
+  namespace?: string | null;
+  tool?: string;
+  arguments?: unknown;
+}
+
+export const CODEX_DYNAMIC_MCP_BRIDGE_VERSION = 1;
+const CODEX_CONTINUATION_PREFIX = `codex-dynamic-mcp-v${CODEX_DYNAMIC_MCP_BRIDGE_VERSION}:`;
+const NANOCLAW_MCP_SERVER_NAME = 'nanoclaw';
+const NANOCLAW_DYNAMIC_TOOL_NAMESPACE = NANOCLAW_MCP_SERVER_NAME;
+const LEGACY_NANOCLAW_DYNAMIC_TOOL_PREFIX = `mcp__${NANOCLAW_MCP_SERVER_NAME}__`;
+const EMPTY_OBJECT_SCHEMA: JsonValue = { type: 'object', properties: {}, additionalProperties: false };
+
+export const NANOCLAW_DEEP_RESEARCH_WORKFLOW_TOOLS = [
+  'describe_workflow_capabilities',
+  'initialize_run',
+  'set_deliverable_contract',
+  'set_execution_mode',
+  'set_subquestions',
+  'create_task_plan',
+  'start_task',
+  'complete_task',
+  'add_followup_tasks',
+  'record_reconciliation',
+  'submit_final_report',
+  'final_audit',
+  'get_run_state',
+] as const;
+
+const NANOCLAW_DEEP_RESEARCH_WORKFLOW_TOOL_SET = new Set<string>(NANOCLAW_DEEP_RESEARCH_WORKFLOW_TOOLS);
+
+function makeRequest(method: string, params: Record<string, unknown> | undefined): JsonRpcRequest {
+  return {
+    id: nextRequestId++,
+    method,
+    ...(params === undefined ? {} : { params }),
+  };
 }
 
 function isResponse(msg: JsonRpcMessage): msg is JsonRpcResponse {
@@ -171,7 +249,7 @@ export function spawnCodexAppServer(configOverrides: string[] = []): AppServer {
 export function sendCodexRequest(
   server: AppServer,
   method: string,
-  params: Record<string, unknown>,
+  params: Record<string, unknown> | undefined,
   timeoutMs = 60_000,
 ): Promise<JsonRpcResponse> {
   const req = makeRequest(method, params);
@@ -213,6 +291,192 @@ export function sendCodexResponse(server: AppServer, id: number, result: unknown
   }
 }
 
+// ── Dynamic MCP tool bridge ─────────────────────────────────────────────────
+// Codex app-server loads MCP servers from config.toml, but those MCP tools do
+// not automatically become direct Responses API tools for turns we start via
+// the app-server protocol. Dynamic tools are the app-server protocol's bridge:
+// attach a tool spec at thread/start, then satisfy `item/tool/call` requests
+// by calling the underlying MCP server.
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isJsonValue(value: unknown): value is JsonValue {
+  if (value === null) return true;
+  const kind = typeof value;
+  if (kind === 'string' || kind === 'number' || kind === 'boolean') return true;
+  if (Array.isArray(value)) return value.every(isJsonValue);
+  if (!isRecord(value)) return false;
+  return Object.values(value).every((entry) => entry === undefined || isJsonValue(entry));
+}
+
+function normalizeInputSchema(schema: unknown): JsonValue {
+  return isJsonValue(schema) && isRecord(schema) ? schema : EMPTY_OBJECT_SCHEMA;
+}
+
+function workflowDynamicToolName(toolName: string): string {
+  return toolName;
+}
+
+function resolveNanoclawDynamicToolName(params: DynamicToolCallParams): string | null {
+  const toolName = typeof params.tool === 'string' ? params.tool : '';
+  if (params.namespace === NANOCLAW_DYNAMIC_TOOL_NAMESPACE) return toolName || null;
+  return toolName.startsWith(LEGACY_NANOCLAW_DYNAMIC_TOOL_PREFIX)
+    ? toolName.slice(LEGACY_NANOCLAW_DYNAMIC_TOOL_PREFIX.length)
+    : null;
+}
+
+export function encodeCodexContinuation(threadId: string): string {
+  return `${CODEX_CONTINUATION_PREFIX}${threadId}`;
+}
+
+export function decodeCodexContinuation(continuation: string | undefined): {
+  threadId: string | undefined;
+  refreshRequired: boolean;
+} {
+  if (!continuation) return { threadId: undefined, refreshRequired: false };
+  if (continuation.startsWith(CODEX_CONTINUATION_PREFIX)) {
+    const threadId = continuation.slice(CODEX_CONTINUATION_PREFIX.length);
+    return { threadId: threadId || undefined, refreshRequired: false };
+  }
+  return { threadId: undefined, refreshRequired: true };
+}
+
+export function buildNanoclawWorkflowDynamicTools(status: McpServerStatusListResponse): DynamicToolSpec[] {
+  const nanoclaw = status.data?.find((serverStatus) => serverStatus.name === NANOCLAW_MCP_SERVER_NAME);
+  const tools = nanoclaw?.tools ?? {};
+
+  const workflowTools: DynamicToolFunctionSpec[] = Object.entries(tools)
+    .filter(([toolName]) => NANOCLAW_DEEP_RESEARCH_WORKFLOW_TOOL_SET.has(toolName))
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([toolName, tool]) => ({
+      type: 'function',
+      name: workflowDynamicToolName(toolName),
+      description: tool.description || `NanoClaw deep-research workflow tool: ${toolName}`,
+      inputSchema: normalizeInputSchema(tool.inputSchema),
+    }));
+
+  if (workflowTools.length === 0) return [];
+  return [
+    {
+      type: 'namespace',
+      name: NANOCLAW_DYNAMIC_TOOL_NAMESPACE,
+      description: 'NanoClaw deep-research workflow tools.',
+      tools: workflowTools,
+    },
+  ];
+}
+
+async function sleep(ms: number): Promise<void> {
+  await new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+
+export async function loadNanoclawWorkflowDynamicTools(
+  server: AppServer,
+  opts: { attempts?: number; delayMs?: number } = {},
+): Promise<DynamicToolSpec[]> {
+  const attempts = opts.attempts ?? 10;
+  const delayMs = opts.delayMs ?? 200;
+
+  const reload = await sendCodexRequest(server, 'config/mcpServer/reload', undefined, 30_000);
+  if (reload.error) {
+    log(`MCP reload failed: ${reload.error.message}`);
+    return [];
+  }
+
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    const resp = await sendCodexRequest(server, 'mcpServerStatus/list', { detail: 'toolsAndAuthOnly' }, 30_000);
+    if (resp.error) {
+      log(`MCP status failed: ${resp.error.message}`);
+      return [];
+    }
+
+    const tools = buildNanoclawWorkflowDynamicTools(resp.result as McpServerStatusListResponse);
+    if (tools.length > 0) {
+      const toolCount = tools.reduce((count, tool) => count + (tool.type === 'namespace' ? tool.tools.length : 1), 0);
+      log(`Loaded ${toolCount} NanoClaw workflow dynamic tools`);
+      return tools;
+    }
+
+    if (attempt < attempts) await sleep(delayMs);
+  }
+
+  log('No NanoClaw workflow MCP tools were discovered for dynamic tool exposure');
+  return [];
+}
+
+function mcpToolResponseToDynamicContent(result: McpServerToolCallResponse): { type: 'inputText'; text: string }[] {
+  const chunks: string[] = [];
+
+  for (const item of result.content ?? []) {
+    if (isRecord(item) && item.type === 'text' && typeof item.text === 'string') {
+      chunks.push(item.text);
+    } else {
+      chunks.push(JSON.stringify(item));
+    }
+  }
+
+  if (chunks.length === 0 && result.structuredContent !== undefined) {
+    chunks.push(JSON.stringify(result.structuredContent));
+  }
+
+  return [{ type: 'inputText', text: chunks.join('\n') || '' }];
+}
+
+async function handleNanoclawDynamicToolCall(
+  server: AppServer,
+  requestId: number,
+  params: DynamicToolCallParams,
+): Promise<void> {
+  const requestedTool = typeof params.tool === 'string' ? params.tool : '';
+  const mcpToolName = resolveNanoclawDynamicToolName(params);
+
+  if (!mcpToolName) {
+    sendCodexResponse(server, requestId, {
+      success: false,
+      contentItems: [
+        { type: 'inputText', text: `Tool "${requestedTool || 'unknown'}" is not available. Use MCP tools instead.` },
+      ],
+    });
+    return;
+  }
+
+  if (!params.threadId) {
+    sendCodexResponse(server, requestId, {
+      success: false,
+      contentItems: [{ type: 'inputText', text: 'Dynamic MCP tool call missing threadId.' }],
+    });
+    return;
+  }
+
+  const resp = await sendCodexRequest(
+    server,
+    'mcpServer/tool/call',
+    {
+      threadId: params.threadId,
+      server: NANOCLAW_MCP_SERVER_NAME,
+      tool: mcpToolName,
+      arguments: params.arguments ?? {},
+    },
+    120_000,
+  );
+
+  if (resp.error) {
+    sendCodexResponse(server, requestId, {
+      success: false,
+      contentItems: [{ type: 'inputText', text: resp.error.message }],
+    });
+    return;
+  }
+
+  const result = (resp.result ?? {}) as McpServerToolCallResponse;
+  sendCodexResponse(server, requestId, {
+    success: result.isError !== true,
+    contentItems: mcpToolResponseToDynamicContent(result),
+  });
+}
+
 export function killCodexAppServer(server: AppServer): void {
   try {
     server.readline.close();
@@ -249,10 +513,12 @@ export function attachCodexAutoApproval(server: AppServer): void {
         break;
       case 'item/tool/call': {
         const toolName = (req.params as { tool?: string }).tool || 'unknown';
-        log(`[approval] Unexpected dynamic tool call: ${toolName}`);
-        sendCodexResponse(server, req.id, {
-          success: false,
-          contentItems: [{ type: 'inputText', text: `Tool "${toolName}" is not available. Use MCP tools instead.` }],
+        log(`[approval] Dynamic tool call: ${toolName}`);
+        void handleNanoclawDynamicToolCall(server, req.id, req.params as DynamicToolCallParams).catch((err) => {
+          sendCodexResponse(server, req.id, {
+            success: false,
+            contentItems: [{ type: 'inputText', text: err instanceof Error ? err.message : String(err) }],
+          });
         });
         break;
       }
@@ -277,7 +543,7 @@ export async function initializeCodexAppServer(server: AppServer): Promise<void>
     'initialize',
     {
       clientInfo: { name: 'nanoclaw', version: '1.0.0' },
-      capabilities: { experimentalApi: false },
+      capabilities: { experimentalApi: true },
     },
     INIT_TIMEOUT_MS,
   );
@@ -292,6 +558,7 @@ export interface ThreadParams {
   approvalPolicy?: string;
   personality?: string;
   baseInstructions?: string;
+  dynamicTools?: DynamicToolSpec[];
 }
 
 /**
@@ -307,9 +574,10 @@ export async function startOrResumeCodexThread(
 ): Promise<string> {
   if (threadId) {
     log(`Resuming thread: ${threadId}`);
+    const { dynamicTools: _dynamicTools, ...resumeParams } = params;
     const resp = await sendCodexRequest(server, 'thread/resume', {
       threadId,
-      ...(params as unknown as Record<string, unknown>),
+      ...(resumeParams as unknown as Record<string, unknown>),
     });
     if (!resp.error) {
       log(`Thread resumed: ${threadId}`);

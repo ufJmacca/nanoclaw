@@ -318,6 +318,11 @@ function buildMounts(
   const agentRunnerSrc = path.join(projectRoot, 'container', 'agent-runner', 'src');
   mounts.push({ hostPath: agentRunnerSrc, containerPath: '/app/src', readonly: true });
 
+  const workflowMount = buildDeepResearchWorkflowMount(projectRoot);
+  if (workflowMount) {
+    mounts.push(workflowMount);
+  }
+
   // Shared skills — read-only, symlinks in .claude-shared/skills/ point here.
   const skillsSrc = path.join(projectRoot, 'container', 'skills');
   if (fs.existsSync(skillsSrc)) {
@@ -336,6 +341,12 @@ function buildMounts(
   }
 
   return mounts;
+}
+
+export function buildDeepResearchWorkflowMount(projectRoot: string = process.cwd()): VolumeMount | null {
+  const workflowSrc = path.join(projectRoot, 'src', 'deep-research-workflow');
+  if (!fs.existsSync(workflowSrc)) return null;
+  return { hostPath: workflowSrc, containerPath: '/app/deep-research-workflow', readonly: true };
 }
 
 export function selectedContainerSkills(containerConfig: ContainerConfig): string[] {
@@ -443,6 +454,11 @@ async function buildContainerArgs(
   // Environment — only vars read by code we don't own.
   // Everything NanoClaw-specific is in container.json (read by runner at startup).
   args.push('-e', `TZ=${TIMEZONE}`);
+  args.push('-e', 'GH_TOKEN=placeholder');
+  args.push('-e', 'GITHUB_TOKEN=placeholder');
+  args.push('-e', 'GH_PROMPT_DISABLED=1');
+  args.push('-e', 'GIT_TERMINAL_PROMPT=0');
+  args.push('-e', 'GIT_CONFIG_GLOBAL=/workspace/agent/.gitconfig');
 
   // Provider-contributed env vars (e.g. XDG_DATA_HOME, OPENCODE_*, NO_PROXY).
   if (providerContribution.env) {
