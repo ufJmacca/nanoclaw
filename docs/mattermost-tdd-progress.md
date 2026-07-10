@@ -439,7 +439,7 @@ Phase status: complete.
 
 ## Phase 3 — Outbound delivery
 
-Phase status: in progress.
+Phase status: complete.
 
 ### Slice 3.1: stable outbox delivery identity reaches the delivery boundary
 
@@ -697,3 +697,7 @@ Phase status: in progress.
 - Isolation review: outbound destinations require the configured instance and exact channel ID; root metadata never chooses a session; pending IDs include instance/channel/root/outbox identity but never content or token; errors exclude credentials/content; Telegram behavior and identities remain unchanged; no Mattermost configuration, token, workspace, mount, or container environment is introduced.
 - Activation boundary: the Mattermost delivery component remains unregistered. Activating it before Phase 4 would still couple thread delivery to per-thread sessions, and before Phase 5 would permit unsafe generic wiring reuse.
 - Deferred work: explicit thread/session policy is Phase 4; strict subscription identity is Phase 5; transport recovery is Phase 8; real-server post/idempotency validation is Phase 9.
+- Diff/secrets review: the Phase 3 commits contain only stable delivery-ID plumbing, the extracted bridge, concrete HTTP response metadata, outbound delivery/components/tests, and this progress log; `git diff --check` passed; no real credentials, generated artifacts, adapter activation, migrations, container configuration, or unrelated changes are present.
+- GitHub checks: the repository code `CI` workflow did not trigger because it is configured only for pull requests targeting `main`; the available `label` metadata check passed in 4 seconds ([run 29099975105](https://github.com/ufJmacca/nanoclaw/actions/runs/29099975105)).
+- Phase status: complete; the full local gate, independent review, and every available GitHub check passed; pull request ready for review.
+- Pull request: [#40](https://github.com/ufJmacca/nanoclaw/pull/40), `codex/mattermost-03-outbound` → `codex/mattermost-02-inbound` (depends on #39).
