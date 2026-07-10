@@ -106,3 +106,4 @@ Phase status: in progress.
 - Diff/secrets review: `git diff --check` passed; only Phase 0 tests and this log are present; no credential patterns or generated artifacts were found.
 - Isolation result: existing Telegram routing, channel/session separation, disjoint writable mounts, and session-keyed execution are characterized without adding Mattermost feature behavior.
 - Phase status: local gate passed; awaiting pull-request CI.
+- Pull request: [#37](https://github.com/ufJmacca/nanoclaw/pull/37), `codex/mattermost-00-characterization` → `main` (draft while CI runs).
