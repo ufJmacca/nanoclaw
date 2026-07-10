@@ -273,6 +273,9 @@ async function* runOneTurn(
       case 'item/completed': {
         const item = params.item as { type?: string; text?: string } | undefined;
         if (item?.type === 'agentMessage' && item.text) resultText = item.text;
+        for (const message of codexProgressMessages(n)) {
+          buffer.push({ type: 'progress', message });
+        }
         break;
       }
       case 'turn/completed':
@@ -285,10 +288,18 @@ async function* runOneTurn(
         break;
       }
       case 'thread/status/changed': {
-        const status = params.status as string | undefined;
-        if (status) buffer.push({ type: 'progress', message: `status: ${status}` });
+        // Status changes are useful as liveness, but too noisy and generic
+        // for user-facing channel progress. The activity event above already
+        // keeps the poll-loop heartbeat honest.
         break;
       }
+      case 'item/mcpToolCall/progress':
+      case 'turn/plan/updated':
+      case 'thread/goal/updated':
+        for (const message of codexProgressMessages(n)) {
+          buffer.push({ type: 'progress', message });
+        }
+        break;
       default:
         // Silently handle the many item/* notifications — they already
         // contributed an activity event above.
@@ -341,6 +352,68 @@ async function* runOneTurn(
     const idx = server.notificationHandlers.indexOf(handler);
     if (idx >= 0) server.notificationHandlers.splice(idx, 1);
   }
+}
+
+interface CodexReasoningItem {
+  type?: string;
+  summary?: unknown;
+  content?: unknown;
+}
+
+interface CodexPlanStep {
+  step?: unknown;
+  status?: unknown;
+}
+
+interface CodexGoal {
+  objective?: unknown;
+  status?: unknown;
+}
+
+export function codexProgressMessages(notification: JsonRpcNotification): string[] {
+  const params = notification.params;
+
+  switch (notification.method) {
+    case 'item/completed': {
+      const item = params.item as CodexReasoningItem | undefined;
+      if (item?.type !== 'reasoning') return [];
+
+      const summary = normalizeStringArray(item.summary).join('\n').trim();
+      return summary ? [summary] : [];
+    }
+    case 'item/mcpToolCall/progress': {
+      const message = typeof params.message === 'string' ? params.message.trim() : '';
+      return message ? [message] : [];
+    }
+    case 'turn/plan/updated': {
+      const explanation = typeof params.explanation === 'string' ? params.explanation.trim() : '';
+      const steps = Array.isArray(params.plan) ? (params.plan as CodexPlanStep[]) : [];
+      const active = steps.find((step) => step.status === 'inProgress');
+      const completed = [...steps].reverse().find((step) => step.status === 'completed');
+      const current = active ?? completed;
+      const step = typeof current?.step === 'string' ? current.step.trim() : '';
+
+      const parts = [explanation, step].filter(Boolean);
+      return parts.length > 0 ? [parts.join('\n')] : [];
+    }
+    case 'thread/goal/updated': {
+      const goal = params.goal as CodexGoal | undefined;
+      if (goal?.status === 'complete') return [];
+
+      const objective = typeof goal?.objective === 'string' ? goal.objective.trim() : '';
+      return objective ? [`Goal: ${objective}`] : [];
+    }
+    default:
+      return [];
+  }
+}
+
+function normalizeStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((entry): entry is string => typeof entry === 'string')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
 }
 
 registerProvider('codex', (opts) => new CodexProvider(opts));

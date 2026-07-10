@@ -20,6 +20,10 @@ function log(msg: string): void {
 }
 
 const INIT_TIMEOUT_MS = 30_000;
+const CODEX_CONFIG_OVERRIDES = [
+  'features.use_linux_sandbox_bwrap=false',
+  'features.goals=true',
+] as const;
 
 /**
  * Errors from `thread/resume` that indicate the thread ID is unusable —
@@ -634,7 +638,7 @@ export function writeCodexMcpConfigToml(servers: Record<string, CodexMcpServer>)
   fs.mkdirSync(codexConfigDir, { recursive: true });
   const configTomlPath = path.join(codexConfigDir, 'config.toml');
 
-  const lines: string[] = [];
+  const lines: string[] = ['[features]', 'goals = true', ''];
   for (const [name, config] of Object.entries(servers)) {
     lines.push(`[mcp_servers.${name}]`);
     lines.push('type = "stdio"');
@@ -657,5 +661,5 @@ export function writeCodexMcpConfigToml(servers: Record<string, CodexMcpServer>)
 }
 
 export function createCodexConfigOverrides(): string[] {
-  return ['features.use_linux_sandbox_bwrap=false'];
+  return [...CODEX_CONFIG_OVERRIDES];
 }

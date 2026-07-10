@@ -1,14 +1,19 @@
-import { describe, it, expect } from 'bun:test';
+import { afterEach, describe, it, expect } from 'bun:test';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 
 import {
   STALE_THREAD_RE,
   attachCodexAutoApproval,
   buildNanoclawWorkflowDynamicTools,
+  createCodexConfigOverrides,
   decodeCodexContinuation,
   encodeCodexContinuation,
   loadNanoclawWorkflowDynamicTools,
   startOrResumeCodexThread,
   tomlBasicString,
+  writeCodexMcpConfigToml,
   type AppServer,
   type DynamicToolSpec,
   type JsonRpcResponse,
@@ -61,6 +66,16 @@ function resolveOutgoingRequest(server: AppServer, request: WrittenRpc, result: 
   if (!pending) throw new Error(`No pending request for id ${request.id}`);
   pending.resolve({ id: request.id, result });
 }
+
+const originalHome = process.env.HOME;
+const tempDirs: string[] = [];
+
+afterEach(() => {
+  process.env.HOME = originalHome;
+  for (const dir of tempDirs.splice(0)) {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 describe('tomlBasicString', () => {
   it('leaves safe strings unchanged inside quotes', () => {
@@ -326,5 +341,28 @@ describe('Codex dynamic MCP bridge', () => {
       resolveOutgoingRequest(server, request, { thread: { id: 'existing-thread' } });
       expect(await resume).toBe('existing-thread');
     }
+  });
+});
+
+describe('Codex feature flags', () => {
+  it('enables goals in launch config overrides', () => {
+    expect(createCodexConfigOverrides()).toContain('features.goals=true');
+  });
+
+  it('writes goals to config.toml alongside MCP servers', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-config-'));
+    tempDirs.push(home);
+    process.env.HOME = home;
+
+    writeCodexMcpConfigToml({
+      nanoclaw: {
+        command: 'bun',
+        args: ['run', '/app/src/mcp-tools/index.ts'],
+      },
+    });
+
+    const config = fs.readFileSync(path.join(home, '.codex', 'config.toml'), 'utf-8');
+    expect(config).toContain('[features]\ngoals = true');
+    expect(config).toContain('[mcp_servers.nanoclaw]');
   });
 });
