@@ -251,13 +251,14 @@ describe('session manager', () => {
     expect(fs.readFileSync(expected, 'utf-8')).toBe('PNGBYTES');
   });
 
-  it('should resolve to existing session (shared mode)', () => {
-    const { session: s1, created: c1 } = resolveSession('ag-1', 'mg-1', null, 'shared');
+  it('should resolve distinct thread ids to one existing session in shared mode', () => {
+    const { session: s1, created: c1 } = resolveSession('ag-1', 'mg-1', 'thread-1', 'shared');
     expect(c1).toBe(true);
 
-    const { session: s2, created: c2 } = resolveSession('ag-1', 'mg-1', null, 'shared');
+    const { session: s2, created: c2 } = resolveSession('ag-1', 'mg-1', 'thread-2', 'shared');
     expect(c2).toBe(false);
     expect(s2.id).toBe(s1.id);
+    expect(s2.thread_id).toBeNull();
   });
 
   it('should create separate sessions per thread (per-thread mode)', () => {
@@ -422,6 +423,171 @@ describe('router', () => {
 
     // Verify container was woken
     expect(wakeContainer).toHaveBeenCalled();
+  });
+
+  it('routes seeded Telegram input to its existing Telegram agent group', async () => {
+    const { routeInbound } = await import('./router.js');
+    const { wakeContainer } = await import('./container-runner.js');
+    const { getSessionsByAgentGroup } = await import('./db/sessions.js');
+
+    createAgentGroup({
+      id: 'ag-telegram',
+      name: 'Telegram Agent',
+      folder: 'telegram-agent',
+      agent_provider: null,
+      created_at: now(),
+    });
+    createMessagingGroup({
+      id: 'mg-telegram',
+      channel_type: 'telegram',
+      platform_id: 'telegram:-100123',
+      name: 'Telegram Group',
+      is_group: 1,
+      unknown_sender_policy: 'public',
+      created_at: now(),
+    });
+    createMessagingGroupAgent({
+      id: 'mga-telegram',
+      messaging_group_id: 'mg-telegram',
+      agent_group_id: 'ag-telegram',
+      engage_mode: 'pattern',
+      engage_pattern: '.',
+      sender_scope: 'all',
+      ignored_message_policy: 'drop',
+      session_mode: 'shared',
+      priority: 0,
+      created_at: now(),
+    });
+    (wakeContainer as unknown as ReturnType<typeof vi.fn>).mockClear();
+
+    await routeInbound({
+      channelType: 'telegram',
+      platformId: 'telegram:-100123',
+      threadId: null,
+      message: {
+        id: 'telegram-message-1',
+        kind: 'chat-sdk',
+        content: JSON.stringify({ sender: 'Telegram User', text: 'Hello from Telegram' }),
+        timestamp: now(),
+      },
+    });
+
+    const telegramSessions = getSessionsByAgentGroup('ag-telegram');
+    expect(telegramSessions).toHaveLength(1);
+    expect(telegramSessions[0].messaging_group_id).toBe('mg-telegram');
+    expect(getSessionsByAgentGroup('ag-1')).toHaveLength(0);
+    expect(wakeContainer).toHaveBeenCalledTimes(1);
+    expect((wakeContainer as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0].agent_group_id).toBe('ag-telegram');
+  });
+
+  it('does not cross-resolve identical platform ids between Telegram and Mattermost rows', async () => {
+    const { routeInbound } = await import('./router.js');
+    const { wakeContainer } = await import('./container-runner.js');
+    const { getSessionsByAgentGroup } = await import('./db/sessions.js');
+
+    createAgentGroup({
+      id: 'ag-telegram-collision',
+      name: 'Telegram Collision Agent',
+      folder: 'telegram-collision-agent',
+      agent_provider: null,
+      created_at: now(),
+    });
+    createAgentGroup({
+      id: 'ag-mattermost-collision',
+      name: 'Mattermost Collision Agent',
+      folder: 'mattermost-collision-agent',
+      agent_provider: null,
+      created_at: now(),
+    });
+
+    for (const fixture of [
+      {
+        channelType: 'mattermost',
+        messagingGroupId: 'mg-mattermost-collision',
+        agentGroupId: 'ag-mattermost-collision',
+      },
+      {
+        channelType: 'telegram',
+        messagingGroupId: 'mg-telegram-collision',
+        agentGroupId: 'ag-telegram-collision',
+      },
+    ]) {
+      createMessagingGroup({
+        id: fixture.messagingGroupId,
+        channel_type: fixture.channelType,
+        platform_id: 'shared-platform-id',
+        name: `${fixture.channelType} collision fixture`,
+        is_group: 1,
+        unknown_sender_policy: 'public',
+        created_at: now(),
+      });
+      createMessagingGroupAgent({
+        id: `mga-${fixture.channelType}-collision`,
+        messaging_group_id: fixture.messagingGroupId,
+        agent_group_id: fixture.agentGroupId,
+        engage_mode: 'pattern',
+        engage_pattern: '.',
+        sender_scope: 'all',
+        ignored_message_policy: 'drop',
+        session_mode: 'shared',
+        priority: 0,
+        created_at: now(),
+      });
+    }
+    (wakeContainer as unknown as ReturnType<typeof vi.fn>).mockClear();
+
+    await routeInbound({
+      channelType: 'telegram',
+      platformId: 'shared-platform-id',
+      threadId: null,
+      message: {
+        id: 'telegram-collision-message',
+        kind: 'chat-sdk',
+        content: JSON.stringify({ sender: 'Telegram User', text: 'Stay in Telegram' }),
+        timestamp: now(),
+      },
+    });
+
+    expect(getSessionsByAgentGroup('ag-telegram-collision')).toHaveLength(1);
+    expect(getSessionsByAgentGroup('ag-mattermost-collision')).toHaveLength(0);
+    expect(wakeContainer).toHaveBeenCalledTimes(1);
+    expect((wakeContainer as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0].agent_group_id).toBe(
+      'ag-telegram-collision',
+    );
+  });
+
+  it('leaves an addressed unknown channel unwired and does not invoke an agent before approval', async () => {
+    const { routeInbound, setChannelRequestGate } = await import('./router.js');
+    const { wakeContainer } = await import('./container-runner.js');
+    const { getMessagingGroupAgents, getMessagingGroupByPlatform } = await import('./db/messaging-groups.js');
+    const requestApproval = vi.fn().mockResolvedValue(undefined);
+    setChannelRequestGate(requestApproval);
+    (wakeContainer as unknown as ReturnType<typeof vi.fn>).mockClear();
+
+    await routeInbound({
+      channelType: 'telegram',
+      platformId: 'telegram:-100-unapproved',
+      threadId: null,
+      message: {
+        id: 'unknown-channel-message',
+        kind: 'chat-sdk',
+        content: JSON.stringify({ sender: 'Unknown User', text: '@bot hello' }),
+        timestamp: now(),
+        isMention: true,
+        isGroup: true,
+      },
+    });
+
+    const messagingGroup = getMessagingGroupByPlatform('telegram', 'telegram:-100-unapproved');
+    expect(messagingGroup).toBeDefined();
+    expect(getMessagingGroupAgents(messagingGroup!.id)).toHaveLength(0);
+    expect(findSession(messagingGroup!.id, null)).toBeUndefined();
+    expect(wakeContainer).not.toHaveBeenCalled();
+    expect(requestApproval).toHaveBeenCalledTimes(1);
+    expect(requestApproval).toHaveBeenCalledWith(
+      expect.objectContaining({ id: messagingGroup!.id }),
+      expect.objectContaining({ channelType: 'telegram', platformId: 'telegram:-100-unapproved' }),
+    );
   });
 
   it('auto-creates messaging group only when the bot is addressed (mention/DM)', async () => {
