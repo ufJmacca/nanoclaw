@@ -863,3 +863,187 @@ Phase status: complete; pull request ready for review.
 - GitHub checks: the repository code `CI` workflow did not trigger because it is configured only for pull requests targeting `main`; the available `label` metadata check passed in 2 seconds ([run 29102770047](https://github.com/ufJmacca/nanoclaw/actions/runs/29102770047)).
 - Phase status: complete; the full local gate, review-driven fixes, independent re-review, and every available GitHub check passed; pull request ready for review.
 - Pull request: [#41](https://github.com/ufJmacca/nanoclaw/pull/41), `codex/mattermost-04-thread-session-policy` → `codex/mattermost-03-outbound` (depends on #40).
+
+## Phase 5 — Strict channel subscription transaction
+
+Phase status: in progress.
+
+### Slice 5.0: race-safe subscription identity schema
+
+- RED command: `pnpm exec vitest run src/channels/mattermost-subscription.test.ts -t 'installs one-to-one subscription identity constraints'`.
+- RED failure observed: `PRAGMA table_info('mattermost_subscriptions')` returned no columns; the strict subscription identity and uniqueness boundary did not exist.
+- GREEN command/result: the same focused command after migration 014 — 1 passed.
+- REFACTOR performed: the composite instance/channel key and unique messaging-group, agent-group, and wiring identities live in one dedicated table; lifecycle status values are explicit for later phases.
+- Affected-suite verification: focused migration test passed; broader DB verification follows the first transactional behavior.
+- Files changed: `src/db/migrations/014-mattermost-subscriptions.ts`, `src/db/migrations/index.ts`, `src/channels/mattermost-subscription.test.ts`.
+- Isolation impact: database uniqueness now reserves one canonical messaging group, agent group, and wiring per strict subscription; no credentials or mutable channel name are stored.
+
+### Slice 5.1: fresh channel and agent identities
+
+- Messaging-group RED command: `pnpm exec vitest run src/channels/mattermost-subscription.test.ts -t 'creates a namespaced messaging group for channel A'`.
+- RED failure observed: the strict subscription seam threw `Strict Mattermost subscription is not implemented`; no channel mapping existed.
+- Messaging-group GREEN: the same command after creating `mattermost:<instance>:<channel>` inside a transaction — 1 passed.
+- Agent-isolation RED command: `pnpm exec vitest run src/channels/mattermost-subscription.test.ts -t 'creates a fresh agent identity for each Mattermost channel without reusing Telegram'`.
+- RED failure observed: both results had no agent group.
+- Agent-isolation GREEN: the same command after deriving a fresh hash-scoped agent ID/folder per immutable instance/channel — 1 passed; A, B, and Telegram IDs/folders are distinct.
+- REFACTOR performed: channel names remain display metadata; IDs and folders derive only from validated immutable coordinates.
+- Files changed: `src/channels/mattermost-subscription.ts`, `src/channels/mattermost-subscription.test.ts`.
+
+### Slice 5.2: one canonical shared wiring
+
+- RED command: `pnpm exec vitest run src/channels/mattermost-subscription.test.ts -t 'creates exactly one shared channel-to-agent wiring and canonical subscription row'`.
+- RED failure observed: the messaging group had zero wirings and no subscription row.
+- GREEN command/result: the same focused command after inserting one safe wiring and its canonical identity row in the same transaction — 1 passed.
+- REFACTOR performed: the wiring is `shared`, `sender_scope=known`, `ignored_message_policy=drop`, and pattern `.`; creation also produces only its normal same-channel destination row.
+- Isolation impact: a strict subscription now owns exactly one messaging group, fresh agent group, shared wiring, and unique workspace folder.
+
+### Slice 5.3: workspace creation and complete rollback
+
+- Workspace RED command: `pnpm exec vitest run src/channels/mattermost-subscription.test.ts -t 'initializes one unique workspace identity for each subscribed channel'`.
+- RED failure observed: the filesystem initializer was called zero times.
+- Workspace GREEN: the same command after initializing the fresh agent group — 1 passed; A and B received distinct hash-scoped folders.
+- Database rollback RED command: `pnpm exec vitest run src/channels/mattermost-subscription.test.ts -t 'rolls back every database row when workspace initialization fails'`.
+- RED failure observed: subscription, wiring, destination, messaging-group, and agent-group rows remained committed after the synthetic failure.
+- Database rollback GREEN: the same command after moving filesystem initialization inside the immediate transaction — 1 passed; every count remained zero.
+- Filesystem fixture correction: the first path-cleanup run used a hoisted mock factory that referenced a non-hoisted constant and was rejected as evidence; the fixture was corrected before rerunning.
+- Filesystem cleanup RED command: `pnpm exec vitest run src/channels/mattermost-subscription.test.ts -t 'removes only newly-created workspace paths when initialization partially fails'`.
+- RED failure observed: the synthetic partial group/state directories remained on disk.
+- Filesystem cleanup GREEN: the same command after exact-path cleanup guarded by invocation-local ownership — 1 passed.
+- Pre-existing identity RED/GREEN: `... -t 'fails closed without deleting a pre-existing workspace identity'` first completed without error, then passed after the transaction rejected the identity while preserving its foreign marker and creating zero rows.
+- REFACTOR performed: rollback removes only paths proven absent before this invocation; it never deletes or inherits pre-existing context.
+
+### Slice 5.4: validated idempotency and safe placeholder adoption
+
+- Idempotency RED command: `pnpm exec vitest run src/channels/mattermost-subscription.test.ts -t 'returns the same validated mapping when the subscription is repeated'`.
+- RED failure observed: the second call hit the messaging-group uniqueness constraint.
+- GREEN command/result: the same command after reloading and fully validating the winner inside `BEGIN IMMEDIATE` — 1 passed; all topology counts and filesystem initialization remained one. A returned-object normalization mismatch for `denied_at` was corrected before accepting Green.
+- Placeholder RED command: `pnpm exec vitest run src/channels/mattermost-subscription.test.ts -t 'adopts only a clean unwired placeholder previously observed by the router'`.
+- RED failure observed: the deterministic insert collided with the already-observed platform identity.
+- Placeholder GREEN: the same command after adopting only a zero-wiring placeholder, tightening it to strict policy, and clearing denial state — 1 passed; no second messaging group was created.
+- Identity-validation RED/GREEN: `... -t 'rejects ambiguous subscription identity before any mutation'` first accepted `primary:shadow`, then passed after delimiter-safe bounded component validation; zero rows/files were touched.
+
+### Slice 5.5: concurrent duplicate serialization
+
+- Cross-process command: `pnpm exec vitest run src/channels/mattermost-subscription.test.ts -t 'serializes concurrent duplicate subscriptions into one valid mapping'` (run outside the process-spawn sandbox).
+- Harness corrections before evidence: the `tsx` CLI IPC socket was sandbox-blocked, then child spawning itself was sandbox-blocked; neither run was accepted. The final harness uses Node's `--import` loader and six real concurrent processes against one file database.
+- Characterization result: all six calls returned the same IDs and the database contained one subscription, messaging group, agent group, and wiring.
+- RED mutation: replacing validated winner reload with a duplicate error made the same cross-process command fail when later contenders observed the winner.
+- GREEN result: after reverting the mutation, all six processes passed again with one valid mapping.
+- REFACTOR performed: `BEGIN IMMEDIATE`, database uniqueness, deterministic identities, and full winner validation form one race-safe boundary; no application-only pre-check decides ownership.
+
+### Slice 5.6: malformed configuration fails before invocation
+
+- Shared-agent RED command: `pnpm exec vitest run src/channels/mattermost-subscription.test.ts -t 'rejects a hand-written second-channel mapping before sender or agent invocation'`.
+- RED failure observed: channel B reached sender resolution and would create a session/wake channel A's agent.
+- GREEN command/result: the same command after installing the reusable strict validator at the router boundary — 1 passed; sender, session, and container invocation stayed untouched.
+- Canonical-agent RED/GREEN: `... -t 'rejects a hand-written subscription that assigns a non-canonical agent identity'` first returned `valid:true` for an arbitrary Telegram-like agent, then returned `non_canonical_agent_identity` after deterministic ID/folder validation.
+- Wiring-policy RED/GREEN: `... -t 'fails closed when the canonical wiring is weakened after subscription'` first accepted `sender_scope=all`, then returned `unsafe_wiring_policy` after canonical policy validation.
+- Messaging-policy RED/GREEN: `... -t 'fails closed when the canonical messaging-group policy is weakened'` first accepted `public`, then returned `unsafe_messaging_group_policy` after strict group validation.
+- Refactor result: one reason-coded validator checks active status, platform identity, canonical agent identity/folder, exact wiring ownership, shared mode, safe sender/engagement policy, forward count, and reverse agent reuse before routing.
+
+### Slice 5.7: generic registration paths cannot bypass strict subscription
+
+- Setup RED command: `pnpm exec vitest run setup/register.test.ts -t 'rejects Mattermost before a caller can select or reuse an agent folder'`.
+- RED failure observed: the generic setup guard did not throw.
+- Setup GREEN: the same command after calling the guard immediately after argument parsing — 1 passed; Telegram remains admitted.
+- Legacy approval RED command: `pnpm exec vitest run src/modules/permissions/channel-approval.test.ts -t 'refuses a legacy generic approval row for Mattermost instead of reusing an agent'`.
+- RED failure observed: the legacy pending row created a Mattermost-to-existing-agent wiring.
+- Legacy approval GREEN: the same command after rejecting and deleting Mattermost rows at the generic response boundary — 1 passed; zero wirings were created.
+- Unknown-channel characterization: `pnpm exec vitest run src/channels/mattermost-subscription.test.ts -t 'keeps unknown Mattermost channels out of the generic approval flow'` passed. Temporarily bypassing strict router validation made the generic approval hook fire; the mutation was reverted.
+- Isolation impact: only the strict transaction may create an active Mattermost mapping; generic setup and generic chat approval cannot select Telegram or another Mattermost agent.
+
+### Slice 5.8: independent-review race and topology hardening
+
+- Concurrent-cleanup RED command: `pnpm exec vitest run src/channels/mattermost-subscription.test.ts -t 'preserves a workspace created by a concurrent winner before this invocation owns initialization'`.
+- RED failure observed: the losing invocation removed the winner's runtime marker (`expected true, received false`) because cleanup relied on a path snapshot taken before the database lock.
+- GREEN command/result: the same command after exclusive directory claims and per-path ownership flags — 1 passed; a contender removes only roots it created. This is the genuine missing concurrent behavior for the Phase 5 concurrency requirement; the earlier mutation proof remains supplemental.
+- Worker review reproduction: the reviewer observed `Unexpected end of JSON input` when piped worker stdout was lost. The fixture now uses synchronous `fs.writeSync(1, ...)`; the real six-process command passed with one mapping and identical returned identities.
+
+- Stale-session placeholder RED command: `pnpm exec vitest run src/channels/mattermost-subscription.test.ts -t 'rejects an unwired placeholder that already owns session context'`.
+- RED failure observed: subscription completed and adopted a messaging group with an existing running session.
+- GREEN command/result: the same command after requiring zero pre-existing sessions — 1 passed; the legacy session remained untouched.
+- Destination-reference placeholder RED command: `pnpm exec vitest run src/channels/mattermost-subscription.test.ts -t 'rejects an unwired placeholder referenced by an existing agent destination'`.
+- RED failure observed: subscription adopted the referenced placeholder.
+- GREEN command/result: the same command after requiring zero channel-destination references — 1 passed; only a truly inert observed row may be adopted.
+
+- Outgoing-destination validator RED command: `pnpm exec vitest run src/channels/mattermost-subscription.test.ts -t 'fails closed when a strict Mattermost agent gains an outgoing agent destination'`.
+- RED failure observed: the reusable validator returned `valid:true` with an agent-to-agent destination.
+- GREEN command/result: the same command after requiring exactly one outgoing destination to the canonical channel — 1 passed with `unsafe_destination_topology`.
+- Incoming-destination validator RED command: `pnpm exec vitest run src/channels/mattermost-subscription.test.ts -t 'fails closed when another agent gains a destination into a strict Mattermost agent'`.
+- RED failure observed: the reusable validator returned `valid:true` for the incoming agent route.
+- GREEN command/result: the same command after requiring zero incoming agent destinations — 1 passed with `unsafe_destination_topology`.
+
+- Fan-out TOCTOU RED command: `pnpm exec vitest run src/channels/mattermost-subscription.test.ts -t 'uses only the validated canonical wiring if topology changes before fan-out'`.
+- RED failure observed: a second wiring inserted from the sender-resolution seam received its own session and invocation after validation.
+- GREEN command/result: the same command after routing with the exact validated wiring snapshot — 1 passed; only the canonical agent received a session/wake. The retained fixture drops the insert guard to simulate a legacy/tampered database and prove the runtime defense independently.
+- Cross-platform RED command: `pnpm exec vitest run src/channels/mattermost-subscription.test.ts -t 'rejects a legacy Telegram wiring into a Mattermost-owned agent before sender resolution'`.
+- RED failure observed: Telegram reached sender resolution and created a session over the Mattermost-owned agent/workspace.
+- GREEN command/result: the same command after applying the symmetric Mattermost ownership boundary to every inbound messaging group — 1 passed; the legacy mapping was rejected as `cross_channel_agent_reuse` before sender/session/wake.
+
+### Slice 5.9: database-enforced ownership reservation
+
+- Active-insert topology RED command: `pnpm exec vitest run src/channels/mattermost-subscription.test.ts -t 'rejects a hand-written subscription row whose agent already has a second channel'`.
+- RED failure observed: the active subscription row was inserted over a two-channel agent topology.
+- GREEN command/result: the same command after an active-subscription topology trigger checks group policy, exact safe shared wiring, forward/reverse exclusivity, and destination topology — 1 passed with a database abort.
+- Reserved-agent INSERT RED/GREEN: `... -t 'prevents a second channel wiring to a Mattermost-owned agent at the database boundary'` first completed without error, then passed after the reserved-agent wiring trigger.
+- Reserved-group INSERT RED/GREEN: `... -t 'prevents a second agent wiring into a strict Mattermost messaging group at the database boundary'` first completed without error, then passed after the mirrored reserved-group trigger.
+- Reserved-agent UPDATE RED/GREEN: `... -t 'prevents an existing generic wiring from being repointed to a Mattermost-owned agent'` first completed without error, then passed after the UPDATE guard.
+- Reserved-group UPDATE RED/GREEN: `... -t 'prevents an existing generic wiring from being repointed into a strict Mattermost channel'` first completed without error, then passed after the mirrored UPDATE guard.
+- Active canonical wiring RED/GREEN: `... -t 'prevents mutation of an active Mattermost canonical wiring at the database boundary'` first changed its messaging group, then passed after active canonical rows became immutable.
+- Inactive canonical ownership RED/GREEN: `... -t 'keeps canonical wiring ownership immutable while a Mattermost subscription is inactive'` first repointed both owners, then passed after identity columns became immutable for every lifecycle status.
+
+- Subscription identity RED/GREEN: `... -t 'keeps a Mattermost subscription ownership identity immutable at the database boundary'` first repointed `agent_group_id`, then passed after immutable instance/channel/group/agent/wiring identity triggers.
+- Active-delete RED/GREEN: `... -t 'prevents deleting an active Mattermost ownership reservation'` first deleted the row, then passed after deletion was refused.
+- Archived-delete RED/GREEN: `... -t 'retains an archived Mattermost ownership reservation so its workspace is never reassigned'` first deleted the archived row, then passed after the ownership reservation became permanent for every status.
+- Reactivation RED/GREEN: `... -t 'revalidates canonical topology before an inactive subscription can become active'` first activated a weakened wiring, then passed after activation reused the complete topology validation trigger.
+- Agent workspace RED/GREEN: `... -t 'keeps the Mattermost-owned agent workspace identity immutable'` first changed the folder to a Telegram-like shared path, then passed after agent ID/folder immutability.
+- Messaging identity RED/GREEN: `... -t 'keeps the Mattermost messaging-channel identity immutable'` first changed the platform identity, then passed after messaging-group ID/channel/platform immutability.
+
+- Outgoing destination INSERT RED/GREEN: `... -t 'prevents an outgoing agent destination from a Mattermost-owned agent at the database boundary'` first inserted the agent route, then passed after the canonical-channel-only trigger.
+- Duplicate destination RED/GREEN: `... -t 'prevents a duplicate destination to the canonical Mattermost channel'` first inserted a second local name for the same channel, then passed after exact restoration was allowed only when no destination exists.
+- Incoming destination INSERT RED/GREEN: `... -t 'prevents an incoming agent destination into a Mattermost-owned agent at the database boundary'` first inserted the incoming route, then passed after the target guard.
+- Canonical destination UPDATE RED/GREEN: `... -t 'prevents mutation of an active Mattermost canonical destination at the database boundary'` first repointed it to an agent, then passed after active-row immutability.
+- Canonical destination DELETE RED/GREEN: `... -t 'prevents deleting an active Mattermost canonical destination'` first deleted it, then passed after the active delete guard.
+- Inactive destination ownership RED/GREEN: `... -t 'keeps canonical destination ownership immutable while a Mattermost subscription is inactive'` first repointed it, then passed after owner/type/target immutability for every status.
+- Incoming destination UPDATE RED/GREEN: `... -t 'prevents an existing destination from being repointed into a Mattermost-owned agent'` first repointed a channel row into the strict agent, then passed after the incoming UPDATE guard.
+- Outgoing owner UPDATE RED/GREEN: `... -t 'prevents an existing generic destination from being reassigned to a Mattermost-owned agent'` first changed its owner to the strict agent, then passed after the owner UPDATE guard.
+- REFACTOR performed: one permanent ownership row, reason-coded application validator, validated runtime snapshot, and synchronized database triggers now enforce the same one-channel/one-agent/one-destination topology. Lifecycle fields remain mutable for Phase 7; identities are never reassigned.
+
+### Slice 5.10: generic management and raw-row bypass closure
+
+- Initial-card RED command: `pnpm exec vitest run src/modules/permissions/channel-approval.test.ts -t 'excludes Mattermost-owned agents from a generic channel approval card'`.
+- RED failure observed: two agents caused a generic `choose_existing` option instead of exposing only the reusable non-Mattermost agent.
+- GREEN command/result: the same command after filtering permanent Mattermost ownership rows — 1 passed; only `connect:ag-1` remained.
+- Forged-connect RED command: `pnpm exec vitest run src/modules/permissions/channel-approval.test.ts -t 'rejects a forged generic connect response targeting a Mattermost-owned agent'`.
+- RED failure observed: the handler reached the database trigger and threw instead of safely claiming/rejecting the forged response.
+- GREEN command/result: the same command after an explicit response-boundary ownership guard — 1 passed; no wiring and no stale pending row remained.
+- Follow-up RED command: `pnpm exec vitest run src/modules/permissions/channel-approval.test.ts -t 'excludes Mattermost-owned agents from a legacy choose-existing follow-up'`.
+- RED failure observed: the follow-up included `connect:<mattermost-agent>`.
+- GREEN command/result: the same command after reusing the ownership filter — 1 passed.
+- Generic setup RED command: `pnpm exec vitest run setup/register.test.ts -t 'rejects a generic channel when its selected agent is owned by Mattermost'`.
+- RED failure observed: the registration seam did not throw.
+- GREEN command/result: the same command after checking permanent ownership before filesystem initialization — 1 passed; generic Telegram selection remains allowed for non-Mattermost agents.
+- Raw-identity RED command: `pnpm exec vitest run src/channels/mattermost-subscription.test.ts -t 'rejects a hand-written subscription with an ambiguous instance identity'`.
+- RED failure observed: a raw `primary:shadow` row with matching derived topology returned `valid:true`.
+- GREEN command/result: the same command after reusing bounded delimiter-safe component validation for database rows — 1 passed with `unsafe_subscription_identity`.
+- Focused strict-subscription verification: `pnpm exec vitest run src/channels/mattermost-subscription.test.ts` (outside the spawn sandbox) — 1 file passed, 44 tests passed at that checkpoint; later trigger-focused additions are included in the final affected gate below.
+
+### Phase 5 gate
+
+- Focused/affected host command: `pnpm exec vitest run src/channels/mattermost-subscription.test.ts setup/register.test.ts src/router.thread-policy.test.ts src/host-core.test.ts src/modules/permissions/channel-approval.test.ts src/modules/permissions/permissions.test.ts src/db/db-v2.test.ts` — 7 files passed, 139 tests passed.
+- Host fast-suite command: `pnpm test` (outside the process-spawn sandbox) — 46 files passed, 463 tests passed, including the six-process subscription race.
+- Reference-schema command: `node --import tsx -e "import Database from 'better-sqlite3'; import { SCHEMA } from './src/db/schema.ts'; const db = new Database(':memory:'); db.exec(SCHEMA); console.log('schema-ok'); db.close();"` — passed with `schema-ok`.
+- Container type-check command: `docker run --rm --network none -v /home/pi/nanoclaw-v2:/workspace -w /workspace/container/agent-runner oven/bun:1.3.12 bun run typecheck` — passed.
+- Container default-suite observation: `docker run --rm --network none -v /home/pi/nanoclaw-v2:/workspace -w /workspace/container/agent-runner oven/bun:1.3.12 bun test` ran 111 tests successfully but twice timed out the unchanged Phase 4 shared-query test at 5.1 seconds. Its focused command passed in 0.75 seconds. Inspection showed that `src/integration.test.ts` leaves an intentionally infinite `runPollLoop()` alive after its `Promise.race` wrapper returns; the leaked loop consumes the next test file's database and message. No Phase 5 source or test participates in this failure, so no assertion, timeout, or unrelated lifecycle code was changed.
+- Complete isolated container gate, unit portion: `docker run --rm --network none -v /home/pi/nanoclaw-v2:/workspace -w /workspace/container/agent-runner oven/bun:1.3.12 bun test src/db/session-state.test.ts src/mcp-tools/deep-research-workflow.test.ts src/providers/codex.factory.test.ts src/providers/factory.test.ts src/providers/codex-app-server.test.ts src/providers/codex.test.ts src/poll-loop.test.ts src/timezone.test.ts src/formatter.test.ts` — 9 files passed, 109 tests passed.
+- Complete isolated container gate, integration portion: `docker run --rm --network none -v /home/pi/nanoclaw-v2:/workspace -w /workspace/container/agent-runner oven/bun:1.3.12 bun test src/integration.test.ts` — 1 file passed, 3 tests passed. Together the two clean processes execute the complete 10-file/112-test inventory with original assertions and timeouts.
+- Formatting command: `pnpm run format:check` — passed; all Phase 5 sources and evidence were also formatted explicitly with the repository Prettier version.
+- Lint command: `pnpm run lint` — passed with 0 errors and the same 100 pre-existing warnings documented in pre-flight.
+- Host type-check command: `pnpm run typecheck` — passed.
+- Diff validation: `git diff --check` — passed.
+- Refactor result: deterministic identity derivation, transactional creation, complete reusable validation, exact validated routing snapshots, permanent database ownership triggers, generic-path filtering, and workspace ownership cleanup are separate boundaries with one shared strict topology contract.
+- Isolation review: one Mattermost channel owns one canonical messaging group, fresh agent group, shared session wiring, workspace folder, canonical channel destination, and container/session identity. Mattermost-to-Mattermost and Telegram-to-Mattermost reuse fail before sender resolution or invocation. Threads can vary only the outbound `root_id` inside their channel's shared context. Ambiguous identities and malformed topology fail closed.
+- Credential review: the subscription API accepts no bot token or Mattermost credential. The token is absent from prompts, message metadata, SQLite subscription state, mounts, workspace initialization, and container environments. A scan of every Phase 5 path found only explanatory progress-log references to token isolation from earlier phases; no credential value is present.
+- Operational impact: migration 014 is append-only and transactional. It creates the strict ownership table plus topology-preserving triggers, and the synchronized reference schema executes cleanly in memory. No dependency, production connection, live credential, or automatic subscription command is introduced. Rollback is code rollback plus database restore; permanent ownership reservations are intentionally not deleted in place.
+- Independent review: the final read-only re-review found no remaining Phase 5 correctness, security, migration, or isolation blocker. It independently passed 67 affected tests, the 463-test host suite, type checking, formatting, linting, and diff checks, and confirmed migration/reference-trigger parity. Exact lifecycle transitions, archived-state rules, stopping, replay, unsubscribe, and resubscribe remain scoped to Phase 7.
+- Phase status: local acceptance gate complete; GitHub publication and available stacked-PR checks pending.
