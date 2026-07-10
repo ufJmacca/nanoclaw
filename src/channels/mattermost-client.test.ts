@@ -386,6 +386,28 @@ describe('NodeMattermostTransport', () => {
     expect(response).toEqual({ status: 200, body: { id: 'bot-user-id' } });
   });
 
+  it('normalizes response headers and tolerates a non-JSON rate-limit body', async () => {
+    const fetch = vi.fn().mockResolvedValue({
+      status: 429,
+      headers: new Headers({ 'Retry-After': '2', 'X-RateLimit-Reset': '7' }),
+      json: vi.fn().mockRejectedValue(new SyntaxError('not json')),
+    });
+    const transport = new NodeMattermostTransport(fetch);
+
+    const response = await transport.request({
+      method: 'POST',
+      url: 'https://mattermost.example.test/api/v4/posts',
+      headers: { Authorization: 'Bearer fixture' },
+      body: '{}',
+    });
+
+    expect(response).toEqual({
+      status: 429,
+      body: undefined,
+      headers: { 'retry-after': '2', 'x-ratelimit-reset': '7' },
+    });
+  });
+
   it('adapts a ws connection and text messages to the transport socket contract', async () => {
     class FakeWebSocket extends EventEmitter {
       static instances: FakeWebSocket[] = [];

@@ -16,6 +16,7 @@ export interface MattermostHttpRequest {
 export interface MattermostHttpResponse {
   status: number;
   body: unknown;
+  headers?: Readonly<Record<string, string>>;
 }
 
 export interface MattermostWebSocket {
@@ -38,7 +39,11 @@ export type MattermostEventListener = (payload: string, context: MattermostEvent
 export type MattermostFetch = (
   url: string,
   init: { method: string; headers: Record<string, string>; body?: string },
-) => Promise<{ status: number; json(): Promise<unknown> }>;
+) => Promise<{
+  status: number;
+  headers?: { forEach(callback: (value: string, key: string) => void): void };
+  json(): Promise<unknown>;
+}>;
 
 const hostFetch: MattermostFetch = (url, init) => fetch(url, init);
 
@@ -69,7 +74,15 @@ export class NodeMattermostTransport implements MattermostTransport {
       headers: request.headers,
       body: request.body,
     });
-    return { status: response.status, body: await response.json() };
+    let body: unknown;
+    try {
+      body = await response.json();
+    } catch (err) {
+      if (!(err instanceof SyntaxError)) throw err;
+      body = undefined;
+    }
+    const headers = normalizeHeaders(response.headers);
+    return { status: response.status, body, ...(headers ? { headers } : {}) };
   }
 
   openWebSocket(url: string): Promise<MattermostWebSocket> {
@@ -224,6 +237,17 @@ export class MattermostClient {
     this.timers.clearTimeout(this.authenticationTimer);
     this.authenticationTimer = null;
   }
+}
+
+function normalizeHeaders(
+  source: { forEach(callback: (value: string, key: string) => void): void } | undefined,
+): Record<string, string> | undefined {
+  if (!source) return undefined;
+  const headers: Record<string, string> = {};
+  source.forEach((value, key) => {
+    headers[key.toLowerCase()] = value;
+  });
+  return headers;
 }
 
 function isAuthenticationResponse(value: unknown): value is { status: string; seq_reply: 1 } {

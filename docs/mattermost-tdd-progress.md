@@ -436,3 +436,264 @@ Phase status: complete.
 - GitHub checks: the repository code `CI` workflow did not trigger because it is configured only for pull requests targeting `main`; the available `label` metadata check passed in 2 seconds ([run 29097109262](https://github.com/ufJmacca/nanoclaw/actions/runs/29097109262)).
 - Phase status: complete; the full local gate and every available GitHub check passed; pull request ready for review.
 - Pull request: [#39](https://github.com/ufJmacca/nanoclaw/pull/39), `codex/mattermost-02-inbound` → `codex/mattermost-01-auth` (depends on #38).
+
+## Phase 3 — Outbound delivery
+
+Phase status: in progress.
+
+### Slice 3.1: stable outbox delivery identity reaches the delivery boundary
+
+- RED command: `pnpm exec vitest run src/delivery.test.ts -t 'forwards the stable outbox message id as the delivery id'`.
+- RED failure observed: the delivery adapter received only six arguments; the durable `messages_out.id` was missing.
+- GREEN command: the same focused command after appending an optional delivery-ID argument to the host delivery boundary and forwarding `msg.id`.
+- GREEN result: 1 passed; the adapter received `out-stable-delivery-id` alongside the original destination, content, and file arguments.
+- REFACTOR performed: appended the optional parameter to preserve every existing adapter call signature and kept the identifier independent of message content, destination names, or credentials; no further structural change was needed for this slice.
+- Affected-suite verification: `pnpm exec vitest run src/delivery.test.ts` — 4 passed; focused Prettier passed; targeted ESLint passed with 0 errors and the same 4 pre-existing warnings in `delivery.ts`; host typecheck passed.
+- Bridge refactor: extracted the index delivery dispatch into `createChannelDeliveryBridge()` without changing routing, content parsing, typing, or missing-adapter behavior; `pnpm exec vitest run src/channels/delivery-bridge.test.ts src/delivery.test.ts` passed 5 tests after extraction.
+- Characterization mutation: temporarily replaced parsed outbound content with an empty object; `pnpm exec vitest run src/channels/delivery-bridge.test.ts -t 'preserves existing outbound content and routing'` failed on the changed payload, then passed after the mutation was reverted.
+- Files changed: `src/delivery.ts`, `src/delivery.test.ts`, `src/channels/delivery-bridge.ts`, `src/channels/delivery-bridge.test.ts`, `src/index.ts`.
+- Remaining risks: the channel-adapter bridge must carry the ID into `OutboundMessage` before Mattermost can derive a stable `pending_post_id`.
+
+### Slice 3.2: stable delivery identity reaches the channel adapter
+
+- RED command: `pnpm exec vitest run src/channels/delivery-bridge.test.ts -t 'forwards the stable delivery id into the outbound message'`.
+- RED failure observed: the bridge delivered parsed content but omitted `deliveryId` from `OutboundMessage`.
+- GREEN command: the same focused command after adding the optional adapter field and carrying the host argument through the extracted bridge.
+- GREEN result: 1 passed; `out-stable-delivery-id` reached the fake `ChannelAdapter` unchanged.
+- REFACTOR performed: formatted the focused test and retained a single bridge conversion point for content, files, and stable identity; existing adapters remain source-compatible because the field is optional.
+- Affected-suite verification: `pnpm exec vitest run src/channels/delivery-bridge.test.ts src/delivery.test.ts` — 2 files passed, 6 tests passed; focused Prettier passed; targeted ESLint passed with 0 errors and 6 existing warnings; host typecheck passed.
+- Files changed: `src/channels/adapter.ts`, `src/channels/delivery-bridge.ts`, `src/channels/delivery-bridge.test.ts`.
+- Remaining risks: Mattermost payload construction must require this ID before any POST.
+
+### Slice 3.3: normal replies use the exact Mattermost channel
+
+- RED command: `pnpm exec vitest run src/channels/mattermost-outbound.test.ts -t 'posts a normal reply to the exact Mattermost channel'`.
+- RED failure observed: the Mattermost outbound delivery module did not exist, so no REST POST could occur.
+- GREEN command: the same focused command after adding the minimal host-side delivery component.
+- GREEN result: 1 passed; one `POST /api/v4/posts` used the configured bearer authentication, exact parsed channel ID, JSON content type, message text, and returned the server post ID.
+- REFACTOR performed: separated destination parsing, text extraction, and response-ID validation into small pure helpers; errors contain status/shape metadata only and never response bodies, outgoing content, or credentials.
+- Affected-suite verification: Mattermost outbound/client + host/adapter delivery suites — 4 files passed, 20 tests passed; focused Prettier, targeted ESLint, and host typecheck passed.
+- Files changed: `src/channels/mattermost-outbound.ts`, `src/channels/mattermost-outbound.test.ts`.
+- Remaining risks: thread placement, stable pending ID, retry policy, mass-mention policy, and full format/length validation follow as independent slices.
+
+### Slice 3.4: thread replies preserve the original root
+
+- RED command: `pnpm exec vitest run src/channels/mattermost-outbound.test.ts -t 'includes the original root id for a thread reply'`.
+- RED failure observed: the POST body contained channel and message only; `root_id` was absent.
+- GREEN command: the same focused command after conditionally mapping non-null delivery thread metadata into the Mattermost payload.
+- GREEN result: 1 passed; a thread reply carried `root_id: root-post-id` while the normal root-post test remained green without a synthetic root.
+- REFACTOR performed: kept root placement in payload construction only; it does not select a NanoClaw session or alter the Phase 4 policy boundary.
+- Affected-suite verification: Mattermost outbound suite — 2 passed; focused Prettier, targeted ESLint, and host typecheck passed.
+- Files changed: `src/channels/mattermost-outbound.ts`, `src/channels/mattermost-outbound.test.ts`.
+- Remaining risks: shared-session routing semantics are explicitly Phase 4; this slice only preserves delivery metadata.
+
+### Slice 3.5: repeated delivery reuses a stable pending post ID
+
+- RED command: `pnpm exec vitest run src/channels/mattermost-outbound.test.ts -t 'uses a stable pending post id for repeated delivery of one outbox message'`.
+- RED failure observed: `pending_post_id` was `undefined` on both POST payloads.
+- GREEN command: the same focused command after deriving a deterministic SHA-256-based ID from instance, immutable channel, root, and stable outbox identity.
+- GREEN result: 1 passed; two deliveries of the same outbox message produced the same non-empty `nanoclaw-…` ID.
+- REFACTOR performed: extracted `buildMattermostPendingPostId()` as a pure component; the input excludes message text, bot token, mutable names, and response data, and delivery fails closed if the host ID is absent.
+- Affected-suite verification: Mattermost outbound + adapter/host delivery suites — 3 files passed, 9 tests passed; focused Prettier, targeted ESLint, and host typecheck passed.
+- Files changed: `src/channels/mattermost-outbound.ts`, `src/channels/mattermost-outbound.test.ts`.
+- Remaining risks: server acceptance with a lost response is covered by Phase 9 live contract tests; Phase 8 adds durable recovery beyond Mattermost's server-side pending-ID window.
+
+### Slice 3.6: response headers survive the concrete host transport
+
+- RED command: `pnpm exec vitest run src/channels/mattermost-client.test.ts -t 'normalizes response headers and tolerates a non-JSON rate-limit body'`.
+- RED failure observed: parsing the non-JSON 429 body threw `SyntaxError`, and retry headers never reached delivery policy.
+- GREEN command: the same focused command after normalizing response headers and treating only JSON syntax failure as an absent body.
+- GREEN result: 1 passed; lowercase `retry-after` and `x-ratelimit-reset` values reached the transport response without reflecting the raw body.
+- REFACTOR performed: isolated header normalization; unexpected parser failures still propagate instead of being swallowed.
+- Affected-suite verification: Mattermost client + outbound suites — 2 files passed, 17 tests passed; focused Prettier, targeted ESLint, and host typecheck passed.
+- Files changed: `src/channels/mattermost-client.ts`, `src/channels/mattermost-client.test.ts`.
+- Remaining risks: delivery has not yet interpreted or bounded the guidance.
+
+### Slice 3.7: HTTP 429 honors Retry-After
+
+- RED command: `pnpm exec vitest run src/channels/mattermost-outbound.test.ts -t 'honors Retry-After guidance before retrying a rate-limited post'`.
+- RED failure observed: delivery rejected immediately with `HTTP 429` instead of waiting and retrying.
+- GREEN command: the same focused command after adding an injected sleeper and a three-attempt loop for valid numeric `Retry-After` guidance.
+- GREEN result: 1 passed; delivery waited 2,000 ms, retried once, returned the successful post ID, and reused the byte-identical payload/pending ID.
+- REFACTOR performed: parsed retry guidance in a pure helper and built the request once outside the loop so retries cannot drift.
+- Affected-suite verification: Mattermost outbound + concrete client suites — 2 files passed, 18 tests passed; focused Prettier, targeted ESLint, and host typecheck passed.
+- Files changed: `src/channels/mattermost-outbound.ts`, `src/channels/mattermost-outbound.test.ts`.
+- Remaining risks: fallback guidance, hostile delay bounds, retryable 5xx, and exhaustion are separate slices.
+
+### Slice 3.8: Mattermost reset guidance is the 429 fallback
+
+- RED command: `pnpm exec vitest run src/channels/mattermost-outbound.test.ts -t 'falls back to Mattermost X-RateLimit-Reset guidance'`.
+- RED failure observed: a 429 with only `X-RateLimit-Reset` failed immediately.
+- GREEN command: the same focused command after preferring `Retry-After` and otherwise parsing Mattermost's reset value as delay seconds.
+- GREEN result: 1 passed; the fallback waited 3,000 ms and retried once.
+- REFACTOR performed: consolidated header precedence in `rateLimitDelayMs()` and retained one strict numeric parser.
+- Affected-suite verification: Mattermost outbound suite — 5 passed; focused Prettier, targeted ESLint, and host typecheck passed.
+- Files changed: `src/channels/mattermost-outbound.ts`, `src/channels/mattermost-outbound.test.ts`.
+- Remaining risks: the next slice clamps untrusted server values.
+
+### Slice 3.9: rate-limit guidance is bounded
+
+- RED command: `pnpm exec vitest run src/channels/mattermost-outbound.test.ts -t 'clamps untrusted rate-limit delays to a bounded maximum'`.
+- RED failure observed: an untrusted `Retry-After: 999999` requested a 999,999,000 ms sleep.
+- GREEN command: the same focused command after applying a configurable 30,000 ms default maximum.
+- GREEN result: 1 passed; hostile guidance was clamped to 30,000 ms before reaching the sleeper.
+- REFACTOR performed: kept the bound at the policy boundary and formatted the helper; no timer or server value is stored globally.
+- Affected-suite verification: Mattermost outbound suite — 6 passed; focused Prettier, targeted ESLint, and host typecheck passed.
+- Files changed: `src/channels/mattermost-outbound.ts`, `src/channels/mattermost-outbound.test.ts`.
+- Remaining risks: retry count and 5xx classification follow.
+
+### Slice 3.10: retryable 5xx uses bounded exponential backoff
+
+- RED command: `pnpm exec vitest run src/channels/mattermost-outbound.test.ts -t 'retries transient 5xx failures with bounded exponential backoff'`.
+- RED failure observed: the first HTTP 500 rejected delivery immediately instead of retrying.
+- GREEN command: the same focused command after classifying 500–599 as retryable within the existing bounded attempt loop.
+- GREEN result: 1 passed; 500 → 502 → 201 waited 250 ms then 500 ms, made exactly three requests, reused one payload, and returned the post ID.
+- Test-fixture correction before accepting Green: once delivery reached the final assertion, Vitest exposed unsupported `toHaveSize`; changed it to the equivalent typed `Set.size` assertion and reran the focused test.
+- REFACTOR performed: extracted exponential delay calculation and shared the existing maximum delay/attempt policy.
+- Affected-suite verification: Mattermost outbound suite — 7 passed; focused Prettier, targeted ESLint, and host typecheck passed.
+- Files changed: `src/channels/mattermost-outbound.ts`, `src/channels/mattermost-outbound.test.ts`.
+- Remaining risks: permanent status handling and exhaustion must prove there is no infinite loop.
+
+### Slice 3.11: permanent failures stop immediately and stay sanitized
+
+- RED command: `pnpm exec vitest run src/channels/mattermost-outbound.test.ts -t 'does not retry permanent failures or expose response and credential data'` after resetting the not-yet-accepted classifier to retry 4xx–5xx.
+- RED failure observed: HTTP 400 was requested 99 times instead of once.
+- GREEN command/result: the same command after applying the minimal 500–599-only classifier — 1 passed; one request, zero sleeps, and a status-only error excluding token, outgoing content, and server body.
+- REFACTOR performed: retained a narrow explicit 500–599 retry predicate; no response body enters errors or logs.
+- Affected-suite verification: Mattermost outbound suite — 8 passed; focused Prettier, targeted ESLint, and host typecheck passed.
+- Files changed: `src/channels/mattermost-outbound.test.ts`; the production mutation was reverted.
+- Remaining risks: exhaustion for retryable statuses is the next slice.
+
+### Slice 3.12: retryable failures stop at the configured attempt bound
+
+- RED command: `pnpm exec vitest run src/channels/mattermost-outbound.test.ts -t 'stops retryable failures at the configured attempt bound'` after resetting the not-yet-accepted final-attempt guard to allow another sleep.
+- RED failure observed: the final 503 was replaced by a generic exhausted error after an extra sleep, violating the exact three-attempt boundary.
+- GREEN command/result: the same focused command after applying the strict `attempt < maxAttempts` guard — 1 passed; a persistent 503 makes three requests and only two sleeps.
+- REFACTOR performed: retained one attempt counter for both 429 and 5xx paths and status-preserving final failure.
+- Affected-suite verification: Mattermost outbound suite — 9 passed; focused Prettier, targeted ESLint, and host typecheck passed.
+- Files changed: `src/channels/mattermost-outbound.test.ts`; the production mutation was reverted.
+- Remaining risks: none for bounded HTTP-status retry count; transport-level reconnect/recovery is Phase 8.
+
+### Slice 3.13: dangerous mass mentions are neutralized by default
+
+- RED command: `pnpm exec vitest run src/channels/mattermost-outbound.test.ts -t 'neutralizes dangerous mass mentions by default'`.
+- RED failure observed: `@channel`, `@ALL`, `@here`, and full-width `＠channel` reached the POST unchanged.
+- GREEN command: the same focused command after adding the default sanitizer.
+- GREEN result: 1 passed; a zero-width separator neutralized the four mass mentions while ordinary `@ada` remained unchanged.
+- REFACTOR performed: extracted `sanitizeMattermostMassMentions()` as a pure, case-insensitive component and made the unsafe override an explicit host configuration flag.
+- Affected-suite verification: Mattermost outbound suite — 10 passed; focused Prettier, targeted ESLint, and host typecheck passed.
+- Files changed: `src/channels/mattermost-outbound.ts`, `src/channels/mattermost-outbound.test.ts`.
+- Remaining risks: explicit opt-in behavior needs its own proof.
+
+### Slice 3.14: mass mentions require explicit host opt-in
+
+- RED command: `pnpm exec vitest run src/channels/mattermost-outbound.test.ts -t 'allows mass mentions only with explicit host opt-in'` after resetting the not-yet-accepted override path to always sanitize.
+- RED failure observed: the explicit `@channel` was neutralized instead of preserved.
+- GREEN command/result: the same focused command after applying the explicit host-only branch — 1 passed; only explicit host opt-in permits the raw mass mention.
+- REFACTOR performed: retained the unsafe choice solely in host configuration; message content cannot self-enable it.
+- Affected-suite verification: Mattermost outbound suite — 11 passed; focused Prettier, targeted ESLint, and host typecheck passed.
+- Files changed: `src/channels/mattermost-outbound.test.ts`; the production mutation was reverted.
+- Remaining risks: deployment configuration for this flag is deferred until adapter activation; the secure default requires no setting.
+
+### Slice 3.15: outbound format selection is deterministic
+
+- RED command: `pnpm exec vitest run src/channels/mattermost-outbound.test.ts -t 'prefers Markdown content and falls back to plain text predictably'`.
+- RED failure observed: a payload containing both fields sent `Plain response` instead of the Markdown representation.
+- GREEN command: the same focused command after applying an explicit `markdown`-then-`text` precedence.
+- GREEN result: 1 passed; Markdown reached Mattermost unchanged and existing text-only tests stayed green.
+- REFACTOR performed: retained format extraction in the pure content helper before mention sanitization and HTTP construction.
+- Affected-suite verification: Mattermost outbound suite — 12 passed; focused Prettier, targeted ESLint, and host typecheck passed.
+- Files changed: `src/channels/mattermost-outbound.ts`, `src/channels/mattermost-outbound.test.ts`.
+- Remaining risks: empty/invalid input and maximum Unicode length remain.
+
+### Slice 3.16: invalid or empty content fails before HTTP
+
+- RED command: `pnpm exec vitest run src/channels/mattermost-outbound.test.ts -t 'rejects missing, non-string, or empty content before HTTP'`.
+- RED failure observed: an empty string was POSTed and returned `should-not-post` instead of rejecting.
+- GREEN command: the same focused command after requiring a non-whitespace Markdown or text string.
+- GREEN result: 1 passed across missing, non-string, empty text, and empty Markdown cases; zero HTTP requests were made.
+- REFACTOR performed: one pure extraction path now handles precedence and validation without trimming valid output.
+- Affected-suite verification: Mattermost outbound suite — 13 passed; focused Prettier, targeted ESLint, and host typecheck passed.
+- Files changed: `src/channels/mattermost-outbound.ts`, `src/channels/mattermost-outbound.test.ts`.
+- Remaining risks: Unicode code-point limit is the final format constraint.
+
+### Slice 3.17: Mattermost's Unicode code-point limit is enforced predictably
+
+- RED command: `pnpm exec vitest run src/channels/mattermost-outbound.test.ts -t 'enforces the 16383 Unicode code-point limit before HTTP'`.
+- RED failure observed: a 16,384-emoji message was POSTed and resolved instead of rejecting.
+- GREEN command: the same focused command after validating the final sanitized message by Unicode code point.
+- GREEN result: 1 passed; exactly 16,383 emoji posted once, while 16,384 rejected before a second HTTP request.
+- REFACTOR performed: exported the server-aligned `MATTERMOST_MESSAGE_MAX_CODE_POINTS` constant and counted code points rather than UTF-16 code units; content is never silently truncated.
+- Affected-suite verification: Mattermost outbound suite — 14 passed; focused Prettier, targeted ESLint, and host typecheck passed.
+- Files changed: `src/channels/mattermost-outbound.ts`, `src/channels/mattermost-outbound.test.ts`.
+- Remaining risks: the live server boundary is Phase 9 contract-test scope.
+
+### Slice 3.18: outbound destinations fail closed across instances or ambiguity
+
+- RED command: `pnpm exec vitest run src/channels/mattermost-outbound.test.ts -t 'fails closed for cross-instance and ambiguous destinations before HTTP'` after adding whitespace, path-delimiter, and control-character cases.
+- RED failure observed: a malformed channel component posted successfully as `should-not-post`.
+- GREEN command/result: the same focused command after applying a safe opaque-ID grammar — 1 passed; wrong-instance, extra-delimiter, empty, whitespace, path-delimited, and control-character destinations make zero HTTP requests.
+- REFACTOR performed: centralized one safe component grammar and retained exact `mattermost:<configured-instance>:<channel>` parsing as the only outbound authority.
+- Affected-suite verification: Mattermost outbound suite — 18 passed; focused Prettier, targeted ESLint, and host typecheck passed.
+- Files changed: `src/channels/mattermost-outbound.ts`, `src/channels/mattermost-outbound.test.ts`.
+- Remaining risks: none for outbound instance/channel ambiguity.
+
+### Slice 3.19: delivery refuses an unstable idempotency identity
+
+- RED command: `pnpm exec vitest run src/channels/mattermost-outbound.test.ts -t 'refuses delivery without the durable host outbox identity'` after resetting the not-yet-accepted stable-ID guard to missing.
+- RED failure observed: the message POSTed successfully as `should-not-post` with an unstable empty-derived pending ID.
+- GREEN command/result: the same focused command after applying the fail-closed guard — 1 passed; missing delivery identity makes zero HTTP requests.
+- REFACTOR performed: kept the fail-closed guard immediately before pending-ID construction.
+- Affected-suite verification: Mattermost outbound suite — 16 passed; focused Prettier, targeted ESLint, and host typecheck passed.
+- Files changed: `src/channels/mattermost-outbound.test.ts`; the production mutation was reverted.
+- Remaining risks: none for required host idempotency input.
+
+### Slice 3.20: ambiguous instance configuration fails closed
+
+- RED command: `pnpm exec vitest run src/channels/mattermost-outbound.test.ts -t 'rejects an ambiguous configured instance key before HTTP'`.
+- RED failure observed: `primary:shadow` was accepted as a configured instance and posted as `should-not-post`.
+- GREEN command: the same focused command after applying the colon-free instance slug invariant before destination parsing.
+- GREEN result: 1 passed; ambiguous configuration rejected before HTTP.
+- REFACTOR performed: kept the same instance-key grammar established by inbound normalization and no mutable instance display name enters routing.
+- Affected-suite verification: Mattermost outbound suite — 18 passed; focused Prettier, targeted ESLint, and host typecheck passed.
+- Files changed: `src/channels/mattermost-outbound.ts`, `src/channels/mattermost-outbound.test.ts`.
+- Remaining risks: none for configured-instance delimiter ambiguity.
+
+### Slice 3.21: outbound transport failures are sanitized
+
+- RED command: `pnpm exec vitest run src/channels/mattermost-outbound.test.ts -t 'redacts credential and content from transport failures'`.
+- RED failure observed: the thrown error message and stack contained the bearer fixture and private outgoing content.
+- GREEN command: the same focused command after replacing transport-boundary failures with a generic delivery request error and no sensitive cause.
+- GREEN result: 1 passed; serialized error data excluded token, content, and authorization metadata.
+- REFACTOR performed: kept sanitization at the host HTTP boundary so the existing delivery retry logger can safely record the error.
+- Affected-suite verification: Mattermost outbound/client + adapter/host delivery suites — 4 files passed, 37 tests passed; focused Prettier, targeted ESLint, and host typecheck passed.
+- Files changed: `src/channels/mattermost-outbound.ts`, `src/channels/mattermost-outbound.test.ts`.
+- Remaining risks: transport-level retry/reconnect of thrown network failures is Phase 8 recovery scope.
+
+### Phase 3 component refactor and TDD audit
+
+- Payload-component RED command: `pnpm exec vitest run src/channels/mattermost-outbound.test.ts -t 'builds a validated post payload independently of HTTP delivery'`.
+- Payload-component RED observed: `buildMattermostPostPayload` was not a function because payload validation/construction still lived inside `deliver()`.
+- Payload-component GREEN: the same command after extracting the pure builder — 1 passed; the full outbound suite remained green.
+- Retry-component RED command: `pnpm exec vitest run src/channels/mattermost-outbound.test.ts -t 'classifies retry delay independently of HTTP orchestration'`.
+- Retry-component RED observed: `mattermostRetryDelayMs` was not a function because classification/delay logic still lived inside the orchestration loop.
+- Retry-component GREEN: the same command after extracting the bounded pure policy — 1 passed; 429, 5xx, permanent, and final-attempt decisions are directly asserted.
+- Idempotency characterization: `pnpm exec vitest run src/channels/mattermost-outbound.test.ts -t 'derives idempotency identity independently of payload content'` — passed; temporarily removing channel identity from the hash made the test fail because channels A and B collided, then the reverted implementation passed.
+- Independent components: `buildMattermostPostPayload()`, `mattermostRetryDelayMs()`, and `buildMattermostPendingPostId()` are now directly tested; `deliver()` owns only destination parsing, one request, bounded orchestration, sanitized transport errors, and response-ID validation.
+- Review-driven TDD audit: the permanent-failure, retry-exhaustion, mass-mention opt-in, destination-validation, and stable-ID guards were each reset to their missing state, observed failing with their focused command, minimally restored, and rerun Green before accepting the phase.
+- Refactor verification: `pnpm exec vitest run src/channels/mattermost-outbound.test.ts` — 21 passed; focused Prettier, targeted ESLint, and host typecheck passed.
+
+### Phase 3 gate
+
+- Focused/affected command: `pnpm exec vitest run src/channels/mattermost-outbound.test.ts src/channels/mattermost-client.test.ts src/channels/delivery-bridge.test.ts src/delivery.test.ts src/channels/channel-registry.test.ts src/container-runner.isolation.test.ts src/channels/telegram.test.ts src/channels/telegram-pairing.test.ts src/channels/telegram-outbound.test.ts src/channels/telegram-markdown-sanitize.test.ts` — 10 files passed, 105 tests passed.
+- Host fast-suite command: `pnpm test` — 42 files passed, 401 tests passed.
+- Container command: `docker run --rm --network none -v /home/pi/nanoclaw-v2:/workspace -w /workspace/container/agent-runner oven/bun:1.3.12 bun test` — 10 files passed, 103 tests passed.
+- Formatting command: `pnpm run format:check` — passed.
+- Lint command: `pnpm run lint` — passed with 0 errors and the same 100 pre-existing warnings documented in pre-flight.
+- Host type-check command: `pnpm run typecheck` — passed.
+- Container type-check command: `pnpm exec tsc -p container/agent-runner/tsconfig.json --noEmit` — passed.
+- Refactor result: stable outbox identity now traverses one extracted channel-delivery bridge; pending-ID, validated payload construction, and bounded retry classification are deterministic host-side components with direct focused tests.
+- Independent review: a read-only post-fix review reported no remaining actionable Phase 3 acceptance, isolation, correctness, scope, or TDD defect.
+- Isolation review: outbound destinations require the configured instance and exact channel ID; root metadata never chooses a session; pending IDs include instance/channel/root/outbox identity but never content or token; errors exclude credentials/content; Telegram behavior and identities remain unchanged; no Mattermost configuration, token, workspace, mount, or container environment is introduced.
+- Activation boundary: the Mattermost delivery component remains unregistered. Activating it before Phase 4 would still couple thread delivery to per-thread sessions, and before Phase 5 would permit unsafe generic wiring reuse.
+- Deferred work: explicit thread/session policy is Phase 4; strict subscription identity is Phase 5; transport recovery is Phase 8; real-server post/idempotency validation is Phase 9.
