@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
+import { spawnSync } from 'node:child_process';
 import fs from 'fs';
 import path from 'path';
 
@@ -6,7 +7,10 @@ import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from '
 import { getPendingMessages, markCompleted } from './db/messages-in.js';
 import { getUndeliveredMessages } from './db/messages-out.js';
 import { formatMessages, extractRouting } from './formatter.js';
-import { dispatchResultText, processQuery } from './poll-loop.js';
+import { dispatchResultText, processQuery, selectNextRoutingTurn } from './poll-loop.js';
+import { sendMessage } from './mcp-tools/core.js';
+import { sendCard } from './mcp-tools/interactive.js';
+import { scheduleTask } from './mcp-tools/scheduling.js';
 import { MockProvider } from './providers/mock.js';
 import type { AgentQuery, ProviderEvent } from './providers/types.js';
 
@@ -150,6 +154,307 @@ describe('routing', () => {
     expect(routing.channelType).toBe('discord');
     expect(routing.threadId).toBe('thread-456');
     expect(routing.inReplyTo).toBe('m1');
+  });
+
+  it('uses the newest wake-triggering message instead of accumulated context for reply routing', () => {
+    const insert = getInboundDb().prepare(
+      `INSERT INTO messages_in
+         (id, seq, kind, timestamp, status, trigger, platform_id, channel_type, thread_id, content)
+       VALUES (?, ?, 'chat', datetime('now'), 'pending', ?, ?, 'mattermost', ?, '{"text":"hi"}')`,
+    );
+    insert.run('accumulated-root-a', 2, 0, 'mattermost:primary:channel-a', 'root-a');
+    insert.run('trigger-root-b', 4, 1, 'mattermost:primary:channel-a', 'root-b');
+
+    const routing = extractRouting(getPendingMessages());
+
+    expect(routing.threadId).toBe('root-b');
+    expect(routing.inReplyTo).toBe('trigger-root-b');
+  });
+
+  it('separates two same-poll Mattermost roots into ordered turns', () => {
+    const insert = getInboundDb().prepare(
+      `INSERT INTO messages_in
+         (id, seq, kind, timestamp, status, trigger, platform_id, channel_type, thread_id, content)
+       VALUES (?, ?, 'chat', datetime('now'), 'pending', ?, 'mattermost:primary:channel-a',
+               'mattermost', ?, '{"text":"hi"}')`,
+    );
+    insert.run('accumulated-context', 2, 0, 'older-root');
+    insert.run('root-a-message', 4, 1, 'root-a');
+    insert.run('root-b-message', 6, 1, 'root-b');
+
+    const pending = getPendingMessages();
+    const firstTurn = selectNextRoutingTurn(pending);
+    const secondTurn = selectNextRoutingTurn(pending.slice(firstTurn.length));
+
+    expect(firstTurn.map((message) => message.id)).toEqual(['accumulated-context', 'root-a-message']);
+    expect(extractRouting(firstTurn).threadId).toBe('root-a');
+    expect(secondTurn.map((message) => message.id)).toEqual(['root-b-message']);
+    expect(extractRouting(secondTurn).threadId).toBe('root-b');
+  });
+
+  it('keeps the active Mattermost root on a mid-turn send_message', async () => {
+    let toolResult: Awaited<ReturnType<typeof sendMessage.handler>> | undefined;
+    const query: AgentQuery = {
+      push() {
+        /* unused */
+      },
+      end() {
+        /* unused */
+      },
+      abort() {
+        /* unused */
+      },
+      events: {
+        async *[Symbol.asyncIterator]() {
+          toolResult = await sendMessage.handler({ text: 'Still working.' });
+          yield { type: 'result' as const, text: null };
+        },
+      },
+    };
+
+    await processQuery(
+      query,
+      {
+        platformId: 'mattermost:primary:channel-a',
+        channelType: 'mattermost',
+        threadId: 'root-post-id',
+        inReplyTo: 'inbound-reply',
+      },
+      ['inbound-reply'],
+      'mock',
+    );
+
+    expect(toolResult?.isError).not.toBe(true);
+    const [outbound] = getUndeliveredMessages();
+    expect(outbound?.channel_type).toBe('mattermost');
+    expect(outbound?.platform_id).toBe('mattermost:primary:channel-a');
+    expect(outbound?.thread_id).toBe('root-post-id');
+  });
+
+  it('publishes active Mattermost routing for the separate MCP process', async () => {
+    let observed: Record<string, unknown> | null = null;
+    const query: AgentQuery = {
+      push() {
+        /* unused */
+      },
+      end() {
+        /* unused */
+      },
+      abort() {
+        /* unused */
+      },
+      events: {
+        async *[Symbol.asyncIterator]() {
+          const database = getOutboundDb()
+            .query('PRAGMA database_list')
+            .all()
+            .find((row) => (row as { name: string }).name === 'main') as { file: string };
+          const child = spawnSync(
+            process.execPath,
+            [
+              '-e',
+              `import { Database } from 'bun:sqlite';
+               const db = new Database(process.argv[1], { readonly: true });
+               const row = db.query("SELECT value FROM session_state WHERE key = 'active_turn_routing'").get();
+               console.log(row?.value ?? 'null');`,
+              database.file,
+            ],
+            { encoding: 'utf8' },
+          );
+          expect(child.status).toBe(0);
+          observed = JSON.parse(child.stdout.trim());
+          yield { type: 'result' as const, text: null };
+        },
+      },
+    };
+
+    await processQuery(
+      query,
+      {
+        platformId: 'mattermost:primary:channel-a',
+        channelType: 'mattermost',
+        threadId: 'root-post-id',
+        inReplyTo: 'inbound-reply',
+      },
+      ['inbound-reply'],
+      'mock',
+    );
+
+    expect(observed).toEqual({
+      channel_type: 'mattermost',
+      platform_id: 'mattermost:primary:channel-a',
+      thread_id: 'root-post-id',
+      resolvedName: '(current conversation)',
+    });
+  });
+
+  it('keeps the active Mattermost root on a mid-turn send_card', async () => {
+    const query: AgentQuery = {
+      push() {
+        /* unused */
+      },
+      end() {
+        /* unused */
+      },
+      abort() {
+        /* unused */
+      },
+      events: {
+        async *[Symbol.asyncIterator]() {
+          await sendCard.handler({ card: { title: 'Status' }, fallbackText: 'Status' });
+          yield { type: 'result' as const, text: null };
+        },
+      },
+    };
+
+    await processQuery(
+      query,
+      {
+        platformId: 'mattermost:primary:channel-a',
+        channelType: 'mattermost',
+        threadId: 'root-post-id',
+        inReplyTo: 'inbound-reply',
+      },
+      ['inbound-reply'],
+      'mock',
+    );
+
+    const [outbound] = getUndeliveredMessages();
+    expect(outbound?.channel_type).toBe('mattermost');
+    expect(outbound?.platform_id).toBe('mattermost:primary:channel-a');
+    expect(outbound?.thread_id).toBe('root-post-id');
+  });
+
+  it('keeps the active Mattermost root on a task scheduled mid-turn', async () => {
+    const query: AgentQuery = {
+      push() {
+        /* unused */
+      },
+      end() {
+        /* unused */
+      },
+      abort() {
+        /* unused */
+      },
+      events: {
+        async *[Symbol.asyncIterator]() {
+          await scheduleTask.handler({ prompt: 'Follow up', processAfter: '2030-01-01T09:00:00Z' });
+          yield { type: 'result' as const, text: null };
+        },
+      },
+    };
+
+    await processQuery(
+      query,
+      {
+        platformId: 'mattermost:primary:channel-a',
+        channelType: 'mattermost',
+        threadId: 'root-post-id',
+        inReplyTo: 'inbound-reply',
+      },
+      ['inbound-reply'],
+      'mock',
+    );
+
+    const [outbound] = getUndeliveredMessages();
+    expect(outbound?.kind).toBe('system');
+    expect(outbound?.channel_type).toBe('mattermost');
+    expect(outbound?.platform_id).toBe('mattermost:primary:channel-a');
+    expect(outbound?.thread_id).toBe('root-post-id');
+  });
+
+  it('does not retain a completed turn as the default send_message route', async () => {
+    await processQuery(
+      fakeQuery([{ type: 'result', text: null }]),
+      {
+        platformId: 'mattermost:primary:channel-a',
+        channelType: 'mattermost',
+        threadId: 'root-post-id',
+        inReplyTo: 'inbound-reply',
+      },
+      ['inbound-reply'],
+      'mock',
+    );
+
+    const result = await sendMessage.handler({ text: 'Too late.' });
+
+    expect(result.isError).toBe(true);
+    expect(getUndeliveredMessages()).toHaveLength(0);
+  });
+
+  it('advances reply and MCP routing when a second Mattermost root joins the shared query', async () => {
+    let releasePush!: () => void;
+    const pushed = new Promise<void>((resolve) => {
+      releasePush = resolve;
+    });
+    const query: AgentQuery = {
+      push() {
+        releasePush();
+      },
+      end() {
+        /* unused */
+      },
+      abort() {
+        /* unused */
+      },
+      events: {
+        async *[Symbol.asyncIterator]() {
+          yield { type: 'result' as const, text: 'Reply to A' };
+          await pushed;
+          await sendMessage.handler({ text: 'Working on B' });
+          yield { type: 'result' as const, text: 'Reply to B' };
+        },
+      },
+    };
+
+    getInboundDb()
+      .prepare(
+        `INSERT INTO messages_in
+           (id, seq, kind, timestamp, status, trigger, platform_id, channel_type, thread_id, content)
+         VALUES ('root-b-message', 2, 'chat', datetime('now'), 'pending', 1,
+                 'mattermost:primary:channel-a', 'mattermost', 'root-b', '{"text":"second root"}')`,
+      )
+      .run();
+
+    await processQuery(
+      query,
+      {
+        platformId: 'mattermost:primary:channel-a',
+        channelType: 'mattermost',
+        threadId: 'root-a',
+        inReplyTo: 'root-a-message',
+      },
+      ['root-a-message'],
+      'mock',
+    );
+
+    const outbound = outboundBySeq();
+    expect(outbound.map((message) => JSON.parse(message.content).text)).toEqual([
+      'Reply to A',
+      'Working on B',
+      'Reply to B',
+    ]);
+    expect(outbound.map((message) => message.thread_id)).toEqual(['root-a', 'root-b', 'root-b']);
+  });
+
+  it('does not copy a Mattermost root onto a different destination channel', () => {
+    getInboundDb()
+      .prepare(
+        `INSERT INTO destinations (name, display_name, type, channel_type, platform_id)
+         VALUES ('channel-b', 'Channel B', 'channel', 'mattermost', 'mattermost:primary:channel-b')`,
+      )
+      .run();
+
+    dispatchResultText('<message to="channel-b">Cross-channel update</message>', {
+      platformId: 'mattermost:primary:channel-a',
+      channelType: 'mattermost',
+      threadId: 'root-a',
+      inReplyTo: 'root-a-message',
+    });
+
+    const [outbound] = getUndeliveredMessages();
+    expect(outbound.platform_id).toBe('mattermost:primary:channel-b');
+    expect(outbound.thread_id).toBeNull();
   });
 });
 

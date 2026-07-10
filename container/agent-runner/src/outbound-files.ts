@@ -4,6 +4,7 @@ import path from 'path';
 import { findByName, getAllDestinations } from './destinations.js';
 import { writeMessageOut } from './db/messages-out.js';
 import { getSessionRouting } from './db/session-routing.js';
+import { getOutboundDb } from './db/connection.js';
 
 const DEFAULT_AGENT_DIR = '/workspace/agent';
 const DEFAULT_OUTBOX_DIR = '/workspace/outbox';
@@ -31,6 +32,67 @@ export interface QueuedFileMessage {
   filename: string;
 }
 
+const ACTIVE_TURN_ROUTING_KEY = 'active_turn_routing';
+
+/**
+ * Make the routing of the message currently being answered visible to MCP
+ * tools. Shared sessions keep a channel-scoped session route, so their
+ * per-message thread/root must come from the active turn instead.
+ */
+export interface ActiveTurnRoutingBinding {
+  update(routing: ResolvedRouting | null): void;
+  release(): void;
+}
+
+export function bindActiveTurnRouting(routing: ResolvedRouting | null): ActiveTurnRoutingBinding {
+  writeActiveTurnRouting(routing);
+  let released = false;
+  return {
+    update(next) {
+      if (!released) writeActiveTurnRouting(next);
+    },
+    release() {
+      if (released) return;
+      released = true;
+      writeActiveTurnRouting(null);
+    },
+  };
+}
+
+function readActiveTurnRouting(): ResolvedRouting | null {
+  const row = getOutboundDb().prepare('SELECT value FROM session_state WHERE key = ?').get(ACTIVE_TURN_ROUTING_KEY) as
+    | { value: string }
+    | undefined;
+  if (!row) return null;
+  try {
+    const value = JSON.parse(row.value) as Partial<ResolvedRouting>;
+    if (
+      typeof value.channel_type !== 'string' ||
+      typeof value.platform_id !== 'string' ||
+      (typeof value.thread_id !== 'string' && value.thread_id !== null) ||
+      typeof value.resolvedName !== 'string'
+    ) {
+      return null;
+    }
+    return value as ResolvedRouting;
+  } catch {
+    return null;
+  }
+}
+
+function writeActiveTurnRouting(routing: ResolvedRouting | null): void {
+  const db = getOutboundDb();
+  if (!routing) {
+    db.prepare('DELETE FROM session_state WHERE key = ?').run(ACTIVE_TURN_ROUTING_KEY);
+    return;
+  }
+  db.prepare('INSERT OR REPLACE INTO session_state (key, value, updated_at) VALUES (?, ?, ?)').run(
+    ACTIVE_TURN_ROUTING_KEY,
+    JSON.stringify(routing),
+    new Date().toISOString(),
+  );
+}
+
 function generateId(): string {
   return `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -50,6 +112,9 @@ function destinationList(): string {
  */
 export function resolveRouting(to: string | undefined): ResolvedRouting | { error: string } {
   if (!to) {
+    const activeTurnRouting = readActiveTurnRouting();
+    if (activeTurnRouting) return activeTurnRouting;
+
     const session = getSessionRouting();
     if (session.channel_type && session.platform_id) {
       return {
@@ -75,10 +140,14 @@ export function resolveRouting(to: string | undefined): ResolvedRouting | { erro
 
   if (dest.type === 'channel') {
     const session = getSessionRouting();
+    const activeTurnRouting = readActiveTurnRouting();
+    const current = activeTurnRouting ?? {
+      channel_type: session.channel_type,
+      platform_id: session.platform_id,
+      thread_id: session.thread_id,
+    };
     const threadId =
-      session.channel_type === dest.channelType && session.platform_id === dest.platformId
-        ? session.thread_id
-        : null;
+      current.channel_type === dest.channelType && current.platform_id === dest.platformId ? current.thread_id : null;
     return {
       channel_type: dest.channelType!,
       platform_id: dest.platformId!,

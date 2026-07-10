@@ -89,16 +89,19 @@ export interface RoutingContext {
 }
 
 /**
- * Extract routing context from a batch of messages.
- * Uses the first message's routing fields.
+ * Extract routing context from a chronological batch of messages.
+ * Accumulated rows are context only and must not choose the reply address;
+ * the newest wake-triggering row owns the turn. A trigger-less batch falls
+ * back to its newest row for callers that use this helper outside poll-loop.
  */
 export function extractRouting(messages: MessageInRow[]): RoutingContext {
-  const first = messages[0];
+  const newestFirst = [...messages].reverse();
+  const source = newestFirst.find((message) => message.trigger === 1) ?? newestFirst[0];
   return {
-    platformId: first?.platform_id ?? null,
-    channelType: first?.channel_type ?? null,
-    threadId: first?.thread_id ?? null,
-    inReplyTo: first?.id ?? null,
+    platformId: source?.platform_id ?? null,
+    channelType: source?.channel_type ?? null,
+    threadId: source?.thread_id ?? null,
+    inReplyTo: source?.id ?? null,
   };
 }
 

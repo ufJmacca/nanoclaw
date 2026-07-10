@@ -11,7 +11,7 @@ import {
   stripInternalTags,
   type RoutingContext,
 } from './formatter.js';
-import { queueFileMessage } from './outbound-files.js';
+import { bindActiveTurnRouting, queueFileMessage } from './outbound-files.js';
 import type { AgentProvider, AgentQuery, ProviderEvent } from './providers/types.js';
 
 const POLL_INTERVAL_MS = 1000;
@@ -37,6 +37,29 @@ export interface PollLoopConfig {
   systemContext?: {
     instructions?: string;
   };
+}
+
+/** Select the pending rows that form the next provider turn. */
+export function selectNextRoutingTurn(messages: MessageInRow[]): MessageInRow[] {
+  const firstTriggerIndex = messages.findIndex((message) => message.trigger === 1);
+  if (firstTriggerIndex < 0) return [];
+
+  const firstTrigger = messages[firstTriggerIndex];
+  let end = firstTriggerIndex + 1;
+  while (end < messages.length) {
+    const candidate = messages[end];
+    if (candidate.trigger !== 1 || !hasSameReplyRoute(candidate, firstTrigger)) break;
+    end += 1;
+  }
+  return messages.slice(0, end);
+}
+
+function hasSameReplyRoute(left: MessageInRow, right: MessageInRow): boolean {
+  return (
+    left.channel_type === right.channel_type &&
+    left.platform_id === right.platform_id &&
+    left.thread_id === right.thread_id
+  );
 }
 
 /**
@@ -68,7 +91,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
   let pollCount = 0;
   while (true) {
     // Skip system messages — they're responses for MCP tools (e.g., ask_user_question)
-    const messages = getPendingMessages().filter((m) => m.kind !== 'system');
+    const messages = selectNextRoutingTurn(getPendingMessages().filter((m) => m.kind !== 'system'));
     pollCount++;
 
     // Periodic heartbeat so we know the loop is alive
@@ -258,6 +281,8 @@ export async function processQuery(
   let queryContinuation: string | undefined;
   let done = false;
   const deliveredProgress: string[] = [];
+  const turnRoutingQueue: RoutingContext[] = [routing];
+  const activeTurnRouting = bindActiveTurnRouting(toResolvedRouting(routing));
 
   // Concurrent polling: push follow-ups into the active query as they arrive.
   // We do NOT force-end the stream on silence — keeping the query open is
@@ -279,11 +304,13 @@ export async function processQuery(
         // everything. Filtering on thread_id here caused deadlocks when the
         // initial batch and follow-ups had mismatched thread_ids (e.g. a
         // host-generated welcome trigger with null thread vs a Discord DM reply).
-        const newMessages = getPendingMessages().filter((m) => {
-          if (m.kind === 'system') return false;
-          if ((m.kind === 'chat' || m.kind === 'chat-sdk') && isClearCommand(m)) return false;
-          return true;
-        });
+        const newMessages = selectNextRoutingTurn(
+          getPendingMessages().filter((m) => {
+            if (m.kind === 'system') return false;
+            if ((m.kind === 'chat' || m.kind === 'chat-sdk') && isClearCommand(m)) return false;
+            return true;
+          }),
+        );
         if (newMessages.length === 0) return;
 
         const newIds = newMessages.map((m) => m.id);
@@ -314,6 +341,11 @@ export async function processQuery(
 
         const keptIds = keep.map((m) => m.id);
         const prompt = formatMessages(keep);
+        const followUpRouting = extractRouting(keep);
+        turnRoutingQueue.push(followUpRouting);
+        if (turnRoutingQueue.length === 1) {
+          activeTurnRouting.update(toResolvedRouting(followUpRouting));
+        }
         log(`Pushing ${keep.length} follow-up message(s) into active query`);
         query.push(prompt);
         markCompleted(keptIds);
@@ -332,7 +364,8 @@ export async function processQuery(
 
   try {
     for await (const event of query.events) {
-      handleEvent(event, routing);
+      const eventRouting = turnRoutingQueue[0] ?? routing;
+      handleEvent(event, eventRouting);
       touchHeartbeat();
 
       if (event.type === 'init') {
@@ -353,19 +386,32 @@ export async function processQuery(
         // at all — either way the turn is finished.
         markCompleted(initialBatchIds);
         if (event.text) {
-          dispatchResultText(stripDeliveredProgressResult(event.text, deliveredProgress), routing);
+          dispatchResultText(stripDeliveredProgressResult(event.text, deliveredProgress), eventRouting);
         }
+        turnRoutingQueue.shift();
+        activeTurnRouting.update(toResolvedRouting(turnRoutingQueue[0]));
       } else if (event.type === 'progress') {
-        const sent = dispatchProgressText(event.message, routing);
+        const sent = dispatchProgressText(event.message, eventRouting);
         if (sent) deliveredProgress.push(sent);
       }
     }
   } finally {
     done = true;
     clearInterval(pollHandle);
+    activeTurnRouting.release();
   }
 
   return { continuation: queryContinuation };
+}
+
+function toResolvedRouting(routing: RoutingContext | undefined) {
+  if (!routing?.channelType || !routing.platformId) return null;
+  return {
+    channel_type: routing.channelType,
+    platform_id: routing.platformId,
+    thread_id: routing.threadId,
+    resolvedName: '(current conversation)',
+  };
 }
 
 function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
@@ -584,16 +630,19 @@ function decodeXmlEntities(value: string): string {
 function sendToDestination(dest: DestinationEntry, body: string, routing: RoutingContext): void {
   const platformId = dest.type === 'channel' ? dest.platformId! : dest.agentGroupId!;
   const channelType = dest.type === 'channel' ? dest.channelType! : 'agent';
-  // Inherit thread_id from the inbound routing context so replies land in the
-  // same thread the conversation is in. For non-threaded adapters the router
-  // strips thread_id at ingest, so this will already be null.
+  // A thread/root belongs to one concrete channel. Explicit sends back to
+  // that same channel retain it; other channels and agents start unthreaded.
+  const threadId =
+    dest.type === 'channel' && routing.channelType === channelType && routing.platformId === platformId
+      ? routing.threadId
+      : null;
   writeMessageOut({
     id: generateId(),
     in_reply_to: routing.inReplyTo,
     kind: 'chat',
     platform_id: platformId,
     channel_type: channelType,
-    thread_id: routing.threadId,
+    thread_id: threadId,
     content: JSON.stringify({ text: body }),
   });
 }

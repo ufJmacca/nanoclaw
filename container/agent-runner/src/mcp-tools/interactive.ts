@@ -6,7 +6,7 @@
  */
 import { findQuestionResponse, markCompleted } from '../db/messages-in.js';
 import { writeMessageOut } from '../db/messages-out.js';
-import { getSessionRouting } from '../db/session-routing.js';
+import { resolveRouting } from '../outbound-files.js';
 import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
 
@@ -19,7 +19,7 @@ function generateId(): string {
 }
 
 function routing() {
-  return getSessionRouting();
+  return resolveRouting(undefined);
 }
 
 function ok(text: string) {
@@ -88,6 +88,7 @@ export const askUserQuestion: McpToolDefinition = {
 
     const questionId = generateId();
     const r = routing();
+    if ('error' in r) return err(r.error);
 
     // Write question card to outbound.db
     writeMessageOut({
@@ -151,6 +152,7 @@ export const sendCard: McpToolDefinition = {
 
     const id = generateId();
     const r = routing();
+    if ('error' in r) return err(r.error);
 
     writeMessageOut({
       id,
