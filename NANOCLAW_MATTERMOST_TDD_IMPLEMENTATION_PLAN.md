@@ -511,35 +511,19 @@ The integration is complete only when:
 - operational setup and rollback instructions are documented;
 - no real tokens, production message content, or synthetic test markers are committed.
 
-## Codex working instructions
+## Codex execution mode
 
-When Codex is asked to execute this document:
+The Codex CLI launch prompt controls orchestration and GitHub authorization.
 
-1. Work from the NanoClaw repository root.
-2. Read all applicable `AGENTS.md` instructions first.
-3. Inspect the current repository and validate this document's assumptions.
-4. Do not modify unrelated user changes in a dirty working tree.
-5. Do not push, open a pull request, change production Mattermost, or use production credentials unless separately authorized.
-6. Begin with **Phase 0 only**.
-7. Report discovery results, baseline tests, proposed first Red test, and any architecture conflicts.
-8. If the worktree and baseline are safe, execute the first complete Red → Green → Refactor slice.
-9. Show the Red failure before modifying production code.
-10. Pause at the Phase 0 gate and summarize changed files and test evidence before beginning Phase 1.
-11. For later phases, repeat one small vertical slice at a time and stop when blocked rather than weakening an invariant.
+When launched with the autonomous multi-PR bootstrap prompt, Codex must:
 
-## Bootstrap prompt for Codex CLI
-
-Use this as the first instruction in the Codex session:
-
-```text
-Read ./NANOCLAW_MATTERMOST_TDD_IMPLEMENTATION_PLAN.md in full and treat it as the implementation contract for this task.
-
-Start with Phase 0 only. First read all applicable AGENTS.md files, inspect the repository and git status, discover the real test/lint/typecheck commands, and run the existing fast-test baseline. Do not edit production code until you have added or selected the first focused test and shown me the expected Red failure. Existing behavior may use characterization tests with mutation proof, but every new behavior must follow Red → Green → Refactor.
-
-Preserve all unrelated user changes. Do not push, create a PR, use production credentials, or contact the production Mattermost instance. Enforce the non-negotiable rule that every Mattermost channel has a distinct agent group, shared channel session, writable workspace, and container execution identity, with Telegram remaining separate.
-
-After repository discovery, explain any assumptions that no longer match the code. Then complete one small Phase 0 Red/Green/Refactor or characterization/mutation-proof cycle, run the appropriate verification, update the progress log, and stop at the Phase 0 checkpoint with a concise summary.
-```
+1. Execute Phases 0–9 sequentially.
+2. Follow Red → Green → Refactor for every new behavior.
+3. Create one stacked pull request per phase.
+4. Complete each phase gate and CI verification before continuing.
+5. Continue automatically without requesting a manual phase kickoff.
+6. Stop only for the blocker conditions defined in the launch prompt.
+7. Never merge PRs or access production Mattermost unless separately authorized.
 
 ## References
 
