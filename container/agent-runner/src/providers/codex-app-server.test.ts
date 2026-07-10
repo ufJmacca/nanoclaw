@@ -1,6 +1,24 @@
-import { describe, it, expect } from 'bun:test';
+import { afterEach, describe, it, expect } from 'bun:test';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 
-import { STALE_THREAD_RE, tomlBasicString } from './codex-app-server.js';
+import {
+  STALE_THREAD_RE,
+  createCodexConfigOverrides,
+  tomlBasicString,
+  writeCodexMcpConfigToml,
+} from './codex-app-server.js';
+
+const originalHome = process.env.HOME;
+const tempDirs: string[] = [];
+
+afterEach(() => {
+  process.env.HOME = originalHome;
+  for (const dir of tempDirs.splice(0)) {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 describe('tomlBasicString', () => {
   it('leaves safe strings unchanged inside quotes', () => {
@@ -43,5 +61,28 @@ describe('STALE_THREAD_RE', () => {
     expect(STALE_THREAD_RE.test('authentication failed')).toBe(false);
     expect(STALE_THREAD_RE.test('connection reset by peer')).toBe(false);
     expect(STALE_THREAD_RE.test('internal server error')).toBe(false);
+  });
+});
+
+describe('Codex feature flags', () => {
+  it('enables goals in launch config overrides', () => {
+    expect(createCodexConfigOverrides()).toContain('features.goals=true');
+  });
+
+  it('writes goals to config.toml alongside MCP servers', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-config-'));
+    tempDirs.push(home);
+    process.env.HOME = home;
+
+    writeCodexMcpConfigToml({
+      nanoclaw: {
+        command: 'bun',
+        args: ['run', '/app/src/mcp-tools/index.ts'],
+      },
+    });
+
+    const config = fs.readFileSync(path.join(home, '.codex', 'config.toml'), 'utf-8');
+    expect(config).toContain('[features]\ngoals = true');
+    expect(config).toContain('[mcp_servers.nanoclaw]');
   });
 });
