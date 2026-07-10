@@ -23,7 +23,7 @@ This log records test-first evidence for the stacked Mattermost integration. It 
 
 ## Phase 0 — Repository discovery and safety net
 
-Phase status: in progress.
+Phase status: complete.
 
 ### Slice 0.1: shared and per-thread session characterization
 
@@ -111,7 +111,7 @@ Phase status: in progress.
 
 ## Phase 1 — Host-side Mattermost client authentication
 
-Phase status: in progress.
+Phase status: complete.
 
 ### Slice 1.1: bearer-authenticated identity validation
 
@@ -234,7 +234,7 @@ Phase status: in progress.
 
 ## Phase 2 — Inbound event normalization
 
-Phase status: in progress.
+Phase status: complete.
 
 ### Slice 2.1: posted event produces one inbound message
 
@@ -432,3 +432,7 @@ Phase status: in progress.
 - Isolation review: channel identity is namespaced by a validated instance key; sender/post/root identities remain distinct; contradictory mappings fail closed; Telegram paths are unchanged; the host-only bot token is absent from inbound events, logs, SQLite metadata, container environments, and mounts.
 - Activation boundary: no `ChannelAdapter` is registered yet. Activating one before Phase 4 would either force the current per-thread session policy or discard `root_id`; both conflict with the binding channel-shared-session invariant. This phase therefore ends at the authenticated client → normalized inbound sink seam, and Phase 4 supplies the explicit thread/session policy before startup activation.
 - Deferred work: bounded durable deduplication, reconnect, and replay behavior remain Phase 8 scope.
+- Diff/secrets review: the Phase 2 commit contains only the authenticated-event callback, inbound normalizer/processor, focused tests, and this progress log; `git diff --check` passed; no real credentials, generated artifacts, outbound behavior, adapter activation, migrations, or unrelated changes are present.
+- GitHub checks: the repository code `CI` workflow did not trigger because it is configured only for pull requests targeting `main`; the available `label` metadata check passed in 2 seconds ([run 29097109262](https://github.com/ufJmacca/nanoclaw/actions/runs/29097109262)).
+- Phase status: complete; the full local gate and every available GitHub check passed; pull request ready for review.
+- Pull request: [#39](https://github.com/ufJmacca/nanoclaw/pull/39), `codex/mattermost-02-inbound` → `codex/mattermost-01-auth` (depends on #38).
