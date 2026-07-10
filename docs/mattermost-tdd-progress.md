@@ -866,7 +866,7 @@ Phase status: complete; pull request ready for review.
 
 ## Phase 5 — Strict channel subscription transaction
 
-Phase status: in progress.
+Phase status: complete; pull request ready for review.
 
 ### Slice 5.0: race-safe subscription identity schema
 
@@ -1046,4 +1046,6 @@ Phase status: in progress.
 - Credential review: the subscription API accepts no bot token or Mattermost credential. The token is absent from prompts, message metadata, SQLite subscription state, mounts, workspace initialization, and container environments. A scan of every Phase 5 path found only explanatory progress-log references to token isolation from earlier phases; no credential value is present.
 - Operational impact: migration 014 is append-only and transactional. It creates the strict ownership table plus topology-preserving triggers, and the synchronized reference schema executes cleanly in memory. No dependency, production connection, live credential, or automatic subscription command is introduced. Rollback is code rollback plus database restore; permanent ownership reservations are intentionally not deleted in place.
 - Independent review: the final read-only re-review found no remaining Phase 5 correctness, security, migration, or isolation blocker. It independently passed 67 affected tests, the 463-test host suite, type checking, formatting, linting, and diff checks, and confirmed migration/reference-trigger parity. Exact lifecycle transitions, archived-state rules, stopping, replay, unsubscribe, and resubscribe remain scoped to Phase 7.
-- Phase status: local acceptance gate complete; GitHub publication and available stacked-PR checks pending.
+- GitHub checks: the repository code `CI` workflow did not trigger because it is configured only for pull requests targeting `main`; the available `label` metadata check passed in 3 seconds ([run 29125527546](https://github.com/ufJmacca/nanoclaw/actions/runs/29125527546)).
+- Phase status: complete; the full local gate, review-driven fixes, independent re-review, and every available GitHub check passed; pull request ready for review.
+- Pull request: [#42](https://github.com/ufJmacca/nanoclaw/pull/42), `codex/mattermost-05-strict-subscriptions` → `codex/mattermost-04-thread-session-policy` (depends on #41).
