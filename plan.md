@@ -199,6 +199,7 @@ The final answer is only permitted when `final_audit` returns:
   "allowed_to_answer_user": true
 }
 ```
+
 ### 3.5 Workspace Persistence
 
 All workflow tools must use this root inside a running agent container:
@@ -380,3 +381,4 @@ The returned JSON should contain:
   "allowed_to_answer_user": true
 }
 ```
+
