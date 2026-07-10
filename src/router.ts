@@ -33,10 +33,32 @@ import { resolveSession, writeSessionMessage, writeOutboundDirect } from './sess
 import { wakeContainer } from './container-runner.js';
 import { getSession } from './db/sessions.js';
 import type { AgentGroup, MessagingGroup, MessagingGroupAgent } from './types.js';
-import type { InboundEvent } from './channels/adapter.js';
+import type { ChannelAdapter, InboundEvent, ThreadSessionPolicy } from './channels/adapter.js';
 
 function generateId(): string {
   return `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+type SessionMode = MessagingGroupAgent['session_mode'];
+
+/**
+ * Resolve an agent's context boundary without changing its reply address.
+ * Thread-capable UIs can therefore retain their root/thread identifiers while
+ * a channel-scoped wiring still shares one NanoClaw session.
+ */
+export function resolveEffectiveSessionMode(
+  wiringMode: SessionMode,
+  isGroup: boolean,
+  threadSessionPolicy: ThreadSessionPolicy,
+): SessionMode {
+  if (threadSessionPolicy === 'force-per-thread' && wiringMode !== 'agent-shared' && isGroup) {
+    return 'per-thread';
+  }
+  return wiringMode;
+}
+
+function resolveThreadSessionPolicy(adapter: ChannelAdapter | undefined): ThreadSessionPolicy {
+  return adapter?.threadSessionPolicy ?? (adapter?.supportsThreads ? 'force-per-thread' : 'honor-wiring');
 }
 
 /**
@@ -163,6 +185,7 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
   // 0. Apply the adapter's thread policy. Non-threaded adapters (Telegram,
   //    WhatsApp, iMessage, email) collapse threads to the channel.
   const adapter = getChannelAdapter(event.channelType);
+  const threadSessionPolicy = resolveThreadSessionPolicy(adapter);
   if (adapter && !adapter.supportsThreads) {
     event = { ...event, threadId: null };
   }
@@ -284,7 +307,7 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
     const scopeOk = engages && (!senderScopeGate || senderScopeGate(event, userId, mg, agent).allowed);
 
     if (engages && accessOk && scopeOk) {
-      await deliverToAgent(agent, agentGroup, mg, event, userId, adapter?.supportsThreads === true, true);
+      await deliverToAgent(agent, agentGroup, mg, event, userId, threadSessionPolicy, true);
       engagedCount++;
 
       // Mention-sticky: ask the adapter to subscribe the thread so the
@@ -315,7 +338,7 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
       // message (which also stages their attachments to disk via
       // writeSessionMessage → extractAttachmentFiles) is exactly what the
       // gate is meant to prevent.
-      await deliverToAgent(agent, agentGroup, mg, event, userId, adapter?.supportsThreads === true, false);
+      await deliverToAgent(agent, agentGroup, mg, event, userId, threadSessionPolicy, false);
       accumulatedCount++;
     } else {
       log.debug('Message not engaged for agent (drop policy)', {
@@ -400,17 +423,10 @@ async function deliverToAgent(
   mg: MessagingGroup,
   event: InboundEvent,
   userId: string | null,
-  adapterSupportsThreads: boolean,
+  threadSessionPolicy: ThreadSessionPolicy,
   wake: boolean,
 ): Promise<void> {
-  // Apply the adapter thread policy: threaded adapter in a group chat →
-  // per-thread session regardless of wiring. agent-shared preserved (it's
-  // a cross-channel directive the adapter doesn't know about). DMs collapse
-  // sub-threads to one session (is_group=0 short-circuit).
-  let effectiveSessionMode = agent.session_mode;
-  if (adapterSupportsThreads && effectiveSessionMode !== 'agent-shared' && mg.is_group !== 0) {
-    effectiveSessionMode = 'per-thread';
-  }
+  const effectiveSessionMode = resolveEffectiveSessionMode(agent.session_mode, mg.is_group !== 0, threadSessionPolicy);
 
   const { session, created } = resolveSession(agent.agent_group_id, mg.id, event.threadId, effectiveSessionMode);
 
