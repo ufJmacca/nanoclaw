@@ -29,6 +29,12 @@ export interface MattermostTransport {
   openWebSocket(url: string): Promise<MattermostWebSocket>;
 }
 
+export interface MattermostEventContext {
+  botUserId: string;
+}
+
+export type MattermostEventListener = (payload: string, context: MattermostEventContext) => void;
+
 export type MattermostFetch = (
   url: string,
   init: { method: string; headers: Record<string, string>; body?: string },
@@ -107,6 +113,7 @@ export class MattermostClient {
   private socket: MattermostWebSocket | null = null;
   private authenticationTimer: unknown | null = null;
   private removeAuthenticationListener: (() => void) | null = null;
+  private removeEventListener: (() => void) | null = null;
   private rejectAuthentication: ((reason?: unknown) => void) | null = null;
 
   constructor(
@@ -115,7 +122,7 @@ export class MattermostClient {
     private readonly timers: MattermostTimers = systemTimers,
   ) {}
 
-  async setup(): Promise<void> {
+  async setup(onEvent?: MattermostEventListener): Promise<void> {
     const baseUrl = this.config.baseUrl.replace(/\/+$/, '');
     const response = await this.transport
       .request({
@@ -131,6 +138,10 @@ export class MattermostClient {
       });
     if (response.status < 200 || response.status >= 300) {
       throw new Error(`Mattermost authentication failed (HTTP ${response.status})`);
+    }
+    const botUserId = authenticatedUserId(response.body);
+    if (!botUserId) {
+      throw new Error('Mattermost authentication identity response was invalid');
     }
 
     const websocketUrl = `${baseUrl.replace(/^http/, 'ws')}/api/v4/websocket`;
@@ -151,6 +162,9 @@ export class MattermostClient {
         if (!isAuthenticationResponse(response)) return;
         this.clearAuthenticationWait();
         if (response.status === 'OK') {
+          if (onEvent) {
+            this.removeEventListener = socket.onMessage((eventPayload) => onEvent(eventPayload, { botUserId }));
+          }
           resolve();
         } else {
           socket.close();
@@ -188,6 +202,8 @@ export class MattermostClient {
   teardown(): void {
     const rejectAuthentication = this.rejectAuthentication;
     this.clearAuthenticationWait();
+    this.removeEventListener?.();
+    this.removeEventListener = null;
 
     const socket = this.socket;
     this.socket = null;
@@ -214,4 +230,10 @@ function isAuthenticationResponse(value: unknown): value is { status: string; se
   if (!value || typeof value !== 'object') return false;
   const response = value as Record<string, unknown>;
   return response.seq_reply === 1 && typeof response.status === 'string';
+}
+
+function authenticatedUserId(value: unknown): string | null {
+  if (!value || typeof value !== 'object') return null;
+  const id = (value as Record<string, unknown>).id;
+  return typeof id === 'string' && id.length > 0 ? id : null;
 }
