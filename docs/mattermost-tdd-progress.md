@@ -228,4 +228,6 @@ Phase status: in progress.
 - Container typecheck: `pnpm exec tsc -p container/agent-runner/tsconfig.json --noEmit` — passed.
 - Diff/secrets review: only the host client/tests, pinned `ws` dependency metadata, container credential characterization, and this progress evidence differ from Phase 0; no real credentials, generated artifacts, inbound mapping, or outbound delivery behavior are present.
 - Isolation result: the bot credential exists only in the host client closure and its authentication request/challenge; safe errors, container args, inherited environment, and mounts exclude it.
-- Phase status: local gate passed; awaiting stacked pull-request creation and available checks.
+- GitHub checks: the repository `CI` workflow did not trigger because it is configured only for pull requests targeting `main`; the available `label` metadata check passed in 2 seconds ([run 29095477461](https://github.com/ufJmacca/nanoclaw/actions/runs/29095477461)).
+- Phase status: complete; the full local gate and every available GitHub check passed; pull request ready for review.
+- Pull request: [#38](https://github.com/ufJmacca/nanoclaw/pull/38), `codex/mattermost-01-auth` → `codex/mattermost-00-characterization` (depends on #37).
