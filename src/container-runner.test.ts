@@ -3,7 +3,7 @@ import os from 'os';
 import path from 'path';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { resolveProviderName, syncContainerSkillSymlinks } from './container-runner.js';
+import { buildDeepResearchWorkflowMount, resolveProviderName, syncContainerSkillSymlinks } from './container-runner.js';
 import type { ContainerConfig } from './container-config.js';
 
 const tmpDirs: string[] = [];
@@ -79,5 +79,23 @@ describe('syncContainerSkillSymlinks', () => {
     syncContainerSkillSymlinks(skillsDir, testConfig(['welcome']));
 
     expect(fs.readlinkSync(path.join(skillsDir, 'welcome'))).toBe('/app/skills/welcome');
+  });
+});
+
+describe('buildDeepResearchWorkflowMount', () => {
+  it('mounts the shared workflow module read-only inside agent containers', () => {
+    const root = tempDir();
+    const workflowDir = path.join(root, 'src', 'deep-research-workflow');
+    fs.mkdirSync(workflowDir, { recursive: true });
+
+    expect(buildDeepResearchWorkflowMount(root)).toEqual({
+      hostPath: workflowDir,
+      containerPath: '/app/deep-research-workflow',
+      readonly: true,
+    });
+  });
+
+  it('skips the mount when the shared workflow module is absent', () => {
+    expect(buildDeepResearchWorkflowMount(tempDir())).toBeNull();
   });
 });

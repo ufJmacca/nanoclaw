@@ -5,6 +5,35 @@ description: Use for broad, multi-source research tasks that require a todo-driv
 
 # Deep Research
 
+## Tool-enforced execution
+
+When workflow tools are available, they are authoritative.
+
+Do not mark a workflow step complete in prose. A workflow step is complete only when the corresponding workflow tool returns `ok: true`.
+
+For a new deep-research run, the first required workflow call is the `initialize_run` tool in the `nanoclaw` namespace.
+
+After `initialize_run` succeeds, use the returned `workflow_run_path` as the actual filesystem folder for all artifacts in this run. This is a per-request folder such as `research/obsidian-ai-systems-20260515-152650`.
+
+For workflow tool inputs, keep artifact fields in the contract form such as `research/findings/R1.yaml` and `research/final-report.html`. On disk, create those files under `workflow_run_path` by removing the leading `research/`. For example, `research/final-report.html` is written at the returned `workflow_report_path`.
+
+When calling `submit_final_report`, pass `artifact_path` as the returned `workflow_submit_artifact_path`, normally `research/final-report.html`.
+
+Use the `get_run_state` tool in the `nanoclaw` namespace to determine the next required action when resuming or when uncertain.
+
+Use only the next tool named by `run_state.allowed_next_tool`, called from the `nanoclaw` namespace, except that `describe_workflow_capabilities` and `get_run_state` in the `nanoclaw` namespace may be called at any time.
+
+Never call a later workflow tool before the current gate passes.
+
+Do not produce the final answer until the `final_audit` tool in the `nanoclaw` namespace returns:
+
+- `ok: true`
+- `allowed_to_answer_user: true`
+
+If a workflow tool rejects a step, correct the missing fields or complete the required earlier step. Do not bypass the tool.
+
+After `final_audit` returns `ok: true` and `allowed_to_answer_user: true`, call `mcp__nanoclaw__send_file` with `path` set to the returned `workflow_report_path` and a short `text` caption. Use a final-response file directive such as `<file path="research/<run-slug>/final-report.html" text="HTML report." />` only if `mcp__nanoclaw__send_file` is unavailable.
+
 ## Non-negotiable workflow
 
 When this skill is invoked, follow this workflow in order. Do not skip directly to the final answer unless the user explicitly asks for a quick answer.
@@ -34,6 +63,26 @@ At the start, define:
 - What would count as “done”:
 
 If the user does not specify these, infer reasonable defaults and state them briefly.
+
+## Output mode priority
+
+Default mode is `human_report`.
+
+In `human_report` mode:
+- Final format is HTML.
+- Workflow artifact is `research/final-report.html`.
+- Actual file path is the `workflow_report_path` returned by `initialize_run`.
+- Markdown is not allowed.
+
+In `printable` mode:
+- Generate HTML first.
+- Then generate PDF.
+
+In `skill_handoff` mode:
+- Markdown is allowed.
+- Final artifact is `research/handoff.md`.
+
+If two instructions conflict, the deliverable contract recorded by `set_deliverable_contract` wins.
 
 ## Research task list protocol
 
@@ -145,7 +194,7 @@ When sources disagree:
 
 ## Final report format
 
-Default to Markdown unless the user asks for HTML, PDF, or another file format.
+Default to HTML for normal human-readable deep research reports. Use Markdown only for `skill_handoff` mode or when the deliverable contract explicitly allows it.
 
 The final report must include:
 
@@ -166,7 +215,7 @@ Keep the final report decisive. Say what matters, what is uncertain, and what th
 When running in a Codex repo or workspace and the user asks for a durable research process, create:
 
 ```txt
-research/
+research/<run-slug>/
   tasks.yaml
   sources.yaml
   findings/
@@ -176,7 +225,9 @@ research/
   final-report.html
 ```
 
-Use research/tasks.yaml as the source of truth.
+Use the `workflow_run_path` returned by `initialize_run` as the source folder for this run.
+
+When workflow tools are available, use the state tools as the source of truth for workflow completion. Only a successful tool result may advance `run_state.yaml` or task status in `tasks.yaml` inside `workflow_run_path`.
 
 Do not use research/TODO.md unless the skill is operating in skill-handoff mode and another skill explicitly expects Markdown.
 
@@ -241,7 +292,7 @@ skipped
 
 Use this loop:
 
-1. Read `research/tasks.yaml`.
+1. Read the `tasks.yaml` inside `workflow_run_path`.
 2. Pick the next `todo` task.
 3. Mark it `running`.
 4. Execute it directly or delegate it to a subagent.
@@ -249,7 +300,7 @@ Use this loop:
 6. Mark the task `done`, `blocked`, or `skipped`.
 7. Add follow-up tasks for conflicts, missing evidence, or unanswered questions.
 8. Continue until no `todo` or `running` tasks remain.
-9. Write `research/final-report.html`.
+9. Write the final report at `workflow_report_path`.
 
 Never leave unfinished tasks without a reason.
 
@@ -277,12 +328,12 @@ Use this decision tree:
 
 For normal deep research, the final artifact must be:
 ```txt
-research/final-report.html
+workflow_report_path
 ```
 
 not:
 ```txt
-research/final-report.md
+workflow_run_path/final-report.md
 ```
 
 ## Output modes

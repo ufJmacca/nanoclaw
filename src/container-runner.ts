@@ -318,6 +318,11 @@ function buildMounts(
   const agentRunnerSrc = path.join(projectRoot, 'container', 'agent-runner', 'src');
   mounts.push({ hostPath: agentRunnerSrc, containerPath: '/app/src', readonly: true });
 
+  const workflowMount = buildDeepResearchWorkflowMount(projectRoot);
+  if (workflowMount) {
+    mounts.push(workflowMount);
+  }
+
   // Shared skills — read-only, symlinks in .claude-shared/skills/ point here.
   const skillsSrc = path.join(projectRoot, 'container', 'skills');
   if (fs.existsSync(skillsSrc)) {
@@ -336,6 +341,12 @@ function buildMounts(
   }
 
   return mounts;
+}
+
+export function buildDeepResearchWorkflowMount(projectRoot: string = process.cwd()): VolumeMount | null {
+  const workflowSrc = path.join(projectRoot, 'src', 'deep-research-workflow');
+  if (!fs.existsSync(workflowSrc)) return null;
+  return { hostPath: workflowSrc, containerPath: '/app/deep-research-workflow', readonly: true };
 }
 
 export function selectedContainerSkills(containerConfig: ContainerConfig): string[] {
