@@ -24,8 +24,11 @@ import {
   STALE_THREAD_RE,
   attachCodexAutoApproval,
   createCodexConfigOverrides,
+  decodeCodexContinuation,
+  encodeCodexContinuation,
   initializeCodexAppServer,
   killCodexAppServer,
+  loadNanoclawWorkflowDynamicTools,
   spawnCodexAppServer,
   startCodexTurn,
   startOrResumeCodexThread,
@@ -135,11 +138,19 @@ export class CodexProvider implements AgentProvider {
       const server = spawnCodexAppServer(createCodexConfigOverrides());
       attachCodexAutoApproval(server);
 
-      let threadId: string | undefined = input.continuation;
+      const decodedContinuation = decodeCodexContinuation(input.continuation);
+      let threadId: string | undefined = decodedContinuation.threadId;
       let initYielded = false;
 
       try {
         await initializeCodexAppServer(server);
+        const dynamicTools = await loadNanoclawWorkflowDynamicTools(server);
+
+        if (decodedContinuation.refreshRequired) {
+          console.error(
+            '[codex-provider] Refreshing pre-bridge Codex continuation so dynamic MCP workflow tools are attached',
+          );
+        }
 
         const threadParams = {
           model: self.model,
@@ -148,6 +159,7 @@ export class CodexProvider implements AgentProvider {
           approvalPolicy: 'never',
           personality: 'friendly',
           baseInstructions: composeBaseInstructions(input.systemContext?.instructions),
+          dynamicTools,
         };
 
         threadId = await startOrResumeCodexThread(server, threadId, threadParams);
@@ -174,6 +186,7 @@ export class CodexProvider implements AgentProvider {
             text,
             self.model,
             input.cwd,
+            encodeCodexContinuation,
             () => initYielded,
             () => {
               initYielded = true;
@@ -214,6 +227,7 @@ async function* runOneTurn(
   inputText: string,
   model: string,
   cwd: string,
+  encodeContinuation: (threadId: string) => string,
   hasInit: () => boolean,
   markInit: () => void,
 ): AsyncGenerator<ProviderEvent> {
@@ -247,7 +261,7 @@ async function* runOneTurn(
         const thread = params.thread as { id?: string } | undefined;
         if (thread?.id && !hasInit()) {
           markInit();
-          buffer.push({ type: 'init', continuation: thread.id });
+          buffer.push({ type: 'init', continuation: encodeContinuation(thread.id) });
         }
         break;
       }
@@ -308,7 +322,7 @@ async function* runOneTurn(
     // continuation early and survives a mid-turn crash.
     if (!hasInit()) {
       markInit();
-      buffer.push({ type: 'init', continuation: threadId });
+      buffer.push({ type: 'init', continuation: encodeContinuation(threadId) });
     }
 
     await startCodexTurn(server, { threadId, inputText, model, cwd });

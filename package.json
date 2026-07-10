@@ -16,6 +16,7 @@
     "prepare": "husky",
     "setup": "tsx setup/index.ts",
     "setup:auto": "tsx setup/auto.ts",
+    "deep-research-workflow": "tsx src/deep-research-workflow/cli.ts",
     "chat": "tsx scripts/chat.ts",
     "auth": "tsx src/whatsapp-auth.ts",
     "lint": "eslint src/",

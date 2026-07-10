@@ -1,7 +1,26 @@
 interface:
   display_name: "Deep Research"
-  short_description: "Delegate, synthesize, and ship reports"
-  default_prompt: "Use $deep-research to break this topic into sub-questions, delegate research to sub-agents, and return a polished HTML or PDF report."
+  short_description: "Todo-driven research workflow with subagents, source reconciliation, and HTML reports"
+  default_prompt: |
+    Use $deep-research for this task.
+
+    Follow the full deep-research workflow, not a shortcut:
+    1. Restate the research question and define the deliverable.
+    2. Create or update research/tasks.yaml as the source of truth.
+    3. Split the work into independent research tasks.
+    4. If there are 2 or more independent slices, explicitly spawn Codex subagents:
+       "Spawn one subagent per research slice, wait for all of them, then synthesize."
+    5. Give each subagent a narrow scope, required output schema, and stop condition.
+    6. Save intermediate findings under research/findings/.
+    7. Iterate through research/tasks.yaml until every task is done, blocked, or skipped with a reason.
+    8. Reconcile conflicts, remove duplication, and separate verified facts from inferences.
+    9. Produce one final synthesized human-readable report as research/final-report.html.
+
+    Output format rules:
+    - Default human-readable output: HTML.
+    - Use PDF only when the user explicitly asks for a printable or PDF deliverable.
+    - Use Markdown only in skill-handoff mode, when this skill is being used to support another skill or downstream agent workflow.
+    - Do not create a Markdown final report for normal human-readable output.
 
 policy:
   allow_implicit_invocation: true
