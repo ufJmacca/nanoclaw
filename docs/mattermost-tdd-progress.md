@@ -701,3 +701,162 @@ Phase status: complete.
 - GitHub checks: the repository code `CI` workflow did not trigger because it is configured only for pull requests targeting `main`; the available `label` metadata check passed in 4 seconds ([run 29099975105](https://github.com/ufJmacca/nanoclaw/actions/runs/29099975105)).
 - Phase status: complete; the full local gate, independent review, and every available GitHub check passed; pull request ready for review.
 - Pull request: [#40](https://github.com/ufJmacca/nanoclaw/pull/40), `codex/mattermost-03-outbound` → `codex/mattermost-02-inbound` (depends on #39).
+
+## Phase 4 — Decouple UI threading from context selection
+
+Phase status: local gate passed; pull request publication pending.
+
+### Slice 4.1: Mattermost shared wiring owns one channel session
+
+- RED command: `pnpm exec vitest run src/router.thread-policy.test.ts -t 'routes a channel root and its thread replies into one shared session'`.
+- RED failure observed: a root post and its thread reply created two sessions because `supportsThreads: true` unconditionally forced per-thread context.
+- GREEN command: the same focused command after adding explicit `force-per-thread | honor-wiring` capability and honoring the Mattermost fixture's shared wiring.
+- GREEN result: 1 passed; both messages resolved to one session with `session.thread_id = NULL`.
+- REFACTOR performed: appended an optional adapter capability with a legacy-compatible threaded default; delivery thread preservation remains controlled by `supportsThreads`.
+- Affected-suite verification: thread-policy + host-core suites — 2 files passed, 26 tests passed; focused Prettier passed; targeted ESLint passed with 0 errors and 2 existing warnings; host typecheck passed.
+- Files changed: `src/channels/adapter.ts`, `src/router.ts`, `src/router.thread-policy.test.ts`.
+- Remaining risks: per-message root metadata, channel separation, legacy threaded behavior, Telegram behavior, and the concrete unregistered Mattermost adapter capability follow.
+
+### Slice 4.2: shared context retains per-message root delivery metadata
+
+- Test-fixture correction before evidence: the first query used the raw external post ID, while router rows are namespaced per agent; changed it to read the sole routed row, then established the valid characterization.
+- Characterization command: `pnpm exec vitest run src/router.thread-policy.test.ts -t 'keeps root_id as per-message delivery metadata in the shared session'` — passed.
+- RED mutation command: the same focused command after temporarily nulling the default delivery thread in `deliverToAgent()`.
+- RED failure observed: the stored row's `thread_id` became `NULL` instead of `root-post-id`.
+- GREEN command/result: the same focused command after reverting the mutation — 1 passed; the shared session stays threadless while its message retains the root.
+- REFACTOR performed: session identity and delivery address remain separate values; the router never derives one from the other.
+- Affected-suite verification: included in the current thread-policy suite; host typecheck remained green after Slice 4.1.
+- Files changed: `src/router.thread-policy.test.ts`; the production mutation was reverted.
+- Remaining risks: actual outbound POST composition with the stored row is verified after concrete adapter assembly.
+
+### Slice 4.3: a second Mattermost channel stays in a distinct session
+
+- Characterization command: `pnpm exec vitest run src/router.thread-policy.test.ts -t 'keeps a second Mattermost channel in a distinct session'` — passed.
+- RED mutation command: the same focused command after temporarily forcing every messaging-group lookup to channel A.
+- RED failure observed: channel B created no session and its work was misrouted to A.
+- GREEN command/result: `pnpm exec vitest run src/router.thread-policy.test.ts` after reverting the mutation — 3 passed; A and B own distinct messaging groups, agent groups, and session IDs.
+- REFACTOR performed: parameterized the fixture by immutable channel identity without introducing channel-name routing.
+- Affected-suite verification: thread-policy suite — 3 passed.
+- Files changed: `src/router.thread-policy.test.ts`; the production mutation was reverted.
+- Remaining risks: Phase 5 makes this topology mandatory and transactionally enforced for real subscriptions.
+
+### Slice 4.4: legacy threaded adapters still force per-thread context
+
+- RED command: `pnpm exec vitest run src/router.thread-policy.test.ts -t 'keeps the legacy force-per-thread default for threaded adapters without a policy'` after resetting the not-yet-accepted default to honor wiring.
+- RED failure observed: the root and thread reply collapsed into one session instead of the legacy two.
+- GREEN command: the same focused command after restoring `force-per-thread` as the omitted-policy default for threaded adapters.
+- GREEN result: 1 passed; the adapter without a policy created root and thread-scoped sessions exactly as before.
+- REFACTOR performed: compatibility remains an explicit default decision rather than a change to every existing adapter fixture/plugin.
+- Affected-suite verification: included in the current thread-policy suite.
+- Files changed: `src/router.ts`, `src/router.thread-policy.test.ts`.
+- Remaining risks: the duplicated policy resolution is extracted after Telegram compatibility is covered.
+
+### Slice 4.5: Telegram behavior remains channel-scoped
+
+- Characterization command: `pnpm exec vitest run src/router.thread-policy.test.ts -t 'keeps Telegram channel-scoped session and delivery behavior unchanged'` — passed.
+- RED mutation command: the same focused command after temporarily disabling the non-threaded adapter normalization.
+- RED failure observed: `ignored-telegram-thread` leaked into the stored message row instead of being stripped.
+- GREEN command/result: `pnpm exec vitest run src/router.thread-policy.test.ts` after reverting the mutation — 5 passed; Telegram's session and message thread IDs remain `NULL`.
+- REFACTOR performed: UI thread normalization remains a separate pre-routing decision from effective session mode.
+- Affected-suite verification: thread-policy suite — 5 passed.
+- Files changed: `src/router.thread-policy.test.ts`; the production mutation was reverted.
+- Remaining risks: none for Telegram compatibility; the next refactor removes duplicated effective-policy calculation.
+
+### Slice 4.6: session selection is a pure policy decision
+
+- RED command: `pnpm exec vitest run src/router.thread-policy.test.ts -t 'resolves context mode independently from UI thread support'`.
+- RED failure observed: `TypeError: resolveEffectiveSessionMode is not a function`; the router still embedded policy selection inside delivery orchestration.
+- GREEN command/result: the same focused command after extracting the resolver — 1 passed, 5 skipped.
+- REFACTOR performed: `resolveEffectiveSessionMode()` now accepts wiring mode, group scope, and explicit adapter policy; `resolveThreadSessionPolicy()` centralizes the compatibility default and both engage/accumulate paths reuse one decision.
+- Affected-suite verification: `pnpm exec vitest run src/router.thread-policy.test.ts src/host-core.test.ts` — 2 files passed, 31 tests passed.
+- Files changed: `src/router.ts`, `src/router.thread-policy.test.ts`.
+
+### Slice 4.7: active-turn tools retain the current Mattermost root
+
+- RED command: `docker run --rm --network none -v /home/pi/nanoclaw-v2:/workspace -w /workspace/container/agent-runner oven/bun:1.3.12 bun test src/poll-loop.test.ts -t 'keeps the active Mattermost root on a mid-turn send_message'`.
+- RED failure observed: `send_message` returned an error because the shared session's immutable route has no thread-specific destination; no rooted outbound row was written.
+- GREEN command/result: the same focused command after binding per-turn routing around `processQuery()` — 1 passed; the outbox row retained channel A and `root-post-id`.
+- Cleanup characterization: `... -t 'does not retain a completed turn as the default send_message route'` passed before and after the change.
+- Cleanup mutation proof: temporarily omitting `releaseActiveTurnRouting()` made the post-turn tool send succeed against stale channel A instead of returning an error; the cleanup was restored and the focused test passed.
+- REFACTOR performed: current-turn routing is an explicit scoped binding; immutable `session_routing` remains only the fallback outside an active turn.
+- Files changed: `container/agent-runner/src/outbound-files.ts`, `container/agent-runner/src/poll-loop.ts`, `container/agent-runner/src/poll-loop.test.ts`.
+
+### Slice 4.8: accumulated context cannot choose the reply root
+
+- RED command: `docker run --rm --network none -v /home/pi/nanoclaw-v2:/workspace -w /workspace/container/agent-runner oven/bun:1.3.12 bun test src/poll-loop.test.ts -t 'uses the newest wake-triggering message instead of accumulated context for reply routing'`.
+- RED failure observed: routing selected older accumulated `root-a` instead of the wake-triggering `root-b`.
+- GREEN command/result: the same focused command after selecting the newest `trigger=1` row — 1 passed; `root-b` and its inbound ID own the reply.
+- REFACTOR performed: `extractRouting()` now documents and implements one deterministic chronological rule with a safe newest-row fallback for non-poll callers.
+- Files changed: `container/agent-runner/src/formatter.ts`, `container/agent-runner/src/poll-loop.test.ts`.
+
+### Slice 4.9: shared-query follow-ups advance root routing FIFO
+
+- RED command: `docker run --rm --network none -v /home/pi/nanoclaw-v2:/workspace -w /workspace/container/agent-runner oven/bun:1.3.12 bun test src/poll-loop.test.ts -t 'advances reply and MCP routing when a second Mattermost root joins the shared query'`.
+- RED failure observed: the initial reply, second-root `send_message`, and second result all carried `root-a`; expected roots were `root-a`, `root-b`, `root-b`.
+- GREEN command/result: the same focused command after adding a routing-context FIFO synchronized with pushed prompts/results — 1 passed.
+- REFACTOR performed: result/progress dispatch and active MCP routing now use the current queue head; a follow-up that arrives after the prior result immediately becomes current.
+- Files changed: `container/agent-runner/src/outbound-files.ts`, `container/agent-runner/src/poll-loop.ts`, `container/agent-runner/src/poll-loop.test.ts`.
+
+### Slice 4.10: roots never cross explicit destination channels
+
+- RED command: `docker run --rm --network none -v /home/pi/nanoclaw-v2:/workspace -w /workspace/container/agent-runner oven/bun:1.3.12 bun test src/poll-loop.test.ts -t 'does not copy a Mattermost root onto a different destination channel'`.
+- RED failure observed: an explicit send from channel A to channel B incorrectly copied `root-a` onto B.
+- GREEN command/result: the same focused command after requiring channel type and platform ID equality before inheriting a root — 1 passed; B receives a rootless cross-channel message.
+- REFACTOR performed: thread inheritance is now address-scoped and agent destinations are always unthreaded.
+- Files changed: `container/agent-runner/src/poll-loop.ts`, `container/agent-runner/src/poll-loop.test.ts`.
+
+### Slice 4.11: concrete Mattermost adapter declares and preserves the policy
+
+- Capability RED command: `pnpm exec vitest run src/channels/mattermost-adapter.test.ts -t 'supports thread-aware delivery while honoring the shared wiring session'`.
+- Capability RED observed: the concrete adapter module/factory did not exist, so the required Mattermost capability could only be faked in router tests.
+- Capability GREEN: the same command after adding an unregistered adapter assembly — 1 passed; it advertises `supportsThreads=true` and `threadSessionPolicy='honor-wiring'`.
+- Inbound RED command: `pnpm exec vitest run src/channels/mattermost-adapter.test.ts -t 'authenticates and forwards a Mattermost thread reply through the host setup boundary'`.
+- Inbound RED observed: no authentication challenge or inbound callback occurred because setup was inactive.
+- Inbound GREEN: the same command after composing the authenticated client and inbound normalizer — 1 passed; the host received the namespaced channel and original root.
+- Outbound RED command: `pnpm exec vitest run src/channels/mattermost-adapter.test.ts -t 'delivers the shared-session reply with its per-message Mattermost root id'`.
+- Outbound RED observed: adapter delivery rejected as inactive.
+- Outbound GREEN: the same command after composing `MattermostOutboundDelivery` — 1 passed; the HTTP body contained channel A and `root_id=root-post-id`.
+- Activation characterization: `pnpm exec vitest run src/channels/mattermost-adapter.test.ts -t 'stays unregistered until strict subscription validation is available'` passed. Temporarily self-registering the adapter failed with `['mattermost']`; the registration mutation was reverted.
+- REFACTOR performed: client, inbound normalization, and outbound delivery are composed behind `ChannelAdapter`, but the module is deliberately absent from `src/channels/index.ts` until Phase 5 closes generic wiring reuse.
+- Files changed: `src/channels/mattermost-adapter.ts`, `src/channels/mattermost-adapter.test.ts`, `src/channels/adapter.ts`.
+
+### Slice 4.12: interactive and scheduled current-conversation tools retain roots
+
+- Card RED command: `docker run --rm --network none -v /home/pi/nanoclaw-v2:/workspace -w /workspace/container/agent-runner oven/bun:1.3.12 bun test src/poll-loop.test.ts -t 'keeps the active Mattermost root on a mid-turn send_card'`.
+- Card RED observed: the card outbox row had `channel_type=NULL`, `platform_id=NULL`, and no root because interactive tools read only static session routing.
+- Card GREEN: the same focused command after using the scoped resolver — 1 passed with the exact Mattermost channel/root.
+- Schedule RED command: `docker run --rm --network none -v /home/pi/nanoclaw-v2:/workspace -w /workspace/container/agent-runner oven/bun:1.3.12 bun test src/poll-loop.test.ts -t 'keeps the active Mattermost root on a task scheduled mid-turn'`.
+- Schedule RED observed: the scheduling system row had a null channel route and root.
+- Schedule GREEN: the same focused command after sharing the active resolver — 1 passed with the exact channel/root.
+- REFACTOR performed: `send_message`, `send_file`, `ask_user_question`, `send_card`, and `schedule_task` now share the same active-turn-first routing boundary; missing current destinations fail closed rather than writing ambiguous rows.
+- Files changed: `container/agent-runner/src/mcp-tools/interactive.ts`, `container/agent-runner/src/mcp-tools/scheduling.ts`, `container/agent-runner/src/outbound-files.ts`, `container/agent-runner/src/poll-loop.test.ts`.
+
+### Slice 4.13: cross-process and same-poll review hardening
+
+- Independent-review finding: the first active-route binding was module-local, while production MCP tools run in a separate Bun process; same-poll trigger rows from different roots were also being collapsed into one provider turn.
+- Cross-process RED command: `docker run --rm --network none -v /home/pi/nanoclaw-v2:/workspace -w /workspace/container/agent-runner oven/bun:1.3.12 bun test src/poll-loop.test.ts -t 'publishes active Mattermost routing for the separate MCP process'`.
+- Cross-process RED observed: a child Bun process reading the shared outbound database saw `NULL` while the poll-loop process held channel A/root routing only in module memory.
+- Cross-process GREEN: the same focused command after persisting the scoped route in `outbound.db.session_state` and reading it on every resolution — 1 passed; the independent process observed the exact channel/root tuple.
+- Same-poll fixture correction: the first attempt imported a not-yet-present selector and could not execute, so it was not accepted as Red. An identity selector seam was added without changing behavior and the focused command was rerun.
+- Same-poll RED command: `docker run --rm --network none -v /home/pi/nanoclaw-v2:/workspace -w /workspace/container/agent-runner oven/bun:1.3.12 bun test src/poll-loop.test.ts -t 'separates two same-poll Mattermost roots into ordered turns'`.
+- Same-poll RED observed: the first turn contained accumulated context, root A, and root B instead of stopping before B; B would have been completed under A/B's single newest route.
+- Same-poll GREEN: the same focused command after selecting one reply-address turn at a time — 1 passed; accumulated context + A form turn one and B remains turn two with its own root.
+- REFACTOR performed: consecutive triggers are still batched when channel, platform, and root are identical, preserving the existing same-conversation batch behavior; a different route stays pending and enters the existing FIFO push/result queue on the next poll. Scoped route cleanup deletes the persisted row instead of restoring potentially stale crash state.
+- Affected-suite verification: `docker run --rm --network none -v /home/pi/nanoclaw-v2:/workspace -w /workspace/container/agent-runner oven/bun:1.3.12 bun test src/poll-loop.test.ts src/integration.test.ts` — 2 files passed, 31 tests passed, including the existing same-route multi-message batch.
+- Files changed: `container/agent-runner/src/outbound-files.ts`, `container/agent-runner/src/poll-loop.ts`, `container/agent-runner/src/poll-loop.test.ts`.
+
+### Phase 4 gate
+
+- Focused/affected host command: `pnpm exec vitest run src/router.thread-policy.test.ts src/host-core.test.ts src/channels/mattermost-adapter.test.ts src/channels/mattermost-inbound.test.ts src/channels/mattermost-outbound.test.ts src/channels/mattermost-client.test.ts src/channels/delivery-bridge.test.ts` — 7 files passed, 87 tests passed.
+- Host fast-suite command: `pnpm test` — 44 files passed, 411 tests passed.
+- Container command: `docker run --rm --network none -v /home/pi/nanoclaw-v2:/workspace -w /workspace/container/agent-runner oven/bun:1.3.12 bun test` — 10 files passed, 112 tests passed.
+- Formatting command: `pnpm run format:check` — passed; changed container sources were also formatted explicitly with the repository Prettier version.
+- Lint command: `pnpm run lint` — passed with 0 errors and the same 100 pre-existing warnings documented in pre-flight.
+- Host type-check command: `pnpm run typecheck` — passed.
+- Container type-check command: `pnpm exec tsc -p container/agent-runner/tsconfig.json --noEmit` — passed.
+- Refactor result: platform reply placement, effective context/session selection, active-turn routing, and immutable session fallback are separate decisions. Mattermost preserves roots while honoring one shared channel wiring; legacy threaded adapters retain their default; Telegram remains threadless.
+- Isolation review: channel A and B resolve distinct messaging/agent/session identities; root IDs never select an agent group or workspace; cross-destination sends cannot inherit another channel's root; active routes are scoped and released; neither the adapter configuration nor bot token reaches messages, prompts, SQLite routing metadata, mounts, or container environments.
+- Activation boundary: the concrete Mattermost adapter is tested but remains unregistered and absent from the channel barrel. Phase 5 must install strict one-to-one subscription validation before activation, preventing generic approval from reusing a Telegram or Mattermost agent group.
+- Operational impact: no migration, configuration, dependency, live connection, or credential is introduced. Existing threaded adapters keep their prior behavior unless they explicitly opt into `honor-wiring`.
+- Diff/secrets review: `git diff --check` passed; only Phase 4 router/adapter/container routing tests and progress evidence are present; no real credentials, generated artifacts, runtime data, or unrelated changes were found.
+- Independent review: the first review exposed the separate-MCP-process and same-poll multi-root gaps in Slice 4.13. A read-only post-fix re-review found no remaining actionable blocker and confirmed cross-process route visibility, stale-state deletion, FIFO turn selection, cross-destination root stripping, adapter non-registration, and isolation semantics.
