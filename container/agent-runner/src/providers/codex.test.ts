@@ -53,6 +53,90 @@ describe('codexProgressMessages', () => {
     expect(messages).toEqual(['Checking the visible progress behavior.\nAdd tests']);
   });
 
+  it('emits commentary agent messages as user-facing progress', () => {
+    const messages = codexProgressMessages(
+      notification('item/completed', {
+        item: {
+          type: 'agentMessage',
+          text: 'I’m checking the deployment comment now.',
+          phase: 'commentary',
+        },
+      }),
+    );
+
+    expect(messages).toEqual(['I’m checking the deployment comment now.']);
+  });
+
+  it('does not emit final agent messages as progress', () => {
+    const messages = codexProgressMessages(
+      notification('item/completed', {
+        item: {
+          type: 'agentMessage',
+          text: 'Done.',
+          phase: 'final_answer',
+        },
+      }),
+    );
+
+    expect(messages).toEqual([]);
+  });
+
+  it('emits assistant commentary message items as progress', () => {
+    const messages = codexProgressMessages(
+      notification('item/completed', {
+        item: {
+          type: 'message',
+          role: 'assistant',
+          phase: 'commentary',
+          content: [{ type: 'output_text', text: 'The branch is pushed. I’m opening the PR now.' }],
+        },
+      }),
+    );
+
+    expect(messages).toEqual(['The branch is pushed. I’m opening the PR now.']);
+  });
+
+  it('emits completed web searches as progress', () => {
+    const messages = codexProgressMessages(
+      notification('item/completed', {
+        item: {
+          type: 'web_search_call',
+          status: 'completed',
+          action: { type: 'search', query: 'weather: Morisset, NSW, Australia' },
+        },
+      }),
+    );
+
+    expect(messages).toEqual(['Completed web search: weather: Morisset, NSW, Australia']);
+  });
+
+  it('emits function call start and completion as progress', () => {
+    const state = { functionCalls: new Map<string, string>() };
+
+    const started = codexProgressMessages(
+      notification('item/completed', {
+        item: {
+          type: 'function_call',
+          name: 'exec_command',
+          call_id: 'call-1',
+        },
+      }),
+      state,
+    );
+    const completed = codexProgressMessages(
+      notification('item/completed', {
+        item: {
+          type: 'function_call_output',
+          call_id: 'call-1',
+        },
+      }),
+      state,
+    );
+
+    expect(started).toEqual(['Running exec_command.']);
+    expect(completed).toEqual(['Completed exec_command.']);
+  });
+
   it('skips completed goal notifications so completion does not replay progress', () => {
     const messages = codexProgressMessages(
       notification('thread/goal/updated', {

@@ -236,6 +236,7 @@ async function* runOneTurn(
   const turnState: { error: Error | null } = { error: null };
   let resultText = '';
   let turnDone = false;
+  const progressState: CodexProgressState = { functionCalls: new Map(), completedWebSearches: new Set() };
 
   // Buffered event queue so we can `yield` across the async notification
   // callback. Each notification pushes zero or more ProviderEvents; the
@@ -271,9 +272,18 @@ async function* runOneTurn(
         break;
       }
       case 'item/completed': {
-        const item = params.item as { type?: string; text?: string } | undefined;
-        if (item?.type === 'agentMessage' && item.text) resultText = item.text;
-        for (const message of codexProgressMessages(n)) {
+        const item = params.item as { type?: string; text?: string; phase?: string } | undefined;
+        if (item?.type === 'agentMessage' && item.text && item.phase !== 'commentary') {
+          resultText = item.text;
+        }
+        for (const message of codexProgressMessages(n, progressState)) {
+          buffer.push({ type: 'progress', message });
+        }
+        break;
+      }
+      case 'item/started':
+      case 'item/updated': {
+        for (const message of codexProgressMessages(n, progressState)) {
           buffer.push({ type: 'progress', message });
         }
         break;
@@ -296,7 +306,7 @@ async function* runOneTurn(
       case 'item/mcpToolCall/progress':
       case 'turn/plan/updated':
       case 'thread/goal/updated':
-        for (const message of codexProgressMessages(n)) {
+        for (const message of codexProgressMessages(n, progressState)) {
           buffer.push({ type: 'progress', message });
         }
         break;
@@ -325,7 +335,11 @@ async function* runOneTurn(
       buffer.push({ type: 'init', continuation: encodeContinuation(threadId) });
     }
 
-    await startCodexTurn(server, { threadId, inputText, model, cwd });
+    void startCodexTurn(server, { threadId, inputText, model, cwd }).catch((err) => {
+      turnState.error = err instanceof Error ? err : new Error(String(err));
+      turnDone = true;
+      kick();
+    });
 
     while (true) {
       while (buffer.length > 0) {
@@ -360,6 +374,28 @@ interface CodexReasoningItem {
   content?: unknown;
 }
 
+interface CodexMessageItem {
+  type?: string;
+  role?: unknown;
+  text?: unknown;
+  phase?: unknown;
+  content?: unknown;
+}
+
+interface CodexWebSearchItem {
+  type?: string;
+  id?: unknown;
+  status?: unknown;
+  action?: unknown;
+}
+
+interface CodexFunctionCallItem {
+  type?: string;
+  name?: unknown;
+  call_id?: unknown;
+  callId?: unknown;
+}
+
 interface CodexPlanStep {
   step?: unknown;
   status?: unknown;
@@ -370,16 +406,28 @@ interface CodexGoal {
   status?: unknown;
 }
 
-export function codexProgressMessages(notification: JsonRpcNotification): string[] {
+export interface CodexProgressState {
+  functionCalls: Map<string, string>;
+  completedWebSearches?: Set<string>;
+}
+
+export function codexProgressMessages(notification: JsonRpcNotification, state?: CodexProgressState): string[] {
   const params = notification.params;
 
   switch (notification.method) {
     case 'item/completed': {
-      const item = params.item as CodexReasoningItem | undefined;
-      if (item?.type !== 'reasoning') return [];
-
-      const summary = normalizeStringArray(item.summary).join('\n').trim();
-      return summary ? [summary] : [];
+      const item = params.item as
+        | CodexReasoningItem
+        | CodexMessageItem
+        | CodexWebSearchItem
+        | CodexFunctionCallItem
+        | undefined;
+      return progressMessagesForCompletedItem(item, state);
+    }
+    case 'item/started':
+    case 'item/updated': {
+      const item = params.item as CodexFunctionCallItem | CodexWebSearchItem | undefined;
+      return progressMessagesForStartedOrUpdatedItem(item, state);
     }
     case 'item/mcpToolCall/progress': {
       const message = typeof params.message === 'string' ? params.message.trim() : '';
@@ -406,6 +454,134 @@ export function codexProgressMessages(notification: JsonRpcNotification): string
     default:
       return [];
   }
+}
+
+function progressMessagesForCompletedItem(
+  item: CodexReasoningItem | CodexMessageItem | CodexWebSearchItem | CodexFunctionCallItem | undefined,
+  state?: CodexProgressState,
+): string[] {
+  if (!item) return [];
+
+  switch (item.type) {
+    case 'reasoning': {
+      const summary = normalizeStringArray((item as CodexReasoningItem).summary)
+        .join('\n')
+        .trim();
+      return summary ? [summary] : [];
+    }
+    case 'agentMessage':
+      return commentaryMessageProgress(item as CodexMessageItem);
+    case 'message':
+      return assistantCommentaryProgress(item as CodexMessageItem);
+    case 'web_search_call':
+    case 'webSearchCall':
+      return webSearchProgress(item as CodexWebSearchItem, state);
+    case 'function_call':
+    case 'functionCall':
+      return functionCallStartedProgress(item as CodexFunctionCallItem, state);
+    case 'function_call_output':
+    case 'functionCallOutput':
+      return functionCallCompletedProgress(item as CodexFunctionCallItem, state);
+    default:
+      return [];
+  }
+}
+
+function progressMessagesForStartedOrUpdatedItem(
+  item: CodexFunctionCallItem | CodexWebSearchItem | undefined,
+  state?: CodexProgressState,
+): string[] {
+  if (!item) return [];
+  switch (item.type) {
+    case 'function_call':
+    case 'functionCall':
+      return functionCallStartedProgress(item, state);
+    case 'web_search_call':
+    case 'webSearchCall':
+      return webSearchProgress(item, state);
+    default:
+      return [];
+  }
+}
+
+function commentaryMessageProgress(item: CodexMessageItem): string[] {
+  if (item.phase !== 'commentary') return [];
+  const text = typeof item.text === 'string' ? item.text.trim() : '';
+  return text ? [text] : [];
+}
+
+function assistantCommentaryProgress(item: CodexMessageItem): string[] {
+  if (item.phase !== 'commentary' || item.role !== 'assistant') return [];
+  const text = extractMessageText(item.content);
+  return text ? [text] : [];
+}
+
+function webSearchProgress(item: CodexWebSearchItem, state?: CodexProgressState): string[] {
+  if (item.status && item.status !== 'completed') return [];
+  const query = webSearchQuery(item.action);
+  const key = webSearchKey(item, query);
+  if (key && state?.completedWebSearches?.has(key)) return [];
+  if (key) state?.completedWebSearches?.add(key);
+  return query ? [`Completed web search: ${query}`] : ['Completed web search.'];
+}
+
+function functionCallStartedProgress(item: CodexFunctionCallItem, state?: CodexProgressState): string[] {
+  const name = typeof item.name === 'string' ? item.name.trim() : '';
+  if (!name) return [];
+
+  const callId = functionCallId(item);
+  if (callId && state?.functionCalls.has(callId)) return [];
+  if (callId) {
+    state?.functionCalls.set(callId, name);
+  }
+
+  return [`Running ${name}.`];
+}
+
+function functionCallCompletedProgress(item: CodexFunctionCallItem, state?: CodexProgressState): string[] {
+  const callId = functionCallId(item);
+  const name = callId ? state?.functionCalls.get(callId) : undefined;
+  if (callId) state?.functionCalls.delete(callId);
+  return [name ? `Completed ${name}.` : 'Completed tool call.'];
+}
+
+function functionCallId(item: CodexFunctionCallItem): string {
+  const raw = item.call_id ?? item.callId;
+  return typeof raw === 'string' ? raw : '';
+}
+
+function webSearchQuery(action: unknown): string {
+  if (!action || typeof action !== 'object') return '';
+  const record = action as { query?: unknown; queries?: unknown };
+  const query = typeof record.query === 'string' ? record.query : '';
+  if (query.trim()) return truncateProgressDetail(query.trim());
+  if (Array.isArray(record.queries)) {
+    const first = record.queries.find((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0);
+    return first ? truncateProgressDetail(first.trim()) : '';
+  }
+  return '';
+}
+
+function webSearchKey(item: CodexWebSearchItem, query: string): string {
+  const id = typeof item.id === 'string' ? item.id : '';
+  return id || query;
+}
+
+function extractMessageText(content: unknown): string {
+  if (!Array.isArray(content)) return '';
+  return content
+    .map((entry) => {
+      if (!entry || typeof entry !== 'object') return '';
+      const text = (entry as { text?: unknown }).text;
+      return typeof text === 'string' ? text.trim() : '';
+    })
+    .filter(Boolean)
+    .join('\n')
+    .trim();
+}
+
+function truncateProgressDetail(text: string): string {
+  return text.length > 120 ? `${text.slice(0, 117).trimEnd()}...` : text;
 }
 
 function normalizeStringArray(value: unknown): string[] {
