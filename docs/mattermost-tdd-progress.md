@@ -704,7 +704,7 @@ Phase status: complete.
 
 ## Phase 4 — Decouple UI threading from context selection
 
-Phase status: local gate passed; pull request publication pending.
+Phase status: complete; pull request ready for review.
 
 ### Slice 4.1: Mattermost shared wiring owns one channel session
 
@@ -860,3 +860,6 @@ Phase status: local gate passed; pull request publication pending.
 - Operational impact: no migration, configuration, dependency, live connection, or credential is introduced. Existing threaded adapters keep their prior behavior unless they explicitly opt into `honor-wiring`.
 - Diff/secrets review: `git diff --check` passed; only Phase 4 router/adapter/container routing tests and progress evidence are present; no real credentials, generated artifacts, runtime data, or unrelated changes were found.
 - Independent review: the first review exposed the separate-MCP-process and same-poll multi-root gaps in Slice 4.13. A read-only post-fix re-review found no remaining actionable blocker and confirmed cross-process route visibility, stale-state deletion, FIFO turn selection, cross-destination root stripping, adapter non-registration, and isolation semantics.
+- GitHub checks: the repository code `CI` workflow did not trigger because it is configured only for pull requests targeting `main`; the available `label` metadata check passed in 2 seconds ([run 29102770047](https://github.com/ufJmacca/nanoclaw/actions/runs/29102770047)).
+- Phase status: complete; the full local gate, review-driven fixes, independent re-review, and every available GitHub check passed; pull request ready for review.
+- Pull request: [#41](https://github.com/ufJmacca/nanoclaw/pull/41), `codex/mattermost-04-thread-session-policy` → `codex/mattermost-03-outbound` (depends on #40).
