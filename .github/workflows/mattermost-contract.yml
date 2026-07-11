@@ -1,0 +1,54 @@
+name: Mattermost Contract
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/mattermost-contract.yml'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'vitest.mattermost.config.ts'
+      - 'docs/mattermost-contract-tests.md'
+      - 'docs/mattermost-tdd-progress.md'
+      - 'src/channels/**'
+      - 'src/contracts/mattermost/**'
+      - 'src/db/**'
+      - 'src/modules/permissions/**'
+      - 'src/router.ts'
+      - 'src/session-manager.ts'
+      - 'test/contracts/mattermost/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mattermost-contract-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  live-contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install host dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify local contract safety
+        run: pnpm test:mattermost:safety
+
+      - name: Validate disposable Compose model
+        run: docker compose -f test/contracts/mattermost/docker-compose.yml -p nanoclaw-mm-contract-ci config --quiet
+
+      - name: Run disposable Mattermost contract suite
+        run: pnpm test:mattermost
