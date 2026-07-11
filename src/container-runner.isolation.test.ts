@@ -125,6 +125,11 @@ function writableMounts(args: string[]): Map<string, string> {
   return mounts;
 }
 
+function pathContains(parent: string, child: string): boolean {
+  const relative = path.relative(path.resolve(parent), path.resolve(child));
+  return relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative));
+}
+
 beforeEach(() => {
   fs.rmSync(runnerMocks.testRoot, { recursive: true, force: true });
   fs.mkdirSync(runnerMocks.testRoot, { recursive: true });
@@ -213,5 +218,39 @@ describe('container execution isolation', () => {
 
     await wakeContainer({ ...firstSession });
     expect(runnerMocks.spawn).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps Mattermost credentials host-side during container launch', async () => {
+    const previousCredential = process.env.MATTERMOST_BOT_TOKEN;
+    const credential = 'container-exclusion-fixture-credential';
+    process.env.MATTERMOST_BOT_TOKEN = credential;
+
+    try {
+      const group = agentGroup('agent-credential-boundary', 'credential-boundary');
+      runnerMocks.groups.set(group.id, group);
+
+      await wakeContainer(session('session-credential-boundary', group.id));
+
+      const args = runnerMocks.spawn.mock.calls[0][1] as string[];
+      const renderedArgs = args.join('\0');
+      const environmentEntries = args.flatMap((arg, index) => (arg === '-e' ? [args[index + 1]] : []));
+      const mountSpecs = args.flatMap((arg, index) => (arg === '-v' || arg === '--mount-ro' ? [args[index + 1]] : []));
+
+      expect(renderedArgs).not.toContain(credential);
+      expect(
+        environmentEntries.some(
+          (entry) => entry === 'MATTERMOST_BOT_TOKEN' || entry.startsWith('MATTERMOST_BOT_TOKEN='),
+        ),
+      ).toBe(false);
+
+      const hostEnvFile = path.join(process.cwd(), '.env');
+      for (const spec of mountSpecs) {
+        const source = spec.slice(0, spec.lastIndexOf(':'));
+        expect(pathContains(source, hostEnvFile)).toBe(false);
+      }
+    } finally {
+      if (previousCredential === undefined) delete process.env.MATTERMOST_BOT_TOKEN;
+      else process.env.MATTERMOST_BOT_TOKEN = previousCredential;
+    }
   });
 });
