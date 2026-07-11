@@ -301,6 +301,67 @@ describe('MattermostClient authentication', () => {
     await expect(setup).rejects.toThrow('Mattermost WebSocket authentication failed');
     expect(socket.close).toHaveBeenCalledOnce();
   });
+
+  it('fails closed when users/me omits the authenticated user id', async () => {
+    const transport: MattermostTransport = {
+      request: vi.fn().mockResolvedValue({ status: 200, body: {} }),
+      openWebSocket: vi.fn().mockResolvedValue(authenticatedSocket()),
+    };
+    const client = new MattermostClient(
+      {
+        baseUrl: 'https://mattermost.example.test',
+        botToken: 'identity-fixture-credential',
+        instanceKey: 'primary',
+      },
+      transport,
+    );
+
+    await expect(client.setup()).rejects.toThrow('Mattermost authentication identity response was invalid');
+    expect(transport.openWebSocket).not.toHaveBeenCalled();
+  });
+
+  it('forwards raw events only after authentication and unsubscribes on teardown', async () => {
+    const listeners = new Set<(payload: string) => void>();
+    const socket = {
+      send: vi.fn(),
+      close: vi.fn(),
+      onMessage: vi.fn((listener: (payload: string) => void) => {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      }),
+    };
+    const emit = (payload: string) => {
+      for (const listener of [...listeners]) listener(payload);
+    };
+    const onEvent = vi.fn();
+    const client = new MattermostClient(
+      {
+        baseUrl: 'https://mattermost.example.test',
+        botToken: 'event-fixture-credential',
+        instanceKey: 'primary',
+      },
+      {
+        request: vi.fn().mockResolvedValue({ status: 200, body: { id: 'authenticated-bot-id' } }),
+        openWebSocket: vi.fn().mockResolvedValue(socket),
+      },
+    );
+
+    const setup = client.setup(onEvent);
+    await vi.waitFor(() => expect(socket.send).toHaveBeenCalledOnce());
+    emit(JSON.stringify({ event: 'posted', data: { post: '{}' } }));
+    expect(onEvent).not.toHaveBeenCalled();
+    emit(JSON.stringify({ status: 'OK', seq_reply: 1 }));
+    await setup;
+
+    const rawEvent = JSON.stringify({ event: 'posted', data: { post: '{"id":"post-id"}' } });
+    emit(rawEvent);
+    expect(onEvent).toHaveBeenCalledOnce();
+    expect(onEvent).toHaveBeenCalledWith(rawEvent, { botUserId: 'authenticated-bot-id' });
+
+    client.teardown();
+    emit(rawEvent);
+    expect(onEvent).toHaveBeenCalledOnce();
+  });
 });
 
 describe('NodeMattermostTransport', () => {

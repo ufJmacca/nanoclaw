@@ -23,7 +23,7 @@ This log records test-first evidence for the stacked Mattermost integration. It 
 
 ## Phase 0 — Repository discovery and safety net
 
-Phase status: in progress.
+Phase status: complete.
 
 ### Slice 0.1: shared and per-thread session characterization
 
@@ -111,7 +111,7 @@ Phase status: in progress.
 
 ## Phase 1 — Host-side Mattermost client authentication
 
-Phase status: in progress.
+Phase status: complete.
 
 ### Slice 1.1: bearer-authenticated identity validation
 
@@ -231,3 +231,208 @@ Phase status: in progress.
 - GitHub checks: the repository `CI` workflow did not trigger because it is configured only for pull requests targeting `main`; the available `label` metadata check passed in 2 seconds ([run 29095477461](https://github.com/ufJmacca/nanoclaw/actions/runs/29095477461)).
 - Phase status: complete; the full local gate and every available GitHub check passed; pull request ready for review.
 - Pull request: [#38](https://github.com/ufJmacca/nanoclaw/pull/38), `codex/mattermost-01-auth` → `codex/mattermost-00-characterization` (depends on #37).
+
+## Phase 2 — Inbound event normalization
+
+Phase status: complete.
+
+### Slice 2.1: posted event produces one inbound message
+
+- RED command: `pnpm exec vitest run src/channels/mattermost-inbound.test.ts -t 'turns one posted event into one NanoClaw inbound message'`.
+- RED failure observed: the Mattermost inbound processor module did not exist.
+- GREEN command: the same focused command after adding the minimal processor and sink boundary.
+- GREEN result: 1 passed; one valid `posted` frame produced one chat message with sender display name and text.
+- REFACTOR performed: isolated raw-event handling from the authenticated transport behind a typed `MattermostInboundSink`; formatting, lint, and typecheck remained clean.
+- Affected-suite verification: `pnpm exec vitest run src/channels/mattermost-inbound.test.ts` — 1 passed.
+- Files changed: `src/channels/mattermost-inbound.ts`, `src/channels/mattermost-inbound.test.ts`.
+- Remaining risks: stable identities, threading metadata, bot filtering, deduplication, validation, and safe logging follow as separate slices.
+
+### Slice 2.2: collision-safe channel platform identity
+
+- RED command: `pnpm exec vitest run src/channels/mattermost-inbound.test.ts -t 'namespaces channel identity by Mattermost instance and channel id'`.
+- RED failure observed: the processor emitted the raw channel ID instead of `mattermost:primary:channel-id`.
+- GREEN command: the same focused command after adding the instance/channel namespace.
+- GREEN result: 1 passed; identical channel IDs on two instance keys produced distinct stable platform IDs.
+- REFACTOR performed: kept channel identity derived exclusively from immutable instance key and channel ID, never channel name.
+- Affected-suite verification: inbound suite — 2 passed; targeted ESLint and host typecheck passed.
+- Files changed: `src/channels/mattermost-inbound.ts`, `src/channels/mattermost-inbound.test.ts`.
+- Remaining risks: malformed/ambiguous identity components will be rejected by the validation slice.
+
+### Slice 2.3: stable sender identity
+
+- RED command: `pnpm exec vitest run src/channels/mattermost-inbound.test.ts -t 'uses a stable Mattermost sender id independent of display name'`.
+- RED failure observed: normalized content carried the display name but no `senderId`.
+- GREEN command: the same focused command after namespacing the immutable Mattermost user ID.
+- GREEN result: 1 passed; content carries `senderId: mattermost:user-id` independently of sender display name.
+- REFACTOR performed: kept the human-readable sender and authorization identity as separate fields.
+- Affected-suite verification: inbound suite — 3 passed; targeted ESLint passed.
+- Files changed: `src/channels/mattermost-inbound.ts`, `src/channels/mattermost-inbound.test.ts`.
+- Remaining risks: missing/invalid user IDs are handled by the validation slice.
+
+### Slice 2.4: external post identity retention
+
+- RED command: `pnpm exec vitest run src/channels/mattermost-inbound.test.ts -t 'retains the Mattermost post id as the external message id'`.
+- RED failure observed: the normalized message still used the temporary placeholder ID.
+- GREEN command: the same focused command after mapping `post.id`.
+- GREEN result: 1 passed; the NanoClaw inbound message ID exactly matches the Mattermost post ID.
+- REFACTOR performed: no additional identifier or content copy was introduced; the external ID remains the deduplication key.
+- Affected-suite verification: inbound suite — 4 passed.
+- Files changed: `src/channels/mattermost-inbound.ts`, `src/channels/mattermost-inbound.test.ts`.
+- Remaining risks: duplicate suppression is added after bot filtering.
+
+### Slice 2.5: thread reply delivery metadata
+
+- RED command: `pnpm exec vitest run src/channels/mattermost-inbound.test.ts -t 'retains root_id as delivery metadata for thread replies'`.
+- RED failure observed: normalized `threadId` was `null` instead of the Mattermost root post ID.
+- GREEN command: the same focused command after mapping non-empty `root_id`.
+- GREEN result: 1 passed; thread replies retain their root ID while root posts continue to map to `null`.
+- REFACTOR performed: reused NanoClaw's delivery `threadId` field without creating a per-thread session decision in the processor.
+- Affected-suite verification: inbound suite — 5 passed; host typecheck passed.
+- Files changed: `src/channels/mattermost-inbound.ts`, `src/channels/mattermost-inbound.test.ts`.
+- Remaining risks: Phase 4 explicitly decouples this UI delivery metadata from context selection.
+
+### Slice 2.6: bot-authored events are ignored
+
+- RED command: `pnpm exec vitest run src/channels/mattermost-inbound.test.ts -t 'ignores posts authored by the authenticated bot user'`.
+- RED failure observed: the sink received one normalized message authored by the configured bot user.
+- GREEN command: the same focused command after filtering on the authenticated `/users/me` ID.
+- GREEN result: 1 passed; the bot-authored post produced zero inbound messages.
+- REFACTOR performed: filtering uses immutable user ID rather than username/display name and occurs before any sink invocation.
+- Affected-suite verification: inbound suite — 6 passed; targeted ESLint passed.
+- Files changed: `src/channels/mattermost-inbound.ts`, `src/channels/mattermost-inbound.test.ts`.
+- Remaining risks: the authenticated identity is wired from the client after processor behavior is complete.
+
+### Slice 2.7: duplicate posts are processed exactly once
+
+- RED command: `pnpm exec vitest run src/channels/mattermost-inbound.test.ts -t 'processes concurrent duplicate post events exactly once'`.
+- RED failure observed: two concurrent copies invoked the sink twice.
+- GREEN command: the same focused command after atomically reserving the external post ID before awaiting the sink.
+- GREEN result: 1 passed; concurrent duplicate frames invoked the sink once.
+- REFACTOR performed: reused the immutable external post ID established in Slice 2.4 and placed dedup after bot filtering.
+- Affected-suite verification: inbound suite — 7 passed; host typecheck passed.
+- Files changed: `src/channels/mattermost-inbound.ts`, `src/channels/mattermost-inbound.test.ts`.
+- Remaining risks: bounded/durable deduplication across reconnect and restart is Phase 8 scope.
+
+### Slice 2.8: malformed JSON is rejected safely
+
+- RED command: `pnpm exec vitest run src/channels/mattermost-inbound.test.ts -t 'rejects malformed envelope and nested post JSON without throwing'`.
+- RED failure observed: invalid outer JSON rejected the processor promise with a `SyntaxError`.
+- GREEN command: the same focused command after adding guarded outer/nested parsing and structural envelope checks.
+- GREEN result: 1 passed; malformed outer and nested JSON returned `false`, invoked no sink, and did not throw.
+- REFACTOR performed: extracted safe JSON and record guards that rethrow only unexpected non-syntax failures; targeted lint remains clean.
+- Affected-suite verification: inbound suite — 8 passed; targeted ESLint and host typecheck passed.
+- Files changed: `src/channels/mattermost-inbound.ts`, `src/channels/mattermost-inbound.test.ts`.
+- Remaining risks: required-field/type validation and size limits are separate following slices.
+
+### Slice 2.9: unsupported events are ignored
+
+- Characterization command: `pnpm exec vitest run src/channels/mattermost-inbound.test.ts -t 'ignores unsupported WebSocket event types'` — initially passed.
+- RED mutation command: the same focused command after temporarily removing the `posted` discriminator.
+- RED failure observed: a `typing` event was normalized and returned `true` instead of being ignored.
+- GREEN command/result: the same command after reverting the mutation — 1 passed and zero sink calls.
+- REFACTOR performed: retained a single outer-envelope discriminator before nested post parsing.
+- Affected-suite verification: included in the current inbound suite.
+- Files changed: `src/channels/mattermost-inbound.test.ts`; the production mutation was reverted.
+- Remaining risks: none for unsupported event dispatch; reconnect/event catalog changes are Phase 8 scope.
+
+### Slice 2.10: malformed required fields fail closed
+
+- RED command: `pnpm exec vitest run src/channels/mattermost-inbound.test.ts -t 'rejects posted events with missing or invalid required fields'`.
+- RED failure observed: a post missing its ID returned `true` and reached the sink.
+- GREEN command: the same focused command after adding a pure required-field/type/timestamp guard.
+- GREEN result: 1 passed across missing ID, empty channel ID, non-string user/root/message fields, and invalid timestamp fixtures; none invoked the sink.
+- REFACTOR performed: consolidated nested post validation in a type predicate before bot filtering, deduplication, timestamp conversion, or routing identity construction.
+- Affected-suite verification: inbound suite — 10 passed; targeted ESLint and host typecheck passed.
+- Files changed: `src/channels/mattermost-inbound.ts`, `src/channels/mattermost-inbound.test.ts`.
+- Remaining risks: ambiguous broadcast/post channel disagreement is the next fail-closed slice.
+
+### Slice 2.11: oversized payloads are rejected before parsing
+
+- RED command: `pnpm exec vitest run src/channels/mattermost-inbound.test.ts -t 'rejects oversized events before invoking the sink'`.
+- RED failure observed: the over-limit frame returned `true` and reached the sink.
+- GREEN command: the same focused command after adding an injectable UTF-8 byte limit with a 1 MiB host default.
+- GREEN result: 1 passed; the over-limit frame returned `false` before parsing or sink invocation.
+- REFACTOR performed: measured bytes rather than JavaScript character count and kept the limit in host-only processor configuration.
+- Affected-suite verification: inbound suite — 11 passed; Prettier, targeted ESLint, and host typecheck passed.
+- Files changed: `src/channels/mattermost-inbound.ts`, `src/channels/mattermost-inbound.test.ts`.
+- Remaining risks: server-specific lower post limits are an outbound Phase 3 concern.
+
+### Slice 2.12: ambiguous channel identity fails closed
+
+- RED command: `pnpm exec vitest run src/channels/mattermost-inbound.test.ts -t 'fails closed when broadcast and post channel identities disagree'`.
+- RED failure observed: the contradictory envelope returned `true` and routed using the nested post channel.
+- GREEN command: the same focused command after validating optional broadcast identity against `post.channel_id`.
+- GREEN result: 1 passed; contradictory or malformed broadcast identity returns `false` with zero sink calls.
+- REFACTOR performed: the processor has one authoritative channel only after all supplied immutable IDs agree.
+- Affected-suite verification: inbound suite — 12 passed; host typecheck passed.
+- Files changed: `src/channels/mattermost-inbound.ts`, `src/channels/mattermost-inbound.test.ts`.
+- Remaining risks: none for envelope channel ambiguity.
+
+### Slice 2.13: ambiguous instance keys are rejected at configuration time
+
+- RED command: `pnpm exec vitest run src/channels/mattermost-inbound.test.ts -t 'rejects ambiguous Mattermost instance keys before processing'`.
+- RED failure observed: constructing a processor with `primary:shadow` did not throw, allowing delimiter ambiguity.
+- GREEN command: the same focused command after enforcing a colon-free slug.
+- GREEN result: 1 passed; ambiguous instance identity fails before any frame can be processed.
+- REFACTOR performed: centralized the configuration invariant in the processor constructor.
+- Affected-suite verification: inbound suite — 13 passed; targeted ESLint passed.
+- Files changed: `src/channels/mattermost-inbound.ts`, `src/channels/mattermost-inbound.test.ts`.
+- Remaining risks: none for platform-ID delimiter ambiguity.
+
+### Slice 2.14: diagnostics exclude message content
+
+- RED command: `pnpm exec vitest run src/channels/mattermost-inbound.test.ts -t 'logs diagnostic metadata without full message content'`.
+- RED failure observed: the logger recorded zero diagnostic events.
+- GREEN command: the same focused command after adding structured metadata-only logging.
+- GREEN result: 1 passed; logs contain instance/event/post/channel/sender/root/byte metadata and exclude the private message body.
+- REFACTOR performed: injected a minimal logger interface and kept the production logger as the default; raw frame, serialized post, parser error, token, and text are never logged.
+- Affected-suite verification: inbound suite — 14 passed; targeted ESLint and host typecheck passed.
+- Files changed: `src/channels/mattermost-inbound.ts`, `src/channels/mattermost-inbound.test.ts`.
+- Remaining risks: post-auth socket wiring remains before the Phase 2 gate.
+
+### Slice 2.15: authenticated bot identity is required
+
+- RED command: `pnpm exec vitest run src/channels/mattermost-client.test.ts -t 'fails closed when users/me omits the authenticated user id'`.
+- RED failure observed: setup resolved for a 200 response without a user ID and opened the socket.
+- GREEN command: the same focused command after validating the identity response before WebSocket setup.
+- GREEN result: 1 passed; invalid identity rejected safely and `openWebSocket` was never called.
+- REFACTOR performed: extracted the authenticated ID without retaining the REST response body.
+- Affected-suite verification: Mattermost client suite — 12 passed at completion of this slice; host typecheck passed.
+- Files changed: `src/channels/mattermost-client.ts`, `src/channels/mattermost-client.test.ts`.
+- Remaining risks: the ID must accompany post-auth frames without exposing the raw socket.
+
+### Slice 2.16: post-auth raw event subscription
+
+- RED command: `pnpm exec vitest run src/channels/mattermost-client.test.ts -t 'forwards raw events only after authentication and unsubscribes on teardown'`.
+- RED failure observed: the post-auth event callback remained at zero calls.
+- GREEN command: the same focused command after installing a distinct listener only after the matching `OK` challenge.
+- GREEN result: 1 passed; pre-auth and auth frames were not forwarded, a post-auth frame arrived once with the authenticated bot ID, and teardown prevented later delivery.
+- REFACTOR performed: client owns and removes the event listener independently of the temporary authentication listener; the socket remains private.
+- Affected-suite verification: Mattermost client + inbound suites — 27 passed immediately after the slice; targeted ESLint and host typecheck passed.
+- Files changed: `src/channels/mattermost-client.ts`, `src/channels/mattermost-client.test.ts`.
+- Remaining risks: no reconnect listener is introduced before Phase 8.
+
+### Phase 2 refactor and fake-transport integration
+
+- Pure refactor: extracted `normalizeMattermostPayload()` with discriminated accepted/ignored/rejected results and metadata separate from stateful deduplication, sink invocation, and logging.
+- Refactor verification: `pnpm exec vitest run src/channels/mattermost-inbound.test.ts` — 14 tests passed immediately after extraction; Prettier, targeted ESLint, and host typecheck passed after formatting/type cleanup.
+- Fake transport characterization: `pnpm exec vitest run src/channels/mattermost-inbound.test.ts -t 'routes an authenticated fake WebSocket post through the inbound processor'` — 1 passed.
+- Integration result: authenticated fake socket → client listener → processor → NanoClaw inbound sink preserves channel and post identity with no adapter registration or outbound behavior.
+- Affected verification: `pnpm exec vitest run src/channels/mattermost-inbound.test.ts src/channels/mattermost-client.test.ts` — 2 files passed, 28 tests passed.
+
+### Phase 2 gate
+
+- Focused/affected command: `pnpm exec vitest run src/channels/mattermost-inbound.test.ts src/channels/mattermost-client.test.ts src/container-runner.isolation.test.ts src/channels/telegram.test.ts src/channels/telegram-pairing.test.ts src/channels/telegram-outbound.test.ts src/channels/telegram-markdown-sanitize.test.ts` — 7 files passed, 88 tests passed.
+- Host fast-suite command: `pnpm test` — 40 files passed, 376 tests passed.
+- Container command: `docker run --rm --network none -v /home/pi/nanoclaw-v2:/workspace -w /workspace/container/agent-runner oven/bun:1.3.12 bun test` — 10 files passed, 103 tests passed.
+- Formatting command: `pnpm run format:check` — passed.
+- Lint command: `pnpm run lint` — passed with 0 errors and the same 100 pre-existing warnings documented in pre-flight.
+- Host type-check command: `pnpm run typecheck` — passed.
+- Container type-check command: `pnpm exec tsc -p container/agent-runner/tsconfig.json --noEmit` — passed.
+- Isolation review: channel identity is namespaced by a validated instance key; sender/post/root identities remain distinct; contradictory mappings fail closed; Telegram paths are unchanged; the host-only bot token is absent from inbound events, logs, SQLite metadata, container environments, and mounts.
+- Activation boundary: no `ChannelAdapter` is registered yet. Activating one before Phase 4 would either force the current per-thread session policy or discard `root_id`; both conflict with the binding channel-shared-session invariant. This phase therefore ends at the authenticated client → normalized inbound sink seam, and Phase 4 supplies the explicit thread/session policy before startup activation.
+- Deferred work: bounded durable deduplication, reconnect, and replay behavior remain Phase 8 scope.
+- Diff/secrets review: the Phase 2 commit contains only the authenticated-event callback, inbound normalizer/processor, focused tests, and this progress log; `git diff --check` passed; no real credentials, generated artifacts, outbound behavior, adapter activation, migrations, or unrelated changes are present.
+- GitHub checks: the repository code `CI` workflow did not trigger because it is configured only for pull requests targeting `main`; the available `label` metadata check passed in 2 seconds ([run 29097109262](https://github.com/ufJmacca/nanoclaw/actions/runs/29097109262)).
+- Phase status: complete; the full local gate and every available GitHub check passed; pull request ready for review.
+- Pull request: [#39](https://github.com/ufJmacca/nanoclaw/pull/39), `codex/mattermost-02-inbound` → `codex/mattermost-01-auth` (depends on #38).
