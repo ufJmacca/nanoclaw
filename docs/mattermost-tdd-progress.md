@@ -2077,10 +2077,18 @@ Phase status: complete; pull request #45 is ready for review.
 - Affected verification: `src/contracts/mattermost/run.test.ts` passes 15/15; `pnpm test:mattermost:safety` passes 5 files/66 tests; `pnpm typecheck`, actual normalized Compose validation, targeted Prettier/ESLint, and `git diff --check` pass; `pnpm test` passes 62 files/799 tests.
 - Isolation impact: Mattermost/Postgres retain no-egress network isolation, the only host listener is loopback, no bot token or other credential enters a container, and the proxy carries bytes without logging or persisting them. Channel/Telegram agent groups, sessions, workspaces, mounts, memory, and execution identities remain unchanged and separate.
 
+### Slice 9.10: unmutated live failures retain the same safe diagnostics
+
+- CI evidence: [run 29142872946](https://github.com/ufJmacca/nanoclaw/actions/runs/29142872946) finished in 1m13s, proving the host loopback proxy cleared readiness and the root mutation produced its required marker. The subsequent unmutated run failed through the generic `Mattermost contract command failed: pnpm exec` path, which still discarded its behavioral assertion before cleanup.
+- RED command: `pnpm exec vitest run src/contracts/mattermost/run.test.ts -t 'redacted full live-suite failure'` — received the generic checked-command error instead of `Mattermost contract live suite failed`, and the diagnostic reporter was never reached.
+- GREEN command/result: the same focus passes after the Green child uses the same pre-cleanup Compose status/log collector as mutation failures. Its bounded report retains `GREEN_ASSERTION` and the synthetic failure detail while proving the synthetic Green token and password are absent.
+- REFACTOR performed: one shared diagnostic closure now serves both mutation and Green failures; successful children still emit nothing, and the content-free parent error remains distinct from captured untrusted output.
+- Affected verification: `src/contracts/mattermost/run.test.ts` passes 16/16; `pnpm test:mattermost:safety` passes 5 files/67 tests; `pnpm typecheck`, targeted Prettier/ESLint, and `git diff --check` pass; `pnpm test` passes 62 files/800 tests.
+
 ### Phase 9 local gate
 
-- Focused contract command: `pnpm test:mattermost:safety` — 5 files/66 tests passed.
-- Full host fast-suite command: `pnpm test` — 62 files/799 tests passed. The separate `*.contract.ts` live suite remained excluded.
+- Focused contract command: `pnpm test:mattermost:safety` — 5 files/67 tests passed.
+- Full host fast-suite command: `pnpm test` — 62 files/800 tests passed. The separate `*.contract.ts` live suite remained excluded.
 - Host static commands: `pnpm typecheck` and `pnpm format:check` passed; `pnpm lint` passed with zero errors and 101 warnings; `git diff --check` passed.
 - Compose commands: `docker compose -f test/contracts/mattermost/docker-compose.yml -p nanoclaw-mm-contract-ci config --quiet` passed; the real `--format json` output passed `parseMattermostContractComposeConfig` and `assertSafeMattermostContractEnvironment`, including exact service/image/mount/port/network/project-volume topology.
 - Container type-check command: `docker run --rm --network none -v /home/pi/nanoclaw-v2:/workspace -w /workspace/container/agent-runner oven/bun:1.3.12 bun run typecheck` — passed.

@@ -171,6 +171,27 @@ export function createMattermostContractHarnessDependencies(
     }
     return result;
   };
+  const reportFailureDiagnostics = async (result: MattermostContractCommandResult): Promise<void> => {
+    const diagnosticResults = await Promise.all(
+      [
+        [...composeArgs, 'ps', '--all', '--format', 'json'],
+        [...composeArgs, 'logs', '--no-color', '--tail', '200'],
+      ].map((args) =>
+        execute('docker', args, 30_000).catch(() => ({
+          exitCode: 1,
+          stdout: '',
+          stderr: 'diagnostic command unavailable',
+        })),
+      ),
+    );
+    reportDiagnostic(
+      formatMattermostContractDiagnostic([
+        result.stdout,
+        result.stderr,
+        ...diagnosticResults.flatMap((diagnostic) => [diagnostic.stdout, diagnostic.stderr]),
+      ]),
+    );
+  };
   return {
     async assertSafe() {
       assertSafeMattermostContractEnvironment({
@@ -245,35 +266,21 @@ export function createMattermostContractHarnessDependencies(
         },
       );
       if (result.exitCode === 0 || !`${result.stdout}\n${result.stderr}`.includes('CONTRACT_ROOT_ID_ASSERTION')) {
-        const diagnosticResults = await Promise.all(
-          [
-            [...composeArgs, 'ps', '--all', '--format', 'json'],
-            [...composeArgs, 'logs', '--no-color', '--tail', '200'],
-          ].map((args) =>
-            execute('docker', args, 30_000).catch(() => ({
-              exitCode: 1,
-              stdout: '',
-              stderr: 'diagnostic command unavailable',
-            })),
-          ),
-        );
-        reportDiagnostic(
-          formatMattermostContractDiagnostic([
-            result.stdout,
-            result.stderr,
-            ...diagnosticResults.flatMap((diagnostic) => [diagnostic.stdout, diagnostic.stderr]),
-          ]),
-        );
+        await reportFailureDiagnostics(result);
         throw new Error('Mattermost contract root_id mutation was not detected');
       }
     },
     async runGreenSuite() {
-      await checked(
+      const result = await execute(
         'pnpm',
         ['exec', 'vitest', 'run', '--config', path.join(options.repoRoot, 'vitest.mattermost.config.ts')],
         600_000,
         { NANOCLAW_MM_CONTRACT_ACTIVE: '1' },
       );
+      if (result.exitCode !== 0) {
+        await reportFailureDiagnostics(result);
+        throw new Error('Mattermost contract live suite failed');
+      }
     },
     async stop() {
       let proxyFailure: unknown;

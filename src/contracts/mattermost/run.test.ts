@@ -239,6 +239,37 @@ describe('Mattermost contract harness runner', () => {
     expect(diagnostic).not.toContain('synthetic-worker-token');
   });
 
+  it('reports a redacted full live-suite failure before cleanup', async () => {
+    const reportDiagnostic = vi.fn();
+    const execute = vi.fn(async (command: MattermostContractCommand) => {
+      const joined = [command.executable, ...command.args].join(' ');
+      if (command.executable === 'pnpm') {
+        return { exitCode: 1, stdout: '', stderr: 'GREEN_ASSERTION token=synthetic-green-token' };
+      }
+      if (joined.includes(' ps --all ')) return { exitCode: 0, stdout: 'mattermost running', stderr: '' };
+      if (joined.includes(' logs --no-color ')) {
+        return { exitCode: 0, stdout: 'green failure detail password=synthetic-green-password', stderr: '' };
+      }
+      return { exitCode: 0, stdout: '', stderr: '' };
+    });
+    const dependencies = createMattermostContractHarnessDependencies({
+      repoRoot: '/repo',
+      callerEnvironment: { PATH: '/usr/bin' },
+      hostArchitecture: 'x64',
+      projectName: 'nanoclaw-mm-contract-test',
+      execute,
+      reportDiagnostic,
+    });
+
+    await expect(dependencies.runGreenSuite()).rejects.toThrow('Mattermost contract live suite failed');
+    expect(reportDiagnostic).toHaveBeenCalledOnce();
+    const diagnostic = reportDiagnostic.mock.calls[0]![0] as string;
+    expect(diagnostic).toContain('GREEN_ASSERTION');
+    expect(diagnostic).toContain('green failure detail');
+    expect(diagnostic).not.toContain('synthetic-green-token');
+    expect(diagnostic).not.toContain('synthetic-green-password');
+  });
+
   it('normalizes the complete Compose safety surface before startup', () => {
     expect(
       parseMattermostContractComposeConfig(
