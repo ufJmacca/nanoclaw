@@ -1991,7 +1991,7 @@ Phase status: complete; pull request #45 is ready for review.
 
 ## Phase 9 — Live Mattermost contract tests
 
-- Phase status: in progress. The disposable harness and its host-side safety boundaries are under local verification; no live contract result, pull-request result, or CI result is claimed here.
+- Phase status: complete. The local host/container gate and disposable x86 live gate passed; Phase 9 PR #46 remains unmerged and ready for review.
 
 ### Slice 9.1: disposable environment fails closed before Docker
 
@@ -2049,7 +2049,7 @@ Phase status: complete; pull request #45 is ready for review.
 - Network-name RED command: `pnpm exec vitest run src/contracts/mattermost/run.test.ts -t 'fixed top-level network names'`; a shared global network name resolved. GREEN requires the normalized internal network name to carry the exact current Compose project prefix.
 - GREEN/affected result: `pnpm exec vitest run src/contracts/mattermost/run.test.ts` — 14/14 passed; `pnpm test:mattermost:safety` — 5 files/65 tests passed.
 - REFACTOR performed: Compose normalization now retains the current project identity only for validation and returns the minimal safety model; dual run/cleanup failures preserve both errors and the cleanup cause; live cleanup follows stop worker → revoke token → disable bot → delete channels/team → deactivate actor before the outer authoritative `down --volumes`.
-- Live assertions strengthened: A and B must have distinct real group and session-state paths, distinct agent/messaging/wiring/session/composite execution identities, stopped container state throughout, active status after restart, and closed/stopped B state after authenticated bot removal. These assertions await the disposable x86 execution and are not represented as locally passed.
+- Live assertions strengthened: A and B must have distinct real group and session-state paths, distinct agent/messaging/wiring/session/composite execution identities, stopped container state throughout, active status after restart, and closed/stopped B state after authenticated bot removal. The disposable x86 run recorded in Slice 9.11 passed every assertion.
 - Independent audit: two read-only reviews checked the Mattermost 11.7.6 REST/WebSocket contracts, restart semantics, topology/session assertions, cleanup ordering, Compose isolation, and credential surfaces. Every identified correctness or isolation gap was fixed; their final local review found no remaining semantic blocker.
 
 ### Slice 9.7: first CI startup hypothesis is tested and rejected
@@ -2092,15 +2092,19 @@ Phase status: complete; pull request #45 is ready for review.
 - GREEN command/result: the same focus passes after the parent waits for the worker's acknowledged shutdown result, closes its stdin pipe, and then awaits exit. A 30-second bounded timer still sends `SIGKILL` and fails if adapter/WebSocket teardown cannot finish; nonzero exits remain failures.
 - REFACTOR performed: shutdown request, input closure, exit promise, and kill action form one pure tested boundary used by the live client. The existing worker continues to close the adapter registry and SQLite in `finally`; no forced success, swallowed exit code, or lifecycle assertion was introduced.
 - Affected verification: `src/contracts/mattermost/worker-protocol.test.ts` passes 5/5; `pnpm test:mattermost:safety` passes 5 files/68 tests; `pnpm typecheck`, targeted Prettier/ESLint, and `git diff --check` pass; `pnpm test` passes 62 files/801 tests.
+- Live GREEN: [run 29143194410](https://github.com/ufJmacca/nanoclaw/actions/runs/29143194410) passed in 42 seconds. The job passed the 68-test safety suite, actual Compose validation, required forced-`root_id` Red, complete unmutated Green, adapter process restart without reprovisioning, A-only unsubscribe, B continuity, authenticated bot-removal closure, credential guards, and container/volume teardown.
 
-### Phase 9 local gate
+### Phase 9 complete gate
 
 - Focused contract command: `pnpm test:mattermost:safety` — 5 files/68 tests passed.
 - Full host fast-suite command: `pnpm test` — 62 files/801 tests passed. The separate `*.contract.ts` live suite remained excluded.
 - Host static commands: `pnpm typecheck` and `pnpm format:check` passed; `pnpm lint` passed with zero errors and 101 warnings; `git diff --check` passed.
-- Compose commands: `docker compose -f test/contracts/mattermost/docker-compose.yml -p nanoclaw-mm-contract-ci config --quiet` passed; the real `--format json` output passed `parseMattermostContractComposeConfig` and `assertSafeMattermostContractEnvironment`, including exact service/image/mount/port/network/project-volume topology.
+- Compose commands: `docker compose -f test/contracts/mattermost/docker-compose.yml -p nanoclaw-mm-contract-ci config --quiet` passed; the real `--format json` output passed `parseMattermostContractComposeConfig` and `assertSafeMattermostContractEnvironment`, including exact service/image/mount/no-published-port/network/project-volume topology.
 - Container type-check command: `docker run --rm --network none -v /home/pi/nanoclaw-v2:/workspace -w /workspace/container/agent-runner oven/bun:1.3.12 bun run typecheck` — passed.
 - Complete isolated container unit command: `docker run --rm --network none -v /home/pi/nanoclaw-v2:/workspace -w /workspace/container/agent-runner oven/bun:1.3.12 bun test src/db/session-state.test.ts src/mcp-tools/deep-research-workflow.test.ts src/providers/codex.factory.test.ts src/providers/factory.test.ts src/providers/codex-app-server.test.ts src/providers/codex.test.ts src/poll-loop.test.ts src/timezone.test.ts src/formatter.test.ts` — 9 files/109 tests passed.
 - Complete isolated container integration command: `docker run --rm --network none -v /home/pi/nanoclaw-v2:/workspace -w /workspace/container/agent-runner oven/bun:1.3.12 bun test src/integration.test.ts` — 1 file/3 tests passed.
 - Local live command outside the sandbox: `pnpm test:mattermost` failed closed before Docker with `Mattermost contract tests require an amd64 host`. The official pinned Mattermost image is not emulated on this arm64 host, so no local live pass is claimed.
-- Phase status remains in progress pending the stacked draft PR's disposable `ubuntu-24.04` live-contract check. These local results are not a pull-request, CI, or live Mattermost pass claim.
+- Scope/security audit: no focused or skipped test markers, generated artifacts, production URLs, production credentials, production message content, or unrelated changes were committed. Disposable credentials remained host-side; redacted diagnostics were regression-tested before being enabled.
+- Pull request: [#46](https://github.com/ufJmacca/nanoclaw/pull/46), `codex/mattermost-09-contract-tests` targeting `codex/mattermost-08-recovery` (dependent on Phase 8 PR #45).
+- GitHub verification: the dedicated `Mattermost Contract / live-contract` check passed on the implementation head in [run 29143194410](https://github.com/ufJmacca/nanoclaw/actions/runs/29143194410); the available `label` metadata check also passed on PR creation. No repository secret or production Mattermost service was used.
+- Phase status: complete; every acceptance item, local gate, independent audit, scope/security review, live contract, and available required GitHub check passed. Pull request #46 is ready for review and remains unmerged.
