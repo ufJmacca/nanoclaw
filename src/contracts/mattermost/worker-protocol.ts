@@ -31,6 +31,39 @@ export type MattermostContractWorkerCommand =
   | MattermostContractDeactivateCommand
   | MattermostContractShutdownCommand;
 
+export interface MattermostContractWorkerShutdownDependencies {
+  requestShutdown(): Promise<void>;
+  endInput(): void;
+  readonly exit: Promise<number>;
+  kill(): void;
+}
+
+export async function shutdownMattermostContractWorkerProcess(
+  dependencies: MattermostContractWorkerShutdownDependencies,
+  timeoutMs: number,
+): Promise<void> {
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 60_000) {
+    throw new Error('Mattermost contract worker shutdown timeout was invalid');
+  }
+  await dependencies.requestShutdown().then(
+    () => undefined,
+    () => undefined,
+  );
+  dependencies.endInput();
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const exitCode = await Promise.race([
+    dependencies.exit,
+    new Promise<number>((resolve) => {
+      timeout = setTimeout(() => {
+        dependencies.kill();
+        resolve(1);
+      }, timeoutMs);
+    }),
+  ]);
+  if (timeout) clearTimeout(timeout);
+  if (exitCode !== 0) throw new Error('Mattermost contract worker did not stop cleanly');
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }

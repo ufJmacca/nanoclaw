@@ -15,7 +15,7 @@ import {
   type MattermostContractTeam,
   type MattermostContractUser,
 } from './api.js';
-import { parseMattermostContractWorkerEventLine } from './worker-protocol.js';
+import { parseMattermostContractWorkerEventLine, shutdownMattermostContractWorkerProcess } from './worker-protocol.js';
 
 if (process.env.NANOCLAW_MM_CONTRACT_ACTIVE !== '1') {
   throw new Error('Mattermost live contracts must run through the disposable safety harness');
@@ -169,20 +169,19 @@ class ContractWorkerClient {
     if (this.closing) return;
     this.closing = true;
     if (this.child.exitCode === null) {
-      await this.command({ kind: 'shutdown' }).catch(() => undefined);
-      let timeout: ReturnType<typeof setTimeout>;
-      const exitCode = await Promise.race([
-        this.exit,
-        new Promise<number>(
-          (resolve) =>
-            (timeout = setTimeout(() => {
-              this.child.kill('SIGKILL');
-              resolve(1);
-            }, 10_000)),
-        ),
-      ]);
-      clearTimeout(timeout!);
-      if (exitCode !== 0) throw new Error('Mattermost contract worker did not stop cleanly');
+      await shutdownMattermostContractWorkerProcess(
+        {
+          requestShutdown: async () => {
+            await this.command({ kind: 'shutdown' });
+          },
+          endInput: () => this.child.stdin.end(),
+          exit: this.exit,
+          kill: () => {
+            this.child.kill('SIGKILL');
+          },
+        },
+        30_000,
+      );
     }
   }
 

@@ -2085,10 +2085,18 @@ Phase status: complete; pull request #45 is ready for review.
 - REFACTOR performed: one shared diagnostic closure now serves both mutation and Green failures; successful children still emit nothing, and the content-free parent error remains distinct from captured untrusted output.
 - Affected verification: `src/contracts/mattermost/run.test.ts` passes 16/16; `pnpm test:mattermost:safety` passes 5 files/67 tests; `pnpm typecheck`, targeted Prettier/ESLint, and `git diff --check` pass; `pnpm test` passes 62 files/800 tests.
 
+### Slice 9.11: acknowledged worker shutdown closes its input before bounded exit
+
+- CI evidence: [run 29143038362](https://github.com/ufJmacca/nanoclaw/actions/runs/29143038362) confirmed the mutation Red and progressed through the Green scenario to the first explicit adapter restart. It then failed after the 10-second process wait with `Mattermost contract worker did not stop cleanly`; no worker exception or server failure preceded it.
+- RED command: `pnpm exec vitest run src/contracts/mattermost/worker-protocol.test.ts -t 'closes worker input'` — the shutdown seam was undefined (`expected Any<Function>, received undefined`).
+- GREEN command/result: the same focus passes after the parent waits for the worker's acknowledged shutdown result, closes its stdin pipe, and then awaits exit. A 30-second bounded timer still sends `SIGKILL` and fails if adapter/WebSocket teardown cannot finish; nonzero exits remain failures.
+- REFACTOR performed: shutdown request, input closure, exit promise, and kill action form one pure tested boundary used by the live client. The existing worker continues to close the adapter registry and SQLite in `finally`; no forced success, swallowed exit code, or lifecycle assertion was introduced.
+- Affected verification: `src/contracts/mattermost/worker-protocol.test.ts` passes 5/5; `pnpm test:mattermost:safety` passes 5 files/68 tests; `pnpm typecheck`, targeted Prettier/ESLint, and `git diff --check` pass; `pnpm test` passes 62 files/801 tests.
+
 ### Phase 9 local gate
 
-- Focused contract command: `pnpm test:mattermost:safety` — 5 files/67 tests passed.
-- Full host fast-suite command: `pnpm test` — 62 files/800 tests passed. The separate `*.contract.ts` live suite remained excluded.
+- Focused contract command: `pnpm test:mattermost:safety` — 5 files/68 tests passed.
+- Full host fast-suite command: `pnpm test` — 62 files/801 tests passed. The separate `*.contract.ts` live suite remained excluded.
 - Host static commands: `pnpm typecheck` and `pnpm format:check` passed; `pnpm lint` passed with zero errors and 101 warnings; `git diff --check` passed.
 - Compose commands: `docker compose -f test/contracts/mattermost/docker-compose.yml -p nanoclaw-mm-contract-ci config --quiet` passed; the real `--format json` output passed `parseMattermostContractComposeConfig` and `assertSafeMattermostContractEnvironment`, including exact service/image/mount/port/network/project-volume topology.
 - Container type-check command: `docker run --rm --network none -v /home/pi/nanoclaw-v2:/workspace -w /workspace/container/agent-runner oven/bun:1.3.12 bun run typecheck` — passed.

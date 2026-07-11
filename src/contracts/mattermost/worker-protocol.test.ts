@@ -106,4 +106,42 @@ describe('Mattermost contract worker protocol', () => {
       ),
     ).toThrow('Mattermost contract worker event was invalid');
   });
+
+  it('closes worker input after acknowledged shutdown before awaiting clean exit', async () => {
+    const protocolModule = (await import('./worker-protocol.js')) as unknown as {
+      shutdownMattermostContractWorkerProcess?: (
+        dependencies: {
+          requestShutdown(): Promise<void>;
+          endInput(): void;
+          exit: Promise<number>;
+          kill(): void;
+        },
+        timeoutMs: number,
+      ) => Promise<void>;
+    };
+    expect(protocolModule.shutdownMattermostContractWorkerProcess).toEqual(expect.any(Function));
+    if (!protocolModule.shutdownMattermostContractWorkerProcess) return;
+
+    const order: string[] = [];
+    let resolveExit!: (code: number) => void;
+    const exit = new Promise<number>((resolve) => (resolveExit = resolve));
+    await protocolModule.shutdownMattermostContractWorkerProcess(
+      {
+        async requestShutdown() {
+          order.push('acknowledged');
+        },
+        endInput() {
+          order.push('input-closed');
+          resolveExit(0);
+        },
+        exit,
+        kill() {
+          order.push('killed');
+        },
+      },
+      30_000,
+    );
+
+    expect(order).toEqual(['acknowledged', 'input-closed']);
+  });
 });
