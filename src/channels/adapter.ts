@@ -23,7 +23,12 @@ export interface ChannelSetup {
 
   /** Called when a user clicks a button/action in a card (e.g., ask_user_question response). */
   onAction(questionId: string, selectedOption: string, userId: string): void;
+
+  /** Called for authenticated platform lifecycle events that are not chat messages. */
+  onLifecycle?(event: ChannelLifecycleEvent): void | Promise<void>;
 }
+
+export type ChannelLifecycleEvent = { kind: 'bot_removed'; platformId: string };
 
 /** Delivery address used for reply-to overrides and (normally) the inbound's own origin. */
 export interface DeliveryAddress {

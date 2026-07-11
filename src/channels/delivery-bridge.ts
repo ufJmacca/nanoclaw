@@ -9,6 +9,7 @@ export function createChannelDeliveryBridge(
   lookupAdapter: ChannelAdapterLookup = getChannelAdapter,
 ): ChannelDeliveryAdapter {
   return {
+    isAvailable: (channelType) => lookupAdapter(channelType) !== undefined,
     async deliver(channelType, platformId, threadId, kind, content, files, deliveryId) {
       const adapter = lookupAdapter(channelType);
       if (!adapter) {

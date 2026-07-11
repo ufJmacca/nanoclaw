@@ -1,7 +1,7 @@
 import { log } from '../log.js';
 import type { ChannelAdapter, ChannelSetup } from './adapter.js';
 import { MattermostClient, type MattermostClientConfig, type MattermostTransport } from './mattermost-client.js';
-import { MattermostInboundProcessor } from './mattermost-inbound.js';
+import { MattermostInboundProcessor, normalizeMattermostLifecyclePayload } from './mattermost-inbound.js';
 import { MattermostOutboundDelivery } from './mattermost-outbound.js';
 
 export interface MattermostAdapterConfig extends MattermostClientConfig {
@@ -28,17 +28,23 @@ export function createMattermostAdapter(
     async setup(host: ChannelSetup) {
       let inbound: MattermostInboundProcessor | null = null;
       await client.setup((payload, context) => {
-        inbound ??= new MattermostInboundProcessor(
-          { instanceKey: config.instanceKey, botUserId: context.botUserId },
-          (event) =>
-            host.onInbound(event.platformId, event.threadId, {
-              id: event.message.id,
-              kind: event.message.kind,
-              content: JSON.parse(event.message.content),
-              timestamp: event.message.timestamp,
-              isMention: event.message.isMention,
-              isGroup: event.message.isGroup,
-            }),
+        const inboundConfig = { instanceKey: config.instanceKey, botUserId: context.botUserId };
+        const lifecycle = normalizeMattermostLifecyclePayload(payload, inboundConfig);
+        if (lifecycle) {
+          void Promise.resolve(host.onLifecycle?.(lifecycle)).catch((err) =>
+            log.warn('Mattermost lifecycle handling failed', { err }),
+          );
+          return;
+        }
+        inbound ??= new MattermostInboundProcessor(inboundConfig, (event) =>
+          host.onInbound(event.platformId, event.threadId, {
+            id: event.message.id,
+            kind: event.message.kind,
+            content: JSON.parse(event.message.content),
+            timestamp: event.message.timestamp,
+            isMention: event.message.isMention,
+            isGroup: event.message.isGroup,
+          }),
         );
         void inbound.handle(payload).catch((err) => log.warn('Mattermost inbound handling failed', { err }));
       });

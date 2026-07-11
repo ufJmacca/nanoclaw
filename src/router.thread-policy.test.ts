@@ -214,13 +214,26 @@ describe('Mattermost thread/session policy', () => {
     expect(sessionB.messaging_group_id).toBe('mg-mattermost-b');
   });
 
-  it('keeps the legacy force-per-thread default for threaded adapters without a policy', async () => {
+  it('keeps the legacy force-per-thread default for a generic threaded adapter without a policy', async () => {
+    seedTelegramChannel();
     vi.mocked(getChannelAdapter).mockReturnValue({ supportsThreads: true } as never);
 
-    await routeInbound(mattermostEvent('legacy-root', null));
-    await routeInbound(mattermostEvent('legacy-thread', 'root-post-id'));
+    const telegramEvent = (id: string, threadId: string | null) => ({
+      channelType: 'telegram',
+      platformId: 'telegram:-100123',
+      threadId,
+      message: {
+        id,
+        kind: 'chat' as const,
+        content: JSON.stringify({ senderId: 'telegram:user-a', text: id }),
+        timestamp: now(),
+        isGroup: true,
+      },
+    });
+    await routeInbound(telegramEvent('legacy-root', null));
+    await routeInbound(telegramEvent('legacy-thread', 'root-post-id'));
 
-    const sessions = getSessionsByAgentGroup(mattermostFixture('a').agentGroupId);
+    const sessions = getSessionsByAgentGroup('ag-telegram');
     expect(sessions).toHaveLength(2);
     expect(sessions.map((session) => session.thread_id)).toEqual(expect.arrayContaining([null, 'root-post-id']));
   });

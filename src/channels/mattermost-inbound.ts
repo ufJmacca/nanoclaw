@@ -1,5 +1,5 @@
 import { log } from '../log.js';
-import type { InboundEvent } from './adapter.js';
+import type { ChannelLifecycleEvent, InboundEvent } from './adapter.js';
 
 export interface MattermostInboundConfig {
   instanceKey: string;
@@ -40,6 +40,29 @@ export type MattermostNormalizationResult =
   | { kind: 'accepted'; event: InboundEvent; diagnostics: MattermostInboundDiagnostics }
   | { kind: 'ignored'; reason: 'unsupported_event' | 'bot_authored' }
   | { kind: 'rejected'; reason: 'oversized' | 'malformed_event' | 'malformed_post' | 'ambiguous_channel' };
+
+export function normalizeMattermostLifecyclePayload(
+  payload: string,
+  config: MattermostInboundConfig,
+): ChannelLifecycleEvent | null {
+  if (Buffer.byteLength(payload, 'utf8') > (config.maxPayloadBytes ?? DEFAULT_MAX_PAYLOAD_BYTES)) return null;
+  const event = safeParseJson(payload);
+  if (!isRecord(event) || event.event !== 'user_removed' || !isRecord(event.data) || !isRecord(event.broadcast)) {
+    return null;
+  }
+  if (event.broadcast.user_id !== config.botUserId) return null;
+  const channelId = event.data.channel_id;
+  if (typeof channelId !== 'string' || !isValidIdentityComponent(channelId)) return null;
+  if (event.data.user_id !== undefined && event.data.user_id !== config.botUserId) return null;
+  const broadcastChannelId = event.broadcast.channel_id;
+  if (
+    broadcastChannelId !== undefined &&
+    (typeof broadcastChannelId !== 'string' || (broadcastChannelId.length > 0 && broadcastChannelId !== channelId))
+  ) {
+    return null;
+  }
+  return { kind: 'bot_removed', platformId: `mattermost:${config.instanceKey}:${channelId}` };
+}
 
 export class MattermostInboundProcessor {
   private readonly seenPostIds = new Set<string>();
@@ -113,6 +136,7 @@ export function normalizeMattermostPayload(
         text: post.message,
       }),
       timestamp: new Date(post.create_at).toISOString(),
+      isMention: mentionsAuthenticatedBot(parsedEvent.data.mentions, config.botUserId),
       isGroup: true,
     },
   };
@@ -132,6 +156,14 @@ export function normalizeMattermostPayload(
   };
 }
 
+function mentionsAuthenticatedBot(rawMentions: unknown, botUserId: string): boolean {
+  if (typeof rawMentions !== 'string') return false;
+  const mentions = safeParseJson(rawMentions);
+  return (
+    Array.isArray(mentions) && mentions.every((mention) => typeof mention === 'string') && mentions.includes(botUserId)
+  );
+}
+
 function safeParseJson(payload: string): unknown | undefined {
   try {
     return JSON.parse(payload);
@@ -146,7 +178,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isValidInstanceKey(instanceKey: string): boolean {
-  return /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(instanceKey);
+  return isValidIdentityComponent(instanceKey);
+}
+
+function isValidIdentityComponent(value: string): boolean {
+  return value.length <= 128 && /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value);
 }
 
 function isMattermostPost(value: unknown): value is MattermostPost {
