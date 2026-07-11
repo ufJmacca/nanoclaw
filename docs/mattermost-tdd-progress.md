@@ -1324,7 +1324,7 @@ Phase status: complete; pull request ready for review.
 
 ## Phase 7 — Approval, subscribe, and unsubscribe lifecycle
 
-Phase status: in progress.
+Phase status: complete; the full local gate, independent release audits, and every available GitHub check passed.
 
 ### Slice 7.0: dedicated unknown-channel approval boundary
 
@@ -1605,3 +1605,6 @@ Phase status: in progress.
 - Independent audit: three read-only review tracks found and verified fixes for startup readiness, unusable owner destinations, delivery/processing retries, removal and concurrent-mention races, literal session cardinality/immutability, raw lifecycle ordering, outbound drain invalidation, deactivation's pre-yield transaction, partial-approval recovery, migration preflight, schema parity, and public router coverage. Their final re-audits found no remaining Phase 7 correctness, acceptance, credential, or isolation blocker.
 - Operational note: approval currently requires a reachable Telegram owner because the built-in native Mattermost and CLI adapters do not implement an authenticated action response round-trip. Explicit retain/archive/resubscribe are exported strict host service boundaries; bot removal is the only automatic production deactivation caller in this phase, and no operator-facing command is added speculatively.
 - Isolation impact: the final gate covers A/B/Telegram routing, session, workspace, mount, context, container, lifecycle, authorization, outbound, migration, and credential boundaries under normal, malformed, concurrent, failure, removal, and retained-resubscription paths.
+- Pull request: [#44 — Phase 7: add Mattermost subscription lifecycle](https://github.com/ufJmacca/nanoclaw/pull/44), base `codex/mattermost-06-isolation`, head `codex/mattermost-07-lifecycle`.
+- GitHub checks: the available `label` check passed in 3 seconds ([run 29134118426](https://github.com/ufJmacca/nanoclaw/actions/runs/29134118426)); the code CI workflow did not trigger because it is configured only for pull requests targeting `main`, so no code-CI pass is claimed.
+- Phase status: complete; the full local gate, all three independent final audits, and every available GitHub check passed; pull request ready for review.
