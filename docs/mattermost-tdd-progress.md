@@ -1321,3 +1321,287 @@ Phase status: complete; pull request ready for review.
 - Pull request: [#43 — Phase 6: prove Mattermost container and context isolation](https://github.com/ufJmacca/nanoclaw/pull/43), base `codex/mattermost-05-strict-subscriptions`, head `codex/mattermost-06-isolation`.
 - GitHub checks: the available `label` check passed in 3 seconds ([run 29131018921](https://github.com/ufJmacca/nanoclaw/actions/runs/29131018921)); the code CI workflow did not trigger because it is configured only for pull requests targeting `main`, so no code-CI pass is claimed.
 - Phase status: complete; the full local gate, independent release audit, and every available GitHub check passed; pull request ready for review.
+
+## Phase 7 — Approval, subscribe, and unsubscribe lifecycle
+
+Phase status: in progress.
+
+### Slice 7.0: dedicated unknown-channel approval boundary
+
+- RED command: `pnpm exec vitest run src/channels/mattermost-subscription.test.ts -t 'routes an unknown Mattermost mention only to the dedicated subscription approval gate'`.
+- RED failure observed: the router exposed no Mattermost-specific approval hook (`undefined` instead of a function), so every missing subscription failed at the strict boundary and could not begin the authorized lifecycle without entering the forbidden generic connect-to-existing-agent flow.
+- GREEN command/result: the same focused command after adding the dedicated hook and pristine-placeholder branch — 1 passed; the Mattermost gate received the exact channel/event, the generic gate was untouched, and no subscription, agent, wiring, session, or container wake was created.
+- REFACTOR performed: the hook reuses the channel-request function shape but has separate state and is reachable only for an addressed, group-scoped, unwired, non-denied `request_approval` Mattermost placeholder with the reason `missing_subscription`; all other invalid Mattermost topology still fails closed.
+- Affected-suite verification: `pnpm exec vitest run src/channels/mattermost-subscription.test.ts -t 'unknown Mattermost channels|dedicated subscription approval gate|unwired placeholder'` — 5 tests passed.
+- Files changed: `src/router.ts`, `src/channels/mattermost-subscription.test.ts`.
+- Isolation impact: unknown Mattermost channels can request a new dedicated identity, but they cannot invoke the generic flow, select an existing Telegram/other-channel agent, create context, or wake a container before approval.
+
+### Slice 7.1: owner-only pending subscription request
+
+- RED command: `pnpm exec vitest run src/modules/permissions/mattermost-channel-approval.test.ts -t 'delivers one dedicated subscription request'`.
+- RED failure observed: the owner delivery adapter was called zero times instead of once because the dedicated router hook had no persistent owner-request implementation.
+- GREEN command/result: the same focused command after adding the dedicated pending table, owner-DM request service, and permissions-module registration — 1 passed; the card contained only `approve`/`reject`, stored the exact trigger and canonical channel identity, and created no subscription, agent, wiring, session, or wake.
+- REFACTOR performed: channel and requester identifiers use bounded exact parsing; the request service independently revalidates a pristine unwired placeholder and owner-only recipient list before persisting anything. Prettier normalized the touched Phase 7 tests and service.
+- Affected-suite verification: `pnpm exec vitest run src/modules/permissions/mattermost-channel-approval.test.ts src/channels/mattermost-subscription.test.ts` — 2 files passed, 64 tests passed after refactoring.
+- Static verification: `pnpm typecheck` passed; the initial `pnpm format:check` identified only the three touched files, they were formatted, and the repeated command passed.
+- Files changed: `src/db/migrations/015-mattermost-lifecycle.ts`, `src/db/migrations/index.ts`, `src/modules/permissions/db/pending-mattermost-channel-approvals.ts`, `src/modules/permissions/mattermost-channel-approval.ts`, `src/modules/permissions/index.ts`, `src/modules/permissions/mattermost-channel-approval.test.ts`.
+- Isolation impact: a mention can create only host-side pending authorization metadata and an owner card. It cannot select an existing agent, grant membership, create a workspace/session/container identity, or move the Mattermost token beyond its host transport boundary.
+
+### Slice 7.2: owner-only decision authorization
+
+- RED command: `pnpm exec vitest run src/modules/permissions/mattermost-channel-approval.test.ts -t 'selects an owner and claims but refuses'`.
+- RED failure observed: an unauthorized global-admin approval response was unclaimed (`false` instead of `true`) because no handler recognized dedicated Mattermost approval IDs.
+- GREEN command/result: the same focused command after registering a dedicated response handler — 1 passed; the reachable owner remained the designated approver, while both a global administrator's approve click and the Mattermost requester's reject click were claimed but made no state change.
+- REFACTOR performed: row lookup is isolated in the dedicated CRUD module and authorization requires both exact designated-recipient identity and a current global owner role; the handler shares no generic admin or channel-registration authorization path.
+- Affected-suite verification: `pnpm exec vitest run src/modules/permissions/mattermost-channel-approval.test.ts src/channels/mattermost-subscription.test.ts` — 2 files passed, 65 tests passed after formatting.
+- Static verification: `pnpm typecheck` passed; the initial `pnpm format:check` identified the touched CRUD file, it was formatted, and the repeated command passed.
+- Isolation impact: forwarded cards, requesters, Mattermost membership, scoped administrators, and global administrators cannot approve or reject a dedicated Mattermost subscription; authorization remains distinct from bot membership and no container or topology is created.
+
+### Slice 7.3: strict subscription transaction on approval
+
+- RED command: `pnpm exec vitest run src/modules/permissions/mattermost-channel-approval.test.ts -t 'approves only through a fresh canonical'`.
+- RED failure observed: after the designated owner's approve click, the requested channel had no subscription row (`undefined` instead of the expected active canonical ownership) because authorized responses still made no topology change.
+- GREEN command/result: the same focused command after atomically claiming `pending -> processing`, validating the stored channel/requester identity, and calling `subscribeMattermostChannelStrict` — 1 passed; the requested channel received a new canonical Mattermost agent, one shared/known-sender wiring, and one channel-only destination.
+- REFACTOR performed: strict stored-event checks precede the atomic claim, and the compare-and-update claim makes duplicate/concurrent clicks unable to invoke the constructor twice. The test seeds both an unrelated Telegram agent and another canonical Mattermost agent and proves neither is selected.
+- Affected-suite verification: `pnpm exec vitest run src/modules/permissions/mattermost-channel-approval.test.ts src/channels/mattermost-subscription.test.ts` — 2 files passed, 66 tests passed after formatting.
+- Static verification: `pnpm typecheck` passed; the initial `pnpm format:check` identified the touched test, it was formatted, and the repeated command passed.
+- Isolation impact: approval can create only the deterministic identity owned by the exact `(instance_key, channel_id)` request. Existing Telegram agents, existing Mattermost agents, their workspaces, and their container identities cannot be adopted or shared.
+
+### Slice 7.4: requester membership in the new channel only
+
+- RED command: `pnpm exec vitest run src/modules/permissions/mattermost-channel-approval.test.ts -t 'adds the requester only'`.
+- RED failure observed: the requester had zero membership rows instead of membership in the newly subscribed agent group, so a replay would fail the strict known-sender gate.
+- GREEN command/result: the same focused command after host-side requester upsert and membership grant — 1 passed; `mattermost:user-requester` belongs only to the fresh canonical channel agent and `added_by` records the designated approving owner.
+- REFACTOR performed: membership uses the strict constructor's returned agent identity rather than a caller-supplied or queried alternative; user creation occurs only after the owner-authorized atomic claim and subscription succeeds.
+- Affected-suite verification: `pnpm exec vitest run src/modules/permissions/mattermost-channel-approval.test.ts src/channels/mattermost-subscription.test.ts` — 2 files passed, 67 tests passed after formatting.
+- Static verification: `pnpm typecheck` passed; the initial `pnpm format:check` identified the touched test, it was formatted, and the repeated command passed.
+- Isolation impact: the approval grants no global Mattermost access and no access to Telegram or another channel. Only the triggering requester becomes a known sender for the one newly created dedicated agent group, before any replay or container wake.
+
+### Slice 7.5: exactly-once trigger replay
+
+- RED command: `pnpm exec vitest run src/modules/permissions/mattermost-channel-approval.test.ts -t 'replays the exact trigger once'`.
+- RED failure observed: concurrent duplicate owner approvals produced zero sessions instead of one because the claimed trigger was never replayed after subscription and membership.
+- GREEN command/result: the same focused command after replaying the stored event and marking the claimed request completed — 1 passed; two concurrent clicks produced one shared session, one inbound row, one trigger wake, and one completed replay timestamp.
+- REFACTOR performed: the original event is replayed unchanged after the requester membership grant, and the affected earlier tests now assert zero wakes before approval plus exactly one after approval. The resulting inbound row preserves the original message ID namespace, Mattermost platform/channel, `root-trigger`, content, and trigger bit.
+- Affected-suite verification: `pnpm exec vitest run src/modules/permissions/mattermost-channel-approval.test.ts src/channels/mattermost-subscription.test.ts src/router.thread-policy.test.ts` — 3 files passed, 75 tests passed.
+- Static verification: `pnpm typecheck` and `pnpm format:check` passed.
+- Isolation impact: atomic `pending -> processing` claim prevents double subscription and double replay; channel-shared session policy collapses the root only for execution context while retaining the Mattermost root on the inbound reply address, and no other channel receives the message or wake.
+
+### Slice 7.6: owner rejection is terminal for the placeholder
+
+- RED command: `pnpm exec vitest run src/modules/permissions/mattermost-channel-approval.test.ts -t 'rejects the pending channel without'`.
+- RED failure observed: the rejected placeholder still reported `denied=0` because the authorized reject response was claimed but made no lifecycle transition.
+- GREEN command/result: the same focused command after adding the atomic rejection transaction — 1 passed; the request records the owner and decision time, the placeholder becomes denied, no topology/session/wake is created, and a later mention emits no second card.
+- REFACTOR performed: pending-row transition and placeholder denial execute in one immediate SQLite transaction guarded by `status='pending'`; duplicate reject/approve races therefore have one winner and cannot both mutate lifecycle state.
+- Affected-suite verification: `pnpm exec vitest run src/modules/permissions/mattermost-channel-approval.test.ts src/channels/mattermost-subscription.test.ts src/modules/permissions/channel-approval.test.ts` — 3 files passed, 82 tests passed after formatting.
+- Static verification: `pnpm typecheck` passed; the initial `pnpm format:check` identified the touched test, it was formatted, and the repeated command passed.
+- Isolation impact: rejection creates no agent identity or writable root, and the permanent denied placeholder prevents repeated approval spam while remaining separate from generic channel registration.
+
+### Slice 7.7: persisted approval rendering
+
+- RED command: `pnpm exec vitest run src/modules/permissions/mattermost-channel-approval.test.ts -t 'resolves persisted button values'`.
+- RED failure observed: `getAskQuestionRender(approval_id)` returned `undefined`, so Chat SDK index-valued button responses could not resolve to the persisted `approve`/`reject` values.
+- GREEN command/result: the same focused command after adding the guarded dedicated-table lookup — 1 passed with the exact persisted title and normalized subscription/rejection options.
+- REFACTOR performed: core rendering checks table existence before querying, preserving the module-optional startup boundary and avoiding any hardcoded option-index mapping.
+- Affected-suite verification: `pnpm exec vitest run src/modules/permissions/mattermost-channel-approval.test.ts src/channels/chat-sdk-bridge.test.ts src/db/session-db.test.ts` — 3 files passed, 15 tests passed.
+- Static verification: `pnpm typecheck` and `pnpm format:check` passed.
+- Isolation impact: only host-side opaque approval IDs resolve button values; no channel identity, credential, prompt content, workspace path, or container context is added to the response bridge.
+
+### Slice 7.8: unsubscribe closes execution before kill
+
+- RED command: `pnpm exec vitest run src/channels/mattermost-subscription.test.ts -t 'marks only channel A inactive'`.
+- RED failure observed: the strict subscription module exposed no deactivation function (`undefined` instead of a function), so an active channel could not enter the required unsubscribed state.
+- GREEN command/result: the same focused command after adding explicit-policy deactivation — 1 passed; A became unsubscribed and its session was closed/stopped before `killContainer(A)`, while B remained active/idle and was never killed.
+- REFACTOR performed: one immediate transaction selects the permanent owner row, captures every session touching A's reserved agent or messaging-group identity, disables the subscription, and closes/stops those sessions. Container termination is dynamically loaded only after commit, avoiding a subscription/container-runner module cycle and ensuring the DB gate precedes process control.
+- Affected-suite verification: `pnpm exec vitest run src/channels/mattermost-subscription.test.ts src/container-runner.isolation.test.ts` — 2 files passed, 108 tests passed.
+- Static verification: `pnpm typecheck` and `pnpm format:check` passed.
+- Isolation impact: deactivation is keyed only by bounded canonical instance/channel identity; it never uses channel names, leaves B untouched, and disables routing/session authorization before the A execution can observe more work.
+
+### Slice 7.9: database guard closes the stale-route race
+
+- RED command: `pnpm exec vitest run src/channels/mattermost-subscription.test.ts -t 'prevents a stale route from creating'`.
+- RED failure observed: after A was unsubscribed and its old session closed, `resolveSession` created a second active A session instead of throwing, leaving stale routing able to persist active work after deactivation.
+- GREEN command/result: the same focused command after installing the active-session and one-session-cardinality guards — 1 passed; the stale resolution throws `Mattermost channel already owns a session identity` and only the reserved closed/stopped session remains.
+- REFACTOR performed: the triggers classify Mattermost ownership by either permanent agent or messaging-group identity, require both identities to match one currently active subscription for active execution, and prohibit a second session identity even while inactive. The pre-existing generic threaded-adapter characterization now uses a Telegram fixture so its generic fallback remains covered without weakening Mattermost's literal 1:1 contract.
+- Affected-suite verification: `pnpm exec vitest run src/channels/mattermost-subscription.test.ts src/router.thread-policy.test.ts src/container-runner.isolation.test.ts` — 3 files passed, 116 tests passed. One simultaneous focused/affected invocation reused the same fixed temporary root and made the focused process see `workspace identity already exists`; the affected run passed and an isolated repeat of the focused command passed, confirming test-process interference rather than a product failure.
+- Static verification: `pnpm typecheck` and `pnpm format:check` passed.
+- Isolation impact: SQLite serialization now makes unsubscribe atomic against session creation: sessions inserted before the transition are closed by it, while inserts after the transition fail before any session directory, message, or container wake can be created.
+
+### Slice 7.10: explicit retain/archive policy and permanent ownership
+
+- Archive RED command: `pnpm exec vitest run src/channels/mattermost-subscription.test.ts -t 'retains or archives the owned workspace'`.
+- Archive RED failure observed: an explicit archive request returned and persisted `unsubscribed` instead of `archived` because deactivation implemented retention only.
+- Archive GREEN: the same focused command after the in-transaction `unsubscribed -> archived` transition — 1 passed; `archived_at` is set, A workspace/state markers remain byte-identical in place, B stays active, and strict subscribe cannot reuse the archived identity.
+- Explicit-policy characterization command: `pnpm exec vitest run src/channels/mattermost-subscription.test.ts -t 'requires an explicit workspace'` — initially passed with A still active after a missing policy was rejected.
+- Mutation proof: temporarily removing only the deactivation policy check made that command fail because the promise resolved `{status:'unsubscribed'}` instead of rejecting; the check was restored and `... -t 'requires an explicit workspace|retains or archives the owned workspace'` passed 2 tests.
+- REFACTOR performed: active archive requests transition through unsubscribed in the same immediate transaction, retained requests keep `archived_at=NULL`, archived identity is terminal, and neither policy deletes or renames the canonical wiring, destination, workspace, state root, or message history.
+- Affected-suite verification: `pnpm exec vitest run src/channels/mattermost-subscription.test.ts src/container-runner.isolation.test.ts src/mattermost-isolation.integration.test.ts` — 3 files passed, 120 tests passed after formatting.
+- Static verification: `pnpm typecheck` and `pnpm format:check` passed.
+- Isolation impact: retention and archive are explicit host lifecycle choices over A's already reserved roots; neither makes those roots assignable to B, Telegram, a future channel, or a new container identity.
+
+### Slice 7.11: SQLite-enforced lifecycle order
+
+- RED command: `pnpm exec vitest run src/channels/mattermost-subscription.test.ts -t 'enforces ordered lifecycle transitions'`.
+- RED failure observed: a raw `active -> archived` update succeeded instead of throwing, allowing callers to bypass the required unsubscribed stage and archive timestamp policy.
+- GREEN command/result: the same focused command after adding lifecycle/archive-coherence triggers — 1 passed; only `pending -> active`, `active -> unsubscribed`, and `unsubscribed -> active|archived` transitions are legal, archived is terminal, and `archived_at` is non-null only for archived rows.
+- REFACTOR performed: the earlier archived-reservation characterization now performs the required intermediate unsubscribe before archive; it still proves the permanent ownership row cannot be deleted.
+- Affected-suite verification: `pnpm exec vitest run src/channels/mattermost-subscription.test.ts src/container-runner.isolation.test.ts src/mattermost-isolation.integration.test.ts` — 3 files passed, 121 tests passed.
+- Static verification: `pnpm typecheck` and `pnpm format:check` passed.
+- Isolation impact: application bugs or direct SQLite writers cannot skip, reverse, or forge lifecycle stages to reactivate an archived identity or expose a retained workspace under inconsistent status metadata.
+
+### Slice 7.12: retained resubscription preserves one channel-owned session
+
+- RED command: `pnpm exec vitest run src/channels/mattermost-subscription.test.ts -t 'resubscribes the retained identity'`.
+- RED failure observed: the strict subscription module exposed no resubscription function (`undefined` instead of a function), so a retained identity could not be safely reactivated.
+- GREEN command/result: the same focused command after adding strict retained-only reactivation — 1 passed; the canonical messaging-group, agent, folder, wiring, and sole shared-session IDs remained identical. The retained A history remained available to A, the new A message appended to that same session, B context was absent, and B remained on its own active session.
+- REFACTOR performed: resubscription runs in an immediate transaction, revalidates the sole reserved session and full canonical topology, validates existing workspace/state components without following symlinks, changes `unsubscribed -> active`, and reactivates that session without allocating or renaming an execution identity.
+- Affected-suite verification: `pnpm exec vitest run src/channels/mattermost-subscription.test.ts src/router.thread-policy.test.ts src/mattermost-isolation.integration.test.ts src/container-runner.isolation.test.ts` — 4 files passed, 129 tests passed.
+- Static verification: `pnpm typecheck` and `pnpm format:check` passed.
+- Isolation impact: resubscribe retains only A's own permanently reserved context and execution identity after validating them; it cannot allocate a second session, copy B/Telegram context, or adopt another channel's workspace, memory, mount, or container identity.
+
+### Slice 7.13: inactive destination remains permanently reserved
+
+- RED command: `pnpm exec vitest run src/channels/mattermost-subscription.test.ts -t 'keeps the canonical channel destination permanently'`.
+- RED failure observed: deleting A's canonical channel destination while unsubscribed succeeded instead of throwing because the Phase 5 delete guard applied only while active.
+- GREEN command/result: the same focused command after adding the permanent destination-delete trigger — 1 passed; the sole `channel -> A messaging group` destination remains present while unsubscribed.
+- REFACTOR performed: the permanent trigger retains the established active-delete error contract so existing active-state characterization remains unchanged; topology mutation is still disabled by lifecycle status rather than by deleting canonical ownership rows.
+- Affected-suite verification: `pnpm exec vitest run src/channels/mattermost-subscription.test.ts src/mattermost-isolation.integration.test.ts src/modules/agent-to-agent/create-agent.test.ts` — 3 files passed, 87 tests passed after aligning the established error text.
+- Static verification: `pnpm typecheck` and `pnpm format:check` passed.
+- Isolation impact: unsubscribe/archive can no longer make A's outbound ACL target disappear and later be replaced or repaired toward another channel; permanent reservation survives every non-active state.
+
+### Slice 7.14: authenticated native mention signal
+
+- RED command: `pnpm exec vitest run src/channels/mattermost-inbound.test.ts -t 'trusts only authenticated WebSocket mention'`.
+- RED failure observed: authenticated-bot, other-user, and malformed `data.mentions` inputs all produced `isMention=undefined`, leaving real native unknown-channel approval unreachable.
+- GREEN command/result: the same focused command after parsing Mattermost's JSON-encoded mention IDs — 1 passed with `[true,false,false]` for authenticated bot, other user, and malformed metadata.
+- REFACTOR performed: mention detection compares only exact platform user IDs against the `/users/me` authenticated bot identity; absent, malformed, non-array, or mixed-type metadata fails closed and no username/message regex is used.
+- Affected-suite verification: `pnpm exec vitest run src/channels/mattermost-inbound.test.ts src/channels/mattermost-adapter.test.ts src/modules/permissions/mattermost-channel-approval.test.ts` — 3 files passed, 27 tests passed after formatting.
+- Static verification: `pnpm typecheck` passed; the initial `pnpm format:check` identified the touched normalizer, it was formatted, and the repeated command passed.
+- Isolation impact: only the authenticated socket's bot-ID mention can open the owner-approval path; ordinary channel chatter or forged textual `@name` content cannot create pending state, agents, sessions, or containers.
+
+### Slice 7.15: authenticated bot removal deactivation
+
+- Adapter RED command: `pnpm exec vitest run src/channels/mattermost-adapter.test.ts -t 'forwards only an authenticated removal'`.
+- Adapter RED failure observed: the authenticated direct `user_removed` event produced zero lifecycle callbacks because every non-`posted` socket event was discarded.
+- Adapter GREEN: the same command after adding the optional host lifecycle boundary and fail-closed removal normalization — 1 passed; only `broadcast.user_id=<authenticated bot>` with one bounded unambiguous channel emitted `{kind:'bot_removed', platformId}`. Other-user and channel-wide sibling shapes emitted neither lifecycle nor chat.
+- Service RED command: `pnpm exec vitest run src/channels/mattermost-subscription.test.ts -t 'deactivates only the removed bot channel'`.
+- Service RED failure observed: no bot-removal lifecycle service was exported (`undefined` instead of a function).
+- Service GREEN: the same command after adding idempotent removal handling — 1 passed; A became retained-unsubscribed and its running session was killed after closure, B remained active/idle, and the pending request for a separately removed channel was deleted so a delayed owner click cannot activate it.
+- REFACTOR performed: the host setup now dispatches only Mattermost `bot_removed` lifecycle events to the same strict deactivation service; it never synthesizes inbound chat or grants/revokes owner authorization. The test fixture resets its per-test kill implementation so full-file execution remains independent.
+- Isolation impact: authenticated bot membership loss disables only the canonical channel named by the platform event, cancels only its pending approval, and cannot deactivate by display name, affect B, or be confused with owner/admin authorization.
+
+### Slice 7.16: production registration and host-only configuration
+
+- Registration RED command: `pnpm exec vitest run src/channels/mattermost-adapter.test.ts -t 'is reachable from the production'`.
+- Registration RED failure observed: the production barrel registered only `cli` and `telegram`, not `mattermost`.
+- Registration GREEN: the same command after adding the self-registration module and barrel import — 1 passed; `mattermost` is registered with no `containerConfig`.
+- Configuration RED command: `pnpm exec vitest run src/channels/mattermost-adapter.test.ts -t 'creates an adapter only from a complete'`.
+- Configuration RED failure observed: the registration module exposed no host-config factory (`undefined` instead of a function).
+- Configuration GREEN: the same command after implementing the host factory — 1 passed; all-absent config disables the adapter, partial config throws a sanitized error without the fixture token, and complete URL/token/instance config creates the native shared-session adapter. The token remains only in the host transport/client object and no mounts or container environment are registered.
+- REFACTOR performed: the delivery bridge is installed before network adapter setup so an immediate authenticated mention cannot strand an undeliverable pending approval; host lifecycle dispatch is installed in the same setup object. Mattermost registration reads only the four named `.env` keys, validates a credential-free HTTP(S) URL and bounded instance key, and opts into mass mentions only on exact `true`.
+- Final affected verification for Slices 7.15–7.16: `pnpm exec vitest run src/channels/mattermost-adapter.test.ts src/channels/mattermost-inbound.test.ts src/channels/mattermost-subscription.test.ts src/modules/permissions/mattermost-channel-approval.test.ts src/channels/channel-registry.test.ts` — 5 files passed, 104 tests passed after resetting the leaked test mock implementation and formatting.
+- Static verification: `pnpm typecheck` and `pnpm format:check` passed.
+- Isolation impact: the production adapter is now reachable without exposing credentials to prompts, SQLite message metadata, channel container config, mounts, or container environments; partial/ambiguous configuration fails closed before network setup.
+
+### Slice 7.17: one immutable session identity per Mattermost channel
+
+- RED command: `pnpm exec vitest run src/channels/mattermost-subscription.test.ts -t 'resubscribes the retained identity into its one|prevents a second session identity'`.
+- RED failure observed: the initial lifecycle design created a second session on retained resubscription, so A had two session rows and a direct second `createSession` did not fail. This contradicted the binding one-channel/one-shared-session invariant.
+- GREEN command/result: the same combined focused command after adding sole-session reactivation and the cardinality trigger — 2 passed; retained A resumes its original session ID and any second identity fails with `Mattermost channel already owns a session identity`.
+- Identity RED command: `pnpm exec vitest run src/channels/mattermost-subscription.test.ts -t 'prevents renaming or deleting the one reserved'`.
+- Identity RED failure observed: with the identity guards temporarily omitted, a raw session-ID rename succeeded instead of throwing.
+- Identity GREEN command/result: the same focused command after restoring the ID-update and delete guards — 1 passed; the reserved session can be neither renamed nor deleted.
+- Ownership RED command: `pnpm exec vitest run src/channels/mattermost-subscription.test.ts -t 'keeps Mattermost session ownership identity immutable'`.
+- Ownership RED failure observed: before the ownership-update guard, a retained A session could be reassigned to a generic agent, messaging group, and thread.
+- Ownership GREEN command/result: the same focused command after guarding `agent_group_id`, `messaging_group_id`, and `thread_id` — 1 passed.
+- REFACTOR performed: migration and reference-schema triggers now enforce cardinality, immutable session ID/ownership/thread identity, and permanent row reservation for any session touching a Mattermost-owned agent or messaging group. The lifecycle service reactivates only the exact stopped/closed row it previously deactivated.
+- Isolation impact: one Mattermost channel has one permanent shared session and execution identity across retention cycles; the row cannot be duplicated, renamed, deleted, reassigned, threaded, or mixed with B/Telegram identity.
+
+### Slice 7.18: approval delivery and retry readiness
+
+- Availability RED command: `pnpm exec vitest run src/modules/permissions/mattermost-channel-approval.test.ts -t 'leaves no pending request when the owner delivery'`.
+- Availability RED failure observed: an unavailable owner adapter was still called once and a pending request was persisted, allowing startup ordering to strand approval.
+- Availability GREEN command/result: the same focused command after adding the adapter `isAvailable` capability and bridge readiness check — 1 passed; no row or delivery is created until the action-capable owner transport is ready.
+- Startup-order RED command: `pnpm exec vitest run src/channels/mattermost-adapter.test.ts -t 'is reachable from the production'`.
+- Startup-order RED failure observed: production import ordering registered Mattermost before Telegram, so an immediate native mention could arrive before its owner action transport.
+- Startup-order GREEN command/result: the same focused command after ordering registration `cli -> telegram -> mattermost` and installing the delivery bridge before Mattermost setup — 1 passed.
+- Destination RED command: `pnpm exec vitest run src/modules/permissions/mattermost-channel-approval.test.ts -t 'skips non-interactive Mattermost and CLI owner destinations'`.
+- Destination RED observed/result: the first run selected the unusable Mattermost owner instead of Telegram; after that path was excluded, the next Red selected the unusable CLI owner. Approval selection now requires an explicitly available action-capable destination, and the same focused command passes with the exact Telegram owner receiving the request while Mattermost/CLI owners are skipped.
+- Delivery-failure RED command: `pnpm exec vitest run src/modules/permissions/mattermost-channel-approval.test.ts -t 'removes an undelivered approval row'`.
+- Delivery-failure RED observed/result: the first run left one pending row after delivery rejection; after cleanup was added, the same command passed and a later mention could create and deliver one fresh request.
+- Processing-retry RED command: `pnpm exec vitest run src/modules/permissions/mattermost-channel-approval.test.ts -t 'releases a failed approval claim'`.
+- Processing-retry RED observed/result: an injected strict-subscription filesystem failure left the request `processing`; after release-on-failure was added, the same command passed and an exact retry completed once with one replay and wake.
+- REFACTOR performed: delivery capability is an optional adapter contract, owner selection is authorization-plus-interactivity rather than membership, pending insertion remains host-side, delivery failures remove only their undelivered row, and in-process approval failures release only their own atomic claim.
+- Isolation impact: credentials and owner transport remain host-side; unavailable or noninteractive destinations grant nothing, and retry paths cannot allocate duplicate topology, sessions, replay, or container execution.
+
+### Slice 7.19: approval/removal concurrency fails closed
+
+- Removal-race RED command: `pnpm exec vitest run src/modules/permissions/mattermost-channel-approval.test.ts -t 'does not create an approval when bot removal wins'`.
+- Removal-race RED failure observed: a delayed owner-resolution path delivered one approval after authenticated bot removal completed.
+- Removal-race GREEN command/result: the same focused command after durable placeholder denial and atomic post-resolution revalidation — 1 passed; no pending row or card survived the removal winner.
+- Concurrent-mention RED command: `pnpm exec vitest run src/modules/permissions/mattermost-channel-approval.test.ts -t 'lets only one concurrent mention'`.
+- Concurrent-mention RED failure observed: two mentions passed the pre-check and one promise rejected with a unique-constraint error.
+- Concurrent-mention GREEN command/result: the same focused command after an `INSERT OR IGNORE ... SELECT` winner operation — 1 passed; both calls settled successfully while exactly one row/card was created.
+- REFACTOR performed: the insert statement revalidates the exact pristine placeholder inside the write, bot removal durably denies unknown placeholders, and only the insertion winner may deliver. The pending row is still removed if that winner's delivery fails.
+- Isolation impact: removal and duplicate mentions cannot resurrect or multiply a channel identity, and no losing race can create an agent, membership, session, message replay, workspace, or container wake.
+
+### Slice 7.20: raw lifecycle and outbound execution boundaries
+
+- Raw-transition RED command: `pnpm exec vitest run src/channels/mattermost-subscription.test.ts -t 'requires the owned session to be closed'`.
+- Raw-transition RED failure observed: a direct `active -> unsubscribed` update succeeded while A's session remained active/running.
+- Raw-transition GREEN command/result: the same focused command after adding the session-state precondition trigger — 1 passed; raw unsubscribe now fails until every owned session is closed/stopped.
+- Router characterization command: `pnpm exec vitest run src/channels/mattermost-subscription.test.ts -t 'drops new A traffic after unsubscribe'` initially passed with no A message/wake and continued B routing. Temporarily removing the inactive-status check made it reject at the reserved session-cardinality guard instead of dropping traffic; restoring the check returned the test to Green.
+- Outbound-drain RED command: `pnpm exec vitest run src/delivery.test.ts -t 'stops a queued Mattermost drain'`.
+- Outbound-drain RED failure observed: deactivation after the first awaited delivery still allowed a second queued Mattermost item to post (`2` adapter calls instead of `1`).
+- Outbound-drain GREEN command/result: the same focused command after per-item execution-boundary revalidation — 1 passed; draining stops after A becomes inactive and persists the remaining queue.
+- REFACTOR performed: the lifecycle transaction closes/stops sessions before container kill, direct SQL must satisfy that same ordering, inbound routes fail closed at subscription status, and each awaited Mattermost outbound send obtains a fresh active-boundary decision.
+- Affected-suite verification: `pnpm exec vitest run src/modules/permissions/mattermost-channel-approval.test.ts src/channels/mattermost-subscription.test.ts src/delivery.test.ts src/channels/mattermost-adapter.test.ts src/channels/mattermost-inbound.test.ts src/channels/channel-registry.test.ts src/router.thread-policy.test.ts src/container-runner.isolation.test.ts src/mattermost-isolation.integration.test.ts src/modules/permissions/channel-approval.test.ts src/modules/permissions/sender-approval.test.ts` — 11 files passed, 202 tests passed.
+- Static verification: `pnpm typecheck`, `pnpm format:check`, `pnpm lint`, and `git diff --check` passed; lint reported zero errors and the same 98 warnings as the Phase 6 baseline.
+- Isolation impact: once unsubscribe wins, A cannot accept inbound, activate a session, continue a queued outbound drain, or keep a running container; B and Telegram remain independently routable and untouched.
+
+### Slice 7.21: deactivation commits before its first asynchronous yield
+
+- RED command: `pnpm exec vitest run src/channels/mattermost-subscription.test.ts -t 'commits unsubscribe before yielding'`.
+- RED failure observed: immediately after invoking deactivation, A was still `active` with an `active/running` session instead of already being `unsubscribed` and `closed/stopped`; awaiting the dynamic container-runner import occurred before the fail-closed database transaction.
+- GREEN command/result: the same focused command after starting the module import without awaiting it until after the transaction — 1 passed; database routing and execution gates close synchronously before container cleanup can yield.
+- REFACTOR performed: module loading begins eagerly to preserve the existing cycle boundary, the immediate transaction remains synchronous, and only the post-commit container-kill step awaits the loader. The focused regression resets its kill mock so the full affected file cannot inherit an earlier assertion implementation.
+- Affected-suite verification: `pnpm exec vitest run src/channels/mattermost-subscription.test.ts src/router.thread-policy.test.ts src/delivery.test.ts` — 3 files passed, 92 tests passed.
+- Isolation impact: bot removal and explicit deactivation cannot leave a microtask window in which another A inbound message creates work or wakes A's container before the database boundary closes; B and Telegram remain unaffected.
+
+### Slice 7.22: partial approval cannot become rejectable active topology
+
+- RED command: `pnpm exec vitest run src/modules/permissions/mattermost-channel-approval.test.ts -t 'keeps a partial approval non-rejectable'`.
+- RED failure observed: an injected requester-membership failure after strict subscription released the claim to `pending`; a subsequent owner rejection changed it to `rejected` and could deny the now-active canonical messaging group (`rejected` instead of the required recovery-safe `processing`).
+- GREEN command/result: the same focused command after topology-aware release/reject guards — 1 passed; once the strict subscription exists, the request remains `processing`, rejection becomes a no-op, and the active messaging group remains non-denied.
+- REFACTOR performed: release and rejection share one correlated pristine-placeholder SQL boundary requiring no subscription, wiring, session, or destination. Pre-topology filesystem failures still return to `pending`; post-topology failures remain durable for Phase 8 recovery.
+- Affected-suite verification: `pnpm exec vitest run src/modules/permissions/mattermost-channel-approval.test.ts` — 1 file passed, 14 tests passed.
+- Isolation impact: failure after the ownership transaction cannot turn an active channel into a denied-but-routable contradiction, authorize a second subscription attempt, or make a partially established A topology assignable to another channel.
+
+### Slice 7.23: lifecycle migration audits legacy session cardinality
+
+- RED command: `pnpm exec vitest run src/channels/mattermost-subscription.test.ts -t 'fails the lifecycle migration closed'`.
+- RED failure observed: a simulated Phase 5/6 database with two closed session identities for one canonical Mattermost channel accepted migration 015; newly created triggers did not retroactively detect the existing 1:many violation.
+- GREEN command/result: the same focused command after adding the preflight audit — 1 passed; migration aborts with `Cannot migrate Mattermost lifecycle: a channel owns multiple session identities`, and its schema-version row is not committed.
+- REFACTOR performed: the audit groups persisted sessions by the immutable Mattermost subscription owner and counts distinct session IDs before any lifecycle table or trigger is created, relying on the migration runner's existing transaction for all-or-nothing rollback.
+- Isolation impact: an upgraded database cannot silently carry multiple historical execution identities into a phase that promises one permanent channel-owned session; operator reconciliation is required before migration can proceed.
+
+### Slice 7.24: production delivery readiness characterization
+
+- Characterization command/result: `pnpm exec vitest run src/channels/delivery-bridge.test.ts -t 'reports whether'` — 1 passed with a registered adapter available and a missing adapter unavailable.
+- Mutation proof: temporarily removing the bridge's `isAvailable` implementation made the same command fail (`undefined` instead of `true`); the implementation was restored and the command passed again.
+- REFACTOR performed: no production refactor was needed; the direct bridge contract now protects the readiness capability independently of approval-service mocks.
+- Isolation impact: approval startup readiness is verified at the real host adapter lookup boundary without introducing credentials, container configuration, filesystem state, or cross-channel routing.
+
+### Slice 7.25: Phase 7 complete local gate and independent audit
+
+- Complete affected-suite command: `pnpm exec vitest run src/modules/permissions/mattermost-channel-approval.test.ts src/channels/mattermost-subscription.test.ts src/delivery.test.ts src/channels/mattermost-adapter.test.ts src/channels/mattermost-inbound.test.ts src/channels/channel-registry.test.ts src/channels/delivery-bridge.test.ts src/router.thread-policy.test.ts src/container-runner.isolation.test.ts src/mattermost-isolation.integration.test.ts src/modules/permissions/channel-approval.test.ts src/modules/permissions/sender-approval.test.ts` — 12 files passed, 208 tests passed.
+- First full host command: `pnpm test` — 48 files and 586 tests passed; one existing create-agent runtime-corruption test failed because migration 015's new cardinality trigger correctly rejected its intentional duplicate before the runtime validator was reached. The fixture now explicitly drops only that trigger while simulating a pre-Phase-7 corrupt database, matching the equivalent subscription-validator fixture.
+- Fixture verification: `pnpm exec vitest run src/modules/agent-to-agent/create-agent.test.ts -t 'duplicate active session'` — 1 passed.
+- Repeated full host command: `pnpm test` — 49 files passed, 587 tests passed.
+- Container type-check command: `docker run --rm --network none -v /home/pi/nanoclaw-v2:/workspace -w /workspace/container/agent-runner oven/bun:1.3.12 bun run typecheck` — passed.
+- Complete isolated container unit command: `docker run --rm --network none -v /home/pi/nanoclaw-v2:/workspace -w /workspace/container/agent-runner oven/bun:1.3.12 bun test src/db/session-state.test.ts src/mcp-tools/deep-research-workflow.test.ts src/providers/codex.factory.test.ts src/providers/factory.test.ts src/providers/codex-app-server.test.ts src/providers/codex.test.ts src/poll-loop.test.ts src/timezone.test.ts src/formatter.test.ts` — 9 files passed, 109 tests passed.
+- Complete isolated container integration command: `docker run --rm --network none -v /home/pi/nanoclaw-v2:/workspace -w /workspace/container/agent-runner oven/bun:1.3.12 bun test src/integration.test.ts` — 1 file passed, 3 tests passed. Together the two clean processes cover the complete 10-file/112-test inventory without the known leaked-loop cross-file interference.
+- Static commands/results: `pnpm typecheck` passed; `pnpm format:check` passed; `pnpm lint` passed with zero errors and the same 98 warnings as the Phase 6 baseline; `git diff --check` passed.
+- Independent audit: three read-only review tracks found and verified fixes for startup readiness, unusable owner destinations, delivery/processing retries, removal and concurrent-mention races, literal session cardinality/immutability, raw lifecycle ordering, outbound drain invalidation, deactivation's pre-yield transaction, partial-approval recovery, migration preflight, schema parity, and public router coverage. Their final re-audits found no remaining Phase 7 correctness, acceptance, credential, or isolation blocker.
+- Operational note: approval currently requires a reachable Telegram owner because the built-in native Mattermost and CLI adapters do not implement an authenticated action response round-trip. Explicit retain/archive/resubscribe are exported strict host service boundaries; bot removal is the only automatic production deactivation caller in this phase, and no operator-facing command is added speculatively.
+- Isolation impact: the final gate covers A/B/Telegram routing, session, workspace, mount, context, container, lifecycle, authorization, outbound, migration, and credential boundaries under normal, malformed, concurrent, failure, removal, and retained-resubscription paths.
