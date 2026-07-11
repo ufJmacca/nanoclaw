@@ -166,6 +166,22 @@ export function setChannelRequestGate(fn: ChannelRequestGateFn): void {
   channelRequestGate = fn;
 }
 
+/**
+ * Dedicated Mattermost subscription-approval hook.
+ *
+ * Mattermost channels may never enter the generic connect-to-existing-agent
+ * flow. The strict boundary invokes this hook only for a pristine, unwired
+ * channel placeholder whose permanent subscription does not exist yet.
+ */
+let mattermostChannelRequestGate: ChannelRequestGateFn | null = null;
+
+export function setMattermostChannelRequestGate(fn: ChannelRequestGateFn): void {
+  if (mattermostChannelRequestGate) {
+    log.warn('Mattermost channel-request gate overwritten');
+  }
+  mattermostChannelRequestGate = fn;
+}
+
 function safeParseContent(raw: string): { text?: string; sender?: string; senderId?: string } {
   try {
     return JSON.parse(raw);
@@ -236,6 +252,27 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
   const mattermostBoundary = validateMattermostRoutingBoundary(mg);
   if (mattermostBoundary.strict) {
     if (!mattermostBoundary.valid) {
+      if (
+        mattermostBoundary.reason === 'missing_subscription' &&
+        agentCount === 0 &&
+        isMention &&
+        mg.is_group === 1 &&
+        mg.unknown_sender_policy === 'request_approval' &&
+        mg.denied_at === null &&
+        mattermostChannelRequestGate
+      ) {
+        recordDroppedMessage({
+          channel_type: event.channelType,
+          platform_id: event.platformId,
+          user_id: null,
+          sender_name: safeParseContent(event.message.content).sender ?? null,
+          reason: 'mattermost_subscription_pending',
+          messaging_group_id: mg.id,
+          agent_group_id: null,
+        });
+        await mattermostChannelRequestGate(mg, event);
+        return;
+      }
       recordDroppedMessage({
         channel_type: event.channelType,
         platform_id: event.platformId,

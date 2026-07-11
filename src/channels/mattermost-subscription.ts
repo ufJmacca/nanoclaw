@@ -48,6 +48,19 @@ export interface MattermostSubscriptionResult {
   wiring: MessagingGroupAgent;
 }
 
+export type MattermostWorkspacePolicy = 'retain' | 'archive';
+
+export interface MattermostDeactivationInput {
+  instanceKey: string;
+  channelId: string;
+  workspacePolicy: MattermostWorkspacePolicy;
+}
+
+export interface MattermostDeactivationResult {
+  status: 'unsubscribed' | 'archived';
+  closedSessionIds: string[];
+}
+
 interface MattermostSubscriptionRow {
   instance_key: string;
   channel_id: string;
@@ -237,6 +250,197 @@ export function subscribeMattermostChannelStrict(input: MattermostSubscriptionIn
 
   if (!result) throw new Error('Mattermost subscription transaction produced no result');
   return result;
+}
+
+export async function deactivateMattermostChannelStrict(
+  input: MattermostDeactivationInput,
+): Promise<MattermostDeactivationResult> {
+  if (
+    !isValidSubscriptionIdentityComponent(input.instanceKey) ||
+    !isValidSubscriptionIdentityComponent(input.channelId) ||
+    (input.workspacePolicy !== 'retain' && input.workspacePolicy !== 'archive')
+  ) {
+    throw new Error('Invalid Mattermost deactivation request');
+  }
+  const runnerPromise = import('../container-runner.js');
+
+  const transition = getDb()
+    .transaction(() => {
+      const row = getDb()
+        .prepare('SELECT * FROM mattermost_subscriptions WHERE instance_key = ? AND channel_id = ?')
+        .get(input.instanceKey, input.channelId) as MattermostSubscriptionRow | undefined;
+      if (!row) throw new Error('Mattermost subscription not found');
+      if (row.status === 'archived') throw new Error('Archived Mattermost subscription is terminal');
+
+      const sessions = getDb()
+        .prepare(
+          `SELECT id, container_status
+             FROM sessions
+            WHERE agent_group_id = ? OR messaging_group_id = ?`,
+        )
+        .all(row.agent_group_id, row.messaging_group_id) as Array<{
+        id: string;
+        container_status: Session['container_status'];
+      }>;
+
+      if (row.status !== 'active' && row.status !== 'unsubscribed') {
+        throw new Error(`Mattermost subscription cannot be deactivated from ${row.status}`);
+      }
+
+      getDb()
+        .prepare(
+          `UPDATE sessions
+              SET status = 'closed', container_status = 'stopped'
+            WHERE agent_group_id = ? OR messaging_group_id = ?`,
+        )
+        .run(row.agent_group_id, row.messaging_group_id);
+
+      if (row.status === 'active') {
+        getDb()
+          .prepare(
+            `UPDATE mattermost_subscriptions
+                SET status = 'unsubscribed', archived_at = NULL
+              WHERE instance_key = ? AND channel_id = ? AND status = 'active'`,
+          )
+          .run(input.instanceKey, input.channelId);
+      }
+
+      let finalStatus: MattermostDeactivationResult['status'] = 'unsubscribed';
+      if (input.workspacePolicy === 'archive') {
+        getDb()
+          .prepare(
+            `UPDATE mattermost_subscriptions
+                SET status = 'archived', archived_at = ?
+              WHERE instance_key = ? AND channel_id = ? AND status = 'unsubscribed'`,
+          )
+          .run(new Date().toISOString(), input.instanceKey, input.channelId);
+        finalStatus = 'archived';
+      }
+
+      return {
+        status: finalStatus,
+        closedSessionIds: sessions.map((session) => session.id),
+        runningSessionIds: sessions
+          .filter((session) => session.container_status === 'running' || session.container_status === 'idle')
+          .map((session) => session.id),
+      };
+    })
+    .immediate();
+
+  const { killContainer } = await runnerPromise;
+  for (const sessionId of transition.runningSessionIds) {
+    killContainer(sessionId, 'Mattermost channel unsubscribed');
+  }
+  return { status: transition.status, closedSessionIds: transition.closedSessionIds };
+}
+
+export function resubscribeMattermostChannelStrict(input: {
+  instanceKey: string;
+  channelId: string;
+}): MattermostSubscriptionResult {
+  if (
+    !isValidSubscriptionIdentityComponent(input.instanceKey) ||
+    !isValidSubscriptionIdentityComponent(input.channelId)
+  ) {
+    throw new Error('Invalid Mattermost resubscription identity');
+  }
+
+  return getDb()
+    .transaction(() => {
+      const row = getDb()
+        .prepare('SELECT * FROM mattermost_subscriptions WHERE instance_key = ? AND channel_id = ?')
+        .get(input.instanceKey, input.channelId) as MattermostSubscriptionRow | undefined;
+      if (!row) throw new Error('Mattermost subscription not found');
+      if (row.status !== 'unsubscribed' || row.archived_at !== null) {
+        throw new Error('Only a retained Mattermost subscription can be reactivated');
+      }
+
+      const ownedSessions = getDb()
+        .prepare(
+          `SELECT id, agent_group_id, messaging_group_id, thread_id, status, container_status
+             FROM sessions
+            WHERE agent_group_id = ? OR messaging_group_id = ?`,
+        )
+        .all(row.agent_group_id, row.messaging_group_id) as Session[];
+      if (ownedSessions.length > 1) {
+        throw new Error('Mattermost resubscription found ambiguous session ownership');
+      }
+      const ownedSession = ownedSessions[0];
+      if (
+        ownedSession &&
+        (ownedSession.agent_group_id !== row.agent_group_id ||
+          ownedSession.messaging_group_id !== row.messaging_group_id ||
+          ownedSession.thread_id !== null ||
+          ownedSession.status !== 'closed' ||
+          ownedSession.container_status !== 'stopped')
+      ) {
+        throw new Error('Mattermost resubscription found an unsafe owned session');
+      }
+
+      const validation = validateMattermostSubscriptionRow({ ...row, status: 'active' });
+      if (!validation.valid) {
+        throw new Error(`Invalid Mattermost subscription topology: ${validation.reason}`);
+      }
+      const workspacePath = resolveGroupFolderPath(validation.value.agentGroup.folder);
+      const stateRoot = path.join(DATA_DIR, 'v2-sessions');
+      const statePath = path.join(stateRoot, validation.value.agentGroup.id);
+      if (!isSafeOwnedDirectory(GROUPS_DIR, workspacePath) || !isSafeOwnedDirectory(stateRoot, statePath)) {
+        throw new Error('Unsafe Mattermost workspace identity');
+      }
+
+      getDb()
+        .prepare(
+          `UPDATE mattermost_subscriptions
+              SET status = 'active', archived_at = NULL
+            WHERE instance_key = ? AND channel_id = ? AND status = 'unsubscribed'`,
+        )
+        .run(input.instanceKey, input.channelId);
+      if (ownedSession) {
+        getDb()
+          .prepare("UPDATE sessions SET status = 'active', container_status = 'stopped' WHERE id = ?")
+          .run(ownedSession.id);
+      }
+      return validation.value;
+    })
+    .immediate();
+}
+
+export async function handleMattermostBotRemoved(platformId: string): Promise<void> {
+  const match = /^mattermost:([^:]+):([^:]+)$/.exec(platformId);
+  if (!match || !isValidSubscriptionIdentityComponent(match[1]) || !isValidSubscriptionIdentityComponent(match[2])) {
+    return;
+  }
+  const [, instanceKey, channelId] = match;
+  getDb()
+    .transaction(() => {
+      getDb()
+        .prepare(
+          `DELETE FROM pending_mattermost_channel_approvals
+            WHERE instance_key = ? AND channel_id = ?
+              AND status IN ('pending', 'processing')`,
+        )
+        .run(instanceKey, channelId);
+      getDb()
+        .prepare(
+          `UPDATE messaging_groups
+              SET denied_at = COALESCE(denied_at, ?)
+            WHERE channel_type = 'mattermost'
+              AND platform_id = ?
+              AND NOT EXISTS (
+                SELECT 1 FROM mattermost_subscriptions ms
+                 WHERE ms.messaging_group_id = messaging_groups.id
+              )`,
+        )
+        .run(new Date().toISOString(), platformId);
+    })
+    .immediate();
+
+  const row = getDb()
+    .prepare('SELECT status FROM mattermost_subscriptions WHERE instance_key = ? AND channel_id = ?')
+    .get(instanceKey, channelId) as { status: MattermostSubscriptionRow['status'] } | undefined;
+  if (row?.status === 'active') {
+    await deactivateMattermostChannelStrict({ instanceKey, channelId, workspacePolicy: 'retain' });
+  }
 }
 
 function validateMattermostSubscriptionRow(row: MattermostSubscriptionRow): MattermostSubscriptionValidation {

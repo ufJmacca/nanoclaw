@@ -6,9 +6,10 @@ import { promisify } from 'node:util';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { TEST_ROOT, initGroupFilesystem, wakeContainer } = vi.hoisted(() => ({
+const { TEST_ROOT, initGroupFilesystem, killContainer, wakeContainer } = vi.hoisted(() => ({
   TEST_ROOT: '/tmp/nanoclaw-test-mattermost-subscription',
   initGroupFilesystem: vi.fn(),
+  killContainer: vi.fn(),
   wakeContainer: vi.fn().mockResolvedValue(true),
 }));
 
@@ -17,7 +18,7 @@ vi.mock('../container-runner.js', () => ({
   wakeContainer,
   isContainerRunning: vi.fn().mockReturnValue(false),
   getActiveContainerCount: vi.fn().mockReturnValue(0),
-  killContainer: vi.fn(),
+  killContainer,
 }));
 vi.mock('../config.js', async () => {
   const actual = await vi.importActual<typeof import('../config.js')>('../config.js');
@@ -41,16 +42,19 @@ import {
   initTestDb,
   runMigrations,
 } from '../db/index.js';
-import { routeInbound, setChannelRequestGate, setSenderResolver } from '../router.js';
-import { resolveSession, sessionDir } from '../session-manager.js';
+import { routeInbound, setChannelRequestGate, setMattermostChannelRequestGate, setSenderResolver } from '../router.js';
+import { openInboundDb, resolveSession, sessionDir, writeSessionMessage } from '../session-manager.js';
 import type { Session } from '../types.js';
 import {
+  deactivateMattermostChannelStrict,
   isMattermostOwnedAgentGroup,
   listMattermostOwnedFilesystemIdentities,
+  resubscribeMattermostChannelStrict,
   subscribeMattermostChannelStrict,
   validateMattermostSessionForExecution,
   validateMattermostSubscriptionForRouting,
 } from './mattermost-subscription.js';
+import * as mattermostSubscriptionModule from './mattermost-subscription.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -170,6 +174,585 @@ describe('strict Mattermost subscription schema', () => {
         )
         .run(messagingGroupId, agentGroupId, wiringId, createdAt),
     ).toThrow('Mattermost subscription topology must be exclusive');
+  });
+
+  it('fails the lifecycle migration closed on a legacy channel with multiple session identities', () => {
+    const channelA = subscribeMattermostChannelStrict({ instanceKey: 'primary', channelId: 'channel-a' });
+    const first = resolveSession(
+      channelA.agentGroup.id,
+      channelA.messagingGroup.id,
+      null,
+      channelA.wiring.session_mode,
+    ).session;
+    const db = getDb();
+    db.exec(`
+      DROP TRIGGER mattermost_guard_active_session_insert;
+      DROP TRIGGER mattermost_guard_active_session_update;
+      DROP TRIGGER mattermost_guard_subscription_lifecycle_update;
+      DROP TRIGGER mattermost_guard_subscription_archive_timestamp_insert;
+      DROP TRIGGER mattermost_guard_subscription_archive_timestamp_update;
+      DROP TRIGGER mattermost_guard_permanent_destination_delete;
+      DROP TRIGGER mattermost_guard_session_cardinality_insert;
+      DROP TRIGGER mattermost_guard_session_delete;
+      DROP TRIGGER mattermost_guard_session_ownership_update;
+      DROP TRIGGER mattermost_guard_unsubscribe_session_state;
+      DROP TABLE pending_mattermost_channel_approvals;
+      DELETE FROM schema_version WHERE name = 'mattermost-lifecycle';
+    `);
+    db.prepare("UPDATE sessions SET status = 'closed', container_status = 'stopped' WHERE id = ?").run(first.id);
+    createSession({
+      ...first,
+      id: 'session-legacy-second-identity',
+      status: 'closed',
+      container_status: 'stopped',
+      created_at: new Date(Date.now() + 1).toISOString(),
+    });
+
+    expect(() => runMigrations(db)).toThrow(
+      'Cannot migrate Mattermost lifecycle: a channel owns multiple session identities',
+    );
+    expect(db.prepare("SELECT 1 FROM schema_version WHERE name = 'mattermost-lifecycle'").get()).toBeUndefined();
+  });
+});
+
+describe('Mattermost subscription lifecycle', () => {
+  it('requires an explicit workspace retention or archive policy', async () => {
+    subscribeMattermostChannelStrict({ instanceKey: 'primary', channelId: 'channel-a' });
+
+    await expect(
+      deactivateMattermostChannelStrict({
+        instanceKey: 'primary',
+        channelId: 'channel-a',
+        workspacePolicy: undefined,
+      } as never),
+    ).rejects.toThrow('Invalid Mattermost deactivation request');
+    expect(getDb().prepare('SELECT status FROM mattermost_subscriptions').get()).toEqual({ status: 'active' });
+  });
+
+  it('enforces ordered lifecycle transitions and archive timestamp coherence in SQLite', () => {
+    subscribeMattermostChannelStrict({ instanceKey: 'primary', channelId: 'channel-a' });
+
+    expect(() =>
+      getDb()
+        .prepare(
+          `UPDATE mattermost_subscriptions
+              SET status = 'archived', archived_at = ?
+            WHERE instance_key = 'primary' AND channel_id = 'channel-a'`,
+        )
+        .run(new Date().toISOString()),
+    ).toThrow('Invalid Mattermost subscription lifecycle transition');
+    expect(getDb().prepare('SELECT status FROM mattermost_subscriptions').get()).toEqual({ status: 'active' });
+
+    getDb().prepare("UPDATE mattermost_subscriptions SET status = 'unsubscribed'").run();
+    expect(() => getDb().prepare("UPDATE mattermost_subscriptions SET status = 'archived'").run()).toThrow(
+      'Mattermost archived status requires an archive timestamp',
+    );
+    getDb()
+      .prepare("UPDATE mattermost_subscriptions SET status = 'archived', archived_at = ?")
+      .run(new Date().toISOString());
+    expect(() =>
+      getDb().prepare("UPDATE mattermost_subscriptions SET status = 'active', archived_at = NULL").run(),
+    ).toThrow('Invalid Mattermost subscription lifecycle transition');
+    expect(getDb().prepare('SELECT status FROM mattermost_subscriptions').get()).toEqual({ status: 'archived' });
+  });
+
+  it('requires the owned session to be closed before a raw unsubscribe transition', () => {
+    const channelA = subscribeMattermostChannelStrict({ instanceKey: 'primary', channelId: 'channel-a' });
+    const sessionA = resolveSession(
+      channelA.agentGroup.id,
+      channelA.messagingGroup.id,
+      null,
+      channelA.wiring.session_mode,
+    ).session;
+    getDb().prepare("UPDATE sessions SET container_status = 'running' WHERE id = ?").run(sessionA.id);
+
+    expect(() => getDb().prepare("UPDATE mattermost_subscriptions SET status = 'unsubscribed'").run()).toThrow(
+      'Mattermost sessions must be closed before unsubscribe',
+    );
+    expect(getDb().prepare('SELECT status FROM mattermost_subscriptions').get()).toEqual({ status: 'active' });
+    expect(getDb().prepare('SELECT status, container_status FROM sessions').get()).toEqual({
+      status: 'active',
+      container_status: 'running',
+    });
+  });
+
+  it('marks only channel A inactive and closes its session before killing its execution', async () => {
+    const channelA = subscribeMattermostChannelStrict({ instanceKey: 'primary', channelId: 'channel-a' });
+    const channelB = subscribeMattermostChannelStrict({ instanceKey: 'primary', channelId: 'channel-b' });
+    const sessionA = resolveSession(
+      channelA.agentGroup.id,
+      channelA.messagingGroup.id,
+      null,
+      channelA.wiring.session_mode,
+    ).session;
+    const sessionB = resolveSession(
+      channelB.agentGroup.id,
+      channelB.messagingGroup.id,
+      null,
+      channelB.wiring.session_mode,
+    ).session;
+    getDb().prepare("UPDATE sessions SET container_status = 'running' WHERE id = ?").run(sessionA.id);
+    getDb().prepare("UPDATE sessions SET container_status = 'idle' WHERE id = ?").run(sessionB.id);
+
+    killContainer.mockImplementation((sessionId: string) => {
+      expect(sessionId).toBe(sessionA.id);
+      expect(
+        getDb()
+          .prepare(
+            `SELECT ms.status, s.status AS session_status, s.container_status
+               FROM mattermost_subscriptions ms
+               JOIN sessions s ON s.agent_group_id = ms.agent_group_id
+              WHERE ms.instance_key = 'primary' AND ms.channel_id = 'channel-a'`,
+          )
+          .get(),
+      ).toEqual({ status: 'unsubscribed', session_status: 'closed', container_status: 'stopped' });
+    });
+
+    const deactivate = (
+      mattermostSubscriptionModule as typeof mattermostSubscriptionModule & {
+        deactivateMattermostChannelStrict?: (input: {
+          instanceKey: string;
+          channelId: string;
+          workspacePolicy: 'retain' | 'archive';
+        }) => Promise<unknown>;
+      }
+    ).deactivateMattermostChannelStrict;
+    expect(deactivate).toBeTypeOf('function');
+    await deactivate?.({ instanceKey: 'primary', channelId: 'channel-a', workspacePolicy: 'retain' });
+
+    expect(killContainer).toHaveBeenCalledTimes(1);
+    expect(killContainer).toHaveBeenCalledWith(sessionA.id, 'Mattermost channel unsubscribed');
+    expect(getDb().prepare('SELECT status, container_status FROM sessions WHERE id = ?').get(sessionB.id)).toEqual({
+      status: 'active',
+      container_status: 'idle',
+    });
+    expect(
+      getDb()
+        .prepare(
+          `SELECT channel_id, status FROM mattermost_subscriptions
+            WHERE instance_key = 'primary' ORDER BY channel_id`,
+        )
+        .all(),
+    ).toEqual([
+      { channel_id: 'channel-a', status: 'unsubscribed' },
+      { channel_id: 'channel-b', status: 'active' },
+    ]);
+  });
+
+  it('commits unsubscribe before yielding to asynchronous container cleanup', async () => {
+    killContainer.mockReset();
+    const channelA = subscribeMattermostChannelStrict({ instanceKey: 'primary', channelId: 'channel-a' });
+    const sessionA = resolveSession(
+      channelA.agentGroup.id,
+      channelA.messagingGroup.id,
+      null,
+      channelA.wiring.session_mode,
+    ).session;
+    getDb().prepare("UPDATE sessions SET container_status = 'running' WHERE id = ?").run(sessionA.id);
+
+    const deactivation = deactivateMattermostChannelStrict({
+      instanceKey: 'primary',
+      channelId: 'channel-a',
+      workspacePolicy: 'retain',
+    });
+
+    expect(
+      getDb()
+        .prepare(
+          `SELECT ms.status, s.status AS session_status, s.container_status
+             FROM mattermost_subscriptions ms
+             JOIN sessions s ON s.agent_group_id = ms.agent_group_id
+            WHERE ms.instance_key = 'primary' AND ms.channel_id = 'channel-a'`,
+        )
+        .get(),
+    ).toEqual({ status: 'unsubscribed', session_status: 'closed', container_status: 'stopped' });
+    await deactivation;
+  });
+
+  it('drops new A traffic after unsubscribe while B continues routing', async () => {
+    killContainer.mockReset();
+    const channelA = subscribeMattermostChannelStrict({ instanceKey: 'primary', channelId: 'channel-a' });
+    const channelB = subscribeMattermostChannelStrict({ instanceKey: 'primary', channelId: 'channel-b' });
+    const inbound = (channel: typeof channelA, id: string, text: string) => ({
+      channelType: 'mattermost',
+      platformId: channel.messagingGroup.platform_id,
+      threadId: null,
+      message: {
+        id,
+        kind: 'chat' as const,
+        content: JSON.stringify({ senderId: `mattermost:user-${id}`, text }),
+        timestamp: new Date().toISOString(),
+        isGroup: true,
+      },
+    });
+    await routeInbound(inbound(channelA, 'a-before', 'A_BEFORE'));
+    await routeInbound(inbound(channelB, 'b-before', 'B_BEFORE'));
+    const [sessionA] = getSessionsByAgentGroup(channelA.agentGroup.id);
+    const [sessionB] = getSessionsByAgentGroup(channelB.agentGroup.id);
+    await deactivateMattermostChannelStrict({
+      instanceKey: 'primary',
+      channelId: 'channel-a',
+      workspacePolicy: 'retain',
+    });
+
+    wakeContainer.mockClear();
+    await expect(routeInbound(inbound(channelA, 'a-after', 'A_AFTER'))).resolves.toBeUndefined();
+    await routeInbound(inbound(channelB, 'b-after', 'B_AFTER'));
+
+    const dbA = openInboundDb(channelA.agentGroup.id, sessionA.id);
+    expect(dbA.prepare('SELECT content FROM messages_in ORDER BY seq').all()).toEqual([
+      { content: JSON.stringify({ senderId: 'mattermost:user-a-before', text: 'A_BEFORE' }) },
+    ]);
+    dbA.close();
+    const dbB = openInboundDb(channelB.agentGroup.id, sessionB.id);
+    expect(dbB.prepare('SELECT content FROM messages_in ORDER BY seq').all()).toEqual([
+      { content: JSON.stringify({ senderId: 'mattermost:user-b-before', text: 'B_BEFORE' }) },
+      { content: JSON.stringify({ senderId: 'mattermost:user-b-after', text: 'B_AFTER' }) },
+    ]);
+    dbB.close();
+    expect(wakeContainer).toHaveBeenCalledTimes(1);
+  });
+
+  it('prevents a stale route from creating a new active session after unsubscribe', async () => {
+    const channelA = subscribeMattermostChannelStrict({ instanceKey: 'primary', channelId: 'channel-a' });
+    const oldSession = resolveSession(
+      channelA.agentGroup.id,
+      channelA.messagingGroup.id,
+      null,
+      channelA.wiring.session_mode,
+    ).session;
+
+    await deactivateMattermostChannelStrict({
+      instanceKey: 'primary',
+      channelId: 'channel-a',
+      workspacePolicy: 'retain',
+    });
+
+    expect(() =>
+      resolveSession(channelA.agentGroup.id, channelA.messagingGroup.id, null, channelA.wiring.session_mode),
+    ).toThrow('Mattermost channel already owns a session identity');
+    expect(getSessionsByAgentGroup(channelA.agentGroup.id)).toEqual([
+      expect.objectContaining({ id: oldSession.id, status: 'closed', container_status: 'stopped' }),
+    ]);
+  });
+
+  it('retains or archives the owned workspace in place according to the explicit policy', async () => {
+    const channelA = subscribeMattermostChannelStrict({ instanceKey: 'primary', channelId: 'channel-a' });
+    subscribeMattermostChannelStrict({ instanceKey: 'primary', channelId: 'channel-b' });
+    const workspaceMarker = path.join(GROUPS_DIR, channelA.agentGroup.folder, 'retained-marker.txt');
+    const stateMarker = path.join(DATA_DIR, 'v2-sessions', channelA.agentGroup.id, 'retained-state.txt');
+    fs.writeFileSync(workspaceMarker, 'workspace-a');
+    fs.writeFileSync(stateMarker, 'state-a');
+
+    await deactivateMattermostChannelStrict({
+      instanceKey: 'primary',
+      channelId: 'channel-a',
+      workspacePolicy: 'retain',
+    });
+    expect(
+      getDb()
+        .prepare(
+          `SELECT status, archived_at FROM mattermost_subscriptions
+            WHERE instance_key = 'primary' AND channel_id = 'channel-a'`,
+        )
+        .get(),
+    ).toEqual({ status: 'unsubscribed', archived_at: null });
+    expect(fs.readFileSync(workspaceMarker, 'utf8')).toBe('workspace-a');
+    expect(fs.readFileSync(stateMarker, 'utf8')).toBe('state-a');
+
+    const archived = await deactivateMattermostChannelStrict({
+      instanceKey: 'primary',
+      channelId: 'channel-a',
+      workspacePolicy: 'archive',
+    });
+    expect(archived.status).toBe('archived');
+    expect(
+      getDb()
+        .prepare(
+          `SELECT status, archived_at IS NOT NULL AS timestamped
+             FROM mattermost_subscriptions
+            WHERE instance_key = 'primary' AND channel_id = 'channel-a'`,
+        )
+        .get(),
+    ).toEqual({ status: 'archived', timestamped: 1 });
+    expect(fs.readFileSync(workspaceMarker, 'utf8')).toBe('workspace-a');
+    expect(fs.readFileSync(stateMarker, 'utf8')).toBe('state-a');
+    expect(() => subscribeMattermostChannelStrict({ instanceKey: 'primary', channelId: 'channel-a' })).toThrow(
+      'Invalid Mattermost subscription topology: inactive_subscription',
+    );
+    expect(
+      getDb()
+        .prepare(
+          "SELECT status FROM mattermost_subscriptions WHERE instance_key = 'primary' AND channel_id = 'channel-b'",
+        )
+        .get(),
+    ).toEqual({ status: 'active' });
+  });
+
+  it('resubscribes the retained identity into its one exclusive session without other-channel context', async () => {
+    const channelA = subscribeMattermostChannelStrict({ instanceKey: 'primary', channelId: 'channel-a' });
+    const channelB = subscribeMattermostChannelStrict({ instanceKey: 'primary', channelId: 'channel-b' });
+    const oldA = resolveSession(
+      channelA.agentGroup.id,
+      channelA.messagingGroup.id,
+      null,
+      channelA.wiring.session_mode,
+    ).session;
+    const sessionB = resolveSession(
+      channelB.agentGroup.id,
+      channelB.messagingGroup.id,
+      null,
+      channelB.wiring.session_mode,
+    ).session;
+    writeSessionMessage(channelA.agentGroup.id, oldA.id, {
+      id: 'old-a',
+      kind: 'chat',
+      timestamp: new Date().toISOString(),
+      content: JSON.stringify({ text: 'OLD_A_CONTEXT' }),
+    });
+    writeSessionMessage(channelB.agentGroup.id, sessionB.id, {
+      id: 'old-b',
+      kind: 'chat',
+      timestamp: new Date().toISOString(),
+      content: JSON.stringify({ text: 'B_CONTEXT' }),
+    });
+    await deactivateMattermostChannelStrict({
+      instanceKey: 'primary',
+      channelId: 'channel-a',
+      workspacePolicy: 'retain',
+    });
+
+    const resubscribe = (
+      mattermostSubscriptionModule as typeof mattermostSubscriptionModule & {
+        resubscribeMattermostChannelStrict?: (input: { instanceKey: string; channelId: string }) => typeof channelA;
+      }
+    ).resubscribeMattermostChannelStrict;
+    expect(resubscribe).toBeTypeOf('function');
+    const resumed = resubscribe?.({ instanceKey: 'primary', channelId: 'channel-a' });
+    expect(resumed).toMatchObject({
+      messagingGroup: { id: channelA.messagingGroup.id },
+      agentGroup: { id: channelA.agentGroup.id, folder: channelA.agentGroup.folder },
+      wiring: { id: channelA.wiring.id },
+    });
+
+    wakeContainer.mockClear();
+    await routeInbound({
+      channelType: 'mattermost',
+      platformId: channelA.messagingGroup.platform_id,
+      threadId: 'new-root-a',
+      message: {
+        id: 'new-a',
+        kind: 'chat',
+        content: JSON.stringify({ senderId: 'mattermost:user-a', text: 'NEW_A_CONTEXT' }),
+        timestamp: new Date().toISOString(),
+        isGroup: true,
+      },
+    });
+
+    const sessionsA = getSessionsByAgentGroup(channelA.agentGroup.id);
+    expect(sessionsA).toEqual([
+      expect.objectContaining({ id: oldA.id, status: 'active', container_status: 'stopped', thread_id: null }),
+    ]);
+    const resumedDb = openInboundDb(channelA.agentGroup.id, oldA.id);
+    expect(resumedDb.prepare('SELECT content FROM messages_in ORDER BY seq').all()).toEqual([
+      { content: JSON.stringify({ text: 'OLD_A_CONTEXT' }) },
+      { content: JSON.stringify({ senderId: 'mattermost:user-a', text: 'NEW_A_CONTEXT' }) },
+    ]);
+    expect(JSON.stringify(resumedDb.prepare('SELECT content FROM messages_in').all())).not.toContain('B_CONTEXT');
+    resumedDb.close();
+    expect(getSessionsByAgentGroup(channelB.agentGroup.id)).toEqual([
+      expect.objectContaining({ id: sessionB.id, status: 'active' }),
+    ]);
+    expect(wakeContainer).toHaveBeenCalledTimes(1);
+  });
+
+  it('prevents a second session identity for a resubscribed Mattermost channel', async () => {
+    const channelA = subscribeMattermostChannelStrict({ instanceKey: 'primary', channelId: 'channel-a' });
+    const oldA = resolveSession(
+      channelA.agentGroup.id,
+      channelA.messagingGroup.id,
+      null,
+      channelA.wiring.session_mode,
+    ).session;
+    await deactivateMattermostChannelStrict({
+      instanceKey: 'primary',
+      channelId: 'channel-a',
+      workspacePolicy: 'retain',
+    });
+    resubscribeMattermostChannelStrict({ instanceKey: 'primary', channelId: 'channel-a' });
+
+    expect(() =>
+      createSession({
+        ...oldA,
+        id: 'sess-forbidden-second-identity',
+        status: 'active',
+        container_status: 'stopped',
+        created_at: new Date().toISOString(),
+      }),
+    ).toThrow('Mattermost channel already owns a session identity');
+    expect(getSessionsByAgentGroup(channelA.agentGroup.id)).toEqual([
+      expect.objectContaining({ id: oldA.id, status: 'active' }),
+    ]);
+  });
+
+  it('keeps Mattermost session ownership identity immutable after deactivation', async () => {
+    const channelA = subscribeMattermostChannelStrict({ instanceKey: 'primary', channelId: 'channel-a' });
+    const oldA = resolveSession(
+      channelA.agentGroup.id,
+      channelA.messagingGroup.id,
+      null,
+      channelA.wiring.session_mode,
+    ).session;
+    createAgentGroup({
+      id: 'ag-generic-target',
+      name: 'Generic target',
+      folder: 'generic-target',
+      agent_provider: null,
+      created_at: new Date().toISOString(),
+    });
+    createMessagingGroup({
+      id: 'mg-generic-target',
+      channel_type: 'telegram',
+      platform_id: 'telegram:generic-target',
+      name: 'Generic target',
+      is_group: 1,
+      unknown_sender_policy: 'public',
+      denied_at: null,
+      created_at: new Date().toISOString(),
+    });
+    await deactivateMattermostChannelStrict({
+      instanceKey: 'primary',
+      channelId: 'channel-a',
+      workspacePolicy: 'retain',
+    });
+
+    expect(() =>
+      getDb()
+        .prepare(
+          `UPDATE sessions
+              SET agent_group_id = 'ag-generic-target',
+                  messaging_group_id = 'mg-generic-target',
+                  thread_id = 'foreign-thread'
+            WHERE id = ?`,
+        )
+        .run(oldA.id),
+    ).toThrow('Mattermost session ownership identity is immutable');
+    expect(
+      getDb().prepare('SELECT agent_group_id, messaging_group_id, thread_id FROM sessions WHERE id = ?').get(oldA.id),
+    ).toEqual({
+      agent_group_id: channelA.agentGroup.id,
+      messaging_group_id: channelA.messagingGroup.id,
+      thread_id: null,
+    });
+  });
+
+  it('prevents renaming or deleting the one reserved Mattermost session identity', async () => {
+    const channelA = subscribeMattermostChannelStrict({ instanceKey: 'primary', channelId: 'channel-a' });
+    const sessionA = resolveSession(
+      channelA.agentGroup.id,
+      channelA.messagingGroup.id,
+      null,
+      channelA.wiring.session_mode,
+    ).session;
+    await deactivateMattermostChannelStrict({
+      instanceKey: 'primary',
+      channelId: 'channel-a',
+      workspacePolicy: 'retain',
+    });
+
+    expect(() => getDb().prepare("UPDATE sessions SET id = 'sess-renamed' WHERE id = ?").run(sessionA.id)).toThrow(
+      'Mattermost session ownership identity is immutable',
+    );
+    expect(() => getDb().prepare('DELETE FROM sessions WHERE id = ?').run(sessionA.id)).toThrow(
+      'Mattermost session identity cannot be deleted',
+    );
+    expect(getDb().prepare('SELECT id FROM sessions').all()).toEqual([{ id: sessionA.id }]);
+  });
+
+  it('keeps the canonical channel destination permanently reserved while unsubscribed', async () => {
+    const channelA = subscribeMattermostChannelStrict({ instanceKey: 'primary', channelId: 'channel-a' });
+    await deactivateMattermostChannelStrict({
+      instanceKey: 'primary',
+      channelId: 'channel-a',
+      workspacePolicy: 'retain',
+    });
+
+    expect(() =>
+      getDb().prepare('DELETE FROM agent_destinations WHERE agent_group_id = ?').run(channelA.agentGroup.id),
+    ).toThrow('Active Mattermost canonical destination cannot be deleted');
+    expect(
+      getDb()
+        .prepare('SELECT target_type, target_id FROM agent_destinations WHERE agent_group_id = ?')
+        .all(channelA.agentGroup.id),
+    ).toEqual([{ target_type: 'channel', target_id: channelA.messagingGroup.id }]);
+  });
+
+  it('deactivates only the removed bot channel and cancels a pending subscription for that channel', async () => {
+    killContainer.mockReset();
+    const channelA = subscribeMattermostChannelStrict({ instanceKey: 'primary', channelId: 'channel-a' });
+    const channelB = subscribeMattermostChannelStrict({ instanceKey: 'primary', channelId: 'channel-b' });
+    const sessionA = resolveSession(
+      channelA.agentGroup.id,
+      channelA.messagingGroup.id,
+      null,
+      channelA.wiring.session_mode,
+    ).session;
+    const sessionB = resolveSession(
+      channelB.agentGroup.id,
+      channelB.messagingGroup.id,
+      null,
+      channelB.wiring.session_mode,
+    ).session;
+    getDb().prepare("UPDATE sessions SET container_status = 'running' WHERE id = ?").run(sessionA.id);
+    getDb().prepare("UPDATE sessions SET container_status = 'idle' WHERE id = ?").run(sessionB.id);
+    createMessagingGroup({
+      id: 'mg-pending-removal',
+      channel_type: 'mattermost',
+      platform_id: 'mattermost:primary:channel-pending',
+      name: null,
+      is_group: 1,
+      unknown_sender_policy: 'request_approval',
+      denied_at: null,
+      created_at: new Date().toISOString(),
+    });
+    getDb()
+      .prepare(
+        `INSERT INTO pending_mattermost_channel_approvals (
+           approval_id, instance_key, channel_id, messaging_group_id,
+           requester_user_id, approver_user_id, original_message, status,
+           created_at, decided_at, decided_by, replayed_at, title, options_json
+         ) VALUES (
+           'pending-removal', 'primary', 'channel-pending', 'mg-pending-removal',
+           'mattermost:requester', 'telegram:owner', '{}', 'pending',
+           ?, NULL, NULL, NULL, 'Pending', '[]'
+         )`,
+      )
+      .run(new Date().toISOString());
+
+    const handleBotRemoved = (
+      mattermostSubscriptionModule as typeof mattermostSubscriptionModule & {
+        handleMattermostBotRemoved?: (platformId: string) => Promise<void>;
+      }
+    ).handleMattermostBotRemoved;
+    expect(handleBotRemoved).toBeTypeOf('function');
+    await handleBotRemoved?.('mattermost:primary:channel-a');
+    await handleBotRemoved?.('mattermost:primary:channel-pending');
+
+    expect(killContainer).toHaveBeenCalledTimes(1);
+    expect(killContainer).toHaveBeenCalledWith(sessionA.id, 'Mattermost channel unsubscribed');
+    expect(
+      getDb().prepare('SELECT channel_id, status FROM mattermost_subscriptions ORDER BY channel_id').all(),
+    ).toEqual([
+      { channel_id: 'channel-a', status: 'unsubscribed' },
+      { channel_id: 'channel-b', status: 'active' },
+    ]);
+    expect(getDb().prepare('SELECT status, container_status FROM sessions WHERE id = ?').get(sessionB.id)).toEqual({
+      status: 'active',
+      container_status: 'idle',
+    });
+    expect(getDb().prepare('SELECT COUNT(*) AS count FROM pending_mattermost_channel_approvals').get()).toEqual({
+      count: 0,
+    });
   });
 });
 
@@ -875,6 +1458,13 @@ describe('subscribeMattermostChannelStrict', () => {
     getDb()
       .prepare(
         `UPDATE mattermost_subscriptions
+            SET status = 'unsubscribed'
+          WHERE instance_key = 'primary' AND channel_id = 'channel-a'`,
+      )
+      .run();
+    getDb()
+      .prepare(
+        `UPDATE mattermost_subscriptions
             SET status = 'archived', archived_at = ?
           WHERE instance_key = 'primary' AND channel_id = 'channel-a'`,
       )
@@ -1350,6 +1940,43 @@ describe('subscribeMattermostChannelStrict', () => {
     expect(wakeContainer).not.toHaveBeenCalled();
   });
 
+  it('routes an unknown Mattermost mention only to the dedicated subscription approval gate', async () => {
+    const genericApproval = vi.fn().mockResolvedValue(undefined);
+    const mattermostApproval = vi.fn().mockResolvedValue(undefined);
+    setChannelRequestGate(genericApproval);
+    setMattermostChannelRequestGate(mattermostApproval);
+
+    const event = {
+      channelType: 'mattermost',
+      platformId: 'mattermost:primary:approval-channel',
+      threadId: null,
+      message: {
+        id: 'unknown-mattermost-approval-message',
+        kind: 'chat' as const,
+        content: JSON.stringify({ senderId: 'mattermost:user-a', text: '@bot subscribe' }),
+        timestamp: new Date().toISOString(),
+        isMention: true,
+        isGroup: true,
+      },
+    };
+    await routeInbound(event);
+
+    expect(mattermostApproval).toHaveBeenCalledTimes(1);
+    expect(mattermostApproval).toHaveBeenCalledWith(
+      expect.objectContaining({
+        channel_type: 'mattermost',
+        platform_id: 'mattermost:primary:approval-channel',
+      }),
+      event,
+    );
+    expect(genericApproval).not.toHaveBeenCalled();
+    expect(getDb().prepare('SELECT COUNT(*) AS count FROM mattermost_subscriptions').get()).toEqual({ count: 0 });
+    expect(getDb().prepare('SELECT COUNT(*) AS count FROM agent_groups').get()).toEqual({ count: 0 });
+    expect(getDb().prepare('SELECT COUNT(*) AS count FROM messaging_group_agents').get()).toEqual({ count: 0 });
+    expect(getDb().prepare('SELECT COUNT(*) AS count FROM sessions').get()).toEqual({ count: 0 });
+    expect(wakeContainer).not.toHaveBeenCalled();
+  });
+
   it('rejects a hand-written subscription that assigns a non-canonical agent identity', () => {
     const createdAt = new Date().toISOString();
     createAgentGroup({
@@ -1762,6 +2389,10 @@ describe('subscribeMattermostChannelStrict', () => {
   it('rejects duplicate active shared sessions for one Mattermost channel', () => {
     const channel = subscribeMattermostChannelStrict({ instanceKey: 'primary', channelId: 'channel-a' });
     const { session } = resolveSession(channel.agentGroup.id, channel.messagingGroup.id, null, 'shared');
+    // Simulate a duplicate persisted by a pre-Phase-7 writer. The new DB
+    // trigger rejects this state; runtime validation must still fail closed
+    // for legacy/corrupt databases upgraded in place.
+    getDb().exec('DROP TRIGGER mattermost_guard_session_cardinality_insert');
     createSession({
       ...session,
       id: 'session-duplicate-canonical',

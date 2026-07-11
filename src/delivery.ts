@@ -54,6 +54,8 @@ const deliveryAttempts = new Map<string, number>();
 const inflightDeliveries = new Set<string>();
 
 export interface ChannelDeliveryAdapter {
+  /** Whether an adapter is currently active for this channel type. */
+  isAvailable?(channelType: string): boolean;
   deliver(
     channelType: string,
     platformId: string,
@@ -202,8 +204,21 @@ async function drainSession(session: Session): Promise<void> {
     migrateDeliveredTable(inDb);
 
     for (const msg of undelivered) {
+      let currentMattermostBoundary: MattermostSessionExecutionBoundary = mattermostBoundary;
+      if (mattermostBoundary.strict) {
+        const refreshedBoundary = validateMattermostSessionForExecution(session);
+        if (!refreshedBoundary.strict || !refreshedBoundary.valid) {
+          log.warn('Stopping Mattermost delivery drain after subscription/session invalidation', {
+            sessionId: session.id,
+            reason:
+              refreshedBoundary.strict && !refreshedBoundary.valid ? refreshedBoundary.reason : 'ownership_removed',
+          });
+          break;
+        }
+        currentMattermostBoundary = refreshedBoundary;
+      }
       try {
-        const platformMsgId = await deliverMessage(msg, session, inDb, mattermostBoundary);
+        const platformMsgId = await deliverMessage(msg, session, inDb, currentMattermostBoundary);
         markDelivered(inDb, msg.id, platformMsgId ?? null);
         deliveryAttempts.delete(msg.id);
 

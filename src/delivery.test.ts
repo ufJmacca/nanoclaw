@@ -234,6 +234,48 @@ describe('deliverSessionMessages — concurrent invocations', () => {
     );
   });
 
+  it('stops a queued Mattermost drain when the subscription is deactivated after one delivery', async () => {
+    seedMattermostAgentAndChannel();
+    const { session } = resolveSession('ag-mattermost-a', 'mg-mattermost-a', null, 'shared');
+    const inDb = new Database(inboundDbPath(session.agent_group_id, session.id));
+    insertMessage(inDb, {
+      id: 'inbound-root',
+      kind: 'chat',
+      timestamp: now(),
+      platformId: 'mattermost:primary:channel-a',
+      channelType: 'mattermost',
+      threadId: 'root-a',
+      content: JSON.stringify({ text: 'canonical' }),
+      processAfter: null,
+      recurrence: null,
+    });
+    inDb.close();
+    insertMattermostOutbound(session.agent_group_id, session.id, 'out-before-deactivate', 'root-a');
+    insertMattermostOutbound(session.agent_group_id, session.id, 'out-after-deactivate', 'root-a');
+    const validBoundary = {
+      strict: true as const,
+      valid: true as const,
+      value: {
+        messagingGroup: {
+          id: 'mg-mattermost-a',
+          channel_type: 'mattermost',
+          platform_id: 'mattermost:primary:channel-a',
+        },
+      },
+    };
+    deliveryMocks.validateMattermostSessionForExecution
+      .mockReturnValueOnce(validBoundary)
+      .mockReturnValueOnce(validBoundary)
+      .mockReturnValue({ strict: true, valid: false, reason: 'inactive_subscription' });
+    const deliver = vi.fn().mockResolvedValue('platform-message-id');
+    setDeliveryAdapter({ deliver });
+
+    await deliverSessionMessages(session);
+
+    expect(deliver).toHaveBeenCalledOnce();
+    expect(deliver.mock.calls[0][6]).toBe('out-before-deactivate');
+  });
+
   it('delivers a message exactly once when active and sweep polls overlap', async () => {
     seedAgentAndChannel();
     const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');

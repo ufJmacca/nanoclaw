@@ -211,6 +211,10 @@ describe('Mattermost create_agent isolation', () => {
       id: 'session-duplicate-self-route',
       created_at: new Date(Date.now() + 1).toISOString(),
     };
+    // Simulate a duplicate persisted by a pre-Phase-7 writer. Migration 015
+    // now rejects this state before installing the cardinality trigger, while
+    // runtime validation must still fail closed for a corrupt legacy database.
+    getDb().exec('DROP TRIGGER mattermost_guard_session_cardinality_insert');
     createSession(duplicate);
     initSessionFolder(duplicate.agent_group_id, duplicate.id);
 
