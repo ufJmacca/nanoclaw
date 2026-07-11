@@ -30,7 +30,7 @@ export function stopContainer(name: string): void {
   if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(name)) {
     throw new Error(`Invalid container name: ${name}`);
   }
-  execSync(`${CONTAINER_RUNTIME_BIN} stop -t 1 ${name}`, { stdio: 'pipe' });
+  execSync(`${CONTAINER_RUNTIME_BIN} stop -t 1 ${name}`, { stdio: 'pipe', timeout: 10_000 });
 }
 
 /** Ensure the container runtime is running, starting it if needed. */
@@ -64,7 +64,7 @@ export function ensureContainerRuntimeRunning(): void {
  * cannot reap our containers, and we cannot reap theirs. The label is
  * stamped onto every container at spawn time — see container-runner.ts.
  */
-export function cleanupOrphans(): void {
+function listOrphanContainers(): string[] {
   try {
     const output = execSync(
       `${CONTAINER_RUNTIME_BIN} ps --filter label=${CONTAINER_INSTALL_LABEL} --format '{{.Names}}'`,
@@ -73,18 +73,36 @@ export function cleanupOrphans(): void {
         encoding: 'utf-8',
       },
     );
-    const orphans = output.trim().split('\n').filter(Boolean);
-    for (const name of orphans) {
-      try {
-        stopContainer(name);
-      } catch {
-        /* already stopped */
-      }
-    }
-    if (orphans.length > 0) {
-      log.info('Stopped orphaned containers', { count: orphans.length, names: orphans });
-    }
+    return output.trim().split('\n').filter(Boolean);
   } catch (err) {
-    log.warn('Failed to clean up orphaned containers', { err });
+    log.error('Failed to enumerate orphaned containers', { err });
+    throw new Error('Failed to enumerate orphaned containers', { cause: err });
+  }
+}
+
+export function cleanupOrphans(): void {
+  const orphans = listOrphanContainers();
+  const failedStops: string[] = [];
+  for (const name of orphans) {
+    try {
+      stopContainer(name);
+      // Deliberately continue so every known orphan gets a stop request;
+      // failedStops below still makes the overall startup gate throw.
+      // eslint-disable-next-line no-catch-all/no-catch-all
+    } catch {
+      failedStops.push(name);
+    }
+  }
+  const survivors = orphans.length > 0 ? listOrphanContainers() : [];
+  if (survivors.length > 0) {
+    log.error('Orphaned containers remain after cleanup', { names: survivors });
+    throw new Error(`Orphaned containers remain after cleanup: ${survivors.join(', ')}`);
+  }
+  if (failedStops.length > 0) {
+    log.error('Failed to stop orphaned containers', { names: failedStops });
+    throw new Error(`Failed to stop orphaned containers: ${failedStops.join(', ')}`);
+  }
+  if (orphans.length > 0) {
+    log.info('Stopped orphaned containers', { count: orphans.length, names: orphans });
   }
 }

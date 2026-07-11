@@ -141,7 +141,12 @@ export function mattermostRetryDelayMs(
   policy: MattermostRetryPolicy,
 ): number | null {
   if (attempt >= policy.maxAttempts) return null;
-  if (response.status === 429) return rateLimitDelayMs(response.headers, policy.maxDelayMs);
+  if (response.status === 429) {
+    return (
+      rateLimitDelayMs(response.headers, policy.maxDelayMs) ??
+      exponentialBackoffMs(attempt, policy.baseDelayMs, policy.maxDelayMs)
+    );
+  }
   if (response.status >= 500 && response.status <= 599) {
     return exponentialBackoffMs(attempt, policy.baseDelayMs, policy.maxDelayMs);
   }

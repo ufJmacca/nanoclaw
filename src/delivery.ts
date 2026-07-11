@@ -51,7 +51,7 @@ const deliveryAttempts = new Map<string, number>();
  * Skipping (vs. queueing) is correct: any message left over when the
  * second caller skips will be picked up on the next poll tick (~1s).
  */
-const inflightDeliveries = new Set<string>();
+const inflightDeliveries = new Map<string, Promise<void>>();
 
 export interface ChannelDeliveryAdapter {
   /** Whether an adapter is currently active for this channel type. */
@@ -68,9 +68,18 @@ export interface ChannelDeliveryAdapter {
   setTyping?(channelType: string, platformId: string, threadId: string | null): Promise<void>;
 }
 
+/** A transient routing condition: leave the outbound row due for a later poll. */
+export class DeliveryAdapterUnavailableError extends Error {
+  constructor(channelType: string) {
+    super(`Delivery adapter unavailable for ${channelType}`);
+    this.name = 'DeliveryAdapterUnavailableError';
+  }
+}
+
 let deliveryAdapter: ChannelDeliveryAdapter | null = null;
 let activePolling = false;
 let sweepPolling = false;
+let deliveryIntakeOpen = false;
 
 /**
  * Callbacks fired when the delivery adapter is first set (and again if it's
@@ -114,6 +123,7 @@ export function setDeliveryAdapter(adapter: ChannelDeliveryAdapter): void {
 /** Start the active container poll loop (~1s). */
 export function startActiveDeliveryPoll(): void {
   if (activePolling) return;
+  deliveryIntakeOpen = true;
   activePolling = true;
   pollActive();
 }
@@ -121,8 +131,14 @@ export function startActiveDeliveryPoll(): void {
 /** Start the sweep poll loop (~60s). */
 export function startSweepDeliveryPoll(): void {
   if (sweepPolling) return;
+  deliveryIntakeOpen = true;
   sweepPolling = true;
   pollSweep();
+}
+
+/** Open direct delivery admission during host startup. */
+export function startDeliveryIntake(): void {
+  deliveryIntakeOpen = true;
 }
 
 async function pollActive(): Promise<void> {
@@ -131,13 +147,14 @@ async function pollActive(): Promise<void> {
   try {
     const sessions = getRunningSessions();
     for (const session of sessions) {
+      if (!activePolling) break;
       await deliverSessionMessages(session);
     }
   } catch (err) {
     log.error('Active delivery poll error', { err });
   }
 
-  setTimeout(pollActive, ACTIVE_POLL_MS);
+  if (activePolling) setTimeout(pollActive, ACTIVE_POLL_MS);
 }
 
 async function pollSweep(): Promise<void> {
@@ -146,25 +163,34 @@ async function pollSweep(): Promise<void> {
   try {
     const sessions = getActiveSessions();
     for (const session of sessions) {
+      if (!sweepPolling) break;
       await deliverSessionMessages(session);
     }
   } catch (err) {
     log.error('Sweep delivery poll error', { err });
   }
 
-  setTimeout(pollSweep, SWEEP_POLL_MS);
+  if (sweepPolling) setTimeout(pollSweep, SWEEP_POLL_MS);
 }
 
-export async function deliverSessionMessages(session: Session): Promise<void> {
+export function deliverSessionMessages(session: Session): Promise<void> {
+  if (!deliveryIntakeOpen) return Promise.resolve();
   // Reject re-entry from a concurrent poll on the same session — see the
   // comment on inflightDeliveries above.
-  if (inflightDeliveries.has(session.id)) return;
-  inflightDeliveries.add(session.id);
+  if (inflightDeliveries.has(session.id)) return Promise.resolve();
+  const draining = drainSession(session).finally(() => {
+    if (inflightDeliveries.get(session.id) === draining) {
+      inflightDeliveries.delete(session.id);
+    }
+  });
+  inflightDeliveries.set(session.id, draining);
+  return draining;
+}
 
-  try {
-    await drainSession(session);
-  } finally {
-    inflightDeliveries.delete(session.id);
+/** Wait until every delivery accepted before poll intake stopped has settled. */
+export async function awaitDeliveryDrains(): Promise<void> {
+  while (inflightDeliveries.size > 0) {
+    await Promise.allSettled([...inflightDeliveries.values()]);
   }
 }
 
@@ -217,6 +243,19 @@ async function drainSession(session: Session): Promise<void> {
         }
         currentMattermostBoundary = refreshedBoundary;
       }
+      if (
+        msg.kind !== 'system' &&
+        msg.channel_type !== 'agent' &&
+        msg.channel_type &&
+        (!deliveryAdapter || deliveryAdapter.isAvailable?.(msg.channel_type) === false)
+      ) {
+        log.warn('Delivery adapter unavailable; leaving outbound message due', {
+          messageId: msg.id,
+          sessionId: session.id,
+          channelType: msg.channel_type,
+        });
+        break;
+      }
       try {
         const platformMsgId = await deliverMessage(msg, session, inDb, currentMattermostBoundary);
         markDelivered(inDb, msg.id, platformMsgId ?? null);
@@ -232,6 +271,14 @@ async function drainSession(session: Session): Promise<void> {
           pauseTypingRefreshAfterDelivery(session.id);
         }
       } catch (err) {
+        if (err instanceof DeliveryAdapterUnavailableError) {
+          log.warn('Delivery adapter became unavailable; leaving outbound message due', {
+            messageId: msg.id,
+            sessionId: session.id,
+            channelType: msg.channel_type,
+          });
+          break;
+        }
         const attempts = (deliveryAttempts.get(msg.id) ?? 0) + 1;
         deliveryAttempts.set(msg.id, attempts);
         if (attempts >= MAX_DELIVERY_ATTEMPTS) {
@@ -474,6 +521,13 @@ async function handleSystemAction(
 }
 
 export function stopDeliveryPolls(): void {
+  deliveryIntakeOpen = false;
   activePolling = false;
   sweepPolling = false;
+}
+
+/** Stop poll admission before waiting for every already-started drain. */
+export async function stopAndDrainDeliveryPolls(): Promise<void> {
+  stopDeliveryPolls();
+  await awaitDeliveryDrains();
 }

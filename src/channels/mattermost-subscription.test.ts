@@ -413,6 +413,62 @@ describe('Mattermost subscription lifecycle', () => {
     expect(wakeContainer).toHaveBeenCalledTimes(1);
   });
 
+  it('accepts an exact crash-replayed Mattermost post once without a second wake', async () => {
+    const channelA = subscribeMattermostChannelStrict({ instanceKey: 'primary', channelId: 'channel-a' });
+    const event = {
+      channelType: 'mattermost',
+      platformId: channelA.messagingGroup.platform_id,
+      threadId: 'root-a',
+      message: {
+        id: 'post-crash-replay',
+        kind: 'chat' as const,
+        content: JSON.stringify({ senderId: 'mattermost:user-a', text: 'EXACT_REPLAY' }),
+        timestamp: '2026-07-11T00:00:00.000Z',
+        isGroup: true,
+      },
+    };
+
+    wakeContainer.mockClear();
+    await routeInbound(event);
+    await expect(routeInbound(event)).resolves.toBeUndefined();
+
+    const [sessionA] = getSessionsByAgentGroup(channelA.agentGroup.id);
+    const inbound = openInboundDb(channelA.agentGroup.id, sessionA.id);
+    expect(inbound.prepare('SELECT id, content FROM messages_in').all()).toEqual([
+      {
+        id: `post-crash-replay:${channelA.agentGroup.id}`,
+        content: event.message.content,
+      },
+    ]);
+    inbound.close();
+    expect(wakeContainer).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects a crash replay whose deterministic Mattermost message identity changed', async () => {
+    const channelA = subscribeMattermostChannelStrict({ instanceKey: 'primary', channelId: 'channel-a' });
+    const event = {
+      channelType: 'mattermost',
+      platformId: channelA.messagingGroup.platform_id,
+      threadId: 'root-a',
+      message: {
+        id: 'post-collision',
+        kind: 'chat' as const,
+        content: JSON.stringify({ senderId: 'mattermost:user-a', text: 'ORIGINAL' }),
+        timestamp: '2026-07-11T00:00:00.000Z',
+        isGroup: true,
+      },
+    };
+
+    await routeInbound(event);
+    await expect(
+      routeInbound({
+        ...event,
+        message: { ...event.message, content: JSON.stringify({ senderId: 'mattermost:user-a', text: 'MUTATED' }) },
+      }),
+    ).rejects.toThrow('Mattermost replay message identity collision');
+    expect(wakeContainer).toHaveBeenCalledTimes(1);
+  });
+
   it('prevents a stale route from creating a new active session after unsubscribe', async () => {
     const channelA = subscribeMattermostChannelStrict({ instanceKey: 'primary', channelId: 'channel-a' });
     const oldSession = resolveSession(

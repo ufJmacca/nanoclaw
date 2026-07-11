@@ -40,6 +40,11 @@ export interface MattermostSubscriptionInput {
   instanceKey: string;
   channelId: string;
   channelName?: string;
+  /** Authenticated post that authorized this activation; never includes content. */
+  recoveryBaseline?: {
+    postId: string;
+    createAt: number;
+  };
 }
 
 export interface MattermostSubscriptionResult {
@@ -115,7 +120,11 @@ export type MattermostSessionExecutionBoundary =
 export function subscribeMattermostChannelStrict(input: MattermostSubscriptionInput): MattermostSubscriptionResult {
   if (
     !isValidSubscriptionIdentityComponent(input.instanceKey) ||
-    !isValidSubscriptionIdentityComponent(input.channelId)
+    !isValidSubscriptionIdentityComponent(input.channelId) ||
+    (input.recoveryBaseline !== undefined &&
+      (!isValidSubscriptionIdentityComponent(input.recoveryBaseline.postId) ||
+        !Number.isSafeInteger(input.recoveryBaseline.createAt) ||
+        input.recoveryBaseline.createAt < 0))
   ) {
     throw new Error('Invalid Mattermost subscription identity');
   }
@@ -166,6 +175,7 @@ export function subscribeMattermostChannelStrict(input: MattermostSubscriptionIn
           if (!validation.valid) {
             throw new Error(`Invalid Mattermost subscription topology: ${validation.reason}`);
           }
+          seedMattermostRecoveryBaseline(input);
           result = validation.value;
           return;
         }
@@ -227,6 +237,7 @@ export function subscribeMattermostChannelStrict(input: MattermostSubscriptionIn
             wiring.id,
             messagingGroup.created_at,
           );
+        seedMattermostRecoveryBaseline(input);
         result = { messagingGroup, agentGroup, wiring };
 
         // Atomically claim the two channel-owned roots. Observation alone is
@@ -250,6 +261,27 @@ export function subscribeMattermostChannelStrict(input: MattermostSubscriptionIn
 
   if (!result) throw new Error('Mattermost subscription transaction produced no result');
   return result;
+}
+
+function seedMattermostRecoveryBaseline(input: MattermostSubscriptionInput): void {
+  const baseline = input.recoveryBaseline;
+  if (!baseline) return;
+  getDb()
+    .prepare(
+      `INSERT INTO mattermost_recovery_cursors (
+         instance_key, channel_id, last_post_created_at, last_post_id, updated_at
+       ) VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(instance_key, channel_id) DO UPDATE SET
+         last_post_created_at = excluded.last_post_created_at,
+         last_post_id = excluded.last_post_id,
+         updated_at = excluded.updated_at
+       WHERE excluded.last_post_created_at > mattermost_recovery_cursors.last_post_created_at
+          OR (
+            excluded.last_post_created_at = mattermost_recovery_cursors.last_post_created_at
+            AND excluded.last_post_id > COALESCE(mattermost_recovery_cursors.last_post_id, '')
+          )`,
+    )
+    .run(input.instanceKey, input.channelId, baseline.createAt, baseline.postId, new Date().toISOString());
 }
 
 export async function deactivateMattermostChannelStrict(
@@ -417,7 +449,15 @@ export async function handleMattermostBotRemoved(platformId: string): Promise<vo
         .prepare(
           `DELETE FROM pending_mattermost_channel_approvals
             WHERE instance_key = ? AND channel_id = ?
-              AND status IN ('pending', 'processing')`,
+              AND status IN ('pending', 'processing')
+              AND (
+                status = 'pending'
+                OR NOT EXISTS (
+                  SELECT 1
+                    FROM mattermost_approval_recovery_quarantine quarantine
+                   WHERE quarantine.approval_id = pending_mattermost_channel_approvals.approval_id
+                )
+              )`,
         )
         .run(instanceKey, channelId);
       getDb()

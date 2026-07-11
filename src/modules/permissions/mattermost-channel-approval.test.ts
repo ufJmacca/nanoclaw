@@ -53,6 +53,7 @@ import {
   handleMattermostBotRemoved,
   subscribeMattermostChannelStrict,
 } from '../../channels/mattermost-subscription.js';
+import { MattermostInboundProcessor } from '../../channels/mattermost-inbound.js';
 import { openInboundDb } from '../../session-manager.js';
 import { getAskQuestionRender } from '../../db/sessions.js';
 import { grantRole } from './db/user-roles.js';
@@ -561,6 +562,213 @@ describe('Mattermost channel subscription approval', () => {
         .prepare('SELECT status, replayed_at IS NOT NULL AS replayed FROM pending_mattermost_channel_approvals')
         .get(),
     ).toEqual({ status: 'completed', replayed: 1 });
+  });
+
+  it('holds a newer live post behind the approval trigger replay for the same channel', async () => {
+    const trigger = unknownMattermostMention();
+    await routeInbound(trigger);
+    const pending = getDb().prepare('SELECT approval_id FROM pending_mattermost_channel_approvals').get() as {
+      approval_id: string;
+    };
+    let releaseTriggerWake!: () => void;
+    const triggerWake = new Promise<boolean>((resolve) => {
+      releaseTriggerWake = () => resolve(true);
+    });
+    approvalMocks.wakeContainer.mockImplementationOnce(() => triggerWake).mockResolvedValue(true);
+    const { getResponseHandlers } = await import('../../response-registry.js');
+    const approve = (async (): Promise<void> => {
+      for (const handler of getResponseHandlers()) {
+        if (
+          await handler({
+            questionId: pending.approval_id,
+            value: 'approve',
+            userId: 'owner',
+            channelType: 'telegram',
+            platformId: 'telegram:owner-dm',
+            threadId: null,
+          })
+        ) {
+          return;
+        }
+      }
+    })();
+    await vi.waitFor(() => expect(approvalMocks.wakeContainer).toHaveBeenCalledOnce());
+
+    const livePayload = JSON.stringify({
+      event: 'posted',
+      data: {
+        sender_name: 'Mattermost Requester',
+        mentions: JSON.stringify(['bot-user-id']),
+        post: JSON.stringify({
+          id: 'mattermost-live-after-approval',
+          channel_id: 'channel-awaiting-owner',
+          user_id: 'user-requester',
+          root_id: 'root-live',
+          message: '@nanoclaw newer live message',
+          create_at: Date.parse(trigger.message.timestamp) + 1,
+        }),
+      },
+      broadcast: { channel_id: 'channel-awaiting-owner' },
+    });
+    const processor = new MattermostInboundProcessor(
+      { instanceKey: 'primary', botUserId: 'bot-user-id' },
+      routeInbound,
+    );
+    let liveSettled = false;
+    const live = processor.handle(livePayload).then((handled) => {
+      liveSettled = true;
+      return handled;
+    });
+
+    try {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(approvalMocks.wakeContainer).toHaveBeenCalledOnce();
+      expect(liveSettled).toBe(false);
+    } finally {
+      releaseTriggerWake();
+      await Promise.allSettled([approve, live]);
+    }
+
+    await expect(approve).resolves.toBeUndefined();
+    await expect(live).resolves.toBe(true);
+    const subscription = getDb().prepare('SELECT agent_group_id FROM mattermost_subscriptions').get() as {
+      agent_group_id: string;
+    };
+    const session = getDb()
+      .prepare('SELECT id FROM sessions WHERE agent_group_id = ?')
+      .get(subscription.agent_group_id) as {
+      id: string;
+    };
+    const inbound = openInboundDb(subscription.agent_group_id, session.id);
+    expect(inbound.prepare('SELECT id FROM messages_in ORDER BY seq').all()).toEqual([
+      { id: `${trigger.message.id}:${subscription.agent_group_id}` },
+      { id: `mattermost-live-after-approval:${subscription.agent_group_id}` },
+    ]);
+    inbound.close();
+  });
+
+  it('does not activate an approval behind an earlier queued bot removal', async () => {
+    await routeInbound(unknownMattermostMention());
+    const pending = getDb().prepare('SELECT approval_id FROM pending_mattermost_channel_approvals').get() as {
+      approval_id: string;
+    };
+    let releaseRemoval!: () => void;
+    const removalBarrier = new Promise<void>((resolve) => {
+      releaseRemoval = resolve;
+    });
+    let removalStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      removalStarted = resolve;
+    });
+    const processor = new MattermostInboundProcessor({ instanceKey: 'primary', botUserId: 'bot-user-id' }, vi.fn());
+    const removal = processor.handleLifecycle(
+      { kind: 'bot_removed', platformId: 'mattermost:primary:channel-awaiting-owner' },
+      async (event) => {
+        removalStarted();
+        await removalBarrier;
+        await handleMattermostBotRemoved(event.platformId);
+      },
+    );
+    await started;
+    const { getResponseHandlers } = await import('../../response-registry.js');
+    const approve = (async (): Promise<void> => {
+      for (const handler of getResponseHandlers()) {
+        if (
+          await handler({
+            questionId: pending.approval_id,
+            value: 'approve',
+            userId: 'owner',
+            channelType: 'telegram',
+            platformId: 'telegram:owner-dm',
+            threadId: null,
+          })
+        ) {
+          return;
+        }
+      }
+    })();
+
+    releaseRemoval();
+    await Promise.all([removal, approve]);
+
+    expect(getDb().prepare('SELECT COUNT(*) AS count FROM pending_mattermost_channel_approvals').get()).toEqual({
+      count: 0,
+    });
+    expect(getDb().prepare('SELECT COUNT(*) AS count FROM mattermost_subscriptions').get()).toEqual({ count: 0 });
+    expect(
+      getDb()
+        .prepare(
+          `SELECT denied_at IS NOT NULL AS denied
+             FROM messaging_groups
+            WHERE platform_id = 'mattermost:primary:channel-awaiting-owner'`,
+        )
+        .get(),
+    ).toEqual({ denied: 1 });
+    expect(approvalMocks.wakeContainer).not.toHaveBeenCalled();
+  });
+
+  it('blocks newer channel work after approval replay fails until the exact trigger is recovered', async () => {
+    const trigger = unknownMattermostMention();
+    await routeInbound(trigger);
+    const pending = getDb().prepare('SELECT approval_id FROM pending_mattermost_channel_approvals').get() as {
+      approval_id: string;
+    };
+    approvalMocks.wakeContainer.mockRejectedValueOnce(new Error('injected approval trigger wake failure'));
+    const { getResponseHandlers } = await import('../../response-registry.js');
+    const approve = async (): Promise<void> => {
+      for (const handler of getResponseHandlers()) {
+        if (
+          await handler({
+            questionId: pending.approval_id,
+            value: 'approve',
+            userId: 'owner',
+            channelType: 'telegram',
+            platformId: 'telegram:owner-dm',
+            threadId: null,
+          })
+        ) {
+          return;
+        }
+      }
+    };
+    await expect(approve()).rejects.toThrow('injected approval trigger wake failure');
+    expect(getDb().prepare('SELECT status FROM pending_mattermost_channel_approvals').get()).toEqual({
+      status: 'processing',
+    });
+
+    const onInbound = vi.fn().mockResolvedValue(undefined);
+    const processor = new MattermostInboundProcessor({ instanceKey: 'primary', botUserId: 'bot-user-id' }, onInbound);
+    const posted = (channelId: string, postId: string) =>
+      JSON.stringify({
+        event: 'posted',
+        data: {
+          post: JSON.stringify({
+            id: postId,
+            channel_id: channelId,
+            user_id: 'user-requester',
+            root_id: '',
+            message: postId,
+            create_at: Date.parse(trigger.message.timestamp) + 1,
+          }),
+        },
+        broadcast: { channel_id: channelId },
+      });
+    const newerChannelA = posted('channel-awaiting-owner', 'mattermost-newer-channel-a');
+    const channelB = posted('independent-channel-b', 'mattermost-independent-channel-b');
+
+    await expect(processor.handle(newerChannelA)).rejects.toThrow(
+      'Mattermost channel ingress is blocked by an earlier failed post',
+    );
+    await expect(processor.handle(channelB)).resolves.toBe(true);
+    expect(onInbound.mock.calls.map(([event]) => event.message.id)).toEqual(['mattermost-independent-channel-b']);
+
+    const { recoverProcessingMattermostChannelApprovals } = await import('./mattermost-channel-approval.js');
+    await expect(recoverProcessingMattermostChannelApprovals()).resolves.toEqual({ completed: 1, quarantined: 0 });
+    await expect(processor.handle(newerChannelA)).resolves.toBe(true);
+    expect(onInbound.mock.calls.map(([event]) => event.message.id)).toEqual([
+      'mattermost-independent-channel-b',
+      'mattermost-newer-channel-a',
+    ]);
   });
 
   it('releases a failed approval claim so the exact trigger can be retried safely', async () => {

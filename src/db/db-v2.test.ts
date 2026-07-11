@@ -32,6 +32,7 @@ import {
   getPendingQuestion,
   deletePendingQuestion,
 } from './index.js';
+import * as dbModule from './index.js';
 
 function now() {
   return new Date().toISOString();
@@ -54,6 +55,244 @@ describe('migrations', () => {
     runMigrations(db);
     // Running again should not throw
     runMigrations(db);
+  });
+
+  it('installs durable Mattermost recovery cursors and content-free post receipts', () => {
+    const db = initTestDb();
+    runMigrations(db);
+
+    expect(
+      (db.prepare("PRAGMA table_info('mattermost_recovery_cursors')").all() as Array<{ name: string }>).map(
+        ({ name }) => name,
+      ),
+    ).toEqual(['instance_key', 'channel_id', 'last_post_created_at', 'last_post_id', 'updated_at']);
+    expect(
+      (db.prepare("PRAGMA table_info('mattermost_post_receipts')").all() as Array<{ name: string }>).map(
+        ({ name }) => name,
+      ),
+    ).toEqual([
+      'instance_key',
+      'post_id',
+      'channel_id',
+      'create_at',
+      'payload_digest',
+      'status',
+      'claimed_at',
+      'completed_at',
+    ]);
+  });
+
+  it('installs subscription-independent Mattermost receipt retention floors', () => {
+    const db = initTestDb();
+    runMigrations(db);
+
+    expect(
+      (db.prepare("PRAGMA table_info('mattermost_receipt_retention_floors')").all() as Array<{ name: string }>).map(
+        ({ name }) => name,
+      ),
+    ).toEqual(['instance_key', 'channel_id', 'reject_before_create_at', 'updated_at']);
+    db.prepare(
+      `INSERT INTO mattermost_receipt_retention_floors (
+         instance_key, channel_id, reject_before_create_at, updated_at
+       ) VALUES (?, ?, ?, ?)`,
+    ).run('primary', 'unknown-channel', 100, now());
+    expect(() =>
+      db
+        .prepare(
+          `INSERT INTO mattermost_receipt_retention_floors (
+             instance_key, channel_id, reject_before_create_at, updated_at
+           ) VALUES (?, ?, ?, ?)`,
+        )
+        .run('primary', 'negative-floor-channel', -1, now()),
+    ).toThrow();
+    expect(() =>
+      db
+        .prepare(
+          `INSERT INTO mattermost_receipt_retention_floors (
+             instance_key, channel_id, reject_before_create_at, updated_at
+           ) VALUES (?, ?, ?, ?)`,
+        )
+        .run('primary', 'unknown-channel', 200, now()),
+    ).toThrow();
+  });
+
+  it('installs one central host execution lease before container admission', () => {
+    const db = initTestDb();
+    runMigrations(db);
+
+    expect(
+      (db.prepare("PRAGMA table_info('host_execution_lease')").all() as Array<{ name: string }>).map(
+        ({ name }) => name,
+      ),
+    ).toEqual(['singleton_id', 'owner_id', 'pid', 'acquired_at']);
+    expect(() =>
+      db
+        .prepare('INSERT INTO host_execution_lease (singleton_id, owner_id, pid, acquired_at) VALUES (?, ?, ?, ?)')
+        .run(2, 'invalid-slot', 101, now()),
+    ).toThrow();
+    expect(() =>
+      db
+        .prepare('INSERT INTO host_execution_lease (singleton_id, owner_id, pid, acquired_at) VALUES (?, ?, ?, ?)')
+        .run(1, 'invalid-pid', 0, now()),
+    ).toThrow();
+    db.prepare('INSERT INTO host_execution_lease (singleton_id, owner_id, pid, acquired_at) VALUES (?, ?, ?, ?)').run(
+      1,
+      'valid-owner',
+      101,
+      now(),
+    );
+    expect(() =>
+      db
+        .prepare('INSERT INTO host_execution_lease (singleton_id, owner_id, pid, acquired_at) VALUES (?, ?, ?, ?)')
+        .run(1, 'second-owner', 202, now()),
+    ).toThrow();
+  });
+});
+
+describe('host execution lease', () => {
+  it('rejects a second live host before either can admit containers', () => {
+    const acquire = (
+      dbModule as typeof dbModule & {
+        acquireHostExecutionLease?: (
+          db: ReturnType<typeof initTestDb>,
+          options: {
+            pid: number;
+            ownerId: string;
+            now: () => string;
+            isProcessAlive: (pid: number) => boolean;
+          },
+        ) => { ownerId: string; pid: number };
+      }
+    ).acquireHostExecutionLease;
+    expect(acquire).toBeTypeOf('function');
+    if (!acquire) return;
+
+    const db = initTestDb();
+    runMigrations(db);
+    const alive = (pid: number) => pid === 101;
+    expect(
+      acquire(db, {
+        pid: 101,
+        ownerId: 'host-owner-a',
+        now: () => '2026-07-11T00:00:00.000Z',
+        isProcessAlive: alive,
+      }),
+    ).toEqual({ ownerId: 'host-owner-a', pid: 101 });
+    expect(() =>
+      acquire(db, {
+        pid: 202,
+        ownerId: 'host-owner-b',
+        now: () => '2026-07-11T00:00:01.000Z',
+        isProcessAlive: alive,
+      }),
+    ).toThrow('NanoClaw host execution lease is already held by a live process');
+  });
+
+  it('atomically reclaims a lease left by a process that is no longer alive', () => {
+    const acquire = (
+      dbModule as typeof dbModule & {
+        acquireHostExecutionLease?: (
+          db: ReturnType<typeof initTestDb>,
+          options: {
+            pid: number;
+            ownerId: string;
+            now: () => string;
+            isProcessAlive: (pid: number) => boolean;
+          },
+        ) => { ownerId: string; pid: number };
+      }
+    ).acquireHostExecutionLease;
+    expect(acquire).toBeTypeOf('function');
+    if (!acquire) return;
+
+    const db = initTestDb();
+    runMigrations(db);
+    acquire(db, {
+      pid: 101,
+      ownerId: 'stale-host-owner',
+      now: () => '2026-07-11T00:00:00.000Z',
+      isProcessAlive: () => false,
+    });
+
+    expect(
+      acquire(db, {
+        pid: 202,
+        ownerId: 'replacement-host-owner',
+        now: () => '2026-07-11T00:00:01.000Z',
+        isProcessAlive: (pid) => pid === 202,
+      }),
+    ).toEqual({ ownerId: 'replacement-host-owner', pid: 202 });
+    expect(db.prepare('SELECT owner_id, pid FROM host_execution_lease').get()).toEqual({
+      owner_id: 'replacement-host-owner',
+      pid: 202,
+    });
+  });
+
+  it('reclaims a stale generation when a restarted host reuses the same process id', () => {
+    const db = initTestDb();
+    runMigrations(db);
+    dbModule.acquireHostExecutionLease(db, {
+      pid: 101,
+      ownerId: 'same-pid-stale-owner',
+      now: () => '2026-07-11T00:00:00.000Z',
+      isProcessAlive: () => true,
+    });
+
+    expect(
+      dbModule.acquireHostExecutionLease(db, {
+        pid: 101,
+        ownerId: 'same-pid-restarted-owner',
+        now: () => '2026-07-11T00:00:01.000Z',
+        isProcessAlive: () => true,
+      }),
+    ).toEqual({ ownerId: 'same-pid-restarted-owner', pid: 101 });
+    expect(db.prepare('SELECT owner_id, pid FROM host_execution_lease').get()).toEqual({
+      owner_id: 'same-pid-restarted-owner',
+      pid: 101,
+    });
+  });
+
+  it('allows only the exact current owner to release host execution admission', () => {
+    const leaseModule = dbModule as typeof dbModule & {
+      acquireHostExecutionLease: (
+        db: ReturnType<typeof initTestDb>,
+        options: {
+          pid: number;
+          ownerId: string;
+          now: () => string;
+          isProcessAlive: (pid: number) => boolean;
+        },
+      ) => { ownerId: string; pid: number };
+      releaseHostExecutionLease?: (
+        db: ReturnType<typeof initTestDb>,
+        lease: { ownerId: string; pid: number },
+      ) => boolean;
+    };
+    expect(leaseModule.releaseHostExecutionLease).toBeTypeOf('function');
+    if (!leaseModule.releaseHostExecutionLease) return;
+
+    const db = initTestDb();
+    runMigrations(db);
+    const stale = leaseModule.acquireHostExecutionLease(db, {
+      pid: 101,
+      ownerId: 'stale-host-owner',
+      now: () => '2026-07-11T00:00:00.000Z',
+      isProcessAlive: () => false,
+    });
+    const current = leaseModule.acquireHostExecutionLease(db, {
+      pid: 202,
+      ownerId: 'current-host-owner',
+      now: () => '2026-07-11T00:00:01.000Z',
+      isProcessAlive: () => false,
+    });
+
+    expect(leaseModule.releaseHostExecutionLease(db, stale)).toBe(false);
+    expect(db.prepare('SELECT owner_id, pid FROM host_execution_lease').get()).toEqual({
+      owner_id: 'current-host-owner',
+      pid: 202,
+    });
+    expect(leaseModule.releaseHostExecutionLease(db, current)).toBe(true);
+    expect(db.prepare('SELECT 1 FROM host_execution_lease').get()).toBeUndefined();
   });
 });
 
@@ -143,6 +382,33 @@ describe('messaging groups', () => {
     createMessagingGroup(mg());
     updateMessagingGroup('mg-1', { name: 'Updated' });
     expect(getMessagingGroup('mg-1')!.name).toBe('Updated');
+  });
+
+  it('updates discovered metadata without changing platform identity', () => {
+    createMessagingGroup({ ...mg(), channel_type: 'mattermost', platform_id: 'mattermost:primary:channel-a' });
+    const updateMetadata = (
+      dbModule as typeof dbModule & {
+        updateMessagingGroupMetadataByPlatform?: (
+          channelType: string,
+          platformId: string,
+          name: string,
+          isGroup: boolean,
+        ) => boolean;
+      }
+    ).updateMessagingGroupMetadataByPlatform;
+    expect(updateMetadata).toBeTypeOf('function');
+    if (!updateMetadata) return;
+
+    expect(updateMetadata('mattermost', 'mattermost:primary:channel-a', 'Renamed Channel', true)).toBe(true);
+    expect(getMessagingGroup('mg-1')).toMatchObject({
+      id: 'mg-1',
+      channel_type: 'mattermost',
+      platform_id: 'mattermost:primary:channel-a',
+      name: 'Renamed Channel',
+      is_group: 1,
+    });
+    expect(updateMetadata('mattermost', 'mattermost:primary:channel-b', 'Wrong Channel', true)).toBe(false);
+    expect(getMessagingGroup('mg-1')!.name).toBe('Renamed Channel');
   });
 
   it('should delete', () => {

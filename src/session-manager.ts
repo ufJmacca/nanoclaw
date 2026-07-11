@@ -12,6 +12,7 @@
  */
 import type Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import fs from 'fs';
 import path from 'path';
 
@@ -59,6 +60,59 @@ const EXPECTED_UNSAFE_PATH_ERRORS = new Set(['EACCES', 'EEXIST', 'EINVAL', 'ELOO
 interface DirectoryHandle {
   fd: number;
   descriptorRoot: string;
+}
+
+interface SessionMessageReplayIdentity {
+  kind: string;
+  timestamp: string;
+  platform_id: string | null;
+  channel_type: string | null;
+  thread_id: string | null;
+  content: string;
+  process_after: string | null;
+  recurrence: string | null;
+  series_id: string;
+  trigger: number;
+}
+
+function mattermostReplayContentWithoutDisplaySender(content: string): Record<string, unknown> | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(content);
+  } catch (err) {
+    if (err instanceof SyntaxError) return null;
+    throw err;
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+  const record = parsed as Record<string, unknown>;
+  if (
+    ('sender' in record && typeof record.sender !== 'string') ||
+    typeof record.senderId !== 'string' ||
+    typeof record.text !== 'string'
+  ) {
+    return null;
+  }
+  const stable = { ...record };
+  delete stable.sender;
+  return stable;
+}
+
+function isExactSessionMessageReplay(
+  existing: SessionMessageReplayIdentity,
+  expected: SessionMessageReplayIdentity,
+): boolean {
+  for (const [key, value] of Object.entries(expected)) {
+    if (key !== 'content' && existing[key as keyof SessionMessageReplayIdentity] !== value) return false;
+  }
+  if (existing.content === expected.content) return true;
+  if (expected.channel_type !== 'mattermost') return false;
+  const existingStableContent = mattermostReplayContentWithoutDisplaySender(existing.content);
+  const expectedStableContent = mattermostReplayContentWithoutDisplaySender(expected.content);
+  return (
+    existingStableContent !== null &&
+    expectedStableContent !== null &&
+    isDeepStrictEqual(existingStableContent, expectedStableContent)
+  );
 }
 
 class SecureDescriptorUnavailableError extends Error {
@@ -320,13 +374,42 @@ export function writeSessionMessage(
      * a trigger-1 message does arrive.
      */
     trigger?: 0 | 1;
+    /** Accept an exact stable replay of this deterministic external message ID. */
+    idempotent?: boolean;
   },
-): void {
+): boolean {
   // Extract base64 attachment data, save to inbox, replace with file paths
   const content = extractAttachmentFiles(agentGroupId, sessionId, message.id, message.content);
 
   const db = openInboundDb(agentGroupId, sessionId);
   try {
+    if (message.idempotent) {
+      const existing = db
+        .prepare(
+          `SELECT kind, timestamp, platform_id, channel_type, thread_id, content,
+                  process_after, recurrence, series_id, trigger
+             FROM messages_in WHERE id = ?`,
+        )
+        .get(message.id) as SessionMessageReplayIdentity | undefined;
+      if (existing) {
+        const expected = {
+          kind: message.kind,
+          timestamp: message.timestamp,
+          platform_id: message.platformId ?? null,
+          channel_type: message.channelType ?? null,
+          thread_id: message.threadId ?? null,
+          content,
+          process_after: message.processAfter ?? null,
+          recurrence: message.recurrence ?? null,
+          series_id: message.id,
+          trigger: message.trigger ?? 1,
+        };
+        if (isExactSessionMessageReplay(existing, expected)) {
+          return false;
+        }
+        throw new Error('Mattermost replay message identity collision');
+      }
+    }
     insertMessage(db, {
       id: message.id,
       kind: message.kind,
@@ -344,6 +427,7 @@ export function writeSessionMessage(
   }
 
   updateSession(sessionId, { last_active: new Date().toISOString() });
+  return true;
 }
 
 /**

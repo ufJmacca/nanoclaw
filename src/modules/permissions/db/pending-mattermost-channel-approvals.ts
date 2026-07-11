@@ -44,6 +44,17 @@ export interface PendingMattermostChannelApproval {
   options_json: string;
 }
 
+export type MattermostApprovalRecoveryQuarantineReason =
+  | 'invalid_stored_event'
+  | 'event_identity_mismatch'
+  | 'non_pristine_placeholder'
+  | 'orphan_workspace_identity'
+  | 'invalid_subscription_topology'
+  | 'unsafe_subscription_filesystem'
+  | 'invalid_session_topology'
+  | 'message_identity_collision'
+  | 'bot_membership_absent';
+
 export function createPendingMattermostChannelApproval(row: PendingMattermostChannelApproval): boolean {
   const result = getDb()
     .prepare(
@@ -104,6 +115,51 @@ export function getPendingMattermostChannelApproval(approvalId: string): Pending
     | undefined;
 }
 
+export function listProcessingMattermostChannelApprovals(instanceKey?: string): PendingMattermostChannelApproval[] {
+  const instancePredicate = instanceKey === undefined ? '' : 'AND pending.instance_key = ?';
+  return getDb()
+    .prepare(
+      `SELECT pending.*
+         FROM pending_mattermost_channel_approvals pending
+         LEFT JOIN mattermost_approval_recovery_quarantine quarantine
+           ON quarantine.approval_id = pending.approval_id
+        WHERE pending.status = 'processing'
+          AND quarantine.approval_id IS NULL
+          ${instancePredicate}
+        ORDER BY pending.created_at, pending.approval_id`,
+    )
+    .all(...(instanceKey === undefined ? [] : [instanceKey])) as PendingMattermostChannelApproval[];
+}
+
+export function listUnfinishedMattermostChannelApprovals(instanceKey: string): PendingMattermostChannelApproval[] {
+  return getDb()
+    .prepare(
+      `SELECT *
+         FROM pending_mattermost_channel_approvals
+        WHERE instance_key = ? AND status IN ('pending', 'processing')
+        ORDER BY created_at, approval_id`,
+    )
+    .all(instanceKey) as PendingMattermostChannelApproval[];
+}
+
+export function quarantineProcessingMattermostChannelApproval(
+  approvalId: string,
+  reason: MattermostApprovalRecoveryQuarantineReason,
+  quarantinedAt: string,
+): boolean {
+  const result = getDb()
+    .prepare(
+      `INSERT OR IGNORE INTO mattermost_approval_recovery_quarantine (
+         approval_id, reason, quarantined_at
+       )
+       SELECT approval_id, ?, ?
+         FROM pending_mattermost_channel_approvals
+        WHERE approval_id = ? AND status = 'processing'`,
+    )
+    .run(reason, quarantinedAt, approvalId);
+  return result.changes === 1;
+}
+
 export function claimPendingMattermostChannelApproval(
   approvalId: string,
 ): PendingMattermostChannelApproval | undefined {
@@ -117,14 +173,19 @@ export function claimPendingMattermostChannelApproval(
     .get(approvalId) as PendingMattermostChannelApproval | undefined;
 }
 
-export function completeMattermostChannelApprovalReplay(approvalId: string, replayedAt: string): void {
-  getDb()
+export function completeMattermostChannelApprovalReplay(approvalId: string, replayedAt: string): boolean {
+  const result = getDb()
     .prepare(
       `UPDATE pending_mattermost_channel_approvals
           SET status = 'completed', replayed_at = ?
-        WHERE approval_id = ? AND status = 'processing'`,
+        WHERE approval_id = ? AND status = 'processing'
+          AND NOT EXISTS (
+            SELECT 1 FROM mattermost_approval_recovery_quarantine quarantine
+             WHERE quarantine.approval_id = pending_mattermost_channel_approvals.approval_id
+          )`,
     )
     .run(replayedAt, approvalId);
+  return result.changes === 1;
 }
 
 export function releasePendingMattermostChannelApproval(approvalId: string): void {
@@ -133,6 +194,10 @@ export function releasePendingMattermostChannelApproval(approvalId: string): voi
       `UPDATE pending_mattermost_channel_approvals
           SET status = 'pending'
         WHERE approval_id = ? AND status = 'processing'
+          AND NOT EXISTS (
+            SELECT 1 FROM mattermost_approval_recovery_quarantine quarantine
+             WHERE quarantine.approval_id = pending_mattermost_channel_approvals.approval_id
+          )
           AND ${PRISTINE_PENDING_BOUNDARY_SQL}`,
     )
     .run(approvalId);

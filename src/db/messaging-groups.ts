@@ -96,6 +96,25 @@ export function updateMessagingGroup(
     .run(values);
 }
 
+export function updateMessagingGroupMetadataByPlatform(
+  channelType: string,
+  platformId: string,
+  name: string,
+  isGroup: boolean,
+): boolean {
+  const normalizedName = name.trim();
+  if (!normalizedName) return false;
+  return (
+    getDb()
+      .prepare(
+        `UPDATE messaging_groups
+            SET name = ?, is_group = ?
+          WHERE channel_type = ? AND platform_id = ?`,
+      )
+      .run(normalizedName, isGroup ? 1 : 0, channelType, platformId).changes === 1
+  );
+}
+
 export function deleteMessagingGroup(id: string): void {
   getDb().prepare('DELETE FROM messaging_groups WHERE id = ?').run(id);
 }

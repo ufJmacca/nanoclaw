@@ -406,6 +406,15 @@ CREATE TABLE sessions (
 CREATE INDEX idx_sessions_agent_group ON sessions(agent_group_id);
 CREATE INDEX idx_sessions_lookup ON sessions(messaging_group_id, thread_id);
 
+-- Exactly one NanoClaw host may admit container executions for this central
+-- database. The owner process is checked before stale crash state is replaced.
+CREATE TABLE host_execution_lease (
+  singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+  owner_id     TEXT NOT NULL CHECK (length(owner_id) BETWEEN 1 AND 128),
+  pid          INTEGER NOT NULL CHECK (pid > 0),
+  acquired_at  TEXT NOT NULL
+);
+
 -- Host-side state for owner-authorized creation of a new dedicated
 -- Mattermost subscription. Completed/rejected rows are retained as audit
 -- state; only pending/processing rows can be decided.
@@ -426,6 +435,70 @@ CREATE TABLE pending_mattermost_channel_approvals (
   title              TEXT NOT NULL,
   options_json       TEXT NOT NULL,
   UNIQUE (instance_key, channel_id)
+);
+
+-- Durable content-free recovery state. Cursors advance only after a complete
+-- channel recovery window is proven; receipts never store raw post bodies.
+CREATE TABLE mattermost_recovery_cursors (
+  instance_key         TEXT NOT NULL,
+  channel_id           TEXT NOT NULL,
+  last_post_created_at INTEGER NOT NULL DEFAULT 0 CHECK (last_post_created_at >= 0),
+  last_post_id         TEXT,
+  updated_at           TEXT NOT NULL,
+  PRIMARY KEY (instance_key, channel_id),
+  FOREIGN KEY (instance_key, channel_id)
+    REFERENCES mattermost_subscriptions(instance_key, channel_id)
+);
+
+CREATE TABLE mattermost_post_receipts (
+  instance_key  TEXT NOT NULL,
+  post_id       TEXT NOT NULL,
+  channel_id    TEXT NOT NULL,
+  create_at     INTEGER NOT NULL CHECK (create_at >= 0),
+  payload_digest TEXT NOT NULL,
+  status        TEXT NOT NULL CHECK (status IN ('processing', 'completed')),
+  claimed_at    TEXT NOT NULL,
+  completed_at  TEXT,
+  PRIMARY KEY (instance_key, post_id),
+  CHECK (
+       (status = 'processing' AND completed_at IS NULL)
+    OR (status = 'completed' AND completed_at IS NOT NULL)
+  )
+);
+CREATE INDEX idx_mattermost_post_receipts_channel_created
+  ON mattermost_post_receipts(instance_key, channel_id, create_at, post_id);
+
+-- A compact, content-free rejection boundary for completed receipts retired
+-- from bounded storage. It deliberately has no subscription foreign key:
+-- unknown and owner-pending channels receive durable deduplication too.
+CREATE TABLE mattermost_receipt_retention_floors (
+  instance_key            TEXT NOT NULL,
+  channel_id              TEXT NOT NULL,
+  reject_before_create_at INTEGER NOT NULL CHECK (reject_before_create_at >= 0),
+  updated_at              TEXT NOT NULL,
+  PRIMARY KEY (instance_key, channel_id)
+);
+
+-- A processing approval is durable evidence that the designated owner
+-- already authorized the subscription. Deterministically corrupt recovery
+-- state remains non-rejectable in processing while this content-free record
+-- prevents repeated automatic recovery attempts.
+CREATE TABLE mattermost_approval_recovery_quarantine (
+  approval_id   TEXT PRIMARY KEY
+                REFERENCES pending_mattermost_channel_approvals(approval_id)
+                ON DELETE CASCADE,
+  reason        TEXT NOT NULL CHECK (reason IN (
+                  'invalid_stored_event',
+                  'event_identity_mismatch',
+                  'non_pristine_placeholder',
+                  'orphan_workspace_identity',
+                  'invalid_subscription_topology',
+                  'unsafe_subscription_filesystem',
+                  'invalid_session_topology',
+                  'message_identity_collision',
+                  'bot_membership_absent'
+                )),
+  quarantined_at TEXT NOT NULL
 );
 
 -- Phase 7 lifecycle guards. Application services perform the same checks,

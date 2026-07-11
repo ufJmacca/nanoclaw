@@ -27,6 +27,14 @@ describe('createChannelDeliveryBridge', () => {
     expect(bridge.isAvailable?.('missing')).toBe(false);
   });
 
+  it('reports a registered but disconnected adapter as unavailable', () => {
+    const adapter = fakeAdapter(() => undefined);
+    vi.mocked(adapter.isConnected).mockReturnValue(false);
+    const bridge = createChannelDeliveryBridge(() => adapter);
+
+    expect(bridge.isAvailable?.('mattermost')).toBe(false);
+  });
+
   it('preserves existing outbound content and routing', async () => {
     const delivered: OutboundMessage[] = [];
     const adapter = fakeAdapter((message) => delivered.push(message));
@@ -59,5 +67,16 @@ describe('createChannelDeliveryBridge', () => {
 
     expect(delivered).toHaveLength(1);
     expect(delivered[0]).toMatchObject({ deliveryId: 'out-stable-delivery-id' });
+  });
+
+  it('rejects when an adapter disappears between availability and delivery', async () => {
+    const adapter = fakeAdapter(() => undefined);
+    const lookup = vi.fn().mockReturnValueOnce(adapter).mockReturnValueOnce(undefined);
+    const bridge = createChannelDeliveryBridge(lookup);
+
+    expect(bridge.isAvailable?.('mattermost')).toBe(true);
+    await expect(
+      bridge.deliver('mattermost', 'channel-id', null, 'chat', JSON.stringify({ text: 'hello' })),
+    ).rejects.toThrow('Delivery adapter unavailable for mattermost');
   });
 });
