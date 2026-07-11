@@ -98,6 +98,8 @@ export interface OutboundMessage {
   kind: string;
   content: unknown; // parsed JSON from messages_out
   files?: OutboundFile[]; // file attachments from the session outbox
+  /** Stable host outbox identity used by adapters for idempotent delivery. */
+  deliveryId?: string;
 }
 
 /** Discovered conversation info (from syncConversations). */

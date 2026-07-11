@@ -75,6 +75,26 @@ afterEach(() => {
 });
 
 describe('deliverSessionMessages — concurrent invocations', () => {
+  it('forwards the stable outbox message id as the delivery id', async () => {
+    seedAgentAndChannel();
+    const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
+    insertOutbound('ag-1', session.id, 'out-stable-delivery-id');
+    const deliver = vi.fn().mockResolvedValue('platform-message-id');
+    setDeliveryAdapter({ deliver });
+
+    await deliverSessionMessages(session);
+
+    expect(deliver).toHaveBeenCalledWith(
+      'telegram',
+      'telegram:123',
+      null,
+      'chat',
+      JSON.stringify({ text: 'hello' }),
+      undefined,
+      'out-stable-delivery-id',
+    );
+  });
+
   it('delivers a message exactly once when active and sweep polls overlap', async () => {
     seedAgentAndChannel();
     const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
