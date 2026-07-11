@@ -7,7 +7,7 @@
  */
 import { getInboundDb } from '../db/connection.js';
 import { writeMessageOut } from '../db/messages-out.js';
-import { getSessionRouting } from '../db/session-routing.js';
+import { resolveRouting } from '../outbound-files.js';
 import { TIMEZONE, parseZonedToUtc } from '../timezone.js';
 import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
@@ -21,7 +21,7 @@ function generateId(): string {
 }
 
 function routing() {
-  return getSessionRouting();
+  return resolveRouting(undefined);
 }
 
 function ok(text: string) {
@@ -35,16 +35,14 @@ function err(text: string) {
 export const scheduleTask: McpToolDefinition = {
   tool: {
     name: 'schedule_task',
-    description:
-      `Schedule a one-shot or recurring task. The user's timezone is declared in the <context timezone="..."/> header of your prompt — interpret the user's "9pm" etc. in that zone. Cron expressions are interpreted in the user's timezone too.`,
+    description: `Schedule a one-shot or recurring task. The user's timezone is declared in the <context timezone="..."/> header of your prompt — interpret the user's "9pm" etc. in that zone. Cron expressions are interpreted in the user's timezone too.`,
     inputSchema: {
       type: 'object' as const,
       properties: {
         prompt: { type: 'string', description: 'Task instructions/prompt' },
         processAfter: {
           type: 'string',
-          description:
-            `ISO 8601 timestamp for the first run. Accepts either UTC (ending in "Z" or "+00:00") or a naive local timestamp (no offset) which is interpreted in the user's timezone (e.g. "2026-01-15T21:00:00" = 9pm user-local). Prefer naive local.`,
+          description: `ISO 8601 timestamp for the first run. Accepts either UTC (ending in "Z" or "+00:00") or a naive local timestamp (no offset) which is interpreted in the user's timezone (e.g. "2026-01-15T21:00:00" = 9pm user-local). Prefer naive local.`,
         },
         recurrence: {
           type: 'string',
@@ -72,6 +70,7 @@ export const scheduleTask: McpToolDefinition = {
 
     const id = generateId();
     const r = routing();
+    if ('error' in r) return err(r.error);
     const recurrence = (args.recurrence as string) || null;
     const script = (args.script as string) || null;
 
@@ -148,9 +147,17 @@ export const listTasks: McpToolDefinition = {
 
     if ((rows as unknown[]).length === 0) return ok('No tasks found.');
 
-    const lines = (rows as Array<{ id: string; status: string; process_after: string | null; recurrence: string | null; content: string }>).map((r) => {
+    const lines = (
+      rows as Array<{
+        id: string;
+        status: string;
+        process_after: string | null;
+        recurrence: string | null;
+        content: string;
+      }>
+    ).map((r) => {
       const content = JSON.parse(r.content);
-      const prompt = (content.prompt as string || '').slice(0, 80);
+      const prompt = ((content.prompt as string) || '').slice(0, 80);
       return `- ${r.id} [${r.status}] at=${r.process_after || 'now'} ${r.recurrence ? `recur=${r.recurrence} ` : ''}→ ${prompt}`;
     });
 
@@ -256,8 +263,7 @@ export const updateTask: McpToolDefinition = {
         },
         processAfter: {
           type: 'string',
-          description:
-            `New ISO 8601 timestamp for the next run (optional). Accepts either UTC (ending in "Z" / "+00:00") or a naive local timestamp interpreted in the user's timezone.`,
+          description: `New ISO 8601 timestamp for the next run (optional). Accepts either UTC (ending in "Z" / "+00:00") or a naive local timestamp interpreted in the user's timezone.`,
         },
         script: {
           type: 'string',

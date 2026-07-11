@@ -109,22 +109,30 @@ export interface ConversationInfo {
   isGroup: boolean;
 }
 
+export type ThreadSessionPolicy = 'force-per-thread' | 'honor-wiring';
+
 /** The v2 channel adapter contract. */
 export interface ChannelAdapter {
   name: string;
   channelType: string;
 
   /**
-   * Whether this adapter models conversations as threads.
+   * Whether this adapter preserves platform thread identifiers for delivery.
    *
-   * true  — adapter's platform uses threads as the primary conversation unit
-   *         (Discord, Slack, Linear, GitHub). One thread = one session; the
-   *         agent replies into the originating thread.
+   * true  — thread/root identifiers reach the router and outbound path. The
+   *         independent threadSessionPolicy decides whether they also select
+   *         a NanoClaw session.
    * false — adapter's platform treats the channel itself as the conversation
    *         (Telegram, WhatsApp, iMessage). Thread ids are stripped at the
    *         router; agent replies go to the channel.
    */
   supportsThreads: boolean;
+
+  /**
+   * Controls context selection independently of thread-aware delivery.
+   * Omitted threaded adapters retain the legacy force-per-thread behavior.
+   */
+  threadSessionPolicy?: ThreadSessionPolicy;
 
   // Lifecycle
   setup(config: ChannelSetup): Promise<void>;
