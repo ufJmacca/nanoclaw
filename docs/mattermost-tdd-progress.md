@@ -1611,7 +1611,7 @@ Phase status: complete; the full local gate, independent release audits, and eve
 
 ## Phase 8 — Recovery, ordering, and bounded concurrency
 
-Phase status: in progress.
+Phase status: complete; pull request #45 is ready for review.
 
 ### Slice 8.1: bounded runtime WebSocket reconnect
 
@@ -1985,4 +1985,6 @@ Phase status: in progress.
 - Complete isolated container integration command: `docker run --rm --network none -v /home/pi/nanoclaw-v2:/workspace -w /workspace/container/agent-runner oven/bun:1.3.12 bun test src/integration.test.ts` — 1 file/3 tests passed. The two clean processes cover the full 10-file/112-test container inventory without the pre-existing leaked-loop cross-file interference documented in Phase 5.
 - Scope/security audit: no focused-test markers, whitespace errors, new generated artifacts, or large untracked source files were found. The diff contains synthetic credential markers only; no production Mattermost URL, token, credential, or message content was used.
 - Independent audit: concurrent review tracks found and verified fixes for one-page completeness, durable sequence commits, authenticated approval recovery, terminal failed-head control, startup readiness, reconnect escalation, strict instance preflight, same-PID lease recovery, retention boundaries, FIFO capacity, and shutdown races. Their final reviews found no remaining Phase 8 correctness, acceptance, credential, or mandatory-isolation blocker.
-- Phase status remains in progress until the stacked pull request is published and every available required check passes.
+- Pull request: [#45](https://github.com/ufJmacca/nanoclaw/pull/45), `codex/mattermost-08-recovery` targeting `codex/mattermost-07-lifecycle` (dependent on Phase 7 PR #44).
+- GitHub verification: the available `label` check passed ([run 29140090841](https://github.com/ufJmacca/nanoclaw/actions/runs/29140090841)). The repository's code CI workflow is restricted to pull requests targeting the default branch, so GitHub did not provide a code test/type/lint check for this stacked base; the complete local host/container gate above is the phase gate, and no unavailable check is represented as passing.
+- Phase status: complete; the local gate, independent audits, scope/security review, and every available required GitHub check passed. Pull request #45 is ready for review.
