@@ -45,12 +45,6 @@ services:
       MM_EMAILSETTINGS_SENDEMAILNOTIFICATIONS: 'false'
       MM_LOGSETTINGS_ENABLECONSOLE: 'true'
       MM_LOGSETTINGS_CONSOLELEVEL: ERROR
-    ports:
-      - name: mattermost-http
-        target: 8065
-        published: '8065'
-        host_ip: 127.0.0.1
-        protocol: tcp
     security_opt:
       - no-new-privileges:true
     tmpfs:

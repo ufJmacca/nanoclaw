@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { createConnection, createServer, isIP, type Socket } from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -69,6 +70,15 @@ export type MattermostContractCommandExecutor = (
   command: MattermostContractCommand,
 ) => Promise<MattermostContractCommandResult>;
 
+export interface MattermostContractLoopbackProxy {
+  close(): Promise<void>;
+}
+
+export type MattermostContractLoopbackProxyFactory = (
+  targetHost: string,
+  targetPort: number,
+) => Promise<MattermostContractLoopbackProxy>;
+
 export async function executeMattermostContractCommand(
   command: MattermostContractCommand,
 ): Promise<MattermostContractCommandResult> {
@@ -121,6 +131,7 @@ export interface MattermostContractHarnessOptions {
   projectName: string;
   execute: MattermostContractCommandExecutor;
   reportDiagnostic?: (message: string) => void;
+  createLoopbackProxy?: MattermostContractLoopbackProxyFactory;
 }
 
 export function createMattermostContractHarnessDependencies(
@@ -138,6 +149,8 @@ export function createMattermostContractHarnessDependencies(
   ];
   const commandEnvironment = contractCommandEnvironment(options.callerEnvironment);
   const reportDiagnostic = options.reportDiagnostic ?? ((message: string) => process.stderr.write(`${message}\n`));
+  const createLoopbackProxy = options.createLoopbackProxy ?? createMattermostContractLoopbackProxy;
+  let loopbackProxy: MattermostContractLoopbackProxy | undefined;
   const execute = (executable: string, args: readonly string[], timeoutMs: number, extraEnvironment = {}) =>
     options.execute({
       executable,
@@ -200,6 +213,18 @@ export function createMattermostContractHarnessDependencies(
     },
     async start() {
       await checked('docker', [...composeArgs, 'up', '-d'], 600_000);
+      const containerResult = await checked('docker', [...composeArgs, 'ps', '-q', 'mattermost'], 30_000);
+      const containerId = containerResult.stdout.trim();
+      if (!/^[a-f0-9]{64}$/.test(containerId)) {
+        throw new Error('Mattermost contract container identity was invalid');
+      }
+      const networksResult = await checked(
+        'docker',
+        ['inspect', containerId, '--format', '{{json .NetworkSettings.Networks}}'],
+        30_000,
+      );
+      const targetHost = parseMattermostContractContainerAddress(networksResult.stdout, options.projectName);
+      loopbackProxy = await createLoopbackProxy(targetHost, 8065);
     },
     async proveRootMutation() {
       const result = await execute(
@@ -251,7 +276,94 @@ export function createMattermostContractHarnessDependencies(
       );
     },
     async stop() {
-      await checked('docker', [...composeArgs, 'down', '--volumes', '--remove-orphans', '--timeout', '10'], 120_000);
+      let proxyFailure: unknown;
+      const proxy = loopbackProxy;
+      loopbackProxy = undefined;
+      try {
+        await proxy?.close();
+      } catch (error) {
+        proxyFailure = error;
+      }
+      try {
+        await checked('docker', [...composeArgs, 'down', '--volumes', '--remove-orphans', '--timeout', '10'], 120_000);
+      } catch (cleanupFailure) {
+        if (proxyFailure !== undefined) {
+          throw new AggregateError(
+            [proxyFailure, cleanupFailure],
+            'Mattermost contract proxy and Compose cleanup both failed',
+            { cause: cleanupFailure },
+          );
+        }
+        throw cleanupFailure;
+      }
+      if (proxyFailure !== undefined) throw proxyFailure;
+    },
+  };
+}
+
+function parseMattermostContractContainerAddress(serialized: string, projectName: string): string {
+  let value: unknown;
+  try {
+    value = JSON.parse(serialized);
+  } catch (err) {
+    if (!(err instanceof SyntaxError)) throw err;
+    throw new Error('Mattermost contract container network was invalid', { cause: err });
+  }
+  const networkName = `${projectName}_contract`;
+  if (!isRecord(value) || Object.keys(value).length !== 1 || !isRecord(value[networkName])) {
+    throw new Error('Mattermost contract container network was invalid');
+  }
+  const address = value[networkName].IPAddress;
+  if (typeof address !== 'string' || !isPrivateIpv4Address(address)) {
+    throw new Error('Mattermost contract container network was invalid');
+  }
+  return address;
+}
+
+function isPrivateIpv4Address(value: string): boolean {
+  if (isIP(value) !== 4) return false;
+  const [first, second] = value.split('.').map(Number);
+  return first === 10 || (first === 172 && second! >= 16 && second! <= 31) || (first === 192 && second === 168);
+}
+
+export async function createMattermostContractLoopbackProxy(
+  targetHost: string,
+  targetPort: number,
+  dependencies: {
+    createServer: typeof createServer;
+    createConnection: typeof createConnection;
+  } = { createServer, createConnection },
+): Promise<MattermostContractLoopbackProxy> {
+  if (!isPrivateIpv4Address(targetHost) || targetPort !== 8065) {
+    throw new Error('Mattermost contract proxy target was invalid');
+  }
+  const sockets = new Set<Socket>();
+  const track = (socket: Socket): void => {
+    sockets.add(socket);
+    socket.once('close', () => sockets.delete(socket));
+  };
+  const server = dependencies.createServer((client) => {
+    track(client);
+    const upstream = dependencies.createConnection({ host: targetHost, port: targetPort });
+    track(upstream);
+    client.once('error', () => upstream.destroy());
+    upstream.once('error', () => client.destroy());
+    client.pipe(upstream).pipe(client);
+  });
+  await new Promise<void>((resolve, reject) => {
+    const onError = (error: Error): void => reject(error);
+    server.once('error', onError);
+    server.listen({ host: '127.0.0.1', port: 8065, exclusive: true }, () => {
+      server.off('error', onError);
+      resolve();
+    });
+  });
+  return {
+    async close() {
+      for (const socket of sockets) socket.destroy();
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => (error ? reject(error) : resolve()));
+      });
     },
   };
 }

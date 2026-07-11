@@ -1,3 +1,5 @@
+import { PassThrough } from 'node:stream';
+
 import { describe, expect, it, vi } from 'vitest';
 
 import {
@@ -39,6 +41,47 @@ function harnessDependencies(
 }
 
 describe('Mattermost contract harness runner', () => {
+  it('binds the real contract proxy only on loopback and closes its sockets', async () => {
+    const runModule = (await import('./run.js')) as unknown as {
+      createMattermostContractLoopbackProxy?: (
+        targetHost: string,
+        targetPort: number,
+        dependencies: { createServer: never; createConnection: never },
+      ) => Promise<{ close(): Promise<void> }>;
+    };
+    expect(runModule.createMattermostContractLoopbackProxy).toEqual(expect.any(Function));
+    if (!runModule.createMattermostContractLoopbackProxy) return;
+
+    const client = new PassThrough();
+    const upstream = new PassThrough();
+    let acceptConnection: ((socket: PassThrough) => void) | undefined;
+    const server = {
+      once: vi.fn().mockReturnThis(),
+      off: vi.fn().mockReturnThis(),
+      listen: vi.fn((_options: unknown, callback: () => void) => callback()),
+      close: vi.fn((callback: (error?: Error) => void) => callback()),
+    };
+    const createServer = vi.fn((listener: (socket: PassThrough) => void) => {
+      acceptConnection = listener;
+      return server;
+    });
+    const createConnection = vi.fn(() => upstream);
+    const proxy = await runModule.createMattermostContractLoopbackProxy('10.255.255.1', 8065, {
+      createServer: createServer as never,
+      createConnection: createConnection as never,
+    });
+    expect(server.listen).toHaveBeenCalledWith(
+      { host: '127.0.0.1', port: 8065, exclusive: true },
+      expect.any(Function),
+    );
+    acceptConnection!(client);
+    expect(createConnection).toHaveBeenCalledWith({ host: '10.255.255.1', port: 8065 });
+    await proxy.close();
+    expect(client.destroyed).toBe(true);
+    expect(upstream.destroyed).toBe(true);
+    expect(server.close).toHaveBeenCalledOnce();
+  });
+
   it('executes argv without a shell and captures bounded process results', async () => {
     await expect(
       executeMattermostContractCommand({
@@ -56,11 +99,12 @@ describe('Mattermost contract harness runner', () => {
 
   it('validates Compose, proves the root mutation, runs Green, and destroys volumes', async () => {
     const commands: MattermostContractCommand[] = [];
+    const closeProxy = vi.fn(async () => undefined);
+    const createLoopbackProxy = vi.fn(async () => ({ close: closeProxy }));
     const composeConfig = JSON.stringify({
       services: {
         mattermost: {
           image: MATTERMOST_CONTRACT_IMAGE,
-          ports: [{ host_ip: '127.0.0.1', target: 8065, published: '8065' }],
           volumes: [{ type: 'volume', source: 'mattermost-data', target: '/mattermost/data' }],
         },
         postgres: {
@@ -81,6 +125,18 @@ describe('Mattermost contract harness runner', () => {
         return { exitCode: 0, stdout: '"unix:///var/run/docker.sock"\n', stderr: '' };
       }
       if (joined.includes('config --format json')) return { exitCode: 0, stdout: composeConfig, stderr: '' };
+      if (joined.includes(' ps -q mattermost')) {
+        return { exitCode: 0, stdout: `${'a'.repeat(64)}\n`, stderr: '' };
+      }
+      if (joined.startsWith(`docker inspect ${'a'.repeat(64)} `)) {
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify({
+            'nanoclaw-mm-contract-test_contract': { IPAddress: '172.20.0.2' },
+          }),
+          stderr: '',
+        };
+      }
       if (command.environment.NANOCLAW_MM_CONTRACT_MUTATE_ROOT_ID === '1') {
         return { exitCode: 1, stdout: '', stderr: 'CONTRACT_ROOT_ID_ASSERTION' };
       }
@@ -92,6 +148,7 @@ describe('Mattermost contract harness runner', () => {
       hostArchitecture: 'x64',
       projectName: 'nanoclaw-mm-contract-test',
       execute,
+      createLoopbackProxy,
     });
 
     await expect(runMattermostContractHarness(dependencies)).resolves.toBeUndefined();
@@ -101,10 +158,14 @@ describe('Mattermost contract harness runner', () => {
       'docker context inspect default --format {{json .Endpoints.docker.Host}}',
       'docker compose -f /repo/test/contracts/mattermost/docker-compose.yml -p nanoclaw-mm-contract-test config --format json',
       'docker compose -f /repo/test/contracts/mattermost/docker-compose.yml -p nanoclaw-mm-contract-test up -d',
+      'docker compose -f /repo/test/contracts/mattermost/docker-compose.yml -p nanoclaw-mm-contract-test ps -q mattermost',
+      `docker inspect ${'a'.repeat(64)} --format {{json .NetworkSettings.Networks}}`,
       'pnpm exec vitest run --config /repo/vitest.mattermost.config.ts -t preserves outbound channel and root_id',
       'pnpm exec vitest run --config /repo/vitest.mattermost.config.ts',
       'docker compose -f /repo/test/contracts/mattermost/docker-compose.yml -p nanoclaw-mm-contract-test down --volumes --remove-orphans --timeout 10',
     ]);
+    expect(createLoopbackProxy).toHaveBeenCalledWith('172.20.0.2', 8065);
+    expect(closeProxy).toHaveBeenCalledOnce();
   });
 
   it('does not mistake an unrelated live-test failure for the root mutation proof', async () => {
@@ -117,6 +178,7 @@ describe('Mattermost contract harness runner', () => {
       networks: {},
     });
     const reportDiagnostic = vi.fn();
+    const createLoopbackProxy = vi.fn(async () => ({ close: vi.fn(async () => undefined) }));
     const execute = vi.fn(async (command: MattermostContractCommand) => {
       const joined = [command.executable, ...command.args].join(' ');
       if (joined === 'docker context show') return { exitCode: 0, stdout: 'default\n', stderr: '' };
@@ -124,6 +186,18 @@ describe('Mattermost contract harness runner', () => {
         return { exitCode: 0, stdout: '"unix:///var/run/docker.sock"\n', stderr: '' };
       }
       if (joined.includes('config --format json')) return { exitCode: 0, stdout: composeConfig, stderr: '' };
+      if (joined.includes(' ps -q mattermost')) {
+        return { exitCode: 0, stdout: `${'b'.repeat(64)}\n`, stderr: '' };
+      }
+      if (joined.startsWith(`docker inspect ${'b'.repeat(64)} `)) {
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify({
+            'nanoclaw-mm-contract-test_contract': { IPAddress: '172.20.0.3' },
+          }),
+          stderr: '',
+        };
+      }
       if (joined.includes(' ps --all ')) return { exitCode: 0, stdout: 'mattermost exited', stderr: '' };
       if (joined.includes(' logs --no-color ')) {
         return {
@@ -149,6 +223,7 @@ describe('Mattermost contract harness runner', () => {
       projectName: 'nanoclaw-mm-contract-test',
       execute,
       reportDiagnostic,
+      createLoopbackProxy,
     });
 
     await expect(runMattermostContractHarness(dependencies)).rejects.toThrow(

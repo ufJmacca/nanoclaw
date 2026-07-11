@@ -14,6 +14,8 @@ pnpm test:mattermost
 
 `pnpm test:mattermost` accepts no Mattermost URL, token, or instance from the caller. It rejects those environment variables, a non-loopback endpoint, a non-default or remote Docker daemon, non-amd64 execution, unsafe Compose privileges, public port binding, bind mounts, Docker socket mounts, external networks, or any image other than the approved immutable pins. The test worker runs from a fresh `nanoclaw-mm-contract-*` directory under the operating-system temporary root. Its disposable bot token remains in the host test processes and is rejected from worker events and logs; no agent container is admitted.
 
+The Compose stack publishes no container port and stays on one project-scoped internal network. After startup, the host runner resolves only the exact Compose-owned Mattermost container's private bridge address and opens an exclusive TCP proxy on `127.0.0.1:8065`; the proxy is closed before Compose teardown. This keeps all REST/WebSocket credentials in host processes while preserving a loopback-only test endpoint and a no-egress container network.
+
 The pinned services are:
 
 - `mattermost/mattermost-team-edition:11.7.6@sha256:f9f59fd070b33dda9485c9e6d3249f5f0036720efecbd0c76d45f71c29291456`
