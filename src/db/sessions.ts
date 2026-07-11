@@ -216,6 +216,13 @@ export function getAskQuestionRender(
     if (c?.title) return { title: c.title, options: JSON.parse(c.options_json) };
   }
 
+  if (hasTable(getDb(), 'pending_mattermost_channel_approvals')) {
+    const m = getDb()
+      .prepare('SELECT title, options_json FROM pending_mattermost_channel_approvals WHERE approval_id = ?')
+      .get(id) as { title: string; options_json: string } | undefined;
+    if (m?.title) return { title: m.title, options: JSON.parse(m.options_json) };
+  }
+
   if (hasTable(getDb(), 'pending_sender_approvals')) {
     const s = getDb().prepare('SELECT title, options_json FROM pending_sender_approvals WHERE id = ?').get(id) as
       | { title: string; options_json: string }

@@ -19,6 +19,14 @@ function fakeAdapter(deliver: (message: OutboundMessage) => void): ChannelAdapte
 }
 
 describe('createChannelDeliveryBridge', () => {
+  it('reports whether the requested channel adapter is currently available', () => {
+    const adapter = fakeAdapter(() => undefined);
+    const bridge = createChannelDeliveryBridge((channelType) => (channelType === 'fake' ? adapter : undefined));
+
+    expect(bridge.isAvailable?.('fake')).toBe(true);
+    expect(bridge.isAvailable?.('missing')).toBe(false);
+  });
+
   it('preserves existing outbound content and routing', async () => {
     const delivered: OutboundMessage[] = [];
     const adapter = fakeAdapter((message) => delivered.push(message));

@@ -56,6 +56,7 @@ import './modules/index.js';
 import type { ChannelAdapter, ChannelSetup } from './channels/adapter.js';
 import { initChannelAdapters, teardownChannelAdapters } from './channels/channel-registry.js';
 import { createChannelDeliveryBridge } from './channels/delivery-bridge.js';
+import { handleMattermostBotRemoved } from './channels/mattermost-subscription.js';
 
 async function main(): Promise<void> {
   log.info('NanoClaw starting');
@@ -76,7 +77,12 @@ async function main(): Promise<void> {
   ensureContainerRuntimeRunning();
   cleanupOrphans();
 
-  // 3. Channel adapters
+  // 3. Install delivery before network adapters. An adapter may receive an
+  // event as soon as setup authenticates, and owner-approval cards must be
+  // deliverable before that event can create pending state.
+  setDeliveryAdapter(createChannelDeliveryBridge());
+
+  // 4. Channel adapters
   await initChannelAdapters((adapter: ChannelAdapter): ChannelSetup => {
     return {
       onInbound(platformId, threadId, message) {
@@ -128,11 +134,14 @@ async function main(): Promise<void> {
           log.error('Failed to handle question response', { questionId, err });
         });
       },
+      onLifecycle(event) {
+        if (adapter.channelType !== 'mattermost' || event.kind !== 'bot_removed') return;
+        handleMattermostBotRemoved(event.platformId).catch((err) => {
+          log.error('Failed to handle Mattermost lifecycle event', { kind: event.kind, err });
+        });
+      },
     };
   });
-
-  // 4. Delivery adapter bridge — dispatches to channel adapters
-  setDeliveryAdapter(createChannelDeliveryBridge());
 
   // 5. Start delivery polls
   startActiveDeliveryPoll();

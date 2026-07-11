@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { createMattermostAdapter } from './mattermost-adapter.js';
-import { getRegisteredChannelNames } from './channel-registry.js';
+import { getChannelContainerConfig, getRegisteredChannelNames } from './channel-registry.js';
 import type { MattermostTransport, MattermostWebSocket } from './mattermost-client.js';
 
 class FakeSocket implements MattermostWebSocket {
@@ -32,12 +32,53 @@ function setupCallbacks(onInbound = vi.fn()) {
     onInboundEvent: vi.fn(),
     onMetadata: vi.fn(),
     onAction: vi.fn(),
+    onLifecycle: vi.fn(),
   };
 }
 
 describe('Mattermost channel adapter assembly', () => {
-  it('stays unregistered until strict subscription validation is available', () => {
-    expect(getRegisteredChannelNames()).not.toContain('mattermost');
+  it('is reachable from the production channel registration barrel', async () => {
+    await import('./index.js');
+
+    expect(getRegisteredChannelNames()).toContain('mattermost');
+    expect(getRegisteredChannelNames().indexOf('telegram')).toBeLessThan(
+      getRegisteredChannelNames().indexOf('mattermost'),
+    );
+    expect(getChannelContainerConfig('mattermost')).toBeUndefined();
+  });
+
+  it('creates an adapter only from a complete host-side Mattermost configuration', async () => {
+    const registration = (await import('./mattermost.js')) as typeof import('./mattermost.js') & {
+      createMattermostAdapterFromHostConfig?: (
+        env: Record<string, string | undefined>,
+        transport: MattermostTransport,
+      ) => ReturnType<typeof createMattermostAdapter> | null;
+    };
+    expect(registration.createMattermostAdapterFromHostConfig).toBeTypeOf('function');
+    const create = registration.createMattermostAdapterFromHostConfig as NonNullable<
+      typeof registration.createMattermostAdapterFromHostConfig
+    >;
+
+    expect(create({}, fakeTransport())).toBeNull();
+    expect(() =>
+      create(
+        {
+          MATTERMOST_URL: 'https://mattermost.example.test',
+          MATTERMOST_BOT_TOKEN: 'must-not-appear-in-error',
+        },
+        fakeTransport(),
+      ),
+    ).toThrowError(new Error('Mattermost configuration requires URL, bot token, and instance key'));
+    const adapter = create(
+      {
+        MATTERMOST_URL: 'https://mattermost.example.test',
+        MATTERMOST_BOT_TOKEN: 'host-only-fixture-token',
+        MATTERMOST_INSTANCE: 'primary',
+      },
+      fakeTransport(),
+    );
+    expect(adapter).toMatchObject({ channelType: 'mattermost', threadSessionPolicy: 'honor-wiring' });
+    expect(getChannelContainerConfig('mattermost')).toBeUndefined();
   });
 
   it('supports thread-aware delivery while honoring the shared wiring session', () => {
@@ -99,6 +140,56 @@ describe('Mattermost channel adapter assembly', () => {
       expect.objectContaining({ id: 'reply-post-id', isGroup: true }),
     );
     expect(adapter.isConnected()).toBe(true);
+  });
+
+  it('forwards only an authenticated removal of this bot as a channel lifecycle event', async () => {
+    const socket = new FakeSocket();
+    const transport: MattermostTransport = {
+      request: vi.fn().mockResolvedValue({ status: 200, body: { id: 'bot-user-id' } }),
+      openWebSocket: vi.fn().mockResolvedValue(socket),
+    };
+    const adapter = createMattermostAdapter(
+      {
+        baseUrl: 'https://mattermost.example.test',
+        botToken: 'adapter-fixture-credential',
+        instanceKey: 'primary',
+      },
+      transport,
+    );
+    const setup = setupCallbacks();
+    const setupPromise = adapter.setup(setup);
+    await vi.waitFor(() => expect(socket.send).toHaveBeenCalledOnce());
+    socket.emit(JSON.stringify({ status: 'OK', seq_reply: 1 }));
+    await setupPromise;
+
+    socket.emit(
+      JSON.stringify({
+        event: 'user_removed',
+        data: { channel_id: 'channel-a', remover_id: 'owner-user-id' },
+        broadcast: { user_id: 'bot-user-id', channel_id: '' },
+      }),
+    );
+    socket.emit(
+      JSON.stringify({
+        event: 'user_removed',
+        data: { channel_id: 'channel-a', remover_id: 'owner-user-id' },
+        broadcast: { user_id: 'other-user-id', channel_id: '' },
+      }),
+    );
+    socket.emit(
+      JSON.stringify({
+        event: 'user_removed',
+        data: { channel_id: 'channel-b', user_id: 'bot-user-id' },
+        broadcast: { channel_id: 'channel-b' },
+      }),
+    );
+
+    await vi.waitFor(() => expect(setup.onLifecycle).toHaveBeenCalledOnce());
+    expect(setup.onLifecycle).toHaveBeenCalledWith({
+      kind: 'bot_removed',
+      platformId: 'mattermost:primary:channel-a',
+    });
+    expect(setup.onInbound).not.toHaveBeenCalled();
   });
 
   it('delivers the shared-session reply with its per-message Mattermost root id', async () => {

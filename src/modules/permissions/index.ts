@@ -26,6 +26,7 @@ import {
   routeInbound,
   setAccessGate,
   setChannelRequestGate,
+  setMattermostChannelRequestGate,
   setMessageInterceptor,
   setSenderResolver,
   setSenderScopeGate,
@@ -57,6 +58,10 @@ import { hasAdminPrivilege } from './db/user-roles.js';
 import { getUser, upsertUser } from './db/users.js';
 import { requestSenderApproval } from './sender-approval.js';
 import { ensureUserDm } from './user-dm.js';
+import {
+  handleMattermostChannelApprovalResponse,
+  requestMattermostChannelApproval,
+} from './mattermost-channel-approval.js';
 
 // ── Free-text name input state ──
 // Tracks approvers waiting for a text reply with the agent name. Keyed by
@@ -293,6 +298,12 @@ registerResponseHandler(handleSenderApprovalResponse);
 setChannelRequestGate(async (mg, event) => {
   await requestChannelApproval({ messagingGroupId: mg.id, event });
 });
+
+setMattermostChannelRequestGate(async (mg, event) => {
+  await requestMattermostChannelApproval(mg.id, event);
+});
+
+registerResponseHandler(handleMattermostChannelApprovalResponse);
 
 /**
  * Response handler for the unknown-channel registration card.

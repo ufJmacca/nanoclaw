@@ -82,6 +82,23 @@ describe('MattermostInboundProcessor', () => {
     expect(onInbound.mock.calls[0][0].threadId).toBe('root-post-id');
   });
 
+  it('trusts only authenticated WebSocket mention metadata for the bot mention signal', async () => {
+    const mentionStates: boolean[] = [];
+    for (const mentions of ['["bot-user-id"]', '["other-user-id"]', '{malformed']) {
+      const onInbound = vi.fn();
+      const processor = new MattermostInboundProcessor({ instanceKey: 'primary', botUserId: 'bot-user-id' }, onInbound);
+      const envelope = JSON.parse(postedEvent({ id: `post-${mentionStates.length}` })) as {
+        data: Record<string, unknown>;
+      };
+      envelope.data.mentions = mentions;
+
+      await processor.handle(JSON.stringify(envelope));
+      mentionStates.push(onInbound.mock.calls[0][0].message.isMention as boolean);
+    }
+
+    expect(mentionStates).toEqual([true, false, false]);
+  });
+
   it('ignores posts authored by the authenticated bot user', async () => {
     const onInbound = vi.fn();
     const processor = new MattermostInboundProcessor({ instanceKey: 'primary', botUserId: 'bot-user-id' }, onInbound);
