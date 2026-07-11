@@ -21,6 +21,8 @@ The pinned services are:
 
 PostgreSQL 18 stores versioned data below `/var/lib/postgresql`, so the disposable named volume targets that directory. Update the Compose file, exported safety constants, focused tests, and this document together when intentionally changing either pin. Consult the [official PostgreSQL image PGDATA notes](https://github.com/docker-library/docs/blob/master/postgres/README.md#pgdata) and the [official Mattermost container deployment](https://github.com/mattermost/docker) before doing so.
 
+The Mattermost image runs as its unprivileged `mattermost` user. Bleve therefore stores indexes below the image-owned `/mattermost/data` volume at `/mattermost/data/bleve-indexes`; do not replace it with a fresh standalone mount whose root would not carry the image directory's ownership.
+
 ## Live scenario
 
 The isolated suite:

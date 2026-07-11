@@ -11,7 +11,6 @@ import {
 } from './safety.js';
 
 const MATTERMOST_CONTRACT_VOLUME_NAMES = [
-  'mattermost-bleve',
   'mattermost-client-plugins',
   'mattermost-config',
   'mattermost-data',

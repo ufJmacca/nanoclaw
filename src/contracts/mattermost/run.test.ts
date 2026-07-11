@@ -12,7 +12,6 @@ import { MATTERMOST_CONTRACT_IMAGE, POSTGRES_CONTRACT_IMAGE } from './safety.js'
 
 const CONTRACT_PROJECT_NAME = 'nanoclaw-mm-contract-test';
 const CONTRACT_VOLUME_NAMES = [
-  'mattermost-bleve',
   'mattermost-client-plugins',
   'mattermost-config',
   'mattermost-data',
@@ -353,6 +352,37 @@ describe('Mattermost contract harness runner', () => {
         },
       ),
     ).toThrow('Mattermost contract Compose volumes must match the disposable topology');
+  });
+
+  it('accepts Bleve storage inside the image-owned Mattermost data volume', () => {
+    expect(() =>
+      parseMattermostContractComposeConfig(
+        JSON.stringify({
+          services: {
+            mattermost: { image: MATTERMOST_CONTRACT_IMAGE },
+            postgres: { image: POSTGRES_CONTRACT_IMAGE },
+          },
+          volumes: contractVolumes([
+            'mattermost-client-plugins',
+            'mattermost-config',
+            'mattermost-data',
+            'mattermost-logs',
+            'mattermost-plugins',
+            'postgres-data',
+          ]),
+          networks: {
+            contract: { name: `${CONTRACT_PROJECT_NAME}_contract`, external: false, internal: true },
+          },
+        }),
+        {
+          callerEnvironment: {},
+          dockerContext: 'default',
+          dockerHost: 'unix:///var/run/docker.sock',
+          hostArchitecture: 'x64',
+          projectName: CONTRACT_PROJECT_NAME,
+        },
+      ),
+    ).not.toThrow();
   });
 
   it('always destroys the disposable environment when the live suite fails', async () => {
