@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { DATA_DIR, GROUPS_DIR } from '../config.js';
+import { updateContainerConfig } from '../container-config.js';
 import { createAgentGroup, getAgentGroup } from '../db/agent-groups.js';
 import { getDb } from '../db/connection.js';
 import {
@@ -20,6 +21,7 @@ import { resolveGroupFolderPath } from '../group-folder.js';
 import type { AgentGroup, MessagingGroup, MessagingGroupAgent, Session } from '../types.js';
 
 const SAFE_IDENTITY_COMPONENT = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const MATTERMOST_DEFAULT_AGENT_PROVIDER = 'codex';
 
 function isValidSubscriptionIdentityComponent(component: string): boolean {
   return SAFE_IDENTITY_COMPONENT.test(component) && component.length <= 128;
@@ -143,7 +145,7 @@ export function subscribeMattermostChannelStrict(input: MattermostSubscriptionIn
     id: `ag-mattermost-${digest}`,
     name: input.channelName ?? `Mattermost ${input.channelId}`,
     folder: `mattermost-${digest}`,
-    agent_provider: null,
+    agent_provider: MATTERMOST_DEFAULT_AGENT_PROVIDER,
     created_at: messagingGroup.created_at,
   };
   let wiring: MessagingGroupAgent = {
@@ -251,6 +253,9 @@ export function subscribeMattermostChannelStrict(input: MattermostSubscriptionIn
         claimMattermostWorkspaceDirectory(statePath);
         statePathOwned = true;
         initGroupFilesystem(agentGroup);
+        updateContainerConfig(agentGroup.folder, (config) => {
+          config.provider = MATTERMOST_DEFAULT_AGENT_PROVIDER;
+        });
       })
       .immediate();
   } catch (err) {

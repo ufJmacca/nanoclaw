@@ -834,6 +834,32 @@ describe('subscribeMattermostChannelStrict', () => {
     ).toEqual({ count: 1 });
   });
 
+  it('defaults newly subscribed Mattermost channels to Codex without changing Telegram', () => {
+    createAgentGroup({
+      id: 'ag-telegram',
+      name: 'Telegram Agent',
+      folder: 'telegram-agent',
+      agent_provider: null,
+      created_at: new Date().toISOString(),
+    });
+    const channelA = subscribeMattermostChannelStrict({ instanceKey: 'primary', channelId: 'channel-a' });
+    const channelB = subscribeMattermostChannelStrict({ instanceKey: 'primary', channelId: 'channel-b' });
+
+    expect(channelA.agentGroup.agent_provider).toBe('codex');
+    expect(channelB.agentGroup.agent_provider).toBe('codex');
+    expect(
+      JSON.parse(fs.readFileSync(path.join(GROUPS_DIR, channelA.agentGroup.folder, 'container.json'), 'utf8')),
+    ).toMatchObject({ provider: 'codex' });
+    expect(
+      JSON.parse(fs.readFileSync(path.join(GROUPS_DIR, channelB.agentGroup.folder, 'container.json'), 'utf8')),
+    ).toMatchObject({ provider: 'codex' });
+    expect(getDb().prepare('SELECT id, agent_provider FROM agent_groups ORDER BY id').all()).toEqual([
+      { id: channelA.agentGroup.id, agent_provider: 'codex' },
+      { id: channelB.agentGroup.id, agent_provider: 'codex' },
+      { id: 'ag-telegram', agent_provider: null },
+    ]);
+  });
+
   it('creates a fresh agent identity for each Mattermost channel without reusing Telegram', () => {
     const createdAt = new Date().toISOString();
     createAgentGroup({
