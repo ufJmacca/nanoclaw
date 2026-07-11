@@ -15,6 +15,7 @@ import {
   CONTAINER_INSTALL_LABEL,
   DATA_DIR,
   GROUPS_DIR,
+  MAX_CONCURRENT_CONTAINERS,
   ONECLI_API_KEY,
   ONECLI_URL,
   TIMEZONE,
@@ -25,6 +26,8 @@ import { CONTAINER_RUNTIME_BIN, hostGatewayArgs, readonlyMountArgs, stopContaine
 import { composeGroupClaudeMd } from './claude-md-compose.js';
 import { getAgentGroup, getAllAgentGroups } from './db/agent-groups.js';
 import { getDb, hasTable } from './db/connection.js';
+import { getSession } from './db/sessions.js';
+import { readEnvFile } from './env.js';
 import { initGroupFilesystem } from './group-init.js';
 import { stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
@@ -92,6 +95,28 @@ const activeContainers = new Map<string, ActiveContainerEntry>();
  * racy double-replies.
  */
 const wakePromises = new Map<string, { identity: ContainerExecutionIdentity; promise: Promise<boolean> }>();
+/**
+ * Capacity-blocked wakes in first-seen order. The inbox remains the durable
+ * source of work; this queue only removes the host-sweep delay when an
+ * existing reservation releases capacity.
+ */
+const queuedWakes = new Map<string, ContainerExecutionIdentity>();
+let containerAdmissionsOpen = false;
+
+function releaseActiveContainer(sessionId: string, expected: ActiveContainerEntry): boolean {
+  if (activeContainers.get(sessionId) !== expected) return false;
+  activeContainers.delete(sessionId);
+  markContainerStopped(sessionId);
+  stopTypingRefresh(sessionId);
+  drainQueuedWakes();
+  return true;
+}
+
+function reservedContainerCount(): number {
+  const sessionIds = new Set(activeContainers.keys());
+  for (const sessionId of wakePromises.keys()) sessionIds.add(sessionId);
+  return sessionIds.size;
+}
 
 export function getActiveContainerCount(): number {
   return activeContainers.size;
@@ -101,6 +126,61 @@ export function isContainerRunning(sessionId: string): boolean {
   return activeContainers.has(sessionId);
 }
 
+/** Open container admission during host startup. */
+export function startContainerAdmissions(): void {
+  containerAdmissionsOpen = true;
+}
+
+/** Reject every new wake before shutdown starts waiting on reservations. */
+export function stopContainerAdmissions(): void {
+  containerAdmissionsOpen = false;
+  queuedWakes.clear();
+}
+
+/** Wait for every spawn that reserved capacity before admissions closed. */
+export async function awaitContainerSpawns(): Promise<void> {
+  while (wakePromises.size > 0) {
+    await Promise.allSettled([...wakePromises.values()].map(({ promise }) => promise));
+  }
+}
+
+/** Stop the exact active entries currently bound to their session identities. */
+export async function stopAllActiveContainers(reason = 'graceful-shutdown'): Promise<void> {
+  const failures: unknown[] = [];
+  const failedContainerNames: string[] = [];
+  for (const [sessionId, entry] of [...activeContainers.entries()]) {
+    log.info('Stopping container', { sessionId, reason, containerName: entry.containerName });
+    try {
+      stopContainer(entry.containerName);
+      // Attempt every bound identity before throwing the aggregate failure below.
+      // eslint-disable-next-line no-catch-all/no-catch-all
+    } catch (stopFailure) {
+      const stopAttempts: unknown[] = [stopFailure];
+      try {
+        entry.process.kill('SIGKILL');
+        // A throwing fallback must not prevent stop requests for later identities.
+        // eslint-disable-next-line no-catch-all/no-catch-all
+      } catch (fallbackFailure) {
+        stopAttempts.push(fallbackFailure);
+      }
+      failures.push(new AggregateError(stopAttempts, `Failed to stop active container: ${entry.containerName}`));
+      failedContainerNames.push(entry.containerName);
+      continue;
+    }
+    releaseActiveContainer(sessionId, entry);
+  }
+  if (failures.length > 0) {
+    throw new AggregateError(failures, `Failed to stop active containers: ${failedContainerNames.join(', ')}`);
+  }
+}
+
+/** Close admission, settle reserved spawns, then stop every resulting active container. */
+export async function shutdownContainers(): Promise<void> {
+  stopContainerAdmissions();
+  await awaitContainerSpawns();
+  await stopAllActiveContainers();
+}
+
 /**
  * Wake up a container for a session. If already running or mid-spawn, no-op
  * (the in-flight wake promise is reused).
@@ -108,12 +188,17 @@ export function isContainerRunning(sessionId: string): boolean {
  * The container runs the v2 agent-runner which polls the session DB.
  *
  * Contract: never throws. Returns `true` on successful spawn, `false` on
- * transient spawn failure (e.g. OneCLI gateway unreachable). Callers don't
- * need to wrap — the inbound row stays pending and host-sweep retries on
- * its next tick. Callers that care (e.g. the router's typing indicator)
- * can branch on the boolean.
+ * transient spawn failure or capacity deferral (e.g. OneCLI gateway
+ * unreachable or all execution slots reserved). Callers don't need to wrap
+ * — the inbound row stays pending; capacity deferrals are reconsidered on
+ * release and the host sweep remains the durable fallback. Callers that care
+ * (e.g. the router's typing indicator) can branch on the boolean.
  */
 export function wakeContainer(session: Session): Promise<boolean> {
+  if (!containerAdmissionsOpen) {
+    log.debug('Container admission closed — leaving session inbox pending', { sessionId: session.id });
+    return Promise.resolve(false);
+  }
   const identity = executionIdentity(session);
   const active = activeContainers.get(session.id);
   const mattermostBoundary = validateMattermostSessionForExecution(session);
@@ -145,6 +230,23 @@ export function wakeContainer(session: Session): Promise<boolean> {
     log.debug('Container wake already in-flight — joining existing promise', { sessionId: session.id });
     return existing.promise;
   }
+  const queued = queuedWakes.get(session.id);
+  if (queued) {
+    if (!sameExecutionIdentity(queued, identity)) {
+      log.error('Queued container session identity collision rejected', { sessionId: session.id });
+      return Promise.resolve(false);
+    }
+    log.debug('Container wake already queued for capacity', { sessionId: session.id });
+    return Promise.resolve(false);
+  }
+  if (reservedContainerCount() >= MAX_CONCURRENT_CONTAINERS) {
+    queuedWakes.set(session.id, identity);
+    log.debug('Container capacity reached — queued wake while leaving session inbox pending', {
+      sessionId: session.id,
+      maxConcurrentContainers: MAX_CONCURRENT_CONTAINERS,
+    });
+    return Promise.resolve(false);
+  }
   const promise = spawnContainer(session)
     .then(() => true)
     .catch((err) => {
@@ -153,9 +255,42 @@ export function wakeContainer(session: Session): Promise<boolean> {
     })
     .finally(() => {
       wakePromises.delete(session.id);
+      drainQueuedWakes();
     });
   wakePromises.set(session.id, { identity, promise });
   return promise;
+}
+
+function drainQueuedWakes(): void {
+  while (containerAdmissionsOpen && reservedContainerCount() < MAX_CONCURRENT_CONTAINERS) {
+    const next = queuedWakes.entries().next().value as [string, ContainerExecutionIdentity] | undefined;
+    if (!next) return;
+    const [sessionId, queued] = next;
+    queuedWakes.delete(sessionId);
+
+    let freshSession: Session | undefined;
+    try {
+      freshSession = getSession(sessionId);
+      // Session lookup is a fail-closed execution boundary; durable inbox work
+      // remains available to a later host-sweep wake if the DB is unavailable.
+      // eslint-disable-next-line no-catch-all/no-catch-all
+    } catch (err) {
+      log.warn('Unable to revalidate capacity-queued container session', { sessionId, err });
+      continue;
+    }
+    if (
+      !freshSession ||
+      freshSession.status !== 'active' ||
+      !sameExecutionIdentity(queued, executionIdentity(freshSession))
+    ) {
+      log.warn('Capacity-queued container session is no longer executable', { sessionId });
+      continue;
+    }
+
+    // `wakeContainer` reserves capacity synchronously before yielding, so the
+    // next loop iteration cannot over-admit or race a duplicate direct wake.
+    void wakeContainer(freshSession);
+  }
 }
 
 async function spawnContainer(session: Session): Promise<void> {
@@ -245,7 +380,8 @@ async function spawnContainer(session: Session): Promise<void> {
 
   const container = spawn(CONTAINER_RUNTIME_BIN, args, { stdio: ['ignore', 'pipe', 'pipe'] });
 
-  activeContainers.set(session.id, { process: container, containerName, identity: executionIdentity(session) });
+  const activeEntry = { process: container, containerName, identity: executionIdentity(session) };
+  activeContainers.set(session.id, activeEntry);
   markContainerRunning(session.id);
 
   // Log stderr
@@ -264,18 +400,12 @@ async function spawnContainer(session: Session): Promise<void> {
   // on a wall-clock timer.
 
   container.on('close', (code) => {
-    if (activeContainers.get(session.id)?.process !== container) return;
-    activeContainers.delete(session.id);
-    markContainerStopped(session.id);
-    stopTypingRefresh(session.id);
+    if (!releaseActiveContainer(session.id, activeEntry)) return;
     log.info('Container exited', { sessionId: session.id, code, containerName });
   });
 
   container.on('error', (err) => {
-    if (activeContainers.get(session.id)?.process !== container) return;
-    activeContainers.delete(session.id);
-    markContainerStopped(session.id);
-    stopTypingRefresh(session.id);
+    if (!releaseActiveContainer(session.id, activeEntry)) return;
     log.error('Container spawn error', { sessionId: session.id, err });
   });
 }
@@ -427,13 +557,16 @@ function assertProviderMountIsolation(
 }
 
 function hostMattermostCredentialValues(): Set<string> {
-  return new Set(
+  const credentials = new Set(
     Object.entries(process.env)
       .filter(
         ([key, value]) => /^MATTERMOST(?:_|$)/i.test(key) && /(TOKEN|SECRET|PASSWORD|KEY)/i.test(key) && Boolean(value),
       )
       .map(([, value]) => value as string),
   );
+  const configuredToken = readEnvFile(['MATTERMOST_BOT_TOKEN']).MATTERMOST_BOT_TOKEN;
+  if (configuredToken) credentials.add(configuredToken);
+  return credentials;
 }
 
 function assertNoMattermostCredentialsInContainerConfigArtifact(folder: string): void {

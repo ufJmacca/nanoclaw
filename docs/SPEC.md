@@ -349,12 +349,29 @@ export const DATA_DIR = path.resolve(PROJECT_ROOT, 'data');
 export const CONTAINER_IMAGE = process.env.CONTAINER_IMAGE || 'nanoclaw-agent:latest';
 export const CONTAINER_TIMEOUT = parseInt(process.env.CONTAINER_TIMEOUT || '1800000', 10); // 30min default
 export const IDLE_TIMEOUT = parseInt(process.env.IDLE_TIMEOUT || '1800000', 10); // 30min — keep container alive after last result
-export const MAX_CONCURRENT_CONTAINERS = Math.max(1, parseInt(process.env.MAX_CONCURRENT_CONTAINERS || '5', 10) || 5);
+export const MAX_CONCURRENT_CONTAINERS = Math.max(
+  1,
+  parseInt(process.env.MAX_CONCURRENT_CONTAINERS || envConfig.MAX_CONCURRENT_CONTAINERS || '2', 10) || 2,
+);
 
 export const TRIGGER_PATTERN = new RegExp(`^@${ASSISTANT_NAME}\\b`, 'i');
 ```
 
 **Note:** Paths must be absolute for container volume mounts to work correctly.
+
+### Host execution ownership
+
+Container admission is guarded by a singleton lease in the central SQLite database. A second NanoClaw host process using the same data directory fails before filesystem migration, orphan cleanup, adapter recovery, or container admission. The lease is released only after every accepted delivery/spawn drain and active-container stop succeeds; a crash leaves a stale row that the next process can reclaim after the former PID is no longer alive.
+
+The data directory must remain local to one host and PID namespace. Do not place the central SQLite database on storage shared by multiple machines or containers with independent PID namespaces. A restarted owner may reclaim an old lease generation with the same PID, which safely handles PID reuse inside that supported namespace; independent PID namespaces still require an external single-writer/leader boundary.
+
+### Mattermost recovery boundaries
+
+One NanoClaw process owns one configured Mattermost instance. Startup fails before adapter setup or host sweeps when persisted active/unfinished state belongs to another instance, or when that state exists but credentials are unavailable. Pending and processing approvals are reconciled only after authenticated bot membership is known.
+
+REST catch-up uses one latest 200-post channel page with thread expansion disabled. Recovery requires the exact durable watermark, validates response identity/order, replays its complete timestamp cohort, and fails closed when the watermark is absent, server filtering is reported, or a full page may split the watermark timestamp. An outage of roughly 199 or more newer posts, or deletion of the watermark post, therefore requires operator recovery rather than silently skipping data.
+
+The completeness proof assumes read-after-write-consistent Mattermost REST reads. Deployments that route the channel-post endpoint to a lagging replica must provide an equivalent consistency boundary before enabling recovery. Equal-timestamp posts remain lossless/deduplicated across restart, but their post-crash order is Mattermost's recovered order rather than a durable copy of the earlier WebSocket arrival order.
 
 ### Container Configuration
 

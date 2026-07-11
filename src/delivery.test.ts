@@ -37,7 +37,21 @@ const TEST_DIR = '/tmp/nanoclaw-test-delivery';
 import { initTestDb, closeDb, runMigrations, createAgentGroup, createMessagingGroup } from './db/index.js';
 import { insertMessage } from './db/session-db.js';
 import { inboundDbPath, resolveSession, outboundDbPath } from './session-manager.js';
-import { deliverSessionMessages, setDeliveryAdapter } from './delivery.js';
+import * as deliveryModule from './delivery.js';
+import {
+  DeliveryAdapterUnavailableError,
+  deliverSessionMessages,
+  setDeliveryAdapter,
+  startDeliveryIntake,
+} from './delivery.js';
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
 
 function now(): string {
   return new Date().toISOString();
@@ -90,7 +104,12 @@ function seedMattermostAgentAndChannel(): void {
   });
 }
 
-function insertMattermostOutbound(agentGroupId: string, sessionId: string, msgId: string, threadId: string): void {
+function insertMattermostOutbound(
+  agentGroupId: string,
+  sessionId: string,
+  msgId: string,
+  threadId: string | null,
+): void {
   const db = new Database(outboundDbPath(agentGroupId, sessionId));
   db.prepare(
     `INSERT INTO messages_out (id, timestamp, kind, platform_id, channel_type, thread_id, content)
@@ -100,6 +119,7 @@ function insertMattermostOutbound(agentGroupId: string, sessionId: string, msgId
 }
 
 beforeEach(() => {
+  startDeliveryIntake();
   if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
   fs.mkdirSync(TEST_DIR, { recursive: true });
   const db = initTestDb();
@@ -234,6 +254,79 @@ describe('deliverSessionMessages — concurrent invocations', () => {
     );
   });
 
+  it('leaves Mattermost outbound work due while its channel adapter is unavailable', async () => {
+    seedMattermostAgentAndChannel();
+    const { session } = resolveSession('ag-mattermost-a', 'mg-mattermost-a', null, 'shared');
+    insertMattermostOutbound(session.agent_group_id, session.id, 'out-adapter-unavailable', null);
+    deliveryMocks.validateMattermostSessionForExecution.mockReturnValue({
+      strict: true,
+      valid: true,
+      value: {
+        messagingGroup: {
+          id: 'mg-mattermost-a',
+          channel_type: 'mattermost',
+          platform_id: 'mattermost:primary:channel-a',
+        },
+      },
+    });
+    const deliver = vi.fn().mockResolvedValue(undefined);
+    setDeliveryAdapter({
+      isAvailable: (channelType) => channelType !== 'mattermost',
+      deliver,
+    });
+
+    for (let poll = 0; poll < 4; poll++) {
+      await deliverSessionMessages(session);
+    }
+
+    expect(deliver).not.toHaveBeenCalled();
+    const inDb = new Database(inboundDbPath(session.agent_group_id, session.id));
+    expect(inDb.prepare('SELECT COUNT(*) AS count FROM delivered').get()).toEqual({ count: 0 });
+    inDb.close();
+    const outDb = new Database(outboundDbPath(session.agent_group_id, session.id), { readonly: true });
+    expect(
+      outDb
+        .prepare(
+          `SELECT COUNT(*) AS count
+             FROM messages_out
+            WHERE id = ? AND (deliver_after IS NULL OR deliver_after <= datetime('now'))`,
+        )
+        .get('out-adapter-unavailable'),
+    ).toEqual({ count: 1 });
+    outDb.close();
+  });
+
+  it('keeps retry budget intact when a Mattermost adapter disappears during delivery', async () => {
+    seedMattermostAgentAndChannel();
+    const { session } = resolveSession('ag-mattermost-a', 'mg-mattermost-a', null, 'shared');
+    insertMattermostOutbound(session.agent_group_id, session.id, 'out-adapter-race', null);
+    deliveryMocks.validateMattermostSessionForExecution.mockReturnValue({
+      strict: true,
+      valid: true,
+      value: {
+        messagingGroup: {
+          id: 'mg-mattermost-a',
+          channel_type: 'mattermost',
+          platform_id: 'mattermost:primary:channel-a',
+        },
+      },
+    });
+    const deliver = vi.fn().mockRejectedValue(new DeliveryAdapterUnavailableError('mattermost'));
+    setDeliveryAdapter({
+      isAvailable: () => true,
+      deliver,
+    });
+
+    for (let poll = 0; poll < 4; poll++) {
+      await deliverSessionMessages(session);
+    }
+
+    expect(deliver).toHaveBeenCalledTimes(4);
+    const inDb = new Database(inboundDbPath(session.agent_group_id, session.id));
+    expect(inDb.prepare('SELECT COUNT(*) AS count FROM delivered').get()).toEqual({ count: 0 });
+    inDb.close();
+  });
+
   it('stops a queued Mattermost drain when the subscription is deactivated after one delivery', async () => {
     seedMattermostAgentAndChannel();
     const { session } = resolveSession('ag-mattermost-a', 'mg-mattermost-a', null, 'shared');
@@ -345,5 +438,60 @@ describe('deliverSessionMessages — concurrent invocations', () => {
     await deliverSessionMessages(session);
 
     expect(callCount).toBe(1);
+  });
+
+  it('awaits an already-started delivery drain after poll intake stops', async () => {
+    const stopAndDrainDeliveryPolls = (
+      deliveryModule as typeof deliveryModule & { stopAndDrainDeliveryPolls?: () => Promise<void> }
+    ).stopAndDrainDeliveryPolls;
+    expect(stopAndDrainDeliveryPolls).toBeTypeOf('function');
+    if (!stopAndDrainDeliveryPolls) return;
+
+    seedAgentAndChannel();
+    const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
+    insertOutbound('ag-1', session.id, 'out-shutdown-drain');
+    const enteredDelivery = deferred<void>();
+    const releaseDelivery = deferred<void>();
+    setDeliveryAdapter({
+      async deliver() {
+        enteredDelivery.resolve(undefined);
+        await releaseDelivery.promise;
+        return 'platform-shutdown-message';
+      },
+    });
+
+    const delivering = deliverSessionMessages(session);
+    await enteredDelivery.promise;
+    let drainSettled = false;
+    const draining = stopAndDrainDeliveryPolls().then(() => {
+      drainSettled = true;
+    });
+    await Promise.resolve();
+
+    expect(drainSettled).toBe(false);
+    releaseDelivery.resolve(undefined);
+    await Promise.all([delivering, draining]);
+
+    const inDb = new Database(inboundDbPath(session.agent_group_id, session.id));
+    expect(inDb.prepare('SELECT status FROM delivered WHERE message_out_id = ?').get('out-shutdown-drain')).toEqual({
+      status: 'delivered',
+    });
+    inDb.close();
+  });
+
+  it('does not admit a new delivery drain after shutdown intake closes', async () => {
+    seedAgentAndChannel();
+    const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
+    insertOutbound('ag-1', session.id, 'out-after-delivery-shutdown');
+    const deliver = vi.fn().mockResolvedValue('must-not-send');
+    setDeliveryAdapter({ deliver });
+
+    await deliveryModule.stopAndDrainDeliveryPolls();
+    await deliverSessionMessages(session);
+
+    expect(deliver).not.toHaveBeenCalled();
+    const inDb = new Database(inboundDbPath(session.agent_group_id, session.id));
+    expect(inDb.prepare('SELECT COUNT(*) AS count FROM delivered').get()).toEqual({ count: 0 });
+    inDb.close();
   });
 });

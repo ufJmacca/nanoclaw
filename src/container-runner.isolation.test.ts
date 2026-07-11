@@ -1,3 +1,4 @@
+import Database from 'better-sqlite3';
 import { EventEmitter } from 'events';
 import fs from 'fs';
 import path from 'path';
@@ -9,6 +10,7 @@ import type { AgentGroup, Session } from './types.js';
 const runnerMocks = vi.hoisted(() => ({
   testRoot: `/tmp/nanoclaw-container-runner-isolation-${process.pid}`,
   groups: new Map<string, AgentGroup>(),
+  sessions: new Map<string, Session>(),
   spawned: [] as EventEmitter[],
   spawn: vi.fn(),
   ensureAgent: vi.fn(),
@@ -23,6 +25,7 @@ const runnerMocks = vi.hoisted(() => ({
   getProviderContainerConfig: vi.fn(),
   getAllAgentGroups: vi.fn(),
   logWarn: vi.fn(),
+  maxConcurrentContainers: 100,
 }));
 
 vi.mock('child_process', () => ({
@@ -43,6 +46,9 @@ vi.mock('./config.js', () => ({
   CONTAINER_INSTALL_LABEL: 'nanoclaw-install=test',
   DATA_DIR: path.join(runnerMocks.testRoot, 'data'),
   GROUPS_DIR: path.join(runnerMocks.testRoot, 'groups'),
+  get MAX_CONCURRENT_CONTAINERS() {
+    return runnerMocks.maxConcurrentContainers;
+  },
   ONECLI_API_KEY: undefined,
   ONECLI_URL: undefined,
   TIMEZONE: 'UTC',
@@ -71,6 +77,9 @@ vi.mock('./db/agent-groups.js', () => ({
 vi.mock('./db/connection.js', () => ({
   getDb: vi.fn(() => ({})),
   hasTable: vi.fn(() => false),
+}));
+vi.mock('./db/sessions.js', () => ({
+  getSession: vi.fn((id: string) => runnerMocks.sessions.get(id)),
 }));
 vi.mock('./group-init.js', () => ({ initGroupFilesystem: runnerMocks.initGroupFilesystem }));
 vi.mock('./log.js', () => ({
@@ -101,7 +110,13 @@ vi.mock('./session-manager.js', () => ({
   writeSessionRouting: runnerMocks.writeSessionRouting,
 }));
 
-import { getActiveContainerCount, isContainerRunning, wakeContainer } from './container-runner.js';
+import {
+  getActiveContainerCount,
+  isContainerRunning,
+  startContainerAdmissions,
+  wakeContainer,
+} from './container-runner.js';
+import * as containerRunnerModule from './container-runner.js';
 
 function agentGroup(id: string, folder: string): AgentGroup {
   return {
@@ -152,9 +167,11 @@ function deferred<T>() {
 }
 
 beforeEach(() => {
+  startContainerAdmissions();
   fs.rmSync(runnerMocks.testRoot, { recursive: true, force: true });
   fs.mkdirSync(runnerMocks.testRoot, { recursive: true });
   runnerMocks.groups.clear();
+  runnerMocks.sessions.clear();
   runnerMocks.spawned.length = 0;
   runnerMocks.spawn.mockReset().mockImplementation(() => {
     const child = new EventEmitter() as EventEmitter & {
@@ -185,6 +202,7 @@ beforeEach(() => {
   runnerMocks.getProviderContainerConfig.mockReset().mockReturnValue(undefined);
   runnerMocks.getAllAgentGroups.mockReset().mockImplementation(() => [...runnerMocks.groups.values()]);
   runnerMocks.logWarn.mockReset();
+  runnerMocks.maxConcurrentContainers = 100;
 });
 
 afterEach(() => {
@@ -306,6 +324,167 @@ describe('container execution isolation', () => {
 
     await wakeContainer({ ...firstSession });
     expect(runnerMocks.spawn).toHaveBeenCalledTimes(2);
+  });
+
+  it('reserves capacity across active and spawning identities without reusing another channel container', async () => {
+    runnerMocks.maxConcurrentContainers = 1;
+    const alpha = agentGroup('agent-mattermost-capacity-a', 'mattermost-capacity-a');
+    const beta = agentGroup('agent-mattermost-capacity-b', 'mattermost-capacity-b');
+    const alphaSession = {
+      ...session('session-mattermost-capacity-a', alpha.id),
+      messaging_group_id: 'mattermost-channel-a',
+    };
+    const betaSession = {
+      ...session('session-mattermost-capacity-b', beta.id),
+      messaging_group_id: 'mattermost-channel-b',
+    };
+    runnerMocks.groups.set(alpha.id, alpha);
+    runnerMocks.groups.set(beta.id, beta);
+    runnerMocks.validateMattermostSessionForExecution.mockReturnValue({ strict: true, valid: true, value: {} });
+
+    const betaSessionDir = path.join(runnerMocks.testRoot, 'data', 'v2-sessions', beta.id, betaSession.id);
+    const betaInbox = path.join(betaSessionDir, 'inbound.db');
+    fs.mkdirSync(betaSessionDir, { recursive: true });
+    fs.writeFileSync(betaInbox, 'durable-channel-b-inbox');
+
+    const alphaEnteredLaunch = deferred<void>();
+    const releaseAlphaLaunch = deferred<void>();
+    runnerMocks.ensureAgent.mockImplementation(async ({ identifier }: { identifier: string }) => {
+      if (identifier !== alpha.id) return;
+      alphaEnteredLaunch.resolve(undefined);
+      await releaseAlphaLaunch.promise;
+    });
+
+    const wakingAlpha = wakeContainer(alphaSession);
+    await alphaEnteredLaunch.promise;
+
+    await expect(wakeContainer(betaSession)).resolves.toBe(false);
+    expect(runnerMocks.spawn).not.toHaveBeenCalled();
+    expect(runnerMocks.writeSessionRouting).toHaveBeenCalledTimes(1);
+    expect(runnerMocks.writeSessionRouting).toHaveBeenCalledWith(alpha.id, alphaSession.id);
+    expect(fs.readFileSync(betaInbox, 'utf8')).toBe('durable-channel-b-inbox');
+
+    releaseAlphaLaunch.resolve(undefined);
+    await expect(wakingAlpha).resolves.toBe(true);
+    expect(runnerMocks.spawn).toHaveBeenCalledTimes(1);
+    const alphaMounts = writableMounts(runnerMocks.spawn.mock.calls[0][1] as string[]);
+    expect(alphaMounts.get('/workspace')).toBe(
+      path.join(runnerMocks.testRoot, 'data', 'v2-sessions', alpha.id, alphaSession.id),
+    );
+    expect(alphaMounts.get('/workspace')).not.toBe(betaSessionDir);
+    expect(isContainerRunning(betaSession.id)).toBe(false);
+    await expect(wakeContainer(betaSession)).resolves.toBe(false);
+    expect(runnerMocks.spawn).toHaveBeenCalledTimes(1);
+    expect(runnerMocks.writeSessionRouting).toHaveBeenCalledTimes(1);
+    expect(fs.readFileSync(betaInbox, 'utf8')).toBe('durable-channel-b-inbox');
+
+    runnerMocks.spawned[0].emit('close', 0);
+    await expect(wakeContainer(betaSession)).resolves.toBe(true);
+
+    expect(runnerMocks.spawn).toHaveBeenCalledTimes(2);
+    const betaMounts = writableMounts(runnerMocks.spawn.mock.calls[1][1] as string[]);
+    expect(betaMounts.get('/workspace')).toBe(betaSessionDir);
+    expect(betaMounts.get('/workspace/agent')).toBe(path.join(runnerMocks.testRoot, 'groups', beta.folder));
+    expect(fs.readFileSync(betaInbox, 'utf8')).toBe('durable-channel-b-inbox');
+    expect(runnerMocks.ensureAgent.mock.calls.map(([request]) => request.identifier)).toEqual([alpha.id, beta.id]);
+  });
+
+  it('automatically admits capacity-queued channels in FIFO order without racing spawn bookkeeping', async () => {
+    runnerMocks.maxConcurrentContainers = 1;
+    const alpha = agentGroup('agent-mattermost-fifo-a', 'mattermost-fifo-a');
+    const beta = agentGroup('agent-mattermost-fifo-b', 'mattermost-fifo-b');
+    const gamma = agentGroup('agent-mattermost-fifo-c', 'mattermost-fifo-c');
+    const alphaSession = {
+      ...session('session-mattermost-fifo-a', alpha.id),
+      messaging_group_id: 'mattermost-channel-fifo-a',
+    };
+    const betaSession = {
+      ...session('session-mattermost-fifo-b', beta.id),
+      messaging_group_id: 'mattermost-channel-fifo-b',
+    };
+    const gammaSession = {
+      ...session('session-mattermost-fifo-c', gamma.id),
+      messaging_group_id: 'mattermost-channel-fifo-c',
+    };
+    for (const group of [alpha, beta, gamma]) runnerMocks.groups.set(group.id, group);
+    for (const candidate of [alphaSession, betaSession, gammaSession]) {
+      runnerMocks.sessions.set(candidate.id, candidate);
+      const inbox = path.join(
+        runnerMocks.testRoot,
+        'data',
+        'v2-sessions',
+        candidate.agent_group_id,
+        candidate.id,
+        'inbound.db',
+      );
+      fs.mkdirSync(path.dirname(inbox), { recursive: true });
+      const db = new Database(inbox);
+      db.exec('CREATE TABLE messages_in (id TEXT PRIMARY KEY, status TEXT NOT NULL)');
+      db.prepare('INSERT INTO messages_in (id, status) VALUES (?, ?)').run(`pending-${candidate.id}`, 'pending');
+      db.close();
+    }
+    runnerMocks.validateMattermostSessionForExecution.mockReturnValue({ strict: true, valid: true, value: {} });
+
+    await expect(wakeContainer(alphaSession)).resolves.toBe(true);
+    await expect(wakeContainer(betaSession)).resolves.toBe(false);
+    await expect(wakeContainer(gammaSession)).resolves.toBe(false);
+
+    const betaEnteredLaunch = deferred<void>();
+    const releaseBetaLaunch = deferred<void>();
+    runnerMocks.ensureAgent.mockImplementation(async ({ identifier }: { identifier: string }) => {
+      if (identifier !== beta.id) return;
+      betaEnteredLaunch.resolve(undefined);
+      await releaseBetaLaunch.promise;
+    });
+
+    runnerMocks.spawned[0].emit('close', 0);
+    await vi.waitFor(() => {
+      expect(runnerMocks.ensureAgent).toHaveBeenCalledWith({ name: beta.name, identifier: beta.id });
+    });
+    await betaEnteredLaunch.promise;
+
+    expect(runnerMocks.spawn).toHaveBeenCalledTimes(1);
+    expect(runnerMocks.ensureAgent).not.toHaveBeenCalledWith({ name: gamma.name, identifier: gamma.id });
+    const racingBetaWake = wakeContainer({ ...betaSession });
+
+    releaseBetaLaunch.resolve(undefined);
+    await expect(racingBetaWake).resolves.toBe(true);
+    await vi.waitFor(() => expect(runnerMocks.spawn).toHaveBeenCalledTimes(2));
+
+    const betaMounts = writableMounts(runnerMocks.spawn.mock.calls[1][1] as string[]);
+    expect(betaMounts.get('/workspace')).toBe(
+      path.join(runnerMocks.testRoot, 'data', 'v2-sessions', beta.id, betaSession.id),
+    );
+    expect(betaMounts.get('/workspace')).not.toContain(alpha.id);
+    expect(runnerMocks.ensureAgent).not.toHaveBeenCalledWith({ name: gamma.name, identifier: gamma.id });
+
+    runnerMocks.spawned[1].emit('close', 0);
+    await vi.waitFor(() => expect(runnerMocks.spawn).toHaveBeenCalledTimes(3));
+
+    const gammaMounts = writableMounts(runnerMocks.spawn.mock.calls[2][1] as string[]);
+    expect(gammaMounts.get('/workspace')).toBe(
+      path.join(runnerMocks.testRoot, 'data', 'v2-sessions', gamma.id, gammaSession.id),
+    );
+    expect(runnerMocks.ensureAgent.mock.calls.map(([request]) => request.identifier)).toEqual([
+      alpha.id,
+      beta.id,
+      gamma.id,
+    ]);
+    for (const candidate of [betaSession, gammaSession]) {
+      const inbox = path.join(
+        runnerMocks.testRoot,
+        'data',
+        'v2-sessions',
+        candidate.agent_group_id,
+        candidate.id,
+        'inbound.db',
+      );
+      const db = new Database(inbox, { readonly: true });
+      expect(db.prepare('SELECT id, status FROM messages_in').all()).toEqual([
+        { id: `pending-${candidate.id}`, status: 'pending' },
+      ]);
+      db.close();
+    }
   });
 
   it('rejects a reused session id that changes channel or agent identity', async () => {
@@ -1240,6 +1419,42 @@ describe('container execution isolation', () => {
     }
   });
 
+  it('rejects a provider alias of the Mattermost token loaded from the host .env file', async () => {
+    const previousCredential = process.env.MATTERMOST_BOT_TOKEN;
+    const credential = `mattermost-dotenv-aliased-credential-${process.pid}`;
+    const cwd = vi.spyOn(process, 'cwd').mockReturnValue(runnerMocks.testRoot);
+    delete process.env.MATTERMOST_BOT_TOKEN;
+    fs.writeFileSync(path.join(runnerMocks.testRoot, '.env'), `MATTERMOST_BOT_TOKEN=${credential}\n`);
+    try {
+      const group = agentGroup('agent-mattermost-dotenv-alias', 'mattermost-dotenv-alias');
+      runnerMocks.groups.set(group.id, group);
+      runnerMocks.validateMattermostSessionForExecution.mockReturnValue({
+        strict: true,
+        valid: true,
+        value: {},
+      });
+      runnerMocks.readContainerConfig.mockReturnValue({
+        provider: 'custom-provider',
+        mcpServers: {},
+        packages: { apt: [], npm: [] },
+        additionalMounts: [],
+        skills: [],
+      });
+      runnerMocks.getProviderContainerConfig.mockReturnValue(() => ({
+        env: { CUSTOM_PROXY_TOKEN: credential },
+      }));
+
+      await expect(wakeContainer(session('session-mattermost-dotenv-alias', group.id))).resolves.toBe(false);
+
+      expect(runnerMocks.applyContainerConfig).not.toHaveBeenCalled();
+      expect(runnerMocks.spawn).not.toHaveBeenCalled();
+    } finally {
+      cwd.mockRestore();
+      if (previousCredential === undefined) delete process.env.MATTERMOST_BOT_TOKEN;
+      else process.env.MATTERMOST_BOT_TOKEN = previousCredential;
+    }
+  });
+
   it('rejects a host Mattermost credential wrapped inside a provider environment value', async () => {
     const previousCredential = process.env.MATTERMOST_BOT_TOKEN;
     const credential = `mattermost-provider-wrapped-${process.pid}`;
@@ -1349,5 +1564,126 @@ describe('container execution isolation', () => {
       if (previousCredential === undefined) delete process.env.MATTERMOST_BOT_TOKEN;
       else process.env.MATTERMOST_BOT_TOKEN = previousCredential;
     }
+  });
+
+  it('closes admissions, awaits spawn reservations, and stops only active identities on shutdown', async () => {
+    const shutdownContainers = (
+      containerRunnerModule as typeof containerRunnerModule & { shutdownContainers?: () => Promise<void> }
+    ).shutdownContainers;
+    expect(shutdownContainers).toBeTypeOf('function');
+    if (!shutdownContainers) return;
+
+    const activeGroup = agentGroup('agent-shutdown-active', 'shutdown-active');
+    const spawningGroup = agentGroup('agent-shutdown-spawning', 'shutdown-spawning');
+    const pendingGroup = agentGroup('agent-shutdown-pending', 'shutdown-pending');
+    const activeSession = session('session-shutdown-active', activeGroup.id);
+    const spawningSession = session('session-shutdown-spawning', spawningGroup.id);
+    const pendingSession = session('session-shutdown-pending', pendingGroup.id);
+    for (const group of [activeGroup, spawningGroup, pendingGroup]) runnerMocks.groups.set(group.id, group);
+
+    await expect(wakeContainer(activeSession)).resolves.toBe(true);
+    const spawnEntered = deferred<void>();
+    const releaseSpawn = deferred<void>();
+    runnerMocks.ensureAgent.mockImplementation(async ({ identifier }: { identifier: string }) => {
+      if (identifier !== spawningGroup.id) return;
+      spawnEntered.resolve(undefined);
+      await releaseSpawn.promise;
+    });
+    const spawning = wakeContainer(spawningSession);
+    await spawnEntered.promise;
+
+    const pendingInbox = path.join(
+      runnerMocks.testRoot,
+      'data',
+      'v2-sessions',
+      pendingGroup.id,
+      pendingSession.id,
+      'inbound.db',
+    );
+    fs.mkdirSync(path.dirname(pendingInbox), { recursive: true });
+    const pendingDb = new Database(pendingInbox);
+    pendingDb.exec('CREATE TABLE messages_in (id TEXT PRIMARY KEY, status TEXT NOT NULL)');
+    pendingDb.prepare('INSERT INTO messages_in (id, status) VALUES (?, ?)').run('pending-during-shutdown', 'pending');
+    pendingDb.close();
+
+    let shutdownSettled = false;
+    const shuttingDown = shutdownContainers().then(() => {
+      shutdownSettled = true;
+    });
+    await Promise.resolve();
+
+    expect(shutdownSettled).toBe(false);
+    await expect(wakeContainer(pendingSession)).resolves.toBe(false);
+    expect(runnerMocks.spawn).toHaveBeenCalledTimes(1);
+
+    releaseSpawn.resolve(undefined);
+    await expect(spawning).resolves.toBe(true);
+    await shuttingDown;
+
+    expect(shutdownSettled).toBe(true);
+    expect(getActiveContainerCount()).toBe(0);
+    expect(isContainerRunning(activeSession.id)).toBe(false);
+    expect(isContainerRunning(spawningSession.id)).toBe(false);
+    expect(isContainerRunning(pendingSession.id)).toBe(false);
+    const stoppedNames = runnerMocks.stopContainer.mock.calls.map(([name]) => name as string);
+    expect(stoppedNames).toHaveLength(2);
+    expect(stoppedNames.some((name) => name.includes(activeGroup.folder))).toBe(true);
+    expect(stoppedNames.some((name) => name.includes(spawningGroup.folder))).toBe(true);
+    expect(stoppedNames.some((name) => name.includes(pendingGroup.folder))).toBe(false);
+
+    const durableDb = new Database(pendingInbox, { readonly: true });
+    expect(durableDb.prepare('SELECT id, status FROM messages_in').all()).toEqual([
+      { id: 'pending-during-shutdown', status: 'pending' },
+    ]);
+    durableDb.close();
+    await expect(wakeContainer(pendingSession)).resolves.toBe(false);
+    expect(runnerMocks.spawn).toHaveBeenCalledTimes(2);
+  });
+
+  it('continues stopping later identities when one runtime stop and fallback kill both throw', async () => {
+    const stopAllActiveContainers = (
+      containerRunnerModule as typeof containerRunnerModule & {
+        stopAllActiveContainers?: (reason?: string) => Promise<void>;
+      }
+    ).stopAllActiveContainers;
+    expect(stopAllActiveContainers).toBeTypeOf('function');
+    if (!stopAllActiveContainers) return;
+
+    const firstGroup = agentGroup('agent-stop-fallback-first', 'stop-fallback-first');
+    const secondGroup = agentGroup('agent-stop-fallback-second', 'stop-fallback-second');
+    const firstSession = session('session-stop-fallback-first', firstGroup.id);
+    const secondSession = session('session-stop-fallback-second', secondGroup.id);
+    runnerMocks.groups.set(firstGroup.id, firstGroup);
+    runnerMocks.groups.set(secondGroup.id, secondGroup);
+    await expect(wakeContainer(firstSession)).resolves.toBe(true);
+    await expect(wakeContainer(secondSession)).resolves.toBe(true);
+    runnerMocks.stopContainer.mockImplementationOnce(() => {
+      throw new Error('runtime stop failed');
+    });
+    const firstProcess = runnerMocks.spawned[0] as EventEmitter & { kill: ReturnType<typeof vi.fn> };
+    firstProcess.kill.mockImplementationOnce(() => {
+      throw new Error('fallback kill failed');
+    });
+
+    await expect(stopAllActiveContainers('test-shutdown')).rejects.toThrow(
+      expect.objectContaining({ message: expect.stringContaining('stop-fallback-first') }),
+    );
+
+    expect(runnerMocks.stopContainer).toHaveBeenCalledTimes(2);
+    expect(isContainerRunning(firstSession.id)).toBe(true);
+    expect(isContainerRunning(secondSession.id)).toBe(false);
+  });
+
+  it('keeps a fresh host runner closed until startup explicitly opens container admission', async () => {
+    vi.resetModules();
+    const freshRunner = await import('./container-runner.js');
+    const group = agentGroup('agent-default-closed', 'default-closed');
+    const candidate = session('session-default-closed', group.id);
+    runnerMocks.groups.set(group.id, group);
+
+    await expect(freshRunner.wakeContainer(candidate)).resolves.toBe(false);
+
+    expect(runnerMocks.ensureAgent).not.toHaveBeenCalled();
+    expect(runnerMocks.spawn).not.toHaveBeenCalled();
   });
 });

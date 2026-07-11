@@ -1608,3 +1608,383 @@ Phase status: complete; the full local gate, independent release audits, and eve
 - Pull request: [#44 — Phase 7: add Mattermost subscription lifecycle](https://github.com/ufJmacca/nanoclaw/pull/44), base `codex/mattermost-06-isolation`, head `codex/mattermost-07-lifecycle`.
 - GitHub checks: the available `label` check passed in 3 seconds ([run 29134118426](https://github.com/ufJmacca/nanoclaw/actions/runs/29134118426)); the code CI workflow did not trigger because it is configured only for pull requests targeting `main`, so no code-CI pass is claimed.
 - Phase status: complete; the full local gate, all three independent final audits, and every available GitHub check passed; pull request ready for review.
+
+## Phase 8 — Recovery, ordering, and bounded concurrency
+
+Phase status: complete; pull request #45 is ready for review.
+
+### Slice 8.1: bounded runtime WebSocket reconnect
+
+- RED command: `pnpm exec vitest run src/channels/mattermost-client.test.ts -t 'bounded exponential backoff'`.
+- RED failure observed: an authenticated socket close scheduled no reconnect timer (`undefined` instead of the required 1,000 ms first delay) because the transport/client exposed no post-open close lifecycle.
+- GREEN command/result: the same focused command after adding the optional socket termination seam and client reconnect state — 1 passed; consecutive open failures scheduled 1s, 2s, 4s, 8s, 16s, 30s, and remained capped at 30s, while teardown cancelled the pending attempt.
+- REFACTOR performed: initial and reconnect authentication share one connection method; reconnect state retains only the credential-free URL, authenticated bot ID, event callback, and bounded attempt counter. As finalized in Slice 8.28, the counter resets only after a sequenced event completes durably, and no token enters timer or error state.
+- Affected-suite verification: `pnpm exec vitest run src/channels/mattermost-client.test.ts` — 16 tests passed after the following transport termination slice.
+- Isolation impact: reconnect reuses only this adapter instance's host-side authentication and event callback; it cannot change subscription, channel, agent, session, workspace, mount, or container identity.
+
+### Slice 8.2: post-open socket errors enter recovery safely
+
+- RED command: `pnpm exec vitest run src/channels/mattermost-client.test.ts -t 'post-open error and close'`.
+- RED failure observed: emitting a post-open socket `error` threw `connection lost` from the EventEmitter because the transport had removed its one-shot opening error listener and installed no runtime termination listener.
+- GREEN command/result: the same focused behavior passed as part of the 16-test client file; a runtime `error` followed by `close` emits exactly one termination notification and enters the reconnect path.
+- REFACTOR performed: the Node transport's termination subscription owns both error and close listeners behind a one-shot guard and removes both together. The client removes the guard before closing the failed socket, preventing recursive/double scheduling.
+- Isolation impact: a transport error cannot crash the host and leave unrelated channels unmanaged; recovery remains scoped to the failed Mattermost connection and preserves all database isolation gates.
+
+### Slice 8.3: authentication-window termination is observed
+
+- RED command: `pnpm exec vitest run src/channels/mattermost-client.test.ts -t 'subscribes socket termination before'`.
+- RED failure observed: the socket's termination seam had been subscribed zero times while WebSocket authentication was pending, leaving an error/close window between open and challenge acknowledgement.
+- GREEN command/result: the same focused command passed after installing the one-shot termination listener before sending the authentication challenge; an interrupted setup rejects cleanly and closes once.
+- REFACTOR performed: authentication timer, message listener, rejection callback, and termination listener are cleared through one ownership path, including challenge-send failure and teardown.
+- Affected-suite verification: `pnpm exec vitest run src/channels/mattermost-client.test.ts` — 22 tests passed after the subsequent sequence/reconnect slices.
+- Isolation impact: a half-authenticated socket never accepts channel traffic, and the host-side credential is neither logged nor propagated beyond the challenge transport.
+
+### Slice 8.4: connection sequence, resume, and recovery barriers
+
+- Sequence RED command: `pnpm exec vitest run src/channels/mattermost-client.test.ts -t 'exact missed window'`.
+- Sequence RED failure observed: a jump from expected sequence 2 to received sequence 3 invoked the recovery hook zero times because server `seq` values were ignored.
+- Barrier RED command: `pnpm exec vitest run src/channels/mattermost-client.test.ts -t 'holds live frames'`.
+- Barrier RED failure observed: both the gap-triggering and subsequent live frames reached the event listener before the deferred recovery promise resolved.
+- Resume RED command: `pnpm exec vitest run src/channels/mattermost-client.test.ts -t 'resumes the server connection id'`.
+- Resume RED failure observed: reconnect opened the bare WebSocket URL instead of supplying the server `connection_id` and next sequence number.
+- Replacement-connection RED command: `pnpm exec vitest run src/channels/mattermost-client.test.ts -t 'replacement connection behind catch-up'`.
+- Replacement-connection RED failure observed: a resumed socket whose `hello` supplied a different connection ID invoked the reset hook zero times and released its frames without catch-up.
+- GREEN command/result: each focused command passed after tracking every valid server sequence, awaiting the exact gap hook, retaining the server connection ID for resume, and treating a changed ID as a sequence reset behind the same asynchronous barrier.
+- REFACTOR performed: one per-generation promise tail serializes connection metadata observations while post routing remains independently awaitable by the channel processor; stale socket/generation callbacks are ignored and teardown clears all resume state.
+- Affected-suite verification: `pnpm exec vitest run src/channels/mattermost-client.test.ts` — 22 tests passed.
+- Isolation impact: missed windows cannot release newer channel traffic first; recovery changes no channel identity and buffers only within the same authenticated adapter lifecycle.
+
+### Slice 8.5: per-channel ingress ordering and teardown drain
+
+- Ordering RED command: `pnpm exec vitest run src/channels/mattermost-inbound.test.ts -t 'preserves per-channel order'`.
+- Ordering RED failure observed: A2 began before deferred A1 completed, while the required independent B1 path also had no explicit serialization boundary.
+- Receipt-release RED command: `pnpm exec vitest run src/channels/mattermost-inbound.test.ts -t 'releases a post receipt'`.
+- Receipt-release RED failure observed: retrying a post after its sink failed returned `false` because the process-local receipt had been marked before routing and never released.
+- Failed-head RED command: `pnpm exec vitest run src/channels/mattermost-inbound.test.ts -t 'failed channel blocked'`.
+- Failed-head RED failure observed: A2 fulfilled after A1 rejected, allowing a newer same-channel post to leapfrog the missing head.
+- Adapter-drain RED command: `pnpm exec vitest run src/channels/mattermost-adapter.test.ts -t 'waits for accepted inbound routing'`.
+- Adapter-drain RED failure observed: teardown completed while an accepted host routing promise was still pending.
+- Lifecycle-order RED command: `pnpm exec vitest run src/channels/mattermost-adapter.test.ts -t 'orders bot removal behind'`.
+- Lifecycle-order RED failure observed: authenticated removal overtook an earlier deferred post in the same channel.
+- GREEN command/result: all focused commands passed after adding channel-ID keyed promise queues, retryable failed heads, receipt release, a processor drain, and one shared queue for posts, lifecycle, and metadata. Channel B continues independently while A is blocked.
+- REFACTOR performed: `src/index.ts` now returns routing and lifecycle promises so the adapter can observe durable host completion; failures are logged and rethrown instead of becoming fire-and-forget receipts.
+- Affected-suite verification: `pnpm exec vitest run src/channels/mattermost-adapter.test.ts src/channels/mattermost-inbound.test.ts` — 30 tests passed after rename handling; the wider recovery set passed 62 tests before later additions.
+- Isolation impact: ordering keys use the canonical namespaced channel ID, never channel name or thread; A, B, and Telegram cannot share a queue, session, workspace, or execution identity.
+
+### Slice 8.6: durable recovery cursors and content-free receipts
+
+- Migration RED command: `pnpm exec vitest run src/db/db-v2.test.ts -t 'durable Mattermost recovery'`.
+- Migration RED failure observed: neither recovery-cursor nor post-receipt table existed.
+- Receipt RED commands: focused `src/channels/mattermost-recovery.test.ts` runs for `claims one content-free receipt`, `completes only the exact`, `releases only the exact`, and `resets only crash-left`; each first failed because its store function was undefined.
+- Cursor RED commands: focused runs for `lists only active strict subscriptions` and `advances an active channel watermark`; each first failed because durable enumeration/advancement was undefined.
+- GREEN command/result: the focused behaviors and complete `pnpm exec vitest run src/channels/mattermost-recovery.test.ts` passed after adding exact receipt claim/complete/release/reset and monotonic active-channel cursors.
+- REFACTOR performed: receipt identity is `(instance_key, post_id, channel_id, create_at, SHA-256 payload digest)` with only processing/completed status and timestamps; cursor identity is the immutable subscription tuple. Neither table stores raw messages, tokens, headers, prompts, mounts, or container data.
+- Static verification: `pnpm exec tsc --noEmit --pretty false` passed after narrowing parsed response records outside callback closures.
+- Isolation impact: replayed post IDs cannot move between channels or mutate content; inactive or foreign-instance channels cannot advance a cursor.
+
+### Slice 8.7: durable cross-source deduplication and exact session replay
+
+- Processor RED command: `pnpm exec vitest run src/channels/mattermost-recovery.test.ts -t 'deduplicates the same post across'`.
+- Processor RED failure observed: a restarted processor accepted and routed the same WebSocket/REST post a second time because deduplication existed only in process memory.
+- Session replay RED command: `pnpm exec vitest run src/channels/mattermost-subscription.test.ts -t 'exact crash-replayed'`.
+- Session replay RED failure observed: exact crash replay hit the `messages_in.id` uniqueness constraint instead of recognizing the already-durable identical row.
+- Collision characterization: `pnpm exec vitest run src/channels/mattermost-subscription.test.ts -t 'exact crash-replayed|mismatched.*collision'` passed; temporarily changing the collision branch to return an idempotent result made the mismatch test fail because the promise resolved, and restoring the throw returned both tests to Green.
+- GREEN command/result: durable receipts suppress completed posts across process/source boundaries, while Mattermost session insertion is idempotent only when every stable row field matches exactly. Exact replay does not issue an ordinary second wake; any mismatched message ID fails closed.
+- REFACTOR performed: the canonical receipt digest is source-independent and excludes envelope-only WebSocket metadata; non-Mattermost session writes retain their existing insertion behavior.
+- Isolation impact: a duplicate cannot create two turns, while reuse of one external post/message ID for another channel, thread, content, or routing identity is rejected.
+
+### Slice 8.8: fail-closed REST catch-up and bounded retry
+
+- Parser RED command: `pnpm exec vitest run src/channels/mattermost-recovery.test.ts -t 'parses one REST catch-up page'`.
+- Parser RED failure observed: the catch-up page parser was undefined.
+- Coordinator RED command: `pnpm exec vitest run src/channels/mattermost-recovery.test.ts -t 'recovers each active channel'`.
+- Coordinator RED failure observed: no recovery coordinator existed to request active channels from their durable watermark, route oldest-first, and advance only after completion.
+- Saturation RED command: `pnpm exec vitest run src/channels/mattermost-recovery.test.ts -t 'catch-up window is saturated'`.
+- Saturation RED failure observed: an oversized 1,000-post response resolved and advanced instead of rejecting an unprovable window.
+- Validation RED command: `pnpm exec vitest run src/channels/mattermost-recovery.test.ts -t 'malformed catch-up post'`.
+- Validation RED failure observed: a post with a numeric user identity was routed and advanced rather than rejected before the sink.
+- Watermark-proof RED command: `pnpm exec vitest run src/channels/mattermost-recovery.test.ts -t 'cannot prove the durable watermark'`.
+- Watermark-proof RED failure observed: a sparse response that omitted the prior durable post resolved, routed, and advanced instead of proving a consecutive recovery boundary.
+- WebSocket-cursor RED command: `pnpm exec vitest run src/channels/mattermost-recovery.test.ts -t 'WebSocket receipt completes'`.
+- WebSocket-cursor RED failure observed: completing an active-channel WebSocket receipt left its durable cursor at `{createdAt:0, postId:null}`, forcing later recovery to begin without a trustworthy watermark.
+- Response-retry RED command: `pnpm exec vitest run src/channels/mattermost-recovery.test.ts -t 'retries rate limits'`.
+- Response-retry RED failure observed: the first HTTP 429 failed immediately rather than honoring `Retry-After` and retrying the following 503.
+- Transport-retry RED command: `pnpm exec vitest run src/channels/mattermost-recovery.test.ts -t 'transient catch-up transport'`.
+- Transport-retry RED failure observed: the first network rejection immediately became the sanitized terminal catch-up error.
+- Headerless-429 RED command: `pnpm exec vitest run src/channels/mattermost-outbound.test.ts -t 'headerless rate limit'`.
+- Headerless-429 RED failure observed: retry classification returned `null` instead of the bounded 250 ms fallback.
+- GREEN command/result: the recovery file passed 15 tests at this checkpoint and now passes 34 after the later boundary, state, approval, and retention proofs. REST uses one authenticated channel-ID request ending in `?per_page=200&skipFetchThreads=true`, oldest-first routing of the proven subset, bounded 429/5xx/network delays, sanitized transport errors, and no cursor advance on malformed, failed, saturated, filtered, or unproven windows.
+- REFACTOR performed: catch-up shares the pure Mattermost retry classifier with outbound delivery and requests exactly one ordinary newest-first page of at most 200 posts. It does not use `since`, `page`, `before`, or a multi-page walk. An active channel must already have an exact trusted `(post ID, create_at)` watermark inside that page; otherwise recovery fails closed. Response parsing rejects duplicate/invalid ordered IDs, cross-channel rows, malformed stable identities, unsafe timestamps, nonincreasing-order violations, server filtering, an incomplete equal-timestamp boundary cohort, and unvalidated extra rows before routing. Validated unreferenced parent rows may be present but are never routed. Receipt completion and cursor advancement share one SQLite transaction for active channels.
+- Isolation impact: catch-up never derives identity from a channel name and never stores or renders the bearer token; ambiguous or incomplete windows stay durably pending rather than skipping messages.
+
+### Slice 8.9: startup/reconnect integration and recovery-aware teardown
+
+- Auth-context RED command: `pnpm exec vitest run src/channels/mattermost-client.test.ts -t 'returns the authenticated host context'`.
+- Auth-context RED failure observed: successful setup resolved `undefined`, so the adapter could not build its host-side processor before recovery without waiting for user traffic.
+- Startup-barrier RED command: `pnpm exec vitest run src/channels/mattermost-adapter.test.ts -t 'recovers durable channel posts'`.
+- Startup-barrier RED failure observed: setup made only the users/me request; no active-channel REST recovery ran and newer live traffic was not gated.
+- Runtime-drain RED command: `pnpm exec vitest run src/channels/mattermost-adapter.test.ts -t 'drains earlier channel routing'`.
+- Runtime-drain RED failure observed: the gap catch-up request began while an earlier same-channel host route was still pending (`3` REST calls instead of `2`).
+- Connection-state RED command: `pnpm exec vitest run src/channels/mattermost-adapter.test.ts -t 'reports the adapter unavailable'`.
+- Connection-state RED failure observed: `isConnected()` remained `true` after authenticated socket termination entered reconnect backoff.
+- Teardown RED command: `pnpm exec vitest run src/channels/mattermost-adapter.test.ts -t 'in-flight catch-up work during teardown'`.
+- Teardown RED failure observed: teardown cleared the processor before the pending REST response could route its durable post, producing zero host calls.
+- Crash-receipt characterization: `pnpm exec vitest run src/channels/mattermost-adapter.test.ts -t 'crash-left processing receipts'` passed; temporarily removing startup receipt reset made it fail with zero recovered host calls, and restoring reset returned it to Green.
+- GREEN command/result: the adapter now gates live callbacks behind startup catch-up, drains prior ingress before a gap window, exposes reconnect availability accurately, coalesces/awaits active recovery, and drains it before clearing inbound state on teardown.
+- Affected-suite verification: `pnpm exec vitest run src/channels/mattermost-adapter.test.ts src/channels/mattermost-recovery.test.ts` — 27 tests passed before later additions.
+- Isolation impact: restart/reconnect reuse the existing strict subscription and processor; no recovered item can be dispatched after its channel processor is cleared or into another channel's identity.
+
+### Slice 8.10: channel rename preserves immutable identity
+
+- Normalizer RED command: `pnpm exec vitest run src/channels/mattermost-inbound.test.ts -t 'normalizes a channel rename'`.
+- Normalizer RED failure observed: the channel-update normalizer was undefined.
+- Adapter RED command: `pnpm exec vitest run src/channels/mattermost-adapter.test.ts -t 'forwards a channel rename'`.
+- Adapter RED failure observed: a valid `channel_updated` frame produced zero metadata callbacks because unsupported socket events were discarded.
+- Database RED command: `pnpm exec vitest run src/db/db-v2.test.ts -t 'updates discovered metadata'`.
+- Database RED failure observed: no platform-keyed metadata-only update function existed.
+- GREEN command/result: all three focused commands passed; only exact agreement between parsed channel ID and broadcast channel ID emits metadata, and the host updates only display name/group metadata for the existing exact platform row.
+- REFACTOR performed: rename runs through the same per-channel queue as posts and removal. The database update cannot alter subscription tuple, messaging-group ID/platform ID, agent ID/folder, wiring, session, workspace, mounts, or execution identity.
+- Affected-suite verification: `pnpm exec vitest run src/channels/mattermost-adapter.test.ts src/channels/mattermost-inbound.test.ts` — 30 tests passed; `pnpm exec vitest run src/db/db-v2.test.ts` — 34 tests passed at that point.
+- Isolation impact: names remain presentation metadata; every routing and recovery key remains the immutable namespaced channel ID.
+
+### Slice 8.11: bounded execution admission and fail-closed host availability
+
+- Capacity RED command: `pnpm exec vitest run src/container-runner.isolation.test.ts -t 'reserves capacity across active and spawning identities'`.
+- Capacity RED failure observed: with limit 1, B returned `true` and entered spawn while A was still in asynchronous launch preparation; the expected fail-closed result was `false`.
+- Capacity GREEN command/result: the same focused command passed after reserving capacity across the union of active and spawning session IDs. At saturation, B's durable inbox remains untouched; after A exits, retry launches B only with B's agent, session, workspace, and mounts.
+- Delivery availability REDs: focused delivery/bridge tests first showed an unavailable Mattermost adapter was still called, a registry race resolved `undefined`, retry budget was consumed, and a disconnected registered adapter reported available.
+- Delivery availability GREEN: unavailable/disconnected adapters now leave outbound rows due, and adapter disappearance throws a typed transient error that consumes no permanent retry budget.
+- Orphan REDs: focused container-runtime tests showed enumeration failure, a surviving labeled orphan, and a failed stop request did not abort startup.
+- Orphan GREEN: enumeration or stop uncertainty now throws; cleanup re-enumerates the install-labeled set and startup cannot continue with a known survivor.
+- Affected verification: `pnpm exec vitest run src/container-runner.test.ts src/container-runner.isolation.test.ts src/host-sweep.test.ts` — 3 files/69 tests passed; relevant delivery/bridge/registry/runtime command — 4 files/30 tests passed; full isolation file — 45 tests passed.
+- Static verification: type checking and relevant formatting passed; lint reported zero errors and only established warnings.
+- Isolation impact: global capacity is shared only as a numeric host resource; queued/deferred work remains in its own session database and can never borrow another channel or Telegram container identity. Runtime cleanup fails closed before a second process can knowingly attach to a surviving execution identity.
+
+### Slice 8.12: file-backed restart retains one exact channel context
+
+- Characterization command: `pnpm exec vitest run src/mattermost-restart.integration.test.ts` — 1 passed using a real file-backed central SQLite database closed and reopened between the accepted and recovered posts.
+- Mutation proof: temporarily changing an exact existing receipt from `return existing.status` to `return 'claimed'` made the focused restart test fail (`expected 'claimed' to be 'completed'`); restoring the exact branch returned the test to Green.
+- GREEN behavior: the active subscription, messaging-group/agent/wiring IDs, one shared session ID with `thread_id=null`, workspace/session directories and marker, cursor, and completed receipt survive restart. The durable watermark post is skipped, a missed post enters the same inbox/session with its own root, and only the initial and genuinely new work wake that exact session.
+- Affected verification: `pnpm exec vitest run src/mattermost-restart.integration.test.ts src/channels/mattermost-recovery.test.ts src/mattermost-isolation.integration.test.ts` passed before pagination hardening; after hardening, the restart test and 15-test recovery file passed together.
+- Static verification: focused type checking, ESLint, Prettier, and diff checks passed.
+- Isolation impact: restart preserves inode/path and database identity for A without creating a second session, workspace, memory store, mount set, agent identity, or container identity; the recovered thread root remains delivery metadata only.
+
+### Slice 8.13: processing approval crash recovery
+
+- API RED command: `pnpm exec vitest run src/modules/permissions/mattermost-channel-approval-recovery.test.ts -t 'resumes a claimed pre-topology approval'`.
+- API RED failure observed: the processing-approval recovery function was undefined, so an owner-authorized crash state could not resume.
+- Subsequent focused REDs observed zero recovery wake for an exact pending replay; malformed JSON propagated a syntax error; event-identity mismatches completed; orphan/invalid topology and unsafe artifacts threw or were accepted; message collisions propagated; a lost completion transition reported success; and quarantined rows could return to pending.
+- Characterization mutations: waking every persisted exact row made the completed-replay test fail; removing the non-pristine-placeholder classification made corrupt state complete. Both mutations were reverted and the focused suite returned to Green.
+- GREEN command/result: `pnpm exec vitest run src/modules/permissions/mattermost-channel-approval-recovery.test.ts` — 15 tests passed at this checkpoint and 26 pass after the later authenticated-membership recovery slices. Valid pre-topology, membership, session, and persisted-message crash points converge to one topology/replay; only an exact pending replay is re-woken. Deterministic corruption is quarantined, while operational failures propagate and remain retryable.
+- REFACTOR performed: migration 016 adds a content-free quarantine row containing only approval ID, bounded reason, and timestamp. Quarantined approvals stay non-rejectable `processing`; live exact replay semantics remain unchanged. Startup invokes recovery after verified orphan cleanup and before adapter ingress.
+- Affected verification: the approval checkpoint passed 4 files/143 tests. Later audit-driven coverage superseded that count; the current focused Phase 8 recovery/startup set is recorded after Slice 8.30 rather than claiming this checkpoint as the phase gate.
+- Isolation impact: recovery validates canonical subscription/session/filesystem ownership before replay, never repairs ambiguous topology, and cannot wake a mismatched/corrupt channel or reuse another workspace/container identity.
+
+### Slice 8.14: conservative capacity default
+
+- RED command: `pnpm exec vitest run src/config.test.ts`.
+- RED failure observed: the Pi-sized default was 5 concurrent containers instead of the required conservative value 2.
+- GREEN command/result: the same command passed after changing only the default; an explicit positive `MAX_CONCURRENT_CONTAINERS` environment override remains available for measured deployments.
+- REFACTOR performed: `.env.example` documents the host-global capacity and advises measurement before increasing it; `docs/SPEC.md` matches runtime configuration.
+- Isolation impact: the limit controls only admission count. It never authorizes container reuse, cross-session mounts, shared writable state, or cross-channel execution.
+
+### Slice 8.15: shutdown drains or durably preserves accepted work
+
+- Delivery RED commands: focused `src/delivery.test.ts` runs for `awaits an already-started delivery drain`, the combined stop/drain API, and `does not admit a new delivery drain` first found the drain APIs undefined and one post-stop adapter call.
+- Container RED command: `pnpm exec vitest run src/container-runner.isolation.test.ts -t 'closes admissions, awaits spawn reservations'`.
+- Container RED failure observed: the shutdown API was undefined, so new wakes could race reservations and active-container enumeration.
+- Host-order RED command: `pnpm exec vitest run src/host-shutdown.test.ts`.
+- Host-order RED failure observed: the ordered host shutdown function was undefined.
+- Failure-continuation RED command: `pnpm exec vitest run src/host-shutdown.test.ts -t 'continues durable drains'`.
+- Failure-continuation RED failure observed: the first external-ingress error aborted shutdown immediately instead of draining delivery/spawns and attempting every exact container stop.
+- Registry RED command: `pnpm exec vitest run src/channels/channel-registry.test.ts -t 'reports teardown failures'`.
+- Registry RED failure observed: a failed adapter drain was logged but converted into a resolved teardown promise.
+- GREEN behavior: shutdown synchronously closes host sweep, delivery intake, and container admission; stops external/adapter ingress; awaits accepted recovery/inbound and delivery work; settles spawn reservations; then stops exact active entries. It attempts all later safety steps and aggregates any failures. Failed container stops remain tracked and yield a non-successful host exit; pending SQLite work remains durable.
+- Affected verification: shutdown primitives passed 6 files/91 tests; `pnpm exec vitest run src/host-shutdown.test.ts src/delivery.test.ts src/container-runner.isolation.test.ts src/channels/channel-registry.test.ts` passed 4 files/65 tests after final wiring.
+- Isolation impact: closing admission before drains prevents a late A/B/Telegram wake from crossing the shutdown boundary, and active entries are stopped by immutable session-bound identity only.
+
+### Slice 8.16: FIFO capacity liveness without identity reuse
+
+- RED command: `pnpm exec vitest run src/container-runner.isolation.test.ts -t 'automatically admits capacity-queued channels in FIFO order without racing spawn bookkeeping'`.
+- RED failure observed: 1 failed/47 skipped; after A released the only slot, the expected `ensureAgent({name:'Agent agent-mattermost-fifo-b', identifier:'agent-mattermost-fifo-b'})` call never occurred and the sole call remained A, proving B was not automatically reconsidered.
+- GREEN command/result: the same focused command passed (1 passed/47 skipped) after adding the insertion-ordered capacity queue.
+- Affected-suite verification: `pnpm exec vitest run src/container-runner.isolation.test.ts` — 48/48 passed; `pnpm exec vitest run src/container-runner.test.ts src/container-runner.isolation.test.ts src/host-shutdown.test.ts` — 3 files/62 tests passed.
+- REFACTOR performed: queued work retains only immutable execution identity, reloads the canonical session before admission, revalidates active status and exact identity, joins any racing wake through existing spawn bookkeeping, and clears the process-local queue when admissions close. Focused tests remained Green; `tsc --noEmit`, scoped Prettier, ESLint (zero errors/four unrelated warnings), and diff checks passed.
+- Isolation impact: capacity is shared only as a numeric host limit. FIFO release never lends A's container, agent, session, workspace, mounts, or memory to B/C/Telegram, and each durable inbox remains the source of truth while queued.
+
+### Slice 8.17: startup/shutdown race hardening and bounded best-effort stop
+
+- Deadline RED command: `pnpm exec vitest run src/host-shutdown.test.ts -t 'bounds a hung shutdown stage'`; the test timed out at 5 seconds because one unresolved stage blocked every later stop.
+- Startup REDs: the focused `does not run later startup stages` test found `runHostStartupStages` undefined; `tracks an initializing adapter` observed registry teardown complete early (`true` instead of `false`); `does not retry adapter setup after startup cancellation` observed two setup calls instead of one; and `cannot report connected when teardown interrupts startup catch-up` saw setup resolve `undefined` instead of rejecting cancellation.
+- Stop-fallback REDs: `pnpm exec vitest run src/container-runner.isolation.test.ts -t 'continues stopping later identities'` surfaced the raw `fallback kill failed` error before the next identity was attempted, while `pnpm exec vitest run src/container-runtime.test.ts -t 'calls docker stop for valid container names'` showed the runtime stop lacked `timeout: 10000`.
+- GREEN/affected verification: `pnpm exec vitest run src/host-shutdown.test.ts src/channels/channel-registry.test.ts src/channels/mattermost-adapter.test.ts src/container-runner.isolation.test.ts src/container-runtime.test.ts` — 5 files/88 tests passed.
+- REFACTOR performed: an abort-aware staged startup prevents later admission/poll stages from reopening after termination; the registry tracks initializing adapters and cancels retry sleeps; the Mattermost adapter uses a lifecycle generation and rejects its startup barrier; each asynchronous shutdown stage has a referenced 30-second deadline; Docker stop has its own 10-second bound; and nested runtime/fallback failures are aggregated while later identities are still attempted and failed identities remain tracked.
+- Static verification: `pnpm typecheck` and targeted Prettier passed; targeted ESLint reported zero errors/seven established warnings; `git diff --check` passed.
+- Isolation impact: shutdown cannot briefly resurrect Mattermost ingress or a container after its gates close, and a failed A stop cannot prevent exact B/Telegram stop attempts or authorize execution-identity reuse.
+
+### Slice 8.18: exclusive host lease and default-closed execution admission
+
+- Schema RED command: `pnpm exec vitest run src/db/db-v2.test.ts -t 'installs one central host execution lease before container admission'`; the observed column list was `[]` instead of the singleton owner/PID/acquisition columns.
+- Lease API RED commands: focused `rejects a second live host`, `atomically reclaims a lease`, and `allows only the exact current owner to release` runs first found the acquire/reclaim/release exports undefined. The release proof also established that a stale generation cannot delete the current owner's row.
+- Startup-order RED command: `pnpm exec vitest run src/host-shutdown.test.ts -t 'acquires exclusive host execution ownership'`; the ordered ownership helper was undefined, so filesystem/runtime mutation and admission were not proven to follow lease acquisition.
+- Default-closed REDs: `pnpm exec vitest run src/container-runner.isolation.test.ts -t 'keeps a fresh host runner closed'` resolved `true` instead of `false`; `pnpm exec vitest run src/delivery-admission.test.ts` made one downstream agent-group call instead of zero. Both modules therefore admitted work before exclusive startup opened them.
+- Conditional-release RED command: `pnpm exec vitest run src/host-shutdown.test.ts -t 'releases the host execution lease only after'`; the successful shutdown path never called lease release, rather than calling it only after the final container stop, while a failed stop had to retain the lease.
+- GREEN contract result: `pnpm exec vitest run src/host-execution-lease.integration.test.ts` — 1 passed using real child processes; the second live host was rejected before writing its admission marker, and the exact database was reclaimable only after the first owner received `SIGKILL` and exited.
+- Affected-suite verification: `pnpm exec vitest run src/container-runner.test.ts src/container-runner.isolation.test.ts src/host-shutdown.test.ts src/host-execution-lease.integration.test.ts src/db/db-v2.test.ts` — 5 files/105 tests passed; `pnpm exec vitest run src/modules/permissions/mattermost-channel-approval-recovery.test.ts src/modules/permissions/mattermost-channel-approval.test.ts src/host-shutdown.test.ts src/host-execution-lease.integration.test.ts src/container-runner.isolation.test.ts src/db/db-v2.test.ts` — 6 files/126 tests passed; `pnpm exec vitest run src/delivery-admission.test.ts src/delivery.test.ts` — 2 files/13 tests passed. Type checking passed.
+- REFACTOR performed: startup now initializes/migrates the central database, atomically acquires one SQLite lease, and only then mutates shared filesystem/runtime state, cleans labeled orphans, and opens default-closed container/delivery intake. Shutdown releases only the exact owner generation and only after every ingress drain, spawn settlement, and container stop succeeds; any prior failure keeps the lease for fail-closed process exit and later stale-owner recovery.
+- Operational assumption: liveness uses `process.kill(pid, 0)`, so this lease coordinates processes on the same host and PID namespace. Deployments that share the SQLite database across hosts or isolated PID namespaces still require an external single-writer/leader boundary.
+- Isolation impact: two live local hosts cannot concurrently admit channel or Telegram execution against the same central database; crash recovery can replace only a provably dead owner, and no lease decision exposes Mattermost credentials or changes channel/session/workspace identity.
+
+### Slice 8.19: missed supported non-post state is reconciled before gap recovery completes
+
+- Rename RED command: `pnpm exec vitest run src/channels/mattermost-adapter.test.ts -t 'reconciles a missed channel rename'`.
+- Rename RED failure observed: the gap recovery completed with zero metadata callbacks because REST catch-up recovered posts only and never reconciled current channel metadata.
+- Removal RED command: `pnpm exec vitest run src/channels/mattermost-adapter.test.ts -t 'reconciles a missed bot removal'`.
+- Removal RED failure observed: the gap recovery completed with zero lifecycle callbacks, leaving the active subscription intact when the authenticated bot was absent from the current membership set.
+- Identity-validation RED commands: `pnpm exec vitest run src/channels/mattermost-recovery.test.ts -t 'rejects an ambiguous current-state identity'` and `pnpm exec vitest run src/channels/mattermost-recovery.test.ts -t 'rejects a malformed identity anywhere'`.
+- Identity-validation RED failures observed: both malformed/ambiguous authenticated current-state responses resolved instead of failing closed before metadata, lifecycle, or post routing.
+- Retry RED command: `pnpm exec vitest run src/channels/mattermost-recovery.test.ts -t 'retries rate limits and transient failures while reconciling current channel state'`.
+- Retry RED failure observed: the first HTTP 429 escaped immediately rather than honoring the bounded retry policy and continuing through the following transient 503 to the valid snapshot.
+- Teardown mutation proof: `pnpm exec vitest run src/channels/mattermost-adapter.test.ts -t 'waits for an in-flight current-state callback'`; temporarily bypassing the inbound processor made teardown finish early (`expected true to be false`). Restoring the exact processor path returned the test to Green.
+- GREEN command/result: `pnpm exec vitest run src/channels/mattermost-adapter.test.ts src/channels/mattermost-recovery.test.ts src/channels/mattermost-outbound.test.ts` — 3 files passed, 62 tests passed.
+- REFACTOR performed: recovery now obtains one authenticated host-side snapshot from `/api/v4/users/me/channels?include_deleted=false`, strictly validates every returned stable identity, applies exact-ID rename/removal state through the existing per-channel processor, reloads the active subscription set, and only then performs post catch-up. Current-state and post requests share the same bounded 429/transient retry helper and credential-sanitized transport errors.
+- Isolation impact: absence can deactivate only the exact namespaced active channel; ambiguous or deleted/non-channel identities stop recovery before routing. Renames change presentation metadata only, and removal cannot redirect a subscription, session, workspace, mount, memory store, or container identity. The bot token remains solely in the host-side Authorization header and is never written to prompts, logs, SQLite metadata, mounts, container environments, or the progress evidence; reconciliation stores no message content.
+
+### Slice 8.20: approval activation and live ingress share one failed-head-aware channel sequencer
+
+- Live-race RED command: `pnpm exec vitest run src/modules/permissions/mattermost-channel-approval.test.ts -t 'holds a newer live post'`.
+- Live-race RED failure observed: while the approved trigger's first container wake remained deferred, the newer same-channel WebSocket post reached routing and called `wakeContainer` a second time instead of waiting behind the trigger replay.
+- Failed-head RED command: `pnpm exec vitest run src/modules/permissions/mattermost-channel-approval.test.ts -t 'blocks newer channel work after approval replay fails'`.
+- Failed-head RED failure observed: after activation succeeded and trigger replay failed, newer channel-A work resolved `true` and entered the partially activated session; the expected failed-head rejection was absent.
+- Lifecycle/claim RED command: `pnpm exec vitest run src/modules/permissions/mattermost-channel-approval.test.ts -t 'does not activate an approval behind an earlier queued bot removal'`.
+- Lifecycle/claim RED failure observed: an already-queued authenticated bot removal deleted/denied the pending row, but the approval had claimed outside the channel queue and subsequently recreated one active subscription (`count: 1` instead of `0`).
+- Mutation proof: temporarily removing the approval task's stable head ID made `pnpm exec vitest run src/modules/permissions/mattermost-channel-approval.test.ts -t 'blocks newer channel work after approval replay fails'` fail again because newer A resolved `true`; restoring the head ID returned the same command to 1 passed/16 skipped.
+- GREEN focused result: the combined live-race, failed-head, and lifecycle/claim behaviors passed 3 tests/14 skipped after the final implementation.
+- Affected-suite verification: `pnpm exec vitest run src/channels/mattermost-inbound.test.ts src/channels/mattermost-adapter.test.ts src/channels/mattermost-recovery.test.ts src/modules/permissions/mattermost-channel-approval.test.ts src/modules/permissions/mattermost-channel-approval-recovery.test.ts` — 5 files passed, 96 tests passed.
+- REFACTOR performed: one host-scoped sequencer now owns canonical channel-ID tails and stable failed post heads for approval activation/replay, live and recovered posts, metadata, and lifecycle. A failed head rejects later identified work without replacing the original head; only the exact post-ID retry can clear it, while unkeyed lifecycle control remains able to fail closed. Approval claim, activation, requester membership, trigger replay, and completion transition now execute inside that same boundary, and completion failure is asserted rather than ignored.
+- Static verification: `pnpm typecheck` passed; `pnpm lint` exited zero with 97 established warnings and no errors; scoped Prettier and `git diff --check` passed.
+- Isolation impact: queue keys are exact namespaced Mattermost channel IDs, so channel B remains independent while failed channel A is blocked, and Telegram never shares this sequencer, agent group, session, workspace, mounts, memory, or container identity. The sequencer retains only process-local promise tails and stable post IDs; it stores no bot token, authorization header, raw message content, prompt, SQLite message metadata, mount data, or container environment.
+
+### Slice 8.21: only contiguous durable WebSocket sequences are committed
+
+- RED commands: focused `src/channels/mattermost-client.test.ts` runs for `replays a failed lifecycle sequence instead of resuming past it`, `does not commit a later sequence while an earlier handler is pending`, `commits out-of-order successes once the contiguous predecessor settles`, and `prevents an old generation recovery from overwriting replacement resume state`.
+- RED failures observed: the client advanced its resume sequence when a handler merely started, skipped a failed predecessor, and allowed an obsolete connection generation to overwrite the replacement connection's recovery state.
+- GREEN command/result: `pnpm exec vitest run src/channels/mattermost-client.test.ts` — 26 tests passed. A connection records separately observed and contiguously committed sequence numbers; it advances the resume point only when every preceding host handler has completed durably, and resumes at the failed/pending predecessor.
+- REFACTOR performed: handler completion is an explicit outcome, connection generations own their recovery state, and late work from an old generation is ignored without mutating the authenticated replacement. The same connection-wide sequence barrier covers posts, rename metadata, and lifecycle events.
+- Affected-suite verification: `pnpm exec vitest run src/channels/mattermost-client.test.ts src/channels/mattermost-adapter.test.ts src/channels/mattermost-recovery.test.ts src/channels/mattermost-inbound.test.ts` — 4 files/80 tests passed.
+- Isolation impact: no event is acknowledged before its exact host-side durable effect, and a replaced connection cannot route or acknowledge work into a newer channel/session generation. Connection IDs and sequence counters contain no credentials or message content.
+
+### Slice 8.22: bounded ordinary-page catch-up and trustworthy restart baselines
+
+- Window-design RED failures: multi-request `since`/pagination designs could omit nonconsecutive posts and equal-timestamp peers, while an unbounded response made completeness impossible to prove. The final focused proofs are recorded in Slice 8.25.
+- Bootstrap RED failures: recovery began from an untrusted empty cursor instead of failing closed; the legacy-completed-approval bootstrap API was undefined; an unsafe trigger post was seeded as one accepted baseline instead of being rejected; and an equal-timestamp lower post ID regressed the durable cursor.
+- GREEN behavior: REST makes exactly one ordinary `per_page=200&skipFetchThreads=true` channel-post request, rejects a missing or ambiguous exact prior watermark, preserves Mattermost's server order for equal timestamps, and fails closed when a full-page boundary cannot prove the complete timestamp cohort. No `since`, `page`, `before`, keyset walk, or 50-page budget remains. Approval activation atomically seeds its trusted trigger baseline; startup derives a baseline only for exact, completed Phase 7 approvals whose topology and trigger identity still validate. Direct/manual active rows without a trusted baseline fail closed.
+- REFACTOR performed: the cursor remains monotonic over `(create_at, lexical post ID)` while catch-up retains server order and treats the cursor only as a durable identity proof, not as a server pagination token. Legacy bootstrap and approval crash recovery share strict identity/topology validation and never infer a baseline from a channel display name or mutable metadata.
+- GREEN/affected verification: the current recovery suite passes 34 tests; `pnpm exec vitest run src/modules/permissions/mattermost-channel-approval-recovery.test.ts src/modules/permissions/mattermost-channel-approval.test.ts` now covers 43 approval tests. The combined current recovery/startup verification is recorded after Slice 8.30.
+- Isolation impact: a recovery baseline belongs to one exact platform/channel/subscription/session tuple. Ambiguous legacy state remains inactive for recovery and cannot inherit another channel's history, workspace, memory, mounts, or container identity.
+
+### Slice 8.23: source-independent identity and host-only credential aliases
+
+- Sender-label RED command: `pnpm exec vitest run src/mattermost-restart.integration.test.ts -t 'reconciles a WS sender label'`.
+- Sender-label RED failure observed: the same post received by WebSocket with `sender_name` and later by REST without that presentation field was rejected as an identity collision instead of recognized as one durable post.
+- Credential RED command: `pnpm exec vitest run src/container-runner.isolation.test.ts -t 'loaded from the host .env file'`.
+- Credential RED failure observed: a Mattermost token alias loaded from the host `.env` was not included in the launch-time value scan and could enter provider/container contributions (`true` instead of the required fail-closed `false`).
+- GREEN behavior: the durable receipt digest uses only stable source-independent post identity/content fields; optional sender presentation is preserved for the first routed message but cannot change replay identity. Launch admission scans configured host `.env` Mattermost credential values as well as process-environment aliases and rejects any occurrence in provider environment, arguments, mounts, or rendered configuration.
+- GREEN/affected verification: the sender restart focus passed 1 test/1 skipped; the credential focus and the 48-test `src/container-runner.isolation.test.ts` suite passed at the current checkpoint.
+- REFACTOR performed: one credential-value collector feeds the existing exact-value and derived-output guards without logging values; test fixtures use synthetic markers only.
+- Isolation impact: delivery-source presentation cannot fork one Mattermost post into two turns, and the bot token remains host-side rather than entering prompts, logs, SQLite message metadata, writable workspaces, mounts, container environments, or launch arguments.
+
+### Slice 8.24: bounded durable receipt retention without replay ambiguity
+
+- Schema RED command/result: the focused migration test found no retention-floor table (`[]` instead of four constrained columns).
+- Classification REDs: exact receipt lookup and below-floor classification initially had no behavior; removing floor classification later made the file-backed pruned-replay test accept a changed replay (`false` expected, `true` observed).
+- Pruning REDs: an initial stub threw; a processing receipt incorrectly allowed the floor to advance to `100` and delete two rows instead of clamping at timestamp `50` and deleting only one. Injected deletion failure initially left floor `100`, proving cursor/floor/prune were not one rollback boundary.
+- Claim RED command: `pnpm exec vitest run src/channels/mattermost-recovery.test.ts -t 'checks exact receipts before retiring absent posts below the floor'`; an exact completed receipt returned `claimed` because the floor was consulted before exact identity.
+- Nested-transaction RED command: `pnpm exec vitest run src/channels/mattermost-recovery.test.ts -t 'atomically completes, advances its cursor, and prunes through a nested transaction'`; the expected injected deletion failure did not propagate, so completion and pruning could diverge.
+- GREEN behavior: each channel retains the newest 10,000 completed receipts plus the complete boundary-timestamp cohort and every processing receipt. The subscription-independent per-channel floor rejects absent unknown/changed posts below it, while exact retained identity is always checked first and equal-boundary collisions remain provable. Receipt completion, cursor advancement, floor movement, and deletion share one SQLite transaction and roll back together.
+- Restart GREEN command: `pnpm exec vitest run src/mattermost-restart.integration.test.ts -t 'rejects pruned WS and changed REST replays after restart before session or wake'` — 1 passed. The retention checkpoint passed 9 files/225 tests; the recovery suite now passes 34/34 after the later audit-driven cases, and static checks remained green.
+- REFACTOR performed: migration 018 adds content-free per-channel retention floors with integrity constraints; pruning is deterministic and uses the same transaction helper as durable completion. No retained row or floor contains message content, sender labels, prompts, tokens, workspace paths, mounts, or container environment.
+- Isolation impact: retention keys include the immutable platform/channel identity, so a floor cannot suppress another Mattermost channel or Telegram. Conservative boundary retention and processing clamps fail closed rather than treating an ambiguous replay as completed.
+
+### Slice 8.25: one-page recovery completeness proofs
+
+- Same-millisecond RED command: `pnpm exec vitest run src/channels/mattermost-recovery.test.ts -t 'unprocessed post in the same millisecond'`; the durable watermark was listed before its same-millisecond peer, so routing produced `[]` instead of `['post-missed-a']`.
+- Ordinary-boundary RED command: `pnpm exec vitest run src/channels/mattermost-recovery.test.ts -t 'same-millisecond cohort split at the ordinary page boundary'`; the attempted recovery omitted `post-boundary-missed`. The final proof rejects because the exact watermark is outside the sole 200-row page; the companion full-page test also rejects when a present watermark's timestamp cohort reaches the response boundary.
+- Nonconsecutive-window RED command: `pnpm exec vitest run src/channels/mattermost-recovery.test.ts -t 'fills a nonconsecutive since hole'`; the prior `since` strategy routed only `['post-newest']` instead of `['post-since-hole', 'post-newest']`. The retained test name records that regression, but Green obtains the hole from the single ordinary page and sends no `since` request.
+- Parent-row RED command: `pnpm exec vitest run src/channels/mattermost-recovery.test.ts -t 'validates but does not route an unreferenced parent'`; the response was rejected as invalid merely because Mattermost included a parent outside `order`. Green validates every extra row's stable identity/channel but routes only rows referenced by `order`.
+- Boundary/order/filter mutation RED commands: `pnpm exec vitest run src/channels/mattermost-recovery.test.ts -t 'full page whose watermark timestamp cohort'`, `pnpm exec vitest run src/channels/mattermost-recovery.test.ts -t 'not in nonincreasing creation order'`, and `pnpm exec vitest run src/channels/mattermost-recovery.test.ts -t 'server-filtered page'`. Temporarily bypassing the respective checks made the boundary and order cases resolve instead of reject; the filtered response likewise resolved instead of rejecting.
+- GREEN command/result: `pnpm exec vitest run src/channels/mattermost-recovery.test.ts` — 34/34 passed. Each channel issues one request to `/api/v4/channels/{id}/posts?per_page=200&skipFetchThreads=true`; the exact watermark must be present, timestamps must be nonincreasing in server order, `first_inaccessible_post_time` must not report filtering, and a full equal-timestamp boundary must be provably complete or recovery stops without routing or cursor movement.
+- REFACTOR performed: removed the unsafe `since`, offset, keyset, and multi-page assumptions. One bounded parser validates the complete returned object, reverses only the proven route subset, preserves equal-timestamp server order, prioritizes an exact failed head separately, and treats every proof failure as terminal for that recovery attempt.
+- Isolation impact: completeness is proven independently for each immutable instance/channel cursor. An ambiguous page can neither acknowledge skipped work nor borrow another channel's receipt, session, workspace, memory, mount, or container identity.
+
+### Slice 8.26: recovered-post priority and terminal channel control
+
+- Present-channel ordering RED command: `pnpm exec vitest run src/channels/mattermost-recovery.test.ts -t 'replays recoverable posts before applying current metadata'`; callbacks ran as `['metadata', 'post']` instead of `['post', 'metadata']`, so a rename could be blocked ahead of the post whose failed head had to be retried.
+- Exact-head RED command: `pnpm exec vitest run src/channels/mattermost-recovery.test.ts -t 'prioritizes the exact failed head'`; the recovery promise rejected with `Mattermost channel ingress is blocked by an earlier failed post` because a later same-millisecond candidate ran before the exact failed head.
+- Terminal-removal RED command: `pnpm exec vitest run src/channels/mattermost-inbound.test.ts -t 'lets terminal bot removal clear a failed head'`; the removal promise was rejected as blocked and the failed-head ID remained set, so an absent bot could not terminally close the channel.
+- GREEN behavior: current authenticated membership is validated first, but for a present channel its recoverable posts run before rename metadata. Recovery promotes only the sequencer's exact failed post ID ahead of otherwise preserved server order. Metadata remains blocked behind a failed post, while authenticated bot removal is terminal control that may execute, clear the exact failed head, and prevent later work.
+- REFACTOR performed: the recovery coordinator receives a read-only failed-head lookup from the shared channel sequencer; terminal lifecycle clearing remains inside that sequencer rather than adding a second ordering mechanism.
+- Verification: the recovery and inbound suites pass 34/34 and 21/21 respectively.
+- Isolation impact: priority is scoped by exact namespaced channel ID and stable post ID. Terminal removal affects only its canonical channel; it cannot release another Mattermost channel or any Telegram execution.
+
+### Slice 8.27: authenticated approval membership recovery
+
+- Offline-membership RED commands: `pnpm exec vitest run src/modules/permissions/mattermost-channel-approval-recovery.test.ts -t 'reports unfinished approval work'` and `pnpm exec vitest run src/channels/mattermost-recovery.test.ts -t 'unfinished approvals from authenticated membership'`. The membership-work APIs were undefined, so startup with no active subscription skipped the authenticated current-channel request and could strand an owner-authorized pending/processing approval.
+- Pending/processing RED commands: focused runs for `terminal-cancels a pending approval`, `quarantines an absent processing approval`, `recovers a processing approval only after authenticated startup membership`, and `deactivates partial processing topology`. Before Green, absent processing reported `membershipQuarantined: 0` instead of `1`, present processing reported `completed: 0` instead of `1`, and absent partial topology remained active. Pending work also lacked an authenticated terminal-cancellation path.
+- Live-owner RED command: `pnpm exec vitest run src/modules/permissions/mattermost-channel-approval-recovery.test.ts -t 'live owner replay that completes ahead'`; stale startup recovery threw `Mattermost approval recovery completion transition failed` after the live owner path had already completed the exact row.
+- Scoped-bootstrap RED command: `pnpm exec vitest run src/modules/permissions/mattermost-channel-approval-recovery.test.ts -t 'bootstraps legacy cursors only for the authenticated Mattermost instance'`; primary startup seeded one secondary-instance cursor instead of zero.
+- Terminal-head RED command: `pnpm exec vitest run src/modules/permissions/mattermost-channel-approval-recovery.test.ts -t 'terminal-cancels an absent approval through the shared failed-head sequencer'`; cancellation left the failed-head string in place.
+- GREEN behavior: unfinished approvals force one authenticated membership snapshot even when there is no active subscription. An absent `pending` row is terminally cancelled and denied; an absent `processing` row is content-free quarantined and any partial subscription is deactivated; a present O/P-channel processing row resumes exact topology/replay and completes. A concurrent live owner completion is accepted as already resolved, and legacy cursor bootstrap is restricted to the authenticated instance.
+- REFACTOR performed: membership reconciliation precedes legacy bootstrap and active-channel post recovery, uses the shared terminal sequencer for cancellation, and keeps deterministic absence quarantine distinct from retryable operational failures. Direct-message, group-message, and deleted memberships cannot authorize channel recovery; public and private channels remain the only accepted types.
+- Verification: `src/modules/permissions/mattermost-channel-approval-recovery.test.ts` passes 26/26, `src/modules/permissions/mattermost-channel-approval.test.ts` passes 17/17, and the recovery suite passes 34/34.
+- Isolation impact: authenticated bot membership is checked for the exact instance/channel before activation or replay. A pending/processing row cannot construct or wake topology for an absent, foreign-instance, direct-message, group-message, deleted, or ambiguous channel, and quarantine contains no message content or credential.
+
+### Slice 8.28: recovery readiness, socket truth, and persistent reconnect backoff
+
+- Pre-initialization RED command: `pnpm exec vitest run src/channels/mattermost-adapter.test.ts -t 'settles a pre-initialization sequence-gap hook'`; after teardown, `teardownSettled` was still `false` because a gap hook remained blocked on an unresolved recovery-ready promise.
+- Post-auth cleanup RED command: `pnpm exec vitest run src/channels/mattermost-adapter.test.ts -t 'tears down authenticated transport when post-auth initialization fails'`; the database failure escaped with zero socket-close calls instead of one.
+- Socket-state RED command: `pnpm exec vitest run src/channels/mattermost-adapter.test.ts -t 'remains unavailable when the authenticated socket closes during startup recovery'`; `isConnected()` returned `true` instead of `false` after the socket terminated while REST startup recovery was pending.
+- Persistent-backoff RED command: `pnpm exec vitest run src/channels/mattermost-client.test.ts -t 'continues exponential backoff across authenticated connections whose recovery fails'`; after a second authenticated `hello` and another unprovable recovery gap, the active delay reset to 1,000 ms instead of continuing to 2,000 ms.
+- GREEN behavior: setup creates an explicitly rejectable `recoveryReady` boundary before client callbacks can observe a gap; teardown and setup failure settle it, drain hooks, and close authenticated transport exactly once. Adapter availability requires both completed recovery setup and a currently connected socket. Reconnect attempts reset only after a sequenced event completes durably, not merely after authentication or `hello` while recovery still fails.
+- REFACTOR performed: socket connectivity and recovery readiness are separate state variables joined only at the adapter availability boundary; lifecycle generations own all deferred setup state and stale callbacks cannot reopen it.
+- Verification: the adapter suite passes 23/23 and the client suite passes 27/27.
+- Isolation impact: no pre-initialization or stale-generation hook can outlive teardown and route into replacement state. Backoff state carries only counters/connection sequence metadata, never token, content, channel workspace, or container identity.
+
+### Slice 8.29: restart-generation lease and project-file capacity configuration
+
+- Same-PID RED command: `pnpm exec vitest run src/db/db-v2.test.ts -t 'reclaims a stale generation when a restarted host reuses the same process id'`; acquisition threw the live-lease error when a restarted host reused PID 101 instead of replacing the prior owner generation.
+- `.env` capacity RED command: `pnpm exec vitest run src/config.test.ts -t 'honors the global container limit from the project env file'`; configuration remained at the default `2` instead of the project-file value `3`.
+- GREEN behavior: the lease's random owner generation distinguishes a restarted same-PID host and exact-generation release still cannot delete a replacement row. `MAX_CONCURRENT_CONTAINERS` now follows normal project configuration precedence—process environment, project `.env`, then conservative default 2—with a minimum of 1.
+- REFACTOR performed: same-PID generation replacement stays inside the existing immediate SQLite acquisition transaction; capacity uses the shared bounded env-file reader rather than a second parser.
+- Verification: `src/db/db-v2.test.ts` passes 40/40 and `src/config.test.ts` passes 2/2.
+- Isolation impact: PID reuse cannot strand all execution admission, stale owner IDs cannot release current admission, and a configured capacity changes only the number of distinct identities admitted—not their channel/session/workspace/mount/container binding.
+
+### Slice 8.30: strict required-adapter startup gates
+
+- Strict-recovery RED command: `pnpm exec vitest run src/channels/channel-registry.test.ts -t 'propagates a strict adapter recovery failure'`; initialization resolved instead of rejecting the adapter's recovery failure.
+- Required-credentials RED command: `pnpm exec vitest run src/channels/channel-registry.test.ts -t 'durable state requires an adapter whose credentials are missing'`; initialization resolved instead of rejecting missing credentials for persisted Mattermost state.
+- Instance-preflight RED command: `pnpm exec vitest run src/channels/channel-registry.test.ts -t 'persisted instance mismatch before adapter setup'`; the mismatched adapter's `setup` ran instead of failing before any adapter mutation. The companion `requires the active adapter to match every persisted platform instance` focus initially lacked the required instance-check API.
+- GREEN behavior: a strict Mattermost setup/recovery error propagates before host work starts; persisted Mattermost state makes the adapter and its host credentials required; and every persisted instance key must exactly match the configured adapter instance both before setup and at the post-initialization guard.
+- REFACTOR performed: optional adapters retain best-effort startup, while strict, required, and required-instance policies are explicit registry options supplied by host startup. Required-instance preflight occurs immediately after factory construction and before `adapter.setup()`.
+- Verification: `pnpm exec vitest run src/channels/channel-registry.test.ts` — 11/11 passed.
+- Isolation impact: durable `mattermost:{instance}:{channel}` state cannot be served by a missing, partially initialized, or differently configured instance, so startup fails before ingress, recovery, workspace mutation, or container admission can cross an instance boundary.
+
+### Current Phase 8 regression checkpoint
+
+- Focused command/result: `pnpm exec vitest run src/channels/mattermost-recovery.test.ts src/channels/mattermost-inbound.test.ts src/channels/mattermost-adapter.test.ts src/channels/mattermost-client.test.ts src/modules/permissions/mattermost-channel-approval-recovery.test.ts src/modules/permissions/mattermost-channel-approval.test.ts src/db/db-v2.test.ts src/config.test.ts src/channels/channel-registry.test.ts` — 9 files/201 tests passed.
+- Latest full host regression command/result: `pnpm test` — 57 files/733 tests passed.
+- Phase status remains in progress. These are current local verification results, not a completed phase gate, pull-request result, or CI claim.
+
+### Phase 8 local gate
+
+- Focused recovery/startup command: `pnpm exec vitest run src/channels/mattermost-recovery.test.ts src/channels/mattermost-inbound.test.ts src/channels/mattermost-adapter.test.ts src/channels/mattermost-client.test.ts src/modules/permissions/mattermost-channel-approval-recovery.test.ts src/modules/permissions/mattermost-channel-approval.test.ts src/db/db-v2.test.ts src/config.test.ts src/channels/channel-registry.test.ts` — 9 files/201 tests passed.
+- Full host fast-suite command: `pnpm test` — 57 files/733 tests passed.
+- Host static commands: `pnpm typecheck` and `pnpm format:check` passed; `pnpm lint` passed with zero errors and 96 warnings; `git diff --check` passed.
+- Container type-check command: `docker run --rm --network none -v /home/pi/nanoclaw-v2:/workspace -w /workspace/container/agent-runner oven/bun:1.3.12 bun run typecheck` — passed.
+- Complete isolated container unit command: `docker run --rm --network none -v /home/pi/nanoclaw-v2:/workspace -w /workspace/container/agent-runner oven/bun:1.3.12 bun test src/db/session-state.test.ts src/mcp-tools/deep-research-workflow.test.ts src/providers/codex.factory.test.ts src/providers/factory.test.ts src/providers/codex-app-server.test.ts src/providers/codex.test.ts src/poll-loop.test.ts src/timezone.test.ts src/formatter.test.ts` — 9 files/109 tests passed.
+- Complete isolated container integration command: `docker run --rm --network none -v /home/pi/nanoclaw-v2:/workspace -w /workspace/container/agent-runner oven/bun:1.3.12 bun test src/integration.test.ts` — 1 file/3 tests passed. The two clean processes cover the full 10-file/112-test container inventory without the pre-existing leaked-loop cross-file interference documented in Phase 5.
+- Scope/security audit: no focused-test markers, whitespace errors, new generated artifacts, or large untracked source files were found. The diff contains synthetic credential markers only; no production Mattermost URL, token, credential, or message content was used.
+- Independent audit: concurrent review tracks found and verified fixes for one-page completeness, durable sequence commits, authenticated approval recovery, terminal failed-head control, startup readiness, reconnect escalation, strict instance preflight, same-PID lease recovery, retention boundaries, FIFO capacity, and shutdown races. Their final reviews found no remaining Phase 8 correctness, acceptance, credential, or mandatory-isolation blocker.
+- Pull request: [#45](https://github.com/ufJmacca/nanoclaw/pull/45), `codex/mattermost-08-recovery` targeting `codex/mattermost-07-lifecycle` (dependent on Phase 7 PR #44).
+- GitHub verification: the available `label` check passed ([run 29140090841](https://github.com/ufJmacca/nanoclaw/actions/runs/29140090841)). The repository's code CI workflow is restricted to pull requests targeting the default branch, so GitHub did not provide a code test/type/lint check for this stacked base; the complete local host/container gate above is the phase gate, and no unavailable check is represented as passing.
+- Phase status: complete; the local gate, independent audits, scope/security review, and every available required GitHub check passed. Pull request #45 is ready for review.

@@ -1,6 +1,11 @@
 export { initDb, initTestDb, getDb, closeDb } from './connection.js';
 export { runMigrations } from './migrations/index.js';
 export {
+  acquireHostExecutionLease,
+  releaseHostExecutionLease,
+  type HostExecutionLease,
+} from './host-execution-lease.js';
+export {
   createAgentGroup,
   getAgentGroup,
   getAgentGroupByFolder,
@@ -15,6 +20,7 @@ export {
   getAllMessagingGroups,
   getMessagingGroupsByChannel,
   updateMessagingGroup,
+  updateMessagingGroupMetadataByPlatform,
   deleteMessagingGroup,
   createMessagingGroupAgent,
   getMessagingGroupAgents,

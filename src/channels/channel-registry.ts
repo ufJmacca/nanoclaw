@@ -16,10 +16,34 @@ function isNetworkError(err: unknown): err is Error {
   return err instanceof Error && err.name === 'NetworkError';
 }
 
-const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (!signal) return new Promise<void>((resolve) => setTimeout(resolve, ms));
+  if (signal.aborted) return Promise.resolve();
+  return new Promise<void>((resolve) => {
+    const onAbort = (): void => {
+      clearTimeout(timeout);
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    };
+    const timeout = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener('abort', onAbort, { once: true });
+    if (signal.aborted) onAbort();
+  });
+}
 
 const registry = new Map<string, ChannelRegistration>();
 const activeAdapters = new Map<string, ChannelAdapter>();
+const initializingAdapters = new Set<Promise<void>>();
+
+export interface ChannelAdapterInitOptions {
+  signal?: AbortSignal;
+  strictChannels?: readonly string[];
+  requiredChannels?: readonly string[];
+  requiredInstances?: Readonly<Record<string, readonly string[]>>;
+}
 
 /** Register a channel adapter factory. Called by channel modules on import. */
 export function registerChannelAdapter(name: string, registration: ChannelRegistration): void {
@@ -36,6 +60,15 @@ export function getActiveAdapters(): ChannelAdapter[] {
   return [...activeAdapters.values()];
 }
 
+/** Fail closed when durable instance state is not owned by the active adapter. */
+export function requireChannelAdapterInstances(channelType: string, instanceKeys: ReadonlySet<string>): void {
+  if (instanceKeys.size === 0) return;
+  const adapter = activeAdapters.get(channelType);
+  if (!adapter?.platformInstanceKey || instanceKeys.size !== 1 || !instanceKeys.has(adapter.platformInstanceKey)) {
+    throw new Error('Configured channel adapter does not cover persisted instance state');
+  }
+}
+
 /** Get all registered channel names. */
 export function getRegisteredChannelNames(): string[] {
   return [...registry.keys()];
@@ -50,58 +83,126 @@ export function getChannelContainerConfig(name: string): ChannelRegistration['co
  * Instantiate and set up all registered channel adapters.
  * Skips adapters that return null (missing credentials).
  */
-export async function initChannelAdapters(setupFn: (adapter: ChannelAdapter) => ChannelSetup): Promise<void> {
+export async function initChannelAdapters(
+  setupFn: (adapter: ChannelAdapter) => ChannelSetup,
+  options: ChannelAdapterInitOptions = {},
+): Promise<void> {
   for (const [name, registration] of registry) {
+    if (options.signal?.aborted) break;
+    const initializing = initializeChannelAdapter(
+      name,
+      registration,
+      setupFn,
+      options.signal,
+      options.requiredChannels?.includes(name) ?? false,
+      new Set(options.requiredInstances?.[name] ?? []),
+    );
+    initializingAdapters.add(initializing);
     try {
-      const adapter = await registration.factory();
-      if (!adapter) {
-        log.warn('Channel credentials missing, skipping', { channel: name });
-        continue;
-      }
-
-      const setup = setupFn(adapter);
-      // Transient network failures during adapter init (e.g. Telegram deleteWebhook
-      // hitting a DNS hiccup at boot) would otherwise leave the channel permanently
-      // dead until manual restart. Retry only on NetworkError so misconfigs (bad
-      // tokens, etc.) still fail fast.
-      let attempt = 0;
-      while (true) {
-        try {
-          await adapter.setup(setup);
-          break;
-        } catch (err) {
-          if (isNetworkError(err) && attempt < SETUP_RETRY_DELAYS_MS.length) {
-            const delay = SETUP_RETRY_DELAYS_MS[attempt]!;
-            log.warn('Channel adapter setup failed with network error, retrying', {
-              channel: name,
-              attempt: attempt + 1,
-              delayMs: delay,
-              err: err.message,
-            });
-            await sleep(delay);
-            attempt += 1;
-            continue;
-          }
-          throw err;
-        }
-      }
-      activeAdapters.set(adapter.channelType, adapter);
-      log.info('Channel adapter started', { channel: name, type: adapter.channelType });
+      await initializing;
     } catch (err) {
       log.error('Failed to start channel adapter', { channel: name, err });
+      if (
+        options.strictChannels?.includes(name) ||
+        options.requiredChannels?.includes(name) ||
+        options.requiredInstances?.[name]
+      ) {
+        throw err;
+      }
+    } finally {
+      initializingAdapters.delete(initializing);
     }
   }
 }
 
-/** Tear down all active adapters. */
-export async function teardownChannelAdapters(): Promise<void> {
-  for (const [name, adapter] of activeAdapters) {
-    try {
+async function initializeChannelAdapter(
+  name: string,
+  registration: ChannelRegistration,
+  setupFn: (adapter: ChannelAdapter) => ChannelSetup,
+  signal?: AbortSignal,
+  required = false,
+  requiredInstances: ReadonlySet<string> = new Set(),
+): Promise<void> {
+  const adapter = await registration.factory();
+  if (!adapter) {
+    if (required) throw new Error(`Required channel adapter credentials are missing: ${name}`);
+    log.warn('Channel credentials missing, skipping', { channel: name });
+    return;
+  }
+  if (
+    requiredInstances.size > 0 &&
+    (!adapter.platformInstanceKey ||
+      requiredInstances.size !== 1 ||
+      !requiredInstances.has(adapter.platformInstanceKey))
+  ) {
+    throw new Error('Configured channel adapter does not cover persisted instance state');
+  }
+  if (signal?.aborted) return;
+
+  const setup = setupFn(adapter);
+  // Transient network failures during adapter init (e.g. Telegram deleteWebhook
+  // hitting a DNS hiccup at boot) would otherwise leave the channel permanently
+  // dead until manual restart. Retry only on NetworkError so misconfigs (bad
+  // tokens, etc.) still fail fast.
+  let attempt = 0;
+  while (true) {
+    if (signal?.aborted) {
       await adapter.teardown();
-      log.info('Channel adapter stopped', { channel: name });
+      return;
+    }
+    try {
+      await adapter.setup(setup);
+      break;
     } catch (err) {
-      log.error('Failed to stop channel adapter', { channel: name, err });
+      if (signal?.aborted) {
+        await adapter.teardown();
+        return;
+      }
+      if (isNetworkError(err) && attempt < SETUP_RETRY_DELAYS_MS.length) {
+        const delay = SETUP_RETRY_DELAYS_MS[attempt]!;
+        log.warn('Channel adapter setup failed with network error, retrying', {
+          channel: name,
+          attempt: attempt + 1,
+          delayMs: delay,
+          err: err.message,
+        });
+        await sleep(delay, signal);
+        attempt += 1;
+        continue;
+      }
+      throw err;
     }
   }
-  activeAdapters.clear();
+  if (signal?.aborted) {
+    await adapter.teardown();
+    return;
+  }
+  activeAdapters.set(adapter.channelType, adapter);
+  log.info('Channel adapter started', { channel: name, type: adapter.channelType });
+}
+
+/** Tear down all active adapters. */
+export async function teardownChannelAdapters(): Promise<void> {
+  const failures: unknown[] = [];
+  const teardownActive = async (): Promise<void> => {
+    for (const [name, adapter] of [...activeAdapters]) {
+      activeAdapters.delete(name);
+      try {
+        await adapter.teardown();
+        log.info('Channel adapter stopped', { channel: name });
+      } catch (err) {
+        log.error('Failed to stop channel adapter', { channel: name, err });
+        failures.push(err);
+      }
+    }
+  };
+  await teardownActive();
+  if (initializingAdapters.size > 0) {
+    const results = await Promise.allSettled([...initializingAdapters]);
+    for (const result of results) {
+      if (result.status === 'rejected') failures.push(result.reason);
+    }
+  }
+  await teardownActive();
+  if (failures.length > 0) throw new AggregateError(failures, 'Channel adapter teardown incomplete');
 }

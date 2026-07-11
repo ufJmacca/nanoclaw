@@ -120,6 +120,8 @@ export type ThreadSessionPolicy = 'force-per-thread' | 'honor-wiring';
 export interface ChannelAdapter {
   name: string;
   channelType: string;
+  /** Stable host-side platform instance identity when one adapter covers one instance. */
+  platformInstanceKey?: string;
 
   /**
    * Whether this adapter preserves platform thread identifiers for delivery.

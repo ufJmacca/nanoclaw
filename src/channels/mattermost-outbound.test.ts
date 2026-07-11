@@ -575,4 +575,11 @@ describe('Mattermost outbound pure components', () => {
     expect(mattermostRetryDelayMs({ status: 400 }, 1, policy)).toBeNull();
     expect(mattermostRetryDelayMs({ status: 503 }, 3, policy)).toBeNull();
   });
+
+  it('falls back to bounded exponential delay for a headerless rate limit', () => {
+    const policy = { maxAttempts: 3, baseDelayMs: 250, maxDelayMs: 30_000 };
+
+    expect(mattermostRetryDelayMs({ status: 429 }, 1, policy)).toBe(250);
+    expect(mattermostRetryDelayMs({ status: 429, headers: { 'retry-after': 'invalid' } }, 2, policy)).toBe(500);
+  });
 });

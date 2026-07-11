@@ -27,6 +27,14 @@ function now() {
   return new Date().toISOString();
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
 /** Create a mock ChannelAdapter for testing. */
 function createMockAdapter(
   channelType: string,
@@ -114,6 +122,253 @@ describe('channel registry', () => {
     const active = getActiveAdapters();
     const noCreds = active.find((a) => a.name === 'no-creds');
     expect(noCreds).toBeUndefined();
+  });
+
+  it('propagates a strict adapter recovery failure before host work can start', async () => {
+    const { registerChannelAdapter, initChannelAdapters, getActiveAdapters } = await import('./channel-registry.js');
+    const adapter = createMockAdapter('strict-recovery');
+    adapter.setup = vi.fn().mockRejectedValue(new Error('injected strict recovery failure'));
+    let created = false;
+    registerChannelAdapter('strict-recovery-registration', {
+      factory: () => {
+        if (created) return null;
+        created = true;
+        return adapter;
+      },
+    });
+
+    await expect(
+      initChannelAdapters(
+        () => ({
+          onInbound: () => {},
+          onInboundEvent: () => {},
+          onMetadata: () => {},
+          onAction: () => {},
+        }),
+        { strictChannels: ['strict-recovery-registration'] },
+      ),
+    ).rejects.toThrow('injected strict recovery failure');
+    expect(getActiveAdapters()).not.toContain(adapter);
+  });
+
+  it('fails closed when durable state requires an adapter whose credentials are missing', async () => {
+    const { registerChannelAdapter, initChannelAdapters } = await import('./channel-registry.js');
+    registerChannelAdapter('required-missing-registration', { factory: () => null });
+
+    await expect(
+      initChannelAdapters(
+        () => ({
+          onInbound: () => {},
+          onInboundEvent: () => {},
+          onMetadata: () => {},
+          onAction: () => {},
+        }),
+        { requiredChannels: ['required-missing-registration'] },
+      ),
+    ).rejects.toThrow('Required channel adapter credentials are missing');
+  });
+
+  it('requires the active adapter to match every persisted platform instance', async () => {
+    const registry = await import('./channel-registry.js');
+    const requireInstances = (
+      registry as typeof registry & {
+        requireChannelAdapterInstances?: (channelType: string, instanceKeys: ReadonlySet<string>) => void;
+      }
+    ).requireChannelAdapterInstances;
+    expect(requireInstances).toBeTypeOf('function');
+    if (!requireInstances) return;
+    const adapter = {
+      ...createMockAdapter('instance-bound'),
+      platformInstanceKey: 'primary',
+    };
+    let created = false;
+    registry.registerChannelAdapter('instance-bound-registration', {
+      factory: () => {
+        if (created) return null;
+        created = true;
+        return adapter;
+      },
+    });
+    await registry.initChannelAdapters(() => ({
+      onInbound: () => {},
+      onInboundEvent: () => {},
+      onMetadata: () => {},
+      onAction: () => {},
+    }));
+
+    expect(() => requireInstances('instance-bound', new Set(['secondary']))).toThrow(
+      'Configured channel adapter does not cover persisted instance state',
+    );
+    expect(() => requireInstances('instance-bound', new Set(['primary']))).not.toThrow();
+  });
+
+  it('rejects a persisted instance mismatch before adapter setup can mutate state', async () => {
+    const registry = await import('./channel-registry.js');
+    const adapter = {
+      ...createMockAdapter('pre-setup-instance-bound'),
+      platformInstanceKey: 'primary',
+      setup: vi.fn().mockResolvedValue(undefined),
+    };
+    let created = false;
+    registry.registerChannelAdapter('pre-setup-instance-registration', {
+      factory: () => {
+        if (created) return null;
+        created = true;
+        return adapter;
+      },
+    });
+
+    await expect(
+      registry.initChannelAdapters(
+        () => ({
+          onInbound: () => {},
+          onInboundEvent: () => {},
+          onMetadata: () => {},
+          onAction: () => {},
+        }),
+        { requiredInstances: { 'pre-setup-instance-registration': ['secondary'] } },
+      ),
+    ).rejects.toThrow('Configured channel adapter does not cover persisted instance state');
+    expect(adapter.setup).not.toHaveBeenCalled();
+  });
+
+  it('stops every active adapter and reports teardown failures', async () => {
+    const { registerChannelAdapter, initChannelAdapters, teardownChannelAdapters, getActiveAdapters } =
+      await import('./channel-registry.js');
+    const failing = createMockAdapter('teardown-failing');
+    const healthy = createMockAdapter('teardown-healthy');
+    const failure = new Error('injected adapter drain failure');
+    failing.teardown = vi.fn().mockRejectedValue(failure);
+    healthy.teardown = vi.fn().mockResolvedValue(undefined);
+    let failingCreated = false;
+    let healthyCreated = false;
+    registerChannelAdapter('teardown-failing-registration', {
+      factory: () => {
+        if (failingCreated) return null;
+        failingCreated = true;
+        return failing;
+      },
+    });
+    registerChannelAdapter('teardown-healthy-registration', {
+      factory: () => {
+        if (healthyCreated) return null;
+        healthyCreated = true;
+        return healthy;
+      },
+    });
+    await initChannelAdapters(() => ({
+      onInbound: () => {},
+      onInboundEvent: () => {},
+      onMetadata: () => {},
+      onAction: () => {},
+    }));
+
+    await expect(teardownChannelAdapters()).rejects.toThrow('Channel adapter teardown incomplete');
+
+    expect(failing.teardown).toHaveBeenCalledOnce();
+    expect(healthy.teardown).toHaveBeenCalledOnce();
+    expect(getActiveAdapters()).toEqual([]);
+  });
+
+  it('tracks an initializing adapter so termination cannot leave it active after teardown', async () => {
+    const { registerChannelAdapter, initChannelAdapters, teardownChannelAdapters, getActiveAdapters } =
+      await import('./channel-registry.js');
+    const setupStarted = deferred<void>();
+    const releaseSetup = deferred<void>();
+    let connected = false;
+    const adapter = createMockAdapter('startup-race');
+    adapter.setup = vi.fn(async () => {
+      setupStarted.resolve(undefined);
+      await releaseSetup.promise;
+      connected = true;
+    });
+    adapter.teardown = vi.fn(async () => {
+      connected = false;
+    });
+    adapter.isConnected = () => connected;
+    let created = false;
+    registerChannelAdapter('startup-race-registration', {
+      factory: () => {
+        if (created) return null;
+        created = true;
+        return adapter;
+      },
+    });
+    const controller = new AbortController();
+    const initialize = (
+      initChannelAdapters as typeof initChannelAdapters & {
+        (setupFn: (adapter: ChannelAdapter) => ChannelSetup, options: { signal: AbortSignal }): Promise<void>;
+      }
+    )(
+      () => ({
+        onInbound: () => {},
+        onInboundEvent: () => {},
+        onMetadata: () => {},
+        onAction: () => {},
+      }),
+      { signal: controller.signal },
+    );
+    await setupStarted.promise;
+
+    controller.abort();
+    let teardownComplete = false;
+    const teardown = teardownChannelAdapters().then(() => {
+      teardownComplete = true;
+    });
+    await Promise.resolve();
+    expect(teardownComplete).toBe(false);
+
+    releaseSetup.resolve(undefined);
+    await Promise.all([initialize, teardown]);
+
+    expect(adapter.teardown).toHaveBeenCalledOnce();
+    expect(adapter.isConnected()).toBe(false);
+    expect(getActiveAdapters()).not.toContain(adapter);
+  });
+
+  it('does not retry adapter setup after startup cancellation', async () => {
+    vi.useFakeTimers();
+    try {
+      const { registerChannelAdapter, initChannelAdapters, teardownChannelAdapters } =
+        await import('./channel-registry.js');
+      const networkFailure = new Error('temporary network failure');
+      networkFailure.name = 'NetworkError';
+      const adapter = createMockAdapter('startup-retry-race');
+      adapter.setup = vi
+        .fn()
+        .mockRejectedValueOnce(networkFailure)
+        .mockImplementationOnce(async () => {});
+      adapter.teardown = vi.fn().mockResolvedValue(undefined);
+      let created = false;
+      registerChannelAdapter('startup-retry-race-registration', {
+        factory: () => {
+          if (created) return null;
+          created = true;
+          return adapter;
+        },
+      });
+      const controller = new AbortController();
+      const initialize = initChannelAdapters(
+        () => ({
+          onInbound: () => {},
+          onInboundEvent: () => {},
+          onMetadata: () => {},
+          onAction: () => {},
+        }),
+        { signal: controller.signal },
+      );
+      await vi.waitFor(() => expect(adapter.setup).toHaveBeenCalledOnce());
+
+      controller.abort();
+      const teardown = teardownChannelAdapters();
+      await vi.runAllTimersAsync();
+      await Promise.all([initialize, teardown]);
+
+      expect(adapter.setup).toHaveBeenCalledOnce();
+      expect(adapter.teardown).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { MattermostClient, type MattermostTransport } from './mattermost-client.js';
 import { MattermostInboundProcessor, type MattermostInboundLogger } from './mattermost-inbound.js';
+import * as inboundModule from './mattermost-inbound.js';
 
 function postedEvent(postOverrides: Record<string, unknown> = {}): string {
   return JSON.stringify({
@@ -118,6 +119,109 @@ describe('MattermostInboundProcessor', () => {
     expect(onInbound).toHaveBeenCalledOnce();
   });
 
+  it('releases a post receipt when its sink fails so catch-up can retry it', async () => {
+    const onInbound = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('injected routing failure'))
+      .mockResolvedValueOnce(undefined);
+    const processor = new MattermostInboundProcessor({ instanceKey: 'primary', botUserId: 'bot-user-id' }, onInbound);
+    const payload = postedEvent({ id: 'post-retry-after-failure' });
+
+    await expect(processor.handle(payload)).rejects.toThrow('injected routing failure');
+    await expect(processor.handle(payload)).resolves.toBe(true);
+
+    expect(onInbound).toHaveBeenCalledTimes(2);
+  });
+
+  it('preserves per-channel order without blocking a different channel', async () => {
+    let releaseFirstA: (() => void) | undefined;
+    const firstA = new Promise<void>((resolve) => {
+      releaseFirstA = resolve;
+    });
+    const started: string[] = [];
+    const onInbound = vi.fn(async (event: { message: { id?: string } }) => {
+      started.push(event.message.id ?? 'missing');
+      if (event.message.id === 'post-a-1') await firstA;
+    });
+    const processor = new MattermostInboundProcessor({ instanceKey: 'primary', botUserId: 'bot-user-id' }, onInbound);
+
+    const processingA1 = processor.handle(postedEvent({ id: 'post-a-1', channel_id: 'channel-a' }));
+    const processingA2 = processor.handle(postedEvent({ id: 'post-a-2', channel_id: 'channel-a' }));
+    const processingB1 = processor.handle(postedEvent({ id: 'post-b-1', channel_id: 'channel-b' }));
+    await Promise.resolve();
+
+    expect(started).toEqual(['post-a-1', 'post-b-1']);
+    releaseFirstA?.();
+    await Promise.all([processingA1, processingA2, processingB1]);
+    expect(started).toEqual(['post-a-1', 'post-b-1', 'post-a-2']);
+  });
+
+  it('keeps a failed channel blocked until its head post is recovered in order', async () => {
+    let failFirstA = true;
+    const started: string[] = [];
+    const onInbound = vi.fn(async (event: { message: { id?: string } }) => {
+      const id = event.message.id ?? 'missing';
+      started.push(id);
+      if (id === 'post-a-1' && failFirstA) throw new Error('injected A1 failure');
+    });
+    const processor = new MattermostInboundProcessor({ instanceKey: 'primary', botUserId: 'bot-user-id' }, onInbound);
+    const a1 = postedEvent({ id: 'post-a-1', channel_id: 'channel-a' });
+    const a2 = postedEvent({ id: 'post-a-2', channel_id: 'channel-a' });
+    const b1 = postedEvent({ id: 'post-b-1', channel_id: 'channel-b' });
+
+    const firstResults = await Promise.allSettled([processor.handle(a1), processor.handle(a2), processor.handle(b1)]);
+    expect(firstResults.map((result) => result.status)).toEqual(['rejected', 'rejected', 'fulfilled']);
+    expect(started).toEqual(['post-a-1', 'post-b-1']);
+
+    failFirstA = false;
+    await expect(processor.handle(a1)).resolves.toBe(true);
+    await expect(processor.handle(a2)).resolves.toBe(true);
+    expect(started).toEqual(['post-a-1', 'post-b-1', 'post-a-1', 'post-a-2']);
+  });
+
+  it('lets terminal bot removal clear a failed head while metadata remains blocked', async () => {
+    let rejectFirstA: ((error: Error) => void) | undefined;
+    const pendingFirstA = new Promise<void>((_resolve, reject) => {
+      rejectFirstA = reject;
+    });
+    let firstA = true;
+    const onInbound = vi.fn((event: { message: { id?: string } }) => {
+      if (event.message.id === 'post-a-head' && firstA) {
+        firstA = false;
+        return pendingFirstA;
+      }
+      return Promise.resolve();
+    });
+    const processor = new MattermostInboundProcessor({ instanceKey: 'primary', botUserId: 'bot-user-id' }, onInbound);
+    const lifecycleSink = vi.fn().mockResolvedValue(undefined);
+    const metadataSink = vi.fn().mockResolvedValue(undefined);
+    const aHead = postedEvent({ id: 'post-a-head', channel_id: 'channel-a' });
+
+    const failedHead = processor.handle(aHead);
+    await vi.waitFor(() => expect(onInbound).toHaveBeenCalledOnce());
+    const queuedMetadataA = processor.handleMetadata(
+      { platformId: 'mattermost:primary:channel-a', name: 'Blocked rename', isGroup: true },
+      metadataSink,
+    );
+    const queuedLifecycleA = processor.handleLifecycle(
+      { kind: 'bot_removed', platformId: 'mattermost:primary:channel-a' },
+      lifecycleSink,
+    );
+    const independentLifecycleB = processor.handleLifecycle(
+      { kind: 'bot_removed', platformId: 'mattermost:primary:channel-b' },
+      lifecycleSink,
+    );
+    rejectFirstA?.(new Error('injected failed head'));
+
+    await expect(failedHead).rejects.toThrow('injected failed head');
+    await expect(queuedMetadataA).rejects.toThrow('Mattermost channel ingress is blocked');
+    await expect(queuedLifecycleA).resolves.toBeUndefined();
+    await expect(independentLifecycleB).resolves.toBeUndefined();
+    expect(lifecycleSink).toHaveBeenCalledTimes(2);
+    expect(metadataSink).not.toHaveBeenCalled();
+    expect(processor.failedHeadId('mattermost:primary:channel-a')).toBeUndefined();
+  });
+
   it('rejects malformed envelope and nested post JSON without throwing', async () => {
     const onInbound = vi.fn();
     const processor = new MattermostInboundProcessor({ instanceKey: 'primary', botUserId: 'bot-user-id' }, onInbound);
@@ -136,6 +240,42 @@ describe('MattermostInboundProcessor', () => {
 
     await expect(processor.handle(JSON.stringify(unsupported))).resolves.toBe(false);
     expect(onInbound).not.toHaveBeenCalled();
+  });
+
+  it('normalizes a channel rename by stable channel id and rejects ambiguous identity', () => {
+    const normalize = (
+      inboundModule as typeof inboundModule & {
+        normalizeMattermostChannelUpdatedPayload?: (
+          payload: string,
+          config: { instanceKey: string; botUserId: string },
+        ) => { platformId: string; name: string; isGroup: true } | null;
+      }
+    ).normalizeMattermostChannelUpdatedPayload;
+    expect(normalize).toBeTypeOf('function');
+    if (!normalize) return;
+    const config = { instanceKey: 'primary', botUserId: 'bot-user-id' };
+    const channel = { id: 'channel-a', name: 'renamed-channel', display_name: 'Renamed Channel' };
+    const payload = JSON.stringify({
+      event: 'channel_updated',
+      data: { channel: JSON.stringify(channel) },
+      broadcast: { channel_id: 'channel-a' },
+    });
+
+    expect(normalize(payload, config)).toEqual({
+      platformId: 'mattermost:primary:channel-a',
+      name: 'Renamed Channel',
+      isGroup: true,
+    });
+    expect(
+      normalize(
+        JSON.stringify({
+          event: 'channel_updated',
+          data: { channel: JSON.stringify(channel) },
+          broadcast: { channel_id: 'channel-b' },
+        }),
+        config,
+      ),
+    ).toBeNull();
   });
 
   it('rejects posted events with missing or invalid required fields', async () => {

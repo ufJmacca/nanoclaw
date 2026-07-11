@@ -1,4 +1,4 @@
-import type { ChannelDeliveryAdapter } from '../delivery.js';
+import { DeliveryAdapterUnavailableError, type ChannelDeliveryAdapter } from '../delivery.js';
 import { log } from '../log.js';
 import type { ChannelAdapter } from './adapter.js';
 import { getChannelAdapter } from './channel-registry.js';
@@ -9,12 +9,12 @@ export function createChannelDeliveryBridge(
   lookupAdapter: ChannelAdapterLookup = getChannelAdapter,
 ): ChannelDeliveryAdapter {
   return {
-    isAvailable: (channelType) => lookupAdapter(channelType) !== undefined,
+    isAvailable: (channelType) => lookupAdapter(channelType)?.isConnected() === true,
     async deliver(channelType, platformId, threadId, kind, content, files, deliveryId) {
       const adapter = lookupAdapter(channelType);
       if (!adapter) {
         log.warn('No adapter for channel type', { channelType });
-        return;
+        throw new DeliveryAdapterUnavailableError(channelType);
       }
       return adapter.deliver(platformId, threadId, { kind, content: JSON.parse(content), files, deliveryId });
     },
