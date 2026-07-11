@@ -35,7 +35,7 @@ services:
     environment:
       MM_SQLSETTINGS_DRIVERNAME: postgres
       MM_SQLSETTINGS_DATASOURCE: postgres://mattermost_contract:disposable-contract-password@postgres:5432/mattermost_contract?sslmode=disable&connect_timeout=10
-      MM_BLEVESETTINGS_INDEXDIR: /mattermost/data/bleve-indexes
+      MM_BLEVESETTINGS_INDEXDIR: /mattermost/bleve-indexes
       MM_SERVICESETTINGS_SITEURL: http://127.0.0.1:8065
       MM_SERVICESETTINGS_LISTENADDRESS: :8065
       MM_SERVICESETTINGS_ENABLEUSERACCESSTOKENS: 'true'
@@ -71,6 +71,9 @@ services:
       - type: volume
         source: mattermost-client-plugins
         target: /mattermost/client/plugins
+      - type: volume
+        source: mattermost-bleve
+        target: /mattermost/bleve-indexes
     networks:
       - contract
 
@@ -81,6 +84,7 @@ volumes:
   mattermost-logs:
   mattermost-plugins:
   mattermost-client-plugins:
+  mattermost-bleve:
 
 networks:
   contract:

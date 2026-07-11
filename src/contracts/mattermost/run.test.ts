@@ -12,6 +12,7 @@ import { MATTERMOST_CONTRACT_IMAGE, POSTGRES_CONTRACT_IMAGE } from './safety.js'
 
 const CONTRACT_PROJECT_NAME = 'nanoclaw-mm-contract-test';
 const CONTRACT_VOLUME_NAMES = [
+  'mattermost-bleve',
   'mattermost-client-plugins',
   'mattermost-config',
   'mattermost-data',
@@ -115,6 +116,7 @@ describe('Mattermost contract harness runner', () => {
       volumes: contractVolumes(),
       networks: {},
     });
+    const reportDiagnostic = vi.fn();
     const execute = vi.fn(async (command: MattermostContractCommand) => {
       const joined = [command.executable, ...command.args].join(' ');
       if (joined === 'docker context show') return { exitCode: 0, stdout: 'default\n', stderr: '' };
@@ -122,8 +124,21 @@ describe('Mattermost contract harness runner', () => {
         return { exitCode: 0, stdout: '"unix:///var/run/docker.sock"\n', stderr: '' };
       }
       if (joined.includes('config --format json')) return { exitCode: 0, stdout: composeConfig, stderr: '' };
+      if (joined.includes(' ps --all ')) return { exitCode: 0, stdout: 'mattermost exited', stderr: '' };
+      if (joined.includes(' logs --no-color ')) {
+        return {
+          exitCode: 0,
+          stdout:
+            'open /mattermost/config/config.json: permission denied password=synthetic-password Authorization: Bearer synthetic-bot-token',
+          stderr: '',
+        };
+      }
       if (command.environment.NANOCLAW_MM_CONTRACT_MUTATE_ROOT_ID === '1') {
-        return { exitCode: 1, stdout: '', stderr: 'unrelated infrastructure failure' };
+        return {
+          exitCode: 1,
+          stdout: '',
+          stderr: 'unrelated infrastructure failure token=synthetic-worker-token',
+        };
       }
       return { exitCode: 0, stdout: '', stderr: '' };
     });
@@ -133,12 +148,20 @@ describe('Mattermost contract harness runner', () => {
       hostArchitecture: 'x64',
       projectName: 'nanoclaw-mm-contract-test',
       execute,
+      reportDiagnostic,
     });
 
     await expect(runMattermostContractHarness(dependencies)).rejects.toThrow(
       'Mattermost contract root_id mutation was not detected',
     );
     expect(execute.mock.calls.some(([{ args }]) => args.includes('down') && args.includes('--volumes'))).toBe(true);
+    expect(reportDiagnostic).toHaveBeenCalledOnce();
+    const diagnostic = reportDiagnostic.mock.calls[0]![0] as string;
+    expect(diagnostic).toContain('permission denied');
+    expect(diagnostic).toContain('[REDACTED]');
+    expect(diagnostic).not.toContain('synthetic-password');
+    expect(diagnostic).not.toContain('synthetic-bot-token');
+    expect(diagnostic).not.toContain('synthetic-worker-token');
   });
 
   it('normalizes the complete Compose safety surface before startup', () => {
@@ -352,37 +375,6 @@ describe('Mattermost contract harness runner', () => {
         },
       ),
     ).toThrow('Mattermost contract Compose volumes must match the disposable topology');
-  });
-
-  it('accepts Bleve storage inside the image-owned Mattermost data volume', () => {
-    expect(() =>
-      parseMattermostContractComposeConfig(
-        JSON.stringify({
-          services: {
-            mattermost: { image: MATTERMOST_CONTRACT_IMAGE },
-            postgres: { image: POSTGRES_CONTRACT_IMAGE },
-          },
-          volumes: contractVolumes([
-            'mattermost-client-plugins',
-            'mattermost-config',
-            'mattermost-data',
-            'mattermost-logs',
-            'mattermost-plugins',
-            'postgres-data',
-          ]),
-          networks: {
-            contract: { name: `${CONTRACT_PROJECT_NAME}_contract`, external: false, internal: true },
-          },
-        }),
-        {
-          callerEnvironment: {},
-          dockerContext: 'default',
-          dockerHost: 'unix:///var/run/docker.sock',
-          hostArchitecture: 'x64',
-          projectName: CONTRACT_PROJECT_NAME,
-        },
-      ),
-    ).not.toThrow();
   });
 
   it('always destroys the disposable environment when the live suite fails', async () => {

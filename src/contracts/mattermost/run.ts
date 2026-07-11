@@ -11,6 +11,7 @@ import {
 } from './safety.js';
 
 const MATTERMOST_CONTRACT_VOLUME_NAMES = [
+  'mattermost-bleve',
   'mattermost-client-plugins',
   'mattermost-config',
   'mattermost-data',
@@ -119,6 +120,7 @@ export interface MattermostContractHarnessOptions {
   hostArchitecture: string;
   projectName: string;
   execute: MattermostContractCommandExecutor;
+  reportDiagnostic?: (message: string) => void;
 }
 
 export function createMattermostContractHarnessDependencies(
@@ -135,6 +137,7 @@ export function createMattermostContractHarnessDependencies(
     options.projectName,
   ];
   const commandEnvironment = contractCommandEnvironment(options.callerEnvironment);
+  const reportDiagnostic = options.reportDiagnostic ?? ((message: string) => process.stderr.write(`${message}\n`));
   const execute = (executable: string, args: readonly string[], timeoutMs: number, extraEnvironment = {}) =>
     options.execute({
       executable,
@@ -217,6 +220,25 @@ export function createMattermostContractHarnessDependencies(
         },
       );
       if (result.exitCode === 0 || !`${result.stdout}\n${result.stderr}`.includes('CONTRACT_ROOT_ID_ASSERTION')) {
+        const diagnosticResults = await Promise.all(
+          [
+            [...composeArgs, 'ps', '--all', '--format', 'json'],
+            [...composeArgs, 'logs', '--no-color', '--tail', '200'],
+          ].map((args) =>
+            execute('docker', args, 30_000).catch(() => ({
+              exitCode: 1,
+              stdout: '',
+              stderr: 'diagnostic command unavailable',
+            })),
+          ),
+        );
+        reportDiagnostic(
+          formatMattermostContractDiagnostic([
+            result.stdout,
+            result.stderr,
+            ...diagnosticResults.flatMap((diagnostic) => [diagnostic.stdout, diagnostic.stderr]),
+          ]),
+        );
         throw new Error('Mattermost contract root_id mutation was not detected');
       }
     },
@@ -232,6 +254,22 @@ export function createMattermostContractHarnessDependencies(
       await checked('docker', [...composeArgs, 'down', '--volumes', '--remove-orphans', '--timeout', '10'], 120_000);
     },
   };
+}
+
+function formatMattermostContractDiagnostic(parts: readonly string[]): string {
+  const untrusted = parts.filter((part) => part.length > 0).join('\n');
+  const redacted = untrusted
+    .replace(/(\bauthorization\s*:\s*bearer\s+)[^\s]+/gi, '$1[REDACTED]')
+    .replace(/(["']?(?:password|token)["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s]+)/gi, '$1[REDACTED]')
+    .replace(/Disposable-contract-(?:admin|actor)-2026!|disposable-contract-password/gi, '[REDACTED]');
+  const printable = Array.from(redacted)
+    .filter((character) => {
+      const codePoint = character.codePointAt(0)!;
+      return character === '\n' || character === '\t' || (codePoint >= 32 && codePoint !== 127);
+    })
+    .join('');
+  const bounded = printable.slice(-12_000);
+  return `Mattermost contract diagnostic (redacted and bounded):\n${bounded}`;
 }
 
 function contractCommandEnvironment(
