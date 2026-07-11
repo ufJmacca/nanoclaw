@@ -13,14 +13,20 @@
  *  - No-owner install: no card, no row
  *  - No agent groups configured: no card, no row
  */
+import { createHash } from 'node:crypto';
 import fs from 'fs';
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 
 import { initTestDb, closeDb, runMigrations } from '../../db/index.js';
 import { createAgentGroup } from '../../db/agent-groups.js';
-import { createMessagingGroup, getMessagingGroupByPlatform } from '../../db/messaging-groups.js';
+import {
+  createMessagingGroup,
+  createMessagingGroupAgent,
+  getMessagingGroupByPlatform,
+} from '../../db/messaging-groups.js';
 import { upsertUser } from './db/users.js';
 import { grantRole } from './db/user-roles.js';
+import { createPendingChannelApproval } from './db/pending-channel-approvals.js';
 
 // Mock container runner — prevent actual docker spawn.
 vi.mock('../../container-runner.js', () => ({
@@ -61,6 +67,51 @@ const TEST_DIR = '/tmp/nanoclaw-test-channel-approval';
 
 function now() {
   return new Date().toISOString();
+}
+
+async function seedStrictMattermostSubscription(): Promise<string> {
+  const createdAt = now();
+  const digest = createHash('sha256').update('primary\0channel-a').digest('hex').slice(0, 24);
+  const agentGroupId = `ag-mattermost-${digest}`;
+  const messagingGroupId = `mg-mattermost-${digest}`;
+  const wiringId = `mga-mattermost-${digest}`;
+  createAgentGroup({
+    id: agentGroupId,
+    name: 'Mattermost A',
+    folder: `mattermost-${digest}`,
+    agent_provider: null,
+    created_at: createdAt,
+  });
+  createMessagingGroup({
+    id: messagingGroupId,
+    channel_type: 'mattermost',
+    platform_id: 'mattermost:primary:channel-a',
+    name: 'Mattermost A',
+    is_group: 1,
+    unknown_sender_policy: 'strict',
+    created_at: createdAt,
+  });
+  createMessagingGroupAgent({
+    id: wiringId,
+    messaging_group_id: messagingGroupId,
+    agent_group_id: agentGroupId,
+    engage_mode: 'pattern',
+    engage_pattern: '.',
+    sender_scope: 'known',
+    ignored_message_policy: 'drop',
+    session_mode: 'shared',
+    priority: 0,
+    created_at: createdAt,
+  });
+  const { getDb } = await import('../../db/connection.js');
+  getDb()
+    .prepare(
+      `INSERT INTO mattermost_subscriptions (
+         instance_key, channel_id, messaging_group_id, agent_group_id, wiring_id, status, created_at
+       ) VALUES ('primary', 'channel-a', ?, ?, ?, 'active', ?)`,
+    )
+    .run(messagingGroupId, agentGroupId, wiringId, createdAt);
+  return agentGroupId;
 }
 
 beforeEach(async () => {
@@ -163,6 +214,86 @@ describe('unknown-channel registration flow', () => {
       messaging_group_id: string;
     }>;
     expect(rows).toHaveLength(1);
+  });
+
+  it('excludes Mattermost-owned agents from a generic channel approval card', async () => {
+    const strictAgentGroupId = await seedStrictMattermostSubscription();
+    const { routeInbound } = await import('../../router.js');
+
+    await routeInbound(groupMention('chat-filtered-agents'));
+    await new Promise((r) => setTimeout(r, 10));
+
+    const content = deliverMock.mock.calls[0]?.[4] as string;
+    const payload = JSON.parse(content) as { options: Array<{ value: string }> };
+    expect(payload.options.map((option) => option.value)).toContain('connect:ag-1');
+    expect(payload.options.map((option) => option.value)).not.toContain(`connect:${strictAgentGroupId}`);
+    expect(payload.options.map((option) => option.value)).not.toContain('choose_existing');
+  });
+
+  it('rejects a forged generic connect response targeting a Mattermost-owned agent', async () => {
+    const strictAgentGroupId = await seedStrictMattermostSubscription();
+    const { routeInbound } = await import('../../router.js');
+    const { getResponseHandlers } = await import('../../response-registry.js');
+    const { getDb } = await import('../../db/connection.js');
+
+    await routeInbound(groupMention('chat-forged-strict-connect'));
+    await new Promise((r) => setTimeout(r, 10));
+    const pending = getDb().prepare('SELECT messaging_group_id FROM pending_channel_approvals').get() as {
+      messaging_group_id: string;
+    };
+
+    for (const handler of getResponseHandlers()) {
+      const claimed = await handler({
+        questionId: pending.messaging_group_id,
+        value: `connect:${strictAgentGroupId}`,
+        userId: 'owner',
+        channelType: 'telegram',
+        platformId: 'dm-owner',
+        threadId: null,
+      });
+      if (claimed) break;
+    }
+
+    expect(
+      getDb()
+        .prepare('SELECT COUNT(*) AS count FROM messaging_group_agents WHERE messaging_group_id = ?')
+        .get(pending.messaging_group_id),
+    ).toEqual({ count: 0 });
+    expect(
+      getDb()
+        .prepare('SELECT COUNT(*) AS count FROM pending_channel_approvals WHERE messaging_group_id = ?')
+        .get(pending.messaging_group_id),
+    ).toEqual({ count: 0 });
+  });
+
+  it('excludes Mattermost-owned agents from a legacy choose-existing follow-up', async () => {
+    const strictAgentGroupId = await seedStrictMattermostSubscription();
+    const { routeInbound } = await import('../../router.js');
+    const { getResponseHandlers } = await import('../../response-registry.js');
+    const { getDb } = await import('../../db/connection.js');
+
+    await routeInbound(groupMention('chat-legacy-choose-existing'));
+    await new Promise((r) => setTimeout(r, 10));
+    const pending = getDb().prepare('SELECT messaging_group_id FROM pending_channel_approvals').get() as {
+      messaging_group_id: string;
+    };
+
+    for (const handler of getResponseHandlers()) {
+      const claimed = await handler({
+        questionId: pending.messaging_group_id,
+        value: 'choose_existing',
+        userId: 'owner',
+        channelType: 'telegram',
+        platformId: 'dm-owner',
+        threadId: null,
+      });
+      if (claimed) break;
+    }
+
+    const content = deliverMock.mock.calls.at(-1)?.[4] as string;
+    const payload = JSON.parse(content) as { options: Array<{ value: string }> };
+    expect(payload.options.map((option) => option.value)).toContain('connect:ag-1');
+    expect(payload.options.map((option) => option.value)).not.toContain(`connect:${strictAgentGroupId}`);
   });
 
   it('delivers a card on DM too (non-threaded event)', async () => {
@@ -277,6 +408,65 @@ describe('unknown-channel registration flow', () => {
       .get(pending.messaging_group_id) as { engage_mode: string; engage_pattern: string };
     expect(mga.engage_mode).toBe('pattern');
     expect(mga.engage_pattern).toBe('.');
+  });
+
+  it('refuses a legacy generic approval row for Mattermost instead of reusing an agent', async () => {
+    const createdAt = now();
+    createMessagingGroup({
+      id: 'mg-mattermost-legacy-pending',
+      channel_type: 'mattermost',
+      platform_id: 'mattermost:primary:channel-a',
+      name: 'Mattermost A',
+      is_group: 1,
+      unknown_sender_policy: 'strict',
+      created_at: createdAt,
+    });
+    createPendingChannelApproval({
+      messaging_group_id: 'mg-mattermost-legacy-pending',
+      agent_group_id: 'ag-1',
+      original_message: JSON.stringify({
+        channelType: 'mattermost',
+        platformId: 'mattermost:primary:channel-a',
+        threadId: 'root-a',
+        message: {
+          id: 'legacy-message',
+          kind: 'chat',
+          content: JSON.stringify({ senderId: 'user-a', text: 'hello' }),
+          timestamp: createdAt,
+          isMention: true,
+          isGroup: true,
+        },
+      }),
+      approver_user_id: 'telegram:owner',
+      created_at: createdAt,
+      title: 'Legacy request',
+      options_json: '[]',
+    });
+    const { getDb } = await import('../../db/connection.js');
+    const { getResponseHandlers } = await import('../../response-registry.js');
+
+    for (const handler of getResponseHandlers()) {
+      const claimed = await handler({
+        questionId: 'mg-mattermost-legacy-pending',
+        value: 'connect:ag-1',
+        userId: 'owner',
+        channelType: 'telegram',
+        platformId: 'dm-owner',
+        threadId: null,
+      });
+      if (claimed) break;
+    }
+
+    expect(
+      getDb()
+        .prepare('SELECT COUNT(*) AS count FROM messaging_group_agents WHERE messaging_group_id = ?')
+        .get('mg-mattermost-legacy-pending'),
+    ).toEqual({ count: 0 });
+    expect(
+      getDb()
+        .prepare('SELECT COUNT(*) AS count FROM pending_channel_approvals WHERE messaging_group_id = ?')
+        .get('mg-mattermost-legacy-pending'),
+    ).toEqual({ count: 0 });
   });
 
   it('deny → sets denied_at; future mentions drop silently without a second card', async () => {

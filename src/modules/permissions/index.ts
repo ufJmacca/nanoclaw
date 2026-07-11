@@ -16,8 +16,12 @@
  * access gate is not registered and core defaults to allow-all.
  */
 import { recordDroppedMessage } from '../../db/dropped-messages.js';
+import {
+  excludeMattermostOwnedAgentGroups,
+  isMattermostOwnedAgentGroup,
+} from '../../channels/mattermost-subscription.js';
 import { getAgentGroup, getAllAgentGroups } from '../../db/agent-groups.js';
-import { createMessagingGroupAgent, setMessagingGroupDeniedAt } from '../../db/messaging-groups.js';
+import { createMessagingGroupAgent, getMessagingGroup, setMessagingGroupDeniedAt } from '../../db/messaging-groups.js';
 import {
   routeInbound,
   setAccessGate,
@@ -321,6 +325,15 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
   }
   const approverId = clickerId;
 
+  const registrationGroup = getMessagingGroup(row.messaging_group_id);
+  if (registrationGroup?.channel_type === 'mattermost') {
+    deletePendingChannelApproval(row.messaging_group_id);
+    log.warn('Legacy generic Mattermost approval rejected; strict subscription is required', {
+      messagingGroupId: row.messaging_group_id,
+    });
+    return true;
+  }
+
   // ── Reject / Cancel ──
   if (payload.value === REJECT_VALUE) {
     setMessagingGroupDeniedAt(row.messaging_group_id, new Date().toISOString());
@@ -346,7 +359,7 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
     const adapter = getDeliveryAdapter();
     if (!adapter) return true;
 
-    const agentGroups = getAllAgentGroups();
+    const agentGroups = excludeMattermostOwnedAgentGroups(getAllAgentGroups());
     const options = buildAgentSelectionOptions(agentGroups);
     const title = '📋 Choose an agent';
     updatePendingChannelApprovalCard(row.messaging_group_id, title, JSON.stringify(options));
@@ -429,6 +442,14 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
         targetAgentGroupId,
       });
       deletePendingChannelApproval(row.messaging_group_id);
+      return true;
+    }
+    if (isMattermostOwnedAgentGroup(targetAgentGroupId)) {
+      deletePendingChannelApproval(row.messaging_group_id);
+      log.warn('Generic channel registration refused a Mattermost-owned agent', {
+        messagingGroupId: row.messaging_group_id,
+        targetAgentGroupId,
+      });
       return true;
     }
   } else {
