@@ -7,6 +7,7 @@
  */
 import path from 'path';
 
+import { isMattermostOwnedAgentGroup } from '../../channels/mattermost-subscription.js';
 import { GROUPS_DIR } from '../../config.js';
 import { createAgentGroup, getAgentGroup, getAgentGroupByFolder } from '../../db/agent-groups.js';
 import { getSession } from '../../db/sessions.js';
@@ -43,6 +44,11 @@ export async function handleCreateAgent(content: Record<string, unknown>, sessio
   if (!sourceGroup) {
     notifyAgent(session, `create_agent failed: source agent group not found.`);
     log.warn('create_agent failed: missing source group', { sessionAgentGroup: session.agent_group_id, name });
+    return;
+  }
+  if (isMattermostOwnedAgentGroup(sourceGroup.id)) {
+    notifyAgent(session, 'create_agent is unavailable for isolated Mattermost channel agents.');
+    log.warn('create_agent rejected for Mattermost-owned agent group', { agentGroupId: sourceGroup.id });
     return;
   }
 

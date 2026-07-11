@@ -1049,3 +1049,275 @@ Phase status: complete; pull request ready for review.
 - GitHub checks: the repository code `CI` workflow did not trigger because it is configured only for pull requests targeting `main`; the available `label` metadata check passed in 3 seconds ([run 29125527546](https://github.com/ufJmacca/nanoclaw/actions/runs/29125527546)).
 - Phase status: complete; the full local gate, review-driven fixes, independent re-review, and every available GitHub check passed; pull request ready for review.
 - Pull request: [#42](https://github.com/ufJmacca/nanoclaw/pull/42), `codex/mattermost-05-strict-subscriptions` → `codex/mattermost-04-thread-session-policy` (depends on #41).
+
+## Phase 6 — Container and context isolation proof
+
+Phase status: complete; pull request ready for review.
+
+### Slice 6.0: immutable active-container execution identity
+
+- RED command: `pnpm exec vitest run src/container-runner.isolation.test.ts -t 'rejects a reused session id that changes channel or agent identity'`.
+- RED failure observed: the second wake resolved `true` for the already-active session ID even though its agent group and messaging group changed; the runner treated a different channel execution as the same container.
+- GREEN command/result: the same focused command after binding active and in-flight entries to the complete session/agent/messaging-group/thread tuple — 1 passed; the collision returned `false`, spawned nothing, and did not create a second OneCLI identity.
+- REFACTOR performed: one `ContainerExecutionIdentity` value and equality helper now guard both active and in-flight maps; legitimate duplicate wakes still share their original promise.
+- Affected-suite verification: `pnpm exec vitest run src/container-runner.isolation.test.ts` — 1 file passed, 4 tests passed; `pnpm run typecheck` — passed.
+- Files changed: `src/container-runner.ts`, `src/container-runner.isolation.test.ts`.
+- Isolation impact: a running or spawning container key cannot be rebound to work for another agent, channel, session context, or thread.
+
+### Slice 6.1: canonical execution-session boundary
+
+- Cross-channel RED command: `pnpm exec vitest run src/channels/mattermost-subscription.test.ts -t 'rejects a Mattermost-owned agent session bound to another channel'`.
+- Cross-channel RED failure observed: the reusable execution validator did not exist, so a canonical agent could not be checked against its owning messaging group before execution.
+- Cross-channel GREEN: the same focused command after resolving ownership from both agent and messaging-group directions — 1 passed with `session_identity_mismatch` for A-agent/B-channel reuse.
+- Shared-session RED command: `pnpm exec vitest run src/channels/mattermost-subscription.test.ts -t 'rejects a per-thread session for a shared Mattermost channel'`.
+- Shared-session RED failure observed: the validator returned `valid:true` for a strict session carrying a non-null root; the channel could acquire a second context identity.
+- Shared-session GREEN: the same command after requiring `thread_id = NULL` for execution — 1 passed with `threaded_session`.
+- Active-session RED command: `pnpm exec vitest run src/channels/mattermost-subscription.test.ts -t 'rejects a closed session for an active Mattermost subscription'`.
+- Active-session RED failure observed: the closed session returned `valid:true`.
+- Active-session GREEN: the same command after requiring an active session — 1 passed with `inactive_session`.
+- Persistence RED command: `pnpm exec vitest run src/channels/mattermost-subscription.test.ts -t 'rejects a canonical-looking Mattermost session without a matching database record'`.
+- Persistence RED failure observed: an unpersisted caller-constructed session returned `valid:true` solely because its visible channel and agent fields looked canonical.
+- Persistence GREEN: the same command after comparing the exact agent, messaging-group, thread, and status tuple to the central `sessions` row — 1 passed with `session_record_mismatch`.
+- Characterization/mutation proof: canonical persisted Mattermost and generic persisted Telegram tests initially passed. Temporarily returning `{ strict:false }` for the canonical strict path made `... -t 'accepts the persisted canonical shared Mattermost session'` fail (`strict:false` versus the required strict validated value); the mutation was reverted and both characterization tests passed again.
+- REFACTOR performed: `validateMattermostSessionForExecution()` is one reusable, reason-coded boundary layered on the complete Phase 5 topology validator; Telegram remains on the generic path.
+- Affected-suite verification: `pnpm exec vitest run src/channels/mattermost-subscription.test.ts -t 'Mattermost-owned agent session|per-thread session|closed session|canonical-looking Mattermost session|persisted canonical shared Mattermost session|persisted Telegram session'` — 6 tests passed; `pnpm run typecheck` — passed.
+- Files changed: `src/channels/mattermost-subscription.ts`, `src/channels/mattermost-subscription.test.ts`.
+- Isolation impact: only a persisted active shared session whose channel, agent, wiring, destination, and subscription all agree can cross an execution boundary.
+
+### Slice 6.2: pre-side-effect invocation and delivery guards
+
+- Container RED command: `pnpm exec vitest run src/container-runner.isolation.test.ts -t 'rejects an invalid Mattermost session before container setup starts'`.
+- Container RED failure observed: the malformed strict session returned `true` and reached routing/config/filesystem/OneCLI/spawn setup because `wakeContainer()` never consulted the execution-session boundary.
+- Container GREEN: the same command after validating at the first line of `spawnContainer()` — 1 passed; the wake returned `false` with zero routing writes, config reads/writes, filesystem initialization, OneCLI calls, or process spawns.
+- Delivery RED command: `pnpm exec vitest run src/delivery.test.ts -t 'rejects an invalid Mattermost session before draining its outbound queue'`.
+- Delivery RED failure observed: the validator was never called and the malformed session proceeded toward its queued outbound message.
+- Delivery GREEN: the same command after applying the shared boundary before agent lookup or database opening — 1 passed; the adapter was untouched and the outbound row was not marked delivered.
+- REFACTOR performed: container setup and outbound drain reuse the same strict/session/topology decision instead of duplicating ownership queries; the generic Telegram path continues unchanged.
+- Affected-suite verification: `pnpm exec vitest run src/container-runner.isolation.test.ts src/delivery.test.ts` — 2 files passed, 10 tests passed; `pnpm run typecheck` — passed.
+- Files changed: `src/container-runner.ts`, `src/container-runner.isolation.test.ts`, `src/delivery.ts`, `src/delivery.test.ts`.
+- Isolation impact: malformed strict sessions fail before writable paths, container identities, scheduled system actions, channel delivery, or agent-to-agent routing can observe them.
+
+### Slice 6.3: strict mount, credential, and launch isolation
+
+- Global-context RED command: `pnpm exec vitest run src/container-runner.isolation.test.ts -t 'does not expose legacy global context to a Mattermost container'`.
+- Global-context RED failure observed: the strict launch included the synthetic marker-bearing `groups/global` source at `/workspace/global`; read-only access still leaked foreign context.
+- Global-context GREEN: the same command after classifying the validated session before mount assembly — 1 passed; strict Mattermost omits the legacy mount. A generic-container characterization retained the read-only mount; temporarily disabling it made that test fail and the mutation was reverted.
+- Additional-mount RED command: `pnpm exec vitest run src/container-runner.isolation.test.ts -t 'refuses even read-only additional mounts for a Mattermost container'`.
+- Additional-mount RED failure observed: a strict launch returned `true` with configured foreign context because the generic allowlist path silently filtered/accepted it.
+- Additional-mount GREEN: the same command after rejecting any non-empty strict `additionalMounts` configuration before validation/OneCLI/spawn — 1 passed. Generic validated mounts remain supported; temporarily applying the rejection to every platform made the Telegram/generic characterization fail and was reverted.
+- Provider-mount RED command: `pnpm exec vitest run src/container-runner.isolation.test.ts -t 'rejects a provider mount outside its Mattermost-owned roots'`.
+- Provider-mount RED failure observed: a writable provider directory outside the channel state/workspace roots reached the launch.
+- Provider-mount GREEN at this checkpoint: the same command after symlink-aware containment checks against the strict channel's owned roots — 1 passed; a provider directory inside the session state root remained allowed. Slice 6.6 later tightened every platform/provider to the current session root only.
+- Credential-key RED command: `pnpm exec vitest run src/container-runner.isolation.test.ts -t 'rejects a Mattermost credential environment contribution before spawn'`.
+- Credential-key RED failure observed: `MATTERMOST_BOT_TOKEN=<marker>` entered the rendered container environment and the launch returned `true`.
+- Credential-key GREEN: the same command after rejecting provider environment keys in the `MATTERMOST*` namespace — 1 passed before gateway/spawn.
+- Credential-alias RED command: `pnpm exec vitest run src/container-runner.isolation.test.ts -t 'rejects the host Mattermost token when a provider aliases its environment key'`.
+- Credential-alias RED failure observed: the same host token entered under `CUSTOM_PROXY_TOKEN` because only its key was checked.
+- Credential-alias GREEN: the same command after comparing contributed values with host-side Mattermost credential values without logging them — 1 passed.
+- Three-platform characterization: `... -t 'keeps Mattermost A, Mattermost B, and Telegram on distinct launch identities'` passed with three process launches, three active keys, three OneCLI agent IDs, and distinct `/workspace`, `/workspace/agent`, and `/home/node/.claude` writable sources. Temporarily mapping both strict group workspaces to one source made the test fail (`2` unique paths versus `3`); the mutation was reverted.
+- REFACTOR performed at this checkpoint: the validated strict-session classification threads into mount assembly and provider host-path/environment checks share one fail-closed boundary. Later adversarial slices intentionally tightened generic provider mounts and cross-platform overlap while retaining safe Telegram routing and the characterized read-only global mount.
+- Affected-suite verification: `pnpm exec vitest run src/container-runner.isolation.test.ts` — 1 file passed, 14 tests passed at this checkpoint.
+- Files changed: `src/container-runner.ts`, `src/container-runner.isolation.test.ts`.
+- Isolation impact: A, B, and T have distinct writable state, workspaces, provider state, OneCLI identities, and active execution keys; strict containers cannot see shared legacy context, user-added mounts, or the host Mattermost token.
+
+### Slice 6.4: agent-to-agent entry-point isolation
+
+- Creation RED command: `pnpm exec vitest run src/modules/agent-to-agent/create-agent.test.ts -t 'rejects before creating an orphan agent, workspace, or destination'`.
+- Creation RED failure observed: `handleCreateAgent()` created the child agent and initialized its workspace before migration 014 rejected the destination insert with `SQLITE_CONSTRAINT_TRIGGER`; the operation rejected after leaving partial state.
+- Creation GREEN: the same command after an ownership guard immediately after source lookup — 1 passed; the handler returned normally with no child row, filesystem initialization, or extra destination.
+- Outbound-route RED command: `pnpm exec vitest run src/modules/agent-to-agent/create-agent.test.ts -t 'rejects a Mattermost-to-agent route before creating a target session'`.
+- Outbound-route RED failure observed: with the insertion trigger temporarily removed to model legacy corruption, the route resolved and created a generic target session.
+- Outbound-route GREEN: the same command after rejecting non-self routes from a Mattermost-owned source — 1 passed before target session/message/wake creation.
+- Inbound-route RED command: `pnpm exec vitest run src/modules/agent-to-agent/create-agent.test.ts -t 'rejects a generic-agent route into Mattermost before creating target context'`.
+- Inbound-route RED failure observed: with the incoming trigger temporarily removed, a generic source created an agent-shared session inside the strict Mattermost agent.
+- Inbound-route GREEN: the same command after the mirrored target-ownership guard — 1 passed with no target session or wake.
+- Self-route RED command: `pnpm exec vitest run src/modules/agent-to-agent/create-agent.test.ts -t 'keeps a Mattermost self-message inside its canonical session'`.
+- Self-route RED failure observed: the first broad source guard rejected the existing same-agent system-note path as well as cross-agent routes.
+- Self-route GREEN: the same command after limiting the ownership guard to non-self routes — 1 passed; the note stayed in the one canonical session and created no second context.
+- Generic characterization/mutation proof: generic A-to-B routing passed. Temporarily rejecting every non-self route made `... -t 'preserves generic agent-to-agent routing outside Mattermost'` fail; the mutation was reverted and generic routing passed again.
+- REFACTOR performed: strict source and target checks share one non-self predicate; database triggers remain the durable topology layer while these early guards prevent partial runtime/filesystem state.
+- Affected-suite verification: `pnpm exec vitest run src/modules/agent-to-agent/create-agent.test.ts src/modules/agent-to-agent/agent-route.test.ts` — 2 files passed, 11 tests passed; `pnpm run typecheck` — passed after correcting the controlled-launch test's mock-call type annotation.
+- Files changed: `src/modules/agent-to-agent/create-agent.ts`, `src/modules/agent-to-agent/agent-route.ts`, `src/modules/agent-to-agent/create-agent.test.ts`.
+- Isolation impact: Mattermost cannot create or address another agent and no generic agent can address Mattermost, even against hand-edited legacy destination data; internal self-notes remain channel-local.
+
+### Slice 6.5: real A/B/Telegram structural and semantic proof
+
+- Structural characterization: `pnpm exec vitest run src/mattermost-isolation.integration.test.ts -t 'creates disjoint channel, session, workspace, and fake-launch identities'` passed using a migrated temporary central database, real per-session databases/filesystems, and only a fake container launcher. A, B, and T had three messaging groups, agent groups/folders, session IDs/directories, workspaces, `.claude-shared` paths, active fake-launch keys, and platform-specific inbound histories.
+- Required session-resolution mutation: temporarily mapping every `sessionDir()` call to one shared directory made the structural test fail (`1` unique directory versus `3`); the mutation was reverted and the test passed again.
+- Schedule RED command: `pnpm exec vitest run src/mattermost-isolation.integration.test.ts -t 'rejects a forged cross-channel Mattermost schedule route'`.
+- Schedule RED failure observed: channel A's handler resolved normally and inserted a task whose action payload named channel B because scheduling ignored the owning session.
+- Schedule GREEN: the same command after reusing the execution-session boundary and requiring the canonical Mattermost platform ID — 1 passed; the forged task count remained zero.
+- Root RED command: `pnpm exec vitest run src/mattermost-isolation.integration.test.ts -t 'rejects an unobserved Mattermost root on an otherwise canonical schedule route'`.
+- Root RED failure observed: a task with channel A's canonical platform ID but a root never observed in A resolved normally and was inserted.
+- Root GREEN: the same command after checking non-null scheduled roots against A's own inbound history — 1 passed with zero inserted tasks. A valid task using an observed A root remains accepted.
+- Schedule/destination characterization: `... -t 'keeps schedules and projected destinations in their owning session'` passed. A, B, and T each had only its own task route/root, one projected same-channel destination, and one matching central channel destination; no agent or foreign channel appeared.
+- Semantic fixture correction: the first marker run omitted the required `session_state.updated_at` value and failed at fixture insertion. It was rejected as evidence and corrected before rerunning.
+- Semantic characterization: `... -t 'keeps synthetic context markers and the host token out of foreign model inputs and files'` passed with runtime-generated A/B/T markers and a runtime-generated token. Actual formatter model input, inbound history, provider continuation state, group workspace, session tree, and `.claude-shared` state contained only the owning marker; all foreign markers and the token were absent. Central subscription/session/group/channel/destination rows also excluded the token.
+- Active reuse RED command: `pnpm exec vitest run src/container-runner.isolation.test.ts -t 'revalidates a Mattermost session before reusing its active container'`.
+- Active reuse RED failure observed: after the subscription validator changed to `inactive_subscription`, the same session still returned `true` because the active-map shortcut ran before validation.
+- Active reuse GREEN: the same command after validating before every active/in-flight lookup — 1 passed; reuse returned `false` and no second spawn occurred. Spawn setup still revalidates immediately before side effects.
+- REFACTOR performed: the integration fixture exercises real subscription, router, session, scheduling, destination projection, formatter, filesystem, and SQLite boundaries with one common A/B/T topology; marker scans are deterministic and skip symlink traversal.
+- Affected-suite verification: `pnpm exec vitest run src/mattermost-isolation.integration.test.ts` — 1 file passed, 5 tests passed; `pnpm run typecheck` — passed after replacing cross-root static formatter imports with the test runner's runtime import (the real formatter still executes).
+- Files changed: `src/mattermost-isolation.integration.test.ts`, `src/modules/scheduling/actions.ts`, `src/container-runner.ts`, `src/container-runner.isolation.test.ts`.
+- Isolation impact: scheduled work, destination maps, prompts, histories, provider state, memory files, and repeated container wakes remain bound to one canonical channel; the host token reaches none of them.
+
+### Slice 6.6: adversarial fail-closed boundary review
+
+- Orphan-channel RED command: `pnpm exec vitest run src/channels/mattermost-subscription.test.ts -t "fails closed for a persisted session on an unsubscribed Mattermost messaging group"`.
+- Orphan-channel RED failure observed: the persisted session returned `{ strict:false }` because neither side had a subscription row, even though the referenced messaging group was `channel_type='mattermost'`.
+- Orphan-channel GREEN: the same command after classifying the referenced channel before the generic fallback — 1 passed with `missing_subscription`.
+- Orphan-agent RED command: `pnpm exec vitest run src/channels/mattermost-subscription.test.ts -t "fails closed when an agent-shared session belongs to an agent wired to unsubscribed Mattermost"`.
+- Orphan-agent RED failure observed: a persisted `messaging_group_id=NULL` session on an agent wired to an unsubscribed Mattermost group also returned `{ strict:false }`.
+- Orphan-agent GREEN: the same command after deriving Mattermost affiliation from both permanent subscription ownership and any Mattermost wiring — 1 passed with `missing_subscription`; the persisted Telegram characterization remained generic.
+- Cross-platform orphan RED command: `pnpm exec vitest run src/channels/mattermost-subscription.test.ts -t "rejects Telegram routing into an agent also wired to an unsubscribed Mattermost channel"`.
+- Cross-platform orphan RED failure observed: Telegram reached sender resolution through the same agent because the routing boundary considered only canonical subscription rows.
+- Cross-platform orphan GREEN: the same command after inspecting every current agent's permanent reservation and other Mattermost wiring — 1 passed before sender resolution, session creation, or wake.
+- Ownership-reservation RED command: `pnpm exec vitest run src/channels/mattermost-subscription.test.ts -t "retains Mattermost ownership when a reserved subscription topology is corrupted"`.
+- Ownership-reservation RED failure observed: after a controlled legacy mutation changed the canonical messaging-group type, the subscription-reserved agent was reported as non-Mattermost.
+- Ownership-reservation GREEN: the same command after unioning the permanent reservation with live Mattermost wiring — 1 passed. The real ownership-enumeration test was also proven by temporarily returning an empty set; it failed with `[]` instead of the canonical agent/folder and passed after the mutation was reverted.
+- Provider-identity RED command: `pnpm exec vitest run src/channels/mattermost-subscription.test.ts -t "rejects a Mattermost execution identity whose provider differs from the persisted session"`.
+- Provider-identity RED failure observed: a caller-supplied `agent_provider='codex'` was accepted against a persisted null provider because the stored-tuple comparison omitted the provider.
+- Provider-identity GREEN: the same command after including `agent_provider` in the immutable session tuple — 1 passed with `session_record_mismatch`.
+- Unsafe-ID RED command: `pnpm exec vitest run src/channels/mattermost-subscription.test.ts -t "rejects a persisted Mattermost session id that can escape its channel state directory"`.
+- Unsafe-ID RED failure observed: persisted ID `../foreign-agent/foreign-session` validated successfully and could escape `v2-sessions/<agent>` during path construction.
+- Unsafe-ID GREEN: the same command after applying the bounded identity-component policy to strict session IDs — 1 passed with `unsafe_session_identity`.
+- Duplicate-session RED command: `pnpm exec vitest run src/channels/mattermost-subscription.test.ts -t "rejects duplicate active shared sessions for one Mattermost channel"`.
+- Duplicate-session RED failure observed: both active null-thread rows independently validated, allowing one channel to acquire two execution streams over one workspace and shared memory.
+- Duplicate-session GREEN: the same command after requiring exactly one active row across the union of canonical agent and messaging-group ownership — 1 passed with `duplicate_active_session`.
+- Filesystem-symlink RED command: `pnpm exec vitest run src/channels/mattermost-subscription.test.ts -t "rejects a canonical Mattermost session whose state directory was replaced by a symlink"`.
+- Filesystem-symlink RED failure observed: replacing the canonical session directory with a symlink to foreign state still returned `valid:true`.
+- Filesystem-symlink GREEN: the same command after checking every component and canonical path below trusted group/session roots — 1 passed with `unsafe_session_path`. A workspace-symlink characterization was proven by temporarily removing the group-root check: it returned `valid:true`, then passed after the check was restored.
+- Mounted-config credential-key RED command: `pnpm exec vitest run src/container-runner.isolation.test.ts -t "rejects a Mattermost credential key in mounted MCP container configuration"`.
+- Mounted-config credential-key RED failure observed: an MCP `MATTERMOST_BOT_TOKEN` environment entry reached launch and returned `true` because only provider contributions were scanned.
+- Mounted-config credential-key GREEN: the same command after recursively rejecting the Mattermost namespace before config mutation/composition/mounting — 1 passed with no config write, gateway call, or spawn.
+- Mounted-config credential-value mutation proof: temporarily removing the host-credential value scan made `... -t "rejects an aliased host Mattermost credential in mounted MCP instructions"` fail because launch returned `true`; restoring the scan made the test pass before prompt composition or spawn.
+- Generic additional-mount RED command: `pnpm exec vitest run src/container-runner.isolation.test.ts -t "rejects a generic additional mount that exposes a Mattermost-owned workspace"`.
+- Generic additional-mount RED failure observed: a Telegram container launched with the exact Mattermost workspace as an allowed read-only extra mount.
+- Generic additional-mount GREEN: the same command after comparing every assembled source against all permanently Mattermost-owned group/state roots in both ancestor directions — 1 passed before OneCLI or spawn.
+- Generic provider-mount mutation proof: moving the ownership-overlap check before provider mounts made `... -t "rejects a generic provider mount that exposes Mattermost-owned state"` fail with a successful launch; restoring the final assembled-mount check made both generic additional/provider overlap tests pass.
+- Provider confinement RED command: `pnpm exec vitest run src/container-runner.isolation.test.ts -t "confines generic provider mounts to the current session state root"`.
+- Provider confinement RED failure observed: a generic custom provider could mount an arbitrary external host directory.
+- Provider confinement GREEN: the same command after applying current-session real-path containment to every platform/provider — 1 passed; the built-in-compatible provider path inside the current session remained green.
+- Subscription-race RED command: `pnpm exec vitest run src/container-runner.isolation.test.ts -t "fails closed when a Mattermost subscription is invalidated during"`.
+- Subscription-race RED failures observed: both deferred `ensureAgent` and `applyContainerConfig` cases launched and returned `true` after the validator changed to `inactive_subscription` during the await.
+- Subscription-race GREEN: the same two-case command after final synchronous execution-boundary validation — 2 passed with zero process spawns.
+- Active-invalidation RED command: `pnpm exec vitest run src/container-runner.isolation.test.ts -t "terminates an active Mattermost container when its canonical subscription becomes invalid"`.
+- Active-invalidation RED failure observed: reuse returned `false`, but the already-running child was not stopped and remained able to poll pending work.
+- Active-invalidation GREEN: the same command after stopping only an identity-equal active entry — 1 passed; a forged session-ID collision cannot terminate the unrelated canonical child.
+- Mount-race RED command: `pnpm exec vitest run src/container-runner.isolation.test.ts -t "rejects a provider mount replaced with a foreign symlink during asynchronous launch setup"`.
+- Mount-race RED failure observed: swapping the validated provider directory for a foreign symlink while OneCLI awaited still launched and returned `true`.
+- Mount-race GREEN: the same command after revalidating provider containment and complete Mattermost mount ownership after all awaits — 1 passed with zero process spawns.
+- REFACTOR performed: permanent Mattermost affiliation/ownership queries now serve routing, execution, early module guards, and mount isolation; filesystem checks separate trusted roots from owned non-symlink components; provider/config credential scans share one host-secret value source; and pre-spawn validation is repeated after every asynchronous setup boundary.
+- Affected-suite verification: `pnpm exec vitest run src/mattermost-isolation.integration.test.ts src/container-runner.isolation.test.ts src/channels/mattermost-subscription.test.ts src/delivery.test.ts src/modules/agent-to-agent/create-agent.test.ts src/modules/agent-to-agent/agent-route.test.ts src/modules/scheduling/db.test.ts src/router.thread-policy.test.ts src/host-core.test.ts` — 9 files passed, 148 tests passed at this checkpoint (three later characterization tests were added after this run).
+- Static verification: `pnpm run typecheck` and `pnpm run format:check` passed; `pnpm run lint` passed with 0 errors and the same 100 pre-existing warnings; `git diff --check` passed.
+- Isolation impact: malformed, orphaned, duplicated, path-escaping, symlinked, cross-platform, stale-during-launch, and credential-bearing identities now fail closed before a container can observe another Mattermost channel's workspace, state, prompt material, token, or execution stream.
+
+### Slice 6.7: hostile host-artifact and message-route hardening
+
+- Provider-context RED command: `pnpm exec vitest run src/container-runner.isolation.test.ts -t "withholds host Mattermost credentials from provider callback context"`.
+- Provider-context RED failure observed: a custom provider read `MATTERMOST_BOT_TOKEN` directly from its raw `process.env` context and copied it into a session-local file before post-contribution checks ran.
+- Provider-context GREEN: the same command after supplying a copy with the Mattermost namespace and aliased Mattermost credential values removed — 1 passed; no file was created and a safe provider still launched.
+- Derived-config RED command: `pnpm exec vitest run src/container-runner.isolation.test.ts -t "rejects host-derived runtime identity fields containing the Mattermost credential"`.
+- Derived-config RED failure observed: a token-valued agent name passed the pre-mutation scan, was written as `groupName`/`assistantName`, reached OneCLI, and launched.
+- Derived-config GREEN: the same command after populating identity fields in memory, rescanning, and only then persisting — 1 passed with no config write, gateway call, or spawn.
+- Missing-provider-source RED command: `pnpm exec vitest run src/container-runner.isolation.test.ts -t "rejects a nonexistent provider mount below a symlinked session child"`.
+- Missing-provider-source RED failure observed: lexical fallback accepted `session/link/new-state` while `link` pointed outside the session and the leaf did not yet exist.
+- Missing-provider-source GREEN: the same command after requiring every provider mount source to exist and resolve inside the current session — 1 passed before OneCLI/spawn.
+- Shared-memory-symlink RED command: `pnpm exec vitest run src/container-runner.isolation.test.ts -t "rejects a symlinked Mattermost shared-memory directory before filesystem mutation"`.
+- Shared-memory-symlink RED failure observed: `.claude-shared -> Telegram state` launched and skill synchronization created a foreign `skills` directory.
+- Shared-memory-symlink GREEN: the same command after no-follow validation of group, shared-memory, session, database, config, fragment, and provider-managed child paths before any initialization/provider/composition side effect — 1 passed with the foreign directory unchanged.
+- Container-config-symlink mutation proof: temporarily omitting `container.json` from the host-managed path set made `... -t "rejects a symlinked Mattermost container config before reading or rewriting foreign state"` launch successfully; restoring the check made it fail closed before read/write/OneCLI while preserving foreign bytes.
+- Skill-traversal RED command: `pnpm exec vitest run src/container-runner.isolation.test.ts -t "rejects a traversing skill name before it can write another channel state directory"`.
+- Skill-traversal RED failure observed: configured `../../../<B>/.claude-shared/foreign-link` was joined beneath A's writable skills directory and created the link in B before spawn.
+- Skill-traversal GREEN: the same command after requiring every configured skill to be one bounded path component — 1 passed with no B write, OneCLI call, or spawn.
+- Stale-child RED command: `pnpm exec vitest run src/container-runner.isolation.test.ts -t "ignores stale child callbacks after a replacement container becomes active"`.
+- Stale-child RED failure observed: after child B replaced failed child A for one session, A's late `close` callback unconditionally deleted B's active-map entry, permitting a third concurrent child.
+- Stale-child GREEN: the same command after process-identity comparison in both callbacks — 1 passed; B stayed active and the third wake reused it.
+- Raw-config RED command: `pnpm exec vitest run src/container-runner.isolation.test.ts -t "rejects a host Mattermost credential hidden in an unknown raw container-config field"`.
+- Raw-config RED failure observed: normalization discarded the unknown token field while Docker still mounted the original token-bearing bytes and launch returned `true`.
+- Raw-config GREEN: the same command after scanning the exact mounted artifact before normalization — 1 passed before write, OneCLI, or spawn.
+- Config-TOCTOU RED command: `pnpm exec vitest run src/container-runner.isolation.test.ts -t "rejects container-config credential injection during asynchronous launch setup"`.
+- Config-TOCTOU RED failure observed: replacing safe config bytes with an aliased MCP credential while `ensureAgent` awaited still spawned.
+- Config-TOCTOU GREEN: the same command after pinning exact post-runtime config bytes and checking them after provider setup and every OneCLI await — 1 passed with zero spawns.
+- Wrapped-provider RED command: `pnpm exec vitest run src/container-runner.isolation.test.ts -t "rejects a host Mattermost credential wrapped inside a provider environment value"`.
+- Wrapped-provider RED failure observed: `CUSTOM_AUTHORIZATION=Bearer <token>` bypassed exact-value comparison and entered launch args.
+- Wrapped-provider GREEN: the same command after substring comparison against every host Mattermost credential — 1 passed before gateway/spawn.
+- Final-args RED command: `pnpm exec vitest run src/container-runner.isolation.test.ts -t "rejects a Mattermost credential injected into final launch arguments by the gateway"`.
+- Final-args RED failure observed: OneCLI appended a wrapped token after provider/config checks and the final Docker argv launched.
+- Final-args GREEN: the same command after scanning every final argument without logging values — 1 passed with zero spawns.
+- Compatibility RED command: `pnpm exec vitest run src/container-runner.isolation.test.ts -t "allows a benign MCP server named mattermost when it contains no credential"`.
+- Compatibility RED failure observed: the recursive namespace scan rejected the harmless server-name key and returned `false`.
+- Compatibility GREEN: the same command after narrowing key rejection to credential-bearing Mattermost names while retaining exact secret-value scans — 1 passed and spawned normally.
+- Cross-platform nested-root RED command: `pnpm exec vitest run src/container-runner.isolation.test.ts -t "rejects a Mattermost workspace that contains another platform agent workspace"`.
+- Cross-platform nested-root RED failure observed: A launched with Telegram's malformed nested workspace visible inside A's writable group mount because the inventory included only Mattermost ownership.
+- Cross-platform nested-root GREEN: the same command after comparing every assembled mount in both ancestor directions against every other agent group/state root — 1 passed before OneCLI/spawn.
+- Stacked-session self-route RED command: `pnpm exec vitest run src/modules/agent-to-agent/create-agent.test.ts -t "rejects Mattermost self-routing when a duplicate active session makes ownership ambiguous"`.
+- Stacked-session self-route RED failure observed: `routeAgentMessage()` re-resolved the newest duplicate session and wrote/woke it instead of rejecting ambiguity.
+- Stacked-session self-route GREEN: the same command after validating the supplied source session at entry and using that exact canonical session for strict self-routing — 1 passed with neither session modified or woken.
+- Outbound-root RED command: `pnpm exec vitest run src/delivery.test.ts -t "rejects a Mattermost outbound root that was observed only outside its canonical channel"`.
+- Outbound-root RED failure observed: A's outbound row carrying B-only `root-b` reached the adapter with that `root_id`.
+- Outbound-root GREEN: the same command after requiring strict channel/platform equality and same-session canonical-root observation — 1 passed with the adapter untouched; a canonical A-observed root characterization delivered with the correct `root_id`.
+- Foreign-reply RED command: `pnpm exec vitest run src/router.thread-policy.test.ts -t "rejects foreign replyTo metadata before creating Mattermost channel context"`.
+- Foreign-reply RED failure observed: A accepted B's `replyTo`, created A's session, and wrote the foreign route into A's model context.
+- Foreign-reply GREEN: the same command after requiring strict `replyTo` channel, platform, and root to equal the canonical inbound route before session resolution — 1 passed with no A/B session or message.
+- Host-DB RED command: `pnpm exec vitest run src/mattermost-isolation.integration.test.ts -t "rejects a host inbound write redirected through another channel database symlink"`.
+- Host-DB RED failure observed: replacing A's `inbound.db` with a symlink to B made `writeSessionMessage(A)` write directly into B without throwing.
+- Host-DB GREEN: the same command after pre-open non-symlink, regular-file, single-link, real-path, ancestor, and SQLite-sidecar checks at every host database open — 1 passed with B's count/content unchanged.
+- Read-only inbound mutation proof: temporarily removing the nested inbound bind made `pnpm exec vitest run src/container-runner.isolation.test.ts -t "shadows the host-owned inbound database with a read-only nested mount"` fail because `/workspace/inbound.db` was exposed only through the writable session mount; restoring it passed with an explicit read-only nested source and no writable duplicate.
+- REFACTOR performed: host-derived config is now validated as a pinned artifact; all provider inputs/outputs/final argv share one secret boundary; host-managed paths reject symlink components before mutation; every other agent root participates in mount overlap; active callbacks retain process identity; strict message roots are checked at ingress and egress; and host-owned SQLite artifacts receive pre-open identity checks while the inbound database is nested read-only in the container.
+- Affected-suite verification: `pnpm exec vitest run src/mattermost-isolation.integration.test.ts src/container-runner.isolation.test.ts src/channels/mattermost-subscription.test.ts src/delivery.test.ts src/modules/agent-to-agent/create-agent.test.ts src/modules/agent-to-agent/agent-route.test.ts src/modules/scheduling/db.test.ts src/router.thread-policy.test.ts src/host-core.test.ts` — 9 files passed, 169 tests passed.
+- Full host gate: `pnpm test` outside the filesystem sandbox — 48 files passed, 531 tests passed.
+- Static gate: `pnpm run typecheck` and `pnpm run format:check` passed; `pnpm run lint` passed with 0 errors and the same 100 pre-existing warnings.
+- Isolation impact: the host token cannot reach provider callbacks, derived config, raw config, prompts, gateway-mutated argv, or provider env; no agent can expose another platform's nested root; strict ingress/egress roots remain channel-local; and neither a container nor a symlink/hardlink can redirect host-owned database IO into another session.
+
+### Slice 6.8: post-provider, attachment, and filesystem-race closure
+
+- Post-provider path RED commands:
+  - `pnpm exec vitest run src/container-runner.isolation.test.ts -t "rejects a traversing MCP server name before prompt-fragment composition"` — a `../` MCP name reached fragment-path construction instead of failing before composition.
+  - `pnpm exec vitest run src/container-runner.isolation.test.ts -t "revalidates host-managed paths after provider callbacks and before skill writes"` — a provider replaced a validated host-managed directory during its callback and later skill synchronization followed it.
+  - `pnpm exec vitest run src/container-runner.isolation.test.ts -t "rejects a symlinked provider auth child before the provider can overwrite foreign state"` — a provider-managed auth child symlink remained writable after only its parent was validated.
+  - `pnpm exec vitest run src/container-runner.isolation.test.ts -t "rejects a provider mount that creates an alternate writable view of host inbound state"` — the provider could expose `inbound.db` through a second writable container path despite the canonical nested read-only bind.
+- Post-provider path GREEN: the same focused commands passed after applying bounded MCP/skill names, repeating host-managed no-symlink validation after provider callbacks, checking provider-managed children before the callback, and rejecting any provider mount that overlaps the host-owned inbound artifact. Provider contributions are rechecked before skill writes and immediately before spawn.
+- Wrapped host-environment RED command: `pnpm exec vitest run src/container-runner.isolation.test.ts -t "withholds host variables that wrap a Mattermost credential from provider callbacks"`.
+- Wrapped host-environment RED failure observed: the provider callback received `Authorization=Bearer <host-token>` because the sanitized callback environment removed only exact credential values.
+- Wrapped host-environment GREEN: the same command passed after removing any callback environment value containing a host Mattermost credential; a generic provider contribution containing the host token is independently rejected.
+- A2A source RED command: `pnpm exec vitest run src/modules/agent-to-agent/create-agent.test.ts -t "does not follow a symlinked Mattermost self-route outbox into foreign files"`.
+- A2A source RED failure observed: direct path-based forwarding copied the synthetic foreign attachment marker through a symlinked source message directory.
+- A2A source GREEN: the same command passed after forwarding reused the guarded outbox reader; no marker appeared in the target inbox or inbound content.
+- Inbox/outbox root RED commands:
+  - `pnpm exec vitest run src/host-core.test.ts -t "reject an outbox root symlink redirected into another session"` — the reader returned the foreign session attachment.
+  - `pnpm exec vitest run src/host-core.test.ts -t "not clear another session through a redirected outbox root"` — cleanup deleted the foreign message directory.
+  - `pnpm exec vitest run src/host-core.test.ts -t "reject an inbox root symlink redirected outside its owned session"` — the host wrote the decoded attachment into the foreign root.
+- Inbox/outbox root GREEN: all three commands passed after validating every session/root component and refusing symlinked inbox/outbox roots. A2A target writes were refactored to reuse the same owned-inbox writer.
+- Main-database hardlink characterization/mutation proof: `pnpm exec vitest run src/mattermost-isolation.integration.test.ts -t "database hardlink"` passed with the single-link guard. Temporarily removing `artifactStat.nlink !== 1` made it fail because the A write no longer threw and entered B's linked database; the guard was restored.
+- SQLite-sidecar characterization/mutation proof:
+  - `pnpm exec vitest run src/mattermost-isolation.integration.test.ts -t "SQLite sidecar"` passed for redirected and hardlinked journals.
+  - Temporarily removing the sidecar loop changed the redirected-sidecar result from the application boundary error to SQLite's `unable to open database file`; restoring the loop returned Green.
+  - Temporarily removing the sidecar `nlink !== 1` check made `... -t "hardlinked SQLite sidecar"` fail because the open no longer threw; restoring it returned Green with foreign bytes unchanged.
+- Concurrent-root RED command: `pnpm exec vitest run src/host-core.test.ts -t "opened directory when the container swaps|opened inbox"`.
+- Concurrent-root RED failures observed: immediately before the final path IO, replacing A's lexical outbox with B's made the reader return `FOREIGN_ATTACHMENT`, cleanup deleted B's `keep.txt`, and the inbound writer created B's `photo.png`.
+- Concurrent-root GREEN: the focused command passed after opening the session, inbox/outbox, message directory, and file through stable directory descriptors with `O_DIRECTORY`/`O_NOFOLLOW`; reads and writes use file descriptors, and cleanup atomically quarantines within the pinned outbox before recursive removal.
+- File-open/rename mutation proof:
+  - `pnpm exec vitest run src/host-core.test.ts -t "pin the outbox message directory before opening"` failed with `FOREIGN_ATTACHMENT` after temporarily reopening the file through the lexical outbox path.
+  - `pnpm exec vitest run src/host-core.test.ts -t "pin the inbox message directory before opening"` failed because the temporary lexical file open created foreign `photo.png`.
+  - `pnpm exec vitest run src/host-core.test.ts -t "pin the outbox root before quarantining"` failed because temporary lexical rename/delete removed B's `keep.txt`.
+  - Each mutation was reverted; `... -t "pin the outbox message|pin the outbox root|pin the inbox message"` passed 3 tests.
+- Descriptor-capability RED command: `pnpm exec vitest run src/host-core.test.ts -t "fail explicitly when stable descriptor-relative traversal is unavailable"`.
+- Descriptor-capability RED failure observed: when both descriptor roots returned `ENOTDIR`, the guarded read silently returned `undefined` instead of an explicit security failure.
+- Descriptor-capability GREEN: the same command passed after probing actual child traversal through `/proc/self/fd` and `/dev/fd`; supported hosts use the pinned-descriptor path, while an unsupported host fails closed with `Secure descriptor-relative filesystem access is unavailable` rather than silently using a raceable path.
+- Empty-attachment RED command: `pnpm exec vitest run src/host-core.test.ts -t "not create inbox artifacts for a message without attachment data"`.
+- Empty-attachment RED failure observed: an empty attachment array created an unnecessary `inbox/<message-id>` directory during the descriptor refactor.
+- Empty-attachment GREEN: the same command passed after returning before filesystem setup when there are no files.
+- Positive A2A characterization/mutation proof: `pnpm exec vitest run src/modules/agent-to-agent/create-agent.test.ts -t "copies generic agent-to-agent attachment bytes"` passed with exact source bytes, target `localPath`, inbound metadata, and one target wake. Temporarily returning no forwarded files made the test fail with `attachments: []`; the mutation was reverted and the focused test passed.
+- REFACTOR performed: one descriptor-relative inbox/outbox boundary now serves inbound attachments, outbound delivery, cleanup, and A2A forwarding; descriptors are closed in `finally`, unexpected filesystem errors rethrow, safe path rejections fail closed, and no-data messages avoid filesystem churn. Database claims were narrowed to pre-open identity checks rather than an unsupported atomic `SQLITE_OPEN_NOFOLLOW` claim.
+- Final affected-suite command: `pnpm exec vitest run src/mattermost-isolation.integration.test.ts src/container-runner.isolation.test.ts src/channels/mattermost-subscription.test.ts src/delivery.test.ts src/modules/agent-to-agent/create-agent.test.ts src/modules/agent-to-agent/agent-route.test.ts src/modules/scheduling/db.test.ts src/router.thread-policy.test.ts src/host-core.test.ts` — 9 files passed, 190 tests passed.
+- Final host gate: `pnpm test` outside the filesystem sandbox — 48 files passed, 552 tests passed.
+- Container typecheck: `docker run --rm --network none -v /home/pi/nanoclaw-v2:/workspace -w /workspace/container/agent-runner oven/bun:1.3.12 bun run typecheck` — passed.
+- Complete isolated container gate: the 9-file unit command recorded in Phase 5 passed 109 tests; the separate `src/integration.test.ts` command passed 3 tests. Together they execute the complete 10-file, 112-test inventory without the documented pre-existing leaked-poll-loop process contamination.
+- Static gate: `pnpm run typecheck`, `pnpm run format:check`, and `git diff --check` passed; `pnpm run lint` passed with 0 errors and 98 warnings, two fewer than the 100-warning pre-flight baseline.
+- Operational note: attachment isolation requires descriptor-relative child traversal. Linux `/proc/self/fd` is exercised by this gate. Other supported hosts are capability-checked against `/proc/self/fd` and `/dev/fd`; if neither works, attachment IO fails explicitly instead of falling back to a check-then-use path.
+- Residual risk: `better-sqlite3` does not expose SQLite's no-follow open flag, so database artifact validation remains a pre-open identity check. The running container sees host-owned `inbound.db` through a nested read-only bind, and all tested symlink/hardlink/sidecar states fail closed; the container-owned outbound database retains a narrow leaf-swap window for future native/openat hardening.
+- Isolation impact: A/B/Telegram marker, workspace, mount, session, routing, credential, attachment, and execution boundaries remain disjoint even under malformed topology, provider mutation, root replacement, and deterministic filesystem races covered by this phase.
+- Pull request: [#43 — Phase 6: prove Mattermost container and context isolation](https://github.com/ufJmacca/nanoclaw/pull/43), base `codex/mattermost-05-strict-subscriptions`, head `codex/mattermost-06-isolation`.
+- GitHub checks: the available `label` check passed in 3 seconds ([run 29131018921](https://github.com/ufJmacca/nanoclaw/actions/runs/29131018921)); the code CI workflow did not trigger because it is configured only for pull requests targeting `main`, so no code-CI pass is claimed.
+- Phase status: complete; the full local gate, independent release audit, and every available GitHub check passed; pull request ready for review.

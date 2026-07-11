@@ -9,6 +9,7 @@
  */
 import type Database from 'better-sqlite3';
 
+import { validateMattermostSessionForExecution } from '../../channels/mattermost-subscription.js';
 import { wakeContainer } from '../../container-runner.js';
 import { getSession } from '../../db/sessions.js';
 import { log } from '../../log.js';
@@ -18,9 +19,32 @@ import { cancelTask, insertTask, pauseTask, resumeTask, updateTask, type TaskUpd
 
 export async function handleScheduleTask(
   content: Record<string, unknown>,
-  _session: Session,
+  session: Session,
   inDb: Database.Database,
 ): Promise<void> {
+  const mattermostBoundary = validateMattermostSessionForExecution(session);
+  if (
+    mattermostBoundary.strict &&
+    (!mattermostBoundary.valid ||
+      content.channelType !== 'mattermost' ||
+      content.platformId !== mattermostBoundary.value.messagingGroup.platform_id)
+  ) {
+    throw new Error('Invalid Mattermost scheduled task route');
+  }
+  if (mattermostBoundary.strict && mattermostBoundary.valid && content.threadId != null) {
+    const observedRoot =
+      typeof content.threadId === 'string'
+        ? inDb
+            .prepare(
+              `SELECT 1
+                 FROM messages_in
+                WHERE channel_type = ? AND platform_id = ? AND thread_id = ?
+                LIMIT 1`,
+            )
+            .get('mattermost', mattermostBoundary.value.messagingGroup.platform_id, content.threadId)
+        : undefined;
+    if (!observedRoot) throw new Error('Invalid Mattermost scheduled task root');
+  }
   const taskId = content.taskId as string;
   const prompt = content.prompt as string;
   const script = content.script as string | null;

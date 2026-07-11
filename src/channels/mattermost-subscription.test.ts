@@ -34,6 +34,7 @@ import {
   createAgentGroup,
   createMessagingGroup,
   createMessagingGroupAgent,
+  createSession,
   getDb,
   getSessionsByAgentGroup,
   initDb,
@@ -41,8 +42,13 @@ import {
   runMigrations,
 } from '../db/index.js';
 import { routeInbound, setChannelRequestGate, setSenderResolver } from '../router.js';
+import { resolveSession, sessionDir } from '../session-manager.js';
+import type { Session } from '../types.js';
 import {
+  isMattermostOwnedAgentGroup,
+  listMattermostOwnedFilesystemIdentities,
   subscribeMattermostChannelStrict,
+  validateMattermostSessionForExecution,
   validateMattermostSubscriptionForRouting,
 } from './mattermost-subscription.js';
 
@@ -534,6 +540,78 @@ describe('subscribeMattermostChannelStrict', () => {
 
     expect(senderResolver).not.toHaveBeenCalled();
     expect(getSessionsByAgentGroup(channelA.agentGroup.id)).toHaveLength(0);
+    expect(wakeContainer).not.toHaveBeenCalled();
+  });
+
+  it('rejects Telegram routing into an agent also wired to an unsubscribed Mattermost channel', async () => {
+    const createdAt = new Date().toISOString();
+    createAgentGroup({
+      id: 'ag-orphan-cross-platform',
+      name: 'Orphan Cross Platform',
+      folder: 'orphan-cross-platform',
+      agent_provider: null,
+      created_at: createdAt,
+    });
+    createMessagingGroup({
+      id: 'mg-orphan-cross-platform-mattermost',
+      channel_type: 'mattermost',
+      platform_id: 'mattermost:primary:orphan-cross-platform',
+      name: 'Orphan Mattermost',
+      is_group: 1,
+      unknown_sender_policy: 'strict',
+      created_at: createdAt,
+    });
+    createMessagingGroupAgent({
+      id: 'mga-orphan-cross-platform-mattermost',
+      messaging_group_id: 'mg-orphan-cross-platform-mattermost',
+      agent_group_id: 'ag-orphan-cross-platform',
+      engage_mode: 'pattern',
+      engage_pattern: '.',
+      sender_scope: 'known',
+      ignored_message_policy: 'drop',
+      session_mode: 'shared',
+      priority: 0,
+      created_at: createdAt,
+    });
+    createMessagingGroup({
+      id: 'mg-orphan-cross-platform-telegram',
+      channel_type: 'telegram',
+      platform_id: 'telegram:-100779',
+      name: 'Cross Platform Telegram',
+      is_group: 1,
+      unknown_sender_policy: 'public',
+      created_at: createdAt,
+    });
+    createMessagingGroupAgent({
+      id: 'mga-orphan-cross-platform-telegram',
+      messaging_group_id: 'mg-orphan-cross-platform-telegram',
+      agent_group_id: 'ag-orphan-cross-platform',
+      engage_mode: 'pattern',
+      engage_pattern: '.',
+      sender_scope: 'all',
+      ignored_message_policy: 'drop',
+      session_mode: 'shared',
+      priority: 0,
+      created_at: createdAt,
+    });
+    const senderResolver = vi.fn().mockReturnValue('telegram:user-t');
+    setSenderResolver(senderResolver);
+
+    await routeInbound({
+      channelType: 'telegram',
+      platformId: 'telegram:-100779',
+      threadId: null,
+      message: {
+        id: 'orphan-cross-platform-message',
+        kind: 'chat',
+        content: JSON.stringify({ senderId: 'telegram:user-t', text: 'must fail closed' }),
+        timestamp: createdAt,
+        isGroup: true,
+      },
+    });
+
+    expect(senderResolver).not.toHaveBeenCalled();
+    expect(getSessionsByAgentGroup('ag-orphan-cross-platform')).toHaveLength(0);
     expect(wakeContainer).not.toHaveBeenCalled();
   });
 
@@ -1454,5 +1532,324 @@ describe('subscribeMattermostChannelStrict', () => {
       valid: false,
       reason: 'unsafe_destination_topology',
     });
+  });
+
+  it('rejects a Mattermost-owned agent session bound to another channel', () => {
+    const channelA = subscribeMattermostChannelStrict({ instanceKey: 'primary', channelId: 'channel-a' });
+    const channelB = subscribeMattermostChannelStrict({ instanceKey: 'primary', channelId: 'channel-b' });
+    const session: Session = {
+      id: 'session-cross-channel',
+      agent_group_id: channelA.agentGroup.id,
+      messaging_group_id: channelB.messagingGroup.id,
+      thread_id: null,
+      agent_provider: null,
+      status: 'active',
+      container_status: 'stopped',
+      last_active: null,
+      created_at: new Date().toISOString(),
+    };
+    expect(validateMattermostSessionForExecution(session)).toEqual({
+      strict: true,
+      valid: false,
+      reason: 'session_identity_mismatch',
+    });
+  });
+
+  it('fails closed for a persisted session on an unsubscribed Mattermost messaging group', () => {
+    const createdAt = new Date().toISOString();
+    createAgentGroup({
+      id: 'ag-orphan-mattermost',
+      name: 'Orphan Mattermost',
+      folder: 'orphan-mattermost',
+      agent_provider: null,
+      created_at: createdAt,
+    });
+    createMessagingGroup({
+      id: 'mg-orphan-mattermost',
+      channel_type: 'mattermost',
+      platform_id: 'mattermost:primary:orphan',
+      name: 'Orphan Mattermost',
+      is_group: 1,
+      unknown_sender_policy: 'strict',
+      created_at: createdAt,
+    });
+    createMessagingGroupAgent({
+      id: 'mga-orphan-mattermost',
+      messaging_group_id: 'mg-orphan-mattermost',
+      agent_group_id: 'ag-orphan-mattermost',
+      engage_mode: 'pattern',
+      engage_pattern: '.',
+      sender_scope: 'known',
+      ignored_message_policy: 'drop',
+      session_mode: 'shared',
+      priority: 0,
+      created_at: createdAt,
+    });
+    const { session } = resolveSession('ag-orphan-mattermost', 'mg-orphan-mattermost', null, 'shared');
+
+    expect(validateMattermostSessionForExecution(session)).toEqual({
+      strict: true,
+      valid: false,
+      reason: 'missing_subscription',
+    });
+  });
+
+  it('fails closed when an agent-shared session belongs to an agent wired to unsubscribed Mattermost', () => {
+    const createdAt = new Date().toISOString();
+    createAgentGroup({
+      id: 'ag-orphan-mattermost-shared',
+      name: 'Orphan Mattermost Shared',
+      folder: 'orphan-mattermost-shared',
+      agent_provider: null,
+      created_at: createdAt,
+    });
+    createMessagingGroup({
+      id: 'mg-orphan-mattermost-shared',
+      channel_type: 'mattermost',
+      platform_id: 'mattermost:primary:orphan-shared',
+      name: 'Orphan Mattermost Shared',
+      is_group: 1,
+      unknown_sender_policy: 'strict',
+      created_at: createdAt,
+    });
+    createMessagingGroupAgent({
+      id: 'mga-orphan-mattermost-shared',
+      messaging_group_id: 'mg-orphan-mattermost-shared',
+      agent_group_id: 'ag-orphan-mattermost-shared',
+      engage_mode: 'pattern',
+      engage_pattern: '.',
+      sender_scope: 'known',
+      ignored_message_policy: 'drop',
+      session_mode: 'shared',
+      priority: 0,
+      created_at: createdAt,
+    });
+    const session: Session = {
+      id: 'session-orphan-agent-shared',
+      agent_group_id: 'ag-orphan-mattermost-shared',
+      messaging_group_id: null,
+      thread_id: null,
+      agent_provider: null,
+      status: 'active',
+      container_status: 'stopped',
+      last_active: null,
+      created_at: createdAt,
+    };
+    createSession(session);
+
+    expect(validateMattermostSessionForExecution(session)).toEqual({
+      strict: true,
+      valid: false,
+      reason: 'missing_subscription',
+    });
+  });
+
+  it('retains Mattermost ownership when a reserved subscription topology is corrupted', () => {
+    const channel = subscribeMattermostChannelStrict({ instanceKey: 'primary', channelId: 'channel-a' });
+    getDb().exec('DROP TRIGGER mattermost_guard_messaging_channel_identity_update');
+    getDb()
+      .prepare("UPDATE messaging_groups SET channel_type = 'telegram' WHERE id = ?")
+      .run(channel.messagingGroup.id);
+
+    expect(isMattermostOwnedAgentGroup(channel.agentGroup.id)).toBe(true);
+  });
+
+  it('enumerates canonical Mattermost workspace and state ownership for mount isolation', () => {
+    const channel = subscribeMattermostChannelStrict({ instanceKey: 'primary', channelId: 'channel-a' });
+
+    expect(listMattermostOwnedFilesystemIdentities()).toContainEqual({
+      agentGroupId: channel.agentGroup.id,
+      folder: channel.agentGroup.folder,
+    });
+  });
+
+  it('rejects a per-thread session for a shared Mattermost channel', () => {
+    const channel = subscribeMattermostChannelStrict({ instanceKey: 'primary', channelId: 'channel-a' });
+    const session: Session = {
+      id: 'session-threaded',
+      agent_group_id: channel.agentGroup.id,
+      messaging_group_id: channel.messagingGroup.id,
+      thread_id: 'root-post-id',
+      agent_provider: null,
+      status: 'active',
+      container_status: 'stopped',
+      last_active: null,
+      created_at: new Date().toISOString(),
+    };
+
+    expect(validateMattermostSessionForExecution(session)).toEqual({
+      strict: true,
+      valid: false,
+      reason: 'threaded_session',
+    });
+  });
+
+  it('rejects a closed session for an active Mattermost subscription', () => {
+    const channel = subscribeMattermostChannelStrict({ instanceKey: 'primary', channelId: 'channel-a' });
+    const session: Session = {
+      id: 'session-closed',
+      agent_group_id: channel.agentGroup.id,
+      messaging_group_id: channel.messagingGroup.id,
+      thread_id: null,
+      agent_provider: null,
+      status: 'closed',
+      container_status: 'stopped',
+      last_active: null,
+      created_at: new Date().toISOString(),
+    };
+
+    expect(validateMattermostSessionForExecution(session)).toEqual({
+      strict: true,
+      valid: false,
+      reason: 'inactive_session',
+    });
+  });
+
+  it('rejects a canonical-looking Mattermost session without a matching database record', () => {
+    const channel = subscribeMattermostChannelStrict({ instanceKey: 'primary', channelId: 'channel-a' });
+    const session: Session = {
+      id: 'session-not-persisted',
+      agent_group_id: channel.agentGroup.id,
+      messaging_group_id: channel.messagingGroup.id,
+      thread_id: null,
+      agent_provider: null,
+      status: 'active',
+      container_status: 'stopped',
+      last_active: null,
+      created_at: new Date().toISOString(),
+    };
+
+    expect(validateMattermostSessionForExecution(session)).toEqual({
+      strict: true,
+      valid: false,
+      reason: 'session_record_mismatch',
+    });
+  });
+
+  it('rejects a persisted Mattermost session id that can escape its channel state directory', () => {
+    const channel = subscribeMattermostChannelStrict({ instanceKey: 'primary', channelId: 'channel-a' });
+    const session: Session = {
+      id: '../foreign-agent/foreign-session',
+      agent_group_id: channel.agentGroup.id,
+      messaging_group_id: channel.messagingGroup.id,
+      thread_id: null,
+      agent_provider: null,
+      status: 'active',
+      container_status: 'stopped',
+      last_active: null,
+      created_at: new Date().toISOString(),
+    };
+    createSession(session);
+
+    expect(validateMattermostSessionForExecution(session)).toEqual({
+      strict: true,
+      valid: false,
+      reason: 'unsafe_session_identity',
+    });
+  });
+
+  it('accepts the persisted canonical shared Mattermost session', () => {
+    const channel = subscribeMattermostChannelStrict({ instanceKey: 'primary', channelId: 'channel-a' });
+    const { session } = resolveSession(channel.agentGroup.id, channel.messagingGroup.id, 'ignored-root', 'shared');
+
+    expect(validateMattermostSessionForExecution(session)).toEqual({
+      strict: true,
+      valid: true,
+      value: channel,
+    });
+  });
+
+  it('rejects duplicate active shared sessions for one Mattermost channel', () => {
+    const channel = subscribeMattermostChannelStrict({ instanceKey: 'primary', channelId: 'channel-a' });
+    const { session } = resolveSession(channel.agentGroup.id, channel.messagingGroup.id, null, 'shared');
+    createSession({
+      ...session,
+      id: 'session-duplicate-canonical',
+      created_at: new Date(Date.now() + 1).toISOString(),
+    });
+
+    expect(validateMattermostSessionForExecution(session)).toEqual({
+      strict: true,
+      valid: false,
+      reason: 'duplicate_active_session',
+    });
+  });
+
+  it('rejects a canonical Mattermost session whose state directory was replaced by a symlink', () => {
+    const channel = subscribeMattermostChannelStrict({ instanceKey: 'primary', channelId: 'channel-a' });
+    const { session } = resolveSession(channel.agentGroup.id, channel.messagingGroup.id, null, 'shared');
+    const ownedSessionDir = sessionDir(channel.agentGroup.id, session.id);
+    const foreignDir = path.join(TEST_ROOT, 'foreign-session-state');
+    fs.mkdirSync(foreignDir, { recursive: true });
+    fs.rmSync(ownedSessionDir, { recursive: true });
+    fs.symlinkSync(foreignDir, ownedSessionDir, 'dir');
+
+    expect(validateMattermostSessionForExecution(session)).toEqual({
+      strict: true,
+      valid: false,
+      reason: 'unsafe_session_path',
+    });
+  });
+
+  it('rejects a canonical Mattermost workspace directory replaced by a foreign symlink', () => {
+    const channel = subscribeMattermostChannelStrict({ instanceKey: 'primary', channelId: 'channel-a' });
+    const { session } = resolveSession(channel.agentGroup.id, channel.messagingGroup.id, null, 'shared');
+    const groupDir = path.join(GROUPS_DIR, channel.agentGroup.folder);
+    const foreignDir = path.join(TEST_ROOT, 'foreign-group-workspace');
+    fs.mkdirSync(foreignDir, { recursive: true });
+    fs.rmSync(groupDir, { recursive: true });
+    fs.symlinkSync(foreignDir, groupDir, 'dir');
+
+    expect(validateMattermostSessionForExecution(session)).toEqual({
+      strict: true,
+      valid: false,
+      reason: 'unsafe_session_path',
+    });
+  });
+
+  it('rejects a Mattermost execution identity whose provider differs from the persisted session', () => {
+    const channel = subscribeMattermostChannelStrict({ instanceKey: 'primary', channelId: 'channel-a' });
+    const { session } = resolveSession(channel.agentGroup.id, channel.messagingGroup.id, null, 'shared');
+
+    expect(validateMattermostSessionForExecution({ ...session, agent_provider: 'codex' })).toEqual({
+      strict: true,
+      valid: false,
+      reason: 'session_record_mismatch',
+    });
+  });
+
+  it('leaves a persisted Telegram session on the generic execution path', () => {
+    const createdAt = new Date().toISOString();
+    createAgentGroup({
+      id: 'ag-telegram-execution',
+      name: 'Telegram Execution',
+      folder: 'telegram-execution',
+      agent_provider: null,
+      created_at: createdAt,
+    });
+    createMessagingGroup({
+      id: 'mg-telegram-execution',
+      channel_type: 'telegram',
+      platform_id: 'telegram:-100123',
+      name: 'Telegram Execution',
+      is_group: 1,
+      unknown_sender_policy: 'public',
+      created_at: createdAt,
+    });
+    createMessagingGroupAgent({
+      id: 'mga-telegram-execution',
+      messaging_group_id: 'mg-telegram-execution',
+      agent_group_id: 'ag-telegram-execution',
+      engage_mode: 'pattern',
+      engage_pattern: '.',
+      sender_scope: 'all',
+      ignored_message_policy: 'drop',
+      session_mode: 'shared',
+      priority: 0,
+      created_at: createdAt,
+    });
+    const { session } = resolveSession('ag-telegram-execution', 'mg-telegram-execution', null, 'shared');
+
+    expect(validateMattermostSessionForExecution(session)).toEqual({ strict: false });
   });
 });

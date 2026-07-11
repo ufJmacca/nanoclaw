@@ -18,15 +18,16 @@
  * `channel_type === 'agent'` check. When the module is absent the check in
  * core throws with a "module not installed" message so retry → mark failed.
  */
-import fs from 'fs';
-import path from 'path';
-
 import { isSafeAttachmentName } from '../../attachment-safety.js';
+import {
+  isMattermostOwnedAgentGroup,
+  validateMattermostSessionForExecution,
+} from '../../channels/mattermost-subscription.js';
 import { getAgentGroup } from '../../db/agent-groups.js';
 import { getSession } from '../../db/sessions.js';
 import { wakeContainer } from '../../container-runner.js';
 import { log } from '../../log.js';
-import { resolveSession, sessionDir, writeSessionMessage } from '../../session-manager.js';
+import { readOutboxFiles, resolveSession, writeInboxFiles, writeSessionMessage } from '../../session-manager.js';
 import type { Session } from '../../types.js';
 import { hasDestination } from './db/agent-destinations.js';
 
@@ -55,46 +56,24 @@ export function forwardAttachedFiles(
   target: { agentGroupId: string; sessionId: string; messageId: string },
 ): ForwardedAttachment[] {
   if (source.filenames.length === 0) return [];
+  if (!isSafeAttachmentName(source.messageId) || !isSafeAttachmentName(target.messageId)) return [];
 
-  const sourceDir = path.join(sessionDir(source.agentGroupId, source.sessionId), 'outbox', source.messageId);
-  if (!fs.existsSync(sourceDir)) {
-    log.warn('agent-route: source outbox dir missing, no files forwarded', {
-      sourceMsgId: source.messageId,
-      sourceDir,
-    });
-    return [];
-  }
+  const sourceFiles = readOutboxFiles(source.agentGroupId, source.sessionId, source.messageId, source.filenames);
+  if (!sourceFiles || sourceFiles.length === 0) return [];
 
-  const targetInboxDir = path.join(sessionDir(target.agentGroupId, target.sessionId), 'inbox', target.messageId);
-  fs.mkdirSync(targetInboxDir, { recursive: true });
-
-  const attachments: ForwardedAttachment[] = [];
-  for (const filename of source.filenames) {
-    if (!isSafeAttachmentName(filename)) {
-      log.warn('agent-route: rejecting unsafe attachment filename (path traversal attempt?)', {
-        sourceMsgId: source.messageId,
-        filename,
-      });
-      continue;
-    }
-    const src = path.join(sourceDir, filename);
-    if (!fs.existsSync(src)) {
-      log.warn('agent-route: referenced file missing in source outbox, skipped', {
-        sourceMsgId: source.messageId,
-        filename,
-      });
-      continue;
-    }
-    const dst = path.join(targetInboxDir, filename);
-    fs.copyFileSync(src, dst);
-    attachments.push({
-      name: filename,
-      filename,
-      type: 'file',
-      localPath: `inbox/${target.messageId}/${filename}`,
-    });
-  }
-  return attachments;
+  const written = writeInboxFiles(target.agentGroupId, target.sessionId, target.messageId, sourceFiles);
+  return sourceFiles.flatMap((file, index) =>
+    written[index]
+      ? [
+          {
+            name: file.filename,
+            filename: file.filename,
+            type: 'file' as const,
+            localPath: `inbox/${target.messageId}/${file.filename}`,
+          },
+        ]
+      : [],
+  );
 }
 
 export interface RoutableAgentMessage {
@@ -104,9 +83,19 @@ export interface RoutableAgentMessage {
 }
 
 export async function routeAgentMessage(msg: RoutableAgentMessage, session: Session): Promise<void> {
+  const mattermostBoundary = validateMattermostSessionForExecution(session);
+  if (mattermostBoundary.strict && !mattermostBoundary.valid) {
+    throw new Error(`Invalid Mattermost execution session: ${mattermostBoundary.reason}`);
+  }
   const targetAgentGroupId = msg.platform_id;
   if (!targetAgentGroupId) {
     throw new Error(`agent-to-agent message ${msg.id} is missing a target agent group id`);
+  }
+  if (
+    targetAgentGroupId !== session.agent_group_id &&
+    (isMattermostOwnedAgentGroup(session.agent_group_id) || isMattermostOwnedAgentGroup(targetAgentGroupId))
+  ) {
+    throw new Error('Mattermost agent-to-agent routing is disabled');
   }
   if (
     targetAgentGroupId !== session.agent_group_id &&
@@ -119,7 +108,10 @@ export async function routeAgentMessage(msg: RoutableAgentMessage, session: Sess
   if (!getAgentGroup(targetAgentGroupId)) {
     throw new Error(`target agent group ${targetAgentGroupId} not found for message ${msg.id}`);
   }
-  const { session: targetSession } = resolveSession(targetAgentGroupId, null, null, 'agent-shared');
+  const targetSession =
+    targetAgentGroupId === session.agent_group_id && mattermostBoundary.strict
+      ? session
+      : resolveSession(targetAgentGroupId, null, null, 'agent-shared').session;
   const a2aMsgId = `a2a-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
   // If the source message references files (via `send_file`), forward the

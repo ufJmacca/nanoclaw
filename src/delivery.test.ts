@@ -12,6 +12,10 @@ import Database from 'better-sqlite3';
 import fs from 'fs';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
+const deliveryMocks = vi.hoisted(() => ({
+  validateMattermostSessionForExecution: vi.fn(),
+}));
+
 vi.mock('./container-runner.js', () => ({
   wakeContainer: vi.fn().mockResolvedValue(undefined),
   isContainerRunning: vi.fn().mockReturnValue(false),
@@ -24,10 +28,15 @@ vi.mock('./config.js', async () => {
   return { ...actual, DATA_DIR: '/tmp/nanoclaw-test-delivery' };
 });
 
+vi.mock('./channels/mattermost-subscription.js', () => ({
+  validateMattermostSessionForExecution: deliveryMocks.validateMattermostSessionForExecution,
+}));
+
 const TEST_DIR = '/tmp/nanoclaw-test-delivery';
 
 import { initTestDb, closeDb, runMigrations, createAgentGroup, createMessagingGroup } from './db/index.js';
-import { resolveSession, outboundDbPath } from './session-manager.js';
+import { insertMessage } from './db/session-db.js';
+import { inboundDbPath, resolveSession, outboundDbPath } from './session-manager.js';
 import { deliverSessionMessages, setDeliveryAdapter } from './delivery.js';
 
 function now(): string {
@@ -62,11 +71,40 @@ function insertOutbound(agentGroupId: string, sessionId: string, msgId: string):
   db.close();
 }
 
+function seedMattermostAgentAndChannel(): void {
+  createAgentGroup({
+    id: 'ag-mattermost-a',
+    name: 'Mattermost A',
+    folder: 'mattermost-a',
+    agent_provider: null,
+    created_at: now(),
+  });
+  createMessagingGroup({
+    id: 'mg-mattermost-a',
+    channel_type: 'mattermost',
+    platform_id: 'mattermost:primary:channel-a',
+    name: 'Mattermost A',
+    is_group: 1,
+    unknown_sender_policy: 'strict',
+    created_at: now(),
+  });
+}
+
+function insertMattermostOutbound(agentGroupId: string, sessionId: string, msgId: string, threadId: string): void {
+  const db = new Database(outboundDbPath(agentGroupId, sessionId));
+  db.prepare(
+    `INSERT INTO messages_out (id, timestamp, kind, platform_id, channel_type, thread_id, content)
+     VALUES (?, datetime('now'), 'chat', 'mattermost:primary:channel-a', 'mattermost', ?, ?)`,
+  ).run(msgId, threadId, JSON.stringify({ text: 'hello' }));
+  db.close();
+}
+
 beforeEach(() => {
   if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
   fs.mkdirSync(TEST_DIR, { recursive: true });
   const db = initTestDb();
   runMigrations(db);
+  deliveryMocks.validateMattermostSessionForExecution.mockReset().mockReturnValue({ strict: false });
 });
 
 afterEach(() => {
@@ -92,6 +130,107 @@ describe('deliverSessionMessages — concurrent invocations', () => {
       JSON.stringify({ text: 'hello' }),
       undefined,
       'out-stable-delivery-id',
+    );
+  });
+
+  it('rejects an invalid Mattermost session before draining its outbound queue', async () => {
+    seedAgentAndChannel();
+    const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
+    insertOutbound('ag-1', session.id, 'out-invalid-session');
+    const deliver = vi.fn().mockResolvedValue('platform-message-id');
+    setDeliveryAdapter({ deliver });
+    deliveryMocks.validateMattermostSessionForExecution.mockReturnValue({
+      strict: true,
+      valid: false,
+      reason: 'session_identity_mismatch',
+    });
+
+    await deliverSessionMessages(session);
+
+    expect(deliveryMocks.validateMattermostSessionForExecution).toHaveBeenCalledWith(session);
+    expect(deliver).not.toHaveBeenCalled();
+    const db = new Database(inboundDbPath(session.agent_group_id, session.id));
+    expect(db.prepare('SELECT COUNT(*) AS count FROM delivered').get()).toEqual({ count: 0 });
+    db.close();
+  });
+
+  it('rejects a Mattermost outbound root that was observed only outside its canonical channel', async () => {
+    seedMattermostAgentAndChannel();
+    const { session } = resolveSession('ag-mattermost-a', 'mg-mattermost-a', null, 'shared');
+    const inDb = new Database(inboundDbPath(session.agent_group_id, session.id));
+    insertMessage(inDb, {
+      id: 'inbound-foreign-root',
+      kind: 'chat',
+      timestamp: now(),
+      platformId: 'mattermost:primary:channel-b',
+      channelType: 'mattermost',
+      threadId: 'root-b',
+      content: JSON.stringify({ text: 'foreign' }),
+      processAfter: null,
+      recurrence: null,
+    });
+    inDb.close();
+    insertMattermostOutbound(session.agent_group_id, session.id, 'out-foreign-root', 'root-b');
+    deliveryMocks.validateMattermostSessionForExecution.mockReturnValue({
+      strict: true,
+      valid: true,
+      value: {
+        messagingGroup: {
+          id: 'mg-mattermost-a',
+          channel_type: 'mattermost',
+          platform_id: 'mattermost:primary:channel-a',
+        },
+      },
+    });
+    const deliver = vi.fn().mockResolvedValue('platform-message-id');
+    setDeliveryAdapter({ deliver });
+
+    await deliverSessionMessages(session);
+
+    expect(deliver).not.toHaveBeenCalled();
+  });
+
+  it('delivers a Mattermost reply to a root observed in its canonical channel session', async () => {
+    seedMattermostAgentAndChannel();
+    const { session } = resolveSession('ag-mattermost-a', 'mg-mattermost-a', null, 'shared');
+    const inDb = new Database(inboundDbPath(session.agent_group_id, session.id));
+    insertMessage(inDb, {
+      id: 'inbound-canonical-root',
+      kind: 'chat',
+      timestamp: now(),
+      platformId: 'mattermost:primary:channel-a',
+      channelType: 'mattermost',
+      threadId: 'root-a',
+      content: JSON.stringify({ text: 'canonical' }),
+      processAfter: null,
+      recurrence: null,
+    });
+    inDb.close();
+    insertMattermostOutbound(session.agent_group_id, session.id, 'out-canonical-root', 'root-a');
+    deliveryMocks.validateMattermostSessionForExecution.mockReturnValue({
+      strict: true,
+      valid: true,
+      value: {
+        messagingGroup: {
+          id: 'mg-mattermost-a',
+          channel_type: 'mattermost',
+          platform_id: 'mattermost:primary:channel-a',
+        },
+      },
+    });
+    const deliver = vi.fn().mockResolvedValue('platform-message-id');
+    setDeliveryAdapter({ deliver });
+
+    await deliverSessionMessages(session);
+
+    expect(deliver).toHaveBeenCalledWith(
+      'mattermost',
+      'mattermost:primary:channel-a',
+      'root-a',
+      'chat',
+      JSON.stringify({ text: 'hello' }),
+      undefined,
+      'out-canonical-root',
     );
   });
 

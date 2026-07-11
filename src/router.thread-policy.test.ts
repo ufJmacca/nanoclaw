@@ -186,6 +186,21 @@ describe('Mattermost thread/session policy', () => {
     expect(row.thread_id).toBe('root-post-id');
   });
 
+  it('rejects foreign replyTo metadata before creating Mattermost channel context', async () => {
+    seedMattermostChannel('b');
+    await routeInbound({
+      ...mattermostEvent('foreign-reply-address', 'root-a'),
+      replyTo: {
+        channelType: 'mattermost',
+        platformId: 'mattermost:primary:channel-b',
+        threadId: 'root-b',
+      },
+    });
+
+    expect(getSessionsByAgentGroup(mattermostFixture('a').agentGroupId)).toHaveLength(0);
+    expect(getSessionsByAgentGroup(mattermostFixture('b').agentGroupId)).toHaveLength(0);
+  });
+
   it('keeps a second Mattermost channel in a distinct session', async () => {
     seedMattermostChannel('b');
 

@@ -11,6 +11,7 @@
  *      the mount; concurrent writers corrupt the DB.
  */
 import type Database from 'better-sqlite3';
+import { randomUUID } from 'node:crypto';
 import fs from 'fs';
 import path from 'path';
 
@@ -50,6 +51,116 @@ export function sessionsBaseDir(): string {
 /** Directory for a specific session: sessions/{agent_group_id}/{session_id}/ */
 export function sessionDir(agentGroupId: string, sessionId: string): string {
   return path.join(sessionsBaseDir(), agentGroupId, sessionId);
+}
+
+const DIRECTORY_OPEN_FLAGS = fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW;
+const EXPECTED_UNSAFE_PATH_ERRORS = new Set(['EACCES', 'EEXIST', 'EINVAL', 'ELOOP', 'ENOENT', 'ENOTDIR', 'EPERM']);
+
+interface DirectoryHandle {
+  fd: number;
+  descriptorRoot: string;
+}
+
+class SecureDescriptorUnavailableError extends Error {
+  constructor() {
+    super('Secure descriptor-relative filesystem access is unavailable');
+  }
+}
+
+function isExpectedUnsafePathError(err: unknown): boolean {
+  return EXPECTED_UNSAFE_PATH_ERRORS.has((err as NodeJS.ErrnoException).code ?? '');
+}
+
+function descriptorPath(handle: DirectoryHandle, child?: string): string {
+  return child === undefined
+    ? path.join(handle.descriptorRoot, String(handle.fd))
+    : path.join(handle.descriptorRoot, String(handle.fd), child);
+}
+
+function openDirectoryAt(parent: DirectoryHandle, child: string, create: boolean): DirectoryHandle | undefined {
+  if (!isSafeAttachmentName(child)) return undefined;
+  const childPath = descriptorPath(parent, child);
+  if (create) {
+    try {
+      fs.mkdirSync(childPath, { mode: 0o700 });
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') {
+        if (isExpectedUnsafePathError(err)) return undefined;
+        throw err;
+      }
+    }
+  }
+  let fd: number | undefined;
+  try {
+    fd = fs.openSync(childPath, DIRECTORY_OPEN_FLAGS);
+    if (!fs.fstatSync(fd).isDirectory()) {
+      fs.closeSync(fd);
+      fd = undefined;
+      return undefined;
+    }
+    return { fd, descriptorRoot: parent.descriptorRoot };
+  } catch (err) {
+    if (fd !== undefined) fs.closeSync(fd);
+    if (isExpectedUnsafePathError(err)) return undefined;
+    throw err;
+  }
+}
+
+function openFirstOwnedDirectory(baseFd: number, child: string): DirectoryHandle | undefined {
+  for (const descriptorRoot of ['/proc/self/fd', '/dev/fd']) {
+    const opened = openDirectoryAt({ fd: baseFd, descriptorRoot }, child, false);
+    if (opened !== undefined) return opened;
+  }
+
+  const lexicalChild = path.join(sessionsBaseDir(), child);
+  const stat = fs.lstatSync(lexicalChild, { throwIfNoEntry: false });
+  if (!stat || stat.isSymbolicLink() || !stat.isDirectory()) return undefined;
+  throw new SecureDescriptorUnavailableError();
+}
+
+/**
+ * Open an owned inbox/outbox through stable directory descriptors.
+ *
+ * The container can rename writable session directories concurrently with
+ * host delivery. Traversing from an already-open parent via /proc/self/fd
+ * (or /dev/fd) pins every directory inode, so replacing a lexical pathname
+ * after validation cannot redirect the subsequent host read, write, or
+ * cleanup into another session.
+ */
+function openOwnedSessionSubdirectory(
+  agentGroupId: string,
+  sessionId: string,
+  child: 'inbox' | 'outbox',
+  create: boolean = false,
+): DirectoryHandle | undefined {
+  if (!isSafeAttachmentName(agentGroupId) || !isSafeAttachmentName(sessionId)) return undefined;
+
+  const openedFds: number[] = [];
+  let result: DirectoryHandle | undefined;
+  try {
+    const baseFd = fs.openSync(sessionsBaseDir(), DIRECTORY_OPEN_FLAGS);
+    openedFds.push(baseFd);
+    let current = openFirstOwnedDirectory(baseFd, agentGroupId);
+    if (current === undefined) return undefined;
+    openedFds.push(current.fd);
+    for (const component of [sessionId]) {
+      const next = openDirectoryAt(current, component, false);
+      if (next === undefined) return undefined;
+      openedFds.push(next.fd);
+      current = next;
+    }
+    result = openDirectoryAt(current, child, create);
+    if (result !== undefined) openedFds.push(result.fd);
+    return result;
+  } catch (err) {
+    if (err instanceof SecureDescriptorUnavailableError) throw err;
+    if (isExpectedUnsafePathError(err)) return undefined;
+    throw err;
+  } finally {
+    for (const fd of openedFds) {
+      if (fd !== result?.fd) fs.closeSync(fd);
+    }
+  }
 }
 
 /** Path to the host-owned inbound DB (messages_in + delivered). */
@@ -247,12 +358,55 @@ export function writeSessionMessage(
  * with a matching id to redirect the host's write.
  *
  * Defenses, mirrored from the outbound side:
- *   1. basename check on `messageId` and `filename`.
- *   2. lstat of the inbox dir to refuse pre-placed symlinks.
- *   3. realpath-based containment under the session inbox root.
- *   4. `wx` flag on writeFileSync to refuse following a pre-existing symlink
- *      at the target file path or overwriting any existing file.
+ *   1. basename checks on every owned path component.
+ *   2. descriptor-relative directory traversal with O_NOFOLLOW.
+ *   3. an open message-directory descriptor held through every file write.
+ *   4. O_EXCL + O_NOFOLLOW file creation and descriptor-only writes.
  */
+export function writeInboxFiles(
+  agentGroupId: string,
+  sessionId: string,
+  messageId: string,
+  files: OutboundFile[],
+): boolean[] {
+  const written = files.map(() => false);
+  if (files.length === 0) return written;
+  if (!isSafeAttachmentName(messageId)) return written;
+
+  const inboxFd = openOwnedSessionSubdirectory(agentGroupId, sessionId, 'inbox', true);
+  if (inboxFd === undefined) return written;
+  let messageHandle: DirectoryHandle | undefined;
+  try {
+    messageHandle = openDirectoryAt(inboxFd, messageId, true);
+    if (messageHandle === undefined) return written;
+
+    for (const [index, file] of files.entries()) {
+      if (!isSafeAttachmentName(file.filename)) continue;
+      const filePath = descriptorPath(messageHandle, file.filename);
+      let fileFd: number | undefined;
+      try {
+        fileFd = fs.openSync(
+          filePath,
+          fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW,
+          0o600,
+        );
+        const stat = fs.fstatSync(fileFd);
+        if (!stat.isFile() || stat.nlink !== 1) continue;
+        fs.writeFileSync(fileFd, file.data);
+        written[index] = true;
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+      } finally {
+        if (fileFd !== undefined) fs.closeSync(fileFd);
+      }
+    }
+  } finally {
+    if (messageHandle !== undefined) fs.closeSync(messageHandle.fd);
+    fs.closeSync(inboxFd.fd);
+  }
+  return written;
+}
+
 function extractAttachmentFiles(
   agentGroupId: string,
   sessionId: string,
@@ -274,7 +428,7 @@ function extractAttachmentFiles(
     return contentStr;
   }
 
-  let changed = false;
+  const pending: Array<{ attachment: Record<string, unknown>; file: OutboundFile }> = [];
   for (const att of attachments) {
     if (typeof att.data !== 'string') continue;
 
@@ -288,56 +442,31 @@ function extractAttachmentFiles(
       });
     }
 
-    const inboxDir = path.join(sessionDir(agentGroupId, sessionId), 'inbox', messageId);
+    pending.push({
+      attachment: att,
+      file: { filename, data: Buffer.from(att.data, 'base64') },
+    });
+  }
 
-    // Refuse to mkdir through a symlink that the container may have pre placed
-    // at inboxDir. With recursive:true, mkdirSync would silently no op on a
-    // pre existing symlink and the subsequent writeFileSync would follow it.
-    if (fs.existsSync(inboxDir)) {
-      const stat = fs.lstatSync(inboxDir);
-      if (stat.isSymbolicLink() || !stat.isDirectory()) {
-        log.warn('Rejecting unsafe inbox directory', { messageId, inboxDir });
-        continue;
-      }
-    }
-    fs.mkdirSync(inboxDir, { recursive: true });
-
-    let realInboxDir: string;
-    try {
-      realInboxDir = fs.realpathSync(inboxDir);
-    } catch (err) {
-      log.warn('Failed to resolve inbox directory', { messageId, err });
-      continue;
-    }
-    const inboxRoot = path.join(sessionDir(agentGroupId, sessionId), 'inbox');
-    if (!isPathInside(fs.realpathSync(inboxRoot), realInboxDir)) {
-      log.warn('Inbox directory escaped session inbox root', { messageId, inboxDir });
-      continue;
-    }
-
-    const filePath = path.join(inboxDir, filename);
-    try {
-      // wx = exclusive create. Refuses to follow a pre existing symlink or
-      // overwrite any existing file. The host expects to be the sole writer
-      // of these attachments.
-      fs.writeFileSync(filePath, Buffer.from(att.data as string, 'base64'), { flag: 'wx' });
-    } catch (err: unknown) {
-      const e = err as NodeJS.ErrnoException;
-      if (e.code === 'EEXIST') {
-        log.warn('Inbox attachment target already exists, refusing to overwrite', {
-          messageId,
-          filename,
-        });
-        continue;
-      }
-      throw err;
-    }
-
-    att.name = filename;
-    att.localPath = `inbox/${messageId}/${filename}`;
-    delete att.data;
+  const results = writeInboxFiles(
+    agentGroupId,
+    sessionId,
+    messageId,
+    pending.map(({ file }) => file),
+  );
+  let changed = false;
+  for (const [index, success] of results.entries()) {
+    const item = pending[index];
+    if (!success || !item) continue;
+    item.attachment.name = item.file.filename;
+    item.attachment.localPath = `inbox/${messageId}/${item.file.filename}`;
+    delete item.attachment.data;
     changed = true;
-    log.debug('Saved attachment to inbox', { messageId, filename, size: att.size });
+    log.debug('Saved attachment to inbox', {
+      messageId,
+      filename: item.file.filename,
+      size: item.attachment.size,
+    });
   }
 
   return changed ? JSON.stringify(parsed) : contentStr;
@@ -345,7 +474,9 @@ function extractAttachmentFiles(
 
 /** Open the inbound DB for a session (host reads/writes). */
 export function openInboundDb(agentGroupId: string, sessionId: string): Database.Database {
-  const db = openInboundDbRaw(inboundDbPath(agentGroupId, sessionId));
+  const dbPath = inboundDbPath(agentGroupId, sessionId);
+  assertSafeSessionDatabaseArtifact(agentGroupId, sessionId, dbPath);
+  const db = openInboundDbRaw(dbPath);
   migrateMessagesInTable(db);
   return db;
 }
@@ -356,7 +487,50 @@ export function openOutboundDb(
   sessionId: string,
   opts: { readonly?: boolean } = {},
 ): Database.Database {
-  return openOutboundDbRaw(outboundDbPath(agentGroupId, sessionId), opts);
+  const dbPath = outboundDbPath(agentGroupId, sessionId);
+  assertSafeSessionDatabaseArtifact(agentGroupId, sessionId, dbPath);
+  return openOutboundDbRaw(dbPath, opts);
+}
+
+function assertSafeSessionDatabaseArtifact(agentGroupId: string, sessionId: string, dbPath: string): void {
+  const baseDir = path.resolve(sessionsBaseDir());
+  const ownedSessionDir = path.resolve(sessionDir(agentGroupId, sessionId));
+  const relativeSession = path.relative(baseDir, ownedSessionDir);
+  if (
+    relativeSession === '' ||
+    relativeSession === '..' ||
+    relativeSession.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(relativeSession)
+  ) {
+    throw new Error('Unsafe session database artifact');
+  }
+
+  let cursor = baseDir;
+  for (const component of relativeSession.split(path.sep)) {
+    cursor = path.join(cursor, component);
+    const stat = fs.lstatSync(cursor, { throwIfNoEntry: false });
+    if (!stat || stat.isSymbolicLink() || !stat.isDirectory()) {
+      throw new Error('Unsafe session database artifact');
+    }
+  }
+
+  const artifactStat = fs.lstatSync(dbPath, { throwIfNoEntry: false });
+  if (!artifactStat || artifactStat.isSymbolicLink() || !artifactStat.isFile() || artifactStat.nlink !== 1) {
+    throw new Error('Unsafe session database artifact');
+  }
+  const realSessionDir = fs.realpathSync(ownedSessionDir);
+  const realArtifact = fs.realpathSync(dbPath);
+  if (!isPathInside(realSessionDir, realArtifact)) {
+    throw new Error('Unsafe session database artifact');
+  }
+
+  for (const suffix of ['-journal', '-wal', '-shm']) {
+    const sidecarPath = `${dbPath}${suffix}`;
+    const sidecarStat = fs.lstatSync(sidecarPath, { throwIfNoEntry: false });
+    if (sidecarStat && (sidecarStat.isSymbolicLink() || !sidecarStat.isFile() || sidecarStat.nlink !== 1)) {
+      throw new Error('Unsafe session database artifact');
+    }
+  }
 }
 
 /**
@@ -437,47 +611,46 @@ export function readOutboxFiles(
     return undefined;
   }
 
-  const outboxDir = path.join(sessionDir(agentGroupId, sessionId), 'outbox', messageId);
-  if (!fs.existsSync(outboxDir)) return undefined;
-
-  let realOutboxDir: string;
-  try {
-    const stat = fs.lstatSync(outboxDir);
-    if (!stat.isDirectory() || stat.isSymbolicLink()) {
-      log.warn('Rejecting unsafe outbox directory', { messageId, outboxDir });
-      return undefined;
-    }
-    realOutboxDir = fs.realpathSync(outboxDir);
-  } catch (err) {
-    log.warn('Failed to inspect outbox directory', { messageId, err });
+  const outboxFd = openOwnedSessionSubdirectory(agentGroupId, sessionId, 'outbox');
+  if (outboxFd === undefined) {
+    log.warn('Rejecting unsafe outbox root', { messageId });
     return undefined;
   }
+  let messageHandle: DirectoryHandle | undefined;
+  try {
+    messageHandle = openDirectoryAt(outboxFd, messageId, false);
+    if (messageHandle === undefined) return undefined;
 
-  const files: OutboundFile[] = [];
-  for (const filename of filenames) {
-    if (!isSafeAttachmentName(filename)) {
-      log.warn('Refused unsafe outbox filename, would escape outbox', { messageId, filename });
-      continue;
-    }
-
-    const filePath = path.join(outboxDir, filename);
-    try {
-      const stat = fs.lstatSync(filePath);
-      if (!stat.isFile() || stat.isSymbolicLink()) {
-        log.warn('Rejecting unsafe outbox file', { messageId, filename });
+    const files: OutboundFile[] = [];
+    for (const filename of filenames) {
+      if (!isSafeAttachmentName(filename)) {
+        log.warn('Refused unsafe outbox filename, would escape outbox', { messageId, filename });
         continue;
       }
-      const realFilePath = fs.realpathSync(filePath);
-      if (!isPathInside(realOutboxDir, realFilePath)) {
-        log.warn('Rejecting outbox file outside message directory', { messageId, filename });
-        continue;
+
+      let fileFd: number | undefined;
+      try {
+        fileFd = fs.openSync(
+          descriptorPath(messageHandle, filename),
+          fs.constants.O_RDONLY | fs.constants.O_NONBLOCK | fs.constants.O_NOFOLLOW,
+        );
+        const stat = fs.fstatSync(fileFd);
+        if (!stat.isFile() || stat.nlink !== 1) {
+          log.warn('Rejecting unsafe outbox file', { messageId, filename });
+          continue;
+        }
+        files.push({ filename, data: fs.readFileSync(fileFd) });
+      } catch {
+        log.warn('Outbox file not found', { messageId, filename });
+      } finally {
+        if (fileFd !== undefined) fs.closeSync(fileFd);
       }
-      files.push({ filename, data: fs.readFileSync(realFilePath) });
-    } catch {
-      log.warn('Outbox file not found', { messageId, filename });
     }
+    return files.length > 0 ? files : undefined;
+  } finally {
+    if (messageHandle !== undefined) fs.closeSync(messageHandle.fd);
+    fs.closeSync(outboxFd.fd);
   }
-  return files.length > 0 ? files : undefined;
 }
 
 /**
@@ -492,23 +665,25 @@ export function clearOutbox(agentGroupId: string, sessionId: string, messageId: 
     return;
   }
 
-  const outboxDir = path.join(sessionDir(agentGroupId, sessionId), 'outbox', messageId);
-  if (!fs.existsSync(outboxDir)) return;
+  const outboxFd = openOwnedSessionSubdirectory(agentGroupId, sessionId, 'outbox');
+  if (outboxFd === undefined) {
+    log.warn('Rejecting unsafe outbox cleanup root', { messageId });
+    return;
+  }
+  const quarantineName = `.clear-${process.pid}-${randomUUID()}`;
+  const sourcePath = descriptorPath(outboxFd, messageId);
+  const quarantinePath = descriptorPath(outboxFd, quarantineName);
   try {
-    const stat = fs.lstatSync(outboxDir);
-    if (!stat.isDirectory() || stat.isSymbolicLink()) {
-      log.warn('Rejecting unsafe outbox cleanup directory', { messageId, outboxDir });
-      return;
-    }
-    const realOutboxBase = fs.realpathSync(path.join(sessionDir(agentGroupId, sessionId), 'outbox'));
-    const realOutboxDir = fs.realpathSync(outboxDir);
-    if (!isPathInside(realOutboxBase, realOutboxDir)) {
-      log.warn('Rejecting outbox cleanup outside session outbox', { messageId, outboxDir });
-      return;
-    }
-    fs.rmSync(realOutboxDir, { recursive: true, force: true });
+    fs.renameSync(sourcePath, quarantinePath);
+    const stat = fs.lstatSync(quarantinePath);
+    if (stat.isSymbolicLink() || !stat.isDirectory()) fs.unlinkSync(quarantinePath);
+    else fs.rmSync(quarantinePath, { recursive: true, force: true });
   } catch (err) {
-    log.warn('Outbox cleanup failed (message already delivered)', { messageId, err });
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+      log.warn('Outbox cleanup failed (message already delivered)', { messageId, err });
+    }
+  } finally {
+    fs.closeSync(outboxFd.fd);
   }
 }
 

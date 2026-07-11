@@ -19,10 +19,11 @@ import {
   ONECLI_URL,
   TIMEZONE,
 } from './config.js';
+import { validateMattermostSessionForExecution } from './channels/mattermost-subscription.js';
 import { readContainerConfig, writeContainerConfig, type ContainerConfig } from './container-config.js';
 import { CONTAINER_RUNTIME_BIN, hostGatewayArgs, readonlyMountArgs, stopContainer } from './container-runtime.js';
 import { composeGroupClaudeMd } from './claude-md-compose.js';
-import { getAgentGroup } from './db/agent-groups.js';
+import { getAgentGroup, getAllAgentGroups } from './db/agent-groups.js';
 import { getDb, hasTable } from './db/connection.js';
 import { initGroupFilesystem } from './group-init.js';
 import { stopTypingRefresh } from './modules/typing/index.js';
@@ -38,6 +39,7 @@ import {
 } from './providers/provider-container-registry.js';
 import {
   heartbeatPath,
+  inboundDbPath,
   markContainerRunning,
   markContainerStopped,
   sessionDir,
@@ -47,8 +49,39 @@ import type { AgentGroup, Session } from './types.js';
 
 const onecli = new OneCLI({ url: ONECLI_URL, apiKey: ONECLI_API_KEY });
 
-/** Active containers tracked by session ID. */
-const activeContainers = new Map<string, { process: ChildProcess; containerName: string }>();
+interface ContainerExecutionIdentity {
+  sessionId: string;
+  agentGroupId: string;
+  messagingGroupId: string | null;
+  threadId: string | null;
+}
+
+interface ActiveContainerEntry {
+  process: ChildProcess;
+  containerName: string;
+  identity: ContainerExecutionIdentity;
+}
+
+function executionIdentity(session: Session): ContainerExecutionIdentity {
+  return {
+    sessionId: session.id,
+    agentGroupId: session.agent_group_id,
+    messagingGroupId: session.messaging_group_id,
+    threadId: session.thread_id,
+  };
+}
+
+function sameExecutionIdentity(left: ContainerExecutionIdentity, right: ContainerExecutionIdentity): boolean {
+  return (
+    left.sessionId === right.sessionId &&
+    left.agentGroupId === right.agentGroupId &&
+    left.messagingGroupId === right.messagingGroupId &&
+    left.threadId === right.threadId
+  );
+}
+
+/** Active containers tracked by session ID and bound to one immutable execution identity. */
+const activeContainers = new Map<string, ActiveContainerEntry>();
 
 /**
  * In-flight wake promises, keyed by session id. Deduplicates concurrent
@@ -58,7 +91,7 @@ const activeContainers = new Map<string, { process: ChildProcess; containerName:
  * a duplicate container against the same session directory, producing
  * racy double-replies.
  */
-const wakePromises = new Map<string, Promise<boolean>>();
+const wakePromises = new Map<string, { identity: ContainerExecutionIdentity; promise: Promise<boolean> }>();
 
 export function getActiveContainerCount(): number {
   return activeContainers.size;
@@ -81,14 +114,36 @@ export function isContainerRunning(sessionId: string): boolean {
  * can branch on the boolean.
  */
 export function wakeContainer(session: Session): Promise<boolean> {
-  if (activeContainers.has(session.id)) {
+  const identity = executionIdentity(session);
+  const active = activeContainers.get(session.id);
+  const mattermostBoundary = validateMattermostSessionForExecution(session);
+  if (mattermostBoundary.strict && !mattermostBoundary.valid) {
+    if (active && sameExecutionIdentity(active.identity, identity)) {
+      killContainer(session.id, `Mattermost execution session invalid: ${mattermostBoundary.reason}`);
+    }
+    log.warn('Mattermost execution session rejected before wake', {
+      sessionId: session.id,
+      reason: mattermostBoundary.reason,
+    });
+    return Promise.resolve(false);
+  }
+
+  if (active) {
+    if (!sameExecutionIdentity(active.identity, identity)) {
+      log.error('Container session identity collision rejected', { sessionId: session.id });
+      return Promise.resolve(false);
+    }
     log.debug('Container already running', { sessionId: session.id });
     return Promise.resolve(true);
   }
   const existing = wakePromises.get(session.id);
   if (existing) {
+    if (!sameExecutionIdentity(existing.identity, identity)) {
+      log.error('In-flight container session identity collision rejected', { sessionId: session.id });
+      return Promise.resolve(false);
+    }
     log.debug('Container wake already in-flight — joining existing promise', { sessionId: session.id });
-    return existing;
+    return existing.promise;
   }
   const promise = spawnContainer(session)
     .then(() => true)
@@ -99,16 +154,24 @@ export function wakeContainer(session: Session): Promise<boolean> {
     .finally(() => {
       wakePromises.delete(session.id);
     });
-  wakePromises.set(session.id, promise);
+  wakePromises.set(session.id, { identity, promise });
   return promise;
 }
 
 async function spawnContainer(session: Session): Promise<void> {
+  const mattermostBoundary = validateMattermostSessionForExecution(session);
+  if (mattermostBoundary.strict && !mattermostBoundary.valid) {
+    throw new Error(`Invalid Mattermost execution session: ${mattermostBoundary.reason}`);
+  }
+
   const agentGroup = getAgentGroup(session.agent_group_id);
   if (!agentGroup) {
     log.error('Agent group not found', { agentGroupId: session.agent_group_id });
     return;
   }
+  assertHostManagedPaths(agentGroup, session);
+  assertNoAgentRootOverlap(agentGroup);
+  assertNoMattermostCredentialsInContainerConfigArtifact(agentGroup.folder);
 
   // Refresh the destination map and default reply routing so any admin
   // changes take effect on wake. Destinations come from the agent-to-agent
@@ -122,17 +185,31 @@ async function spawnContainer(session: Session): Promise<void> {
   // Read container config once — threaded through provider resolution,
   // buildMounts, and buildContainerArgs so we don't re-read the file.
   const containerConfig = readContainerConfig(agentGroup.folder);
+  assertNoMattermostCredentialsInContainerConfig(containerConfig);
+  assertSafeContainerSkillNames(containerConfig);
+  if (mattermostBoundary.strict && containerConfig.additionalMounts.length > 0) {
+    throw new Error('Mattermost containers cannot use additional host mounts');
+  }
 
-  // Ensure container.json has the agent group identity fields the runner needs.
-  // Written at spawn time so the runner can read them from the RO mount.
-  ensureRuntimeFields(containerConfig, agentGroup);
+  // Populate host-derived runtime identity in memory, then scan the complete
+  // downstream config before persisting or exposing it to OneCLI/container IO.
+  const runtimeFieldsChanged = ensureRuntimeFields(containerConfig, agentGroup);
+  assertNoMattermostCredentialsInContainerConfig(containerConfig);
+  if (runtimeFieldsChanged) {
+    writeContainerConfig(agentGroup.folder, containerConfig);
+  }
+  const containerConfigSnapshot = captureContainerConfigArtifact(agentGroup.folder);
 
   // Resolve the effective provider + any host-side contribution it declares
   // (extra mounts, env passthrough). Computed once and threaded through both
   // buildMounts and buildContainerArgs so side effects (mkdir, etc.) fire once.
   const { provider, contribution } = resolveProviderContribution(session, agentGroup, containerConfig);
+  assertHostManagedPaths(agentGroup, session);
+  assertContainerConfigArtifactUnchanged(agentGroup.folder, containerConfigSnapshot);
+  assertNoMattermostContainerCredentials(contribution);
+  assertProviderMountIsolation(agentGroup, session, contribution);
 
-  const mounts = buildMounts(agentGroup, session, containerConfig, provider, contribution);
+  const mounts = buildMounts(agentGroup, session, containerConfig, provider, contribution, mattermostBoundary.strict);
   const containerName = `nanoclaw-v2-${agentGroup.folder}-${Date.now()}`;
   // OneCLI agent identifier is always the agent group id — stable across
   // sessions and reversible via getAgentGroup() for approval routing.
@@ -147,6 +224,17 @@ async function spawnContainer(session: Session): Promise<void> {
     agentIdentifier,
   );
 
+  assertNoMattermostCredentialsInLaunchArgs(args);
+  assertProviderMountIsolation(agentGroup, session, contribution);
+  assertNoForeignAgentMountAccess(agentGroup, mounts);
+  assertHostManagedPaths(agentGroup, session);
+  assertContainerConfigArtifactUnchanged(agentGroup.folder, containerConfigSnapshot);
+  assertNoMattermostCredentialsInContainerConfigArtifact(agentGroup.folder);
+  const finalMattermostBoundary = validateMattermostSessionForExecution(session);
+  if (finalMattermostBoundary.strict && !finalMattermostBoundary.valid) {
+    throw new Error(`Mattermost execution session became invalid before spawn: ${finalMattermostBoundary.reason}`);
+  }
+
   log.info('Spawning container', { sessionId: session.id, agentGroup: agentGroup.name, containerName });
 
   // Clear any orphan heartbeat from a previous container instance — the
@@ -157,7 +245,7 @@ async function spawnContainer(session: Session): Promise<void> {
 
   const container = spawn(CONTAINER_RUNTIME_BIN, args, { stdio: ['ignore', 'pipe', 'pipe'] });
 
-  activeContainers.set(session.id, { process: container, containerName });
+  activeContainers.set(session.id, { process: container, containerName, identity: executionIdentity(session) });
   markContainerRunning(session.id);
 
   // Log stderr
@@ -176,6 +264,7 @@ async function spawnContainer(session: Session): Promise<void> {
   // on a wall-clock timer.
 
   container.on('close', (code) => {
+    if (activeContainers.get(session.id)?.process !== container) return;
     activeContainers.delete(session.id);
     markContainerStopped(session.id);
     stopTypingRefresh(session.id);
@@ -183,6 +272,7 @@ async function spawnContainer(session: Session): Promise<void> {
   });
 
   container.on('error', (err) => {
+    if (activeContainers.get(session.id)?.process !== container) return;
     activeContainers.delete(session.id);
     markContainerStopped(session.id);
     stopTypingRefresh(session.id);
@@ -233,10 +323,220 @@ function resolveProviderContribution(
     ? fn({
         sessionDir: sessionDir(agentGroup.id, session.id),
         agentGroupId: agentGroup.id,
-        hostEnv: process.env,
+        hostEnv: providerSafeHostEnv(),
       })
     : {};
   return { provider, contribution };
+}
+
+function containmentPath(candidate: string): string {
+  return fs.existsSync(candidate) ? fs.realpathSync(candidate) : path.resolve(candidate);
+}
+
+function isPathWithin(root: string, candidate: string): boolean {
+  const relative = path.relative(containmentPath(root), containmentPath(candidate));
+  return relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative));
+}
+
+function pathsOverlap(left: string, right: string): boolean {
+  return isPathWithin(left, right) || isPathWithin(right, left);
+}
+
+function assertNoSymlinkComponents(root: string, candidate: string): void {
+  const resolvedRoot = path.resolve(root);
+  const relative = path.relative(resolvedRoot, path.resolve(candidate));
+  if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    throw new Error('Host-managed Mattermost path escapes its owned root');
+  }
+  let cursor = resolvedRoot;
+  for (const component of relative.split(path.sep).filter(Boolean)) {
+    cursor = path.join(cursor, component);
+    const stat = fs.lstatSync(cursor, { throwIfNoEntry: false });
+    if (!stat) return;
+    if (stat.isSymbolicLink()) {
+      throw new Error('Host-managed Mattermost paths cannot contain symlinks');
+    }
+  }
+}
+
+function assertHostManagedPaths(agentGroup: AgentGroup, session: Session): void {
+  const groupDir = path.resolve(GROUPS_DIR, agentGroup.folder);
+  assertNoSymlinkComponents(GROUPS_DIR, groupDir);
+  for (const child of ['container.json', '.claude-fragments', 'CLAUDE.md', 'CLAUDE.local.md', '.gitconfig']) {
+    assertNoSymlinkComponents(groupDir, path.join(groupDir, child));
+  }
+
+  const sessionStateRoot = path.join(DATA_DIR, 'v2-sessions');
+  const agentStateDir = path.join(sessionStateRoot, agentGroup.id);
+  const claudeDir = path.join(agentStateDir, '.claude-shared');
+  const ownedSessionDir = sessionDir(agentGroup.id, session.id);
+  assertNoSymlinkComponents(sessionStateRoot, agentStateDir);
+  assertNoSymlinkComponents(agentStateDir, claudeDir);
+  assertNoSymlinkComponents(claudeDir, path.join(claudeDir, 'skills'));
+  assertNoSymlinkComponents(claudeDir, path.join(claudeDir, 'settings.json'));
+  assertNoSymlinkComponents(agentStateDir, ownedSessionDir);
+  for (const child of ['inbound.db', 'outbound.db', 'codex']) {
+    assertNoSymlinkComponents(ownedSessionDir, path.join(ownedSessionDir, child));
+  }
+  const codexDir = path.join(ownedSessionDir, 'codex');
+  for (const child of ['auth.json', 'config.toml', 'skills']) {
+    assertNoSymlinkComponents(codexDir, path.join(codexDir, child));
+  }
+}
+
+function assertNoForeignAgentMountAccess(agentGroup: AgentGroup, mounts: VolumeMount[]): void {
+  for (const identity of getAllAgentGroups()) {
+    if (identity.id === agentGroup.id) continue;
+    const ownedRoots = [path.resolve(GROUPS_DIR, identity.folder), path.join(DATA_DIR, 'v2-sessions', identity.id)];
+    if (mounts.some((mount) => ownedRoots.some((root) => pathsOverlap(mount.hostPath, root)))) {
+      throw new Error('Container mounts cannot overlap a foreign agent workspace or state root');
+    }
+  }
+}
+
+function agentOwnedRoots(agentGroup: AgentGroup): string[] {
+  return [path.resolve(GROUPS_DIR, agentGroup.folder), path.join(DATA_DIR, 'v2-sessions', agentGroup.id)];
+}
+
+function assertNoAgentRootOverlap(agentGroup: AgentGroup): void {
+  const currentRoots = agentOwnedRoots(agentGroup);
+  for (const other of getAllAgentGroups()) {
+    if (other.id === agentGroup.id) continue;
+    if (currentRoots.some((current) => agentOwnedRoots(other).some((foreign) => pathsOverlap(current, foreign)))) {
+      throw new Error('Agent workspace and state roots must not overlap');
+    }
+  }
+}
+
+function assertProviderMountIsolation(
+  agentGroup: AgentGroup,
+  session: Session,
+  contribution: ProviderContainerContribution,
+): void {
+  const allowedRoot = sessionDir(agentGroup.id, session.id);
+  const protectedInboundDb = inboundDbPath(agentGroup.id, session.id);
+  for (const mount of contribution.mounts ?? []) {
+    if (
+      !fs.existsSync(mount.hostPath) ||
+      !isPathWithin(allowedRoot, mount.hostPath) ||
+      pathsOverlap(mount.hostPath, protectedInboundDb)
+    ) {
+      throw new Error('Provider mounts must remain inside the current session state root');
+    }
+  }
+}
+
+function hostMattermostCredentialValues(): Set<string> {
+  return new Set(
+    Object.entries(process.env)
+      .filter(
+        ([key, value]) => /^MATTERMOST(?:_|$)/i.test(key) && /(TOKEN|SECRET|PASSWORD|KEY)/i.test(key) && Boolean(value),
+      )
+      .map(([, value]) => value as string),
+  );
+}
+
+function assertNoMattermostCredentialsInContainerConfigArtifact(folder: string): void {
+  const artifactPath = path.join(GROUPS_DIR, folder, 'container.json');
+  if (!fs.existsSync(artifactPath)) return;
+  const raw = fs.readFileSync(artifactPath, 'utf8');
+  if (/"MATTERMOST[^"]*(?:TOKEN|SECRET|PASSWORD|KEY)[^"]*"\s*:/i.test(raw)) {
+    throw new Error('Mattermost credentials cannot enter mounted container configuration');
+  }
+  for (const credential of hostMattermostCredentialValues()) {
+    if (raw.includes(credential)) {
+      throw new Error('Mattermost credentials cannot enter mounted container configuration');
+    }
+  }
+}
+
+function captureContainerConfigArtifact(folder: string): string | null {
+  const artifactPath = path.join(GROUPS_DIR, folder, 'container.json');
+  return fs.existsSync(artifactPath) ? fs.readFileSync(artifactPath, 'utf8') : null;
+}
+
+function assertContainerConfigArtifactUnchanged(folder: string, expected: string | null): void {
+  if (captureContainerConfigArtifact(folder) !== expected) {
+    throw new Error('Container configuration changed during launch setup');
+  }
+}
+
+function providerSafeHostEnv(): NodeJS.ProcessEnv {
+  const credentials = hostMattermostCredentialValues();
+  return Object.fromEntries(
+    Object.entries(process.env).filter(
+      ([key, value]) =>
+        !/^MATTERMOST(?:_|$)/i.test(key) &&
+        (!value || ![...credentials].some((credential) => value.includes(credential))),
+    ),
+  );
+}
+
+function hasMattermostCredentialKey(value: unknown): boolean {
+  if (!value || typeof value !== 'object') return false;
+  for (const [key, child] of Object.entries(value)) {
+    if (
+      (/^MATTERMOST(?:_|$)/i.test(key) && /(TOKEN|SECRET|PASSWORD|KEY)/i.test(key)) ||
+      hasMattermostCredentialKey(child)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function assertNoMattermostCredentialsInContainerConfig(containerConfig: ContainerConfig): void {
+  if (hasMattermostCredentialKey(containerConfig)) {
+    throw new Error('Mattermost credentials cannot enter mounted container configuration');
+  }
+  const serialized = JSON.stringify(containerConfig);
+  for (const credential of hostMattermostCredentialValues()) {
+    if (serialized.includes(credential)) {
+      throw new Error('Mattermost credentials cannot enter mounted container configuration');
+    }
+  }
+}
+
+function assertSafeContainerSkillNames(containerConfig: ContainerConfig): void {
+  const safeName = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+  if (containerConfig.skills !== 'all') {
+    for (const skill of containerConfig.skills) {
+      if (!safeName.test(skill)) {
+        throw new Error('Container skill names must be safe path components');
+      }
+    }
+  }
+  for (const serverName of Object.keys(containerConfig.mcpServers)) {
+    if (!safeName.test(serverName)) {
+      throw new Error('MCP server names must be safe path components');
+    }
+  }
+}
+
+function assertNoMattermostContainerCredentials(contribution: ProviderContainerContribution): void {
+  for (const key of Object.keys(contribution.env ?? {})) {
+    if (/^MATTERMOST(?:_|$)/i.test(key)) {
+      throw new Error('Mattermost credentials cannot enter provider container environments');
+    }
+  }
+  const hostMattermostCredentials = hostMattermostCredentialValues();
+  for (const value of Object.values(contribution.env ?? {})) {
+    if ([...hostMattermostCredentials].some((credential) => value.includes(credential))) {
+      throw new Error('Mattermost credentials cannot enter provider container environments');
+    }
+  }
+}
+
+function assertNoMattermostCredentialsInLaunchArgs(args: string[]): void {
+  const credentials = hostMattermostCredentialValues();
+  for (const arg of args) {
+    if (/MATTERMOST[^=]*(?:TOKEN|SECRET|PASSWORD|KEY)/i.test(arg)) {
+      throw new Error('Mattermost credentials cannot enter container launch arguments');
+    }
+    if ([...credentials].some((credential) => arg.includes(credential))) {
+      throw new Error('Mattermost credentials cannot enter container launch arguments');
+    }
+  }
 }
 
 function buildMounts(
@@ -245,6 +545,7 @@ function buildMounts(
   containerConfig: ContainerConfig,
   provider: string,
   providerContribution: ProviderContainerContribution,
+  strictMattermost: boolean,
 ): VolumeMount[] {
   const projectRoot = process.cwd();
   const sessDir = sessionDir(agentGroup.id, session.id);
@@ -270,6 +571,14 @@ function buildMounts(
 
   // Session folder at /workspace (contains inbound.db, outbound.db, outbox/, .claude/)
   mounts.push({ hostPath: sessDir, containerPath: '/workspace', readonly: false });
+
+  // The host is the sole writer for inbound.db. Shadow the copy visible
+  // through the writable session mount with an explicit read-only bind so
+  // the container cannot replace or redirect the host-owned artifact.
+  const hostInboundDb = inboundDbPath(agentGroup.id, session.id);
+  if (fs.existsSync(hostInboundDb)) {
+    mounts.push({ hostPath: hostInboundDb, containerPath: '/workspace/inbound.db', readonly: true });
+  }
 
   // Agent group folder at /workspace/agent (RW for working files + CLAUDE.local.md)
   mounts.push({ hostPath: groupDir, containerPath: '/workspace/agent', readonly: false });
@@ -299,7 +608,7 @@ function buildMounts(
 
   // Global memory directory — always read-only.
   const globalDir = path.join(GROUPS_DIR, 'global');
-  if (fs.existsSync(globalDir)) {
+  if (!strictMattermost && fs.existsSync(globalDir)) {
     mounts.push({ hostPath: globalDir, containerPath: '/workspace/global', readonly: true });
   }
 
@@ -339,6 +648,8 @@ function buildMounts(
   if (providerContribution.mounts) {
     mounts.push(...providerContribution.mounts);
   }
+
+  assertNoForeignAgentMountAccess(agentGroup, mounts);
 
   return mounts;
 }
@@ -421,7 +732,7 @@ export function syncContainerSkillSymlinks(skillsDir: string, containerConfig: C
  * change (e.g. group rename). Only writes if values differ to avoid
  * unnecessary file churn.
  */
-function ensureRuntimeFields(containerConfig: ContainerConfig, agentGroup: AgentGroup): void {
+function ensureRuntimeFields(containerConfig: ContainerConfig, agentGroup: AgentGroup): boolean {
   let dirty = false;
   if (containerConfig.agentGroupId !== agentGroup.id) {
     containerConfig.agentGroupId = agentGroup.id;
@@ -435,9 +746,7 @@ function ensureRuntimeFields(containerConfig: ContainerConfig, agentGroup: Agent
     containerConfig.assistantName = agentGroup.name;
     dirty = true;
   }
-  if (dirty) {
-    writeContainerConfig(agentGroup.folder, containerConfig);
-  }
+  return dirty;
 }
 
 async function buildContainerArgs(
