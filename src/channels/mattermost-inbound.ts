@@ -1,13 +1,21 @@
 import { createHash } from 'node:crypto';
 
 import { log } from '../log.js';
-import type { ChannelLifecycleEvent, InboundEvent } from './adapter.js';
+import type {
+  ChannelLifecycleEvent,
+  InboundAttachmentLoader,
+  InboundAttachmentLoadResult,
+  InboundEvent,
+} from './adapter.js';
+import type { MattermostTransport } from './mattermost-client.js';
 import type { MattermostPostReceiptIdentity } from './mattermost-recovery.js';
+import { MATTERMOST_POST_MAX_FILES, mattermostRetryDelayMs } from './mattermost-outbound.js';
 
 export interface MattermostInboundConfig {
   instanceKey: string;
   botUserId: string;
   maxPayloadBytes?: number;
+  createAttachmentLoader?: (references: readonly MattermostInboundAttachmentReference[]) => InboundAttachmentLoader;
 }
 
 export type MattermostInboundSink = (event: InboundEvent) => void | Promise<void>;
@@ -25,6 +33,33 @@ interface MattermostPost {
   root_id: string;
   message: string;
   create_at: number;
+  file_ids?: string[];
+}
+
+/**
+ * Authenticated file identity captured from a Mattermost post. The opaque
+ * file ID may survive host-side approval persistence; post/channel bindings
+ * are always reconstructed from the authenticated inbound event and
+ * revalidated against Mattermost metadata before bytes are accepted.
+ */
+export interface MattermostInboundAttachmentReference {
+  fileId: string;
+  postId: string;
+  channelId: string;
+}
+
+export interface MattermostInboundAttachmentLoaderConfig {
+  baseUrl: string;
+  botToken: string;
+}
+
+export interface MattermostInboundAttachmentLoaderDependencies {
+  sleep?(delayMs: number): Promise<void>;
+  maxAttempts?: number;
+  baseRetryDelayMs?: number;
+  maxRetryDelayMs?: number;
+  requestTimeoutMs?: number;
+  logger?: Pick<MattermostInboundLogger, 'info' | 'warn'>;
 }
 
 const DEFAULT_MAX_PAYLOAD_BYTES = 1024 * 1024;
@@ -39,6 +74,7 @@ export interface MattermostInboundDiagnostics {
   payloadBytes: number;
   createAt: number;
   payloadDigest: string;
+  attachmentCount: number;
 }
 
 export interface MattermostReceiptStore {
@@ -166,6 +202,209 @@ export class MattermostChannelSequencer {
 
 export const mattermostChannelSequencer = new MattermostChannelSequencer();
 
+const defaultAttachmentSleep = (delayMs: number) => new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+const DEFAULT_ATTACHMENT_REQUEST_TIMEOUT_MS = 30_000;
+
+interface ValidatedMattermostFileInfo {
+  name: string;
+  mimeType: string;
+  size: number;
+}
+
+/**
+ * Build the lazy authenticated download operation for one Mattermost post.
+ * The returned closure memoizes its promise so router fan-out downloads each
+ * source file once while still allowing each destination to stage its own
+ * independent copy.
+ */
+export function createMattermostInboundAttachmentLoader(
+  config: MattermostInboundAttachmentLoaderConfig,
+  transport: Pick<MattermostTransport, 'request'>,
+  references: readonly MattermostInboundAttachmentReference[],
+  dependencies: MattermostInboundAttachmentLoaderDependencies = {},
+): InboundAttachmentLoader {
+  const stableReferences = references.map((reference) => ({ ...reference }));
+  let pending: Promise<InboundAttachmentLoadResult[]> | undefined;
+  return () => {
+    pending ??= loadMattermostInboundAttachments(config, transport, stableReferences, dependencies);
+    return pending;
+  };
+}
+
+async function loadMattermostInboundAttachments(
+  config: MattermostInboundAttachmentLoaderConfig,
+  transport: Pick<MattermostTransport, 'request'>,
+  references: readonly MattermostInboundAttachmentReference[],
+  dependencies: MattermostInboundAttachmentLoaderDependencies,
+): Promise<InboundAttachmentLoadResult[]> {
+  const results: InboundAttachmentLoadResult[] = [];
+  for (const [index, reference] of references.entries()) {
+    // Sequential metadata/download pairs bound peak host memory to one new
+    // download at a time. Completed buffers remain for memoized router fan-out.
+    results.push(await loadMattermostInboundAttachment(config, transport, reference, index, dependencies));
+  }
+  const available = results.filter((result) => result.data !== undefined);
+  dependencies.logger?.info('Mattermost inbound attachments loaded', {
+    postId: references[0]?.postId,
+    channelId: references[0]?.channelId,
+    attachmentCount: results.length,
+    availableCount: available.length,
+    unavailableCount: results.length - available.length,
+    byteTotal: available.reduce((total, result) => total + (result.data?.byteLength ?? 0), 0),
+  });
+  return results;
+}
+
+async function loadMattermostInboundAttachment(
+  config: MattermostInboundAttachmentLoaderConfig,
+  transport: Pick<MattermostTransport, 'request'>,
+  reference: MattermostInboundAttachmentReference,
+  index: number,
+  dependencies: MattermostInboundAttachmentLoaderDependencies,
+): Promise<InboundAttachmentLoadResult> {
+  const fallbackName = `attachment-${index + 1}`;
+  const baseUrl = config.baseUrl.replace(/\/+$/, '');
+  const headers = {
+    Accept: 'application/json',
+    Authorization: `Bearer ${config.botToken}`,
+  };
+  const infoResponse = await requestMattermostAttachmentWithRetry(
+    transport,
+    {
+      method: 'GET',
+      url: `${baseUrl}/api/v4/files/${encodeURIComponent(reference.fileId)}/info`,
+      headers,
+      timeoutMs: dependencies.requestTimeoutMs ?? DEFAULT_ATTACHMENT_REQUEST_TIMEOUT_MS,
+    },
+    dependencies,
+  );
+  if (!infoResponse || infoResponse.status < 200 || infoResponse.status >= 300) {
+    logMattermostAttachmentFailure(dependencies, reference, index, 'metadata', 'metadata_failed');
+    return { name: fallbackName, unavailable: 'metadata_failed' };
+  }
+
+  const info = validateMattermostFileInfo(infoResponse.body, reference);
+  if (!info) {
+    logMattermostAttachmentFailure(dependencies, reference, index, 'metadata', 'metadata_mismatch');
+    return { name: fallbackName, unavailable: 'metadata_mismatch' };
+  }
+
+  const downloadResponse = await requestMattermostAttachmentWithRetry(
+    transport,
+    {
+      method: 'GET',
+      url: `${baseUrl}/api/v4/files/${encodeURIComponent(reference.fileId)}`,
+      headers: {
+        Accept: '*/*',
+        Authorization: `Bearer ${config.botToken}`,
+      },
+      responseType: 'binary',
+      timeoutMs: dependencies.requestTimeoutMs ?? DEFAULT_ATTACHMENT_REQUEST_TIMEOUT_MS,
+    },
+    dependencies,
+  );
+  if (
+    !downloadResponse ||
+    downloadResponse.status < 200 ||
+    downloadResponse.status >= 300 ||
+    !Buffer.isBuffer(downloadResponse.body)
+  ) {
+    logMattermostAttachmentFailure(dependencies, reference, index, 'download', 'download_failed');
+    return { ...info, unavailable: 'download_failed' };
+  }
+  if (downloadResponse.body.byteLength !== info.size) {
+    logMattermostAttachmentFailure(dependencies, reference, index, 'download', 'size_mismatch');
+    return { ...info, unavailable: 'size_mismatch' };
+  }
+  return { ...info, data: downloadResponse.body };
+}
+
+function validateMattermostFileInfo(
+  body: unknown,
+  reference: MattermostInboundAttachmentReference,
+): ValidatedMattermostFileInfo | null {
+  if (!isRecord(body)) return null;
+  if (body.id !== reference.fileId || body.post_id !== reference.postId || body.channel_id !== reference.channelId) {
+    return null;
+  }
+  if (!isValidMattermostFilename(body.name) || !isValidMattermostMimeType(body.mime_type)) return null;
+  if (typeof body.size !== 'number' || !Number.isSafeInteger(body.size) || body.size < 0) return null;
+  return { name: body.name, mimeType: body.mime_type, size: body.size };
+}
+
+function isValidMattermostFilename(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    value.length > 0 &&
+    Buffer.byteLength(value, 'utf8') <= 4096 &&
+    !hasControlCharacters(value)
+  );
+}
+
+function isValidMattermostMimeType(value: unknown): value is string {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 255 || hasControlCharacters(value)) {
+    return false;
+  }
+  const mediaType = value.split(';', 1)[0]?.trim() ?? '';
+  const separator = mediaType.indexOf('/');
+  return separator > 0 && separator < mediaType.length - 1 && mediaType.indexOf('/', separator + 1) < 0;
+}
+
+function hasControlCharacters(value: string): boolean {
+  return [...value].some((character) => {
+    const codePoint = character.codePointAt(0) ?? 0;
+    return codePoint <= 31 || codePoint === 127;
+  });
+}
+
+async function requestMattermostAttachmentWithRetry(
+  transport: Pick<MattermostTransport, 'request'>,
+  request: Parameters<MattermostTransport['request']>[0],
+  dependencies: MattermostInboundAttachmentLoaderDependencies,
+): Promise<Awaited<ReturnType<MattermostTransport['request']>> | undefined> {
+  const maxAttempts = dependencies.maxAttempts ?? 3;
+  const sleep = dependencies.sleep ?? defaultAttachmentSleep;
+  const retryPolicy = {
+    maxAttempts,
+    baseDelayMs: dependencies.baseRetryDelayMs ?? 250,
+    maxDelayMs: dependencies.maxRetryDelayMs ?? 30_000,
+  };
+  let response: Awaited<ReturnType<MattermostTransport['request']>> | undefined;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      response = await transport.request(request);
+      // Transport failures are retried and deliberately reduced to a safe
+      // category so response bodies and authenticated URLs cannot reach logs.
+      // eslint-disable-next-line no-catch-all/no-catch-all
+    } catch {
+      const retryDelayMs = mattermostRetryDelayMs({ status: 503 }, attempt, retryPolicy);
+      if (retryDelayMs === null) return undefined;
+      await sleep(retryDelayMs);
+      continue;
+    }
+    const retryDelayMs = mattermostRetryDelayMs(response, attempt, retryPolicy);
+    if (retryDelayMs === null) return response;
+    await sleep(retryDelayMs);
+  }
+  return response;
+}
+
+function logMattermostAttachmentFailure(
+  dependencies: MattermostInboundAttachmentLoaderDependencies,
+  reference: MattermostInboundAttachmentReference,
+  index: number,
+  stage: 'metadata' | 'download',
+  category: 'metadata_failed' | 'download_failed' | 'metadata_mismatch' | 'size_mismatch',
+): void {
+  dependencies.logger?.warn('Mattermost inbound attachment unavailable', {
+    postId: reference.postId,
+    channelId: reference.channelId,
+    attachmentIndex: index,
+    stage,
+    category,
+  });
+}
+
 export class MattermostInboundProcessor {
   private readonly seenPostIds = new Set<string>();
 
@@ -218,6 +457,7 @@ export class MattermostInboundProcessor {
         senderId: normalized.diagnostics.senderId,
         rootId: normalized.diagnostics.rootId,
         payloadBytes: normalized.diagnostics.payloadBytes,
+        attachmentCount: normalized.diagnostics.attachmentCount,
       });
       return true;
     } catch (err) {
@@ -296,6 +536,14 @@ export function normalizeMattermostPayload(
 
   const senderId = `mattermost:${post.user_id}`;
   const rootId = post.root_id || null;
+  const attachmentReferences = (post.file_ids ?? []).map((fileId) => ({
+    fileId,
+    postId: post.id,
+    channelId: post.channel_id,
+  }));
+  const loadAttachments =
+    attachmentReferences.length > 0 ? config.createAttachmentLoader?.(attachmentReferences) : undefined;
+  const attachmentRefs = attachmentReferences.map(({ fileId }) => ({ id: fileId }));
   const event: InboundEvent = {
     channelType: 'mattermost',
     platformId: `mattermost:${config.instanceKey}:${post.channel_id}`,
@@ -311,6 +559,8 @@ export function normalizeMattermostPayload(
       timestamp: new Date(post.create_at).toISOString(),
       isMention: mentionsAuthenticatedBot(parsedEvent.data.mentions, config.botUserId),
       isGroup: true,
+      ...(attachmentRefs.length > 0 ? { attachmentRefs } : {}),
+      ...(loadAttachments ? { loadAttachments } : {}),
     },
   };
 
@@ -326,8 +576,19 @@ export function normalizeMattermostPayload(
       rootId,
       payloadBytes,
       createAt: post.create_at,
+      attachmentCount: attachmentReferences.length,
       payloadDigest: createHash('sha256')
-        .update(JSON.stringify([post.id, post.channel_id, post.user_id, post.root_id, post.message, post.create_at]))
+        .update(
+          JSON.stringify([
+            post.id,
+            post.channel_id,
+            post.user_id,
+            post.root_id,
+            post.message,
+            post.create_at,
+            post.file_ids ?? [],
+          ]),
+        )
         .digest('hex'),
     },
   };
@@ -364,17 +625,29 @@ function isValidIdentityComponent(value: string): boolean {
 
 function isMattermostPost(value: unknown): value is MattermostPost {
   if (!isRecord(value)) return false;
+  const fileIds = value.file_ids;
+  if (
+    fileIds !== undefined &&
+    (!Array.isArray(fileIds) ||
+      fileIds.length > MATTERMOST_POST_MAX_FILES ||
+      fileIds.some((fileId) => typeof fileId !== 'string' || !isValidIdentityComponent(fileId)) ||
+      new Set(fileIds).size !== fileIds.length)
+  ) {
+    return false;
+  }
   return (
     typeof value.id === 'string' &&
-    value.id.length > 0 &&
+    isValidIdentityComponent(value.id) &&
     typeof value.channel_id === 'string' &&
-    value.channel_id.length > 0 &&
+    isValidIdentityComponent(value.channel_id) &&
     typeof value.user_id === 'string' &&
-    value.user_id.length > 0 &&
+    isValidIdentityComponent(value.user_id) &&
     typeof value.root_id === 'string' &&
+    (value.root_id.length === 0 || isValidIdentityComponent(value.root_id)) &&
     typeof value.message === 'string' &&
     typeof value.create_at === 'number' &&
-    Number.isFinite(value.create_at) &&
+    Number.isSafeInteger(value.create_at) &&
+    value.create_at >= 0 &&
     !Number.isNaN(new Date(value.create_at).getTime())
   );
 }

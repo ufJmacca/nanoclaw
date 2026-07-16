@@ -3,10 +3,22 @@ export const MATTERMOST_CONTRACT_EVENT_PREFIX = 'NANOCLAW_MM_CONTRACT ';
 
 export interface MattermostContractDeliverCommand {
   id: string;
+  deliveryId: string;
   kind: 'deliver';
   platformId: string;
   threadId: string | null;
   text: string;
+}
+
+export interface MattermostContractDeliverFileCommand {
+  id: string;
+  deliveryId: string;
+  kind: 'deliver_file';
+  platformId: string;
+  threadId: string | null;
+  text: string;
+  filename: string;
+  dataBase64: string;
 }
 
 export interface MattermostContractSnapshotCommand {
@@ -27,6 +39,7 @@ export interface MattermostContractShutdownCommand {
 
 export type MattermostContractWorkerCommand =
   | MattermostContractDeliverCommand
+  | MattermostContractDeliverFileCommand
   | MattermostContractSnapshotCommand
   | MattermostContractDeactivateCommand
   | MattermostContractShutdownCommand;
@@ -87,6 +100,9 @@ export function parseMattermostContractWorkerCommand(
   line: string,
   instanceKey: string,
 ): MattermostContractWorkerCommand {
+  if (Buffer.byteLength(line, 'utf8') > 65_536) {
+    throw new Error('Mattermost contract worker command was invalid');
+  }
   let value: unknown;
   try {
     value = JSON.parse(line);
@@ -104,7 +120,9 @@ export function parseMattermostContractWorkerCommand(
   }
   if (
     value.kind === 'deliver' &&
-    hasOnlyKeys(value, ['id', 'kind', 'platformId', 'text', 'threadId']) &&
+    hasOnlyKeys(value, ['deliveryId', 'id', 'kind', 'platformId', 'text', 'threadId']) &&
+    typeof value.deliveryId === 'string' &&
+    SAFE_ID.test(value.deliveryId) &&
     typeof value.platformId === 'string' &&
     SAFE_ID.test(platformChannelId) &&
     (value.threadId === null || (typeof value.threadId === 'string' && SAFE_ID.test(value.threadId))) &&
@@ -113,6 +131,22 @@ export function parseMattermostContractWorkerCommand(
     value.text.length <= 20_000
   ) {
     return value as unknown as MattermostContractDeliverCommand;
+  }
+  if (
+    value.kind === 'deliver_file' &&
+    hasOnlyKeys(value, ['dataBase64', 'deliveryId', 'filename', 'id', 'kind', 'platformId', 'text', 'threadId']) &&
+    typeof value.deliveryId === 'string' &&
+    SAFE_ID.test(value.deliveryId) &&
+    typeof value.platformId === 'string' &&
+    SAFE_ID.test(platformChannelId) &&
+    (value.threadId === null || (typeof value.threadId === 'string' && SAFE_ID.test(value.threadId))) &&
+    typeof value.text === 'string' &&
+    value.text.length <= 20_000 &&
+    typeof value.filename === 'string' &&
+    SAFE_ID.test(value.filename) &&
+    isBoundedCanonicalBase64(value.dataBase64)
+  ) {
+    return value as unknown as MattermostContractDeliverFileCommand;
   }
   if (value.kind === 'snapshot' && hasOnlyKeys(value, ['id', 'kind'])) {
     return value as unknown as MattermostContractSnapshotCommand;
@@ -129,6 +163,13 @@ export function parseMattermostContractWorkerCommand(
     return value as unknown as MattermostContractShutdownCommand;
   }
   throw new Error('Mattermost contract worker command was invalid');
+}
+
+function isBoundedCanonicalBase64(value: unknown): value is string {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 48_000 || value.length % 4 !== 0) return false;
+  if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)) return false;
+  const decoded = Buffer.from(value, 'base64');
+  return decoded.length > 0 && decoded.toString('base64') === value;
 }
 
 export function encodeMattermostContractWorkerEvent(event: unknown, forbiddenValues: readonly string[] = []): string {

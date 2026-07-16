@@ -526,14 +526,18 @@ describe('Mattermost durable recovery store', () => {
     const frames = parse(
       {
         order: ['post-2', 'post-1'],
-        posts: { 'post-2': post('post-2', 200), 'post-1': post('post-1', 100) },
+        posts: {
+          'post-2': { ...post('post-2', 200), file_ids: ['file-a', 'file-b'] },
+          'post-1': post('post-1', 100),
+        },
       },
       'channel-a',
     );
-    expect(frames.map((frame) => JSON.parse((JSON.parse(frame) as { data: { post: string } }).data.post).id)).toEqual([
-      'post-1',
-      'post-2',
-    ]);
+    const recoveredPosts = frames.map((frame) =>
+      JSON.parse((JSON.parse(frame) as { data: { post: string } }).data.post),
+    );
+    expect(recoveredPosts.map((post) => post.id)).toEqual(['post-1', 'post-2']);
+    expect(recoveredPosts[1].file_ids).toEqual(['file-a', 'file-b']);
     expect(() =>
       parse(
         { order: ['post-x'], posts: { 'post-x': { ...post('post-x', 300), channel_id: 'channel-b' } } },
@@ -549,6 +553,24 @@ describe('Mattermost durable recovery store', () => {
         'channel-a',
       ),
     ).toThrow('Mattermost catch-up response was invalid');
+    for (const file_ids of [
+      'file-a',
+      [42],
+      ['../file-a'],
+      ['file-a', 'file-a'],
+      ['x'.repeat(129)],
+      Array.from({ length: 6 }, (_, index) => `file-${index}`),
+    ]) {
+      expect(() =>
+        parse(
+          {
+            order: ['post-files'],
+            posts: { 'post-files': { ...post('post-files', 300), file_ids } },
+          },
+          'channel-a',
+        ),
+      ).toThrow('Mattermost catch-up response was invalid');
+    }
   });
 
   it('requires an explicit trusted bootstrap for an active subscription without a cursor', async () => {

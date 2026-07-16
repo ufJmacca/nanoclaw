@@ -1,12 +1,20 @@
 import { log } from '../log.js';
-import type { ChannelAdapter, ChannelSetup } from './adapter.js';
+import {
+  registerInboundAttachmentLoaderFactory,
+  type ChannelAdapter,
+  type ChannelSetup,
+  type InboundAttachmentLoader,
+  type InboundEvent,
+} from './adapter.js';
 import { MattermostClient, type MattermostClientConfig, type MattermostTransport } from './mattermost-client.js';
 import {
+  createMattermostInboundAttachmentLoader,
   MattermostInboundProcessor,
   normalizeMattermostChannelUpdatedPayload,
   normalizeMattermostLifecyclePayload,
+  type MattermostInboundConfig,
 } from './mattermost-inbound.js';
-import { MattermostOutboundDelivery } from './mattermost-outbound.js';
+import { MATTERMOST_POST_MAX_FILES, MattermostOutboundDelivery } from './mattermost-outbound.js';
 import {
   bootstrapLegacyMattermostRecoveryCursors,
   hasMattermostApprovalMembershipWork,
@@ -37,7 +45,7 @@ export function createMattermostAdapter(
   let socketConnected = false;
   let setupComplete = false;
   let inbound: MattermostInboundProcessor | null = null;
-  let inboundConfig: { instanceKey: string; botUserId: string } | null = null;
+  let inboundConfig: MattermostInboundConfig | null = null;
   let recovery: MattermostRecoveryCoordinator | null = null;
   let recoveryReady: Promise<MattermostRecoveryCoordinator> | null = null;
   let resolveRecoveryReady: ((coordinator: MattermostRecoveryCoordinator) => void) | null = null;
@@ -45,6 +53,7 @@ export function createMattermostAdapter(
   let startupBarrier: Promise<void> = Promise.resolve();
   let resolveStartupBarrier: (() => void) | null = null;
   let rejectStartupBarrier: ((reason: unknown) => void) | null = null;
+  let unregisterAttachmentLoaderFactory: (() => void) | null = null;
   let lifecycleGeneration = 0;
   const recoveryHooks = new Set<Promise<void>>();
   const recover = (): Promise<void> => {
@@ -70,12 +79,51 @@ export function createMattermostAdapter(
     },
   });
 
+  const createInboundAttachmentLoader = (event: InboundEvent): InboundAttachmentLoader | undefined => {
+    if (event.channelType !== 'mattermost' || event.message.kind !== 'chat' || event.message.isGroup !== true) {
+      return undefined;
+    }
+    const platformPrefix = `mattermost:${config.instanceKey}:`;
+    if (!event.platformId.startsWith(platformPrefix)) return undefined;
+    const channelId = event.platformId.slice(platformPrefix.length);
+    if (!isValidMattermostIdentityComponent(channelId) || !isValidMattermostIdentityComponent(event.message.id)) {
+      return undefined;
+    }
+    const opaqueReferences = event.message.attachmentRefs;
+    if (
+      !Array.isArray(opaqueReferences) ||
+      opaqueReferences.length === 0 ||
+      opaqueReferences.length > MATTERMOST_POST_MAX_FILES ||
+      opaqueReferences.some(
+        (reference) =>
+          !reference ||
+          typeof reference !== 'object' ||
+          Object.keys(reference).length !== 1 ||
+          !isValidMattermostIdentityComponent(reference.id),
+      ) ||
+      new Set(opaqueReferences.map((reference) => reference.id)).size !== opaqueReferences.length
+    ) {
+      return undefined;
+    }
+    return createMattermostInboundAttachmentLoader(
+      config,
+      transport,
+      opaqueReferences.map((reference) => ({
+        fileId: reference.id,
+        postId: event.message.id,
+        channelId,
+      })),
+      { logger: log },
+    );
+  };
+
   return {
     name: 'mattermost',
     channelType: 'mattermost',
     platformInstanceKey: config.instanceKey,
     supportsThreads: true,
     threadSessionPolicy: 'honor-wiring',
+    createInboundAttachmentLoader,
     async setup(host: ChannelSetup) {
       const setupGeneration = ++lifecycleGeneration;
       const assertSetupCurrent = (): void => {
@@ -98,6 +146,9 @@ export function createMattermostAdapter(
         rejectRecoveryReady = reject;
       });
       void recoveryReady.catch(() => {});
+      unregisterAttachmentLoaderFactory?.();
+      const unregisterForSetup = registerInboundAttachmentLoaderFactory('mattermost', createInboundAttachmentLoader);
+      unregisterAttachmentLoaderFactory = unregisterForSetup;
       try {
         const context = await client.setup(async (payload) => {
           await startupBarrier;
@@ -130,7 +181,12 @@ export function createMattermostAdapter(
           }
         });
         assertSetupCurrent();
-        inboundConfig = { instanceKey: config.instanceKey, botUserId: context.botUserId };
+        inboundConfig = {
+          instanceKey: config.instanceKey,
+          botUserId: context.botUserId,
+          createAttachmentLoader: (references) =>
+            createMattermostInboundAttachmentLoader(config, transport, references, { logger: log }),
+        };
         inbound = new MattermostInboundProcessor(
           inboundConfig,
           (event) =>
@@ -141,6 +197,8 @@ export function createMattermostAdapter(
               timestamp: event.message.timestamp,
               isMention: event.message.isMention,
               isGroup: event.message.isGroup,
+              attachmentRefs: event.message.attachmentRefs,
+              loadAttachments: event.message.loadAttachments,
             }),
           log,
           {
@@ -224,12 +282,18 @@ export function createMattermostAdapter(
         resolveRecoveryReady = null;
         resolveStartupBarrier = null;
         rejectStartupBarrier = null;
+        unregisterForSetup();
+        if (unregisterAttachmentLoaderFactory === unregisterForSetup) {
+          unregisterAttachmentLoaderFactory = null;
+        }
         throw err;
       }
     },
     async teardown() {
       lifecycleGeneration += 1;
       setupComplete = false;
+      unregisterAttachmentLoaderFactory?.();
+      unregisterAttachmentLoaderFactory = null;
       const cancellation = new Error('Mattermost adapter setup cancelled');
       rejectStartupBarrier?.(cancellation);
       rejectRecoveryReady?.(cancellation);
@@ -258,4 +322,8 @@ export function createMattermostAdapter(
       return outbound.deliver(platformId, threadId, message);
     },
   };
+}
+
+function isValidMattermostIdentityComponent(value: unknown): value is string {
+  return typeof value === 'string' && value.length <= 128 && /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value);
 }

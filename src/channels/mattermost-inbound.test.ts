@@ -1,7 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { MattermostClient, type MattermostTransport } from './mattermost-client.js';
-import { MattermostInboundProcessor, type MattermostInboundLogger } from './mattermost-inbound.js';
+import {
+  createMattermostInboundAttachmentLoader,
+  MattermostInboundProcessor,
+  type MattermostInboundAttachmentReference,
+  type MattermostInboundLogger,
+} from './mattermost-inbound.js';
 import * as inboundModule from './mattermost-inbound.js';
 
 function postedEvent(postOverrides: Record<string, unknown> = {}): string {
@@ -34,6 +39,59 @@ describe('MattermostInboundProcessor', () => {
       sender: 'Ada',
       text: 'Hello from Mattermost',
     });
+  });
+
+  it('preserves validated opaque file references alongside a host-only lazy loader', async () => {
+    const loadAttachments = vi.fn().mockResolvedValue([]);
+    const createAttachmentLoader = vi.fn().mockReturnValue(loadAttachments);
+    const onInbound = vi.fn();
+    const processor = new MattermostInboundProcessor(
+      { instanceKey: 'primary', botUserId: 'bot-user-id', createAttachmentLoader },
+      onInbound,
+    );
+
+    await processor.handle(postedEvent({ message: '', file_ids: ['file-a', 'file-b'] }));
+
+    expect(createAttachmentLoader).toHaveBeenCalledWith([
+      { fileId: 'file-a', postId: 'post-id', channelId: 'channel-id' },
+      { fileId: 'file-b', postId: 'post-id', channelId: 'channel-id' },
+    ]);
+    const event = onInbound.mock.calls[0][0];
+    expect(event.message.loadAttachments).toBe(loadAttachments);
+    expect(event.message.attachmentRefs).toEqual([{ id: 'file-a' }, { id: 'file-b' }]);
+    expect(JSON.parse(event.message.content)).toMatchObject({ text: '' });
+    expect(event.message.content).not.toContain('file-a');
+  });
+
+  it('rejects malformed or ambiguous file id lists', async () => {
+    for (const file_ids of [
+      'file-a',
+      [42],
+      ['../file-a'],
+      ['file-a', 'file-a'],
+      ['x'.repeat(129)],
+      Array.from({ length: 6 }, (_, index) => `file-${index}`),
+    ]) {
+      const onInbound = vi.fn();
+      const processor = new MattermostInboundProcessor({ instanceKey: 'primary', botUserId: 'bot-user-id' }, onInbound);
+
+      await expect(processor.handle(postedEvent({ file_ids }))).resolves.toBe(false);
+      expect(onInbound).not.toHaveBeenCalled();
+    }
+  });
+
+  it('binds the validated attachment set into the durable receipt digest', () => {
+    const config = { instanceKey: 'primary', botUserId: 'bot-user-id' };
+    const digest = (fileIds: string[] | undefined) => {
+      const result = inboundModule.normalizeMattermostPayload(postedEvent({ file_ids: fileIds }), config);
+      expect(result.kind).toBe('accepted');
+      if (result.kind !== 'accepted') throw new Error('fixture normalization failed');
+      return result.diagnostics.payloadDigest;
+    };
+
+    expect(digest(['file-a'])).not.toBe(digest(['file-b']));
+    expect(digest(['file-a', 'file-b'])).not.toBe(digest(['file-b', 'file-a']));
+    expect(digest([])).toBe(digest(undefined));
   });
 
   it('namespaces channel identity by Mattermost instance and channel id', async () => {
@@ -296,6 +354,21 @@ describe('MattermostInboundProcessor', () => {
       (post) => {
         post.create_at = 'not-a-timestamp';
       },
+      (post) => {
+        post.id = '../unsafe-post';
+      },
+      (post) => {
+        post.channel_id = 'channel:ambiguous';
+      },
+      (post) => {
+        post.user_id = 'user/unsafe';
+      },
+      (post) => {
+        post.root_id = '../unsafe-root';
+      },
+      (post) => {
+        post.create_at = 1.5;
+      },
     ];
 
     for (const invalidate of invalidPosts) {
@@ -406,5 +479,163 @@ describe('MattermostInboundProcessor', () => {
     });
     expect(JSON.stringify(onInbound.mock.calls)).not.toContain('integration-fixture-credential');
     client.teardown();
+  });
+});
+
+describe('Mattermost inbound attachment loader', () => {
+  const config = {
+    baseUrl: 'https://mattermost.example.test/',
+    botToken: 'host-only-loader-token',
+  };
+  const reference = (overrides: Partial<MattermostInboundAttachmentReference> = {}) => ({
+    fileId: 'file-a',
+    postId: 'post-id',
+    channelId: 'channel-id',
+    ...overrides,
+  });
+  const info = (overrides: Record<string, unknown> = {}) => ({
+    id: 'file-a',
+    post_id: 'post-id',
+    channel_id: 'channel-id',
+    name: 'code.html',
+    mime_type: 'text/html',
+    size: 12,
+    ...overrides,
+  });
+
+  it('authenticates metadata and binary downloads, validates bytes, and memoizes the operation', async () => {
+    const bytes = Buffer.from('hello world!');
+    const request = vi
+      .fn()
+      .mockResolvedValueOnce({ status: 200, body: info() })
+      .mockResolvedValueOnce({ status: 200, body: bytes });
+    const logger = { info: vi.fn(), warn: vi.fn() };
+    const loader = createMattermostInboundAttachmentLoader(config, { request }, [reference()], { logger });
+
+    const [first, second] = await Promise.all([loader(), loader()]);
+
+    expect(first).toEqual([{ name: 'code.html', mimeType: 'text/html', size: 12, data: bytes }]);
+    expect(second).toBe(first);
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(request.mock.calls[0][0]).toEqual({
+      method: 'GET',
+      url: 'https://mattermost.example.test/api/v4/files/file-a/info',
+      headers: { Accept: 'application/json', Authorization: 'Bearer host-only-loader-token' },
+      timeoutMs: 30_000,
+    });
+    expect(request.mock.calls[1][0]).toEqual({
+      method: 'GET',
+      url: 'https://mattermost.example.test/api/v4/files/file-a',
+      headers: { Accept: '*/*', Authorization: 'Bearer host-only-loader-token' },
+      responseType: 'binary',
+      timeoutMs: 30_000,
+    });
+    expect(logger.info).toHaveBeenCalledWith(
+      'Mattermost inbound attachments loaded',
+      expect.objectContaining({ attachmentCount: 1, availableCount: 1, unavailableCount: 0, byteTotal: 12 }),
+    );
+    expect(JSON.stringify(first)).not.toContain('host-only-loader-token');
+    expect(JSON.stringify(first)).not.toContain('file-a');
+  });
+
+  it('downloads multiple files sequentially', async () => {
+    const order: string[] = [];
+    const request = vi.fn(async (input: { url: string; responseType?: string }) => {
+      order.push(input.url.replace('https://mattermost.example.test/api/v4/files/', ''));
+      if (input.url.endsWith('/info')) {
+        const fileId = input.url.includes('file-b') ? 'file-b' : 'file-a';
+        return {
+          status: 200,
+          body: info({ id: fileId, name: `${fileId}.txt`, size: 1 }),
+        };
+      }
+      return { status: 200, body: Buffer.from('x') };
+    });
+    const loader = createMattermostInboundAttachmentLoader(config, { request }, [
+      reference(),
+      reference({ fileId: 'file-b' }),
+    ]);
+
+    await expect(loader()).resolves.toEqual([
+      { name: 'file-a.txt', mimeType: 'text/html', size: 1, data: Buffer.from('x') },
+      { name: 'file-b.txt', mimeType: 'text/html', size: 1, data: Buffer.from('x') },
+    ]);
+    expect(order).toEqual(['file-a/info', 'file-a', 'file-b/info', 'file-b']);
+  });
+
+  it('retries transient metadata and download failures with the bounded policy', async () => {
+    const request = vi
+      .fn()
+      .mockResolvedValueOnce({ status: 503, body: { private: 'must-not-log' } })
+      .mockResolvedValueOnce({ status: 429, body: {}, headers: { 'retry-after': '0' } })
+      .mockResolvedValueOnce({ status: 200, body: info() })
+      .mockRejectedValueOnce(new Error('Authorization: Bearer host-only-loader-token'))
+      .mockResolvedValueOnce({ status: 200, body: Buffer.from('hello world!') });
+    const sleep = vi.fn().mockResolvedValue(undefined);
+    const loader = createMattermostInboundAttachmentLoader(config, { request }, [reference()], {
+      sleep,
+      maxAttempts: 3,
+      baseRetryDelayMs: 1,
+    });
+
+    await expect(loader()).resolves.toEqual([
+      { name: 'code.html', mimeType: 'text/html', size: 12, data: Buffer.from('hello world!') },
+    ]);
+    expect(request).toHaveBeenCalledTimes(5);
+    expect(sleep).toHaveBeenCalledTimes(3);
+  });
+
+  it.each([
+    ['id', { id: 'other-file' }],
+    ['post', { post_id: 'other-post' }],
+    ['channel', { channel_id: 'other-channel' }],
+    ['filename', { name: 'bad\nname.txt' }],
+    ['mime', { mime_type: 'not-a-media-type' }],
+    ['size', { size: -1 }],
+  ])('refuses a %s metadata mismatch before downloading', async (_label, overrides) => {
+    const request = vi.fn().mockResolvedValue({ status: 200, body: info(overrides) });
+    const loader = createMattermostInboundAttachmentLoader(config, { request }, [reference()]);
+
+    await expect(loader()).resolves.toEqual([
+      expect.objectContaining({ name: 'attachment-1', unavailable: 'metadata_mismatch' }),
+    ]);
+    expect(request).toHaveBeenCalledOnce();
+  });
+
+  it('degrades failed files visibly without blocking later attachment downloads', async () => {
+    const bytes = Buffer.from('x');
+    const request = vi
+      .fn()
+      .mockResolvedValueOnce({ status: 404, body: { message: 'private server error body' } })
+      .mockResolvedValueOnce({ status: 200, body: info({ id: 'file-b', name: '../unsafe.txt', size: 1 }) })
+      .mockResolvedValueOnce({ status: 200, body: bytes });
+    const logger = { info: vi.fn(), warn: vi.fn() };
+    const loader = createMattermostInboundAttachmentLoader(
+      config,
+      { request },
+      [reference(), reference({ fileId: 'file-b' })],
+      { logger },
+    );
+
+    await expect(loader()).resolves.toEqual([
+      expect.objectContaining({ name: 'attachment-1', unavailable: 'metadata_failed' }),
+      { name: '../unsafe.txt', mimeType: 'text/html', size: 1, data: bytes },
+    ]);
+    const renderedLogs = JSON.stringify([logger.info.mock.calls, logger.warn.mock.calls]);
+    expect(renderedLogs).not.toContain('host-only-loader-token');
+    expect(renderedLogs).not.toContain('../unsafe.txt');
+    expect(renderedLogs).not.toContain('private server error body');
+  });
+
+  it('marks a binary length mismatch unavailable', async () => {
+    const request = vi
+      .fn()
+      .mockResolvedValueOnce({ status: 200, body: info() })
+      .mockResolvedValueOnce({ status: 200, body: Buffer.from('short') });
+    const loader = createMattermostInboundAttachmentLoader(config, { request }, [reference()]);
+
+    await expect(loader()).resolves.toEqual([
+      { name: 'code.html', mimeType: 'text/html', size: 12, unavailable: 'size_mismatch' },
+    ]);
   });
 });

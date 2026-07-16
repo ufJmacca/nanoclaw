@@ -10,7 +10,10 @@ export interface MattermostHttpRequest {
   method: 'GET' | 'POST';
   url: string;
   headers: Record<string, string>;
-  body?: string;
+  body?: string | FormData;
+  responseType?: 'json' | 'binary';
+  /** Bound the complete response, including binary body consumption. */
+  timeoutMs?: number;
 }
 
 export interface MattermostHttpResponse {
@@ -45,11 +48,12 @@ export interface MattermostClientHooks {
 
 export type MattermostFetch = (
   url: string,
-  init: { method: string; headers: Record<string, string>; body?: string },
+  init: { method: string; headers: Record<string, string>; body?: string | FormData; signal?: AbortSignal },
 ) => Promise<{
   status: number;
   headers?: { forEach(callback: (value: string, key: string) => void): void };
   json(): Promise<unknown>;
+  arrayBuffer(): Promise<ArrayBuffer>;
 }>;
 
 const hostFetch: MattermostFetch = (url, init) => fetch(url, init);
@@ -79,20 +83,36 @@ export class NodeMattermostTransport implements MattermostTransport {
   ) {}
 
   async request(request: MattermostHttpRequest): Promise<MattermostHttpResponse> {
-    const response = await this.fetchImpl(request.url, {
-      method: request.method,
-      headers: request.headers,
-      body: request.body,
-    });
-    let body: unknown;
-    try {
-      body = await response.json();
-    } catch (err) {
-      if (!(err instanceof SyntaxError)) throw err;
-      body = undefined;
+    const timeoutMs = request.timeoutMs;
+    if (timeoutMs !== undefined && (!Number.isFinite(timeoutMs) || timeoutMs <= 0)) {
+      throw new Error('Mattermost request timeout was invalid');
     }
-    const headers = normalizeHeaders(response.headers);
-    return { status: response.status, body, ...(headers ? { headers } : {}) };
+    const controller = timeoutMs === undefined ? undefined : new AbortController();
+    const timeout =
+      controller === undefined ? undefined : setTimeout(() => controller.abort(), Math.min(timeoutMs!, 2_147_483_647));
+    try {
+      const response = await this.fetchImpl(request.url, {
+        method: request.method,
+        headers: request.headers,
+        body: request.body,
+        ...(controller ? { signal: controller.signal } : {}),
+      });
+      let body: unknown;
+      if (request.responseType === 'binary') {
+        body = Buffer.from(await response.arrayBuffer());
+      } else {
+        try {
+          body = await response.json();
+        } catch (err) {
+          if (!(err instanceof SyntaxError)) throw err;
+          body = undefined;
+        }
+      }
+      const headers = normalizeHeaders(response.headers);
+      return { status: response.status, body, ...(headers ? { headers } : {}) };
+    } finally {
+      if (timeout !== undefined) clearTimeout(timeout);
+    }
   }
 
   openWebSocket(url: string): Promise<MattermostWebSocket> {

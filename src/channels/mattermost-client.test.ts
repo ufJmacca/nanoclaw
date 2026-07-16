@@ -1052,6 +1052,79 @@ describe('NodeMattermostTransport', () => {
     });
   });
 
+  it('passes multipart request bodies through without setting a content type', async () => {
+    const fetch = vi.fn().mockResolvedValue({
+      status: 201,
+      json: vi.fn().mockResolvedValue({ file_infos: [{ id: 'uploaded-file-id' }] }),
+    });
+    const transport = new NodeMattermostTransport(fetch);
+    const form = new FormData();
+    form.append('files', new Blob([Buffer.from('fixture bytes')]), 'fixture.txt');
+
+    const response = await transport.request({
+      method: 'POST',
+      url: 'https://mattermost.example.test/api/v4/files?channel_id=channel-id',
+      headers: { Authorization: 'Bearer fixture' },
+      body: form,
+    });
+
+    expect(fetch).toHaveBeenCalledWith('https://mattermost.example.test/api/v4/files?channel_id=channel-id', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer fixture' },
+      body: form,
+    });
+    expect(response.body).toEqual({ file_infos: [{ id: 'uploaded-file-id' }] });
+  });
+
+  it('returns authenticated binary response bytes without attempting JSON parsing', async () => {
+    const bytes = Uint8Array.from([0, 1, 2, 254, 255]);
+    const json = vi.fn();
+    const fetch = vi.fn().mockResolvedValue({
+      status: 200,
+      json,
+      arrayBuffer: vi.fn().mockResolvedValue(bytes.buffer),
+    });
+    const transport = new NodeMattermostTransport(fetch);
+
+    const response = await transport.request({
+      method: 'GET',
+      url: 'https://mattermost.example.test/api/v4/files/file-id',
+      headers: { Authorization: 'Bearer fixture' },
+      responseType: 'binary',
+    });
+
+    expect(json).not.toHaveBeenCalled();
+    expect(Buffer.isBuffer(response.body)).toBe(true);
+    expect(response.body).toEqual(Buffer.from(bytes));
+  });
+
+  it('aborts a stalled binary body at the request timeout boundary', async () => {
+    let observedSignal: AbortSignal | undefined;
+    const fetch = vi.fn(async (_url: string, init: { signal?: AbortSignal }) => {
+      observedSignal = init.signal;
+      return {
+        status: 200,
+        json: vi.fn(),
+        arrayBuffer: () =>
+          new Promise<ArrayBuffer>((_resolve, reject) => {
+            init.signal?.addEventListener('abort', () => reject(new Error('aborted fixture')), { once: true });
+          }),
+      };
+    });
+    const transport = new NodeMattermostTransport(fetch);
+
+    await expect(
+      transport.request({
+        method: 'GET',
+        url: 'https://mattermost.example.test/api/v4/files/file-id',
+        headers: { Authorization: 'Bearer fixture' },
+        responseType: 'binary',
+        timeoutMs: 5,
+      }),
+    ).rejects.toThrow('aborted fixture');
+    expect(observedSignal?.aborted).toBe(true);
+  });
+
   it('reports a post-open error and close as one socket termination', async () => {
     class FakeWebSocket extends EventEmitter {
       static instances: FakeWebSocket[] = [];

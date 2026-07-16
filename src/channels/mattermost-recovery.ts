@@ -3,7 +3,7 @@ import {
   classifyMattermostReceiptRetention,
   pruneMattermostCompletedPostReceipts,
 } from '../db/mattermost-receipt-retention.js';
-import { mattermostRetryDelayMs } from './mattermost-outbound.js';
+import { MATTERMOST_POST_MAX_FILES, mattermostRetryDelayMs } from './mattermost-outbound.js';
 
 const SAFE_MATTERMOST_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const CATCH_UP_PAGE_SIZE = 200;
@@ -15,10 +15,15 @@ type MattermostCatchUpPost = Record<string, unknown> & {
   root_id: string;
   message: string;
   create_at: number;
+  file_ids?: string[];
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isSafeMattermostId(value: string): boolean {
+  return value.length <= 128 && SAFE_MATTERMOST_ID.test(value);
 }
 
 function parseMattermostCatchUpPage(
@@ -34,7 +39,7 @@ function parseMattermostCatchUpPage(
   const seenPostIds = new Set<string>();
 
   const parsePost = (postId: string): MattermostCatchUpPost => {
-    if (!SAFE_MATTERMOST_ID.test(postId)) {
+    if (!isSafeMattermostId(postId)) {
       throw new Error('Mattermost catch-up response was invalid');
     }
     const post = postsById[postId];
@@ -42,13 +47,18 @@ function parseMattermostCatchUpPage(
       !isRecord(post) ||
       post.id !== postId ||
       typeof post.user_id !== 'string' ||
-      !SAFE_MATTERMOST_ID.test(post.user_id) ||
+      !isSafeMattermostId(post.user_id) ||
       typeof post.root_id !== 'string' ||
-      (post.root_id.length > 0 && !SAFE_MATTERMOST_ID.test(post.root_id)) ||
+      (post.root_id.length > 0 && !isSafeMattermostId(post.root_id)) ||
       typeof post.message !== 'string' ||
       typeof post.create_at !== 'number' ||
       !Number.isSafeInteger(post.create_at) ||
-      post.create_at < 0
+      post.create_at < 0 ||
+      (post.file_ids !== undefined &&
+        (!Array.isArray(post.file_ids) ||
+          post.file_ids.length > MATTERMOST_POST_MAX_FILES ||
+          post.file_ids.some((fileId) => typeof fileId !== 'string' || !isSafeMattermostId(fileId)) ||
+          new Set(post.file_ids).size !== post.file_ids.length))
     ) {
       throw new Error('Mattermost catch-up response was invalid');
     }

@@ -30,12 +30,14 @@ function err(text: string) {
 export const sendMessage: McpToolDefinition = {
   tool: {
     name: 'send_message',
-    description:
-      'Send a message to a named destination. If you have only one destination, you can omit `to`.',
+    description: 'Send a message to a named destination. If you have only one destination, you can omit `to`.',
     inputSchema: {
       type: 'object' as const,
       properties: {
-        to: { type: 'string', description: 'Destination name (e.g., "family", "worker-1"). Optional if you have only one destination.' },
+        to: {
+          type: 'string',
+          description: 'Destination name (e.g., "family", "worker-1"). Optional if you have only one destination.',
+        },
         text: { type: 'string', description: 'Message content' },
       },
       required: ['text'],
@@ -87,7 +89,7 @@ export const sendFile: McpToolDefinition = {
     });
     if ('error' in result) return err(result.error);
 
-    log(`send_file: ${result.id} → ${result.resolvedName} (${result.filename})`);
+    log(`send_file: ${result.id} → ${result.resolvedName}`);
     return ok(`File sent to ${result.resolvedName} (id: ${result.id}, filename: ${result.filename})`);
   },
 };
