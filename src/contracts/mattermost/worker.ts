@@ -207,7 +207,7 @@ export async function runMattermostContractWorker(): Promise<void> {
           const postId = await adapter.deliver(command.platformId, command.threadId, {
             kind: 'chat',
             content: { text: command.text },
-            deliveryId: command.id,
+            deliveryId: command.deliveryId,
           });
           if (!postId) throw new Error('Mattermost contract delivery returned no post identity');
           emit({ kind: 'command_result', commandId: command.id, result: { postId } });
@@ -220,7 +220,7 @@ export async function runMattermostContractWorker(): Promise<void> {
             kind: 'chat',
             content: { text: command.text },
             files: [{ filename: command.filename, data: Buffer.from(command.dataBase64, 'base64') }],
-            deliveryId: command.id,
+            deliveryId: command.deliveryId,
           });
           if (!postId) throw new Error('Mattermost contract file delivery returned no post identity');
           emit({ kind: 'command_result', commandId: command.id, result: { postId } });

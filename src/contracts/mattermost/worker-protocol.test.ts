@@ -13,6 +13,7 @@ describe('Mattermost contract worker protocol', () => {
       parseMattermostContractWorkerCommand(
         JSON.stringify({
           id: 'command-1',
+          deliveryId: 'delivery-1',
           kind: 'deliver',
           platformId: 'mattermost:contract:channel-a',
           threadId: 'root-a',
@@ -22,6 +23,7 @@ describe('Mattermost contract worker protocol', () => {
       ),
     ).toEqual({
       id: 'command-1',
+      deliveryId: 'delivery-1',
       kind: 'deliver',
       platformId: 'mattermost:contract:channel-a',
       threadId: 'root-a',
@@ -33,6 +35,7 @@ describe('Mattermost contract worker protocol', () => {
       parseMattermostContractWorkerCommand(
         JSON.stringify({
           id: 'command-file-1',
+          deliveryId: 'delivery-file-1',
           kind: 'deliver_file',
           platformId: 'mattermost:contract:channel-a',
           threadId: 'root-a',
@@ -44,6 +47,7 @@ describe('Mattermost contract worker protocol', () => {
       ),
     ).toEqual({
       id: 'command-file-1',
+      deliveryId: 'delivery-file-1',
       kind: 'deliver_file',
       platformId: 'mattermost:contract:channel-a',
       threadId: 'root-a',
@@ -54,16 +58,64 @@ describe('Mattermost contract worker protocol', () => {
 
     for (const candidate of [
       '{',
-      JSON.stringify({ id: 'command-2', kind: 'deliver', platformId: 'mattermost:other:channel-a', text: 'x' }),
-      JSON.stringify({ id: 'command-3', kind: 'deliver', platformId: 'mattermost:contract:../escape', text: 'x' }),
       JSON.stringify({
-        id: 'command-4',
+        id: 'command-missing-delivery',
         kind: 'deliver',
         platformId: 'mattermost:contract:channel-a',
+        threadId: null,
+        text: 'x',
+      }),
+      JSON.stringify({
+        id: 'command-bad-delivery',
+        deliveryId: '../escape',
+        kind: 'deliver',
+        platformId: 'mattermost:contract:channel-a',
+        threadId: null,
+        text: 'x',
+      }),
+      JSON.stringify({
+        id: 'command-empty-delivery',
+        deliveryId: '',
+        kind: 'deliver',
+        platformId: 'mattermost:contract:channel-a',
+        threadId: null,
+        text: 'x',
+      }),
+      JSON.stringify({
+        id: 'command-long-delivery',
+        deliveryId: `d${'x'.repeat(128)}`,
+        kind: 'deliver',
+        platformId: 'mattermost:contract:channel-a',
+        threadId: null,
+        text: 'x',
+      }),
+      JSON.stringify({
+        id: 'command-2',
+        deliveryId: 'delivery-2',
+        kind: 'deliver',
+        platformId: 'mattermost:other:channel-a',
+        threadId: null,
+        text: 'x',
+      }),
+      JSON.stringify({
+        id: 'command-3',
+        deliveryId: 'delivery-3',
+        kind: 'deliver',
+        platformId: 'mattermost:contract:../escape',
+        threadId: null,
+        text: 'x',
+      }),
+      JSON.stringify({
+        id: 'command-4',
+        deliveryId: 'delivery-4',
+        kind: 'deliver',
+        platformId: 'mattermost:contract:channel-a',
+        threadId: null,
         text: 'x'.repeat(20_001),
       }),
       JSON.stringify({
         id: 'command-file-bad-name',
+        deliveryId: 'delivery-file-bad-name',
         kind: 'deliver_file',
         platformId: 'mattermost:contract:channel-a',
         threadId: null,
@@ -73,6 +125,7 @@ describe('Mattermost contract worker protocol', () => {
       }),
       JSON.stringify({
         id: 'command-file-bad-data',
+        deliveryId: 'delivery-file-bad-data',
         kind: 'deliver_file',
         platformId: 'mattermost:contract:channel-a',
         threadId: null,

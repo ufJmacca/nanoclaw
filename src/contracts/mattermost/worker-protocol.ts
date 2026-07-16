@@ -3,6 +3,7 @@ export const MATTERMOST_CONTRACT_EVENT_PREFIX = 'NANOCLAW_MM_CONTRACT ';
 
 export interface MattermostContractDeliverCommand {
   id: string;
+  deliveryId: string;
   kind: 'deliver';
   platformId: string;
   threadId: string | null;
@@ -11,6 +12,7 @@ export interface MattermostContractDeliverCommand {
 
 export interface MattermostContractDeliverFileCommand {
   id: string;
+  deliveryId: string;
   kind: 'deliver_file';
   platformId: string;
   threadId: string | null;
@@ -118,7 +120,9 @@ export function parseMattermostContractWorkerCommand(
   }
   if (
     value.kind === 'deliver' &&
-    hasOnlyKeys(value, ['id', 'kind', 'platformId', 'text', 'threadId']) &&
+    hasOnlyKeys(value, ['deliveryId', 'id', 'kind', 'platformId', 'text', 'threadId']) &&
+    typeof value.deliveryId === 'string' &&
+    SAFE_ID.test(value.deliveryId) &&
     typeof value.platformId === 'string' &&
     SAFE_ID.test(platformChannelId) &&
     (value.threadId === null || (typeof value.threadId === 'string' && SAFE_ID.test(value.threadId))) &&
@@ -130,7 +134,9 @@ export function parseMattermostContractWorkerCommand(
   }
   if (
     value.kind === 'deliver_file' &&
-    hasOnlyKeys(value, ['dataBase64', 'filename', 'id', 'kind', 'platformId', 'text', 'threadId']) &&
+    hasOnlyKeys(value, ['dataBase64', 'deliveryId', 'filename', 'id', 'kind', 'platformId', 'text', 'threadId']) &&
+    typeof value.deliveryId === 'string' &&
+    SAFE_ID.test(value.deliveryId) &&
     typeof value.platformId === 'string' &&
     SAFE_ID.test(platformChannelId) &&
     (value.threadId === null || (typeof value.threadId === 'string' && SAFE_ID.test(value.threadId))) &&

@@ -16,7 +16,11 @@ import {
   type MattermostContractTeam,
   type MattermostContractUser,
 } from './api.js';
-import { parseMattermostContractWorkerEventLine, shutdownMattermostContractWorkerProcess } from './worker-protocol.js';
+import {
+  type MattermostContractWorkerCommand,
+  parseMattermostContractWorkerEventLine,
+  shutdownMattermostContractWorkerProcess,
+} from './worker-protocol.js';
 
 if (process.env.NANOCLAW_MM_CONTRACT_ACTIVE !== '1') {
   throw new Error('Mattermost live contracts must run through the disposable safety harness');
@@ -28,6 +32,11 @@ const ADMIN_PASSWORD = 'Disposable-contract-admin-2026!';
 const ADMIN_EMAIL = 'nanoclaw-contract-admin@example.test';
 
 type WorkerEvent = Record<string, unknown>;
+type WorkerCommandInput = MattermostContractWorkerCommand extends infer Command
+  ? Command extends { id: string }
+    ? Omit<Command, 'id'>
+    : never
+  : never;
 
 interface WorkerWaiter {
   predicate(event: WorkerEvent): boolean;
@@ -162,7 +171,7 @@ class ContractWorkerClient {
     return this.waitFor((event) => event.kind === 'inbound' && event.postId === postId);
   }
 
-  async command(command: Omit<Record<string, unknown>, 'id'>): Promise<Record<string, unknown>> {
+  async command(command: WorkerCommandInput): Promise<Record<string, unknown>> {
     const id = `command-${++this.commandSequence}`;
     const response = this.waitFor(
       (event) => (event.kind === 'command_result' || event.kind === 'command_error') && event.commandId === id,
@@ -570,6 +579,7 @@ test('preserves outbound channel and root_id through isolation, restart, unsubsc
     const outboundRoot = process.env.NANOCLAW_MM_CONTRACT_MUTATE_ROOT_ID === '1' ? null : rootA.id;
     const replyAResult = await worker.command({
       kind: 'deliver',
+      deliveryId: `delivery-reply-a-${suffix}`,
       platformId: `mattermost:contract:${channelA.id}`,
       threadId: outboundRoot,
       text: `reply A ${suffix}`,
@@ -578,6 +588,7 @@ test('preserves outbound channel and root_id through isolation, restart, unsubsc
     assertOutboundAddress(replyA, channelA.id, rootA.id);
     const replyBResult = await worker.command({
       kind: 'deliver',
+      deliveryId: `delivery-reply-b-${suffix}`,
       platformId: `mattermost:contract:${channelB.id}`,
       threadId: null,
       text: `reply B ${suffix}`,
@@ -636,6 +647,7 @@ test('preserves outbound channel and root_id through isolation, restart, unsubsc
     const outboundCaption = `outbound file ${suffix}`;
     const outboundResult = await worker.command({
       kind: 'deliver_file',
+      deliveryId: `delivery-file-${suffix}`,
       platformId: `mattermost:contract:${channelA.id}`,
       threadId: rootA.id,
       text: outboundCaption,

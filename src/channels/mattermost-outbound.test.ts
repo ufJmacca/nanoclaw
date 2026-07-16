@@ -988,9 +988,11 @@ describe('Mattermost outbound pure components', () => {
     const first = buildMattermostPendingPostId('primary', 'channel-a', null, 'outbox-id');
     const repeated = buildMattermostPendingPostId('primary', 'channel-a', null, 'outbox-id');
     const otherChannel = buildMattermostPendingPostId('primary', 'channel-b', null, 'outbox-id');
+    const otherDelivery = buildMattermostPendingPostId('primary', 'channel-a', null, 'other-outbox-id');
 
     expect(repeated).toBe(first);
     expect(otherChannel).not.toBe(first);
+    expect(otherDelivery).not.toBe(first);
     expect(first).not.toContain('channel-a');
     expect(first).not.toContain('outbox-id');
   });
