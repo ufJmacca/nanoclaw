@@ -141,6 +141,8 @@ export async function runMattermostContractWorker(): Promise<void> {
           timestamp: message.timestamp,
           isMention: message.isMention,
           isGroup: message.isGroup,
+          attachmentRefs: message.attachmentRefs,
+          loadAttachments: message.loadAttachments,
         },
       });
       emit({ kind: 'inbound', postId: message.id, platformId, threadId });
@@ -208,6 +210,19 @@ export async function runMattermostContractWorker(): Promise<void> {
             deliveryId: command.id,
           });
           if (!postId) throw new Error('Mattermost contract delivery returned no post identity');
+          emit({ kind: 'command_result', commandId: command.id, result: { postId } });
+          continue;
+        }
+        if (command.kind === 'deliver_file') {
+          const adapter = getChannelAdapter('mattermost');
+          if (!adapter) throw new Error('Mattermost contract adapter was unavailable');
+          const postId = await adapter.deliver(command.platformId, command.threadId, {
+            kind: 'chat',
+            content: { text: command.text },
+            files: [{ filename: command.filename, data: Buffer.from(command.dataBase64, 'base64') }],
+            deliveryId: command.id,
+          });
+          if (!postId) throw new Error('Mattermost contract file delivery returned no post identity');
           emit({ kind: 'command_result', commandId: command.id, result: { postId } });
           continue;
         }

@@ -27,7 +27,7 @@ import {
   clearOutbox,
 } from './session-manager.js';
 import { getSession, findSession } from './db/sessions.js';
-import type { InboundEvent } from './channels/adapter.js';
+import { registerInboundAttachmentLoaderFactory, type InboundEvent } from './channels/adapter.js';
 
 // Mock container runner to prevent actual Docker spawning
 vi.mock('./container-runner.js', () => ({
@@ -550,6 +550,205 @@ describe('session manager', () => {
     expect(fs.existsSync(path.join(sessionDir('ag-1', session.id), 'inbox'))).toBe(false);
   });
 
+  it('stages direct inbound buffers without persisting file bytes in message JSON', () => {
+    const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
+
+    writeSessionMessage('ag-1', session.id, {
+      id: 'msg-direct',
+      kind: 'chat',
+      timestamp: now(),
+      content: JSON.stringify({ sender: 'User', text: '' }),
+      attachments: [
+        {
+          name: 'code.html',
+          mimeType: 'text/html',
+          size: 16,
+          data: Buffer.from('<h1>fixture</h1>'),
+        },
+      ],
+    });
+
+    const staged = path.join(sessionDir('ag-1', session.id), 'inbox', 'msg-direct', 'code.html');
+    expect(fs.readFileSync(staged, 'utf8')).toBe('<h1>fixture</h1>');
+
+    const db = new Database(inboundDbPath('ag-1', session.id));
+    const row = db.prepare('SELECT content FROM messages_in WHERE id = ?').get('msg-direct') as { content: string };
+    db.close();
+    const content = JSON.parse(row.content) as Record<string, unknown>;
+    expect(content).toEqual({
+      sender: 'User',
+      text: '',
+      attachments: [
+        {
+          type: 'file',
+          name: 'code.html',
+          mimeType: 'text/html',
+          size: 16,
+          localPath: 'inbox/msg-direct/code.html',
+        },
+      ],
+    });
+    expect(row.content).not.toContain('fixture');
+    expect(row.content).not.toContain('"data"');
+  });
+
+  it('uses deterministic safe names and keeps unavailable direct attachments visible', () => {
+    const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
+
+    writeSessionMessage('ag-1', session.id, {
+      id: 'msg-direct-failures',
+      kind: 'chat',
+      timestamp: now(),
+      content: JSON.stringify({ text: '' }),
+      attachments: [
+        {
+          name: '../../escape.txt',
+          mimeType: 'text/plain',
+          size: 5,
+          data: Buffer.from('owned'),
+        },
+        {
+          name: 'missing.bin',
+          unavailable: 'download_failed',
+        },
+        {
+          name: `${'é'.repeat(121)}.txt`,
+          mimeType: 'text/plain',
+          size: 4,
+          data: Buffer.from('long'),
+        },
+      ],
+    });
+
+    const safePath = path.join(sessionDir('ag-1', session.id), 'inbox', 'msg-direct-failures', 'attachment-1.txt');
+    expect(fs.readFileSync(safePath, 'utf8')).toBe('owned');
+
+    const db = new Database(inboundDbPath('ag-1', session.id));
+    const row = db.prepare('SELECT content FROM messages_in WHERE id = ?').get('msg-direct-failures') as {
+      content: string;
+    };
+    db.close();
+    expect(JSON.parse(row.content).attachments).toEqual([
+      {
+        type: 'file',
+        name: 'attachment-1.txt',
+        mimeType: 'text/plain',
+        size: 5,
+        localPath: 'inbox/msg-direct-failures/attachment-1.txt',
+      },
+      {
+        type: 'file',
+        name: 'missing.bin',
+        unavailable: 'download_failed',
+      },
+      {
+        type: 'file',
+        name: 'attachment-3.txt',
+        mimeType: 'text/plain',
+        size: 4,
+        localPath: 'inbox/msg-direct-failures/attachment-3.txt',
+      },
+    ]);
+    expect(
+      fs.readFileSync(
+        path.join(sessionDir('ag-1', session.id), 'inbox', 'msg-direct-failures', 'attachment-3.txt'),
+        'utf8',
+      ),
+    ).toBe('long');
+  });
+
+  it('reuses exact staged bytes for an idempotent inbound attachment replay', () => {
+    const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
+    const message = {
+      id: 'msg-direct-replay',
+      kind: 'chat',
+      timestamp: now(),
+      channelType: 'mattermost',
+      content: JSON.stringify({ senderId: 'mattermost:user-1', text: '' }),
+      attachments: [
+        {
+          name: 'replay.txt',
+          mimeType: 'text/plain',
+          size: 12,
+          data: Buffer.from('replay bytes'),
+        },
+      ],
+      idempotent: true,
+    } as const;
+
+    expect(writeSessionMessage('ag-1', session.id, message)).toBe(true);
+    expect(writeSessionMessage('ag-1', session.id, message)).toBe(false);
+    expect(
+      fs.readFileSync(path.join(sessionDir('ag-1', session.id), 'inbox', 'msg-direct-replay', 'replay.txt'), 'utf8'),
+    ).toBe('replay bytes');
+  });
+
+  it('does not stage orphan files before rejecting a contradictory attachment replay', () => {
+    const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
+    const base = {
+      id: 'msg-direct-collision',
+      kind: 'chat',
+      timestamp: now(),
+      channelType: 'mattermost',
+      content: JSON.stringify({ senderId: 'mattermost:user-1', text: '' }),
+      idempotent: true,
+    } as const;
+    expect(
+      writeSessionMessage('ag-1', session.id, {
+        ...base,
+        attachments: [{ name: 'first.txt', mimeType: 'text/plain', size: 5, data: Buffer.from('first') }],
+      }),
+    ).toBe(true);
+
+    expect(() =>
+      writeSessionMessage('ag-1', session.id, {
+        ...base,
+        attachments: [{ name: 'orphan.txt', mimeType: 'text/plain', size: 6, data: Buffer.from('second') }],
+      }),
+    ).toThrow('Mattermost replay message identity collision');
+
+    const inbox = path.join(sessionDir('ag-1', session.id), 'inbox', base.id);
+    expect(fs.readdirSync(inbox)).toEqual(['first.txt']);
+  });
+
+  it('opens a pre-existing inbound attachment nonblocking before checking its file type', () => {
+    const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
+    const inbox = path.join(sessionDir('ag-1', session.id), 'inbox', 'msg-direct-fifo');
+    fs.mkdirSync(inbox, { recursive: true });
+    fs.writeFileSync(path.join(inbox, 'blocked.txt'), 'owned');
+    const originalOpenSync = fs.openSync;
+    let existingOpenFlags: number | undefined;
+    const openSpy = vi.spyOn(fs, 'openSync').mockImplementation(((
+      candidate: fs.PathLike,
+      flags: number,
+      mode?: number,
+    ) => {
+      if (String(candidate).endsWith('/blocked.txt') && (flags & fs.constants.O_NONBLOCK) !== 0) {
+        existingOpenFlags = flags;
+      }
+      return originalOpenSync(candidate, flags, mode);
+    }) as typeof fs.openSync);
+
+    try {
+      expect(
+        writeSessionMessage('ag-1', session.id, {
+          id: 'msg-direct-fifo',
+          kind: 'chat',
+          timestamp: now(),
+          channelType: 'mattermost',
+          content: JSON.stringify({ senderId: 'mattermost:user-1', text: '' }),
+          attachments: [{ name: 'blocked.txt', mimeType: 'text/plain', size: 5, data: Buffer.from('owned') }],
+          idempotent: true,
+        }),
+      ).toBe(true);
+    } finally {
+      openSpy.mockRestore();
+    }
+
+    expect(existingOpenFlags).toBeDefined();
+    expect((existingOpenFlags! & fs.constants.O_NONBLOCK) !== 0).toBe(true);
+  });
+
   it('should resolve distinct thread ids to one existing session in shared mode', () => {
     const { session: s1, created: c1 } = resolveSession('ag-1', 'mg-1', 'thread-1', 'shared');
     expect(c1).toBe(true);
@@ -1000,6 +1199,138 @@ describe('router', () => {
     expect(getSessionsByAgentGroup('ag-2')).toHaveLength(1);
   });
 
+  it('loads inbound attachments once and stages an independent copy for each engaged agent', async () => {
+    const { routeInbound } = await import('./router.js');
+    const { getSessionsByAgentGroup } = await import('./db/sessions.js');
+    createAgentGroup({
+      id: 'ag-2',
+      name: 'Secondary Agent',
+      folder: 'secondary-agent',
+      agent_provider: null,
+      created_at: now(),
+    });
+    createMessagingGroupAgent({
+      id: 'mga-2',
+      messaging_group_id: 'mg-1',
+      agent_group_id: 'ag-2',
+      engage_mode: 'pattern',
+      engage_pattern: '.',
+      sender_scope: 'all',
+      ignored_message_policy: 'drop',
+      session_mode: 'shared',
+      priority: 0,
+      created_at: now(),
+    });
+    const loadAttachments = vi.fn().mockResolvedValue([
+      {
+        name: 'shared.txt',
+        mimeType: 'text/plain',
+        size: 12,
+        data: Buffer.from('shared bytes'),
+      },
+    ]);
+
+    await routeInbound({
+      channelType: 'discord',
+      platformId: 'chan-123',
+      threadId: null,
+      message: {
+        id: 'msg-lazy-fanout',
+        kind: 'chat',
+        content: JSON.stringify({ sender: 'User', text: '' }),
+        timestamp: now(),
+        loadAttachments,
+      },
+    });
+
+    expect(loadAttachments).toHaveBeenCalledTimes(1);
+    for (const agentGroupId of ['ag-1', 'ag-2']) {
+      const [session] = getSessionsByAgentGroup(agentGroupId);
+      const namespacedMessageId = `msg-lazy-fanout:${agentGroupId}`;
+      const staged = path.join(sessionDir(agentGroupId, session.id), 'inbox', namespacedMessageId, 'shared.txt');
+      expect(fs.readFileSync(staged, 'utf8')).toBe('shared bytes');
+
+      const db = new Database(inboundDbPath(agentGroupId, session.id));
+      const row = db.prepare('SELECT content FROM messages_in').get() as { content: string };
+      db.close();
+      const [attachment] = JSON.parse(row.content).attachments as Array<Record<string, unknown>>;
+      expect(attachment.localPath).toBe(`inbox/${namespacedMessageId}/shared.txt`);
+      expect(attachment).not.toHaveProperty('data');
+    }
+  });
+
+  it('rehydrates serialized attachment refs only after approval replay reaches an engaged destination', async () => {
+    const { routeInbound } = await import('./router.js');
+    const serializedEvent = JSON.stringify({
+      channelType: 'discord',
+      platformId: 'chan-123',
+      threadId: null,
+      message: {
+        id: 'msg-approval-replay',
+        kind: 'chat',
+        content: JSON.stringify({ sender: 'User', text: '' }),
+        timestamp: now(),
+        attachmentRefs: [{ id: 'opaque-file-1' }],
+      },
+    } satisfies InboundEvent);
+    const replayedEvent = JSON.parse(serializedEvent) as InboundEvent;
+    const loadAttachments = vi.fn().mockResolvedValue([
+      {
+        name: 'approved.txt',
+        mimeType: 'text/plain',
+        size: 14,
+        data: Buffer.from('approved bytes'),
+      },
+    ]);
+    const factory = vi.fn().mockReturnValue(loadAttachments);
+    const unregister = registerInboundAttachmentLoaderFactory('discord', factory);
+
+    expect(replayedEvent.message.loadAttachments).toBeUndefined();
+    expect(replayedEvent.message.attachmentRefs).toEqual([{ id: 'opaque-file-1' }]);
+    expect(factory).not.toHaveBeenCalled();
+    try {
+      await routeInbound(replayedEvent);
+    } finally {
+      unregister();
+    }
+
+    expect(factory).toHaveBeenCalledOnce();
+    expect(loadAttachments).toHaveBeenCalledOnce();
+    const session = findSession('mg-1', null)!;
+    expect(
+      fs.readFileSync(
+        path.join(sessionDir('ag-1', session.id), 'inbox', 'msg-approval-replay:ag-1', 'approved.txt'),
+        'utf8',
+      ),
+    ).toBe('approved bytes');
+  });
+
+  it('persists one explicit unavailable marker per ref when loader rehydration is unavailable', async () => {
+    const { routeInbound } = await import('./router.js');
+
+    await routeInbound({
+      channelType: 'discord',
+      platformId: 'chan-123',
+      threadId: null,
+      message: {
+        id: 'msg-unavailable-refs',
+        kind: 'chat',
+        content: JSON.stringify({ sender: 'User', text: '' }),
+        timestamp: now(),
+        attachmentRefs: [{ id: 'opaque-file-1' }, { id: 'opaque-file-2' }],
+      },
+    });
+
+    const session = findSession('mg-1', null)!;
+    const db = new Database(inboundDbPath('ag-1', session.id));
+    const row = db.prepare('SELECT content FROM messages_in').get() as { content: string };
+    db.close();
+    expect(JSON.parse(row.content).attachments).toEqual([
+      { type: 'file', name: 'attachment-1', unavailable: 'download_failed' },
+      { type: 'file', name: 'attachment-2', unavailable: 'download_failed' },
+    ]);
+  });
+
   it('accumulates without waking when engage fails + ignored_message_policy=accumulate', async () => {
     const { routeInbound } = await import('./router.js');
     const { wakeContainer } = await import('./container-runner.js');
@@ -1057,6 +1388,57 @@ describe('router', () => {
     expect(wakeContainer).not.toHaveBeenCalled();
     // No session should have been created for this agent.
     expect(findSession('mg-1', null)).toBeUndefined();
+  });
+
+  it('does not invoke lazy attachment downloads before engagement, access, and scope checks pass', async () => {
+    const { routeInbound, setAccessGate, setSenderScopeGate } = await import('./router.js');
+    const { updateMessagingGroupAgent } = await import('./db/messaging-groups.js');
+    const loadAttachments = vi.fn().mockResolvedValue([]);
+    const factory = vi.fn().mockReturnValue(loadAttachments);
+    const unregister = registerInboundAttachmentLoaderFactory('discord', factory);
+
+    setAccessGate((event) =>
+      event.message.id === 'msg-access-denied' ? { allowed: false, reason: 'test denial' } : { allowed: true },
+    );
+    setSenderScopeGate((event) =>
+      event.message.id === 'msg-scope-denied' ? { allowed: false, reason: 'test denial' } : { allowed: true },
+    );
+
+    try {
+      for (const id of ['msg-access-denied', 'msg-scope-denied']) {
+        await routeInbound({
+          channelType: 'discord',
+          platformId: 'chan-123',
+          threadId: null,
+          message: {
+            id,
+            kind: 'chat',
+            content: JSON.stringify({ text: 'engages' }),
+            timestamp: now(),
+            attachmentRefs: [{ id: 'opaque-file-1' }],
+          },
+        });
+      }
+
+      updateMessagingGroupAgent('mga-1', { engage_mode: 'mention' });
+      await routeInbound({
+        channelType: 'discord',
+        platformId: 'chan-123',
+        threadId: null,
+        message: {
+          id: 'msg-not-engaged',
+          kind: 'chat',
+          content: JSON.stringify({ text: 'plain chatter' }),
+          timestamp: now(),
+          attachmentRefs: [{ id: 'opaque-file-1' }],
+        },
+      });
+    } finally {
+      unregister();
+    }
+
+    expect(factory).not.toHaveBeenCalled();
+    expect(loadAttachments).not.toHaveBeenCalled();
   });
 });
 

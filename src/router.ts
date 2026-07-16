@@ -34,7 +34,14 @@ import { wakeContainer } from './container-runner.js';
 import { getSession } from './db/sessions.js';
 import { validateMattermostRoutingBoundary } from './channels/mattermost-subscription.js';
 import type { AgentGroup, MessagingGroup, MessagingGroupAgent } from './types.js';
-import type { ChannelAdapter, InboundEvent, ThreadSessionPolicy } from './channels/adapter.js';
+import type {
+  ChannelAdapter,
+  InboundAttachmentLoadResult,
+  InboundAttachmentLoader,
+  InboundEvent,
+  ThreadSessionPolicy,
+} from './channels/adapter.js';
+import { getInboundAttachmentLoaderFactory } from './channels/adapter.js';
 
 function generateId(): string {
   return `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -364,6 +371,17 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
   let engagedCount = 0;
   let accumulatedCount = 0;
   let subscribed = false;
+  let attachmentLoadPromise: Promise<InboundAttachmentLoadResult[]> | undefined;
+  const attachmentReferenceCount = Array.isArray(event.message.attachmentRefs)
+    ? event.message.attachmentRefs.length
+    : 0;
+  const loadAttachmentsOnce: InboundAttachmentLoader | undefined =
+    event.message.loadAttachments || attachmentReferenceCount > 0
+      ? () => {
+          attachmentLoadPromise ??= beginInboundAttachmentLoad(event, adapter, attachmentReferenceCount);
+          return attachmentLoadPromise;
+        }
+      : undefined;
 
   for (const agent of agents) {
     const agentGroup = getAgentGroup(agent.agent_group_id);
@@ -375,7 +393,7 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
     const scopeOk = engages && (!senderScopeGate || senderScopeGate(event, userId, mg, agent).allowed);
 
     if (engages && accessOk && scopeOk) {
-      await deliverToAgent(agent, agentGroup, mg, event, userId, threadSessionPolicy, true);
+      await deliverToAgent(agent, agentGroup, mg, event, userId, threadSessionPolicy, true, loadAttachmentsOnce);
       engagedCount++;
 
       // Mention-sticky: ask the adapter to subscribe the thread so the
@@ -429,6 +447,75 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
       messaging_group_id: mg.id,
       agent_group_id: null,
     });
+  }
+}
+
+function unavailableInboundAttachments(count: number): InboundAttachmentLoadResult[] {
+  return Array.from({ length: Math.max(1, count) }, (_, index) => ({
+    name: `attachment-${index + 1}`,
+    unavailable: 'download_failed' as const,
+  }));
+}
+
+function beginInboundAttachmentLoad(
+  event: InboundEvent,
+  adapter: ChannelAdapter | undefined,
+  attachmentReferenceCount: number,
+): Promise<InboundAttachmentLoadResult[]> {
+  try {
+    const factory = adapter?.createInboundAttachmentLoader ?? getInboundAttachmentLoaderFactory(event.channelType);
+    const loader = event.message.loadAttachments ?? factory?.(event);
+    if (!loader) {
+      log.warn('Inbound attachment loader unavailable', {
+        channelType: event.channelType,
+        messageId: event.message.id,
+        attachmentCount: attachmentReferenceCount,
+        category: 'rehydration_unavailable',
+      });
+      return Promise.resolve(unavailableInboundAttachments(attachmentReferenceCount));
+    }
+    return loadInboundAttachments(event, loader, attachmentReferenceCount);
+  } catch {
+    log.warn('Inbound attachment loader rehydration failed', {
+      channelType: event.channelType,
+      messageId: event.message.id,
+      attachmentCount: attachmentReferenceCount,
+      category: 'rehydration_failed',
+    });
+    return Promise.resolve(unavailableInboundAttachments(attachmentReferenceCount));
+  }
+}
+
+async function loadInboundAttachments(
+  event: InboundEvent,
+  loader: InboundAttachmentLoader,
+  attachmentReferenceCount: number,
+): Promise<InboundAttachmentLoadResult[]> {
+  try {
+    const attachments = await loader();
+    const byteTotal = attachments.reduce(
+      (total, attachment) => total + (Buffer.isBuffer(attachment.data) ? attachment.data.length : 0),
+      0,
+    );
+    log.info('Inbound attachments loaded', {
+      channelType: event.channelType,
+      messageId: event.message.id,
+      attachmentCount: attachments.length,
+      unavailableCount: attachments.filter((attachment) => attachment.unavailable !== undefined).length,
+      byteTotal,
+    });
+    return attachments;
+  } catch {
+    // Loader implementations normally degrade each remote file to an
+    // unavailable result after bounded retries. This final guard ensures an
+    // unexpected adapter failure cannot discard the chat message or stall
+    // all later ingress from the channel.
+    log.warn('Inbound attachment loader failed', {
+      channelType: event.channelType,
+      messageId: event.message.id,
+      category: 'loader_rejected',
+    });
+    return unavailableInboundAttachments(attachmentReferenceCount);
   }
 }
 
@@ -493,6 +580,7 @@ async function deliverToAgent(
   userId: string | null,
   threadSessionPolicy: ThreadSessionPolicy,
   wake: boolean,
+  loadAttachments?: InboundAttachmentLoader,
 ): Promise<void> {
   if (
     mg.channel_type === 'mattermost' &&
@@ -544,6 +632,11 @@ async function deliverToAgent(
     }
   }
 
+  // Only the fully engaged/authorized branch receives a loader. The shared
+  // promise is memoized by routeInbound, while writeSessionMessage stages an
+  // independent inbox copy for each accepted fan-out destination.
+  const attachments = loadAttachments ? await loadAttachments() : undefined;
+
   const inserted = writeSessionMessage(session.agent_group_id, session.id, {
     id: messageIdForAgent(event.message.id, agent.agent_group_id),
     kind: event.message.kind,
@@ -554,6 +647,7 @@ async function deliverToAgent(
     content: event.message.content,
     trigger: wake ? 1 : 0,
     idempotent: mg.channel_type === 'mattermost',
+    attachments,
   });
 
   if (!inserted) return;

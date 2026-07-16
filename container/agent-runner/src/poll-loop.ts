@@ -590,12 +590,12 @@ function dispatchFileDirectives(text: string, routing: RoutingContext): { text: 
     });
 
     if ('error' in result) {
-      log(`File directive failed: ${result.error}`);
+      log('File directive failed');
       cleanedParts.push(`[dropped file: ${result.error}]`);
       continue;
     }
 
-    log(`file directive: ${result.id} → ${result.resolvedName} (${result.filename})`);
+    log(`file directive: ${result.id} → ${result.resolvedName}`);
     sent++;
   }
 

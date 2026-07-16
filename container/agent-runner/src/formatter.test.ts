@@ -24,12 +24,7 @@ afterEach(() => {
   closeSessionDb();
 });
 
-function insertMessage(
-  id: string,
-  kind: string,
-  content: object,
-  opts?: { timestamp?: string },
-) {
+function insertMessage(id: string, kind: string, content: object, opts?: { timestamp?: string }) {
   const timestamp = opts?.timestamp ?? new Date().toISOString();
   getInboundDb()
     .prepare(
@@ -136,15 +131,62 @@ describe('XML escaping', () => {
   });
 });
 
+describe('attachment rendering', () => {
+  it('renders an attachment-only message with its staged workspace path', () => {
+    insertMessage('m1', 'chat', {
+      sender: 'Alice',
+      text: '',
+      attachments: [
+        {
+          type: 'file',
+          name: 'code.html',
+          mimeType: 'text/html',
+          size: 17,
+          localPath: 'inbox/m1/code.html',
+        },
+      ],
+    });
+
+    const result = formatMessages(getPendingMessages());
+    expect(result).toContain('[file: code.html — saved to /workspace/inbox/m1/code.html]');
+  });
+
+  it('renders a safe explicit marker when an attachment is unavailable', () => {
+    insertMessage('m1', 'chat', {
+      sender: 'Alice',
+      text: '',
+      attachments: [
+        {
+          type: 'file',
+          name: 'code.html',
+          unavailable: 'download_failed',
+        },
+      ],
+    });
+
+    const result = formatMessages(getPendingMessages());
+    expect(result).toContain('[file: code.html — unavailable: download failed]');
+  });
+
+  it('XML-escapes attachment names, paths, and unavailable reasons', () => {
+    insertMessage('m1', 'chat', {
+      sender: 'Alice',
+      text: '',
+      attachments: [{ type: 'file', name: '<unsafe>', unavailable: 'bad & unavailable' }],
+    });
+
+    const result = formatMessages(getPendingMessages());
+    expect(result).toContain('[file: &lt;unsafe&gt; — unavailable: bad &amp; unavailable]');
+  });
+});
+
 describe('stripInternalTags', () => {
   it('strips single-line internal tags and trims', () => {
     expect(stripInternalTags('hello <internal>secret</internal> world')).toBe('hello  world');
   });
 
   it('strips multi-line internal tags', () => {
-    expect(stripInternalTags('hello <internal>\nsecret\nstuff\n</internal> world')).toBe(
-      'hello  world',
-    );
+    expect(stripInternalTags('hello <internal>\nsecret\nstuff\n</internal> world')).toBe('hello  world');
   });
 
   it('strips multiple internal tag blocks', () => {
@@ -160,8 +202,6 @@ describe('stripInternalTags', () => {
   });
 
   it('preserves content that surrounds internal tags', () => {
-    expect(stripInternalTags('<internal>thinking</internal>The answer is 42')).toBe(
-      'The answer is 42',
-    );
+    expect(stripInternalTags('<internal>thinking</internal>The answer is 42')).toBe('The answer is 42');
   });
 });

@@ -28,6 +28,30 @@ describe('Mattermost contract worker protocol', () => {
       text: 'contract reply',
     });
 
+    const fileBytes = Buffer.from([0, 1, 2, 253, 254, 255]);
+    expect(
+      parseMattermostContractWorkerCommand(
+        JSON.stringify({
+          id: 'command-file-1',
+          kind: 'deliver_file',
+          platformId: 'mattermost:contract:channel-a',
+          threadId: 'root-a',
+          text: 'contract file reply',
+          filename: 'contract-fixture.bin',
+          dataBase64: fileBytes.toString('base64'),
+        }),
+        'contract',
+      ),
+    ).toEqual({
+      id: 'command-file-1',
+      kind: 'deliver_file',
+      platformId: 'mattermost:contract:channel-a',
+      threadId: 'root-a',
+      text: 'contract file reply',
+      filename: 'contract-fixture.bin',
+      dataBase64: fileBytes.toString('base64'),
+    });
+
     for (const candidate of [
       '{',
       JSON.stringify({ id: 'command-2', kind: 'deliver', platformId: 'mattermost:other:channel-a', text: 'x' }),
@@ -38,7 +62,26 @@ describe('Mattermost contract worker protocol', () => {
         platformId: 'mattermost:contract:channel-a',
         text: 'x'.repeat(20_001),
       }),
+      JSON.stringify({
+        id: 'command-file-bad-name',
+        kind: 'deliver_file',
+        platformId: 'mattermost:contract:channel-a',
+        threadId: null,
+        text: '',
+        filename: '../escape.bin',
+        dataBase64: fileBytes.toString('base64'),
+      }),
+      JSON.stringify({
+        id: 'command-file-bad-data',
+        kind: 'deliver_file',
+        platformId: 'mattermost:contract:channel-a',
+        threadId: null,
+        text: '',
+        filename: 'fixture.bin',
+        dataBase64: 'not-base64',
+      }),
       JSON.stringify({ id: 'command-5', kind: 'shutdown', unexpected: true }),
+      'x'.repeat(65_537),
     ]) {
       expect(() => parseMattermostContractWorkerCommand(candidate, 'contract')).toThrow(
         'Mattermost contract worker command was invalid',

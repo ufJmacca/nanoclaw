@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createMattermostAdapter } from './mattermost-adapter.js';
+import { getInboundAttachmentLoaderFactory, type InboundEvent } from './adapter.js';
 import { getChannelContainerConfig, getRegisteredChannelNames } from './channel-registry.js';
 import type { MattermostTransport, MattermostWebSocket } from './mattermost-client.js';
 import { normalizeMattermostPayload } from './mattermost-inbound.js';
@@ -187,6 +188,109 @@ describe('Mattermost channel adapter assembly', () => {
     expect(adapter.threadSessionPolicy).toBe('honor-wiring');
   });
 
+  it('rehydrates authenticated loaders from serialized opaque attachment refs', async () => {
+    const bytes = Buffer.from('approved attachment bytes');
+    const request = vi.fn(async (input: { url: string }) => {
+      if (input.url.endsWith('/api/v4/files/file-a/info')) {
+        return {
+          status: 200,
+          body: {
+            id: 'file-a',
+            post_id: 'post-a',
+            channel_id: 'channel-a',
+            name: 'approved.txt',
+            mime_type: 'text/plain',
+            size: bytes.length,
+          },
+        };
+      }
+      if (input.url.endsWith('/api/v4/files/file-a')) return { status: 200, body: bytes };
+      throw new Error('Unexpected Mattermost request');
+    });
+    const adapter = createMattermostAdapter(
+      {
+        baseUrl: 'https://mattermost.example.test',
+        botToken: 'rehydration-host-only-token',
+        instanceKey: 'primary',
+      },
+      { request, openWebSocket: vi.fn() } as MattermostTransport,
+    );
+    const serialized = JSON.stringify({
+      channelType: 'mattermost',
+      platformId: 'mattermost:primary:channel-a',
+      threadId: null,
+      message: {
+        id: 'post-a',
+        kind: 'chat',
+        content: JSON.stringify({ senderId: 'mattermost:user-a', text: '' }),
+        timestamp: '2026-07-15T00:00:00.000Z',
+        isGroup: true,
+        attachmentRefs: [{ id: 'file-a' }],
+      },
+    } satisfies InboundEvent);
+    expect(serialized).not.toContain('rehydration-host-only-token');
+    expect(serialized).not.toContain('/api/v4/files/');
+
+    const event = JSON.parse(serialized) as InboundEvent;
+    const loader = adapter.createInboundAttachmentLoader?.(event);
+    await expect(loader?.()).resolves.toEqual([
+      {
+        name: 'approved.txt',
+        mimeType: 'text/plain',
+        size: bytes.length,
+        data: bytes,
+      },
+    ]);
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(
+      adapter.createInboundAttachmentLoader?.({
+        ...event,
+        platformId: 'mattermost:foreign:channel-a',
+      }),
+    ).toBeUndefined();
+    expect(
+      adapter.createInboundAttachmentLoader?.({
+        ...event,
+        message: {
+          ...event.message,
+          attachmentRefs: Array.from({ length: 6 }, (_, index) => ({ id: `file-${index}` })),
+        },
+      }),
+    ).toBeUndefined();
+    expect(
+      adapter.createInboundAttachmentLoader?.({
+        ...event,
+        message: {
+          ...event.message,
+          attachmentRefs: [{ id: 'file-a', unexpected: 'shadow' } as { id: string }],
+        },
+      }),
+    ).toBeUndefined();
+  });
+
+  it('registers attachment rehydration before startup work and removes it on setup failure', async () => {
+    let observedFactory: ReturnType<typeof getInboundAttachmentLoaderFactory> = undefined;
+    const transport: MattermostTransport = {
+      request: vi.fn().mockImplementation(async () => {
+        observedFactory = getInboundAttachmentLoaderFactory('mattermost');
+        throw new Error('authentication fixture failure');
+      }),
+      openWebSocket: vi.fn(),
+    };
+    const adapter = createMattermostAdapter(
+      {
+        baseUrl: 'https://mattermost.example.test',
+        botToken: 'startup-registry-host-only-token',
+        instanceKey: 'primary',
+      },
+      transport,
+    );
+
+    await expect(adapter.setup(setupCallbacks())).rejects.toThrow('Mattermost authentication request failed');
+    expect(observedFactory).toBeTypeOf('function');
+    expect(getInboundAttachmentLoaderFactory('mattermost')).toBeUndefined();
+  });
+
   it('authenticates and forwards a Mattermost thread reply through the host setup boundary', async () => {
     const socket = new FakeSocket();
     const transport: MattermostTransport = {
@@ -231,6 +335,81 @@ describe('Mattermost channel adapter assembly', () => {
       expect.objectContaining({ id: 'reply-post-id', isGroup: true }),
     );
     expect(adapter.isConnected()).toBe(true);
+  });
+
+  it('keeps authenticated file downloads lazy across the host setup boundary', async () => {
+    const socket = new FakeSocket();
+    const bytes = Buffer.from('attachment bytes');
+    const request = vi.fn(async (input: { url: string; responseType?: string }) => {
+      if (input.url.endsWith('/api/v4/users/me')) return { status: 200, body: { id: 'bot-user-id' } };
+      if (input.url.endsWith('/api/v4/files/file-a/info')) {
+        return {
+          status: 200,
+          body: {
+            id: 'file-a',
+            post_id: 'file-post-id',
+            channel_id: 'channel-a',
+            name: 'fixture.txt',
+            mime_type: 'text/plain',
+            size: bytes.byteLength,
+          },
+        };
+      }
+      if (input.url.endsWith('/api/v4/files/file-a') && input.responseType === 'binary') {
+        return { status: 200, body: bytes };
+      }
+      throw new Error('unexpected request');
+    });
+    const transport: MattermostTransport = {
+      request,
+      openWebSocket: vi.fn().mockResolvedValue(socket),
+    };
+    const adapter = createMattermostAdapter(
+      {
+        baseUrl: 'https://mattermost.example.test',
+        botToken: 'host-only-adapter-token',
+        instanceKey: 'primary',
+      },
+      transport,
+    );
+    const setup = setupCallbacks();
+    const setupPromise = adapter.setup(setup);
+    await vi.waitFor(() => expect(socket.send).toHaveBeenCalledOnce());
+    socket.emit(JSON.stringify({ status: 'OK', seq_reply: 1 }));
+    await setupPromise;
+    socket.emit(
+      JSON.stringify({
+        event: 'posted',
+        data: {
+          sender_name: 'Ada',
+          post: JSON.stringify({
+            id: 'file-post-id',
+            channel_id: 'channel-a',
+            user_id: 'user-a',
+            root_id: '',
+            message: '',
+            create_at: 1_700_000_000_000,
+            file_ids: ['file-a'],
+          }),
+        },
+      }),
+    );
+
+    await vi.waitFor(() => expect(setup.onInbound).toHaveBeenCalledOnce());
+    const inboundMessage = setup.onInbound.mock.calls[0][2];
+    expect(request).toHaveBeenCalledTimes(1);
+    await expect(inboundMessage.loadAttachments?.()).resolves.toEqual([
+      {
+        name: 'fixture.txt',
+        mimeType: 'text/plain',
+        size: bytes.byteLength,
+        data: bytes,
+      },
+    ]);
+    expect(request).toHaveBeenCalledTimes(3);
+    expect(JSON.stringify(inboundMessage.content)).not.toContain('file-a');
+    expect(JSON.stringify(inboundMessage.content)).not.toContain('host-only-adapter-token');
+    await adapter.teardown();
   });
 
   it('reports the adapter unavailable while its authenticated WebSocket reconnects', async () => {
@@ -1287,7 +1466,7 @@ describe('Mattermost channel adapter assembly', () => {
     ).resolves.toBe('mattermost-reply-id');
 
     const request = vi.mocked(transport.request).mock.calls[0][0];
-    expect(JSON.parse(request.body ?? '{}')).toMatchObject({
+    expect(JSON.parse(typeof request.body === 'string' ? request.body : '{}')).toMatchObject({
       channel_id: 'channel-a',
       root_id: 'root-post-id',
       message: 'Shared context, threaded reply',

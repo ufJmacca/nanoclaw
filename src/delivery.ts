@@ -28,7 +28,7 @@ import { log } from './log.js';
 import { normalizeOptions } from './channels/ask-question.js';
 import { clearOutbox, openInboundDb, openOutboundDb, readOutboxFiles } from './session-manager.js';
 import { pauseTypingRefreshAfterDelivery, setTypingAdapter } from './modules/typing/index.js';
-import type { OutboundFile } from './channels/adapter.js';
+import { UnconfirmedAttachmentDeliveryError, type OutboundFile } from './channels/adapter.js';
 import type { Session } from './types.js';
 
 const ACTIVE_POLL_MS = 1000;
@@ -279,6 +279,16 @@ async function drainSession(session: Session): Promise<void> {
           });
           break;
         }
+        if (err instanceof UnconfirmedAttachmentDeliveryError) {
+          deliveryAttempts.delete(msg.id);
+          log.warn('Attachment delivery unconfirmed; leaving outbound message due', {
+            messageId: msg.id,
+            sessionId: session.id,
+            channelType: msg.channel_type,
+            category: err.category,
+          });
+          break;
+        }
         const attempts = (deliveryAttempts.get(msg.id) ?? 0) + 1;
         deliveryAttempts.set(msg.id, attempts);
         if (attempts >= MAX_DELIVERY_ATTEMPTS) {
@@ -443,10 +453,15 @@ async function deliverMessage(
   // Read file attachments from outbox if the content declares files.
   // File I/O lives in session-manager.ts (symmetric with inbound
   // extractAttachmentFiles) — delivery just hands buffers to the adapter.
+  const declaredFiles = Array.isArray(content.files) && content.files.length > 0 ? (content.files as string[]) : [];
   const files =
-    Array.isArray(content.files) && content.files.length > 0
-      ? readOutboxFiles(session.agent_group_id, session.id, msg.id, content.files as string[])
-      : undefined;
+    declaredFiles.length > 0 ? readOutboxFiles(session.agent_group_id, session.id, msg.id, declaredFiles) : undefined;
+  if (msg.channel_type === 'mattermost' && declaredFiles.length > 0 && files?.length !== declaredFiles.length) {
+    throw new UnconfirmedAttachmentDeliveryError(
+      'Mattermost outbox attachments were unavailable',
+      'outbox_unavailable',
+    );
+  }
 
   const platformMsgId = await deliveryAdapter.deliver(
     msg.channel_type,

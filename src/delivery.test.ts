@@ -10,6 +10,7 @@
  */
 import Database from 'better-sqlite3';
 import fs from 'fs';
+import path from 'node:path';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 const deliveryMocks = vi.hoisted(() => ({
@@ -36,7 +37,7 @@ const TEST_DIR = '/tmp/nanoclaw-test-delivery';
 
 import { initTestDb, closeDb, runMigrations, createAgentGroup, createMessagingGroup } from './db/index.js';
 import { insertMessage } from './db/session-db.js';
-import { inboundDbPath, resolveSession, outboundDbPath } from './session-manager.js';
+import { inboundDbPath, resolveSession, outboundDbPath, sessionDir } from './session-manager.js';
 import * as deliveryModule from './delivery.js';
 import {
   DeliveryAdapterUnavailableError,
@@ -44,6 +45,7 @@ import {
   setDeliveryAdapter,
   startDeliveryIntake,
 } from './delivery.js';
+import { UnconfirmedAttachmentDeliveryError } from './channels/adapter.js';
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -325,6 +327,131 @@ describe('deliverSessionMessages — concurrent invocations', () => {
     const inDb = new Database(inboundDbPath(session.agent_group_id, session.id));
     expect(inDb.prepare('SELECT COUNT(*) AS count FROM delivered').get()).toEqual({ count: 0 });
     inDb.close();
+  });
+
+  it('retains Mattermost outbox files until attachment association is confirmed, then clears them once', async () => {
+    seedMattermostAgentAndChannel();
+    const { session } = resolveSession('ag-mattermost-a', 'mg-mattermost-a', null, 'shared');
+    const messageId = 'out-file-association';
+    insertMattermostOutbound(session.agent_group_id, session.id, messageId, null);
+    const outDb = new Database(outboundDbPath(session.agent_group_id, session.id));
+    outDb
+      .prepare('UPDATE messages_out SET content = ? WHERE id = ?')
+      .run(JSON.stringify({ text: 'file caption', files: ['report.txt'] }), messageId);
+    outDb.close();
+    const attachmentPath = path.join(sessionDir(session.agent_group_id, session.id), 'outbox', messageId, 'report.txt');
+    fs.mkdirSync(path.dirname(attachmentPath), { recursive: true });
+    fs.writeFileSync(attachmentPath, 'exact outbound bytes');
+    deliveryMocks.validateMattermostSessionForExecution.mockReturnValue({
+      strict: true,
+      valid: true,
+      value: {
+        messagingGroup: {
+          id: 'mg-mattermost-a',
+          channel_type: 'mattermost',
+          platform_id: 'mattermost:primary:channel-a',
+        },
+      },
+    });
+    const deliver = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('Mattermost delivery response did not confirm file associations'))
+      .mockResolvedValue('confirmed-post-id');
+    setDeliveryAdapter({ deliver });
+
+    await deliverSessionMessages(session);
+
+    expect(fs.readFileSync(attachmentPath, 'utf8')).toBe('exact outbound bytes');
+    expect(deliver).toHaveBeenCalledWith(
+      'mattermost',
+      'mattermost:primary:channel-a',
+      null,
+      'chat',
+      JSON.stringify({ text: 'file caption', files: ['report.txt'] }),
+      [{ filename: 'report.txt', data: Buffer.from('exact outbound bytes') }],
+      messageId,
+    );
+    let inbound = new Database(inboundDbPath(session.agent_group_id, session.id));
+    expect(inbound.prepare('SELECT COUNT(*) AS count FROM delivered').get()).toEqual({ count: 0 });
+    inbound.close();
+
+    await deliverSessionMessages(session);
+    expect(fs.existsSync(path.dirname(attachmentPath))).toBe(false);
+    await deliverSessionMessages(session);
+    expect(deliver).toHaveBeenCalledTimes(2);
+    inbound = new Database(inboundDbPath(session.agent_group_id, session.id));
+    expect(inbound.prepare('SELECT COUNT(*) AS count FROM delivered').get()).toEqual({ count: 1 });
+    inbound.close();
+  });
+
+  it('never terminally marks or clears an unconfirmed Mattermost attachment delivery', async () => {
+    seedMattermostAgentAndChannel();
+    const { session } = resolveSession('ag-mattermost-a', 'mg-mattermost-a', null, 'shared');
+    const messageId = 'out-file-unconfirmed';
+    insertMattermostOutbound(session.agent_group_id, session.id, messageId, null);
+    const outDb = new Database(outboundDbPath(session.agent_group_id, session.id));
+    outDb
+      .prepare('UPDATE messages_out SET content = ? WHERE id = ?')
+      .run(JSON.stringify({ text: 'file caption', files: ['report.txt'] }), messageId);
+    outDb.close();
+    const attachmentPath = path.join(sessionDir(session.agent_group_id, session.id), 'outbox', messageId, 'report.txt');
+    fs.mkdirSync(path.dirname(attachmentPath), { recursive: true });
+    fs.writeFileSync(attachmentPath, 'exact outbound bytes');
+    deliveryMocks.validateMattermostSessionForExecution.mockReturnValue({
+      strict: true,
+      valid: true,
+      value: {
+        messagingGroup: {
+          id: 'mg-mattermost-a',
+          channel_type: 'mattermost',
+          platform_id: 'mattermost:primary:channel-a',
+        },
+      },
+    });
+    const deliver = vi
+      .fn()
+      .mockRejectedValue(new UnconfirmedAttachmentDeliveryError('association not confirmed', 'association_mismatch'));
+    setDeliveryAdapter({ deliver });
+
+    for (let poll = 0; poll < 5; poll++) await deliverSessionMessages(session);
+
+    expect(deliver).toHaveBeenCalledTimes(5);
+    expect(fs.readFileSync(attachmentPath, 'utf8')).toBe('exact outbound bytes');
+    const inbound = new Database(inboundDbPath(session.agent_group_id, session.id));
+    expect(inbound.prepare('SELECT COUNT(*) AS count FROM delivered').get()).toEqual({ count: 0 });
+    inbound.close();
+  });
+
+  it('does not send a caption-only Mattermost post when a declared outbox file is unavailable', async () => {
+    seedMattermostAgentAndChannel();
+    const { session } = resolveSession('ag-mattermost-a', 'mg-mattermost-a', null, 'shared');
+    const messageId = 'out-file-missing';
+    insertMattermostOutbound(session.agent_group_id, session.id, messageId, null);
+    const outDb = new Database(outboundDbPath(session.agent_group_id, session.id));
+    outDb
+      .prepare('UPDATE messages_out SET content = ? WHERE id = ?')
+      .run(JSON.stringify({ text: 'must not send alone', files: ['missing.txt'] }), messageId);
+    outDb.close();
+    deliveryMocks.validateMattermostSessionForExecution.mockReturnValue({
+      strict: true,
+      valid: true,
+      value: {
+        messagingGroup: {
+          id: 'mg-mattermost-a',
+          channel_type: 'mattermost',
+          platform_id: 'mattermost:primary:channel-a',
+        },
+      },
+    });
+    const deliver = vi.fn().mockResolvedValue('must-not-send');
+    setDeliveryAdapter({ deliver });
+
+    for (let poll = 0; poll < 4; poll++) await deliverSessionMessages(session);
+
+    expect(deliver).not.toHaveBeenCalled();
+    const inbound = new Database(inboundDbPath(session.agent_group_id, session.id));
+    expect(inbound.prepare('SELECT COUNT(*) AS count FROM delivered').get()).toEqual({ count: 0 });
+    inbound.close();
   });
 
   it('stops a queued Mattermost drain when the subscription is deactivated after one delivery', async () => {

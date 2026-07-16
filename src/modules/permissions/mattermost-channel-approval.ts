@@ -46,6 +46,7 @@ const SAFE_IDENTITY_COMPONENT = '[A-Za-z0-9][A-Za-z0-9._-]{0,127}';
 const MATTERMOST_PLATFORM_ID = new RegExp(`^mattermost:(${SAFE_IDENTITY_COMPONENT}):(${SAFE_IDENTITY_COMPONENT})$`);
 const MATTERMOST_USER_ID = new RegExp(`^mattermost:(${SAFE_IDENTITY_COMPONENT})$`);
 const MATTERMOST_POST_ID = new RegExp(`^${SAFE_IDENTITY_COMPONENT}$`);
+const MATTERMOST_APPROVAL_MAX_ATTACHMENTS = 5;
 
 const SUBSCRIPTION_OPTIONS: RawOption[] = [
   { label: 'Subscribe', selectedLabel: '✅ Subscribed', value: 'approve' },
@@ -97,6 +98,22 @@ function parseStoredMattermostApprovalEvent(row: PendingMattermostChannelApprova
     return { valid: false, reason: 'invalid_stored_event' };
   }
   const candidateMessage = message as Record<string, unknown>;
+  const attachmentRefs = candidateMessage.attachmentRefs;
+  const validAttachmentRefs =
+    attachmentRefs === undefined ||
+    (Array.isArray(attachmentRefs) &&
+      attachmentRefs.length > 0 &&
+      attachmentRefs.length <= MATTERMOST_APPROVAL_MAX_ATTACHMENTS &&
+      attachmentRefs.every(
+        (reference) =>
+          reference !== null &&
+          typeof reference === 'object' &&
+          !Array.isArray(reference) &&
+          Object.keys(reference).length === 1 &&
+          typeof (reference as Record<string, unknown>).id === 'string' &&
+          MATTERMOST_POST_ID.test((reference as Record<string, unknown>).id as string),
+      ) &&
+      new Set(attachmentRefs.map((reference) => (reference as { id: string }).id)).size === attachmentRefs.length);
   const messageTimestamp =
     typeof candidateMessage.timestamp === 'string' ? Date.parse(candidateMessage.timestamp) : Number.NaN;
   if (
@@ -107,7 +124,9 @@ function parseStoredMattermostApprovalEvent(row: PendingMattermostChannelApprova
     !Number.isSafeInteger(messageTimestamp) ||
     messageTimestamp < 0 ||
     candidateMessage.isMention !== true ||
-    candidateMessage.isGroup !== true
+    candidateMessage.isGroup !== true ||
+    candidateMessage.loadAttachments !== undefined ||
+    !validAttachmentRefs
   ) {
     return { valid: false, reason: 'invalid_stored_event' };
   }

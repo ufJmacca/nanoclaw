@@ -36,10 +36,11 @@ import { upsertUser } from './db/users.js';
 import { grantRole } from './db/user-roles.js';
 import { closeDb, createMessagingGroup, getDb, initTestDb, runMigrations } from '../../db/index.js';
 import { routeInbound } from '../../router.js';
+import { registerInboundAttachmentLoaderFactory } from '../../channels/adapter.js';
 import { subscribeMattermostChannelStrict } from '../../channels/mattermost-subscription.js';
 import { mattermostChannelSequencer } from '../../channels/mattermost-inbound.js';
 import { advanceMattermostRecoveryCursor } from '../../channels/mattermost-recovery.js';
-import { inboundDbPath, openInboundDb, resolveSession } from '../../session-manager.js';
+import { inboundDbPath, openInboundDb, resolveSession, sessionDir } from '../../session-manager.js';
 
 const EVENT = {
   channelType: 'mattermost',
@@ -252,6 +253,66 @@ describe('Mattermost processing approval crash recovery', () => {
     expect(getDb().prepare('SELECT status FROM mattermost_subscriptions').get()).toEqual({ status: 'active' });
     expect(getDb().prepare('SELECT COUNT(*) AS count FROM sessions').get()).toEqual({ count: 1 });
     expect(recoveryMocks.wakeContainer).toHaveBeenCalledOnce();
+  });
+
+  it('rehydrates serialized attachment refs during authenticated startup approval recovery', async () => {
+    seedProcessingApproval();
+    const eventWithAttachmentRefs = {
+      ...EVENT,
+      message: {
+        ...EVENT.message,
+        attachmentRefs: [{ id: 'file-approved-recovery' }],
+      },
+    };
+    getDb()
+      .prepare('UPDATE pending_mattermost_channel_approvals SET original_message = ?')
+      .run(JSON.stringify(eventWithAttachmentRefs));
+    const loadAttachments = vi.fn().mockResolvedValue([
+      {
+        name: 'recovered.txt',
+        mimeType: 'text/plain',
+        size: 15,
+        data: Buffer.from('recovered bytes'),
+      },
+    ]);
+    const factory = vi.fn().mockReturnValue(loadAttachments);
+    const unregister = registerInboundAttachmentLoaderFactory('mattermost', factory);
+
+    try {
+      await expect(
+        approvalModule.recoverMattermostApprovalsForAuthenticatedMembership('primary', new Set(['channel-recovery'])),
+      ).resolves.toEqual({
+        cancelledPending: 0,
+        membershipQuarantined: 0,
+        completed: 1,
+        quarantined: 0,
+      });
+    } finally {
+      unregister();
+    }
+
+    expect(factory).toHaveBeenCalledOnce();
+    expect(loadAttachments).toHaveBeenCalledOnce();
+    const session = getDb().prepare('SELECT id, agent_group_id FROM sessions').get() as {
+      id: string;
+      agent_group_id: string;
+    };
+    const inbound = openInboundDb(session.agent_group_id, session.id);
+    const row = inbound.prepare('SELECT id, content FROM messages_in').get() as { id: string; content: string };
+    inbound.close();
+    const content = JSON.parse(row.content) as { attachments: Array<Record<string, unknown>> };
+    expect(content.attachments).toEqual([
+      {
+        type: 'file',
+        name: 'recovered.txt',
+        mimeType: 'text/plain',
+        size: 15,
+        localPath: `inbox/${row.id}/recovered.txt`,
+      },
+    ]);
+    expect(
+      fs.readFileSync(`${sessionDir(session.agent_group_id, session.id)}/inbox/${row.id}/recovered.txt`, 'utf8'),
+    ).toBe('recovered bytes');
   });
 
   it('treats a live owner replay that completes ahead of stale startup recovery as resolved', async () => {
@@ -590,6 +651,29 @@ describe('Mattermost processing approval crash recovery', () => {
       completed: 0,
       quarantined: 0,
     });
+  });
+
+  it.each([
+    ['malformed attachment refs', { attachmentRefs: [{ id: '../file' }] }],
+    ['duplicate attachment refs', { attachmentRefs: [{ id: 'file-a' }, { id: 'file-a' }] }],
+    ['serialized loader shadow', { attachmentRefs: [{ id: 'file-a' }], loadAttachments: 'shadow' }],
+  ])('quarantines a stored event with %s', async (_label, messagePatch) => {
+    seedProcessingApproval();
+    getDb()
+      .prepare('UPDATE pending_mattermost_channel_approvals SET original_message = ?')
+      .run(JSON.stringify({ ...EVENT, message: { ...EVENT.message, ...messagePatch } }));
+
+    await expect(approvalModule.recoverProcessingMattermostChannelApprovals()).resolves.toEqual({
+      completed: 0,
+      quarantined: 1,
+    });
+
+    expect(getDb().prepare('SELECT reason FROM mattermost_approval_recovery_quarantine').get()).toEqual({
+      reason: 'invalid_stored_event',
+    });
+    expect(getDb().prepare('SELECT COUNT(*) AS count FROM mattermost_subscriptions').get()).toEqual({ count: 0 });
+    expect(getDb().prepare('SELECT COUNT(*) AS count FROM sessions').get()).toEqual({ count: 0 });
+    expect(recoveryMocks.wakeContainer).not.toHaveBeenCalled();
   });
 
   it('quarantines a stored event whose channel identity differs from the claimed approval', async () => {

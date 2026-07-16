@@ -63,6 +63,21 @@ export interface InboundEvent {
     isMention?: boolean;
     /** True when the source is a group/channel thread, false for DMs. */
     isGroup?: boolean;
+    /**
+     * Serializable opaque attachment identities. These may survive an
+     * approval/recovery round trip; adapters must revalidate every identity
+     * against the authenticated post/channel before returning bytes.
+     */
+    attachmentRefs?: InboundAttachmentReference[];
+    /**
+     * Lazily fetch authenticated attachment bytes for this inbound event.
+     *
+     * The router calls this only after engagement and authorization checks
+     * pass. Platform credentials and authenticated URLs remain inside the
+     * adapter-owned closure. Opaque references may be persisted for host-side
+     * approval replay, but never enter a session DB or container prompt.
+     */
+    loadAttachments?: InboundAttachmentLoader;
   };
   replyTo?: DeliveryAddress;
 }
@@ -90,6 +105,74 @@ export interface InboundMessage {
   isMention?: boolean;
   /** True when the source is a group/channel thread, false for DMs. */
   isGroup?: boolean;
+  /** Serializable opaque attachment identities; see InboundEvent.message. */
+  attachmentRefs?: InboundAttachmentReference[];
+  /** Host-only lazy attachment fetch; see InboundEvent.message. */
+  loadAttachments?: InboundAttachmentLoader;
+}
+
+export interface InboundAttachmentReference {
+  id: string;
+}
+
+/** Safe, user-visible categories for an attachment that could not be loaded. */
+export type InboundAttachmentUnavailableReason =
+  | 'metadata_failed'
+  | 'download_failed'
+  | 'metadata_mismatch'
+  | 'size_mismatch';
+
+/**
+ * One result from an authenticated inbound attachment fetch.
+ *
+ * Raw bytes are deliberately carried out-of-band from message `content` so
+ * JSON persistence cannot accidentally retain file contents. A failed item
+ * still includes deterministic display metadata, allowing attachment-only
+ * posts to render a useful unavailable marker instead of an empty message.
+ */
+export type InboundAttachmentLoadResult =
+  | {
+      name: string;
+      mimeType: string;
+      size: number;
+      data: Buffer;
+      unavailable?: never;
+    }
+  | {
+      name: string;
+      mimeType?: string;
+      size?: number;
+      data?: never;
+      unavailable: InboundAttachmentUnavailableReason;
+    };
+
+export type InboundAttachmentLoader = () => Promise<InboundAttachmentLoadResult[]>;
+
+export type InboundAttachmentLoaderFactory = (event: InboundEvent) => InboundAttachmentLoader | undefined;
+
+// Adapter setup can replay durable approvals before channel-registry marks the
+// adapter active. This tiny host-only registry makes loader rehydration
+// available during that window without persisting credentials or closures.
+const inboundAttachmentLoaderFactories = new Map<
+  string,
+  { factory: InboundAttachmentLoaderFactory; registration: symbol }
+>();
+
+export function registerInboundAttachmentLoaderFactory(
+  channelType: string,
+  factory: InboundAttachmentLoaderFactory,
+): () => void {
+  const entry = { factory, registration: Symbol(channelType) };
+  inboundAttachmentLoaderFactories.set(channelType, entry);
+  return () => {
+    if (inboundAttachmentLoaderFactories.get(channelType) === entry) {
+      inboundAttachmentLoaderFactories.delete(channelType);
+    }
+  };
+}
+
+export function getInboundAttachmentLoaderFactory(channelType: string): InboundAttachmentLoaderFactory | undefined {
+  return inboundAttachmentLoaderFactories.get(channelType)?.factory;
 }
 
 /** A file attachment to deliver alongside a message. */
@@ -105,6 +188,22 @@ export interface OutboundMessage {
   files?: OutboundFile[]; // file attachments from the session outbox
   /** Stable host outbox identity used by adapters for idempotent delivery. */
   deliveryId?: string;
+}
+
+/**
+ * A platform accepted neither a complete attachment upload nor a confirmed
+ * attachment association. The host must keep the outbound row pending and
+ * retain its outbox bytes instead of applying the generic terminal-failure
+ * policy.
+ */
+export class UnconfirmedAttachmentDeliveryError extends Error {
+  constructor(
+    message: string,
+    readonly category: string,
+  ) {
+    super(message);
+    this.name = 'UnconfirmedAttachmentDeliveryError';
+  }
 }
 
 /** Discovered conversation info (from syncConversations). */
@@ -164,6 +263,13 @@ export interface ChannelAdapter {
    * treats absence as a no-op.
    */
   subscribe?(platformId: string, threadId: string): Promise<void>;
+
+  /**
+   * Rehydrate a host-only attachment loader from serializable opaque refs.
+   * Implementations must fail closed when the event is not owned by this
+   * exact authenticated platform instance.
+   */
+  createInboundAttachmentLoader?(event: InboundEvent): InboundAttachmentLoader | undefined;
 
   /**
    * Open (or fetch) a DM with this user, returning the platform_id of the

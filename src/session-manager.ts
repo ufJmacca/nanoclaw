@@ -16,9 +16,9 @@ import { isDeepStrictEqual } from 'node:util';
 import fs from 'fs';
 import path from 'path';
 
-import { deriveAttachmentName } from './attachment-naming.js';
+import { deriveAttachmentName, extForMime } from './attachment-naming.js';
 import { isSafeAttachmentName } from './attachment-safety.js';
-import type { OutboundFile } from './channels/adapter.js';
+import type { InboundAttachmentLoadResult, OutboundFile } from './channels/adapter.js';
 import { DATA_DIR } from './config.js';
 import { getMessagingGroup } from './db/messaging-groups.js';
 import {
@@ -376,11 +376,13 @@ export function writeSessionMessage(
     trigger?: 0 | 1;
     /** Accept an exact stable replay of this deterministic external message ID. */
     idempotent?: boolean;
+    /**
+     * Authenticated inbound bytes supplied out-of-band from `content`.
+     * Each call stages its own copies beneath this session's inbox.
+     */
+    attachments?: readonly InboundAttachmentLoadResult[];
   },
 ): boolean {
-  // Extract base64 attachment data, save to inbox, replace with file paths
-  const content = extractAttachmentFiles(agentGroupId, sessionId, message.id, message.content);
-
   const db = openInboundDb(agentGroupId, sessionId);
   try {
     if (message.idempotent) {
@@ -392,6 +394,18 @@ export function writeSessionMessage(
         )
         .get(message.id) as SessionMessageReplayIdentity | undefined;
       if (existing) {
+        // A completed row proves the first attempt already finished staging.
+        // Verify its descriptor-pinned files without creating anything; a
+        // contradictory replay must not leave orphan files behind before the
+        // identity collision is reported.
+        const content = stageDirectInboundAttachments(
+          agentGroupId,
+          sessionId,
+          message.id,
+          message.content,
+          message.attachments,
+          'verify',
+        );
         const expected = {
           kind: message.kind,
           timestamp: message.timestamp,
@@ -410,6 +424,17 @@ export function writeSessionMessage(
         throw new Error('Mattermost replay message identity collision');
       }
     }
+    // Extract base64 attachment data, save to inbox, replace with file paths.
+    // Mattermost's authenticated buffers take the direct out-of-band path.
+    const base64ExtractedContent = extractAttachmentFiles(agentGroupId, sessionId, message.id, message.content);
+    const content = stageDirectInboundAttachments(
+      agentGroupId,
+      sessionId,
+      message.id,
+      base64ExtractedContent,
+      message.attachments,
+      'stage',
+    );
     insertMessage(db, {
       id: message.id,
       kind: message.kind,
@@ -428,6 +453,202 @@ export function writeSessionMessage(
 
   updateSession(sessionId, { last_active: new Date().toISOString() });
   return true;
+}
+
+type PersistedInboundAttachment = {
+  type: 'file';
+  name: string;
+  mimeType?: string;
+  size?: number;
+  localPath?: string;
+  unavailable?: string;
+};
+
+function deterministicAttachmentName(
+  requestedName: string,
+  mimeType: string | undefined,
+  index: number,
+  usedNames: Set<string>,
+): string {
+  const extension = extForMime(mimeType);
+  const fallback = `attachment-${index + 1}${extension ? `.${extension}` : ''}`;
+  // Leave headroom beneath common NAME_MAX=255 limits for deterministic
+  // duplicate suffixes. byteLength matters because filenames are UTF-8.
+  const initial =
+    isSafeAttachmentName(requestedName) && Buffer.byteLength(requestedName, 'utf8') <= 240 ? requestedName : fallback;
+  if (!usedNames.has(initial)) {
+    usedNames.add(initial);
+    return initial;
+  }
+
+  const dot = initial.lastIndexOf('.');
+  const stem = dot > 0 ? initial.slice(0, dot) : initial;
+  const suffix = dot > 0 ? initial.slice(dot) : '';
+  let discriminator = index + 1;
+  let candidate = `${stem}-${discriminator}${suffix}`;
+  while (usedNames.has(candidate)) {
+    discriminator++;
+    candidate = `${stem}-${discriminator}${suffix}`;
+  }
+  usedNames.add(candidate);
+  return candidate;
+}
+
+/**
+ * Stage direct buffers without ever embedding them in persisted message JSON.
+ * Unsafe and duplicate display names receive deterministic per-message names,
+ * so every fan-out destination gets the same metadata and local path.
+ */
+function stageDirectInboundAttachments(
+  agentGroupId: string,
+  sessionId: string,
+  messageId: string,
+  contentStr: string,
+  attachments: readonly InboundAttachmentLoadResult[] | undefined,
+  mode: 'stage' | 'verify',
+): string {
+  if (!attachments || attachments.length === 0) return contentStr;
+
+  let parsed: Record<string, unknown>;
+  try {
+    const candidate: unknown = JSON.parse(contentStr);
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return contentStr;
+    parsed = candidate as Record<string, unknown>;
+  } catch {
+    return contentStr;
+  }
+
+  const persisted = Array.isArray(parsed.attachments) ? [...(parsed.attachments as unknown[])] : [];
+  const usedNames = new Set<string>();
+  for (const existing of persisted) {
+    if (!existing || typeof existing !== 'object' || Array.isArray(existing)) continue;
+    const name = (existing as Record<string, unknown>).name;
+    if (typeof name === 'string' && isSafeAttachmentName(name)) usedNames.add(name);
+  }
+
+  const pendingFiles: Array<{ data: Buffer; metadata: PersistedInboundAttachment }> = [];
+  let unavailableCount = 0;
+  for (const [index, attachment] of attachments.entries()) {
+    const requestedName = typeof attachment.name === 'string' ? attachment.name : '';
+    const mimeType = typeof attachment.mimeType === 'string' ? attachment.mimeType : undefined;
+    const declaredSize =
+      typeof attachment.size === 'number' && Number.isSafeInteger(attachment.size) && attachment.size >= 0
+        ? attachment.size
+        : undefined;
+    const name = deterministicAttachmentName(requestedName, mimeType, index, usedNames);
+    const metadata: PersistedInboundAttachment = { type: 'file', name };
+    if (mimeType !== undefined) metadata.mimeType = mimeType;
+    if (declaredSize !== undefined) metadata.size = declaredSize;
+
+    if ('unavailable' in attachment && attachment.unavailable) {
+      metadata.unavailable = attachment.unavailable;
+      persisted.push(metadata);
+      unavailableCount++;
+      continue;
+    }
+
+    if (!Buffer.isBuffer(attachment.data) || declaredSize === undefined) {
+      metadata.unavailable = 'metadata mismatch';
+      persisted.push(metadata);
+      unavailableCount++;
+      continue;
+    }
+    if (attachment.data.length !== declaredSize) {
+      metadata.unavailable = 'size mismatch';
+      persisted.push(metadata);
+      unavailableCount++;
+      continue;
+    }
+    pendingFiles.push({ data: attachment.data, metadata });
+    persisted.push(metadata);
+  }
+
+  const results = pendingFiles.map(({ data, metadata }, attachmentIndex) => {
+    try {
+      const operation = mode === 'stage' ? writeInboxFiles : verifyInboxFiles;
+      return operation(agentGroupId, sessionId, messageId, [{ filename: metadata.name, data }])[0] ?? false;
+    } catch {
+      // Filesystem errors often embed the attempted pathname. Keep the
+      // user-supplied filename out of host logs and degrade this item without
+      // blocking the message or later channel ingress.
+      log.warn('Inbound attachment filesystem operation failed', {
+        messageId,
+        attachmentIndex,
+        stage: mode,
+        category: 'filesystem_error',
+      });
+      return false;
+    }
+  });
+  let stagedBytes = 0;
+  for (const [index, success] of results.entries()) {
+    const pending = pendingFiles[index];
+    if (!pending) continue;
+    if (success) {
+      pending.metadata.localPath = `inbox/${messageId}/${pending.metadata.name}`;
+      stagedBytes += pending.data.length;
+    } else {
+      pending.metadata.unavailable = 'staging failed';
+      unavailableCount++;
+    }
+  }
+
+  parsed.attachments = persisted;
+  log.info('Inbound attachments prepared', {
+    messageId,
+    stage: mode,
+    attachmentCount: attachments.length,
+    stagedCount: results.filter(Boolean).length,
+    unavailableCount,
+    byteTotal: stagedBytes,
+  });
+  return JSON.stringify(parsed);
+}
+
+/** Verify exact replay bytes through pinned descriptors without creating files. */
+function verifyInboxFiles(
+  agentGroupId: string,
+  sessionId: string,
+  messageId: string,
+  files: OutboundFile[],
+): boolean[] {
+  const verified = files.map(() => false);
+  if (files.length === 0 || !isSafeAttachmentName(messageId)) return verified;
+
+  const inboxFd = openOwnedSessionSubdirectory(agentGroupId, sessionId, 'inbox');
+  if (inboxFd === undefined) return verified;
+  let messageHandle: DirectoryHandle | undefined;
+  try {
+    messageHandle = openDirectoryAt(inboxFd, messageId, false);
+    if (messageHandle === undefined) return verified;
+    for (const [index, file] of files.entries()) {
+      if (!isSafeAttachmentName(file.filename)) continue;
+      let fileFd: number | undefined;
+      try {
+        fileFd = fs.openSync(
+          descriptorPath(messageHandle, file.filename),
+          fs.constants.O_RDONLY | fs.constants.O_NONBLOCK | fs.constants.O_NOFOLLOW,
+        );
+        const stat = fs.fstatSync(fileFd);
+        if (
+          stat.isFile() &&
+          stat.nlink === 1 &&
+          stat.size === file.data.length &&
+          fs.readFileSync(fileFd).equals(file.data)
+        ) {
+          verified[index] = true;
+        }
+      } catch (err) {
+        if (!isExpectedUnsafePathError(err)) throw err;
+      } finally {
+        if (fileFd !== undefined) fs.closeSync(fileFd);
+      }
+    }
+    return verified;
+  } finally {
+    if (messageHandle !== undefined) fs.closeSync(messageHandle.fd);
+    fs.closeSync(inboxFd.fd);
+  }
 }
 
 /**
@@ -480,6 +701,27 @@ export function writeInboxFiles(
         written[index] = true;
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+        // A crash can occur after the attachment is staged but before the
+        // platform receipt is completed. Recovery replays the deterministic
+        // message ID; securely reuse the already-pinned file only when its
+        // exact bytes match. Symlinks and conflicting files remain failures.
+        let existingFd: number | undefined;
+        try {
+          existingFd = fs.openSync(filePath, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK | fs.constants.O_NOFOLLOW);
+          const existingStat = fs.fstatSync(existingFd);
+          if (
+            existingStat.isFile() &&
+            existingStat.nlink === 1 &&
+            existingStat.size === file.data.length &&
+            fs.readFileSync(existingFd).equals(file.data)
+          ) {
+            written[index] = true;
+          }
+        } catch (existingErr) {
+          if (!isExpectedUnsafePathError(existingErr)) throw existingErr;
+        } finally {
+          if (existingFd !== undefined) fs.closeSync(existingFd);
+        }
       } finally {
         if (fileFd !== undefined) fs.closeSync(fileFd);
       }
@@ -513,7 +755,7 @@ function extractAttachmentFiles(
   }
 
   const pending: Array<{ attachment: Record<string, unknown>; file: OutboundFile }> = [];
-  for (const att of attachments) {
+  for (const [attachmentIndex, att] of attachments.entries()) {
     if (typeof att.data !== 'string') continue;
 
     const rawName = deriveAttachmentName(att);
@@ -521,8 +763,8 @@ function extractAttachmentFiles(
     if (filename !== rawName) {
       log.warn('Refused unsafe attachment filename, would escape inbox', {
         messageId,
-        rawName,
-        replacement: filename,
+        attachmentIndex,
+        category: 'unsafe_name',
       });
     }
 
@@ -546,11 +788,7 @@ function extractAttachmentFiles(
     item.attachment.localPath = `inbox/${messageId}/${item.file.filename}`;
     delete item.attachment.data;
     changed = true;
-    log.debug('Saved attachment to inbox', {
-      messageId,
-      filename: item.file.filename,
-      size: item.attachment.size,
-    });
+    log.debug('Saved attachment to inbox', { messageId, attachmentIndex: index, size: item.attachment.size });
   }
 
   return changed ? JSON.stringify(parsed) : contentStr;
@@ -706,9 +944,13 @@ export function readOutboxFiles(
     if (messageHandle === undefined) return undefined;
 
     const files: OutboundFile[] = [];
-    for (const filename of filenames) {
+    for (const [attachmentIndex, filename] of filenames.entries()) {
       if (!isSafeAttachmentName(filename)) {
-        log.warn('Refused unsafe outbox filename, would escape outbox', { messageId, filename });
+        log.warn('Refused unsafe outbox filename, would escape outbox', {
+          messageId,
+          attachmentIndex,
+          category: 'unsafe_name',
+        });
         continue;
       }
 
@@ -720,12 +962,12 @@ export function readOutboxFiles(
         );
         const stat = fs.fstatSync(fileFd);
         if (!stat.isFile() || stat.nlink !== 1) {
-          log.warn('Rejecting unsafe outbox file', { messageId, filename });
+          log.warn('Rejecting unsafe outbox file', { messageId, attachmentIndex, category: 'unsafe_file' });
           continue;
         }
         files.push({ filename, data: fs.readFileSync(fileFd) });
       } catch {
-        log.warn('Outbox file not found', { messageId, filename });
+        log.warn('Outbox file not found', { messageId, attachmentIndex, category: 'unavailable' });
       } finally {
         if (fileFd !== undefined) fs.closeSync(fileFd);
       }

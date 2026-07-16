@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
 
+import Database from 'better-sqlite3';
 import { expect, test } from 'vitest';
 
 import {
@@ -51,6 +52,20 @@ interface ContractChannelState {
   } | null;
 }
 
+interface ContractStoredMessage {
+  id: string;
+  thread_id: string | null;
+  content: string;
+}
+
+interface ContractStoredAttachment {
+  type: 'file';
+  name: string;
+  mimeType: string;
+  size: number;
+  localPath: string;
+}
+
 class ContractWorkerClient {
   private readonly events: WorkerEvent[] = [];
   private readonly waiters: WorkerWaiter[] = [];
@@ -62,12 +77,12 @@ class ContractWorkerClient {
 
   private constructor(
     private readonly child: ChildProcessWithoutNullStreams,
-    private readonly botToken: string,
+    private readonly forbiddenOutputValues: readonly string[],
   ) {
     this.output = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
     this.output.on('line', (line) => {
       try {
-        const event = parseMattermostContractWorkerEventLine(line, [botToken]);
+        const event = parseMattermostContractWorkerEventLine(line, forbiddenOutputValues);
         if (event) this.receive(event);
       } catch (error) {
         this.fail(error instanceof Error ? error : new Error('Mattermost contract worker output was invalid'));
@@ -76,7 +91,9 @@ class ContractWorkerClient {
     let stderr = '';
     child.stderr.on('data', (chunk: Buffer) => {
       stderr = `${stderr}${chunk.toString('utf8')}`.slice(-8192);
-      if (stderr.includes(botToken)) this.fail(new Error('Mattermost contract worker exposed its bot token'));
+      if (forbiddenOutputValues.some((value) => value.length >= 4 && stderr.includes(value))) {
+        this.fail(new Error('Mattermost contract worker exposed a forbidden value'));
+      }
     });
     this.exit = new Promise((resolve) => {
       child.once('exit', (code) => {
@@ -93,6 +110,7 @@ class ContractWorkerClient {
     testRoot: string;
     botToken: string;
     bootstrapSubscriptions: boolean;
+    forbiddenOutputValues?: readonly string[];
     channels: Array<{
       channelId: string;
       name: string;
@@ -116,7 +134,7 @@ class ContractWorkerClient {
       shell: false,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
-    const client = new ContractWorkerClient(child, input.botToken);
+    const client = new ContractWorkerClient(child, [input.botToken, ...(input.forbiddenOutputValues ?? [])]);
     const ready = await client.waitFor((event) => event.kind === 'ready', 60_000);
     return { client, ready };
   }
@@ -265,10 +283,80 @@ function assertOutboundAddress(post: MattermostContractPost, channelId: string, 
   }
 }
 
+function readStoredMessage(
+  testRoot: string,
+  state: ContractChannelState,
+  postId: string,
+): { row: ContractStoredMessage; sessionRoot: string } {
+  if (!state.session) throw new Error('Mattermost contract attachment session was missing');
+  const sessionRoot = path.join(testRoot, 'data', 'v2-sessions', state.agent_group_id, state.session.id);
+  const database = new Database(path.join(sessionRoot, 'inbound.db'), { readonly: true });
+  try {
+    const id = `${postId}:${state.agent_group_id}`;
+    const row = database.prepare('SELECT id, thread_id, content FROM messages_in WHERE id = ?').get(id) as
+      | ContractStoredMessage
+      | undefined;
+    if (!row) throw new Error('Mattermost contract stored attachment message was missing');
+    return { row, sessionRoot };
+  } finally {
+    database.close();
+  }
+}
+
+function assertStoredAttachment(input: {
+  testRoot: string;
+  state: ContractChannelState;
+  post: MattermostContractPost;
+  expectedText: string;
+  expectedThreadId: string | null;
+  filename: string;
+  mimeType: string;
+  bytes: Buffer;
+  forbiddenValues: readonly string[];
+}): void {
+  const { row, sessionRoot } = readStoredMessage(input.testRoot, input.state, input.post.id);
+  expect(row.thread_id).toBe(input.expectedThreadId);
+  const content = JSON.parse(row.content) as Record<string, unknown>;
+  expect(content.text).toBe(input.expectedText);
+  expect(content.attachments).toEqual([
+    {
+      type: 'file',
+      name: input.filename,
+      mimeType: input.mimeType,
+      size: input.bytes.length,
+      localPath: `inbox/${row.id}/${input.filename}`,
+    },
+  ] satisfies ContractStoredAttachment[]);
+  const attachment = (content.attachments as ContractStoredAttachment[])[0]!;
+  expect(fs.readFileSync(path.join(sessionRoot, attachment.localPath))).toEqual(input.bytes);
+  expect(row.content).not.toContain(input.post.fileIds[0]);
+  expect(row.content).not.toContain(input.bytes.toString('base64'));
+  for (const forbidden of input.forbiddenValues) expect(row.content).not.toContain(forbidden);
+}
+
 test('preserves outbound channel and root_id through isolation, restart, unsubscribe, and bot removal', async () => {
   const repoRoot = process.cwd();
   const testRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-mm-contract-'));
   const suffix = `${Date.now().toString(36)}${process.pid.toString(36)}`.slice(-14);
+  const captionedFilename = `captioned-${suffix}.html`;
+  const attachmentOnlyFilename = `attachment-only-${suffix}.txt`;
+  const recoveryFilename = `recovered-${suffix}.json`;
+  const outboundFilename = `outbound-${suffix}.bin`;
+  const captionedBytes = Buffer.from(`<!doctype html><title>captioned-${suffix}</title>`);
+  const attachmentOnlyBytes = Buffer.from(`attachment-only-live-${suffix}`);
+  const recoveryBytes = Buffer.from(`{"recovered":"${suffix}","exact":true}`);
+  const outboundBytes = Buffer.from(`outbound-exact-bytes-${suffix}`);
+  const forbiddenWorkerOutputValues = [
+    captionedFilename,
+    attachmentOnlyFilename,
+    recoveryFilename,
+    outboundFilename,
+    captionedBytes.toString('utf8'),
+    attachmentOnlyBytes.toString('utf8'),
+    recoveryBytes.toString('utf8'),
+    outboundBytes.toString('utf8'),
+    outboundBytes.toString('base64'),
+  ];
   const bootstrapApi = new MattermostContractApi(
     { baseUrl: CONTRACT_URL },
     { requestTimeoutMs: 2_000, maxRequestAttempts: 1 },
@@ -346,6 +434,7 @@ test('preserves outbound channel and root_id through isolation, restart, unsubsc
       testRoot,
       botToken: botToken.token,
       bootstrapSubscriptions: true,
+      forbiddenOutputValues: forbiddenWorkerOutputValues,
       channels: [
         {
           channelId: channelA.id,
@@ -371,10 +460,31 @@ test('preserves outbound channel and root_id through isolation, restart, unsubsc
       message: `thread A ${suffix}`,
     });
     const postB = await actorApi.createPost({ channelId: channelB.id, message: `post B ${suffix}` });
+    const captionedFileIds = await actorApi.uploadFiles(channelA.id, [
+      { filename: captionedFilename, mimeType: 'text/html', data: captionedBytes },
+    ]);
+    const captionedPost = await actorApi.createPost({
+      channelId: channelA.id,
+      rootId: rootA.id,
+      message: `captioned attachment ${suffix}`,
+      fileIds: captionedFileIds,
+    });
+    const attachmentOnlyFileIds = await actorApi.uploadFiles(channelB.id, [
+      { filename: attachmentOnlyFilename, mimeType: 'text/plain', data: attachmentOnlyBytes },
+    ]);
+    const attachmentOnlyPost = await actorApi.createPost({
+      channelId: channelB.id,
+      message: '',
+      fileIds: attachmentOnlyFileIds,
+    });
+    const captionedInfo = await actorApi.getFileInfo(captionedFileIds[0]!);
+    const attachmentOnlyInfo = await actorApi.getFileInfo(attachmentOnlyFileIds[0]!);
     await Promise.all([
       worker.waitForInbound(rootA.id),
       worker.waitForInbound(threadA.id),
       worker.waitForInbound(postB.id),
+      worker.waitForInbound(captionedPost.id),
+      worker.waitForInbound(attachmentOnlyPost.id),
     ]);
 
     const initialSnapshot = await worker.snapshot();
@@ -391,8 +501,8 @@ test('preserves outbound channel and root_id through isolation, restart, unsubsc
     expect(initialB.session?.thread_id).toBeNull();
     expect(initialA.session?.container_status).toBe('stopped');
     expect(initialB.session?.container_status).toBe('stopped');
-    expect(initialA.session?.inboxCount).toBe(2);
-    expect(initialB.session?.inboxCount).toBe(1);
+    expect(initialA.session?.inboxCount).toBe(3);
+    expect(initialB.session?.inboxCount).toBe(2);
     expect(`${initialA.agent_group_id}:${initialA.session?.id}`).not.toBe(
       `${initialB.agent_group_id}:${initialB.session?.id}`,
     );
@@ -420,6 +530,42 @@ test('preserves outbound channel and root_id through isolation, restart, unsubsc
         ),
       ),
     );
+    expect(captionedInfo).toMatchObject({
+      id: captionedFileIds[0],
+      postId: captionedPost.id,
+      channelId: channelA.id,
+      name: captionedFilename,
+      size: captionedBytes.length,
+    });
+    expect(attachmentOnlyInfo).toMatchObject({
+      id: attachmentOnlyFileIds[0],
+      postId: attachmentOnlyPost.id,
+      channelId: channelB.id,
+      name: attachmentOnlyFilename,
+      size: attachmentOnlyBytes.length,
+    });
+    assertStoredAttachment({
+      testRoot,
+      state: initialA,
+      post: captionedPost,
+      expectedText: `captioned attachment ${suffix}`,
+      expectedThreadId: rootA.id,
+      filename: captionedFilename,
+      mimeType: captionedInfo.mimeType,
+      bytes: captionedBytes,
+      forbiddenValues: [botToken.token, captionedBytes.toString('utf8')],
+    });
+    assertStoredAttachment({
+      testRoot,
+      state: initialB,
+      post: attachmentOnlyPost,
+      expectedText: '',
+      expectedThreadId: null,
+      filename: attachmentOnlyFilename,
+      mimeType: attachmentOnlyInfo.mimeType,
+      bytes: attachmentOnlyBytes,
+      forbiddenValues: [botToken.token, attachmentOnlyBytes.toString('utf8')],
+    });
 
     const outboundRoot = process.env.NANOCLAW_MM_CONTRACT_MUTATE_ROOT_ID === '1' ? null : rootA.id;
     const replyAResult = await worker.command({
@@ -441,8 +587,19 @@ test('preserves outbound channel and root_id through isolation, restart, unsubsc
 
     await worker.shutdown();
     worker = null;
+    const recoveryFileIds = await actorApi.uploadFiles(channelA.id, [
+      { filename: recoveryFilename, mimeType: 'application/json', data: recoveryBytes },
+    ]);
+    const recoveryPost = await actorApi.createPost({
+      channelId: channelA.id,
+      rootId: rootA.id,
+      message: `stopped worker recovery ${suffix}`,
+      fileIds: recoveryFileIds,
+    });
+    const recoveryInfo = await actorApi.getFileInfo(recoveryFileIds[0]!);
     const restartedWorker = await ContractWorkerClient.start({ ...workerConfig, bootstrapSubscriptions: false });
     worker = restartedWorker.client;
+    await worker.waitForInbound(recoveryPost.id);
     expect(restartedWorker.ready.pid).not.toBe(firstPid);
     const restartedSnapshot = await worker.snapshot();
     const restartedA = channelState(restartedSnapshot, channelA.id);
@@ -455,13 +612,56 @@ test('preserves outbound channel and root_id through isolation, restart, unsubsc
     expect(restartedB.session?.id).toBe(initialB.session?.id);
     expect(restartedA.session?.container_status).toBe('stopped');
     expect(restartedB.session?.container_status).toBe('stopped');
+    expect(restartedA.session?.inboxCount).toBe(4);
+    expect(restartedB.session?.inboxCount).toBe(2);
+    expect(recoveryInfo).toMatchObject({
+      id: recoveryFileIds[0],
+      postId: recoveryPost.id,
+      channelId: channelA.id,
+      name: recoveryFilename,
+      size: recoveryBytes.length,
+    });
+    assertStoredAttachment({
+      testRoot,
+      state: restartedA,
+      post: recoveryPost,
+      expectedText: `stopped worker recovery ${suffix}`,
+      expectedThreadId: rootA.id,
+      filename: recoveryFilename,
+      mimeType: recoveryInfo.mimeType,
+      bytes: recoveryBytes,
+      forbiddenValues: [botToken.token, recoveryBytes.toString('utf8')],
+    });
+
+    const outboundCaption = `outbound file ${suffix}`;
+    const outboundResult = await worker.command({
+      kind: 'deliver_file',
+      platformId: `mattermost:contract:${channelA.id}`,
+      threadId: rootA.id,
+      text: outboundCaption,
+      filename: outboundFilename,
+      dataBase64: outboundBytes.toString('base64'),
+    });
+    const outboundPost = await adminApi.getPost(resultPostId(outboundResult));
+    assertOutboundAddress(outboundPost, channelA.id, rootA.id);
+    expect(outboundPost.message).toBe(outboundCaption);
+    expect(outboundPost.fileIds).toHaveLength(1);
+    const outboundInfo = await adminApi.getFileInfo(outboundPost.fileIds[0]!);
+    expect(outboundInfo).toMatchObject({
+      id: outboundPost.fileIds[0],
+      postId: outboundPost.id,
+      channelId: channelA.id,
+      name: outboundFilename,
+      size: outboundBytes.length,
+    });
+    await expect(adminApi.downloadFile(outboundPost.fileIds[0]!)).resolves.toEqual(outboundBytes);
 
     const restartA = await actorApi.createPost({ channelId: channelA.id, message: `restart A ${suffix}` });
     const restartB = await actorApi.createPost({ channelId: channelB.id, message: `restart B ${suffix}` });
     await Promise.all([worker.waitForInbound(restartA.id), worker.waitForInbound(restartB.id)]);
     const postRestartSnapshot = await worker.snapshot();
-    expect(channelState(postRestartSnapshot, channelA.id).session?.inboxCount).toBe(3);
-    expect(channelState(postRestartSnapshot, channelB.id).session?.inboxCount).toBe(2);
+    expect(channelState(postRestartSnapshot, channelA.id).session?.inboxCount).toBe(5);
+    expect(channelState(postRestartSnapshot, channelB.id).session?.inboxCount).toBe(3);
 
     await worker.command({ kind: 'deactivate', channelId: channelA.id });
     const afterDeactivate = await worker.snapshot();

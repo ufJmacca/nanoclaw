@@ -4,12 +4,13 @@ export interface MattermostContractResponse {
     get(name: string): string | null;
   };
   json(): Promise<unknown>;
+  arrayBuffer?(): Promise<ArrayBuffer>;
 }
 
 export interface MattermostContractRequestInit {
   method: 'GET' | 'POST' | 'PUT' | 'DELETE';
   headers: Record<string, string>;
-  body?: string;
+  body?: string | FormData;
   signal: AbortSignal;
 }
 
@@ -117,6 +118,7 @@ export interface MattermostCreatePostInput {
   message: string;
   rootId?: string;
   pendingPostId?: string;
+  fileIds?: readonly string[];
 }
 
 export interface MattermostContractPost {
@@ -126,6 +128,22 @@ export interface MattermostContractPost {
   rootId: string;
   message: string;
   createAt: number;
+  fileIds: string[];
+}
+
+export interface MattermostContractUploadFile {
+  filename: string;
+  mimeType: string;
+  data: Buffer;
+}
+
+export interface MattermostContractFileInfo {
+  id: string;
+  postId: string;
+  channelId: string;
+  name: string;
+  mimeType: string;
+  size: number;
 }
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
@@ -331,9 +349,13 @@ export class MattermostContractApi {
 
   async createPost(input: MattermostCreatePostInput): Promise<MattermostContractPost> {
     responseId(input.channelId, 'channel');
-    assertNonEmptyString(input.message, 'post message');
+    if (typeof input.message !== 'string') throw new Error('Mattermost contract post message is invalid');
     if (input.rootId !== undefined) responseId(input.rootId, 'root post');
     if (input.pendingPostId !== undefined) assertNonEmptyString(input.pendingPostId, 'pending post id');
+    const fileIds = validateFileIds(input.fileIds ?? []);
+    if (input.message.length === 0 && fileIds.length === 0) {
+      throw new Error('Mattermost contract post message is invalid');
+    }
     const response = await this.rawRequest(
       'POST',
       '/api/v4/posts',
@@ -342,15 +364,80 @@ export class MattermostContractApi {
         message: input.message,
         ...(input.rootId === undefined ? {} : { root_id: input.rootId }),
         ...(input.pendingPostId === undefined ? {} : { pending_post_id: input.pendingPostId }),
+        ...(fileIds.length === 0 ? {} : { file_ids: fileIds }),
       },
       true,
     );
     assertSuccessfulResponse(response, 'create post');
     const post = parsePost(await parseJson(response, 'create post'));
-    if (post.channelId !== input.channelId || post.rootId !== (input.rootId ?? '') || post.message !== input.message) {
+    if (
+      post.channelId !== input.channelId ||
+      post.rootId !== (input.rootId ?? '') ||
+      post.message !== input.message ||
+      !sameStringArray(post.fileIds, fileIds)
+    ) {
       throw new Error('Mattermost contract created post response identity was invalid');
     }
     return post;
+  }
+
+  async uploadFiles(channelId: string, files: readonly MattermostContractUploadFile[]): Promise<string[]> {
+    responseId(channelId, 'channel');
+    if (files.length < 1 || files.length > 5) throw new Error('Mattermost contract upload files are invalid');
+    const form = new FormData();
+    for (const file of files) {
+      validateUploadFile(file);
+      form.append('files', new Blob([file.data], { type: file.mimeType }), file.filename);
+    }
+    const response = await this.rawRequest(
+      'POST',
+      `/api/v4/files?channel_id=${encodeURIComponent(channelId)}`,
+      form,
+      true,
+    );
+    assertSuccessfulResponse(response, 'upload files');
+    const body = await parseJson(response, 'upload files');
+    if (!isRecord(body) || !Array.isArray(body.file_infos) || body.file_infos.length !== files.length) {
+      throw new Error('Mattermost contract upload files response was invalid');
+    }
+    const fileIds = body.file_infos.map((value) => {
+      if (!isRecord(value)) throw new Error('Mattermost contract upload files response was invalid');
+      return responseId(value.id, 'file');
+    });
+    if (new Set(fileIds).size !== fileIds.length) {
+      throw new Error('Mattermost contract upload files response was invalid');
+    }
+    return fileIds;
+  }
+
+  async getFileInfo(fileId: string): Promise<MattermostContractFileInfo> {
+    const response = await this.rawRequest('GET', `/api/v4/files/${encodedId(fileId, 'file')}/info`, undefined, true);
+    assertSuccessfulResponse(response, 'get file info');
+    const info = parseFileInfo(await parseJson(response, 'get file info'));
+    if (info.id !== fileId) throw new Error('Mattermost contract file info response identity was invalid');
+    return info;
+  }
+
+  async downloadFile(fileId: string): Promise<Buffer> {
+    const response = await this.rawRequest(
+      'GET',
+      `/api/v4/files/${encodedId(fileId, 'file')}`,
+      undefined,
+      true,
+      'binary',
+    );
+    assertSuccessfulResponse(response, 'download file');
+    if (typeof response.arrayBuffer !== 'function') {
+      throw new Error('Mattermost contract download file response was invalid');
+    }
+    const body = await response.arrayBuffer().then(
+      (value) => value,
+      () => {
+        throw new Error('Mattermost contract download file response was invalid');
+      },
+    );
+    if (!(body instanceof ArrayBuffer)) throw new Error('Mattermost contract download file response was invalid');
+    return Buffer.from(body);
   }
 
   async getPost(postId: string): Promise<MattermostContractPost> {
@@ -440,10 +527,11 @@ export class MattermostContractApi {
     path: string,
     body?: unknown,
     authenticated = false,
+    responseType: 'json' | 'binary' = 'json',
   ): Promise<MattermostContractResponse> {
     const token = authenticated ? requiredAdminToken(this.config.adminToken) : null;
     for (let attempt = 1; attempt <= this.maxRequestAttempts; attempt += 1) {
-      const response = await this.singleRequest(method, path, body, token).then(
+      const response = await this.singleRequest(method, path, body, token, responseType).then(
         (value) => value,
         () => null,
       );
@@ -467,18 +555,20 @@ export class MattermostContractApi {
     path: string,
     body: unknown,
     token: string | null,
+    responseType: 'json' | 'binary',
   ): Promise<MattermostContractResponse> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.requestTimeoutMs);
     try {
+      const multipart = body instanceof FormData;
       return await this.fetchImpl(`${this.baseUrl}${path}`, {
         method,
         headers: {
-          Accept: 'application/json',
+          Accept: responseType === 'binary' ? '*/*' : 'application/json',
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
-          ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+          ...(body === undefined || multipart ? {} : { 'Content-Type': 'application/json' }),
         },
-        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        ...(body === undefined ? {} : { body: multipart ? body : JSON.stringify(body) }),
         signal: controller.signal,
       });
     } finally {
@@ -594,8 +684,25 @@ function parsePost(value: unknown): MattermostContractPost {
     channelId: responseId(value.channel_id, 'channel'),
     userId: responseId(value.user_id, 'user'),
     rootId: value.root_id === '' ? '' : responseId(value.root_id, 'root post'),
-    message: responseString(value.message, 'post message'),
+    message: responseText(value.message, 'post message'),
     createAt,
+    fileIds: value.file_ids === undefined || value.file_ids === null ? [] : validateFileIds(value.file_ids),
+  };
+}
+
+function parseFileInfo(value: unknown): MattermostContractFileInfo {
+  if (!isRecord(value)) throw new Error('Mattermost contract file info response was invalid');
+  const size = value.size;
+  if (typeof size !== 'number' || !Number.isSafeInteger(size) || size < 0) {
+    throw new Error('Mattermost contract file size response was invalid');
+  }
+  return {
+    id: responseId(value.id, 'file'),
+    postId: responseId(value.post_id, 'post'),
+    channelId: responseId(value.channel_id, 'channel'),
+    name: responseString(value.name, 'file name'),
+    mimeType: responseString(value.mime_type, 'file MIME type'),
+    size,
   };
 }
 
@@ -624,6 +731,36 @@ function responseString(value: unknown, label: string): string {
     throw new Error(`Mattermost contract ${label} response was invalid`);
   }
   return value;
+}
+
+function responseText(value: unknown, label: string): string {
+  if (typeof value !== 'string') throw new Error(`Mattermost contract ${label} response was invalid`);
+  return value;
+}
+
+function validateFileIds(value: unknown): string[] {
+  if (!Array.isArray(value) || value.length > 5) {
+    throw new Error('Mattermost contract file ids are invalid');
+  }
+  const ids = value.map((id) => responseId(id, 'file'));
+  if (new Set(ids).size !== ids.length) throw new Error('Mattermost contract file ids are invalid');
+  return ids;
+}
+
+function validateUploadFile(file: MattermostContractUploadFile): void {
+  if (
+    !file ||
+    typeof file !== 'object' ||
+    !/^[A-Za-z0-9][A-Za-z0-9._ -]{0,239}$/.test(file.filename) ||
+    !/^[A-Za-z0-9!#$&^_.+-]+\/[A-Za-z0-9!#$&^_.+-]+$/.test(file.mimeType) ||
+    !Buffer.isBuffer(file.data)
+  ) {
+    throw new Error('Mattermost contract upload file is invalid');
+  }
+}
+
+function sameStringArray(actual: readonly string[], expected: readonly string[]): boolean {
+  return actual.length === expected.length && actual.every((value, index) => value === expected[index]);
 }
 
 function assertNonEmptyString(value: unknown, label: string): asserts value is string {

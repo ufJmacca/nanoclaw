@@ -230,6 +230,10 @@ function formatAttachments(attachments: any[] | undefined): string {
     const type = a.type || 'file';
     const localPath = a.localPath ? `/workspace/${a.localPath}` : '';
     const url = a.url || '';
+    if (typeof a.unavailable === 'string' && a.unavailable) {
+      const reason = a.unavailable.replace(/_/g, ' ');
+      return `[${type}: ${escapeXml(name)} — unavailable: ${escapeXml(reason)}]`;
+    }
     if (localPath) {
       return `[${type}: ${escapeXml(name)} — saved to ${escapeXml(localPath)}]`;
     }
