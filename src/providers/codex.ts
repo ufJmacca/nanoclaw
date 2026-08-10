@@ -11,15 +11,37 @@
  *   wake with container-appropriate MCP server paths, without racing
  *   other sessions or leaking per-session paths back to the host.
  *
- * Env passthrough covers the two knobs that are read at runtime:
+ * Env passthrough covers the knobs that are read at runtime:
  *   OPENAI_API_KEY  — fallback auth when auth.json isn't a subscription token
  *   CODEX_MODEL     — model override if the user wants something other than the default
+ *   CODEX_REASONING_EFFORT — reasoning override for supported models
  *   OPENAI_BASE_URL — rare, but supports API-compatible alternates
+ * Project-level Codex defaults are read selectively from `.env`; host process
+ * values take precedence when both are present.
  */
 import fs from 'fs';
 import path from 'path';
 
+import { readEnvFile } from '../env.js';
 import { registerProviderContainerConfig } from './provider-container-registry.js';
+
+const CODEX_PROJECT_DEFAULT_KEYS = ['CODEX_MODEL', 'CODEX_REASONING_EFFORT'] as const;
+
+export function resolveCodexContainerEnvironment(
+  hostEnv: NodeJS.ProcessEnv,
+  projectDefaults: Readonly<Record<string, string>>,
+): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const key of ['OPENAI_API_KEY', 'OPENAI_BASE_URL'] as const) {
+    const value = hostEnv[key];
+    if (value) env[key] = value;
+  }
+  for (const key of CODEX_PROJECT_DEFAULT_KEYS) {
+    const value = hostEnv[key] || projectDefaults[key];
+    if (value) env[key] = value;
+  }
+  return env;
+}
 
 registerProviderContainerConfig('codex', (ctx) => {
   const codexDir = path.join(ctx.sessionDir, 'codex');
@@ -36,11 +58,7 @@ registerProviderContainerConfig('codex', (ctx) => {
     }
   }
 
-  const env: Record<string, string> = {};
-  for (const key of ['OPENAI_API_KEY', 'CODEX_MODEL', 'OPENAI_BASE_URL'] as const) {
-    const value = ctx.hostEnv[key];
-    if (value) env[key] = value;
-  }
+  const env = resolveCodexContainerEnvironment(ctx.hostEnv, readEnvFile([...CODEX_PROJECT_DEFAULT_KEYS]));
 
   return {
     mounts: [{ hostPath: codexDir, containerPath: '/home/node/.codex', readonly: false }],

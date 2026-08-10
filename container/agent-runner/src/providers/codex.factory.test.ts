@@ -30,6 +30,18 @@ describe('createProvider (codex)', () => {
     const p = new CodexProvider();
     expect(p.supportsNativeSlashCommands).toBe(false);
   });
+
+  it('accepts Ultra reasoning for supported Codex models', () => {
+    expect(
+      () => new CodexProvider({ env: { CODEX_MODEL: 'gpt-5.6-sol', CODEX_REASONING_EFFORT: 'ultra' } }),
+    ).not.toThrow();
+  });
+
+  it('rejects invalid Codex reasoning effort configuration', () => {
+    expect(() => new CodexProvider({ env: { CODEX_REASONING_EFFORT: 'extreme' } })).toThrow(
+      /Invalid CODEX_REASONING_EFFORT/,
+    );
+  });
 });
 
 describe('resolveClaudeImports', () => {
