@@ -20,10 +20,7 @@ function log(msg: string): void {
 }
 
 const INIT_TIMEOUT_MS = 30_000;
-const CODEX_CONFIG_OVERRIDES = [
-  'features.use_linux_sandbox_bwrap=false',
-  'features.goals=true',
-] as const;
+const CODEX_CONFIG_OVERRIDES = ['features.use_linux_sandbox_bwrap=false', 'features.goals=true'] as const;
 
 /**
  * Errors from `thread/resume` that indicate the thread ID is unusable —
@@ -609,6 +606,7 @@ export interface TurnParams {
   threadId: string;
   inputText: string;
   model?: string;
+  effort?: string;
   cwd?: string;
 }
 
@@ -617,6 +615,7 @@ export async function startCodexTurn(server: AppServer, params: TurnParams): Pro
     threadId: params.threadId,
     input: [{ type: 'text', text: params.inputText }],
     model: params.model,
+    effort: params.effort,
     cwd: params.cwd,
   });
   if (resp.error) throw new Error(`turn/start failed: ${resp.error.message}`);

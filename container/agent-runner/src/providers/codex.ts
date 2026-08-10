@@ -37,6 +37,8 @@ import {
 
 /** Hard ceiling for a single turn. Guards against app-server wedging. */
 const TURN_TIMEOUT_MS = 5 * 60 * 1000;
+const CODEX_REASONING_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'] as const;
+type CodexReasoningEffort = (typeof CODEX_REASONING_EFFORTS)[number];
 
 // ── System-prompt assembly ──────────────────────────────────────────────────
 // Codex's app-server doesn't expand Claude Code's `@-import` syntax in
@@ -106,10 +108,16 @@ export class CodexProvider implements AgentProvider {
 
   private readonly mcpServers: Record<string, { command: string; args: string[]; env: Record<string, string> }>;
   private readonly model: string;
+  private readonly reasoningEffort: CodexReasoningEffort | undefined;
 
   constructor(options: ProviderOptions = {}) {
     this.mcpServers = options.mcpServers ?? {};
     this.model = (options.env?.CODEX_MODEL as string | undefined) ?? 'gpt-5.4-mini';
+    const configuredEffort = (options.env?.CODEX_REASONING_EFFORT as string | undefined)?.trim().toLowerCase();
+    if (configuredEffort !== undefined && !CODEX_REASONING_EFFORTS.includes(configuredEffort as CodexReasoningEffort)) {
+      throw new Error(`Invalid CODEX_REASONING_EFFORT: expected one of ${CODEX_REASONING_EFFORTS.join(', ')}`);
+    }
+    this.reasoningEffort = configuredEffort as CodexReasoningEffort | undefined;
   }
 
   isSessionInvalid(err: unknown): boolean {
@@ -185,6 +193,7 @@ export class CodexProvider implements AgentProvider {
             threadId!,
             text,
             self.model,
+            self.reasoningEffort,
             input.cwd,
             encodeCodexContinuation,
             () => initYielded,
@@ -226,6 +235,7 @@ async function* runOneTurn(
   threadId: string,
   inputText: string,
   model: string,
+  effort: CodexReasoningEffort | undefined,
   cwd: string,
   encodeContinuation: (threadId: string) => string,
   hasInit: () => boolean,
@@ -335,7 +345,7 @@ async function* runOneTurn(
       buffer.push({ type: 'init', continuation: encodeContinuation(threadId) });
     }
 
-    void startCodexTurn(server, { threadId, inputText, model, cwd }).catch((err) => {
+    void startCodexTurn(server, { threadId, inputText, model, effort, cwd }).catch((err) => {
       turnState.error = err instanceof Error ? err : new Error(String(err));
       turnDone = true;
       kick();

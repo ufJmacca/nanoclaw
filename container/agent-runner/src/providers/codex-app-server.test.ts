@@ -11,6 +11,7 @@ import {
   decodeCodexContinuation,
   encodeCodexContinuation,
   loadNanoclawWorkflowDynamicTools,
+  startCodexTurn,
   startOrResumeCodexThread,
   tomlBasicString,
   writeCodexMcpConfigToml,
@@ -364,5 +365,29 @@ describe('Codex feature flags', () => {
     const config = fs.readFileSync(path.join(home, '.codex', 'config.toml'), 'utf-8');
     expect(config).toContain('[features]\ngoals = true');
     expect(config).toContain('[mcp_servers.nanoclaw]');
+  });
+});
+
+describe('Codex turn settings', () => {
+  it('sends the selected model and reasoning effort on turn/start', async () => {
+    const { server, writes } = fakeAppServer();
+    const start = startCodexTurn(server, {
+      threadId: 'thread-sol-ultra',
+      inputText: 'hello',
+      model: 'gpt-5.6-sol',
+      effort: 'ultra',
+      cwd: '/workspace/agent',
+    });
+
+    await waitFor(() => writes.some((write) => write.method === 'turn/start'));
+    const request = writes.find((write) => write.method === 'turn/start')!;
+    expect(request.params).toMatchObject({
+      threadId: 'thread-sol-ultra',
+      model: 'gpt-5.6-sol',
+      effort: 'ultra',
+      cwd: '/workspace/agent',
+    });
+    resolveOutgoingRequest(server, request, {});
+    await expect(start).resolves.toBeUndefined();
   });
 });
