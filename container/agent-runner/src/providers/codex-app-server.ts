@@ -19,7 +19,7 @@ function log(msg: string): void {
   console.error(`[codex-app-server] ${msg}`);
 }
 
-const INIT_TIMEOUT_MS = 30_000;
+export const CODEX_INITIALIZE_TIMEOUT_MS = 120_000;
 const CODEX_CONFIG_OVERRIDES = ['features.use_linux_sandbox_bwrap=false', 'features.goals=true'] as const;
 
 /**
@@ -542,7 +542,7 @@ export async function initializeCodexAppServer(server: AppServer): Promise<void>
       clientInfo: { name: 'nanoclaw', version: '1.0.0' },
       capabilities: { experimentalApi: true },
     },
-    INIT_TIMEOUT_MS,
+    CODEX_INITIALIZE_TIMEOUT_MS,
   );
   if (resp.error) throw new Error(`Initialize failed: ${resp.error.message}`);
   log('Initialize successful');

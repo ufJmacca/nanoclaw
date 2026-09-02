@@ -4,13 +4,16 @@ import os from 'os';
 import path from 'path';
 
 import {
+  CODEX_INITIALIZE_TIMEOUT_MS,
   STALE_THREAD_RE,
   attachCodexAutoApproval,
   buildNanoclawWorkflowDynamicTools,
   createCodexConfigOverrides,
   decodeCodexContinuation,
   encodeCodexContinuation,
+  initializeCodexAppServer,
   loadNanoclawWorkflowDynamicTools,
+  sendCodexRequest,
   startCodexTurn,
   startOrResumeCodexThread,
   tomlBasicString,
@@ -119,6 +122,32 @@ describe('STALE_THREAD_RE', () => {
     expect(STALE_THREAD_RE.test('authentication failed')).toBe(false);
     expect(STALE_THREAD_RE.test('connection reset by peer')).toBe(false);
     expect(STALE_THREAD_RE.test('internal server error')).toBe(false);
+  });
+});
+
+describe('initializeCodexAppServer', () => {
+  it('sends the initialize request with a 120-second deadline and resolves normally', async () => {
+    const { server, writes } = fakeAppServer();
+    const initializing = initializeCodexAppServer(server);
+    const request = writes.find((write) => write.method === 'initialize');
+
+    expect(CODEX_INITIALIZE_TIMEOUT_MS).toBe(120_000);
+    expect(request).toBeDefined();
+    expect(request?.params).toEqual({
+      clientInfo: { name: 'nanoclaw', version: '1.0.0' },
+      capabilities: { experimentalApi: true },
+    });
+
+    resolveOutgoingRequest(server, request!, {});
+    await expect(initializing).resolves.toBeUndefined();
+  });
+
+  it('retains the timeout error when initialize does not respond', async () => {
+    const { server } = fakeAppServer();
+    await expect(sendCodexRequest(server, 'initialize', undefined, 1)).rejects.toThrow(
+      'Timeout waiting for initialize response (1ms)',
+    );
+    expect(server.pending.size).toBe(0);
   });
 });
 

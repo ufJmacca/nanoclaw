@@ -27,6 +27,8 @@ ARG BUN_VERSION=1.3.12
 ARG PNPM_VERSION=10.33.0
 
 # ---- System dependencies -----------------------------------------------------
+# bubblewrap: Codex Linux sandbox runtime prerequisite. NanoClaw continues to
+# disable Codex's inner sandbox because isolation is enforced by the container.
 # tini: correct PID 1 / signal forwarding so outbound.db writes finalize on
 # SIGTERM instead of being orphaned by the shell entrypoint.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
@@ -48,6 +50,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         libcups2 \
         libdrm2 \
         libxshmfence1 \
+        bubblewrap \
         ca-certificates \
         curl \
         git \
