@@ -419,7 +419,7 @@ ANTHROPIC_API_KEY=sk-ant-api03-...
 CODEX_AUTH_FILE=/absolute/path/to/auth.json
 
 # Optional runtime defaults for the built-in codex provider:
-CODEX_MODEL=gpt-5-codex
+CODEX_MODEL=gpt-6-astra
 CODEX_REASONING_EFFORT=high
 ```
 

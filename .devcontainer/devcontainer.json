@@ -18,7 +18,7 @@
       "version": "latest"
     },
     "./features/codex-cli": {
-      "version": "latest"
+      "version": "0.154.0"
     }
   },
   "postCreateCommand": "bash .devcontainer/scripts/post-create.sh",

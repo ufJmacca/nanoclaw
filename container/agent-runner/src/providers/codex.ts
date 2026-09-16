@@ -112,7 +112,7 @@ export class CodexProvider implements AgentProvider {
 
   constructor(options: ProviderOptions = {}) {
     this.mcpServers = options.mcpServers ?? {};
-    this.model = (options.env?.CODEX_MODEL as string | undefined) ?? 'gpt-5.4-mini';
+    this.model = (options.env?.CODEX_MODEL as string | undefined) ?? 'gpt-6-astra';
     const configuredEffort = (options.env?.CODEX_REASONING_EFFORT as string | undefined)?.trim().toLowerCase();
     if (configuredEffort !== undefined && !CODEX_REASONING_EFFORTS.includes(configuredEffort as CodexReasoningEffort)) {
       throw new Error(`Invalid CODEX_REASONING_EFFORT: expected one of ${CODEX_REASONING_EFFORTS.join(', ')}`);
