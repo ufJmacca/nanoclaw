@@ -8,6 +8,7 @@ import { migrate } from '../../modules/chief-of-staff/store/migrations.js';
 import { BoundedDatabase } from '../../modules/chief-of-staff/store/client.js';
 import { PriorityStore } from '../../modules/chief-of-staff/store/priorities.js';
 import type { Change, Context } from '../../modules/chief-of-staff/domain/contracts.js';
+import { connectionFault } from './connection-fault.js';
 
 let admin: pg.Client;
 let pool: pg.Pool;
@@ -28,6 +29,28 @@ const change: Change = {
   reason: 'Owner direction',
   expected_version: 0,
 };
+
+test('S01-PG04 actual connection partition is bounded and reconnects to the external target', async () => {
+  const relay = await connectionFault(parseDatabaseConfig(process.env, 'test'));
+  const partitionPool = new pg.Pool(relay.config);
+  const database = new BoundedDatabase(partitionPool, 350);
+  try {
+    assert.equal((await database.run((client) => client.query('SELECT 1 AS value'))).rows[0].value, 1);
+    relay.partition();
+    const started = Date.now();
+    await assert.rejects(
+      database.run((client) => client.query('SELECT 2 AS value')),
+      /CoS database unavailable/,
+    );
+    assert.ok(Date.now() - started < 1500, 'network stall exceeded bounded deadline');
+    relay.restore();
+    await new Promise((resolve) => setTimeout(resolve, 1050));
+    assert.equal((await database.run((client) => client.query('SELECT 3 AS value'))).rows[0].value, 3);
+  } finally {
+    await partitionPool.end();
+    await relay.close();
+  }
+});
 
 before(async () => {
   // Only the explicitly admitted separate test profile is accepted by this suite.
@@ -78,6 +101,40 @@ test('S01-T03 repeated request returns its original proposal; changed payload co
   assert.equal(first.status, 'ok');
   assert.deepEqual(await store.propose(context, request, { ...change, title: 'Pilot Alpha', kind: 'project' }), first);
   assert.equal((await store.propose(context, request, { ...change, title: 'Different' })).status, 'conflict');
+});
+
+test('S01-T05 durable outbox retains exact previews and separate approved apply work', async () => {
+  const proposal = await store.propose(context, randomUUID(), { ...change, title: 'Durable preview' });
+  const pending = await store.pendingOutbox(scope);
+  const preview = (
+    pending.items as Array<{
+      id: string;
+      kind: string;
+      payload: { proposal_id: string; confirmation_token: string };
+      expires_at: string;
+      session_id: string;
+    }>
+  ).find((item) => item.payload.proposal_id === proposal.proposal_id);
+  assert.ok(preview);
+  assert.equal(preview.kind, 'approval_preview');
+  assert.equal(preview.session_id, context.sessionId);
+  assert.equal(preview.payload.confirmation_token, proposal.confirmation_token);
+  assert.ok(Date.parse(preview.expires_at) > Date.now());
+  assert.equal((await store.acknowledgePreview(scope, preview.id)).status, 'ok');
+  assert.ok(
+    !(await store.pendingOutbox(scope)).items ||
+      !JSON.stringify((await store.pendingOutbox(scope)).items).includes('Durable preview'),
+  );
+  await store.decide(
+    { ...context, ingressId: randomUUID() },
+    String(proposal.proposal_id),
+    String(proposal.confirmation_token),
+    'approve',
+  );
+  const ready = (await store.pendingOutbox(scope)).items as Array<{ kind: string; payload: { proposal_id: string } }>;
+  assert.ok(ready.some((item) => item.kind === 'proposal_apply' && item.payload.proposal_id === proposal.proposal_id));
+  assert.equal((await store.apply(scope, String(proposal.proposal_id))).status, 'ok');
+  assert.ok(!JSON.stringify((await store.pendingOutbox(scope)).items).includes(String(proposal.proposal_id)));
 });
 
 test('S01-T04 wrong owner, foreign scope, bad token and decision replay cannot approve', async () => {

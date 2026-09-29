@@ -31,6 +31,33 @@ async function event(
 
 export class PriorityStore {
   constructor(readonly database: BoundedDatabase) {}
+  async pendingOutbox(scopeId: string): Promise<Result> {
+    return this.transaction(async (client) => {
+      const items = (
+        await client.query(
+          `SELECT o.id,o.kind,o.payload,p.session_id,p.expires_at
+        FROM cos.outbox o JOIN cos.scopes s ON s.id=o.scope_id
+        JOIN cos.proposals p ON p.id=o.payload->>'proposal_id' AND p.scope_id=o.scope_id
+        WHERE o.scope_id=$1 AND s.status='active' AND o.delivered_at IS NULL
+        AND ((o.kind='approval_preview' AND p.state='pending' AND p.expires_at>clock_timestamp())
+          OR (o.kind='proposal_apply' AND p.state='approved'))
+        ORDER BY o.created_at,o.id LIMIT 20`,
+          [scopeId],
+        )
+      ).rows;
+      return { status: 'ok', items };
+    }, false);
+  }
+  async acknowledgePreview(scopeId: string, id: string): Promise<Result> {
+    return this.transaction(async (client) => {
+      const changed = await client.query(
+        `UPDATE cos.outbox SET delivered_at=COALESCE(delivered_at,clock_timestamp())
+        WHERE id=$1 AND scope_id=$2 AND kind='approval_preview' RETURNING id`,
+        [id, scopeId],
+      );
+      return { status: changed.rowCount === 1 ? 'ok' : 'denied' };
+    });
+  }
 
   private async transaction(operation: (client: PoolClient) => Promise<Result>, mutation = true): Promise<Result> {
     try {
