@@ -4,9 +4,10 @@ set -euo pipefail
 umask 077
 [[ "$(uname -s)" == Darwin ]] || { echo 'cos:release requires the Mac host' >&2; exit 1; }
 [[ $# == 6 && "$1" == --slice && "$2" == S01 && "$3" == --target && "$4" == pi && "$5" == --db-profile ]] || {
-  echo 'Usage: cos:release --slice S01 --target pi --db-profile test' >&2; exit 1;
+  echo 'Usage: cos:release --slice S01 --target pi --db-profile test|runtime-disposable' >&2; exit 1;
 }
-[[ "$6" == test ]] || { echo 'Runtime-disposable release coordination is not yet available; no database was selected.' >&2; exit 1; }
+profile=$6
+[[ "$profile" == test || "$profile" == runtime-disposable ]] || exit 1
 [[ -z "${DOCKER_HOST:-}${DOCKER_CONTEXT:-}${DOCKER_TLS_VERIFY:-}${DOCKER_CERT_PATH:-}${BUILDX_BUILDER:-}" ]] || {
   echo 'Explicit Docker endpoint overrides are not accepted for releases.' >&2; exit 1;
 }
@@ -48,11 +49,13 @@ builder=$(cli field "$id" builder)
 context=$(cli field "$id" context)
 assets=$(cli field "$id" assets)
 test_directory="$root/.cos-plan-state/release-tests/$id"
-certificate=$(cli certificate)
-[[ -f "$certificate" && ! -L "$certificate" ]] || { echo 'The selected test CA file is unavailable.' >&2; exit 1; }
-cp "$certificate" "$test_directory/ca.pem"
-chmod 600 "$test_directory/ca.pem"
-cli profile "$id"
+if [[ "$profile" == test ]]; then
+  certificate=$(cli certificate)
+  [[ -f "$certificate" && ! -L "$certificate" ]] || { echo 'The selected test CA file is unavailable.' >&2; exit 1; }
+  cp "$certificate" "$test_directory/ca.pem"
+  chmod 600 "$test_directory/ca.pem"
+  cli profile "$id"
+fi
 fixture_image=$(docker inspect --format '{{.Image}}' "$dev")
 runner_volume=$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/workspace/container/agent-runner/node_modules"}}{{.Name}}{{end}}{{end}}' "$dev")
 [[ "$fixture_image" =~ ^sha256:[a-f0-9]{64}$ && "$runner_volume" =~ ^[a-zA-Z0-9_.-]+$ ]] || exit 1
@@ -81,8 +84,15 @@ runner_checks() {
 }
 check root root_checks
 check runner runner_checks
-check slice cli fixture "$id" slice "$root" "$fixture_image" "$runner_volume"
-check demo cli fixture "$id" demo "$root" "$fixture_image" "$runner_volume"
+source_fixture() {
+  if [[ "$profile" == test ]]; then
+    cli fixture "$id" "$1" "$root" "$fixture_image" "$runner_volume"
+  else
+    bash scripts/cos-runtime-fixture.sh "$id-$1" source "$1" "$root" "$fixture_image" "$fixture_image" "$runner_volume" ''
+  fi
+}
+check slice source_fixture slice
+check demo source_fixture demo
 for target in host agent-standard agent-documents; do
   tag=$(cli field "$id" "$target-tag")
   printf 'Building Linux/ARM64 %s\n' "$target"
@@ -107,6 +117,10 @@ host_checks() {
     --input-type=module -e 'await import("/release/bootstrap.mjs"); const {default:D}=await import("/release/node_modules/better-sqlite3/lib/index.js");const d=new D(":memory:");if(d.prepare("select 1 as n").get().n!==1)process.exit(1);d.close()' || return
   local worker
   for worker in "$standard_image" "$documents_image"; do
+    if [[ "$profile" == runtime-disposable ]]; then
+      bash scripts/cos-runtime-fixture.sh "$id-host-${worker:7:12}" packaged slice "$volume_root" "$host_image" "$worker" '' "$volume" || return
+      continue
+    fi
     docker run --rm --pull=never --user 1000:1000 --group-add 0 \
       --env-file "$test_directory/test.env" \
       --mount "type=bind,src=$test_directory/ca.pem,dst=/fixture/ca.pem,readonly" \

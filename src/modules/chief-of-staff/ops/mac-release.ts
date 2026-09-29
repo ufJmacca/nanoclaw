@@ -41,6 +41,25 @@ export function selectTestEnvironment(input: NodeJS.ProcessEnv, certificate: str
   return result;
 }
 
+export const RUNTIME_ENVIRONMENT_KEYS = TEST_ENVIRONMENT_KEYS.filter((key) => key !== 'COS_TEST_TARGET_ID').map((key) =>
+  key.replace('COS_TEST_PG', 'COS_PG'),
+);
+
+/** Select the runtime profile explicitly; never fall back to test credentials or forward unrelated secrets. */
+export function selectRuntimeEnvironment(input: NodeJS.ProcessEnv, certificate: string): Record<string, string> {
+  if (!certificate.startsWith('/') || /[\0\r\n]/.test(certificate)) throw new Error('unsafe_runtime_environment');
+  const result: Record<string, string> = {};
+  for (const key of RUNTIME_ENVIRONMENT_KEYS) {
+    const value = input[key];
+    if (!value) throw new Error('runtime_profile_incomplete');
+    if (/[\0\r\n]/.test(value)) throw new Error('unsafe_runtime_environment');
+    result[key] = value;
+  }
+  if (result.COS_PGSSLMODE !== 'verify-full') throw new Error('verified_runtime_tls_required');
+  result.COS_PGSSLROOTCERT = certificate;
+  return result;
+}
+
 export function completeLocalRelease(
   manifest: Omit<ReleaseManifest, 'checks'>,
   checks: ReleaseManifest['checks'],

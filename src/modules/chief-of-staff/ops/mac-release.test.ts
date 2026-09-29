@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest';
-import { completeLocalRelease, selectTestEnvironment } from './mac-release.js';
+import { completeLocalRelease, selectTestEnvironment, selectRuntimeEnvironment } from './mac-release.js';
 import { fixtureRelease } from '../../../contracts/chief-of-staff/release-fixture.js';
 
 it('cannot produce a transferable manifest from failed, missing or differently built checks', () => {
@@ -48,4 +48,25 @@ it('exports only the explicitly selected test profile and refuses unsafe env-fil
     selectTestEnvironment({ ...input, COS_TEST_PGPASSWORD: 'line\nbreak' }, '/fixture/certificate.pem'),
   ).toThrow('unsafe_test_environment');
   expect(() => selectTestEnvironment({}, '/fixture/certificate.pem')).toThrow('test_profile_incomplete');
+});
+it('selects runtime credentials separately without inheriting a test marker or another account', () => {
+  const env = {
+    COS_PGHOST: '192.168.50.10',
+    COS_PGPORT: '5432',
+    COS_PGDATABASE: 'fixture',
+    COS_PGUSER: 'runtime',
+    COS_PGPASSWORD: 'synthetic',
+    COS_PGSSLMODE: 'verify-full',
+    COS_PGSSLROOTCERT: '/original/ca.pem',
+    COS_PG_MIGRATION_USER: 'migration',
+    COS_PG_MIGRATION_PASSWORD: 'synthetic-admin',
+    COS_TEST_PGPASSWORD: 'excluded',
+    COS_TEST_TARGET_ID: 'excluded',
+    MATTERMOST_BOT_TOKEN: 'excluded',
+  };
+  const selected = selectRuntimeEnvironment(env, '/fixture/ca.pem');
+  expect(Object.keys(selected)).toHaveLength(9);
+  expect(selected.COS_PGSSLROOTCERT).toBe('/fixture/ca.pem');
+  expect(selected.COS_TEST_TARGET_ID).toBeUndefined();
+  expect(selected.MATTERMOST_BOT_TOKEN).toBeUndefined();
 });
