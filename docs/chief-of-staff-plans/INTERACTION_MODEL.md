@@ -16,6 +16,8 @@ The current fork includes a native Mattermost adapter and strict channel-specifi
 
 Start with one shared coordinator conversation and stable mission/decision IDs. Replies may be visually grouped in Mattermost threads only where the existing adapter supports this without changing strict session semantics. Thread presentation is optional; it is not an S01 prerequisite and must never be used as a security boundary. Do not change the strict topology to implement it. Specialist attempts get their own isolated execution AgentGroups under S05 and return results through the host, not through other Mattermost channels.
 
+The owner explicitly confirmed this topology: channel messages and reply threads share the main CoS context; only specialist agents have their own execution contexts outside that conversation. Verify that replying in a Mattermost thread reuses the coordinator session rather than creating a new context.
+
 ## 2. What the owner sees
 
 | User action / system event | Visible experience | State / control |
