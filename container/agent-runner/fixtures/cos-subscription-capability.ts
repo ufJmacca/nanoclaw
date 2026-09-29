@@ -36,6 +36,13 @@ const token = jwt({
   email: 'fixture@example.invalid',
   'https://api.openai.com/auth': { chatgpt_account_id: 'fixture-account', chatgpt_plan_type: 'plus' },
 });
+const rotatedToken = jwt({
+  exp: 4102444800,
+  email: 'fixture@example.invalid',
+  jti: 'rotated',
+  'https://api.openai.com/auth': { chatgpt_account_id: 'fixture-account', chatgpt_plan_type: 'plus' },
+});
+let refreshCalls = 0;
 fs.writeFileSync(
   '/home/node/.codex/auth.json',
   JSON.stringify({
@@ -111,6 +118,7 @@ execFileSync(
   { stdio: 'ignore' },
 );
 process.env.CODEX_CA_CERTIFICATE = '/tmp/fixture-ca.pem';
+process.env.CODEX_REFRESH_TOKEN_URL_OVERRIDE = 'https://127.0.0.1:8787/fixture/oauth/token';
 function respond(body: any, send: (text: string) => void) {
   if (body.generate !== false) requests.push(body);
   console.log(
@@ -190,10 +198,26 @@ const upstream = Bun.serve({
       JSON.stringify({
         path: url.pathname,
         method: req.method,
-        authFixture: req.headers.get('authorization') === `Bearer ${token}`,
+        authFixture: [token, rotatedToken].some((value) => req.headers.get('authorization') === `Bearer ${value}`),
       }),
     );
     if (server.upgrade(req)) return;
+    if (url.pathname === '/fixture/oauth/token') {
+      const raw = await req.text();
+      const body = req.headers.get('content-type')?.includes('application/json')
+        ? JSON.parse(raw)
+        : Object.fromEntries(new URLSearchParams(raw));
+      assert.equal(body.grant_type, 'refresh_token');
+      assert.equal(body.refresh_token, 'fixture-refresh');
+      refreshCalls++;
+      return Response.json({
+        access_token: rotatedToken,
+        id_token: rotatedToken,
+        refresh_token: 'fixture-refresh-rotated',
+        token_type: 'Bearer',
+        expires_in: 3600,
+      });
+    }
     if (url.pathname.endsWith('/accounts/check'))
       return Response.json({
         accounts: [
@@ -279,8 +303,18 @@ async function turn(threadId: string, text: string) {
 }
 try {
   await connect();
-  const account = await sendCodexRequest(server, 'account/read', { refreshToken: false });
+  const account = await sendCodexRequest(server, 'account/read', { refreshToken: true });
   assert.equal((account.result as any)?.account?.type, 'chatgpt');
+  const refreshed = JSON.parse(fs.readFileSync('/home/node/.codex/auth.json', 'utf8'));
+  assert.equal(refreshed.tokens.refresh_token, 'fixture-refresh-rotated');
+  assert.equal(refreshed.tokens.access_token, rotatedToken);
+  killCodexAppServer(server);
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  // The native refresh owner retains the rotating credential. Query runtimes
+  // consume an access-only native cache and never receive a refresh credential.
+  refreshed.tokens.refresh_token = '';
+  fs.writeFileSync('/home/node/.codex/auth.json', JSON.stringify(refreshed));
+  await connect();
   const created = await sendCodexRequest(server, 'thread/start', params);
   if (created.error) throw Error(JSON.stringify(created.error));
   const threadId = (created.result as any).thread.id;
@@ -297,7 +331,9 @@ try {
   assert.deepEqual(dispatched, ['cos_context_get']);
   assert.equal(fs.existsSync('/tmp/escaped'), false);
   assert.equal(JSON.stringify(requests).includes(token), false);
+  assert.equal(JSON.stringify(requests).includes(rotatedToken), false);
   assert.equal(JSON.stringify(requests).includes('fixture-refresh'), false);
+  assert.equal(refreshCalls, 1);
   const outputs = requests
     .flatMap((request) => request.input ?? [])
     .filter((item: any) => item.type.includes('call_output'));
@@ -338,6 +374,8 @@ try {
       dispatched,
       escapeFile: false,
       credentialCanariesAbsent: true,
+      nativeRefreshCalls: refreshCalls,
+      accessOnlyQueryCache: true,
     }),
   );
 } finally {
