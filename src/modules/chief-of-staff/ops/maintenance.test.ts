@@ -25,6 +25,14 @@ beforeEach(() => {
 });
 afterEach(() => fs.rmSync(parent, { recursive: true, force: true }));
 describe('S01-PG02 durable target maintenance fencing', () => {
+  it('finishes a recovered rollback lease while keeping admission closed for the next deployment', async () => {
+    const lease = beginMaintenance(root, binding, 'release-old', 'deployment');
+    await confirmQuiescence(root, binding, lease, async () => ({ activeCoordinators: 0, activeDatabaseOperations: 0 }));
+    await finishMaintenance(root, binding, lease, async () => true, false);
+    expect(readTarget(root, binding)).toMatchObject({ maintenance: true, maintenanceId: null });
+    expect(admittedGeneration(root, binding)).toBeNull();
+    expect(beginMaintenance(root, binding, 'release-new', 'deployment').generation).toBeGreaterThan(lease.generation);
+  });
   it('persists closed admission before quiescing and returns one stable lease after an interrupted reply', async () => {
     const lease = beginMaintenance(root, binding, 'test-fixture-1', 'runtime-disposable');
     expect(readTarget(root, binding)).toMatchObject({ maintenance: true, generation: lease.generation });

@@ -17,7 +17,12 @@ export type MaintenanceLease = {
   generation: number;
   purpose: 'runtime-disposable' | 'deployment';
 };
-type Receipt = MaintenanceLease & { version: 1; bindingDigest: string; phase: 'closing' | 'quiescent' | 'complete' };
+type Receipt = MaintenanceLease & {
+  version: 1;
+  bindingDigest: string;
+  phase: 'closing' | 'quiescent' | 'complete';
+  reopen?: boolean;
+};
 function receipt(root: string, binding: TargetBinding): Receipt {
   const value = readPrivate<Receipt>(path.join(root, 'maintenance.json'));
   if (
@@ -29,7 +34,8 @@ function receipt(root: string, binding: TargetBinding): Receipt {
     !Number.isSafeInteger(value.generation) ||
     value.generation < 1 ||
     !['runtime-disposable', 'deployment'].includes(value.purpose) ||
-    !['closing', 'quiescent', 'complete'].includes(value.phase)
+    !['closing', 'quiescent', 'complete'].includes(value.phase) ||
+    (value.reopen !== undefined && typeof value.reopen !== 'boolean')
   )
     throw new Error('maintenance_history_conflict');
   return value;
@@ -122,18 +128,20 @@ export async function finishMaintenance(
   binding: TargetBinding,
   lease: MaintenanceLease,
   reconcile: () => Promise<boolean>,
+  reopen = true,
 ): Promise<void> {
   const release = acquireTargetLock(root);
   try {
     const { state, record } = owned(root, binding, lease);
     if (!['quiescent', 'complete'].includes(record.phase)) throw new Error('target_not_quiescent');
+    if (record.phase === 'complete' && (record.reopen ?? true) !== reopen) throw new Error('reconciliation_required');
     if (!(await reconcile())) throw new Error('reconciliation_required');
     owned(root, binding, lease);
     // Completion first; an interrupted final state write retains closed admission.
-    writeAtomic(root, 'maintenance.json', { ...record, phase: 'complete' });
+    writeAtomic(root, 'maintenance.json', { ...record, phase: 'complete', reopen });
     writeAtomic(root, 'state.json', {
       ...state,
-      maintenance: false,
+      maintenance: !reopen,
       maintenanceId: null,
       generation: state.generation + 1,
     });
@@ -148,7 +156,7 @@ export function admittedGeneration(root: string, binding: TargetBinding): number
   if (state.maintenance || state.maintenanceId) return null;
   if (!state.maintenanceHistory) throw new Error('maintenance_history_missing');
   const record = receipt(root, binding);
-  if (record.phase !== 'complete' || record.generation + 1 !== state.generation)
+  if (record.phase !== 'complete' || record.reopen === false || record.generation + 1 !== state.generation)
     throw new Error('maintenance_history_conflict');
   return state.generation;
 }
