@@ -8,6 +8,7 @@
   "scripts": {
     "cos:db": "tsx src/modules/chief-of-staff/ops/db-cli.ts",
     "cos:test": "tsx src/contracts/chief-of-staff/run.ts",
+    "cos:demo": "tsx src/contracts/chief-of-staff/run.ts --demo",
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
