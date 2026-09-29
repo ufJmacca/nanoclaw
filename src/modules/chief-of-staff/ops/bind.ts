@@ -21,9 +21,9 @@ export async function bindCoordinator(
   request: BindingRequest,
   dependencies: { facts(binding: CosBinding): Promise<ChannelFacts>; bindScope(binding: CosBinding): Promise<Result> },
 ): Promise<CosBinding> {
+  if (request.provider !== 'codex') throw new Error('unsupported_coordinator_provider');
   const db = getDb();
   if (
-    !['codex', 'claude'].includes(request.provider) ||
     [request.scopeId, request.instanceId, request.channelId, request.ownerId, request.botId].some(
       (value) => !/^[a-zA-Z0-9_-]{1,128}$/.test(value),
     )

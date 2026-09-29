@@ -228,9 +228,15 @@ export class PriorityStore {
       };
       let changed = 0;
       if (change.record_id) {
+        // The scope lock serializes applies. Treat a competing active charter like
+        // a stale version so the proposal and its outbox work settle as a conflict.
         const update = await client.query(
           `UPDATE cos.records SET title=$3,description=$4,lifecycle=$5,version=version+1,
-          provenance=$6,updated_at=clock_timestamp() WHERE id=$1 AND scope_id=$2 AND version=$7 AND kind=$8`,
+          provenance=$6,updated_at=clock_timestamp() WHERE id=$1 AND scope_id=$2 AND version=$7 AND kind=$8
+          AND ($8 <> 'charter' OR $5 <> 'active' OR NOT EXISTS (
+            SELECT 1 FROM cos.records other WHERE other.scope_id=$2 AND other.kind='charter'
+            AND other.lifecycle='active' AND other.id<>$1
+          ))`,
           [
             recordId,
             scopeId,

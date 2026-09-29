@@ -36,6 +36,16 @@ function fixture() {
   return { session, legacy, facts, bindScope };
 }
 describe('S01 owner-run private coordinator setup', () => {
+  it('refuses unsupported coordinator providers before setup', async () => {
+    const facts = vi.fn(),
+      bindScope = vi.fn();
+    await expect(bindCoordinator({ ...request, provider: 'claude' }, { facts, bindScope })).rejects.toThrow(
+      'unsupported_coordinator_provider',
+    );
+    expect(facts).not.toHaveBeenCalled();
+    expect(bindScope).not.toHaveBeenCalled();
+    expect(getDb().prepare('SELECT count(*) AS count FROM cos_identity_boundaries').get()).toEqual({ count: 0 });
+  });
   it('binds the verified native shared identity and preserves old state behind the fresh root', async () => {
     const f = fixture();
     const binding = await bindCoordinator(request, f);

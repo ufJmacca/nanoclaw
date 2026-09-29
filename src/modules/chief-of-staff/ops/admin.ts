@@ -21,7 +21,7 @@ export function parseAdminArguments(args: string[]): AdminArguments {
       throw new Error('invalid_admin_arguments');
     values[args[i]] = args[i + 1];
   }
-  if (!['codex', 'claude'].includes(values['--provider'])) throw new Error('invalid_admin_arguments');
+  if (values['--provider'] !== 'codex') throw new Error('invalid_admin_arguments');
   return {
     command: 'bind',
     binding: {

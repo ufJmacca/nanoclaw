@@ -364,3 +364,63 @@ test('S01-PG02 a real maintenance lease excludes runtime operations across indep
     await maintenance.end();
   }
 });
+
+test('S01 active-charter edits settle collisions once, including concurrent activation', async () => {
+  const approved = async (value: Change) => {
+    const proposal = await store.propose(context, randomUUID(), value);
+    assert.equal(proposal.status, 'ok');
+    const id = String(proposal.proposal_id);
+    assert.equal(
+      (await store.decide({ ...context, ingressId: randomUUID() }, id, String(proposal.confirmation_token), 'approve'))
+        .status,
+      'ok',
+    );
+    return id;
+  };
+  const create = async (title: string, lifecycle: Change['lifecycle']) => {
+    const id = await approved({ ...change, kind: 'charter', title, lifecycle });
+    const applied = await store.apply(scope, id);
+    assert.equal(applied.status, 'ok');
+    return String(applied.record_id);
+  };
+  const active = await create('Current charter', 'active');
+  const candidates = await Promise.all(
+    ['Alternative one', 'Alternative two'].map((title) => create(title, 'inactive')),
+  );
+  const activate = (id: string) =>
+    approved({ ...change, kind: 'charter', title: 'Alternative charter', record_id: id, expected_version: 1 });
+  const collisions = await Promise.all(candidates.map(activate));
+  for (const id of collisions) {
+    assert.equal((await store.apply(scope, id)).status, 'conflict');
+    assert.equal((await store.apply(scope, id)).status, 'conflict');
+    const state = await pool.query(
+      `SELECT p.state, o.delivered_at IS NOT NULL AS settled
+      FROM cos.proposals p JOIN cos.outbox o ON o.id='apply-'||p.id WHERE p.id=$1`,
+      [id],
+    );
+    assert.deepEqual(state.rows, [{ state: 'conflict', settled: true }]);
+    assert.equal(
+      (await pool.query("SELECT count(*)::int AS n FROM cos.events WHERE resource_id=$1 AND kind='conflict'", [id]))
+        .rows[0].n,
+      1,
+    );
+  }
+  const deactivate = await approved({
+    ...change,
+    kind: 'charter',
+    title: 'Retired charter',
+    record_id: active,
+    expected_version: 1,
+    lifecycle: 'inactive',
+  });
+  assert.equal((await store.apply(scope, deactivate)).status, 'ok');
+  const concurrent = await Promise.all(candidates.map(activate));
+  const results = await Promise.all(concurrent.map((id) => store.apply(scope, id)));
+  assert.deepEqual(results.map((r) => r.status).sort(), ['conflict', 'ok']);
+  const records = await pool.query(
+    "SELECT id,version FROM cos.records WHERE scope_id=$1 AND kind='charter' AND lifecycle='active'",
+    [scope],
+  );
+  assert.equal(records.rowCount, 1);
+  assert.equal(records.rows[0].version, 2);
+});

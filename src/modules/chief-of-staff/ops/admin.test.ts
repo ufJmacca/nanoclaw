@@ -27,6 +27,7 @@ describe('S01 owner administration', () => {
       ['reset'],
       ['bind'],
       [...args, '--provider', 'claude'],
+      [...args.slice(0, -1), 'claude'],
       [...args.slice(0, -1), 'shell'],
       ['status', '--scope', 'fixture'],
     ])
