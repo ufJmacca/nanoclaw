@@ -95,7 +95,9 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
         if (!enabled()) return null;
         const context = await controller.context(session);
         if (!context || !d.store || (await d.store.context(context)).status !== 'ok' || !enabled()) return null;
-        return context.ingressId;
+        // A pause or newer ingress may arrive while PostgreSQL is responding.
+        const current = await controller.context(session);
+        return enabled() && current?.ingressId === context.ingressId ? context.ingressId : null;
       });
     },
     ingress: (binding, event) => controller.ingress(binding, event),
