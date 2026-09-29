@@ -27,11 +27,10 @@ test(
     const { initDb, closeDb } = await import('../../db/connection.js');
     const { runMigrations } = await import('../../db/migrations/index.js');
     const { subscribeMattermostChannelStrict } = await import('../../channels/mattermost-subscription.js');
-    const { resolveSession, sessionDir, openInboundDb, initSessionFolder } = await import('../../session-manager.js');
-    const { updateSession, getSession, getPendingApproval } = await import('../../db/sessions.js');
+    const { resolveSession, sessionDir } = await import('../../session-manager.js');
+    const { getSession, getPendingApproval } = await import('../../db/sessions.js');
     const { getMessagingGroup } = await import('../../db/messaging-groups.js');
-    const { installCosBoundary } = await import('../../cos-boundary.js');
-    const { ensureRpcSchema } = await import('../../modules/chief-of-staff/bridge/rpc.js');
+    const { bindCoordinator } = await import('../../modules/chief-of-staff/ops/bind.js');
     const { createCosRuntime } = await import('../../modules/chief-of-staff/runtime.js');
     const { setDeliveryAdapter, startDeliveryIntake, deliverSessionMessages, stopAndDrainDeliveryPolls } =
       await import('../../delivery.js');
@@ -41,8 +40,6 @@ test(
     const scope = 'fixture-' + randomUUID();
     const subscription = subscribeMattermostChannelStrict({ instanceKey: 'fixture', channelId: scope });
     const { session } = resolveSession(subscription.agentGroup.id, subscription.messagingGroup.id, null, 'shared');
-    updateSession(session.id, { agent_provider: 'codex' });
-    session.agent_provider = 'codex';
     const binding = {
       scopeId: scope,
       agentGroupId: session.agent_group_id,
@@ -54,22 +51,23 @@ test(
       botId: 'fixture-bot',
       provider: 'codex' as const,
     };
-    installCosBoundary(binding, db);
-    initSessionFolder(session.agent_group_id, session.id);
-    db.exec('UPDATE cos_identity_boundaries SET paused=0');
-    const inbound = openInboundDb(session.agent_group_id, session.id);
-    ensureRpcSchema(inbound);
-    inbound.close();
     const admin = await connectChecked(process.env, 'test', 'migration');
     assert.equal((await admin.query('SELECT pg_try_advisory_lock(73101002) AS locked')).rows[0].locked, true);
     await migrate(admin, process.env.COS_TEST_PGUSER!);
     const runtimeCheck = await connectChecked(process.env, 'test');
     await runtimeCheck.end();
     const store = new PriorityStore(BoundedDatabase.fromConfig(parseDatabaseConfig(process.env, 'test')));
-    await admin.query(
-      `INSERT INTO cos.scopes(id,owner_id,instance_id,channel_id,agent_group_id,status) VALUES($1,$2,$3,$4,$5,'active')`,
-      [scope, binding.ownerId, binding.instanceId, binding.channelId, binding.agentGroupId],
-    );
+    const facts = async () => ({
+      id: scope,
+      type: 'P',
+      delete_at: 0,
+      members: [binding.ownerId, binding.botId],
+      activeSubscription: true,
+    });
+    assert.deepEqual(await bindCoordinator(binding, { facts, bindScope: (value) => store.bindScope(value) }), binding);
+    session.agent_provider = 'codex';
+    // Fixture-only admission after setup; the real target helper owns live maintenance admission.
+    db.exec('UPDATE cos_identity_boundaries SET paused=0');
     const delivered: Array<{ text: string; id: string }> = [];
     setDeliveryAdapter({
       deliver: async (type, platform, _thread, _kind, content, _files, id) => {
@@ -84,13 +82,7 @@ test(
       db,
       enabled: true,
       store,
-      facts: async () => ({
-        id: scope,
-        type: 'P',
-        delete_at: 0,
-        members: [binding.ownerId, binding.botId],
-        activeSubscription: true,
-      }),
+      facts,
       session: getSession,
       destination: getMessagingGroup,
       stop: () => {},

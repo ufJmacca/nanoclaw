@@ -3,6 +3,7 @@ import { digest, validChange } from '../domain/contracts.js';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { PoolClient } from 'pg';
 import { BoundedDatabase, DatabaseUnavailable } from './client.js';
+import type { CosBinding } from '../../../cos-boundary.js';
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const equal = (a: string, b: string) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
@@ -31,6 +32,25 @@ async function event(
 
 export class PriorityStore {
   constructor(readonly database: BoundedDatabase) {}
+  /** Trusted setup only; deliberately absent from the agent RPC method table. */
+  async bindScope(binding: CosBinding): Promise<Result> {
+    return this.transaction(async (client) => {
+      await client.query(
+        `INSERT INTO cos.scopes(id,owner_id,instance_id,channel_id,agent_group_id,status)
+        VALUES($1,$2,$3,$4,$5,'active') ON CONFLICT DO NOTHING`,
+        [binding.scopeId, binding.ownerId, binding.instanceId, binding.channelId, binding.agentGroupId],
+      );
+      const row = (await client.query('SELECT * FROM cos.scopes WHERE id=$1 FOR SHARE', [binding.scopeId])).rows[0];
+      const matching =
+        row &&
+        row.owner_id === binding.ownerId &&
+        row.instance_id === binding.instanceId &&
+        row.channel_id === binding.channelId &&
+        row.agent_group_id === binding.agentGroupId &&
+        row.status === 'active';
+      return { status: matching ? 'ok' : 'conflict' };
+    });
+  }
   async pendingOutbox(scopeId: string): Promise<Result> {
     return this.transaction(async (client) => {
       const items = (

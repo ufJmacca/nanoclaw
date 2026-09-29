@@ -95,6 +95,30 @@ test('S01-T02 unapproved proposals are excluded; owner approval applies one dura
   assert.equal(records[0].title, change.title);
 });
 
+test('S01 trusted scope setup is idempotent and refuses identity replacement', async () => {
+  const id = scope + '-binding';
+  const binding = {
+    scopeId: id,
+    ownerId: 'fixture-owner',
+    instanceId: 'fixture-instance',
+    channelId: id,
+    agentGroupId: id,
+    messagingGroupId: id,
+    sessionId: id,
+    botId: 'fixture-bot',
+    provider: 'codex' as const,
+  };
+  try {
+    assert.equal((await store.bindScope(binding)).status, 'ok');
+    assert.equal((await store.bindScope(binding)).status, 'ok');
+    assert.equal((await store.bindScope({ ...binding, ownerId: 'foreign' })).status, 'conflict');
+    const rows = (await pool.query('SELECT owner_id FROM cos.scopes WHERE id=$1', [id])).rows;
+    assert.deepEqual(rows, [{ owner_id: 'fixture-owner' }]);
+  } finally {
+    await pool.query('DELETE FROM cos.scopes WHERE id=$1', [id]);
+  }
+});
+
 test('S01-T03 repeated request returns its original proposal; changed payload conflicts', async () => {
   const request = randomUUID();
   const first = await store.propose(context, request, { ...change, title: 'Pilot Alpha', kind: 'project' });
