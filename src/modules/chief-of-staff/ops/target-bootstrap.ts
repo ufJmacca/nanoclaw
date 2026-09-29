@@ -59,12 +59,23 @@ export async function prepareTargetArtifacts(
     if (fs.readdirSync(release).length) throw new Error('release_extraction_conflict');
     writeAtomic(release, 'extraction.json', identity);
   }
-  await docker(['image', 'load', '--input', archiveFile]);
-  await verifyLoadedImages(manifest, async (id) => {
+  const inspect = async (id: string) => {
     const result = JSON.parse(await docker(['image', 'inspect', id]));
     if (!Array.isArray(result) || result.length !== 1) throw new Error('release_loaded_image_mismatch');
     return result[0];
-  });
+  };
+  // A lost load acknowledgement must not force another full import of already verified immutable images.
+  let loaded = false;
+  try {
+    await verifyLoadedImages(manifest, inspect);
+    loaded = true;
+  } catch {
+    /* Missing or mismatched images must still pass verification after loading the authenticated archive. */
+  }
+  if (!loaded) {
+    await docker(['image', 'load', '--input', archiveFile]);
+    await verifyLoadedImages(manifest, inspect);
+  }
   if (!fs.lstatSync(payload, { throwIfNoEntry: false })) {
     privateDirectory(partial);
     const host = manifest.images.find((image) => image.role === 'host')!;
@@ -179,7 +190,7 @@ export async function bootstrapCommand(args: string[]): Promise<Record<string, u
       (
         await promisify(execFile)('/usr/bin/docker', ['--host=unix:///var/run/docker.sock', ...params], {
           env: { PATH: '/usr/bin:/bin', HOME: settings.userHome },
-          timeout: 600000,
+          timeout: params[0] === 'image' && params[1] === 'load' ? 1800000 : 600000,
           maxBuffer: 2 * 1024 * 1024,
         })
       ).stdout.trim();

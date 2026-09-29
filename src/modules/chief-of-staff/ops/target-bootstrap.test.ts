@@ -16,10 +16,15 @@ it('extracts only from a stopped exact carrier and reuses the same verified payl
   manifest.hostPayloadDigest = await payloadDigest(payload);
   const manifestFile = path.join(root, 'release.json');
   fs.writeFileSync(manifestFile, JSON.stringify(manifest), { mode: 0o600 });
-  let created = false;
+  let created = false,
+    loaded = false;
   const docker = vi.fn<BootstrapDocker>(async (args) => {
-    if (args[0] === 'image' && args[1] === 'load') return 'loaded';
-    if (args[0] === 'image' && args[1] === 'inspect')
+    if (args[0] === 'image' && args[1] === 'load') {
+      loaded = true;
+      return 'loaded';
+    }
+    if (args[0] === 'image' && args[1] === 'inspect') {
+      if (!loaded) throw new Error('image_not_loaded');
       return JSON.stringify([
         {
           Id: args[2],
@@ -33,6 +38,7 @@ it('extracts only from a stopped exact carrier and reuses the same verified payl
           },
         },
       ]);
+    }
     if (args[0] === 'container' && args[1] === 'inspect') {
       if (!created) throw new Error('not found');
       return JSON.stringify([
@@ -72,6 +78,7 @@ it('extracts only from a stopped exact carrier and reuses the same verified payl
       prepareTargetArtifacts(settings, manifest, manifestFile, path.join(root, 'images.tar.gz'), docker),
     ).resolves.toEqual(result);
     expect(docker.mock.calls.filter(([args]) => args[0] === 'create')).toHaveLength(1);
+    expect(docker.mock.calls.filter(([args]) => args[0] === 'image' && args[1] === 'load')).toHaveLength(1);
     expect(docker.mock.calls.flatMap(([args]) => args)).not.toContain('start');
     expect(docker.mock.calls.flatMap(([args]) => args)).not.toContain('build');
     fs.writeFileSync(path.join(result.payload, 'fixture.txt'), 'altered');
