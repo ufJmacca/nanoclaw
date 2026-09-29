@@ -11,6 +11,9 @@ store/
 data/
 logs/
 
+# Private Chief-of-Staff execution ledger
+.cos-plan-state/
+
 # Groups - per-installation state, not tracked
 groups/*
 
