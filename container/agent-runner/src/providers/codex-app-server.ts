@@ -640,7 +640,6 @@ export function writeCodexMcpConfigToml(servers: Record<string, CodexMcpServer>)
   const lines: string[] = ['[features]', 'goals = true', ''];
   for (const [name, config] of Object.entries(servers)) {
     lines.push(`[mcp_servers.${name}]`);
-    lines.push('type = "stdio"');
     lines.push(`command = ${tomlBasicString(config.command)}`);
     if (config.args && config.args.length > 0) {
       const argsStr = config.args.map(tomlBasicString).join(', ');

@@ -22,6 +22,31 @@ function claim(id: string, offsetMs: number) {
 }
 
 describe('decideStuckAction', () => {
+  it.each([
+    ['2026-09-29T09:01:43Z', '2026-09-29 09:01:28'],
+    ['2026-10-05T09:01:43Z', '2026-10-05 09:01:28'],
+  ])('does not kill a fresh SQLite UTC claim at %s', (now, statusChanged) => {
+    expect(
+      decideStuckAction({
+        now: Date.parse(now),
+        heartbeatMtimeMs: 0,
+        containerState: null,
+        claims: [{ message_id: 'fresh', status_changed: statusChanged }],
+      }),
+    ).toEqual({ action: 'ok' });
+  });
+
+  it('still kills a genuinely stale SQLite UTC claim', () => {
+    expect(
+      decideStuckAction({
+        now: Date.parse('2026-09-29T09:01:43Z'),
+        heartbeatMtimeMs: 0,
+        containerState: null,
+        claims: [{ message_id: 'stale', status_changed: '2026-09-29 09:00:28' }],
+      }),
+    ).toEqual({ action: 'kill-claim', messageId: 'stale', claimAgeMs: 75_000, toleranceMs: CLAIM_STUCK_MS });
+  });
+
   it('returns ok when heartbeat is fresh and no claims', () => {
     expect(
       decideStuckAction({
@@ -270,13 +295,14 @@ describe('resetStuckProcessingRows — orphan claim cleanup', () => {
     expect(row.process_after).not.toBeNull();
   });
 
-  it('still clears orphan claims even when the inbound message has already been retried (skip path)', () => {
+  it.each(['iso', 'sqlite'])('preserves future %s retry backoff while clearing orphan claims', (format) => {
     // Edge case: the inbound row was already rescheduled (process_after in
     // future), so the per-message retry loop skips it. The orphan in
     // processing_ack must still be removed — otherwise the bug remains.
     const { inDb, outDb } = makeSessionDbs();
     const claimedAt = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
-    const future = new Date(Date.now() + 60_000).toISOString();
+    const futureIso = new Date(Date.now() + 60_000).toISOString();
+    const future = format === 'sqlite' ? futureIso.slice(0, 19).replace('T', ' ') : futureIso;
 
     inDb
       .prepare(
