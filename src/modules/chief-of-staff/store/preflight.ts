@@ -1,5 +1,5 @@
 import pg from 'pg';
-import { parseDatabaseConfig, verifyExternalHost } from './config.js';
+import { externalDatabaseConfig } from './config.js';
 
 export class DatabasePreflightError extends Error {
   constructor(readonly code: string) {
@@ -12,8 +12,7 @@ export async function connectChecked(
   profile: 'runtime' | 'test',
   login: 'runtime' | 'migration' = 'runtime',
 ): Promise<pg.Client> {
-  const config = parseDatabaseConfig(env, profile, login);
-  await verifyExternalHost(config.host!);
+  const config = await externalDatabaseConfig(env, profile, login);
   const client = new pg.Client(config);
   client.on('error', () => {});
   try {

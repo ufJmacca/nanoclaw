@@ -21,14 +21,38 @@ export function isPrivateAddress(address: string): boolean {
 }
 
 /** DNS names are admitted only after all resolved addresses pass the same target check. */
-export async function verifyExternalHost(host: string): Promise<void> {
+export async function verifyExternalHost(host: string): Promise<string[]> {
   const local = new Set(
     Object.values(networkInterfaces()).flatMap((entries) => entries?.map((entry) => entry.address) ?? []),
   );
-  const addresses = await lookup(host, { all: true });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let addresses: Array<{ address: string }>;
+  try {
+    addresses = await Promise.race([
+      net.isIP(host) ? Promise.resolve([{ address: host }]) : lookup(host, { all: true }),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new DatabaseConfigurationError('COS_PGHOST')), 3000);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
   if (!addresses.length || addresses.some(({ address }) => !isPrivateAddress(address) || local.has(address))) {
     throw new DatabaseConfigurationError('COS_PGHOST');
   }
+  return addresses.map(({ address }) => address);
+}
+
+export async function externalDatabaseConfig(
+  env: NodeJS.ProcessEnv,
+  profile: 'runtime' | 'test',
+  login: 'runtime' | 'migration' = 'runtime',
+): Promise<PoolConfig> {
+  const config = parseDatabaseConfig(env, profile, login);
+  const addresses = await verifyExternalHost(config.host!);
+  if (config.ssl && typeof config.ssl === 'object' && !net.isIP(config.host!))
+    config.ssl = { ...config.ssl, servername: config.host };
+  return { ...config, host: addresses[0] };
 }
 
 export function parseDatabaseConfig(

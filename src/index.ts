@@ -81,6 +81,7 @@ import {
 } from './channels/channel-registry.js';
 import { createChannelDeliveryBridge } from './channels/delivery-bridge.js';
 import { handleMattermostBotRemoved } from './channels/mattermost-subscription.js';
+import { startCosHostModule } from './modules/chief-of-staff/bootstrap.js';
 
 const startupAbortController = new AbortController();
 let hostExecutionOwnership: { db: ReturnType<typeof initDb>; lease: HostExecutionLease } | null = null;
@@ -116,6 +117,8 @@ async function main(): Promise<void> {
         // event as soon as setup authenticates, and owner-approval cards must be
         // deliverable before that event can create pending state.
         setDeliveryAdapter(createChannelDeliveryBridge());
+        const cos = startCosHostModule();
+        onShutdown(() => cos.stop());
       },
       async () => {
         // 3. Channel adapters. The abort signal makes teardown own any adapter
