@@ -34,6 +34,8 @@ export interface PollLoopConfig {
    */
   providerName: string;
   cwd: string;
+  /** Optional cancellation for callers that own the loop lifecycle. */
+  signal?: AbortSignal;
   systemContext?: {
     instructions?: string;
   };
@@ -63,7 +65,7 @@ function hasSameReplyRoute(left: MessageInRow, right: MessageInRow): boolean {
 }
 
 /**
- * Main poll loop. Runs indefinitely until the process is killed.
+ * Main poll loop. Runs until cancelled or the process is killed.
  *
  * 1. Poll messages_in for pending rows
  * 2. Format into prompt, call provider.query()
@@ -89,7 +91,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
   clearStaleProcessingAcks();
 
   let pollCount = 0;
-  while (true) {
+  while (!config.signal?.aborted) {
     // Skip system messages — they're responses for MCP tools (e.g., ask_user_question)
     const messages = selectNextRoutingTurn(getPendingMessages().filter((m) => m.kind !== 'system'));
     pollCount++;
@@ -187,6 +189,8 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
 
     log(`Processing ${keep.length} message(s), kinds: ${[...new Set(keep.map((m) => m.kind))].join(',')}`);
 
+    if (config.signal?.aborted) break;
+
     const query = config.provider.query({
       prompt,
       continuation,
@@ -197,6 +201,8 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // Process the query while concurrently polling for new messages
     const skippedSet = new Set(skipped);
     const processingIds = ids.filter((id) => !commandIds.includes(id) && !skippedSet.has(id));
+    const abortQuery = () => query.abort();
+    config.signal?.addEventListener('abort', abortQuery, { once: true });
     try {
       const result = await processQuery(query, routing, processingIds, config.providerName);
       if (result.continuation && result.continuation !== continuation) {
@@ -204,6 +210,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         setContinuation(config.providerName, continuation);
       }
     } catch (err) {
+      if (config.signal?.aborted) break;
       const errMsg = err instanceof Error ? err.message : String(err);
       log(`Query error: ${errMsg}`);
 
@@ -225,7 +232,11 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         thread_id: routing.threadId,
         content: JSON.stringify({ text: `Error: ${errMsg}` }),
       });
+    } finally {
+      config.signal?.removeEventListener('abort', abortQuery);
     }
+
+    if (config.signal?.aborted) break;
 
     // Ensure completed even if processQuery ended without a result event
     // (e.g. stream closed unexpectedly).
