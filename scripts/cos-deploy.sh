@@ -63,9 +63,7 @@ commit=$(cli field "$id" commit)
 tree=$(cli field "$id" tree)
 fetch_ref=$(cli field "$id" fetchRef)
 [[ "$(git rev-parse "$commit^{tree}")" == "$tree" ]] || exit 1
-git push origin "$commit:$fetch_ref" > "$directory/source-push.log" 2>&1
-remote_source=$(git ls-remote --exit-code origin "$fetch_ref")
-[[ "${remote_source%%[[:space:]]*}" == "$commit" ]] || { echo 'Pushed source identity could not be verified.' >&2; exit 1; }
+bash scripts/cos-push-source.sh "$commit" "$fetch_ref" > "$directory/source-push.log" 2>&1
 cli checkpoint "$id" source_pushed
 stage=$(cli field "$id" stage)
 remote "$(cli stage-command "$id")"
