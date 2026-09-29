@@ -105,3 +105,14 @@ it('failed health keeps CoS closed and only records rollback after compatible re
   await expect(deployRelease(f)).rejects.toThrow('deployment_rolled_back');
   expect(readTarget(f.root, f.binding)).toMatchObject({ releaseId: null, maintenance: true });
 });
+
+it('attempts compatible recovery when service activation fails after migration', async () => {
+  const f = fixture();
+  f.effects.activate = vi.fn(async () => {
+    throw new Error('service start failed');
+  });
+  f.effects.rollback = vi.fn(async () => true);
+  await expect(deployRelease(f)).rejects.toThrow('deployment_rolled_back');
+  expect(f.effects.rollback).toHaveBeenCalledWith(null);
+  expect(readTarget(f.root, f.binding)).toMatchObject({ releaseId: null, maintenance: true, maintenanceId: null });
+});

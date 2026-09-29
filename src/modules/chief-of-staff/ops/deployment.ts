@@ -198,6 +198,9 @@ export async function deployRelease(request: {
       record.pending = null;
       save();
     } catch (error) {
+      // Migration has completed before activation. A failed service start must attempt
+      // compatible recovery rather than leave ordinary NanoClaw stopped indefinitely.
+      if (phase === 'activate') return rollback();
       record.status = 'failed';
       save();
       throw new Error('deployment_incomplete', { cause: error });

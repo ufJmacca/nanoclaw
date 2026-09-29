@@ -1,6 +1,5 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import net from 'node:net';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -11,6 +10,7 @@ import type { Session } from '../../../types.js';
 import type { PriorityStore } from '../store/priorities.js';
 import { ensureRpcSchema, createRpcHandler } from '../bridge/rpc.js';
 import { restrictedLaunch } from '../bridge/restricted-launch.js';
+import { startModelGateway } from '../bridge/model-gateway.js';
 
 /** Runs the real restricted launch and native SQLite RPC with synthetic records and no real adapters. */
 export async function nativeFixtureSmoke(options: { root: string; hostRoot: string; image: string }) {
@@ -47,22 +47,74 @@ export async function nativeFixtureSmoke(options: { root: string; hostRoot: stri
   );
   const canary = path.join(root, 'host-only-canary');
   fs.writeFileSync(canary, 'synthetic-fixture-only', { mode: 0o600 });
-  const server = net.createServer((connection) => connection.destroy());
+  let gateway: Awaited<ReturnType<typeof startModelGateway>> | undefined;
+  let providerRequests = 0;
   let client: McpFixture | undefined,
     stopped = false,
     pump: Promise<void> | undefined;
-  const docker = async (args: string[]) =>
+  const docker = async (args: string[], timeout = 10000) =>
     (
       await promisify(execFile)('docker', args, {
         env: safeHostEnvironment('docker'),
-        timeout: 10000,
+        timeout,
         maxBuffer: 1048576,
       })
     ).stdout;
   try {
-    await new Promise<void>((resolve, reject) => {
-      server.once('error', reject);
-      server.listen(socket, resolve);
+    gateway = await startModelGateway({
+      socket,
+      model: 'fixture-model',
+      apiKey: 'SYNTHETIC_FIXTURE_KEY',
+      authorize: async () => true,
+      upstream: async (body) => {
+        providerRequests++;
+        assert.equal(body.model, 'fixture-model');
+        assert.equal(body.store, false);
+        assert.equal(body.background, false);
+        assert.equal(body.service_tier, 'default');
+        const item = {
+          id: 'msg_fixture',
+          type: 'message',
+          role: 'assistant',
+          status: 'completed',
+          content: [{ type: 'output_text', text: 'Fixture response.', annotations: [] }],
+        };
+        const events = [
+          {
+            type: 'response.created',
+            response: { id: 'resp_fixture', object: 'response', status: 'in_progress', output: [] },
+          },
+          {
+            type: 'response.output_item.added',
+            output_index: 0,
+            item: { ...item, status: 'in_progress', content: [] },
+          },
+          {
+            type: 'response.output_text.delta',
+            item_id: 'msg_fixture',
+            output_index: 0,
+            content_index: 0,
+            delta: 'Fixture response.',
+          },
+          { type: 'response.output_item.done', output_index: 0, item },
+          {
+            type: 'response.completed',
+            response: {
+              id: 'resp_fixture',
+              object: 'response',
+              status: 'completed',
+              output: [item],
+              usage: { input_tokens: 10, output_tokens: 3, total_tokens: 13 },
+            },
+          },
+        ];
+        return {
+          status: 200,
+          body: (async function* () {
+            for (const event of events) yield Buffer.from('data: ' + JSON.stringify(event) + '\n\n');
+          })(),
+        };
+      },
     });
     const launch = restrictedLaunch({
       image: options.image,
@@ -106,6 +158,17 @@ export async function nativeFixtureSmoke(options: { root: string; hostRoot: stri
       if(!fs.existsSync('/app/src/cos-mcp.ts')||!fs.existsSync('/app/skills')||!fs.existsSync('/app/deep-research-workflow'))throw Error('packaged_assets_missing');
       console.log('isolation-passed');`;
     assert.equal((await docker(['exec', client.name, 'bun', '-e', probe])).trim(), 'isolation-passed');
+    const providerProbe = `import {CodexProvider} from '/app/src/providers/codex.ts';
+      import {startCosRelay} from '/app/src/cos-relay.ts';
+      const relay=await startCosRelay('/run/cos/model.sock');
+      const provider=new CodexProvider({restrictedCos:true,env:{CODEX_MODEL:'fixture-model'},mcpServers:{}});
+      const query=provider.query({prompt:'Reply with Fixture response.',cwd:'/workspace/agent'});query.end();
+      const timer=setTimeout(()=>{query.abort();process.exit(2)},30000);
+      try{let received='';for await(const event of query.events)received+=JSON.stringify(event);
+        if(!received.includes('Fixture response.'))throw Error('fixture_provider_response_missing');console.log('provider-passed');}
+      finally{clearTimeout(timer);await relay.close();}`;
+    assert.ok((await docker(['exec', client.name, 'bun', '-e', providerProbe], 35000)).includes('provider-passed'));
+    assert.equal(providerRequests, 1);
     const handler = createRpcHandler({
       resolveContext: async () => ({
         scopeId: 'fixture',
@@ -141,12 +204,19 @@ export async function nativeFixtureSmoke(options: { root: string; hostRoot: stri
     assert.equal(response.result.records[0].id, 'fixture-approved');
     stopped = true;
     await pump;
-    return { status: 'passed', rpc: 'passed', isolation: 'passed', model: 'fixture', messagesSent: 0 } as const;
+    return {
+      status: 'passed',
+      rpc: 'passed',
+      isolation: 'passed',
+      provider: 'passed',
+      model: 'fixture',
+      messagesSent: 0,
+    } as const;
   } finally {
     stopped = true;
     await pump?.catch(() => {});
     await client?.close();
-    if (server.listening) await new Promise<void>((resolve) => server.close(() => resolve()));
+    await gateway?.close();
     inbound.close();
     outbound.close();
     fs.rmSync(root, { recursive: true, force: true });

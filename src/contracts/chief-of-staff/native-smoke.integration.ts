@@ -13,5 +13,12 @@ test('baked restricted worker proves native RPC and isolation without live accou
       process.env.COS_SMOKE_HOST_ROOT ?? path.join(process.env.COS_FIXTURE_HOST_ROOT, '.cos-plan-state/native-smoke'),
     image: process.env.COS_FIXTURE_IMAGE,
   });
-  assert.deepEqual(result, { status: 'passed', rpc: 'passed', isolation: 'passed', model: 'fixture', messagesSent: 0 });
+  assert.deepEqual(result, {
+    status: 'passed',
+    rpc: 'passed',
+    isolation: 'passed',
+    provider: 'passed',
+    model: 'fixture',
+    messagesSent: 0,
+  });
 });

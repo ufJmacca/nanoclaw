@@ -383,7 +383,9 @@ export function createTargetEffects(
           db.close();
         }
       }
-      restoreServiceOverride(override);
+      if (fs.lstatSync(path.join(receipt, 'service-override.json'), { throwIfNoEntry: false }))
+        restoreServiceOverride(override);
+      else if ((await commands.service('cat')) !== previous.unit) throw new Error('service_override_conflict');
       await commands.service('daemon-reload');
       await commands.service('start');
       const restored = await observeProcess(
