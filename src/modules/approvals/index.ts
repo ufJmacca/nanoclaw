@@ -23,6 +23,7 @@ import { startOneCLIApprovalHandler, stopOneCLIApprovalHandler } from './onecli-
 
 // Public API re-exports so consumers import from the module root.
 export { requestApproval, registerApprovalHandler, notifyAgent } from './primitive.js';
+export { requestCorrelatedApproval } from './correlated.js';
 export type { ApprovalHandler, ApprovalHandlerContext, RequestApprovalOptions } from './primitive.js';
 
 registerResponseHandler(handleApprovalsResponse);

@@ -31,6 +31,10 @@ export async function handleApprovalsResponse(payload: ResponsePayload): Promise
   const approval = getPendingApproval(payload.questionId);
   if (!approval) return false;
 
+  // Generic button payloads lack the replay-protected ingress identity
+  // required by CoS text controls. Retain the projection when disabled too.
+  if (approval.action === 'cos_change') return true;
+
   if (approval.action === ONECLI_ACTION) {
     // Row exists but the in-memory resolver is gone (timer fired or the process
     // was in a weird state). Nothing to do — just drop the row.

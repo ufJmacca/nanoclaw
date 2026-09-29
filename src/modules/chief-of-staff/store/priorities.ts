@@ -240,4 +240,19 @@ export class PriorityStore {
       };
     }, false);
   }
+
+  async status(context: Context, requestId: string): Promise<Result> {
+    if (!uuid.test(requestId)) return { status: 'denied' };
+    return this.transaction(async (client) => {
+      if (!(await authorised(client, context))) return { status: 'denied' };
+      const row = (
+        await client.query('SELECT result FROM cos.operations WHERE session_id=$1 AND request_id=$2 AND scope_id=$3', [
+          context.sessionId,
+          requestId,
+          context.scopeId,
+        ])
+      ).rows[0];
+      return row?.result ?? { status: 'unavailable' };
+    }, false);
+  }
 }
