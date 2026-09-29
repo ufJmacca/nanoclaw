@@ -24,7 +24,7 @@ RUN HUSKY=0 pnpm install --frozen-lockfile
 COPY tsconfig.json build-info.json ./
 COPY src ./src
 COPY container ./container
-RUN pnpm build
+RUN pnpm build && bun build src/modules/chief-of-staff/ops/target-bootstrap.ts --target=node --format=esm --outfile=/build/bootstrap.mjs
 
 FROM tooling AS host
 ARG SOURCE_COMMIT
@@ -33,7 +33,7 @@ LABEL org.opencontainers.image.revision=$SOURCE_COMMIT nanoclaw.worker-assets=$W
 COPY --from=host-build /build /release
 COPY --from=host-build /usr/local/bin/node /release/node/bin/node
 # Used only by trusted Mac final-image fixtures. The extracted Pi payload uses its existing host Docker CLI.
-COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
+COPY --from=docker-cli /usr/local/bin/docker /usr/bin/docker
 WORKDIR /release
 ENTRYPOINT ["/release/node/bin/node"]
 CMD ["/release/dist/index.js"]
