@@ -7,9 +7,9 @@ node_modules/
 dist/
 
 # Local data & auth
-store/
-data/
-logs/
+/store/
+/data/
+/logs/
 
 # Private Chief-of-Staff execution ledger
 .cos-plan-state/
