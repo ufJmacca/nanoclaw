@@ -2,6 +2,39 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { waitForTargetProcess } from './service-readiness.js';
 
 afterEach(() => vi.useRealTimers());
+it.each(['cwd', 'exe'])('waits through transient process %s access restrictions during exec', async (link) => {
+  vi.useFakeTimers();
+  const failure = Object.assign(new Error('permission denied'), {
+    code: 'EACCES',
+    syscall: 'readlink',
+    path: '/proc/123/' + link,
+  });
+  const observe = vi.fn().mockRejectedValueOnce(failure).mockResolvedValue('verified');
+  const result = waitForTargetProcess(observe);
+  const expected = expect(result).resolves.toBe('verified');
+  await Promise.all([expected, vi.advanceTimersByTimeAsync(250)]);
+  expect(observe).toHaveBeenCalledTimes(2);
+});
+it('refuses a persistent process access restriction and never retries unrelated permission failures', async () => {
+  vi.useFakeTimers();
+  const failure = Object.assign(new Error('permission denied'), {
+    code: 'EACCES',
+    syscall: 'readlink',
+    path: '/proc/123/exe',
+  });
+  const observe = vi.fn().mockRejectedValue(failure);
+  const rejected = expect(waitForTargetProcess(observe)).rejects.toBe(failure);
+  await vi.runAllTimersAsync();
+  await rejected;
+  expect(observe).toHaveBeenCalledTimes(40);
+  const unrelated = vi
+    .fn()
+    .mockRejectedValue(
+      Object.assign(new Error('permission denied'), { code: 'EACCES', syscall: 'open', path: '/private/data' }),
+    );
+  await expect(waitForTargetProcess(unrelated)).rejects.toThrow('permission denied');
+  expect(unrelated).toHaveBeenCalledOnce();
+});
 it('waits for native database ownership after the service manager reports running', async () => {
   vi.useFakeTimers();
   const identity = { executable: '/release/node', entryPoint: '/release/index.js' };

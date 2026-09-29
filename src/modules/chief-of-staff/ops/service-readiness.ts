@@ -9,7 +9,10 @@ export async function waitForTargetProcess<T>(observe: () => Promise<T>): Promis
         attempt === 39 ||
         !(
           ['target_service_unhealthy', 'target_host_ownership_mismatch'].includes(failure.message) ||
-          failure.code === 'ENOENT'
+          failure.code === 'ENOENT' ||
+          (failure.code === 'EACCES' &&
+            failure.syscall === 'readlink' &&
+            /^\/proc\/[1-9][0-9]*\/(cwd|exe)$/.test(failure.path ?? ''))
         )
       )
         throw error;
