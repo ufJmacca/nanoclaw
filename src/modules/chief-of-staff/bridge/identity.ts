@@ -18,6 +18,18 @@ export type ChannelFacts = {
   activeSubscription: boolean;
 };
 export type VerifiedIngress = { id: string; ownerId: string; text: string; timestamp: string };
+export function validPrivateChannel(binding: Binding, facts: ChannelFacts): boolean {
+  return (
+    facts.id === binding.channelId &&
+    facts.type === 'P' &&
+    facts.delete_at === 0 &&
+    facts.activeSubscription &&
+    binding.ownerId !== binding.botId &&
+    facts.members.length === 2 &&
+    facts.members.includes(binding.ownerId) &&
+    facts.members.includes(binding.botId)
+  );
+}
 /** Only call with an adapter-originated event and freshly fetched host-side facts. */
 export function verifyIngress(
   binding: Binding,
@@ -28,14 +40,7 @@ export function verifyIngress(
   if (
     event.channelType !== 'mattermost' ||
     event.platformId !== `mattermost:${binding.instanceId}:${binding.channelId}` ||
-    facts.id !== binding.channelId ||
-    facts.type !== 'P' ||
-    facts.delete_at !== 0 ||
-    !facts.activeSubscription ||
-    binding.ownerId === binding.botId ||
-    facts.members.length !== 2 ||
-    !facts.members.includes(binding.ownerId) ||
-    !facts.members.includes(binding.botId) ||
+    !validPrivateChannel(binding, facts) ||
     event.message.kind !== 'chat' ||
     !event.message.id ||
     event.message.id.length > 200

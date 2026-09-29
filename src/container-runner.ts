@@ -6,6 +6,7 @@
 import { ChildProcess, execSync, spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
+import { permitCosExecution } from './cos-boundary.js';
 
 import { OneCLI } from '@onecli-sh/sdk';
 
@@ -196,6 +197,10 @@ export async function shutdownContainers(): Promise<void> {
  * (e.g. the router's typing indicator) can branch on the boolean.
  */
 export function wakeContainer(session: Session): Promise<boolean> {
+  if (!permitCosExecution(session)) {
+    killContainer(session.id, 'Restricted CoS execution denied');
+    return Promise.resolve(false);
+  }
   if (!containerAdmissionsOpen) {
     log.debug('Container admission closed — leaving session inbox pending', { sessionId: session.id });
     return Promise.resolve(false);

@@ -46,6 +46,8 @@ import {
   startDeliveryIntake,
 } from './delivery.js';
 import { UnconfirmedAttachmentDeliveryError } from './channels/adapter.js';
+import { installCosBoundary } from './cos-boundary.js';
+import { getDb } from './db/connection.js';
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -175,6 +177,38 @@ describe('deliverSessionMessages — concurrent invocations', () => {
     expect(db.prepare('SELECT COUNT(*) AS count FROM delivered').get()).toEqual({ count: 0 });
     db.close();
   });
+
+  it.each(['self_mod', 'create_agent', 'schedule_task', 'cos_admin'])(
+    'S01-T08 denies forged %s before native action dispatch',
+    async (action) => {
+      seedAgentAndChannel();
+      const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
+      installCosBoundary(
+        {
+          scopeId: 'fixture',
+          agentGroupId: 'ag-1',
+          messagingGroupId: 'mg-1',
+          sessionId: session.id,
+          instanceId: 'fixture',
+          channelId: 'private',
+          ownerId: 'owner',
+          botId: 'bot',
+          provider: 'codex',
+        },
+        getDb(),
+      );
+      const handler = vi.fn();
+      deliveryModule.registerDeliveryAction(action, handler);
+      setDeliveryAdapter({ deliver: vi.fn() });
+      const out = new Database(outboundDbPath('ag-1', session.id));
+      out
+        .prepare(`INSERT INTO messages_out(id,timestamp,kind,content) VALUES(?,datetime('now'),'system',?)`)
+        .run('forged', JSON.stringify({ action }));
+      out.close();
+      await deliverSessionMessages(session);
+      expect(handler).not.toHaveBeenCalled();
+    },
+  );
 
   it('rejects a Mattermost outbound root that was observed only outside its canonical channel', async () => {
     seedMattermostAgentAndChannel();

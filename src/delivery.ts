@@ -8,6 +8,7 @@
  *   - Never writes to outbound.db — preserves single-writer-per-file invariant
  */
 import type Database from 'better-sqlite3';
+import { permitCosOutbound } from './cos-boundary.js';
 
 import {
   validateMattermostSessionForExecution,
@@ -330,6 +331,7 @@ async function deliverMessage(
   inDb: Database.Database,
   mattermostBoundary: MattermostSessionExecutionBoundary,
 ): Promise<string | undefined> {
+  if (!(await permitCosOutbound(session, msg))) throw new Error('Restricted CoS delivery denied');
   if (!deliveryAdapter) {
     log.warn('No delivery adapter configured, dropping message', { id: msg.id });
     return;

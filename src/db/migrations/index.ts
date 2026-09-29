@@ -15,6 +15,7 @@ import { migration015 } from './015-mattermost-lifecycle.js';
 import { migration016 } from './016-mattermost-recovery.js';
 import { migration017 } from './017-host-execution-lease.js';
 import { migration018 } from './018-mattermost-receipt-retention.js';
+import { migration019 } from './019-cos-identity-boundary.js';
 import { moduleApprovalsPendingApprovals } from './module-approvals-pending-approvals.js';
 import { moduleApprovalsTitleOptions } from './module-approvals-title-options.js';
 
@@ -41,6 +42,7 @@ const migrations: Migration[] = [
   migration016,
   migration017,
   migration018,
+  migration019,
 ];
 
 export function runMigrations(db: Database.Database): void {
