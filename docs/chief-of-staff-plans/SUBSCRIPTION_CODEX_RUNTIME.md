@@ -8,6 +8,18 @@ The owner uses the dedicated private Mattermost channel to propose and approve a
 
 Preserve the existing permanent CoS identity restrictions, exact owner approvals, external PostgreSQL ownership, scoped context, emergency pause, ordinary NanoClaw sessions and Pi release controls. Subscription access changes the model transport, not the authority of the model or its tools.
 
+## CoS is a NanoClaw agent group with its own conversation
+
+Owner clarification, 2026-09-30: CoS is a persistent AgentGroup inside NanoClaw, with its own private Mattermost conversation and Codex context. NanoClaw owns its channel routing, session lifecycle, provider execution and delivery. The subscription adapter is part of that runtime; it must not create a separate user interface or independent agent platform.
+
+The dedicated Mattermost channel maps to one persistent coordinator session. Its Codex thread retains multi-turn conversation context and resumes after ordinary container/service restarts, subject to the model's context limit and supported compaction. Mattermost reply threads may group messages visually; the existing strict shared-session routing does not allocate a different model context per reply thread. Coordinator continuity and the fresh specialist attempts introduced in S05 are separate requirements.
+
+“Fresh CoS context” means a clean boundary at initial binding: no implicit import of earlier ordinary chats, another group's history or global personal memory. It does not mean discarding subsequent CoS conversation at every launch. Keep CoS-only provider state and continuation durable and scoped to the bound AgentGroup/session. Subscription credentials remain outside model-controlled tools; retaining conversation does not require exposing credentials or unrelated files.
+
+Conversation is working context, not approval or canonical truth. Unapproved ideas remain usable in discussion but cannot become approved goals without the existing owner confirmation. Read current approved records when answering priorities. On scope/access changes or later source revocation, fence the old continuation and reconstruct an allowed context; do not resume stale sensitive content. Ordinary restarts alone must not trigger that reset. Missing/corrupt provider state needs an explicit, tested recovery path rather than silently claiming full recall.
+
+The current S01 runner calls `clearContinuation('codex')` at startup and uses ephemeral provider HOME. That does not satisfy the continuity requirement and must be corrected alongside subscription transport. Persisting PostgreSQL records alone is not evidence of conversational continuity.
+
 ## Verified starting point
 
 - S01 branch: `cos/s01-first-use-and-priorities`; inspected head `882280b0bd71a3b6b2d25066b339ab3d5cbce584`. PR #54 is open and unmerged. Reconcile these identities again before implementation.
@@ -25,7 +37,7 @@ Reuse NanoClaw's Codex app-server lifecycle, streaming, cancellation and configu
 
 The design to prove first separates the trusted Codex runtime from model-controlled execution:
 
-1. A trusted, isolated Codex runtime owns the minimum required subscription authentication and calls the supported native OpenAI provider. It receives only the current CoS context. It must not run model-generated commands on the Pi host or see other groups' histories, host configuration, database credentials or deployment capabilities.
+1. A trusted Codex runtime managed by NanoClaw owns the minimum required subscription authentication and calls the supported native OpenAI provider. It receives the bound CoS conversation and admitted CoS context, including its own durable continuation. Its execution boundary must prevent model-generated commands on the Pi host and access to other groups' histories, host configuration, database credentials or deployment capabilities. This process boundary does not create a separate CoS interface or discard its session memory.
 2. NanoClaw mediates the fixed CoS tool set and validates scope, ingress, owner, pause and maintenance on every operation. Existing proposal/approval semantics stay in the host. A model output is never an approval.
 3. Any tool-execution worker retains its restricted filesystem and network profile and receives no subscription credentials. Unrestricted shell/file tools, arbitrary MCP servers, plugins, accounts, A2A, scheduling and arbitrary message destinations remain unavailable to CoS.
 4. Model/authentication egress is enforced outside model-writable configuration. Neither a prompt nor hiding tools in the UI counts as enforcement. The runtime must not become a general-purpose authenticated HTTP proxy.
@@ -56,7 +68,7 @@ Report distinct states: paused, authentication missing, reauthentication require
 
 Refactor `bootstrap.ts`, `bridge/coordinator-launcher.ts`, `bridge/model-gateway.ts`, `bridge/model-policy.ts`, the restricted launch path and runner/provider integration according to the proved design. Reuse existing Codex lifecycle code rather than creating a second independent agent implementation. Keep fixture model transport available for automated tests, explicitly separated from production authentication.
 
-Preserve fresh CoS context, `cos_context_get`, `cos_change_propose`, request reconciliation, exact approval previews and restricted delivery. Revalidate private membership and owner identity before execution and publication. Pause, unsubscribe, membership change, shutdown and lost authorization must cancel active work and prevent late output.
+Preserve the native CoS AgentGroup/session binding and its own durable Codex conversation. Replace unconditional startup continuation clearing with scoped resume and explicit invalidation/recovery. Include CoS provider state in protected-state preservation and compatible release recovery without bundling it into release images. Reuse supported native compaction; define bounded recovery if provider state is missing. Preserve `cos_context_get`, `cos_change_propose`, request reconciliation, exact approval previews and restricted delivery. Revalidate private membership and owner identity before execution and publication. Pause, unsubscribe, membership change, shutdown and lost authorization must cancel active work and prevent late output; resumption must revalidate access before reopening retained context.
 
 Retain durable structural limits: bounded turns/attempts, tool calls, concurrency, wall time and payloads. Name each counter by what the native provider actually exposes. Do not present a turn count as a provider-request count, claim a dollar cap for subscription usage, or interpret unknown usage as zero. Handle exhausted subscription limits explicitly without an API fallback or uncontrolled retries.
 
@@ -86,27 +98,29 @@ The live walkthrough is:
 2. Verify exact proposal previews. Approve the charter, goal and project using the displayed host-parsed commands.
 3. Ask “What should I focus on?” Verify references to approved records and clear advisory wording.
 4. Leave a different proposal unapproved and confirm it does not become an approved priority. Repeat an approval and confirm no duplicate record.
-5. Restart through the authorised release/service path; verify the approved records remain and normal NanoClaw conversations still work.
+5. Discuss a synthetic, unapproved detail and ask a follow-up that depends on it. Restart through the authorised release/service path, then verify the CoS conversation resumes with that detail still available, while it remains unapproved. Verify approved records remain and normal NanoClaw conversations still work.
 6. Send `cos pause automation`; verify it stops further work without a model call. Confirm the subscription profile never selected API billing. Preserve a sanitized receipt and leave activation in the explicitly agreed state.
 
 Keep destructive database-outage and crash injection in isolated fixtures. Do not disrupt the user's ordinary live conversation or introduce valuable data while the programme lifecycle is disposable.
 
 ## Acceptance evidence
 
-| ID    | Required evidence                                                                                                       |
-| ----- | ----------------------------------------------------------------------------------------------------------------------- |
-| SUB01 | Pinned Codex capability proof and effective tool/egress policy; unsupported configurations fail closed.                 |
-| SUB02 | Subscription profile works with no API key; API-key, custom-endpoint and provider fallback attempts are refused.        |
-| SUB03 | Credential canaries are absent from model-controlled files, environment, tools, logs, transcripts and release archives. |
-| SUB04 | Missing, revoked, stale and refreshed authentication; concurrent ordinary/CoS use; interrupted refresh persistence.     |
-| SUB05 | Only admitted CoS tools execute; forged dispatch, shell, filesystem escape, arbitrary MCP and network attempts fail.    |
-| SUB06 | Pause, membership change, cancellation, maintenance and expired activation prevent further effects and late delivery.   |
-| SUB07 | Durable bounded usage, quota exhaustion and unknown outcomes cannot trigger automatic paid fallback or infinite retry.  |
-| SUB08 | S01 fixture conversation, exact approval/rejection, restart, duplicate replay and dependency-failure isolation pass.    |
-| SUB09 | Unsupported-provider and charter-conflict review regressions pass, including durable outbox completion.                 |
-| SUB10 | Final ARM64 artifacts, archive/source identity, actual Pi health, preservation and compatible rollback pass.            |
-| SUB11 | Authorized live Mattermost flow succeeds using the subscription profile; cached login alone is insufficient.            |
-| SUB12 | Independent Pi execution and separate activation, fixture, live-test and human-review status are recorded.              |
+| ID    | Required evidence                                                                                                                                                                |
+| ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| SUB01 | Pinned Codex capability proof and effective tool/egress policy; unsupported configurations fail closed.                                                                          |
+| SUB02 | Subscription profile works with no API key; API-key, custom-endpoint and provider fallback attempts are refused.                                                                 |
+| SUB03 | Credential canaries are absent from model-controlled files, environment, tools, logs, transcripts and release archives.                                                          |
+| SUB04 | Missing, revoked, stale and refreshed authentication; concurrent ordinary/CoS use; interrupted refresh persistence.                                                              |
+| SUB05 | Only admitted CoS tools execute; forged dispatch, shell, filesystem escape, arbitrary MCP and network attempts fail.                                                             |
+| SUB06 | Pause, membership change, cancellation, maintenance and expired activation prevent further effects and late delivery.                                                            |
+| SUB07 | Durable bounded usage, quota exhaustion and unknown outcomes cannot trigger automatic paid fallback or infinite retry.                                                           |
+| SUB08 | S01 fixture conversation, exact approval/rejection, restart, duplicate replay and dependency-failure isolation pass.                                                             |
+| SUB09 | Unsupported-provider and charter-conflict review regressions pass, including durable outbox completion.                                                                          |
+| SUB10 | Final ARM64 artifacts, archive/source identity, actual Pi health, preservation and compatible rollback pass.                                                                     |
+| SUB11 | Authorized live Mattermost flow succeeds using the subscription profile; cached login alone is insufficient.                                                                     |
+| SUB12 | Independent Pi execution and separate activation, fixture, live-test and human-review status are recorded.                                                                       |
+| SUB13 | One native CoS AgentGroup/session retains its own multi-turn Codex context across ordinary restarts and supported compaction; no pre-binding or cross-group history is imported. |
+| SUB14 | Context invalidation/recovery is explicit and tested; revoked context cannot return through resume, while remembered discussion cannot bypass approval.                          |
 
 ## Delivery and resume point
 
