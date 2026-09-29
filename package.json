@@ -6,6 +6,8 @@
   "packageManager": "pnpm@10.33.0",
   "main": "dist/index.js",
   "scripts": {
+    "cos:db": "tsx src/modules/chief-of-staff/ops/db-cli.ts",
+    "cos:test": "tsx src/contracts/chief-of-staff/run.ts",
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
