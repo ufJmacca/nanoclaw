@@ -19,6 +19,7 @@ function manifest(): ReleaseManifest {
     },
     buildInputDigest: 'e'.repeat(64),
     hostPayloadDigest: 'f'.repeat(64),
+    workerAssetsDigest: '1'.repeat(64),
     rpc: 'cos-rpc/v1',
     postgres: { minimum: 1, maximum: 1 },
     images: [

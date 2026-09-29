@@ -6,6 +6,13 @@
 import { ChildProcess, execSync, spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
+import {
+  releaseMode,
+  currentRelease,
+  codeAssetRoot,
+  assertReleaseMounts,
+  selectReleaseImage,
+} from './release-runtime.js';
 import { permitCosExecution } from './cos-boundary.js';
 
 import { OneCLI } from '@onecli-sh/sdk';
@@ -693,7 +700,7 @@ function buildMounts(
   providerContribution: ProviderContainerContribution,
   strictMattermost: boolean,
 ): VolumeMount[] {
-  const projectRoot = process.cwd();
+  const projectRoot = codeAssetRoot();
   const sessDir = sessionDir(agentGroup.id, session.id);
 
   // Per-group filesystem state lives forever after first creation. Init is
@@ -760,8 +767,8 @@ function buildMounts(
 
   // Shared CLAUDE.md — read-only, imported by the composed entry point via
   // the `.claude-shared.md` symlink inside the group dir.
-  const sharedClaudeMd = path.join(process.cwd(), 'container', 'CLAUDE.md');
-  if (fs.existsSync(sharedClaudeMd)) {
+  const sharedClaudeMd = path.join(projectRoot, 'container', 'CLAUDE.md');
+  if (!releaseMode() && fs.existsSync(sharedClaudeMd)) {
     mounts.push({ hostPath: sharedClaudeMd, containerPath: '/app/CLAUDE.md', readonly: true });
   }
 
@@ -771,16 +778,16 @@ function buildMounts(
 
   // Shared agent-runner source — read-only, same code for all groups.
   const agentRunnerSrc = path.join(projectRoot, 'container', 'agent-runner', 'src');
-  mounts.push({ hostPath: agentRunnerSrc, containerPath: '/app/src', readonly: true });
+  if (!releaseMode()) mounts.push({ hostPath: agentRunnerSrc, containerPath: '/app/src', readonly: true });
 
   const workflowMount = buildDeepResearchWorkflowMount(projectRoot);
-  if (workflowMount) {
+  if (!releaseMode() && workflowMount) {
     mounts.push(workflowMount);
   }
 
   // Shared skills — read-only, symlinks in .claude-shared/skills/ point here.
   const skillsSrc = path.join(projectRoot, 'container', 'skills');
-  if (fs.existsSync(skillsSrc)) {
+  if (!releaseMode() && fs.existsSync(skillsSrc)) {
     mounts.push({ hostPath: skillsSrc, containerPath: '/app/skills', readonly: true });
   }
 
@@ -800,14 +807,14 @@ function buildMounts(
   return mounts;
 }
 
-export function buildDeepResearchWorkflowMount(projectRoot: string = process.cwd()): VolumeMount | null {
+export function buildDeepResearchWorkflowMount(projectRoot: string = codeAssetRoot()): VolumeMount | null {
   const workflowSrc = path.join(projectRoot, 'src', 'deep-research-workflow');
   if (!fs.existsSync(workflowSrc)) return null;
   return { hostPath: workflowSrc, containerPath: '/app/deep-research-workflow', readonly: true };
 }
 
 export function selectedContainerSkills(containerConfig: ContainerConfig): string[] {
-  const projectRoot = process.cwd();
+  const projectRoot = codeAssetRoot();
   const sharedSkillsDir = path.join(projectRoot, 'container', 'skills');
   if (containerConfig.skills !== 'all') return containerConfig.skills;
 
@@ -900,11 +907,17 @@ async function buildContainerArgs(
   containerName: string,
   agentGroup: AgentGroup,
   containerConfig: ContainerConfig,
-  _provider: string,
+  provider: string,
   providerContribution: ProviderContainerContribution,
   agentIdentifier?: string,
 ): Promise<string[]> {
+  const release = currentRelease();
+  if (release) assertReleaseMounts(mounts);
+  const imageTag = release
+    ? await selectReleaseImage(release, provider, containerConfig.packages)
+    : containerConfig.imageTag || CONTAINER_IMAGE;
   const args: string[] = ['run', '--rm', '--name', containerName, '--label', CONTAINER_INSTALL_LABEL];
+  if (release) args.push('--pull=never');
 
   // Environment — only vars read by code we don't own.
   // Everything NanoClaw-specific is in container.json (read by runner at startup).
@@ -960,7 +973,7 @@ async function buildContainerArgs(
   args.push('--entrypoint', 'bash');
 
   // Use per-agent-group image if one has been built, otherwise base image
-  const imageTag = containerConfig.imageTag || CONTAINER_IMAGE;
+  if (release) assertReleaseMounts(mounts);
   args.push(imageTag);
 
   args.push('-c', 'exec bun run /app/src/index.ts');
@@ -970,6 +983,7 @@ async function buildContainerArgs(
 
 /** Build a per-agent-group Docker image with custom packages. */
 export async function buildAgentGroupImage(agentGroupId: string): Promise<void> {
+  if (releaseMode()) throw new Error('release_build_forbidden');
   const agentGroup = getAgentGroup(agentGroupId);
   if (!agentGroup) throw new Error('Agent group not found');
 

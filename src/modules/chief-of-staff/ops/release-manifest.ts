@@ -21,6 +21,7 @@ export type ReleaseManifest = {
   };
   buildInputDigest: string;
   hostPayloadDigest: string;
+  workerAssetsDigest: string;
   rpc: 'cos-rpc/v1';
   postgres: { minimum: number; maximum: number };
   images: Array<{ role: 'host' | 'agent'; profile: string; tag: string; id: string }>;
@@ -41,7 +42,8 @@ export function validateReleaseManifest(value: unknown): ReleaseManifest {
     value.rpc !== 'cos-rpc/v1' ||
     !matches(value.releaseId, /^release-[a-zA-Z0-9_-]{1,120}$/) ||
     !matches(value.buildInputDigest, /^[a-f0-9]{64}$/) ||
-    !matches(value.hostPayloadDigest, /^[a-f0-9]{64}$/)
+    !matches(value.hostPayloadDigest, /^[a-f0-9]{64}$/) ||
+    !matches(value.workerAssetsDigest, /^[a-f0-9]{64}$/)
   )
     return reject();
   const source = value.source;

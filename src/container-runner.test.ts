@@ -1,9 +1,14 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { buildDeepResearchWorkflowMount, resolveProviderName, syncContainerSkillSymlinks } from './container-runner.js';
+import {
+  buildAgentGroupImage,
+  buildDeepResearchWorkflowMount,
+  resolveProviderName,
+  syncContainerSkillSymlinks,
+} from './container-runner.js';
 import type { ContainerConfig } from './container-config.js';
 
 const tmpDirs: string[] = [];
@@ -98,4 +103,13 @@ describe('buildDeepResearchWorkflowMount', () => {
   it('skips the mount when the shared workflow module is absent', () => {
     expect(buildDeepResearchWorkflowMount(tempDir())).toBeNull();
   });
+});
+
+it('S01-REL04 refuses per-group builds in release mode before reading mutable configuration', async () => {
+  vi.stubEnv('NANOCLAW_RELEASE_MANIFEST', '/fixture/release.json');
+  try {
+    await expect(buildAgentGroupImage('fixture-group')).rejects.toThrow('release_build_forbidden');
+  } finally {
+    vi.unstubAllEnvs();
+  }
 });
