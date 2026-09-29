@@ -1,6 +1,12 @@
-# DOCUMENTATION ONLY; proposed contract, not live configuration.
-# Pi HOST SERVICE runtime environment. Keep real values outside Git and agent mounts.
-# PostgreSQL is on a DIFFERENT machine on the private LAN.
+# REVISION 4: live COS_PG* values stay on the Pi. MAC tests receive a separately
+# provisioned COS_TEST_PG* profile (or explicitly supplied guarded disposable profile).
+# No Pi environment dump/copy; no credentials in Docker build context or images.
+# Read MAC_TO_PI_DELIVERY.md for cross-host test quiescence and migration execution.
+# DOCUMENTATION ONLY. New CoS configuration contract, not an installed feature.
+# Populate these in the Pi NanoClaw HOST SERVICE environment, never agent containers.
+# Database is on a DIFFERENT machine on the same private network.
+# Keep any real environment file outside Git and outside all agent mounts.
+# No localhost/URI/ambient PG* fallback. Do not paste real values into chat.
 COS_ENABLED=false
 COS_PGHOST=db.internal.example
 COS_PGPORT=5432
@@ -8,6 +14,7 @@ COS_PGDATABASE=chief_of_staff
 COS_PGUSER=cos_runtime
 COS_PGPASSWORD=__SET_PRIVATELY_IN_HOST_SERVICE_ENV__
 COS_PGSSLMODE=verify-full
+# Uncomment only with your actual host-side CA path, when a custom CA is needed:
 # COS_PGSSLROOTCERT=/etc/nanoclaw/postgres-ca.pem
 COS_PG_ALLOW_PLAINTEXT=false
 COS_PG_POOL_MAX=5
@@ -19,13 +26,19 @@ COS_PG_IDLE_TIMEOUT_MS=30000
 COS_PG_IDLE_TX_TIMEOUT_MS=10000
 COS_PG_APPLICATION_NAME=nanoclaw-cos
 
-# Only in the selected trusted Pi migration process, NOT daemon or worker:
+# Supply these ONLY to the standing-authorised migration process, NOT the daemon:
+# The implementation goal runs scoped migrations/deployments without another review.
 # COS_PG_MIGRATION_USER=cos_migrator
 # COS_PG_MIGRATION_PASSWORD=__SET_PRIVATELY_FOR_MIGRATION_ONLY__
 
-# Independent external test database profile supplied to Mac test tooling.
-# No automatic inheritance from runtime variables; same timeout/TLS suffixes supported.
-# DBA supplies separate roles and protected cos_admin.target_identity marker.
+# OPTIONAL separate external TEST database: inject only into trusted test tooling.
+# This separate profile never inherits missing runtime values.
+# DBA provisions its database, roles and protected test marker when used.
+# During S01-S11 the goal may instead explicitly select runtime-disposable,
+# using the bound disposable COS_PG* target under IMPLEMENTATION_AUTHORITY.md.
+# No second database or additional migration/deployment approval flag is required.
+# Existing NanoClaw local data is not disposable; protection closes automatically
+# when all slices meet their implementation/merge gates.
 # COS_TEST_PGHOST=db.internal.example
 # COS_TEST_PGPORT=5432
 # COS_TEST_PGDATABASE=chief_of_staff_test
@@ -38,11 +51,3 @@ COS_PG_APPLICATION_NAME=nanoclaw-cos
 # COS_TEST_PG_MIGRATION_USER=cos_test_migrator
 # COS_TEST_PG_MIGRATION_PASSWORD=__SET_PRIVATELY_FOR_TEST_MIGRATIONS_ONLY__
 # COS_TEST_TARGET_ID=__DBA_PROVISIONED_TEST_TARGET_UUID__
-
-# Separate test DB is optional only during eligible implementation disposal.
-# Explicit --db-profile runtime-disposable requires Mac-supplied client env plus
-# Pi-owned current lifecycle, target binding, maintenance lease and quiescence.
-# Never copy/dump Pi secrets, silently switch profiles, install local Postgres,
-# point tests at protected data, or pass these settings into image builds/workers.
-# Runtime scoped migrations/deployments already have the owner's standing approval;
-# automated safety checks and human PR merge requirements still apply.

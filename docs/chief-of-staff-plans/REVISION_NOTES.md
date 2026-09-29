@@ -1,31 +1,52 @@
-# Revision 5 — GitHub-pinned source and repository plan bundle
+# Revision 5 — GitHub-pinned source and plans-only PR
 
-**Date:** 29 September 2026. **Scope:** same eleven ordered slices. **Status:** documentation and templates only; no application implementation, live tests, migrations or deployment performed by this PR.
+**Date:** 29 September 2026.  
+**Scope:** add the agreed GitHub source-synchronisation workflow to the complete revision-4 bundle; S01–S11 order and authority remain unchanged.  
+**Status:** documentation and template changes only. No application implementation, live tests, migrations or deployment are performed by this PR.
 
-## What changed
+The Mac pushes source to the fork. The Pi fetches the exact manifest commit into a separate detached checkout, preserving the active installation and dirty work. GitHub source sync never triggers deployment. Tested images still travel from Mac to Pi over SSH; no build or package installation runs on Pi and no checkout mount can override image code. Source, artifacts and verification receipts must agree before activation.
 
-GitHub now carries source from Mac to the Pi's existing repository. A detached release-source checkout verifies the exact manifest commit/tree. Fetching source never activates a release. Tested Linux/ARM64 images still transfer over SSH; the Pi does not compile/install dependencies, build images or override baked code with checkout mounts. New GITHUB_SOURCE_SYNC.md and S01-REL13–S01-REL18 specify this boundary and its failure tests.
+New file: GITHUB_SOURCE_SYNC.md. Updated: delivery, goal, bootstrap, architecture/authority references, all slice release gates, acceptance matrix, environment examples and the versioned execution template. Existing v4 requirements for external PostgreSQL, the disposable implementation period, pre-authorised migrations/deployments, private Mattermost interaction and human-reviewed merges are retained.
 
-All eleven slices, persistent goal/bootstrap, delivery/authority/database/interaction contracts, acceptance matrix and execution template are included as readable files under docs/chief-of-staff-plans/. Repeated per-slice development/deployment/checkpoint boilerplate is consolidated into SLICE_EXECUTION_RULES.md and explicitly inherited by each slice; it is not deferred to a later phase. Individual outcomes, implementation steps, failure tests and acceptance/rollback requirements remain explicit.
+Adopt by merging this documentation PR and fetching the updated plan files on the Mac. Preserve existing branches, worktrees, receipts and the active ignored ledger; upgrade it additively to v5. The Pi-owned protection/target history is not replaced by a template. Publishing or merging these plans does not begin implementation or activate the assistant.
 
-The detailed source-inspection baseline stays at 1a432912c00d96abf6c39cd19b1a312631d78a9c. Publication branches from main at dea16302f904ef57cf10e91b687a289d76c149f8, preserving intervening work. Source observations are not a new runtime audit.
+The repository publication base is recorded separately from the historical code-inspection baseline. Plan validation covers complete file inventory, relative links, JSON metadata, expected slice order, placeholder-only examples, checksums and the docs-only change scope; it is not an application test result.
 
-## Unchanged decisions
+---
 
-Mac develops/tests/builds. Pi runs the always-on NanoClaw host and workers. PostgreSQL is an existing third LAN machine with trusted environment credentials. Private Mattermost is the primary interface; Telegram stays separate. The implementation DB is disposable only until the programme closes disposal; existing NanoClaw data and credentials are protected throughout.
+# Revision 4 — Mac development, Pi image deployment and Mattermost CoS
 
-Scoped migrations, Pi deployment/restart/health and compatible rollback keep the owner's standing approval after required checks. Tested candidates may deploy before PR review and must be labelled. Human review/merge gates each dependent slice. Runtime app approvals, account access, real messages and model costs remain separate; no worker receives administrative credentials or authority.
+**Date:** 29 September 2026.  
+**Scope:** the same eleven vertical slices, in the same order.  
+**Status:** plan-file changes only; no source implementation, builds, tests, SSH connection, database migration or deployment was performed by this revision.
+
+## Changes
+
+Development, dependency installation, testing and builds occur on the Mac. Only the exact locally tested Linux/ARM64 artifacts are transferred to the Pi over SSH. The Pi verifies, loads and activates them, runs its separately credentialled migrations and performs native smoke tests. No Pi-side builds, source hot fixes or package installs. The deployed system has no dependency on the Mac being online.
+
+Source review identified why the current agent image alone is insufficient: runner code is bind-mounted, host application code is outside the image and per-group builds can happen at runtime. The new release contract ships a matching prebuilt host payload in a carrier image and baked-code agent images, with immutable runtime profile mapping and no checkout-source overrides. Preserve the host service instead of introducing Docker-in-Docker or a new privileged host container.
+
+The initial CoS interface is one private Mattermost channel, with owner-bound approval/control handling and stable mission IDs. Natural language is the primary experience; deterministic controls provide exact approvals and emergency actions. Rich buttons are used only when implemented and tested. Threads do not become mission-isolation boundaries. Telegram stays separate; a new web/mobile UI is not required.
+
+Remote PostgreSQL and disposable-data authority are retained. Mac tests use an explicitly supplied external test profile, or coordinate Pi quiescence/lifecycle and a shared-target lease for permitted runtime-disposable tests. Pi credentials are not copied to the Mac. Authoritative deployment/disposal state remains on the Pi; the coding ledger is on the Mac.
+
+All eleven slices, shared architecture, goal, bootstrap, authority, DB contract, acceptance matrix and execution template are aligned. New files: MAC_TO_PI_DELIVERY.md, INTERACTION_MODEL.md and DEPLOYMENT_ENV.example. S01 includes the first complete release and interaction path. S11 closes the cross-host verification/recovery loop.
+
+## Unchanged permissions
+
+Migrations, Pi deployments/restarts and compatible rollback remain pre-authorised after mandatory local tests. Tested candidates may be deployed before PR review, with that status explicit. Human PR review/merge still gates dependent implementation. Business-action approvals, channel/account activation and model spending remain as previously granted, not implicitly expanded.
+
+Only CoS records are disposable until the programme closes disposal. Existing Pi NanoClaw SQLite/messages/sessions, credentials, unrelated groups, foreign schemas and later valuable records remain protected. Do not copy runtime state through release archives or restore old live data just because code rollback is needed.
 
 ## Adoption
 
-Review/merge the docs-only PR, fetch the plan files on the Mac and use BOOTSTRAP_PROMPT.md as the continuing goal. Preserve code, branches, receipts, private state and unknown ledger fields. Upgrade the active ignored ledger additively to v5; never overwrite progress with EXECUTION_STATE.json. Pi owns target/deployment/protection history. New source-sync fields begin unverified until actual execution supplies evidence. Do not redo already merged slices; necessary alignment gets a focused reviewed correction.
-
-Publishing/merging plans does not start coding or activate the assistant. Proposed cos:* commands and target helpers must be implemented in S01. Documentation validation checks file inventory, local links, JSON, slice order, placeholders and hashes; it is not application testing.
+Install the folder under the Mac checkout's docs/chief-of-staff-plans/ after comparing local plan edits. Reuse BOOTSTRAP_PROMPT.md as the same continuing goal. Preserve previous code/PRs/receipts and upgrade the active ignored ledger to v4 additively. Do not restart completed slices or replace progress with the template. Reconcile Pi-side authoritative target/lifecycle/deployment records before using runtime-disposable tests. If earlier implementation assumed local builds on the Pi, make a focused alignment correction on the Mac and verify it before continuing.
 
 ## History
 
-1. Eleven vertical slices, runtime/state/authority contracts and test-first delivery.
-2. External LAN PostgreSQL and one resumable programme goal.
-3. Disposable implementation database and pre-authorised scoped target operations.
-4. Mac development, tested image delivery to Pi and Mattermost-first interaction.
-5. Pinned GitHub source synchronisation, shared execution rules and complete docs-only PR bundle.
+- Revision 1: eleven ordered vertical slices and explicit runtime/authority contracts.
+- Revision 2: external LAN PostgreSQL and persistent implementation goal.
+- Revision 3: disposable CoS implementation database and pre-authorised target operations.
+- Revision 4: Mac development and tested image delivery to the Pi; Mattermost-first interaction.
+
+The proposed cos:* command names and release helper are implementation requirements, not utilities installed by generating this bundle. Tests performed while assembling the plan bundle verify document links, metadata and archive contents only—not application functionality.

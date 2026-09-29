@@ -1,66 +1,70 @@
-# Implementation authority and deployment boundaries
+# Implementation authority: disposable CoS database and automatic deployment
 
 **Contract:** `cos-implementation-authority/v2`  
-**Plan revision:** 5.  
-**Scope:** S01–S11 development on the Mac and delivery to the owner's designated Raspberry Pi NanoClaw installation.  
-**Status:** planning documentation for review. Publishing this file does not execute a migration, deployment or implementation task.
+**Applies to:** the S01–S11 coding goal on the Mac, delivering to the designated Raspberry Pi NanoClaw installation.  
+**Authority source:** the owner's standing migration/deployment grant and disposable-data declaration, refined by the requirement to develop/test/build on the Mac and transfer built images to the Pi only after successful local tests.  
+**Status:** standing authorisation for the implementing coding agent; no operation is claimed to have run.
 
-## Recorded owner decisions
+## 1. Do the authorised work without another approval
 
-The owner declared the configured external CoS database disposable until all slices are implemented, and authorised in-scope migrations and deployments on the NanoClaw machine without a separate review for each operation. Development, dependency installation, tests and image builds belong on the Mac. The Pi receives only locally tested release artifacts and performs target verification, scoped migrations, activation, restart and smoke checks.
+The implementing coding agent is pre-authorised to execute the in-scope operations below. Do not ask for per-operation consent, create an approval card, wait for `migration_approved` or `deployment_approved`, or require the owner to type a confirmation. Automated target, test and health checks still apply. This standing authority is independent of whether a slice PR has been reviewed; it does not authorise merging that PR.
 
-This approval applies to the identified installation and its owned CoS schema. It is not permission to bypass tool safeguards, operating-system access controls, failing tests, ambiguous targets or unavailable credentials. Those remain real blockers. Human review and merge of each slice PR remain required before dependent implementation begins. The runtime CoS agents do not receive the implementation process's authority.
-
-## Permitted operational scope
-
-| Operation | Conditions |
+| Operation | Treatment during S01–S11 |
 |---|---|
-| Read-only target, connection and schema preflight | Existing access, verified installation/database identity and redacted output. |
-| Apply checked-in CoS migrations | Passed mandatory tests, scoped migration role, bounded migration lock and verified target. |
-| Build images and package dependencies | Mac-local builder; recorded source commit, lockfiles and Linux/ARM64 verification. |
-| Transfer, activate, restart and smoke-test | Exact tested release manifest; protected-state backup and existing service identity preserved. |
-| Compatible rollback | Recorded previous release remains compatible with current schema; no blind restoration of old messages. |
-| Test and clean synthetic CoS fixtures | Separate admitted test DB, or the guarded disposable-runtime procedure below. |
-| Fetch pinned source on the Pi | Existing read access to this fork; separate detached worktree; no activation triggered by fetch. |
+| Inspect the configured CoS database, preflight connectivity and inspect schema state | Run automatically with redacted output. |
+| Apply this programme's checked-in, tested `cos` schema migrations on the configured external runtime database | Run automatically using host-provided migration credentials and a bounded migration lock. |
+| Run synthetic integration tests and fixture demonstrations | Run automatically against a separate admitted test DB when supplied, or the explicitly selected disposable runtime target under section 4. |
+| Deploy a tested slice/release to the designated NanoClaw machine | Run automatically; record the exact source/build identity and service target. |
+| Build/test images and pinned dependencies on the Mac; transfer verified artifacts; load/extract/restart on the Pi | Authorised after mandatory local gates. No builds, dependency installs or source fixes on the Pi; no unrelated upgrades or machine reboot. |
+| Take host-local protected-state backups, enable the installed CoS module for fixture validation, inspect health, and roll back to the last compatible release | Run as part of the deployment transaction. External account/model/channel activation is not implied. |
+| Clean up disposable CoS fixtures or rebuild disposable `cos` objects when a test or failed migration requires it | Only after the target, quiescence and effect-ledger checks below. Never use a reset to hide a failing recovery test. |
 
-The standing operational approval removes an extra migration/deployment approval checkpoint. It does not remove target validation, health tests, compatibility checks, source verification, audit receipts or the human PR merge gate. A tested but unreviewed candidate may be deployed during implementation; its receipt must identify that status.
+A live endpoint is not automatically a production-data endpoint. During this goal, the configured CoS database is a disposable implementation environment even though it is running on the actual remote server.
 
-## Protected resources and credentials
+## 2. Exact scope; other approvals remain
 
-Existing NanoClaw SQLite databases, conversations, sessions, credentials, unrelated workspaces, other applications and foreign database schemas are not disposable. Preserve their paths and identity. Take consistent backups before changes that affect local schema or deployment compatibility; drain affected workloads through the existing shutdown mechanism and check ordinary NanoClaw readiness afterwards.
+This authority applies only to the CoS database selected by the existing trusted `COS_PG*` configuration and the identified NanoClaw installation/service. Bind the actual service, deployment root, runtime data roots and database target once during S01 preflight; the coding agent records that binding itself using existing configuration. A new manual “approve this binding” step is not required. Validate that subsequent operations still target the same installation and database. An ambiguous or changed target is a real blocker, not a reason to guess.
 
-Mac tooling receives only its explicitly supplied development/test profile. Pi runtime and migration credentials remain in the corresponding trusted Pi process environment. Migration credentials are not retained by the daemon. Neither database nor deployment credentials enter worker containers, models, images, shared provider state, Git or public receipts.
+Existing NanoClaw SQLite databases, messages, provider sessions, credentials, unrelated agent workspaces and other applications are **not** disposable. Take consistent local backups before their schema or deployment compatibility is affected. Necessary additive NanoClaw migrations and normal service restarts are authorised, but must preserve these stores. Drain in-flight work using the installed shutdown path, report the expected service interruption, and verify ordinary chat/service health afterwards. An informational update is not an approval request.
 
-Account linking, real messages, paid model calls, real calendar effects, wider source/model permissions, TLS changes, firewall changes, remote database administration, OS upgrades, new machine-wide privileges and unrelated deployments are outside this operational grant unless separately authorised. Reuse an existing valid approval within its scope, without treating it as general authority.
+PR review and human merge requirements stay unchanged. Do not merge your own PR or start a dependent slice before its predecessor is verified merged. You may deploy a tested current-slice candidate before review, labelling it unreviewed in the deployment receipt; after merge verify that the deployed content matches the merged release and redeploy when it differs.
 
-## Automatic release procedure
+This is authority for the **trusted implementation process**, not for the deployed CoS coordinator or specialist containers. Preserve all application-level owner approvals, mission/mandate rules and secret boundaries. No database credential enters an agent container or model context. The Mac implementation process uses its explicitly supplied development/test credentials. The Pi helper invokes narrowly scoped runtime migration/administrative tools with the Pi environment. Do not export Pi secrets to the Mac or delegate either administrative capability to a CoS worker.
 
-Follow [MAC_TO_PI_DELIVERY.md](MAC_TO_PI_DELIVERY.md) and [GITHUB_SOURCE_SYNC.md](GITHUB_SOURCE_SYNC.md): identify the clean source commit; test locally; build and test final Linux/ARM64 host/worker artifacts; push the exact source; verify the Pi's pinned source checkout; transfer the tested bundle; verify/load/extract; back up protected local state; run packaged migrations with the Pi environment; activate the matching host/worker release; restart; run native smoke checks; record health or select a compatible prior release.
+No new authority is granted to connect accounts, send real messages, incur model charges not already authorised, create real calendar effects, widen runtime permissions, change TLS policy, open firewalls, administer the remote PostgreSQL server, drop a database or modify other schemas. Existing authorisations for those actions may be reused within their scope; otherwise their existing gates remain. Do not reopen a satisfied authorisation merely because this bundle was revised.
 
-Source fetch, staging and image loading do not themselves activate a release. The target helper is a narrow, versioned deployment utility, not arbitrary remote execution. Its first installation must come from a tested, hashed artifact using existing target access. The Pi has its own deployment lock and receipt, independent of the Mac goal lock. Shared-database tests also require cross-host maintenance coordination.
+## 3. Automatic Mac-to-Pi delivery cycle
 
-On SSH loss, query the same release receipt instead of repeating uncertain operations. On failure, keep unsafe CoS admissions closed. Prefer compatible code rollback or a tested roll-forward repair; do not restore old SQLite over newer conversations, reset queues, rebuild on the Pi or broaden permissions. Save a redacted receipt outside disposable storage containing target fingerprint, source/tree/image identity, migration checksums, schema versions, health and rollback outcome.
+[MAC_TO_PI_DELIVERY.md](MAC_TO_PI_DELIVERY.md) defines the mandatory cycle. The implementing goal remains on the Mac: edit → local tests → target-platform image build/tests → immutable release → SSH transfer → Pi verification/load/extract → explicit Pi-env migration → service activation/restart → Pi-native smoke checks → compatible rollback or receipt. No candidate-image transfer or deployment before passed mandatory local tests. Read-only target preflight and authorised maintenance coordination for shared-DB local tests can happen earlier.
 
-## Disposable runtime database tests
+The host release is an image-carried prebuilt payload extracted for the existing service; workers use matching baked-code images. Package the host/worker code together, remove checkout-source overrides in release mode and disable on-Pi per-group builds. Preserve existing runtime data roots and service identity. The target is not a build worker and does not execute the coding goal.
 
-A separate external test database is preferred but optional during implementation. A fully configured test profile uses its protected target marker. Otherwise the goal may explicitly select `runtime-disposable`; a partially configured or failing selected profile reports its error instead of silently switching targets.
+S01 adds a small checked-in Mac release coordinator and narrowly scoped Pi deployment helper, not a general remote-execution platform. The helper runs under existing verified access, keeps its own deployment lock/receipt and uses the real installed service manager. Stage and verify artifacts before quiescing; drain before affected protected-state backups; run explicit scoped migrations; restart and verify one active runtime. Existing live bot connections remain Pi-only.
 
-Verify the bound installation/database, current Pi-owned lifecycle record, active programme, target lease and quiescence. The owner decision above supplies the disposal declaration; it does not require another DBA marker for this runtime-disposable option. Existing separate-test marker checks remain mandatory.
+On an interrupted SSH session, reconcile by stable release ID from the Pi receipt. On failed health, select only a compatible previous code/image pair; never blindly restore old SQLite over messages accepted after a backup. Data roots, target bindings, lifecycle and credentials are not replaced by artifact extraction. No additional human migration/deployment reviewer is required.
 
-Before shared-target tests run on the Mac, close Pi CoS admission, fence/drain its workers, obtain exclusive target access, and use isolated Mac SQLite/artifact roots. Fixture scopes do not isolate schema changes. If a test leaves a schema incompatible with the current Pi release, keep Pi CoS paused until compatibility is restored or a locally tested matching release is deployed. A failed local suite never justifies deploying a failing candidate.
+Missing local tools, database/test prerequisites, SSH access, existing privilege, compatible target runtime, a safe drain, or passing tests are genuine blockers. Missing a new operational consent is not. Never change global sandbox rules, grant new machine-wide privilege, ignore host-key failures or move work onto the Pi to get around them.
 
-Routine cleanup removes only that test's owned rows/artifacts. A scoped rebuild of disposable CoS objects is exceptional: it requires verified disposal, no active worker, no protected marker and no real or uncertain effect that could be replayed. Preserve effect identities, native approval/schedule projections and implementation receipts. Never drop the database, change foreign schemas, erase the goal ledger or use a reset to hide a failed recovery test. Fault injection targets only the harness connection/proxy, not the server or LAN firewall.
+## 4. Disposable runtime database as a test target
 
-## End of the disposable period
+A separate external test database remains useful but is **not mandatory during implementation**. When one is fully configured and reachable, use `--db-profile test` with the protected test-target marker. When it is not configured, the goal may explicitly select `--db-profile runtime-disposable`; this uses the already configured runtime endpoint and logs the selection. There is no silent credential fallback. A partially configured or failing explicit test profile reports its actual error; it must not quietly switch databases.
 
-The Pi owns a lifecycle record outside PostgreSQL, release payloads and agent mounts. The Mac ledger references it. A missing/stale Mac copy cannot recreate disposal for a previously bound target. Initial binding may record `implementation_disposable` from the owner's explicit decision while the programme is incomplete.
+The Mac test coordinator and Pi helper verify the private target binding, active goal and the Pi-owned `implementation_disposable` lifecycle before allowing this profile. The Mac ledger is not authoritative for target disposal. This owner's instruction is the standing disposal declaration; do not add another environment approval flag or require DBA marker provisioning for the runtime-disposable option. The separate test profile's marker checks remain unchanged. Use server/database identity checks and current TLS validation as well as the configured endpoint; never accept a target supplied by agent-generated content.
 
-When all eleven slices and necessary alignment changes have passed mandatory implementation tests and verified human merges, set the Pi lifecycle to `protected` before admitting valuable data. This tightening happens automatically. An earlier owner statement that valuable data has been introduced closes disposal immediately. If the target cannot be reached, record the blocker rather than claiming protection was applied.
+Before a Mac-hosted runtime-disposable test, quiesce/fence the Pi CoS through its trusted helper, verify the shared target lease, and use isolated SQLite/artifact roots on the Mac. The tests run locally and connect to remote PostgreSQL. Separate fixture scopes alone do not isolate schema migrations. If a test changes schema incompatibly, do not reopen Pi CoS until compatibility is restored or a locally tested matching release is deployed. Ordinary tests create namespaced fixture scopes and clean only their own rows. Leave the runtime's `cos` schema at the tested release version and reconcile CoS projections before reopening it. Unrelated NanoClaw state is never the fixture database.
 
-Protection is monotonic for this programme: restart, code rollback, lost ledger or an empty template cannot reopen disposal. Uncertain target history is treated as protected. After closure, runtime-disposable tests and resets are refused; further destructive tests require a separate admitted external target.
+A deliberate disposable reset is exceptional, scoped to owned `cos` objects/fixtures and requires no additional human confirmation once these mechanical checks pass. Refuse it while real or uncertain external effects could be replayed, while workers are active, or while protected-state markers exist. Preserve/reconcile any real-effect identities and corresponding native schedule/approval projections before cleanup. Never drop the whole database, alter the protected `cos_admin` marker, touch foreign schemas, or erase the implementation ledger and acceptance receipts. Fault injection affects only the harness connection/proxy, not the database server or LAN firewall.
 
-Data-preserving migrations and deployments needed to finish the bound programme remain operationally authorised after protection closes, subject to protected-data backups and compatibility checks. This does not authorise destruction of later valuable data or future unrelated deployments.
+## 5. End the disposable period automatically
 
-## Review and adoption
+Use a Pi-owned lifecycle record outside PostgreSQL, immutable release payloads and agent mounts; the Mac goal ledger references it. A missing/stale Mac copy cannot initialise or reopen disposal against an already bound Pi. During S01–S11 the state is `implementation_disposable`. It applies to this bound database, not to everything reachable by its login. The agent may initialise this state once from this explicit owner instruction and the active incomplete programme.
 
-One independently reviewable PR per slice remains the delivery unit. Preserve existing work, current main and prior receipts. Record implementation, tested candidate, merged release, deployed release and account activation separately. These plans are documentation; their acceptance does not imply that the proposed `cos:*` commands, target helper or CoS runtime features already exist.
+After all eleven implementation slices and required alignment changes are verified merged and their mandatory tests pass, switch the Pi lifecycle to `protected` **before** admitting non-disposable data. Confirm the remote latch; loss of target contact leaves completion blocked and must not be recorded as success. Do this automatically; no human sign-off is required to tighten protection. In S11 test the transition and its enforcement. An earlier explicit statement that valuable data has been introduced also closes the disposable period immediately.
+
+The protected state is monotonic for this goal: restarting, losing a ledger, changing a local slice status or installing the blank template cannot reopen disposal. Preserve the closure receipt with the protected local state. If closure/target history cannot be reconciled, treat data as protected, not disposable. Runtime-disposable tests, fixture resets on the runtime DB and in-place runtime restore tests are then refused. Use a separately admitted disposable external test target for further destructive testing.
+
+Routine data-preserving migrations and deployments needed to finish this bound implementation goal do not gain a new human-approval gate merely because protection has switched on. Require protected-data backup/recovery and compatibility checks instead. The grant does not authorise destruction of later valuable data or future unrelated deployments. Goal completion reports the final deployed release, data lifecycle and remaining account/model activation gates without claiming the whole service is fully live.
+
+## GitHub source synchronisation — revision 5
+
+[GITHUB_SOURCE_SYNC.md](GITHUB_SOURCE_SYNC.md) adds a pinned-source gate to the existing Mac-to-Pi release contract. The Mac authors/tests/builds/pushes; the Pi may fetch and prepare a separate detached checkout of the exact manifest commit without another operational approval. Preserve dirty work and active runtime paths. No automatic pull/merge, source execution, dependency installation, worker code override, runtime-state sync or expanded GitHub privilege is authorised. Source and artifact identities must agree before activation. Human PR merge gates and the existing disposal/secret boundaries remain unchanged.

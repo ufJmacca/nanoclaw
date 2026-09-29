@@ -1,35 +1,40 @@
 # CoS interaction: Mattermost first, one private conversation
 
 **Contract:** `cos-interaction/mattermost-first-v1`  
-**Plan revision:** 5. **Applies to:** S01–S11. **Decision:** one dedicated private Mattermost channel, not an assertion of an activated bot/account.
+**Applies to:** S01–S11.  
+**Decision:** default product interface is one dedicated, private Mattermost channel. This is a proposed configuration for implementation, not a claim that a channel or account has been activated.
 
 ## 1. Human-facing topology
 
-Use a private chief-of-staff channel with intended owner/bot participants. Bind immutable instance/channel/owner platform IDs, not display names. Revalidate privacy/membership before admission, sensitive previews and output. Platform admins/backups remain trusted; private channel is not cryptographic secrecy from administrators.
+Use a private channel such as `chief-of-staff`, with the designated owner and bot as its intended participants. Bind its immutable instance/channel IDs and the authenticated owner's platform ID, not the display name. Revalidate actual privacy and membership before admission, approval previews and output delivery. Platform administrators and backups remain within the platform's trust boundary; a private channel is not a cryptographic claim that no administrator can access its content.
 
-The channel talks to Pi NanoClaw's persistent scoped coordinator. PostgreSQL owns goals/missions/decisions independently of chat. Mac is development, not the conversation backend. Use the existing Mattermost service; no new server or move onto Pi is required.
+The channel connects to the **Pi's NanoClaw**, which runs one persistent coordinator for that scope. Approved records, missions and decisions are held in PostgreSQL, not in Mattermost messages. Restarting a session does not delete the work model. The Mac is a development machine, not the chat backend. Use the existing Mattermost deployment; installing a new server or moving one onto the Pi is not required by these plans.
 
-Historical code inspection found strict exclusive channel/agent mapping with session_mode shared and invalid threaded execution sessions. Visual threads are not mission isolation. Optional thread presentation may be used only without relaxing strict session semantics. Start with one conversation and stable IDs. S05 specialist attempts have fresh isolated groups and return through host, not separate messaging channels.
+The current fork includes a native Mattermost adapter and strict channel-specific wiring. The inspected strict subscription sets `session_mode='shared'`, identifies threaded sessions as invalid, and maintains an exclusive channel/agent mapping [I01–I03]. Therefore **a Mattermost thread is not an isolated agent session in this plan**.
 
-## 2. User experience
+Start with one shared coordinator conversation and stable mission/decision IDs. Replies may be visually grouped in Mattermost threads only where the existing adapter supports this without changing strict session semantics. Thread presentation is optional; it is not an S01 prerequisite and must never be used as a security boundary. Do not change the strict topology to implement it. Specialist attempts get their own isolated execution AgentGroups under S05 and return results through the host, not through other Mattermost channels.
 
-| Request/event | Response |
-|---|---|
-| What should I focus on? | Grounded advice and current coverage, no priority mutation. |
-| Describe goal/project | Exact versioned proposal requiring owner confirmation. |
-| Research these options | Bounded work order, approval, mission ID and progress. |
-| Daily review | Concise approved-schedule briefing respecting quiet hours. |
-| Useful opportunity found | Evidence-backed proposal with accept/defer/dismiss. |
-| Standing responsibility | Preview scope/sources/limits/expiry; autonomy only within approved mandate. |
-| Reserve an hour tomorrow | Exact action preview before writer executes. |
-| Status/cancel/pause | Host-validated accepted/pending/denied state targeting exact work. |
-| Worker completion | One reviewed result with evidence and limits, not specialist chatter. |
+## 2. What the owner sees
 
-Decision and effect records survive rendering/delivery failure. Pending decisions remain queryable by ID.
+| User action / system event | Visible experience | State / control |
+|---|---|---|
+| Ask “What should I focus on?” | Brief recommendation with sources and current coverage. | Read approved records; advice does not modify priorities. |
+| Describe a goal/project | Proposed exact change followed by owner confirmation. | Versioned proposal; no unapproved canonical change. |
+| “Research these options.” | Bounded work-order preview, then mission ID and status. | S05 approval/dispatch and independent specialist execution. |
+| Daily scheduled review | A concise brief in this private channel. | Approved schedule, quiet hours and deduplicated notification intent. |
+| Assistant notices worthwhile work | Reasoned proposal with accept, defer or dismiss controls. | S07; suggestion is not authorisation. |
+| Approve a standing responsibility | Readable scope, sources, limits and expiry. | S08; future preparation is autonomous only inside the mandate. |
+| “Reserve an hour tomorrow.” | Exact calendar/time/payload preview before any write. | S09 exact external-action approval and verified receipt. |
+| Ask for status/cancel/pause | Immediate accepted/pending/denied state and recorded target ID. | Host validates owner identity and current generation. |
+| A specialist finishes | One reviewed result with evidence and limitations. | Workers cannot directly message the owner or other channels. |
 
-## 3. Deterministic controls alongside natural language
+Retain all decisions and execution receipts independently of chat rendering. A delivery failure does not erase a pending decision. Reopening the conversation should allow querying outstanding decisions by ID.
 
-Natural language proposes actions and requests information. Critical confirmation/cancellation also has deterministic host controls processed before inference. Prefer genuinely implemented/tested native Approve/Reject callbacks; generic types do not prove adapter support. Portable baseline examples:
+## 3. Natural language and deterministic controls
+
+Natural language is the main interface. It can propose actions and request status. For safety-critical confirmation and cancellation, provide deterministic owner-bound controls in addition to model interpretation.
+
+Prefer an existing tested Approve/Reject interaction when the installed Mattermost adapter genuinely supports the required callback/identity flow. Do not assume a rich button works because a generic NanoClaw type exists. The portable baseline is an exact text command intercepted by the **host before model inference**, for example:
 
 ```text
 cos approve P-104 <short-lived-confirmation-token>
@@ -40,35 +45,52 @@ cos pause automation
 cos resume automation
 ```
 
-These are proposed commands. Bind confirmation to exact revision/payload hash, authenticated owner, instance/channel, expiry and replay-protected challenge. Token alone grants no permission. Reject quoted/attachment/source/bot-generated commands, forged sender fields, old events and changed previews. LLM-extracted commands are not authenticated ingress. Ambiguous yes cannot select the wrong approval.
+These are **new proposed command contracts**, not installed bot commands. Confirmations bind the exact proposal/intent revision, payload hash, owner, instance/channel, expiry and a replay-protected challenge. The token alone grants no permission: an authenticated event from the bound owner and destination is required. Reject quote/attachment/source text, bot output, forged sender fields, stale events and modified previews as confirmation. Do not execute a command extracted by an LLM from untrusted documents. Ambiguous natural-language “yes” must not approve the wrong pending decision.
 
-Correction creates a new preview/revision/token; modify is not a fabricated existing third button. S07 accept/defer/dismiss are exact transitions whether tested buttons or text controls.
+A corrected preview creates a new proposal revision and new confirmation token. Approve/Reject is the existing primitive's model; “modify” means prepare a new version, not fabricate an existing third button. Accept/defer/dismiss in S07 must likewise be deterministic versioned transitions, whether rendered as tested buttons or explicit commands.
 
-Deliver CoS approvals only to validated owner-private channel or another explicitly supported/bound owner-private surface. No generic administrator DM fallback and no assumption strict group adapter implements DMs. Reuse native presentation with S01's backward-compatible CoS correlation/destination/receipt adapter. Application approvals differ from PR review and pre-authorised deployments.
+For Mattermost, bind approval delivery to the validated owner-only private CoS channel, or an explicitly supported and separately bound owner-private surface. Do not fall back to a generic administrator DM. The strict subscription path is group/channel-scoped; do not make unverified Mattermost DM support a prerequisite. Reuse the NanoClaw approval abstraction while adding the backward-compatible CoS destination/receipt adapter from S01.
 
-## 4. Other interfaces and local development
+Read-only conversational requests can use the same host-derived session context. Application-level approvals are distinct from coding-agent PR approval and from already pre-authorised Pi deployments.
 
-Telegram remains separate, not a silent fallback or shared agent-shared context with Mattermost. Later CoS linkage needs explicit authenticated owner linking, disclosure policy, operation scope and replay/delivery checks. Notifications can still disclose confidential data and need authority. No web/mobile/voice/multichannel federation in these slices; host CLI is setup/diagnostics/emergency/deployment, not daily UI.
+## 4. Telegram and other interfaces
 
-If Mattermost is unavailable, fixture implementation continues and live interface is unconfigured; do not install/select another service silently. Mac tests use fixture adapter/transport with synthetic identities. Never run a second consumer with Pi token, polling session or WebSocket identity. A separately authorised live dev bot has its own token/channel. Deployment smoke is fixture/no-send unless exact real access is already approved.
+**Mattermost is the selected first implementation target.** Telegram can remain an existing unrelated NanoClaw channel without becoming part of this CoS scope. No account migration or automatic cross-channel memory sharing occurs.
 
-## 5. Tests and slice responsibilities
+A later Telegram CoS surface would require an explicitly linked owner identity, source/destination disclosure policy, independent replay/delivery checks and decisions about which operations it can initiate. It could serve as a notification channel, but forwarding confidential briefing content would still need authority. Do not wire a Mattermost-owned group into `agent-shared` across Telegram to approximate this: native strict routing forbids such cross-group reuse.
 
-S01 proves fixture ingress → scoped proposal → exact host-confirmed approval → durable record → Mattermost-format reply, with live binding prerequisites separate.
+A web dashboard, native mobile app, voice interface and general multi-channel CoS federation are not required by S01–S11. The host administration CLI is for setup, diagnostics, emergency pause and deployment; it is not the daily user interface. If Mattermost is genuinely unavailable, continue fixture implementation and report the live interface as unconfigured—do not silently select Telegram or install another chat service.
 
-| ID | Required behaviour |
+## 5. Development versus live messaging
+
+Local Mac tests use a fixture Mattermost transport and synthetic owner/channel/event identities through the actual adapter contracts. Do not connect the Mac development instance to the Pi bot's tokens, polling session, WebSocket identity or production channel. Two active consumers must not race for the same messages or both answer them.
+
+A live development bot, if separately authorised, uses a distinct bot/token/private test channel. Existing Pi runtime tokens stay on the Pi. Deployment smoke checks are fixture/no-send by default; use authorised real chat only when that exact access is already granted. Connecting a new account or sending real messages remains separate from the standing deployment authority.
+
+## 6. Slice integration and acceptance
+
+S01 proves fixture ingress → private scope → proposed goal → exact host-confirmed decision → durable record → Mattermost-formatted reply. It also documents the live channel-binding prerequisites. The account may remain unconfigured without inventing success.
+
+Add these S01 tests and regress them in S04/S05/S08/S09/S11:
+
+| ID | Requirement |
 |---|---|
-| S01-UI01 | Only bound authenticated owner/private scope can apply controls/approval. |
-| S01-UI02 | Text and supported buttons share exact lifecycle/expiry/replay semantics. |
-| S01-UI03 | Changed membership/privacy/subscription blocks sensitive reads/previews/delivery. |
-| S01-UI04 | Visual threads neither grant authority nor bypass strict shared-session mapping. |
-| S01-UI05 | Mac fixture startup cannot consume/send through Pi real bot. |
-| S01-UI06 | Other channels cannot read/approve CoS by guessed IDs. |
-| S01-UI07 | Quoted/source/bot text cannot trigger confirmation. |
-| S01-UI08 | Emergency pause/cancel requires no successful model turn. |
+| S01-UI01 | Only the designated authenticated owner in the bound private scope can apply a control/approval. |
+| S01-UI02 | Text commands and any supported buttons resolve the same exact proposal/intent lifecycle, expiry and replay rules. |
+| S01-UI03 | Changed membership/privacy/subscription blocks subsequent sensitive previews, reads and deliveries. |
+| S01-UI04 | Threads are presentation only; they neither grant authority nor bypass the existing strict shared-session model. |
+| S01-UI05 | Mac fixture startup cannot consume or send through the Pi's real bot identity. |
+| S01-UI06 | Telegram/other channels cannot inspect or approve Mattermost CoS records by guessing IDs. |
+| S01-UI07 | Replying to a quote, source document or bot-generated command text cannot trigger an approval. |
+| S01-UI08 | A model turn is not required to process a deterministic emergency pause/cancel command. |
 
-Regress in S04/S05/S08/S09/S11. S04 checks formatting/cadence; S05/S06 no specialist chatter; S07/S08 noise/digests; S09 exact previews; S11 safe inspect/control during model/DB failure. Local safe metadata and deny-only controls may survive outages, not unchecked private content.
+S04 validates actual brief formatting and cadence; S05/S06 validate that specialist chatter stays out of the main channel; S07/S08 validate proposal noise and mandate digest behaviour; S09 validates exact external-action previews; S11 validates inspection/control when the model or database is unavailable. Safe status metadata/emergency deny-only actions can survive outages, not unchecked disclosure of stale private records.
 
-## Evidence references
+## 7. Source references
 
-Historical fork: [registration](https://github.com/ufJmacca/nanoclaw/blob/1a432912c00d96abf6c39cd19b1a312631d78a9c/src/channels/mattermost.ts), [adapter](https://github.com/ufJmacca/nanoclaw/blob/1a432912c00d96abf6c39cd19b1a312631d78a9c/src/channels/mattermost-adapter.ts), [strict subscription](https://github.com/ufJmacca/nanoclaw/blob/1a432912c00d96abf6c39cd19b1a312631d78a9c/src/channels/mattermost-subscription.ts), [native agent route](https://github.com/ufJmacca/nanoclaw/blob/1a432912c00d96abf6c39cd19b1a312631d78a9c/src/modules/agent-to-agent/agent-route.ts). Revalidate current source and live binding in S01; no live channel test is claimed by preparing these plans.
+- **I01:** [Mattermost registration](https://github.com/ufJmacca/nanoclaw/blob/1a432912c00d96abf6c39cd19b1a312631d78a9c/src/channels/mattermost.ts).
+- **I02:** [Mattermost adapter](https://github.com/ufJmacca/nanoclaw/blob/1a432912c00d96abf6c39cd19b1a312631d78a9c/src/channels/mattermost-adapter.ts): native ingress/egress, recovery and declared thread support; not evidence of thread session isolation.
+- **I03:** [Strict subscription](https://github.com/ufJmacca/nanoclaw/blob/1a432912c00d96abf6c39cd19b1a312631d78a9c/src/channels/mattermost-subscription.ts): exclusive mapping and shared-session policy.
+- **I04:** [Native agent route](https://github.com/ufJmacca/nanoclaw/blob/1a432912c00d96abf6c39cd19b1a312631d78a9c/src/modules/agent-to-agent/agent-route.ts): cross-agent Mattermost restrictions.
+
+Revalidate the actual installation during S01. No live channel, bot or approval path was tested while preparing this plan revision.

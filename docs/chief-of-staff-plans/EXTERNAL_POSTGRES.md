@@ -1,123 +1,200 @@
 # External PostgreSQL deployment contract
 
 **Contract:** `cos-postgres/external-env-v3`  
-**Plan revision:** 5. **Applies to:** all slices, tests, migrations and recovery. **Status:** requirements, not evidence that a database was contacted.
+**Applies to:** every slice, including fixtures, migration tooling and recovery.  
+**Status:** requirements to implement; no database has been contacted or provisioned by this planning revision.  
+**Implementation authority:** [IMPLEMENTATION_AUTHORITY.md](IMPLEMENTATION_AUTHORITY.md) pre-authorises scoped live migrations and target deployments without additional human review; the bound CoS database is disposable until all slices are implemented.
 
-## 1. Topology and ownership
+## 0. Mac/Pi interpretation of this contract
 
-Use an existing separately operated PostgreSQL server on another machine on the same private network. Mac trusted test tools and Pi trusted host/admin processes are clients. NanoClaw central/session SQLite and source/artifact files stay local; do not move SQLite onto network storage or convert runtime storage to PostgreSQL. Remote domain state does not make NanoClaw stateless or multi-host.
+[MAC_TO_PI_DELIVERY.md](MAC_TO_PI_DELIVERY.md) fixes three locations: Mac development/tests/builds, Pi NanoClaw runtime, and external PostgreSQL. “Host-service environment” below means the **Pi** for live runtime/migration operations. Mac test tools receive their **own explicitly supplied** process-env client profiles; they do not inherit, dump or copy the Pi service environment. No database credentials enter build stages, images or worker containers.
 
-No local PostgreSQL server/container/package/data volume/bootstrap/localhost fallback/Compose depends_on on Mac or Pi, including CI. A controlled test TCP fault proxy is not a DB server: confine override to the harness, retain intended TLS identity and target guards, and reject it in production parsing.
+Local tests stay on the Mac and connect to remote PostgreSQL; neither development nor deployment provisions local PostgreSQL. Prefer the separate test DB for uninterrupted Pi service. The optional runtime-disposable profile remains allowed, but it requires current Pi-owned lifecycle verification, Pi CoS quiescence and a cross-host maintenance lease. The Mac's local lock/ledger is insufficient. Do not run a dev bot against Pi's live messaging identity. When a shared test changes schema incompatibly, leave CoS paused until a tested matching release or verified compatible schema is restored. Failure of local tests never authorises deploying the failed candidate.
 
-The DBA owns server installation/upgrades, storage, network/auth rules, databases/roles and server backups. Application operations cover scoped `cos` migrations and client runbooks only. No server SSH/admin, foreign schemas, extensions, DROP DATABASE, global grants or firewall changes.
+The trusted Pi helper executes the actual runtime migrations after successful local release tests, with scoped Pi migration credentials. A tested host payload is transferred inside an image and extracted; no compilation or dependency installation occurs on the Pi. Service secrets are supplied by the actual target launcher; SSH does not automatically inherit them. After final implementation, the Pi's protected-data latch is authoritative and must be confirmed remotely.
 
-## 2. Canonical environment contract
+## 1. Fixed deployment topology
 
-Read runtime configuration from the Pi NanoClaw service process environment, not a model prompt, chat, implicit shell assumption or mounted worker config. Names are application-defined and mapped explicitly to `pg.Pool`/`pg.Client` properties.
+PostgreSQL is an **existing, separately operated server on the same private network, on a different machine from NanoClaw**. The NanoClaw host is a PostgreSQL client. Only the trusted Pi CoS host module, scoped Pi administrative tools and explicitly configured Mac test/admin clients connect to it within their granted profiles.
 
-| Variable | Requirement/default |
-|---|---|
-| COS_PGHOST | Required private DNS/IP of separate machine; no URI/socket/local default. |
-| COS_PGPORT | 5432; validate 1–65535. |
-| COS_PGDATABASE | Required existing target; never derive from OS user. |
-| COS_PGUSER | Required least-privilege runtime login. |
-| COS_PGPASSWORD | Required opaque secret; do not trim/interpolate/log. |
-| COS_PGSSLMODE | verify-full; only other supported value is explicitly approved disable. |
-| COS_PGSSLROOTCERT | Optional absolute host-local CA path, not a worker mount. |
-| COS_PG_ALLOW_PLAINTEXT | false; must also be true for a pre-approved disable exception. |
-| COS_PG_POOL_MAX | 5 for one shared daemon pool. |
-| COS_PG_CONNECT_TIMEOUT_MS | 3000; bound connection and acquisition paths. |
-| COS_PG_STATEMENT_TIMEOUT_MS | 5000 server-side ordinary statement limit. |
-| COS_PG_QUERY_TIMEOUT_MS | 7000 client deadline, greater than statement limit. |
-| COS_PG_LOCK_TIMEOUT_MS | 2000 ordinary lock wait. |
-| COS_PG_IDLE_TIMEOUT_MS | 30000 pool idle eviction. |
-| COS_PG_IDLE_TX_TIMEOUT_MS | 10000 idle-in-transaction limit. |
-| COS_PG_APPLICATION_NAME | nanoclaw-cos, non-sensitive. |
+NanoClaw central/session SQLite databases, source files and artifact bytes remain on the NanoClaw host. Do not move SQLite onto a network filesystem or convert NanoClaw runtime storage to PostgreSQL. Remote CoS storage does not make the host stateless or establish a multi-host NanoClaw deployment.
 
-These are validated initial defaults, not performance promises. Reject absent/empty/unchanged placeholders. Normal targets reject loopback, wildcard, Unix socket and local machine addresses; verify DNS resolution and known installation/database binding. Hostname alone does not prove another machine; record existing topology and do not scan the LAN.
+There must be **no PostgreSQL server container, package installation, database data volume, local server bootstrap, localhost fallback, or database `depends_on` service** in the application deployment. Do not add a local PostgreSQL server to make development, CI or a demonstration pass. A local TCP fault-injection proxy used only by tests is not a database server, and must be labelled as such. Its controlled transport override is confined to the test harness, retains the intended database TLS identity and protected test-target check, and is never accepted by the production configuration parser.
 
-One parser serves daemon, CLI, migration and tests. No `new Pool()` implicit defaults, DATABASE_URL, ambient PG variables, .pgpass, container defaults or competing URI precedence. Existing env names may be mapped deliberately by the trusted launcher; application input remains canonical.
+The external database administrator owns server installation, upgrades, storage, network/firewall rules, authentication configuration, database/role provisioning and server backups. These plans add client configuration, automatically authorised scoped application migrations and client-side operational runbooks. The trusted implementation process may deploy to the designated NanoClaw machine using its existing authorised execution/access route; it may not administer or SSH into the separate database server on the basis of this grant.
 
-Migration credentials `COS_PG_MIGRATION_USER` and `COS_PG_MIGRATION_PASSWORD` enter only the selected migration process. Reuse explicit runtime endpoint/TLS settings but replace login; runtime password is not needed to migrate. Daemon never retains or falls back to migration privilege. Missing migration credentials block DDL, not unrelated chat. Diagnostics/admin tools may run with COS_ENABLED=false without enabling runtime CoS.
+## 2. Environment-variable contract
+
+The application reads connection settings from **the NanoClaw service process environment on its host**. It must not prompt for passwords in chat or obtain them through agent tools. Required values must be explicitly populated when CoS is enabled. Use the names below consistently throughout implementation.
+
+| Variable | Requirement / default | Meaning |
+|---|---|---|
+| `COS_PGHOST` | Required | Private DNS name or private network IP of the separate database machine. No URL, socket path or implicit local default. |
+| `COS_PGPORT` | `5432` | Explicitly parsed integer port, 1–65535. |
+| `COS_PGDATABASE` | Required | Existing database selected for CoS; never infer from the OS username. |
+| `COS_PGUSER` | Required | Least-privilege runtime login. |
+| `COS_PGPASSWORD` | Required, secret | Runtime password, passed directly as a client property without URL encoding. |
+| `COS_PGSSLMODE` | `verify-full` | Application-defined choices: `verify-full` or explicitly approved `disable`; see section 4. |
+| `COS_PGSSLROOTCERT` | Optional | Absolute host-local CA bundle path when the server CA is not already trusted. Never mounted into agent containers. |
+| `COS_PG_ALLOW_PLAINTEXT` | `false` | Must be `true` in addition to `COS_PGSSLMODE=disable` for an operator-approved plaintext LAN exception. |
+| `COS_PG_POOL_MAX` | `5` | Maximum connections for the daemon's one shared runtime pool. |
+| `COS_PG_CONNECT_TIMEOUT_MS` | `3000` | Connection/acquisition deadline. Test that the installed driver enforces both paths. |
+| `COS_PG_STATEMENT_TIMEOUT_MS` | `5000` | Server-side statement deadline for normal domain operations. |
+| `COS_PG_QUERY_TIMEOUT_MS` | `7000` | Client query deadline; configure greater than the statement deadline. |
+| `COS_PG_LOCK_TIMEOUT_MS` | `2000` | Bound waiting for ordinary database locks. |
+| `COS_PG_IDLE_TIMEOUT_MS` | `30000` | Idle pool connection eviction. |
+| `COS_PG_IDLE_TX_TIMEOUT_MS` | `10000` | Terminate idle-in-transaction sessions. |
+| `COS_PG_APPLICATION_NAME` | `nanoclaw-cos` | Non-sensitive label to distinguish application clients. |
+
+These timeout/pool values are **initial design defaults**, not performance promises; bound and validate overrides. Credentials are opaque strings: do not trim, interpolate or log the password. Reject missing/empty required values and unchanged example placeholders. Restrict normal profile hostnames/IPs to the explicitly configured private-network target; reject loopback, wildcard addresses, local machine addresses and Unix sockets. A hostname alone does not prove another machine: record the operator's topology confirmation and verify resolution during deployment. Do not scan the LAN.
+
+Use one validated configuration adapter for the host module, CLI, migration runner and test harness. Map the namespaced values into explicit `pg.Pool`/`pg.Client` properties. Do not use `new Pool()` with implicit defaults. Do not fall back to `DATABASE_URL`, ambient `PG*`, container defaults, `.pgpass`, or a different profile. Existing installations using other names may explicitly map them at the trusted service-launch boundary; the application still has one canonical contract. Do not implement competing URI and discrete-variable precedence rules.
+
+Node-postgres documents both environment defaults and explicit configuration [PG01]. Our namespaced adapter and rejection rules are additional application requirements, not native `pg` variable names.
 
 ## 3. Service environment and credential boundaries
 
-An interactive export does not prove a service manager received variables. Document the actual installed manager/launcher and verify presence with redacted diagnostics, not env/printenv dumps or credential objects. An optional owner-controlled env file outside Git/mounts may feed the launcher; protect permissions and exclude it from portable exports.
+An interactive shell export is not evidence that a separately launched service received the same configuration. The deployment runbook must show how the **actual installed service manager** supplies these variables to the NanoClaw host process. Check presence through a redacted diagnostic, never by dumping `env`, `printenv`, a service environment, or a connection object into a model context or PR.
 
-Pi runtime/admin secrets stay on Pi. Mac tests need a separately supplied process-env profile, including when using the disposable runtime endpoint; never copy/dump Pi secret files over SSH. SSH does not automatically inherit systemd service env. Migration helper must deliberately use the existing protected injection mechanism.
+An operator-controlled environment file outside the repository can be used by the service launcher to populate its environment; it is optional, not an application dependency. It must be readable only by the relevant account/administrator and excluded from agent mounts, backups intended for export and Git. Do not put real values in `container.json`, a checked-in Compose file, a Docker build argument, an image, a skill, a prompt or an execution receipt. The included `POSTGRES_ENV.example` is documentation with placeholders, not live configuration.
 
-Every host-to-provider/container/helper boundary uses a safe env allowlist, stripping all COS_PG*, COS_TEST_PG*, COS_TEST_TARGET_ID, ambient PG*, DATABASE_URL and documented aliases. Apply to unrelated agent paths sharing the host process too. Inspect synthetic canaries in contributions, mounts, commands, logs and downstream environments. Excluding only Docker -e flags is insufficient if a provider helper inherits secrets.
+The long-running daemon receives only runtime credentials. Supply migration credentials **only to the trusted migration process**. The implementing goal/deployment runner is pre-authorised to invoke it; no per-run human consent is required:
 
-Workers cannot reach PostgreSQL directly. Host-IP allowlists may also match NATed workers, so verify actual network confinement. Only the host broker provides scoped records. Rotation pauses affected work, updates the protected env source and uses the already authorised restart/preflight; no zero-downtime claim and no automatic plaintext downgrade.
+| Variable | Scope |
+|---|---|
+| `COS_PG_MIGRATION_USER` | Required by the explicitly invoked, standing-authorised migration command; never a daemon fallback. |
+| `COS_PG_MIGRATION_PASSWORD` | Secret; required with migration user, only in that command's environment. |
 
-## 4. TLS and access
+Migration commands use the same explicit runtime host/port/database/TLS target, replacing the login with the migration login. They parse only that endpoint/security configuration and the selected migration login; they do not need the runtime password. Explicit diagnostics, tests and migration commands can run with `COS_ENABLED=false` without activating the CoS runtime. They never silently elevate a runtime connection. Missing migration credentials block schema changes, not unrelated chat.
 
-verify-full requires chain and hostname verification, explicit TLS options with rejectUnauthorized true and configured CA when needed. Do not override hostname validation. Test private-CA success, unknown/expired certificates and mismatched name/IP against the chosen driver. Revalidate current node-postgres APIs at implementation.
+At every host-to-provider, host-to-container and helper-process boundary, use an explicit safe environment allowlist. Strip all `COS_PG*`, `COS_TEST_PG*`, `COS_TEST_TARGET_ID`, ambient `PG*`, `DATABASE_URL` and any documented database aliases from **every agent** path, including unrelated agent/provider startup now sharing the host environment. Test synthetic secret canaries in environment values, provider contributions, mounted config, logs and generated commands. Merely excluding variables from Docker `-e` flags is not sufficient if a provider helper or inherited host subprocess can read them.
 
-LAN membership is not a TLS exemption. Existing plaintext requires a separately accepted exception with both SSLMODE=disable and ALLOW_PLAINTEXT=true, visible non-secret warning and evidence. Never downgrade after failure; do not support permissive allow/prefer/unverified require or NODE_TLS_REJECT_UNAUTHORIZED=0.
+Only the trusted database client and explicitly selected database administration subprocess may receive the selected profile. Worker containers cannot reach the database directly; the CoS host broker remains the only source of authorised records. A LAN firewall that permits the host IP may also see NATed worker traffic as that IP, so test effective container egress isolation rather than treating a host-IP allowlist as proof of worker isolation.
 
-DBA restricts client routes and database/role authentication. CI access is an explicit network decision; do not expose database ports publicly, create a VPN or alter firewall/auth rules to make tests pass. Prefer an already authorised LAN runner. Do not expose DB test secrets to untrusted PR jobs.
+For password rotation, drain/pause affected CoS work, update the operator's service-environment source, then perform the **standing-authorised service restart** and preflight without another approval. The same routine applies to migration/release restarts during implementation. A new shell export does not mutate the running daemon. Document the restart's impact on ordinary NanoClaw conversations rather than promising zero downtime. Dynamic secret reload is not required in this sequence.
 
-## 5. Scoped privileges and migrations
+## 4. Transport security and connectivity
 
-Prefer a dedicated existing database with `cos` schema; sharing the server is fine. If database is shared, use fully qualified owned names and restricted roles. DBA provisions a schema-owner/migrator and distinct runtime login with only necessary CONNECT/USAGE/table/sequence grants; no superuser, CREATEDB/CREATEROLE or role escalation. DBA reviews inherited PUBLIC grants; app does not revoke them globally. New objects receive deliberate runtime grants.
+`verify-full` means certificate-chain and server-name verification are both required. Implement it using explicit `pg` TLS options, `rejectUnauthorized: true`, the configured CA bundle when present, and the driver's normal hostname verification. Never override `checkServerIdentity` to accept arbitrary certificates. The certificate must match the configured DNS name or IP as appropriate. Test valid private-CA, unknown-CA, expired-certificate and hostname-mismatch cases against the selected driver/runtime. Node-postgres passes the TLS configuration into Node's TLS machinery [PG02].
 
-S01 introduces proposed commands:
+The same LAN is not, by itself, a TLS exemption. An existing non-TLS installation can be used only after the operator explicitly accepts the risk and configures **both** `COS_PGSSLMODE=disable` and `COS_PG_ALLOW_PLAINTEXT=true`. Emit a non-secret warning and record that exception in deployment evidence. Never downgrade automatically after a TLS failure. Do not support permissive `prefer`, `allow`, or unverified `require` modes in this initial application contract. Do not use `NODE_TLS_REJECT_UNAUTHORIZED=0`.
+
+The database administrator should restrict the configured database and roles to approved client addresses and use appropriate password authentication. PostgreSQL's `pg_hba.conf` selects connection/authentication rules [PG05]. The application must not edit those rules or open firewall ports automatically. Test/deployment access for a CI runner is a separate explicit network decision; do not expose the database publicly so hosted CI can reach it.
+
+## 5. Database ownership and scoped migrations
+
+Prefer a dedicated existing CoS database with a private `cos` schema. Sharing the **server** with other applications is allowed. Where the **database** itself is shared, the administrator must restrict CoS roles to `cos` and migrations must use fully qualified names; no changes to unrelated schemas, extensions, database defaults or roles.
+
+The administrator provisions a schema-owner/migration login and a distinct runtime login. The runtime login gets only required connection, schema usage and table/sequence privileges; no superuser, `CREATEDB`, `CREATEROLE`, arbitrary schema creation, extension management or ability to become the migration role. Review inherited `PUBLIC` grants as part of provisioning; the application must not globally revoke grants in a shared database. Ensure new migration-created objects grant appropriate runtime access deliberately.
+
+S01 introduces **proposed commands**, not commands that already exist:
 
 ```text
 pnpm cos:db check --profile runtime
 pnpm cos:db check --profile test
 pnpm cos:db migrate-status --profile runtime
-pnpm cos:db migrate --profile runtime --confirm-database <verified-name>
-pnpm cos:db migrate --profile test --confirm-database <verified-test-name>
+pnpm cos:db migrate --profile runtime --confirm-database <exact-database-name>
+pnpm cos:db migrate --profile test --confirm-database <exact-test-database-name>
 ```
 
-Check/status are read-only, bounded and redacted: configuration, target identity, negotiated security, actual server version/compatibility, privileges/schema. Driver/version compatibility is discovered and pinned; no server upgrade.
+`check` is read-only: validate configuration, connect with bounded time, verify negotiated security and target identity, inspect server version, required privileges and schema compatibility; report safe status codes only. Server version is discovered, not upgraded. Verify compatibility against the actual externally operated major version and pin the application driver dependency accordingly.
 
-Migrate requires explicit target/profile, scoped migration env, checksums and bounded lock. The exact-target argument is a machine assertion filled from verified binding, not another human confirmation. Existing standing approval covers in-scope runtime DDL. Hold a session advisory migration lock on one checked-out client; disconnect stops runner and checks ledger before retry. Initial DDL is transactional; nontransactional changes require a documented reviewed recovery design. Daemon startup never runs DDL. Bound administrative timeout separately, not infinite/server-wide changes. No destructive routine rollback.
+`migrate-status` is read-only. `migrate` requires the explicit profile and confirmed database name, selected migration credentials, the recorded standing authority for the bound implementation target, checksummed migrations and a bounded migration lock. No human approval prompt or callback is required. Use one checked-out client and a session advisory lock held by that client across the migration sequence; on disconnect the runner stops and checks the ledger before retry. Transactional DDL is required for the initial migrations; any nontransactional operation needs its own documented, tested recovery procedure within the same standing operational authority. Normal daemon startup only checks schema compatibility and must never run DDL automatically. The trusted implementation/deployment runner invokes this migration phase non-interactively before starting the new release; the exact database-name argument is populated from its verified target binding, not requested from the owner each time.
 
-## 6. Pooling and deadlines
+Limit DDL to `cos`. Database/role creation, `DROP DATABASE`, server configuration and broad reset commands are out of scope. Routine rollback preserves data. During the disposable implementation period only, controlled fixture cleanup or a necessary scoped `cos` rebuild is allowed by the implementation-authority contract after target/quiescence/effect checks; never drop the database or foreign schemas. Long migrations use a separate explicitly bounded administrative timeout, not infinite runtime timeouts or hidden changes to server-wide settings. A schema compatibility failure disables CoS operations while unrelated NanoClaw work remains available.
 
-One runtime pool per host, not per tool/session/worker. Bound admin/test connections and total concurrency. Add pool error handlers; release clients in finally and destroy uncertain-transaction clients. A transaction uses the same checked-out client. Do not hold it across models, human waits, HTTP, container startup or file copies.
+## 6. Pools, timeouts and transaction handling
 
-Use bounded application queue (initially 20 waiting operations) and total RPC deadline; return busy/unavailable rather than unbounded memory growth. Safe read-only retries initially at most three with exponential jitter/cooldown; no invalid-auth/cert storm or stacked independent retry multiplication. Client timeout does not prove rollback. Poll waits return an honest durable operation/correlation state.
+Use one small runtime pool per NanoClaw host process, not one pool per tool, mission, session or worker. Administrative/test processes have separately bounded pools; document their combined connection allowance before running them concurrently. Add an idle-pool `error` handler and release checked-out clients in `finally`. Destroy a client with uncertain transaction state rather than returning it to the pool. Node-postgres describes pool limits, client release, shutdown and background error events [PG03].
 
-## 7. Partitions, ambiguous commits and fail-closed recovery
+Use a bounded application queue in front of the pool (initially 20 pending operations) and a total request deadline. A full queue returns a safe busy/unavailable result instead of exhausting memory. A tool must finish within the declared RPC wait or return an honest pending/unavailable state. Do not stack five layers of independent retries. Start with at most three attempts for safe read-only requests, exponential backoff with jitter, a circuit-breaker/cooldown for connectivity failures, and no retry storms on invalid credentials or certificates.
 
-Remote server can commit before acknowledgement is lost. Preserve `(session_id,request_id)` and payload hash. Reconnect and resolve using unique operation records; if necessary re-enter same deduplicated transaction, allowing uniqueness to resolve races with an original still completing. Do not interpret a fast absent-row read as rollback or create a new mission/action ID. External effects require known committed intent/authority.
+Do not hold a transaction or pooled client across a model call, human approval, calendar HTTP request, container start or filesystem copy. Reserve/commit first, perform the external step, then record/reconcile. Statements in one transaction use the **same client**. Client/server statement, query and lock deadlines have separate meanings [PG04]; a client timeout is not proof of rollback.
 
-Not accepted means unavailable, not queued. Possibly committed means original correlation with explicit unresolved state, not fabricated durable receipt. Once reconciled return original result.
+## 7. Lost connections and ambiguous commits
 
-DB uncertainty stops new CoS admission/private retrieval/mutation/approval acceptance/wake/publication. No stale-private-content cache bypass. Local host restriction markers and emergency pause latch close/fence/stop CoS execution without depending on another DB write. In-flight external requests cannot be recalled. Local records are deny-only stop/cancel intentions, not an offline CoS authorisation database.
+Remote networking adds a specific failure boundary: the server can commit a transaction while the host loses the acknowledgement. For a mutating RPC, keep its stable `(session_id, request_id)` and canonical payload hash. Do not allocate a new request/mission/action merely because the first connection timed out.
 
-Reconnect validates target/schema/current permissions, reconciles operations/leases/budgets/outbox and explicit cancellation/revocation before reopening eligible work. Pause stays until authorised resume. No budget reset, receipt erasure or missed-brief backlog. Leases use DB time; human schedules retain timezone semantics.
+After reconnection, resolve the original operation using a fresh connection and the unique operation record. Re-enter a deduplicated transaction under the same identity when necessary; uniqueness must resolve a race with the original transaction. Never infer rollback solely from a quick absent-row read while the old transaction might still be completing. Do not execute an external side effect until its required intent/authority commit is known to have succeeded.
 
-## 8. Test profiles and disposable period
+If no durable operation was accepted, return unavailable without claiming that work was queued. If acceptance may have committed, return the original correlation ID with an explicit unresolved/pending status; do not invent a successful durable receipt. Restore the normal result only after reconciliation.
 
-Preferred separate external DB uses independently parsed COS_TEST_PG* equivalents of every runtime suffix, plus COS_TEST_PG_MIGRATION_USER/PASSWORD. No runtime fallback/inherited security config. COS_TEST_TARGET_ID must match DBA-owned read-only `cos_admin.target_identity` row containing target_id UUID and purpose=test. Runtime/migration test roles cannot modify that marker. Reject known runtime target aliases. Serialize suites with bounded lock or use separately provisioned test targets; clean only owned fixture rows/artifacts, not whole database/foreign schemas.
+Loss of PostgreSQL blocks new CoS admissions, private retrieval, mutation, approval acceptance, worker wake and output publication. CoS content reads are **unavailable** when current source/authority checks cannot be made. Do not serve stale private content as a permission bypass. This differs from a stale calendar snapshot while PostgreSQL and current access policy are healthy.
 
-During this programme the owner permits explicit `--db-profile runtime-disposable` when no separate profile is selected and target safety checks pass. This does not require another DBA marker or approval flag: verify existing Pi-owned installation/database/lifecycle declaration, active incomplete goal, cross-host target lease and Pi CoS quiescence. Never silently switch from partial/failing test configuration. Mac tests use isolated local SQLite/artifacts and explicitly provided DB credentials.
+The host maintains restrictive identity markers and an emergency pause latch locally. On detected database failure it closes CoS work admission and fences/stops affected CoS containers through that trusted local path, without needing a successful database write. Already in-flight provider requests cannot be recalled. No worker restart/renewal or new disclosure is permitted until authority and budgets are reconciled. Record pending stop/cancel intentions locally for replay; this is a **deny-only safety record**, not a writable offline CoS database or a new source of authorisation.
 
-Fixture scopes do not isolate schema changes. Keep Pi CoS paused after incompatible tests until safely restored or a locally tested matching release is deployed. Failing local tests do not justify deploying untested code. A Mac lock alone cannot stop Pi writers. Lost Mac process requires target receipt/lease reconciliation; uncertainty prevents automatic resume. First S01 may use validated existing maintenance operations to prove no writer before the new helper exists.
+On reconnection, validate configuration, target/schema and current authority, reconcile operation results, leases, reservations and outbox records, then reopen only work that remains eligible. Respect explicit pause, cancelled generations and source revocations. Never reset budgets, clear receipts or replay every missed briefing. Use database time for lease comparisons; human schedules retain their IANA timezone semantics.
 
-Routine cleanup is scope-limited. Exceptional disposable rebuild needs no additional consent but must refuse protected state, active workers or real/uncertain effects whose identities might be replayed. Preserve native projections and external receipts; no database drop, cos_admin alteration, foreign schema or protected local-state reset. At all-slice completion the Pi lifecycle becomes protected monotonically; runtime-disposable is then unavailable. See IMPLEMENTATION_AUTHORITY.md.
+## 8. Explicit test profiles and the disposable implementation target
 
-Missing every eligible target blocks integration gates; unit work may proceed but mocks cannot satisfy DB acceptance. A missing second database alone does not block valid disposable-runtime tests. Fault injection alters only test connection/proxy, not server or firewall.
+All integration tests use actual PostgreSQL on the separate LAN server. A second external database is optional during S01–S11 because the owner has explicitly declared the configured CoS runtime database disposable. Do not introduce an approval or infrastructure gate merely to restate that declaration.
 
-## 9. Backups, restore and slice responsibilities
+### Profile selection
 
-DBA-managed backups/PITR are separate from application checkpoints. CoS must pair remote recoverable database state with consistent local SQLite, artifacts, bindings/restrictions and schema/software/image manifest. No remote data-directory copy/local Postgres volume assumption. Logical exports are additional authorised artifacts, not proof of complete PITR.
+Add the explicit selector `--db-profile test|runtime-disposable` to `cos:test` and fixture `cos:demo`. Store the chosen profile in the private goal ledger and each test receipt. These are tool profile choices, not new database endpoints. No implicit runtime credential fallback is permitted.
 
-Before S09 writes, quiesce and demonstrate coordinated restore. Prefer a separate admitted external restore/test DB with isolated local roots and no egress/admission until checks and newer-effect reconciliation pass. Eligible disposable-runtime tests may exercise scoped fixture restore under its strict lifecycle/lease/effect contract; protected runtime and actual local NanoClaw data are never overwritten. Reprovision secret env separately. An older DB missing a receipt does not establish absence of a real provider effect.
+| Selection | Connection source | Required checks |
+|---|---|---|
+| `test` | Independently configured `COS_TEST_PG*` | Separate admitted target, protected DBA marker and test-role boundary. |
+| `runtime-disposable` | Existing `COS_PG*`, with migration credentials only in migration subprocesses | Bound runtime target, current disposable lifecycle, active incomplete goal, exclusive target lock, CoS quiescence, isolated local state and no unresolved real-effect hazard. |
 
-S01 implements env/role/pool/preflight/migration/secret guards and commit reconciliation. S02 protects file+remote publication. S03 snapshots cannot promote partially. S04 occurrences remain stable. S05 stops/fences workers with no direct DB access. S06 roots/budgets/joins survive contention. S07 preserves dispositions. S08 denies stale mandates. S09 reconciles provider success after DB loss. S10 requires complete approved review snapshots. S11 tests redacted readiness, rotation and cross-store restore. Individual PG test IDs are specified in each plan and mandatory.
+When a complete separate test profile is supplied, prefer it. When none is configured, the goal may explicitly select `runtime-disposable` without another human approval. If an explicitly chosen profile is incomplete, unreachable or invalid, report that error; do not silently switch. In all cases, reject loopback/local database servers and unconstrained profile/target names supplied by model output.
 
-## References
+### Separate external test target
 
-- [node-postgres configuration](https://node-postgres.com/features/connecting)
-- [node-postgres TLS](https://node-postgres.com/features/ssl)
-- [Pool API](https://node-postgres.com/apis/pool) and [Client API](https://node-postgres.com/apis/client)
-- [PostgreSQL authentication](https://www.postgresql.org/docs/current/auth-pg-hba-conf.html)
-- [PostgreSQL SQL dump](https://www.postgresql.org/docs/current/backup-dump.html)
+The test profile uses the same suffixes as runtime with `COS_TEST_PG` replacing `COS_PG`, for example `COS_TEST_PGHOST`, `COS_TEST_PGDATABASE`, `COS_TEST_PGUSER`, `COS_TEST_PGPASSWORD`, `COS_TEST_PGSSLMODE`, `COS_TEST_PGSSLROOTCERT`. Parse it independently using documented non-secret defaults; never borrow missing runtime values. Migration credentials are `COS_TEST_PG_MIGRATION_USER` and `COS_TEST_PG_MIGRATION_PASSWORD`.
 
-These support client behaviour, not proof the user's server is configured. Verify selected versions during implementation. Repeated execution/release/receipt rules live in SLICE_EXECUTION_RULES.md.
+For this separate profile only, require `COS_TEST_TARGET_ID` to match the DBA-provisioned read-only marker in `cos_admin.target_identity`: `target_id` and `purpose='test'`. Roles may manage the test database's `cos` schema, not the marker. Reject a known runtime target masquerading as `test`; use the explicit runtime-disposable path when that is intended. Serialize suites or use independently provisioned targets for parallel jobs.
+
+### Bound runtime-disposable target
+
+S01's trusted host tool creates a private, host-owned target/lifecycle binding outside PostgreSQL and agent mounts, based on the actual service deployment and configured endpoint/database identity. The goal's standing authority is sufficient to initialise it while the programme is incomplete; do not require a new `ALLOW_LIVE_MIGRATION` flag, approval card, manual confirmation or DBA marker for this mode. Record only safe identifiers/fingerprints in public evidence. Check current configuration and database identity against the private binding every time.
+
+The tool closes CoS admission, drains/fences CoS workers, checks external-effect safety and holds an exclusive target lock before testing. Use fixture scopes with explicit ownership/run IDs, isolated local SQLite and isolated artifact roots. Ordinary fixture cleanup deletes only that run's records. End with the correct runtime schema, reconcile affected CoS projections and reopen only still-authorised work. This may temporarily pause CoS; it must not destroy ordinary NanoClaw messages, sessions or other workloads.
+
+Necessary destructive migration tests or disposable fixture resets are allowed only under the scoped checks in [IMPLEMENTATION_AUTHORITY.md](IMPLEMENTATION_AUTHORITY.md). Do not wipe effect identity/uncertainty records while an external calendar or message effect could still be replayed. Never use a cleanup to make a failed recovery assertion disappear, drop the whole database, alter `cos_admin`, modify foreign schemas or change server-wide configuration.
+
+After all slices meet their implementation/merge criteria, or when valuable data is declared present earlier, automatically and monotonically close disposal before admitting that data. A protected or unknown lifecycle rejects runtime-disposable tests, in-place runtime restore and fixture resets. Reopening a goal or losing an execution ledger cannot restore this permission. Further destructive tests require a separately admitted disposable external target; routine data-preserving migrations/deployments for the bound goal still use automated safeguards rather than a new human review gate.
+
+### Tests and network isolation
+
+Missing every eligible test route blocks required integration acceptance. Missing just the separate `COS_TEST_PG*` database is not a blocker when runtime-disposable is valid. Unit work can proceed around an actual integration prerequisite failure, but mocks alone cannot satisfy the vertical gate.
+
+CI needs an existing authorised network route and scoped credentials. Prefer an authorised runner on the private network. Never expose credentials to untrusted PR jobs or install a VPN/open firewall/start local PostgreSQL to bypass access problems. Fault injection operates on the harness connection or a controlled proxy only; do not stop the shared server or alter its global firewall. Keep certificates and normal runtime transport policy intact.
+
+## 9. Health, backups and restore
+
+Expose CoS dependency states: disabled, misconfigured, unreachable, authentication_failed, tls_failed, schema_incompatible, reconciling and ready. Separate them from NanoClaw process liveness. Diagnostic output contains safe status codes, variable **names** that are missing, schema/driver versions and counts; not secrets, full connection objects, raw SQL parameters or private server error details.
+
+The PostgreSQL server has its own administrator-managed backup/retention/PITR policy. NanoClaw backups must additionally capture local SQLite, source/artifact files, host-owned restriction/binding metadata and the matching CoS checkpoint. A database backup does not include those local files. PostgreSQL documents the snapshot consistency of a database dump [PG06]; it does not provide a cross-store snapshot of this application.
+
+Before actual S09 external writes, implement a quiesce barrier and a manifest pairing a recoverable remote database backup/checkpoint with consistent local SQLite backups and checksummed artifacts. Disposable content does not make a real calendar effect disposable. Routine implementation migrations/deployments require no human backup approval and no wait for a DBA-operated backup when scoped disposable CoS data is all that is affected; protected local-state backups and mandatory recovery tests still apply. S11 exercises the full drill. A client-side logical export can be an additional authorised artifact, not a claim that production backup/PITR is solved. Do not copy a remote server data directory or assume a local PostgreSQL volume exists.
+
+For an implementation restore drill, prefer an admitted **separate external restore/test database** with its own environment and marker. If none is provisioned and the runtime is still eligible for disposal, the trusted goal may quiesce CoS and restore only its disposable `cos` data in place under the bound runtime-disposable contract. No extra human migration/deployment review is required. Disable effects and reconcile or conclusively exclude every real/uncertain external effect before an in-place drill. Never overwrite protected runtime records, foreign schemas or server configuration. Always restore local NanoClaw files into a separate isolated data root, never over the running installation's protected SQLite/sessions. Verify manifests, revocations and schema before restarting CoS, and preserve checkpoints outside the disposable DB. Once data is protected, an isolated external restore target is mandatory for destructive restore testing. No PostgreSQL server restart or role change is authorised. Keep passwords out of exports and re-inject them through the host environment separately.
+
+## 10. Slice responsibilities
+
+| Slice | Remote-database work in that vertical flow |
+|---|---|
+| S01 | Validated env configuration, external preflight, automatically authorised scoped migration/deploy tooling, credential isolation, commit reconciliation, explicit test profiles and host-owned disposable lifecycle. |
+| S02 | Atomic publication across remote records/local files; no private retrieval during database-policy uncertainty. |
+| S03 | No incomplete remote snapshot promotion after a database disconnect; connector credentials remain distinct from DB credentials. |
+| S04 | One briefing occurrence after a partition; no stale-authority notification or backlog storm. |
+| S05 | Workers have neither database credentials nor a database network route; deny-only local stop during database loss. |
+| S06 | Root budget reservations and join state survive contention/connection loss; bounded shared pool. |
+| S07 | Feedback/dismissal persists before acknowledgement and survives ambiguous commits. |
+| S08 | No mandate admission/renewal/publication without current remote authority and budget checks. |
+| S09 | Lost DB connection after remote calendar success cannot trigger a duplicate event. |
+| S10 | Review input versions remain explicit; failed database snapshots cannot masquerade as complete strategic evidence. |
+| S11 | Network-aware readiness, automatically authorised restart/deployment, coordinated backup and guarded restore, plus monotonic closure of disposable data at programme completion. |
+
+## 11. Primary implementation references
+
+These references support client behaviour, not proof that the target server is already configured. Revalidate driver APIs and the actual server version during implementation.
+
+- **PG01 — [node-postgres connection configuration](https://node-postgres.com/features/connecting):** explicit settings and built-in environment/local defaults. CoS defines its own namespaced adapter.
+- **PG02 — [node-postgres TLS](https://node-postgres.com/features/ssl):** explicit TLS options; mixing URI SSL parameters with an SSL object can replace the object. This plan avoids that ambiguity.
+- **PG03 — [node-postgres pool API](https://node-postgres.com/apis/pool):** pool lifecycle, limits, checked-out clients, transactions and background errors.
+- **PG04 — [node-postgres client API](https://node-postgres.com/apis/client):** statement/query/connect/lock timeouts, keepalive and idle-in-transaction options.
+- **PG05 — [PostgreSQL client authentication](https://www.postgresql.org/docs/current/auth-pg-hba-conf.html):** server-side connection/authentication rules, owned by the database administrator.
+- **PG06 — [PostgreSQL SQL dump](https://www.postgresql.org/docs/current/backup-dump.html):** database dump consistency and restoration; select the matching server-version documentation when operating it.

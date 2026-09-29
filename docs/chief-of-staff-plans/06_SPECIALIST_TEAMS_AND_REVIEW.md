@@ -1,53 +1,87 @@
 # S06 — Coordinate bounded specialist teams
 
 **Status:** not started  
+**Repository:** `ufJmacca/nanoclaw`  
 **Branch:** `cos/s06-specialist-teams-and-review`  
-**Depends on:** S05 merged with receipt.  
-**Delivery unit:** one independently reviewable PR.  
-**Outcome:** one request produces independent analyses, evidence review and a finished recommendation without the owner supervising each worker.
+**Depends on:** S05 merged, with its acceptance receipt available.  
+**Delivery unit:** one independently reviewable PR; multiple red–green commits are expected.  
+**User-visible outcome:** One request can produce independent analyses, an evidence review and a finished recommendation without you managing each agent.
 
-Follow [shared execution rules](SLICE_EXECUTION_RULES.md) and all referenced contracts.
+Read [START HERE](00_START_HERE.md), [architecture/contracts](ARCHITECTURE_AND_CONTRACTS.md), [external PostgreSQL](EXTERNAL_POSTGRES.md), [goal execution](GOAL.md), [Mac-to-Pi delivery](MAC_TO_PI_DELIVERY.md), [Mattermost interaction](INTERACTION_MODEL.md), [implementation authority](IMPLEMENTATION_AUTHORITY.md), and [baseline](REPOSITORY_BASELINE.md) before implementation. This plan inherits their identity, scope, replay, approval, budget and retention rules; none may be postponed to S11.
 
-## Demonstration and scope
+## Demonstration
 
-Approve a small graph with independent technical and operational analyses followed by synthesis/review. Observe progress within the concurrency limit and receive one recommendation with disagreement, uncertainty and sources. Inject required-worker failure: retry only within root limits or explicitly report partial/blocked work. Cancel another graph and fence all descendants.
+Request a comparison requiring both technical and operational analysis. The coordinator proposes a small step graph: two independent specialists, then synthesis/review. Approve it once. Observe concurrent progress within the configured limit; receive a recommendation that includes disagreement, uncertainty and source references. One specialist fails: the system either retries within the root budget or labels the final result partial rather than silently omitting that perspective.
 
-Build a small acyclic step graph, approved templates, bounded parallel dispatch and review. Optional public-source retrieval is host-brokered and allowlisted. No arbitrary agent marketplace, recursive swarm or cross-domain collaboration.
+## In scope
 
-## Implementation sequence
+A small acyclic mission-step graph, approved specialist templates, bounded parallel dispatch, result dependencies and explicit synthesis/review. Optional host-brokered public source retrieval from an operator-approved domain allowlist. No arbitrary agent marketplace, recursive swarms or cross-domain collaboration.
 
-1. Add typed steps, dependencies, required/optional outputs and criteria. Validate acyclicity, maximum graph size, supported templates, sources and root budget before admission. The coordinator proposes; deterministic host checks and exact approval authorise.
-2. Add analyst, writer and reviewer templates using S05's fresh execution identities. Role names grant no additional permissions. Reviewers receive only necessary artifacts and evidence, not every worker's private history.
-3. Dispatch ready steps through the existing native queue/container capacity. Stable attempts start once and dependencies cannot start early. Reserve coordinator capacity or enforce a fair limit so workers cannot starve user interaction.
-4. Reserve root limits before dispatch, account for children/retries and release unused reservations once. Unknown provider usage is not zero; subscription usage is not fictional dollar cost. Do not create a pool per worker or hold DB transactions while a model runs.
-5. Implement deterministic joins: required failure blocks synthesis or yields expressly approved partial work; optional omissions remain visible. Results/events wake subsequent steps. Do not hold coordinator model turns or generate polling chatter while waiting.
-6. Review evidence validity, factual gaps, contradictions and unmet criteria. Schema/access/citation checks block completion; semantic critique is advisory. Permit only bounded rework already inside the approved plan.
-7. Optional public retrieval uses operator-approved providers/domains, time/size/content limits and DNS/IP/redirect checks blocking private, link-local and metadata endpoints. Treat pages as untrusted revisioned evidence. No unrestricted shell internet. Without search-provider configuration use supplied admitted URLs and report coverage limits.
-8. Publish one consolidated result in the originating private scope. Intermediate work belongs in mission status, not other channels. Owner cancellation fences the entire graph.
+## Execution sequence
+
+1. Extend the mission contract with typed steps, dependency IDs, required/optional outputs and per-step acceptance criteria. Validate acyclicity, a small maximum step count, supported templates and a root budget before admission. The coordinator proposes the plan; host validation and approval authorise it.
+2. Add analyst, writer and reviewer templates using S05's attempt isolation. A role label grants no extra permissions. A reviewer receives only the necessary submitted artifacts and evidence access, not private working histories from every worker.
+3. Implement a bounded dependency dispatcher in the CoS module using existing native queue/container capacity. Ready steps get stable attempts; blocked steps never start early. Reserve part of native capacity for the coordinator or configure a fair limit so workers cannot indefinitely starve user interaction.
+4. Add root-budget accounting. Reserve limits before dispatch, account for retries and descendant steps, and release unused reservations exactly once. Record provider usage uncertainty; do not compare subscription usage to fictional dollar costs. Hard per-call limits require adapter support.
+5. Implement join semantics: required failed work blocks synthesis or yields explicitly approved partial output; optional failures are visible. Coordinator returns to idle while steps run. Results/events, not open model turns or polling chatter, wake the next step.
+6. Define structured review outputs: evidence validity, factual gaps, contradictions, unmet criteria, recommended revisions and confidence. Deterministic citation/access/schema tests are blocking. LLM quality judgements remain advisory and can request a bounded rework step, not expand the plan indefinitely.
+7. Optionally add public retrieval through a host broker. Use an operator-approved provider/domain list, time/size/content limits, DNS/IP and redirect validation, and no access to private/link-local/metadata endpoints. Retrieved pages remain untrusted source revisions. Do not enable a general-purpose shell internet connection as “research access”. With no configured search service, use supplied/admitted URLs and state the research coverage limit.
+8. Publish one consolidated result through the original scope. Route intermediate output to mission status, not unrelated messaging channels. Allow owner cancellation of the whole graph and fence all remaining children.
 
 ## Graph contract
 
-Each step has ID, template version, dependency IDs, input artifact references, permitted sources, required/optional designation, result schema and maximum rework count. Workers cannot add steps. Expanded cost, sources, deadline or authority requires a new approved revision. Preserve the S05 single-worker default for simple work.
+Each step has `step_id`, `template_version`, `depends_on`, `input_artifact_refs`, source scope, required status, result schema and maximum rework count. No worker can add steps. A plan change that expands cost, sources, deadline or authority requires a new approved revision.
 
-## Required red → green tests
+Keep the original S05 single-worker route as the default. Use the team route only where the request benefits from independent work; do not force three agents to answer a simple question.
 
-| ID | Behaviour |
+## Required red tests
+
+| ID | Behaviour that must first fail |
 |---|---|
-| S06-T01 | Cyclic/oversized graphs and unauthorised template/source expansion are rejected. |
-| S06-T02 | Dependencies start once/in order with bounded parallelism and coordinator capacity. |
-| S06-T03 | Parent limits include all descendants/retries and cannot reset through replanning. |
-| S06-T04 | Required failure is visible; missing work is not an apparently complete result. |
-| S06-T05 | Review/synthesis cannot acquire unrelated context or credentials. |
-| S06-T06 | Whole-graph cancellation fences descendants and late events. |
-| S06-T07 | Duplicate results/joins do not start duplicate synthesis or notifications. |
-| S06-T08 | Disagreement survives synthesis; majority agreement is not evidence. |
-| S06-T09 | Public fetch rejects SSRF, private redirects, excessive content and unapproved destinations. |
-| S06-T10 | Simple tasks retain the single-worker path. |
-| S06-PG01 | Concurrent admission and DB contention/disconnect cannot overspend or duplicate join work. |
-| S06-PG02 | Ready-step storms respect pool/admission limits without per-worker pools or transaction-held model waits. |
+| S06-T01 | Cyclic/oversized/unsupported graphs and unauthorised template/source expansion are rejected. |
+| S06-T02 | Dependencies start once, in valid order, with bounded parallelism and preserved user capacity. |
+| S06-T03 | Parent limits include every child/retry and cannot be reset by re-planning. |
+| S06-T04 | Required failure is visible; missing work cannot become an apparently complete recommendation. |
+| S06-T05 | Review/synthesis cannot acquire a worker's unrelated context or credentials. |
+| S06-T06 | Entire-graph cancellation fences all descendants and late events. |
+| S06-T07 | Duplicate result/join events do not start duplicate synthesis or notification runs. |
+| S06-T08 | Disagreement remains visible; majority vote cannot convert unsupported claims into facts. |
+| S06-T09 | Public fetch rejects SSRF, redirects into private networks, excessive size and unapproved destinations. |
+| S06-T10 | A simple task still uses the cheaper single-worker path. |
 
-## Acceptance, rollback and handover
+## External PostgreSQL requirements for this slice
 
-Demonstrate successful parallel analysis, required failure and graph cancellation. Show one final result and inspectable step/budget history. New profiles require isolation regressions. Public web access may remain disabled and must not be described as a live search.
+Parallel agents do not create parallel PostgreSQL pools. Reserve root budgets and dependency/join transitions through the one bounded host pool using database-time leases. Do not hold a client while waiting for workers or models, and do not reset reservations when the LAN connection breaks.
 
-Disable team admission independently. Safely continue single-worker work or explicitly cancel team generations; never flatten incomplete graphs into successful missions. Follow common Mac/image/source/Pi gates and record `docs/chief-of-staff/evidence/S06.md`; S07 follows verified human merge.
+| ID | Additional required red → green behaviour |
+|---|---|
+| S06-PG01 | Concurrent step admission plus database contention/connection loss cannot overspend a root reservation or start duplicate join work. |
+| S06-PG02 | Many ready steps respect the pool/admission limit and preserve coordinator responsiveness; no per-worker pools or transaction-held model waits appear. |
+
+## Acceptance gate
+
+Complete three fixture scenarios: successful parallel analysis, required-worker failure and cancelled graph. Demonstrate one final brief with references and an inspectable step/budget history. New specialist/provider profiles require isolation regression tests. Public web capability may remain disabled; document that state rather than simulate a live search.
+
+## Rollback
+
+Disable team admission, let already-safe single-worker missions continue, or explicitly cancel team generations. Do not flatten partially completed graphs into successful single-worker missions.
+
+## Automatic Mac-to-Pi implementation deployment
+
+Implement, test and build this slice **on the Mac**. Run the current slice's mandatory local flow/regressions and the final Linux/ARM64 host/agent image tests. Only then transfer the exact tested image bundle to the bound Pi as specified in [MAC_TO_PI_DELIVERY.md](MAC_TO_PI_DELIVERY.md). The Pi verifies/loads/extracts the prebuilt artifacts, preserves its local NanoClaw state, runs scoped migrations using its own environment, activates/restarts the service and performs native smoke checks. No source fixes, dependency installs, image builds or mutable pulls on the Pi. All in-scope migration/deployment/recovery operations remain pre-authorised; PR merge remains separate.
+
+Use one private Mattermost CoS channel for the live user flow and fixture channel events for local tests, following [INTERACTION_MODEL.md](INTERACTION_MODEL.md). Do not run a Mac bot with the Pi's token or share CoS context across Telegram. Record live interface/account readiness separately from fixture success.
+
+Select `--db-profile test` with explicitly supplied Mac test credentials, or guarded `--db-profile runtime-disposable` while the Pi-owned lifecycle, maintenance lease and CoS quiescence are verified. Tests still run on the Mac. A missing second DB is not a blocker when shared-target safeguards pass; missing access or failed tests is. Never transfer a failing candidate to resolve a shared-schema problem. Keep exact local-image-test, bundle, transfer, Pi migration and Pi health receipts.
+
+## Verification, checkpoint and continuation rule
+
+Run `pnpm cos:test --slice S06 --db-profile <selected-profile>` and `pnpm cos:demo --slice S06 --fixture --db-profile <selected-profile>` after registering this slice. These commands are introduced by S01, not pre-existing NanoClaw commands. Run the root regression commands and the runner checks from the shared contract whenever their code paths are touched. Re-run earlier CoS slice contracts affected by this change.
+
+Write a sanitised acceptance receipt at `docs/chief-of-staff/evidence/S06.md`: base/head SHA, scenario and test IDs, real red/green command results, migration version, policy changes, fixture demo evidence, rollback check, live-test status, residual limitations and reviewer decision. Private logs/artifacts stay outside Git. Record missing live credentials as **live validation pending**, not passed. Missing every eligible database target blocks the required integration gate; a missing separate test DB does not block the guarded disposable-runtime option. Include the plan revision, `cos-postgres/external-env-v3` conformance, selected test profile and target identity confirmation (without credentials/endpoints), actual local-test/final-image/transfer/Pi-migration/Pi-smoke receipts, source and image IDs, Pi-owned data lifecycle, actual remote failure tests and any pending operator configuration.
+
+Update the persistent goal ledger and create or update this slice’s PR. If review/merge is pending, checkpoint `awaiting_review` with the exact resume condition; the overall goal remains incomplete. When an authorised human merge is verified, advance automatically to the next eligible slice under [GOAL.md](GOAL.md), without a new slice-specific instruction. Execute this slice's in-scope database migrations and target deployment/restart/rollback automatically under [IMPLEMENTATION_AUTHORITY.md](IMPLEMENTATION_AUTHORITY.md), through the Mac-to-Pi release path, recording actual results without another human approval. Do not auto-merge, enable an unauthorised account, enlarge permissions or implement a dependent slice before its predecessor is merged. Resume unfinished work on its existing branch; never recreate a finished slice or discard an existing ledger.
+## Pinned-source release gate
+
+Apply [GITHUB_SOURCE_SYNC.md](GITHUB_SOURCE_SYNC.md) in this slice. Push the exact tested source commit from the Mac, fetch/verify it in a detached Pi release-source checkout, and require commit/tree agreement with the tested artifact manifest before activation. Record source-push/source-sync status and verified IDs in the acceptance/deployment receipt. Never use an unattended pull, change the active checkout, build on the Pi or mount fetched source over release code. S01 introduces tests S01-REL13–S01-REL18; later slices regress them where affected.
+
