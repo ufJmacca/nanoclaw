@@ -12,6 +12,7 @@ import { backupNativeDatabase, installServiceOverride, restoreServiceOverride } 
 import { fenceLegacyCoordinators } from './legacy-rollback.js';
 import { artifactHash, verifyReleaseBundle, verifyLoadedImages } from './release-artifacts.js';
 import { payloadDigest } from './payload.js';
+import { waitForTargetProcess } from './service-readiness.js';
 import { syncPinnedSource } from './source-sync.js';
 import { nativeFixtureSmoke } from './native-smoke.js';
 import {
@@ -393,8 +394,8 @@ export function createTargetEffects(
       else if ((await commands.service('cat')) !== previous.unit) throw new Error('service_override_conflict');
       await commands.service('daemon-reload');
       await commands.service('start');
-      const restored = await observeProcess(
-        previousReleaseId ? path.join(settings.releaseRoot, previousReleaseId, 'payload') : undefined,
+      const restored = await waitForTargetProcess(() =>
+        observeProcess(previousReleaseId ? path.join(settings.releaseRoot, previousReleaseId, 'payload') : undefined),
       );
       return restored.entryPoint === previous.entryPoint && restored.executable === previous.executable;
     },
