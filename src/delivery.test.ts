@@ -37,7 +37,7 @@ const TEST_DIR = '/tmp/nanoclaw-test-delivery';
 
 import { initTestDb, closeDb, runMigrations, createAgentGroup, createMessagingGroup } from './db/index.js';
 import { insertMessage } from './db/session-db.js';
-import { inboundDbPath, resolveSession, outboundDbPath, sessionDir } from './session-manager.js';
+import { inboundDbPath, resolveSession, outboundDbPath, sessionDir, initSessionFolder } from './session-manager.js';
 import * as deliveryModule from './delivery.js';
 import {
   DeliveryAdapterUnavailableError,
@@ -198,6 +198,7 @@ describe('deliverSessionMessages — concurrent invocations', () => {
         getDb(),
       );
       const handler = vi.fn();
+      initSessionFolder(session.agent_group_id, session.id);
       deliveryModule.registerDeliveryAction(action, handler);
       setDeliveryAdapter({ deliver: vi.fn() });
       const out = new Database(outboundDbPath('ag-1', session.id));

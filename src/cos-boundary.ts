@@ -6,6 +6,15 @@ import type { InboundEvent } from './channels/adapter.js';
 import type { Binding } from './modules/chief-of-staff/bridge/identity.js';
 
 export type CosBinding = Binding & { sessionId: string };
+export function hasCosStateBoundary(agentGroupId: string, sessionId: string): boolean {
+  const db = getDb();
+  return (
+    hasTable(db, 'cos_identity_boundaries') &&
+    !!db
+      .prepare('SELECT 1 FROM cos_identity_boundaries WHERE agent_group_id=? OR session_id=?')
+      .get(agentGroupId, sessionId)
+  );
+}
 export function ensureCosBoundarySchema(db: Database.Database): void {
   db.exec(`CREATE TABLE IF NOT EXISTS cos_identity_boundaries (
     scope_id TEXT PRIMARY KEY, agent_group_id TEXT NOT NULL UNIQUE,

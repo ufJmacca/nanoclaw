@@ -27,7 +27,7 @@ test(
     const { initDb, closeDb } = await import('../../db/connection.js');
     const { runMigrations } = await import('../../db/migrations/index.js');
     const { subscribeMattermostChannelStrict } = await import('../../channels/mattermost-subscription.js');
-    const { resolveSession, sessionDir, openInboundDb } = await import('../../session-manager.js');
+    const { resolveSession, sessionDir, openInboundDb, initSessionFolder } = await import('../../session-manager.js');
     const { updateSession, getSession, getPendingApproval } = await import('../../db/sessions.js');
     const { getMessagingGroup } = await import('../../db/messaging-groups.js');
     const { installCosBoundary } = await import('../../cos-boundary.js');
@@ -55,6 +55,7 @@ test(
       provider: 'codex' as const,
     };
     installCosBoundary(binding, db);
+    initSessionFolder(session.agent_group_id, session.id);
     db.exec('UPDATE cos_identity_boundaries SET paused=0');
     const inbound = openInboundDb(session.agent_group_id, session.id);
     ensureRpcSchema(inbound);

@@ -15,6 +15,7 @@ import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import fs from 'fs';
 import path from 'path';
+import { hasCosStateBoundary } from './cos-boundary.js';
 
 import { deriveAttachmentName, extForMime } from './attachment-naming.js';
 import { isSafeAttachmentName } from './attachment-safety.js';
@@ -51,7 +52,8 @@ export function sessionsBaseDir(): string {
 
 /** Directory for a specific session: sessions/{agent_group_id}/{session_id}/ */
 export function sessionDir(agentGroupId: string, sessionId: string): string {
-  return path.join(sessionsBaseDir(), agentGroupId, sessionId);
+  const base = path.join(sessionsBaseDir(), agentGroupId, sessionId);
+  return hasCosStateBoundary(agentGroupId, sessionId) ? path.join(base, 'cos-v1') : base;
 }
 
 const DIRECTORY_OPEN_FLAGS = fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW;
