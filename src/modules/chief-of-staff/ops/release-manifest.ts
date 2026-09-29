@@ -1,4 +1,4 @@
-import { INITIAL_CHECKSUM } from '../store/migrations.js';
+import { INITIAL_CHECKSUM } from '../store/schema-definition.js';
 export const REQUIRED_RELEASE_CHECKS = [
   'root',
   'runner',

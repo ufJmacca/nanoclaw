@@ -1,20 +1,11 @@
-import fs from 'node:fs';
 import path from 'node:path';
-import { createHash } from 'node:crypto';
 import type pg from 'pg';
 import type { PoolConfig } from 'pg';
 import { isPrivateAddress } from '../store/config.js';
 import { digest } from '../domain/contracts.js';
 import { readPrivate, readTarget, type TargetState } from './target-state.js';
-
-export function machineFingerprint(): string {
-  if (process.platform !== 'linux' || process.arch !== 'arm64') throw new Error('unsupported_target');
-  const id = fs.readFileSync('/etc/machine-id', 'utf8').trim();
-  if (!/^[a-f0-9]{32}$/.test(id)) throw new Error('target_identity_unavailable');
-  return createHash('sha256')
-    .update('linux-machine-id:' + id)
-    .digest('hex');
-}
+import { machineFingerprint } from './host-fingerprint.js';
+export { machineFingerprint } from './host-fingerprint.js';
 export function localTarget(root: string, installationRoot: string, dataRoot: string): TargetState {
   if (!root || !path.isAbsolute(root)) throw new Error('target_binding_required');
   const value = readPrivate<TargetState>(path.join(root, 'state.json'));
