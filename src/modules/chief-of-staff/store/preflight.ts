@@ -7,6 +7,24 @@ export class DatabasePreflightError extends Error {
   }
 }
 
+/** Classify only stable codes. Driver messages/causes can contain credentials and are discarded. */
+export function preflightFailure(error: unknown): DatabasePreflightError {
+  if (error instanceof DatabasePreflightError) return error;
+  const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : '';
+  if (['28P01', '28000'].includes(code)) return new DatabasePreflightError('authentication_denied');
+  if (
+    code.includes('CERT') ||
+    code.startsWith('ERR_TLS_') ||
+    code.startsWith('ERR_SSL_') ||
+    code === 'UNABLE_TO_VERIFY_LEAF_SIGNATURE' ||
+    (error instanceof Error && error.message === 'The server does not support SSL connections')
+  )
+    return new DatabasePreflightError('tls_rejected');
+  if (code === '42501') return new DatabasePreflightError('schema_privilege_denied');
+  if (['42P01', '3F000'].includes(code)) return new DatabasePreflightError('schema_incompatible');
+  return new DatabasePreflightError('unreachable');
+}
+
 export async function connectChecked(
   env: NodeJS.ProcessEnv,
   profile: 'runtime' | 'test',
@@ -37,8 +55,7 @@ export async function connectChecked(
     return client;
   } catch (error) {
     await client.end();
-    if (error instanceof DatabasePreflightError) throw error;
-    throw new DatabasePreflightError('connection_failed');
+    throw preflightFailure(error);
   }
 }
 

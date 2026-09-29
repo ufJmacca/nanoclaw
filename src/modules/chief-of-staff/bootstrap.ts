@@ -9,7 +9,7 @@ import { killContainer, wakeContainer } from '../../container-runner.js';
 import { NodeMattermostTransport } from '../../channels/mattermost-client.js';
 import { validateMattermostSessionForExecution } from '../../channels/mattermost-subscription.js';
 import { createMattermostFacts } from './bridge/mattermost-facts.js';
-import { connectChecked } from './store/preflight.js';
+import { connectChecked, DatabasePreflightError } from './store/preflight.js';
 import { externalDatabaseConfig, parseDatabaseConfig } from './store/config.js';
 import { migrationStatus } from './store/migrations.js';
 import { BoundedDatabase } from './store/client.js';
@@ -92,8 +92,8 @@ export function startCosHostModule(): { service: CosService; stop(): Promise<voi
           (await databaseFingerprint(check, parseDatabaseConfig(selected, 'runtime'))) !==
           target.binding.databaseFingerprint
         )
-          throw new Error('database_identity_mismatch');
-        if ((await migrationStatus(check)) !== 1) throw new Error('schema_incompatible');
+          throw new DatabasePreflightError('database_identity_mismatch');
+        if ((await migrationStatus(check)) !== 1) throw new DatabasePreflightError('schema_incompatible');
       } finally {
         await check.end();
       }

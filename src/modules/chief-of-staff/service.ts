@@ -1,5 +1,6 @@
 import type { PriorityStore } from './store/priorities.js';
 import { createCosRuntime, type RuntimeDependencies } from './runtime.js';
+import { DatabasePreflightError } from './store/preflight.js';
 import { DatabaseConfigurationError } from './store/config.js';
 import type { CosBinding } from '../../cos-boundary.js';
 export type ServiceDependencies = Omit<RuntimeDependencies, 'store'> & { connect(): Promise<PriorityStore> };
@@ -50,7 +51,12 @@ export class CosService {
           await this.runtime.pump(JSON.parse(row.binding) as CosBinding);
         }
       } catch (error) {
-        this.status = error instanceof DatabaseConfigurationError ? 'misconfigured' : 'unreachable';
+        this.status =
+          error instanceof DatabaseConfigurationError
+            ? 'misconfigured'
+            : error instanceof DatabasePreflightError
+              ? error.code
+              : 'unreachable';
       }
     };
     this.inFlight = run();
