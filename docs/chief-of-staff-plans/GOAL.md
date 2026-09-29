@@ -13,6 +13,8 @@ Maintain one independently reviewable PR per slice and preserve human merge gate
 
 Completion requires all S01–S11 code and required alignment corrections to have verified reviewed merges; mandatory local unit/integration/runner, final Linux/ARM64 image and actual Pi-native smoke/isolation gates to pass; acceptance and deployment receipts to match the final source/image identities; the final target release to be healthy; and the Pi-owned data lifecycle to be protected. Preserve separate account/model/channel activation status. Missing live account consent does not block a fixture-only deployment, but failed mandatory local tests or Pi deployment are not optional activation.
 
+The intended live CoS execution uses NanoClaw's existing Codex subscription-backed runtime on the Pi. The current S01 API-only gateway requires the [subscription-runtime alignment correction](SUBSCRIPTION_CODEX_RUNTIME.md) before subscription-backed live readiness can be claimed. This correction belongs to S01, preserves the existing security and authority contracts, and does not replace the S01–S11 objective.
+
 ## Required reading
 
 Read repository-local instructions, then [START HERE](00_START_HERE.md), [baseline](REPOSITORY_BASELINE.md), [architecture](ARCHITECTURE_AND_CONTRACTS.md), [implementation authority](IMPLEMENTATION_AUTHORITY.md), [Mac-to-Pi delivery](MAC_TO_PI_DELIVERY.md), [GitHub source sync](GITHUB_SOURCE_SYNC.md), [interaction model](INTERACTION_MODEL.md), [external PostgreSQL](EXTERNAL_POSTGRES.md), [acceptance matrix](ACCEPTANCE_MATRIX.md), this goal and the current slice/predecessor receipts. Environment examples are placeholders, not installed configuration. No other prior project is assumed available.
