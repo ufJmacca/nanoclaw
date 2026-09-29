@@ -11,7 +11,7 @@ try {
   const fixtures = Object.fromEntries(
     ['COS_FIXTURE_HOST_ROOT', 'COS_FIXTURE_IMAGE', 'COS_FIXTURE_RUNNER_VOLUME'].map((key) => [key, process.env[key]]),
   );
-  if (Object.values(fixtures).some((value) => !value))
+  if (!fixtures.COS_FIXTURE_HOST_ROOT || !fixtures.COS_FIXTURE_IMAGE)
     throw new Error('explicit_container_fixture_configuration_required');
   const files = demo ? ['flow.integration.ts'] : ['priorities.integration.ts', 'flow.integration.ts'];
   const result = spawnSync(

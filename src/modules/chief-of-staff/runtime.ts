@@ -99,12 +99,14 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
       });
     },
     ingress: (binding, event) => controller.ingress(binding, event),
-    validatePrivateDestination: async (binding) => {
+    validatePrivateDestination: async (binding, purpose) => {
       if (!(await admitted(binding))) return false;
       const session = d.session(binding.sessionId);
       if (!session || !d.store) return false;
       const context = await controller.context(session);
-      return !!context && (await d.store.context(context)).status === 'ok';
+      // The authenticated private RPC may return an unavailable receipt during a DB outage.
+      // Ordinary model text still requires a successful current scoped store check.
+      return !!context && (purpose === 'rpc' || (await d.store.context(context)).status === 'ok');
     },
   });
   if (enabled())

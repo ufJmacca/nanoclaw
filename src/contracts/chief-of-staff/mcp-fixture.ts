@@ -21,8 +21,10 @@ export class McpFixture {
     image: string,
     dependenciesVolume: string,
   ) {
-    if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]+$/.test(dependenciesVolume))
+    if (dependenciesVolume && !/^[a-zA-Z0-9][a-zA-Z0-9_.-]+$/.test(dependenciesVolume))
       throw new Error('Explicit runner dependency volume required');
+    if (!dependenciesVolume && !/^sha256:[a-f0-9]{64}$/.test(image))
+      throw new Error('Baked fixture requires an immutable image identity');
     const hostPath = (local: string) => {
       const relative = path.relative(repository, local);
       if (relative.startsWith('..') || path.isAbsolute(relative)) throw new Error('Fixture path outside repository');
@@ -52,14 +54,19 @@ export class McpFixture {
         `type=bind,src=${hostPath(sessionDirectory)},dst=/workspace`,
         '--mount',
         `type=bind,src=${hostPath(path.join(sessionDirectory, 'inbound.db'))},dst=/workspace/inbound.db,readonly`,
-        '--mount',
-        `type=bind,src=${hostPath(path.join(repository, 'container/agent-runner/src'))},dst=/app/src,readonly`,
-        '--mount',
-        `type=volume,src=${dependenciesVolume},dst=/app/node_modules,readonly`,
+        ...(dependenciesVolume
+          ? [
+              '--mount',
+              `type=bind,src=${hostPath(path.join(repository, 'container/agent-runner/src'))},dst=/app/src,readonly`,
+              '--mount',
+              `type=volume,src=${dependenciesVolume},dst=/app/node_modules,readonly`,
+            ]
+          : []),
         '-w',
         '/app',
-        image,
+        '--entrypoint',
         'bun',
+        image,
         '/app/src/cos-mcp.ts',
       ],
       { env: safeHostEnvironment('docker'), stdio: ['pipe', 'pipe', 'pipe'] },
