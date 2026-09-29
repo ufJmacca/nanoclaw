@@ -20,7 +20,9 @@ export class McpFixture {
     hostRepository: string,
     image: string,
     dependenciesVolume: string,
+    launch?: { containerName: string; args: string[] },
   ) {
+    if (launch) this.name = launch.containerName;
     if (dependenciesVolume && !/^[a-zA-Z0-9][a-zA-Z0-9_.-]+$/.test(dependenciesVolume))
       throw new Error('Explicit runner dependency volume required');
     if (!dependenciesVolume && !/^sha256:[a-f0-9]{64}$/.test(image))
@@ -32,7 +34,7 @@ export class McpFixture {
     };
     this.child = spawn(
       'docker',
-      [
+      launch?.args ?? [
         'run',
         '--rm',
         '--pull=never',
