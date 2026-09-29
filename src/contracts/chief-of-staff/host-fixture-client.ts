@@ -1,6 +1,7 @@
 import { fork, type ChildProcess } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { safeHostEnvironment } from '../../host-environment.js';
+import { selectedFixtureEnvironment } from './fixture-database.js';
 export class HostFixture {
   readonly process: ChildProcess;
   readonly delivered: Array<{ text: string; id: string; platform: string }> = [];
@@ -11,11 +12,7 @@ export class HostFixture {
   >();
   constructor() {
     const extension = import.meta.url.endsWith('.ts') ? 'ts' : 'js';
-    const selected = Object.fromEntries(
-      Object.entries(process.env).filter(
-        ([key]) => (key.startsWith('COS_TEST_PG') && !key.includes('MIGRATION')) || key === 'COS_TEST_TARGET_ID',
-      ),
-    );
+    const selected = selectedFixtureEnvironment(process.env, false);
     this.process = fork(fileURLToPath(new URL('./host-fixture-worker.' + extension, import.meta.url)), [], {
       env: { ...safeHostEnvironment('docker'), ...selected, COS_FIXTURE_HOST_PROCESS: 'S01' },
       execArgv: extension === 'ts' ? ['--import', 'tsx'] : [],

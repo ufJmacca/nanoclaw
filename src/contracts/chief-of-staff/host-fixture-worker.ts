@@ -1,8 +1,7 @@
 import path from 'node:path';
 import pg from 'pg';
 import type { CosBinding } from '../../cos-boundary.js';
-import { parseDatabaseConfig } from '../../modules/chief-of-staff/store/config.js';
-import { connectChecked } from '../../modules/chief-of-staff/store/preflight.js';
+import { fixtureDatabaseConfig, connectFixtureDatabase } from './fixture-database.js';
 import { BoundedDatabase } from '../../modules/chief-of-staff/store/client.js';
 import { PriorityStore } from '../../modules/chief-of-staff/store/priorities.js';
 import { connectionFault } from './connection-fault.js';
@@ -25,9 +24,9 @@ async function start(input: { root: string; binding: CosBinding; ordinarySession
     await import('../../delivery.js');
   const { routeInbound } = await import('../../router.js');
   stopContainerAdmissions(); // Fixture providers are explicit containers; no native provider or paid wake is allowed.
-  const check = await connectChecked(process.env, 'test');
+  const check = await connectFixtureDatabase(process.env);
   await check.end();
-  const relay = await connectionFault(parseDatabaseConfig(process.env, 'test'));
+  const relay = await connectionFault(await fixtureDatabaseConfig(process.env));
   const store = new PriorityStore(new BoundedDatabase(new pg.Pool(relay.config), 600));
   let crashAfterDecision = false;
   const decide = store.decide.bind(store);

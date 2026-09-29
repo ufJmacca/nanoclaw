@@ -2,8 +2,12 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { after, before, test } from 'node:test';
 import pg from 'pg';
-import { parseDatabaseConfig } from '../../modules/chief-of-staff/store/config.js';
-import { connectChecked } from '../../modules/chief-of-staff/store/preflight.js';
+import {
+  fixtureDatabaseConfig,
+  connectFixtureDatabase,
+  fixtureRuntimeUser,
+  fixtureProfile,
+} from './fixture-database.js';
 import { migrate } from '../../modules/chief-of-staff/store/migrations.js';
 import { BoundedDatabase } from '../../modules/chief-of-staff/store/client.js';
 import { PriorityStore } from '../../modules/chief-of-staff/store/priorities.js';
@@ -32,7 +36,7 @@ const change: Change = {
 };
 
 test('S01-PG04 actual connection partition is bounded and reconnects to the external target', async () => {
-  const relay = await connectionFault(parseDatabaseConfig(process.env, 'test'));
+  const relay = await connectionFault(await fixtureDatabaseConfig(process.env));
   const partitionPool = new pg.Pool(relay.config);
   const database = new BoundedDatabase(partitionPool, 350);
   try {
@@ -54,22 +58,22 @@ test('S01-PG04 actual connection partition is bounded and reconnects to the exte
 });
 
 before(async () => {
-  // Only the explicitly admitted separate test profile is accepted by this suite.
-  admin = await connectChecked(process.env, 'test', 'migration');
+  // Separate tests retain the protected marker; runtime fixtures require a live Pi-owned guard.
+  admin = await connectFixtureDatabase(process.env, 'migration');
   const lock = await admin.query('SELECT pg_try_advisory_lock(73101002) AS locked');
   assert.equal(lock.rows[0].locked, true, 'another integration suite owns the target');
-  await migrate(admin, process.env.COS_TEST_PGUSER!);
-  const runtime = await connectChecked(process.env, 'test');
+  await migrate(admin, fixtureRuntimeUser());
+  const runtime = await connectFixtureDatabase(process.env);
   try {
     assert.equal(
-      await databaseFingerprint(admin, parseDatabaseConfig(process.env, 'test', 'migration')),
-      await databaseFingerprint(runtime, parseDatabaseConfig(process.env, 'test')),
+      await databaseFingerprint(admin, await fixtureDatabaseConfig(process.env, 'migration')),
+      await databaseFingerprint(runtime, await fixtureDatabaseConfig(process.env)),
     );
   } finally {
     await runtime.end();
   }
-  pool = new pg.Pool(parseDatabaseConfig(process.env, 'test'));
-  store = new PriorityStore(BoundedDatabase.fromConfig(parseDatabaseConfig(process.env, 'test')));
+  pool = new pg.Pool(await fixtureDatabaseConfig(process.env));
+  store = new PriorityStore(BoundedDatabase.fromConfig(await fixtureDatabaseConfig(process.env)));
   await pool.query(
     `INSERT INTO cos.scopes(id,owner_id,instance_id,channel_id,agent_group_id,status)
     VALUES($1,$2,'fixture-instance',$1,$1,'active')`,
@@ -189,7 +193,7 @@ test('S01-T05 retry after projection loss recovers the original operation result
   const request = randomUUID();
   const first = await store.propose(context, request, change);
   assert.equal(first.status, 'ok');
-  const restarted = new PriorityStore(BoundedDatabase.fromConfig(parseDatabaseConfig(process.env, 'test')));
+  const restarted = new PriorityStore(BoundedDatabase.fromConfig(await fixtureDatabaseConfig(process.env)));
   try {
     assert.deepEqual(await restarted.propose(context, request, change), first);
   } finally {
@@ -282,7 +286,7 @@ test('S01-T04 expiry and replaying a decision event across proposals deny mutati
 });
 
 test('S01-PG05 loss of COMMIT acknowledgement returns pending, then reconciles the same request', async () => {
-  const faultyPool = new pg.Pool(parseDatabaseConfig(process.env, 'test'));
+  const faultyPool = new pg.Pool(await fixtureDatabaseConfig(process.env));
   const connection = await faultyPool.connect();
   const original = connection.query.bind(connection);
   let dropped = false;
@@ -313,8 +317,8 @@ test('S01-PG05 loss of COMMIT acknowledgement returns pending, then reconciles t
 });
 
 test('S01-PG02 a real maintenance lease excludes runtime operations across independent connections', async () => {
-  const maintenance = await connectChecked(process.env, 'test');
-  const runtime = new BoundedDatabase(new pg.Pool(parseDatabaseConfig(process.env, 'test')), 2000, 2, () => true);
+  const maintenance = await connectFixtureDatabase(process.env);
+  const runtime = new BoundedDatabase(new pg.Pool(await fixtureDatabaseConfig(process.env)), 2000, 2, () => true);
   let finish!: () => void;
   let entered!: () => void;
   const entering = new Promise<void>((resolve) => {
@@ -322,6 +326,17 @@ test('S01-PG02 a real maintenance lease excludes runtime operations across indep
   });
   let work: Promise<unknown> | undefined;
   try {
+    if (fixtureProfile() === 'runtime') {
+      // The parent guard owns the exclusive runtime fence for the whole fixture session.
+      assert.equal((await maintenance.query('SELECT pg_try_advisory_lock(73101003) AS locked')).rows[0].locked, false);
+      await assert.rejects(
+        runtime.run(async () => {
+          throw new Error('must_not_run');
+        }, true),
+        /CoS database unavailable/,
+      );
+      return;
+    }
     work = runtime.run(async () => {
       entered();
       await new Promise<void>((resolve) => {

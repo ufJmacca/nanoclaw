@@ -1,27 +1,29 @@
 import { spawnSync } from 'node:child_process';
 import { safeHostEnvironment } from '../../host-environment.js';
 import { parseFixtureArguments } from './arguments.js';
+import { assertRuntimeFixtureGuard, selectedFixtureEnvironment } from './fixture-database.js';
 
 try {
   const { demo, profile } = parseFixtureArguments(process.argv.slice(2));
-  if (profile !== 'test') throw new Error('runtime_disposable_target_guard_not_implemented');
-  const selected = Object.fromEntries(
-    Object.entries(process.env).filter(([key]) => key.startsWith('COS_TEST_PG') || key === 'COS_TEST_TARGET_ID'),
-  );
+  const env = { ...process.env, COS_FIXTURE_DATABASE_PROFILE: profile };
+  if (profile === 'runtime-disposable') await assertRuntimeFixtureGuard(env);
+  const selected = selectedFixtureEnvironment(env, true);
   const fixtures = Object.fromEntries(
     ['COS_FIXTURE_HOST_ROOT', 'COS_FIXTURE_IMAGE', 'COS_FIXTURE_RUNNER_VOLUME'].map((key) => [key, process.env[key]]),
   );
   if (!fixtures.COS_FIXTURE_HOST_ROOT || !fixtures.COS_FIXTURE_IMAGE)
     throw new Error('explicit_container_fixture_configuration_required');
-  const files = demo ? ['flow.integration.ts'] : ['priorities.integration.ts', 'flow.integration.ts'];
+  const extension = import.meta.url.endsWith('.ts') ? 'ts' : 'js';
+  const files = demo ? ['flow.integration'] : ['priorities.integration', 'flow.integration'];
   const result = spawnSync(
     process.execPath,
     [
-      '--import',
-      'tsx',
+      ...(extension === 'ts' ? ['--import', 'tsx'] : []),
       '--test',
       '--test-concurrency=1',
-      ...files.map((file) => 'src/contracts/chief-of-staff/' + file),
+      ...files.map(
+        (file) => (extension === 'ts' ? 'src' : 'dist') + '/contracts/chief-of-staff/' + file + '.' + extension,
+      ),
     ],
     {
       env: { ...safeHostEnvironment('docker'), ...selected, ...fixtures },
