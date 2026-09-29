@@ -18,6 +18,8 @@ function fixture(enabled: boolean) {
     pendingOutbox: vi.fn().mockResolvedValue({ status: 'ok', items: [] }),
   } as unknown as PriorityStore;
   const connect = vi.fn().mockResolvedValue(store);
+  const admission = vi.fn().mockReturnValue(true),
+    stop = vi.fn();
   const service = new CosService({
     db,
     enabled,
@@ -25,11 +27,12 @@ function fixture(enabled: boolean) {
     facts: vi.fn(),
     session: () => undefined,
     destination: () => undefined,
-    stop: vi.fn(),
+    stop,
+    admission,
     wake: vi.fn().mockResolvedValue(undefined),
   });
   services.push(service);
-  return { service, connect, end, query };
+  return { service, connect, end, query, admission, stop };
 }
 describe('S01-T01 host startup and dependency service', () => {
   it('disabled operation starts and ticks without connecting to PostgreSQL', async () => {
@@ -73,4 +76,20 @@ describe('S01-T01 host startup and dependency service', () => {
     expect(f.end).toHaveBeenCalledOnce();
     expect(f.connect).toHaveBeenCalledOnce();
   });
+});
+
+it('closes only CoS admission during maintenance and reconnects after verified reopening', async () => {
+  const f = fixture(true);
+  await f.service.tick();
+  f.admission.mockReturnValue(false);
+  await f.service.tick();
+  expect(f.service.status).toBe('maintenance');
+  expect(f.end).toHaveBeenCalledOnce();
+  await f.service.tick();
+  expect(f.connect).toHaveBeenCalledOnce();
+  expect(f.end).toHaveBeenCalledOnce();
+  f.admission.mockReturnValue(true);
+  await f.service.tick();
+  expect(f.connect).toHaveBeenCalledTimes(2);
+  expect(f.service.status).toBe('ready');
 });

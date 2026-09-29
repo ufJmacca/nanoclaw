@@ -73,19 +73,17 @@ describe('S01-REL04 immutable release runtime', () => {
   });
   it('selects a recorded image by provider/package content and verifies its immutable local identity', async () => {
     const f = fixture(),
-      inspect = vi
-        .fn()
-        .mockResolvedValue({
-          Id: agent,
-          Os: 'linux',
-          Architecture: 'arm64',
-          Config: {
-            Labels: {
-              'org.opencontainers.image.revision': commit,
-              'nanoclaw.worker-assets': f.manifest.workerAssetsDigest,
-            },
+      inspect = vi.fn().mockResolvedValue({
+        Id: agent,
+        Os: 'linux',
+        Architecture: 'arm64',
+        Config: {
+          Labels: {
+            'org.opencontainers.image.revision': commit,
+            'nanoclaw.worker-assets': f.manifest.workerAssetsDigest,
           },
-        });
+        },
+      });
     expect(await selectReleaseImage(readReleaseAt(f.root, f.file), 'codex', { apt: [], npm: [] }, inspect)).toBe(agent);
     expect(inspect).toHaveBeenCalledWith(agent);
     await expect(

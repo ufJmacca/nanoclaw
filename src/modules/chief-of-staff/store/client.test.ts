@@ -73,3 +73,31 @@ describe('S01-PG04 bounded shared database client', () => {
     expect(client.release).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('S01-PG02 shared runtime operation fence', () => {
+  it('checks local admission before acquiring a connection', async () => {
+    const f = fixture();
+    const db = new BoundedDatabase(f.pool as unknown as pg.Pool, 100, 2, () => false);
+    await expect(db.run(async () => 'forbidden', true)).rejects.toMatchObject({ code: 'unavailable' });
+    expect(f.pool.connect).not.toHaveBeenCalled();
+  });
+  it('does not run an operation while a cross-host maintenance lock is held', async () => {
+    const f = fixture();
+    f.client.query.mockResolvedValue({ rows: [{ locked: false }] });
+    const operation = vi.fn();
+    const db = new BoundedDatabase(f.pool as unknown as pg.Pool, 100, 2, () => true);
+    await expect(db.run(operation, true)).rejects.toMatchObject({ code: 'unavailable' });
+    expect(operation).not.toHaveBeenCalled();
+    expect(f.client.release).toHaveBeenCalledWith(true);
+  });
+  it('rechecks admission after the shared lock and releases that same client only after unlock', async () => {
+    const f = fixture(),
+      admission = vi.fn().mockReturnValue(true);
+    f.client.query.mockResolvedValue({ rows: [{ locked: true, unlocked: true }] });
+    const db = new BoundedDatabase(f.pool as unknown as pg.Pool, 100, 2, admission);
+    await expect(db.run(async () => 'done')).resolves.toBe('done');
+    expect(admission.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(f.client.query).toHaveBeenLastCalledWith('SELECT pg_advisory_unlock_shared(73101003) AS unlocked');
+    expect(f.client.release).toHaveBeenCalledWith(false);
+  });
+});

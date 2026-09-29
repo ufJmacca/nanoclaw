@@ -16,6 +16,8 @@ export type TargetState = {
   lifecycle: 'implementation_disposable' | 'protected';
   generation: number;
   maintenance: boolean;
+  maintenanceId?: string | null;
+  maintenanceHistory?: boolean;
   releaseId: string | null;
 };
 
@@ -41,7 +43,7 @@ function privateRoot(root: string): void {
   )
     throw new Error('unsafe_target_state');
 }
-function readPrivate<T>(file: string): T {
+export function readPrivate<T>(file: string): T {
   const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
   try {
     const stat = fs.fstatSync(fd);
@@ -52,7 +54,7 @@ function readPrivate<T>(file: string): T {
     fs.closeSync(fd);
   }
 }
-function writeAtomic(root: string, name: string, value: unknown): void {
+export function writeAtomic(root: string, name: string, value: unknown): void {
   const temporary = path.join(root, '.' + randomUUID() + '.tmp');
   const fd = fs.openSync(temporary, 'wx', 0o600);
   try {
@@ -82,6 +84,7 @@ export function initializeTarget(root: string, binding: TargetBinding): TargetSt
     lifecycle: 'implementation_disposable',
     generation: 1,
     maintenance: true,
+    maintenanceId: null,
     releaseId: null,
   };
   writeAtomic(root, 'state.json', state);
@@ -100,6 +103,11 @@ export function readTarget(root: string, binding: TargetBinding): TargetState {
     !Number.isSafeInteger(state.generation) ||
     state.generation < 1 ||
     typeof state.maintenance !== 'boolean' ||
+    (state.maintenanceHistory !== undefined && typeof state.maintenanceHistory !== 'boolean') ||
+    (state.maintenanceId != null &&
+      (typeof state.maintenanceId !== 'string' ||
+        !/^[a-f0-9-]{36}$/.test(state.maintenanceId) ||
+        !state.maintenance)) ||
     (state.releaseId !== null &&
       (typeof state.releaseId !== 'string' || !/^[a-zA-Z0-9_-]{1,160}$/.test(state.releaseId)))
   )
@@ -153,6 +161,7 @@ export function protectTarget(root: string, binding: TargetBinding): TargetState
   return withTargetLock(root, () => {
     const state = readTarget(root, binding);
     if (state.lifecycle === 'protected') return state;
+    if (state.maintenanceId) throw new Error('active_maintenance_lease');
     const next: TargetState = { ...state, lifecycle: 'protected', generation: state.generation + 1, maintenance: true };
     // Seal first: a crash or stale state copy can tighten protection but cannot reopen disposal.
     writeAtomic(root, 'protected.json', { bindingDigest: digest(binding), generation: next.generation });

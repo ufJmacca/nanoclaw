@@ -8,6 +8,7 @@ import { migrate } from '../../modules/chief-of-staff/store/migrations.js';
 import { BoundedDatabase } from '../../modules/chief-of-staff/store/client.js';
 import { PriorityStore } from '../../modules/chief-of-staff/store/priorities.js';
 import type { Change, Context } from '../../modules/chief-of-staff/domain/contracts.js';
+import { databaseFingerprint } from '../../modules/chief-of-staff/ops/target-identity.js';
 import { connectionFault } from './connection-fault.js';
 
 let admin: pg.Client;
@@ -59,7 +60,14 @@ before(async () => {
   assert.equal(lock.rows[0].locked, true, 'another integration suite owns the target');
   await migrate(admin, process.env.COS_TEST_PGUSER!);
   const runtime = await connectChecked(process.env, 'test');
-  await runtime.end();
+  try {
+    assert.equal(
+      await databaseFingerprint(admin, parseDatabaseConfig(process.env, 'test', 'migration')),
+      await databaseFingerprint(runtime, parseDatabaseConfig(process.env, 'test')),
+    );
+  } finally {
+    await runtime.end();
+  }
   pool = new pg.Pool(parseDatabaseConfig(process.env, 'test'));
   store = new PriorityStore(BoundedDatabase.fromConfig(parseDatabaseConfig(process.env, 'test')));
   await pool.query(
@@ -301,5 +309,43 @@ test('S01-PG05 loss of COMMIT acknowledgement returns pending, then reconciles t
     assert.equal(count.rows[0].count, 1);
   } finally {
     await faultyPool.end();
+  }
+});
+
+test('S01-PG02 a real maintenance lease excludes runtime operations across independent connections', async () => {
+  const maintenance = await connectChecked(process.env, 'test');
+  const runtime = new BoundedDatabase(new pg.Pool(parseDatabaseConfig(process.env, 'test')), 2000, 2, () => true);
+  let finish!: () => void;
+  let entered!: () => void;
+  const entering = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  let work: Promise<unknown> | undefined;
+  try {
+    work = runtime.run(async () => {
+      entered();
+      await new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+    });
+    await entering;
+    assert.equal((await maintenance.query('SELECT pg_try_advisory_lock(73101003) AS locked')).rows[0].locked, false);
+    finish();
+    await work;
+    assert.equal((await maintenance.query('SELECT pg_try_advisory_lock(73101003) AS locked')).rows[0].locked, true);
+    await assert.rejects(
+      runtime.run(async () => {
+        throw new Error('must_not_run');
+      }, true),
+      /CoS database unavailable/,
+    );
+    await maintenance.query('SELECT pg_advisory_unlock(73101003)');
+    await new Promise((resolve) => setTimeout(resolve, 1050));
+    assert.equal(await runtime.run(async (client) => (await client.query('SELECT 1 AS value')).rows[0].value), 1);
+  } finally {
+    finish?.();
+    await work?.catch(() => {});
+    await runtime.pool.end();
+    await maintenance.end();
   }
 });

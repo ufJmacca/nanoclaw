@@ -14,6 +14,7 @@ import type { PriorityStore } from './store/priorities.js';
 export type RuntimeDependencies = {
   db: Database.Database;
   enabled: boolean;
+  admission?(): boolean;
   store?: PriorityStore;
   facts(binding: CosBinding): Promise<ChannelFacts>;
   session(id: string): Session | undefined;
@@ -23,7 +24,7 @@ export type RuntimeDependencies = {
 };
 export function createCosRuntime(dependencies: RuntimeDependencies) {
   const d = dependencies;
-  const enabled = () => d.enabled && !!d.store;
+  const enabled = () => d.enabled && !!d.store && (d.admission?.() ?? true);
   const controller = new CosController({
     db: d.db,
     enabled,

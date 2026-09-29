@@ -1,3 +1,6 @@
+import { DATA_DIR } from '../../config.js';
+import { localTarget, databaseFingerprint } from './ops/target-identity.js';
+import { admittedGeneration } from './ops/maintenance.js';
 import { readEnvFile } from '../../env.js';
 import { getDb } from '../../db/connection.js';
 import { getSession } from '../../db/sessions.js';
@@ -7,7 +10,7 @@ import { NodeMattermostTransport } from '../../channels/mattermost-client.js';
 import { validateMattermostSessionForExecution } from '../../channels/mattermost-subscription.js';
 import { createMattermostFacts } from './bridge/mattermost-facts.js';
 import { connectChecked } from './store/preflight.js';
-import { externalDatabaseConfig } from './store/config.js';
+import { externalDatabaseConfig, parseDatabaseConfig } from './store/config.js';
 import { migrationStatus } from './store/migrations.js';
 import { BoundedDatabase } from './store/client.js';
 import { PriorityStore } from './store/priorities.js';
@@ -17,6 +20,7 @@ import { CosService } from './service.js';
 export function startCosHostModule(): { service: CosService; stop(): Promise<void> } {
   const keys = [
     'COS_ENABLED',
+    'COS_TARGET_STATE_DIR',
     ...[
       'HOST',
       'PORT',
@@ -60,9 +64,19 @@ export function startCosHostModule(): { service: CosService; stop(): Promise<voi
       );
     },
   );
+  const targetRoot = selected.COS_TARGET_STATE_DIR ?? '';
+  const admitted = () => {
+    try {
+      const target = localTarget(targetRoot, process.cwd(), DATA_DIR);
+      return admittedGeneration(targetRoot, target.binding) !== null;
+    } catch {
+      return false;
+    }
+  };
   const service = new CosService({
     db: getDb(),
     enabled: selected.COS_ENABLED === 'true',
+    admission: admitted,
     facts,
     session: getSession,
     destination: getMessagingGroup,
@@ -73,11 +87,17 @@ export function startCosHostModule(): { service: CosService; stop(): Promise<voi
     connect: async () => {
       const check = await connectChecked(selected, 'runtime');
       try {
+        const target = localTarget(targetRoot, process.cwd(), DATA_DIR);
+        if (
+          (await databaseFingerprint(check, parseDatabaseConfig(selected, 'runtime'))) !==
+          target.binding.databaseFingerprint
+        )
+          throw new Error('database_identity_mismatch');
         if ((await migrationStatus(check)) !== 1) throw new Error('schema_incompatible');
       } finally {
         await check.end();
       }
-      return new PriorityStore(BoundedDatabase.fromConfig(await externalDatabaseConfig(selected, 'runtime')));
+      return new PriorityStore(BoundedDatabase.fromConfig(await externalDatabaseConfig(selected, 'runtime'), admitted));
     },
   });
   // PostgreSQL availability never holds up unrelated channel startup.

@@ -17,6 +17,21 @@ export class CosService {
     if (this.stopped || !this.dependencies.enabled || this.inFlight) return;
     const run = async () => {
       try {
+        if (this.dependencies.admission && !this.dependencies.admission()) {
+          this.status = 'maintenance';
+          this.runtime.dispose();
+          this.runtime = createCosRuntime({ ...this.dependencies, enabled: false });
+          const bindings = this.dependencies.db.prepare('SELECT binding FROM cos_identity_boundaries').all() as Array<{
+            binding: string;
+          }>;
+          for (const item of bindings) this.dependencies.stop((JSON.parse(item.binding) as CosBinding).sessionId);
+          if (this.store) {
+            const old = this.store;
+            this.store = undefined;
+            await old.database.pool.end();
+          }
+          return;
+        }
         if (!this.store) {
           this.status = 'reconciling';
           this.store = await this.dependencies.connect();
