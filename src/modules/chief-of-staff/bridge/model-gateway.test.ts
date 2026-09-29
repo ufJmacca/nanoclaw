@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
-import { startModelGateway } from './model-gateway.js';
+import { startModelGateway, modelRequest } from './model-gateway.js';
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0)) await cleanup();
@@ -56,6 +56,15 @@ const body = {
   stream: true,
 };
 describe('S01 model-only gateway', () => {
+  it('accepts the pinned Codex wire metadata but does not forward it or a worker-selected priority tier', () => {
+    const result = modelRequest(
+      { ...body, client_metadata: { originator: 'codex_cli' }, service_tier: 'priority' },
+      'fixture-model',
+    );
+    expect(result).not.toBeNull();
+    expect(result).not.toHaveProperty('client_metadata');
+    expect(result?.service_tier).toBe('default');
+  });
   it('accepts only the admitted fixed model endpoint, strips ambient authority and disables storage', async () => {
     const f = await fixture();
     const result = await f.request(body);

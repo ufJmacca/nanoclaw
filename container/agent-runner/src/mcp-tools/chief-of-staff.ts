@@ -55,7 +55,7 @@ export async function executeCosRequest(request: CosRequest, waitMs = COS_WAIT_M
   return response('pending');
 }
 
-const tools: McpToolDefinition[] = (
+export const cosTools: McpToolDefinition[] = (
   ['cos_context_get', 'cos_change_propose', 'cos_request_status'] as const
 ).map<McpToolDefinition>((method) => ({
   tool: {
@@ -69,7 +69,31 @@ const tools: McpToolDefinition[] = (
     inputSchema: {
       type: 'object',
       properties: (method === 'cos_change_propose'
-        ? { request_id: { type: 'string' }, change: { type: 'object' } }
+        ? {
+            request_id: { type: 'string', format: 'uuid' },
+            change: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                kind: { type: 'string', enum: ['charter', 'goal', 'project'] },
+                title: { type: 'string', minLength: 1, maxLength: 200 },
+                description: { type: 'string', maxLength: 8000 },
+                lifecycle: { type: 'string', enum: ['active', 'inactive'] },
+                reason: { type: 'string', minLength: 1, maxLength: 2000 },
+                record_id: {
+                  type: 'string',
+                  pattern: '^[a-zA-Z0-9_-]{1,100}$',
+                  description: 'Existing record ID for an update; omit when creating.',
+                },
+                expected_version: {
+                  type: 'integer',
+                  minimum: 0,
+                  description: 'Zero when creating; the current positive version when updating.',
+                },
+              },
+              required: ['kind', 'title', 'description', 'lifecycle', 'reason', 'expected_version'],
+            },
+          }
         : method === 'cos_request_status'
           ? { request_id: { type: 'string' } }
           : { view: { type: 'string', enum: ['today'] } }) as Record<string, object>,
@@ -89,4 +113,4 @@ const tools: McpToolDefinition[] = (
     return { content: [{ type: 'text' as const, text: JSON.stringify(value) }] };
   },
 }));
-if (process.env.NANOCLAW_COS_PROTOCOL === COS_PROTOCOL) registerTools(tools);
+if (process.env.NANOCLAW_COS_PROTOCOL === COS_PROTOCOL) registerTools(cosTools);

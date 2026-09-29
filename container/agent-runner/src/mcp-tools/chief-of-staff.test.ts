@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test';
 import { initTestSessionDb, closeSessionDb, getOutboundDb } from '../db/connection.js';
-import { executeCosRequest } from './chief-of-staff.js';
+import { executeCosRequest, cosTools } from './chief-of-staff.js';
 import { digest, type CosRequest } from './generated/cos-protocol.js';
 const request: CosRequest = {
   protocol: 'cos-rpc/v1',
@@ -9,6 +9,17 @@ const request: CosRequest = {
   params: { view: 'today' },
 };
 const previous = process.env.NANOCLAW_COS_PROTOCOL;
+test('proposal tool advertises the complete exact-change contract to the provider', () => {
+  const schema = cosTools.find((definition) => definition.tool.name === 'cos_change_propose')!.tool.inputSchema;
+  const change = schema.properties!.change as {
+    required: string[];
+    additionalProperties: boolean;
+    properties: Record<string, unknown>;
+  };
+  expect(change.required).toEqual(['kind', 'title', 'description', 'lifecycle', 'reason', 'expected_version']);
+  expect(change.properties.kind).toEqual({ type: 'string', enum: ['charter', 'goal', 'project'] });
+  expect(change.additionalProperties).toBe(false);
+});
 beforeEach(() => {
   process.env.NANOCLAW_COS_PROTOCOL = 'cos-rpc/v1';
 });

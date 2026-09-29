@@ -57,6 +57,7 @@ export function modelRequest(value: unknown, model: string): Record<string, unkn
     'truncation',
     'prompt_cache_key',
     'safety_identifier',
+    'client_metadata',
   ];
   if (
     body.model !== model ||
@@ -66,8 +67,9 @@ export function modelRequest(value: unknown, model: string): Record<string, unkn
     (body.tools !== undefined && (!Array.isArray(body.tools) || !body.tools.every(localTool)))
   )
     return null;
-  // Both fields are host-controlled even if the worker supplies other values.
-  return { ...body, model, store: false, background: false, max_output_tokens: 4096, service_tier: 'default' };
+  // CLI-specific routing metadata is not an upstream authority or API parameter.
+  const clean = Object.fromEntries(Object.entries(body).filter(([key]) => key !== 'client_metadata'));
+  return { ...clean, model, store: false, background: false, max_output_tokens: 4096, service_tier: 'default' };
 }
 export async function startModelGateway(options: {
   socket: string;
