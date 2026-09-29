@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import net from 'node:net';
 import { restrictedLaunch } from './restricted-launch.js';
+import { getInstallSlug } from '../../../install-slug.js';
 let root: string, session: string, config: string, socket: string, server: net.Server;
 beforeEach(async () => {
   root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-launch-'));
@@ -47,6 +48,7 @@ function input() {
 describe('S01 restricted coordinator launch', () => {
   it('launches a pinned baked entry with no network, credentials, Docker socket, global history or checkout overlays', () => {
     const launch = restrictedLaunch(input());
+    expect(launch.args).toContain('nanoclaw-install=' + getInstallSlug(process.cwd()));
     for (const flag of [
       '--network=none',
       '--read-only',

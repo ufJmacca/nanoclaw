@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { getInstallSlug } from '../../../install-slug.js';
 export type RestrictedLaunchInput = {
   image: string;
   sessionDirectory: string;
@@ -90,6 +91,8 @@ export function restrictedLaunch(input: RestrictedLaunchInput): { containerName:
       'run',
       '--rm',
       '--pull=never',
+      '--label',
+      'nanoclaw-install=' + getInstallSlug(process.cwd()),
       '--name',
       containerName,
       '--network=none',
