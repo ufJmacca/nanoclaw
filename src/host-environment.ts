@@ -25,6 +25,7 @@ const PROVIDER_KEYS = [
 ];
 const DOCKER_KEYS = ['DOCKER_HOST', 'DOCKER_CONTEXT', 'DOCKER_CONFIG', 'DOCKER_CERT_PATH', 'DOCKER_TLS_VERIFY'];
 const DATABASE_SECRET_KEYS = [
+  'COS_MODEL_API_KEY',
   'COS_PGPASSWORD',
   'COS_PG_MIGRATION_PASSWORD',
   'COS_TEST_PGPASSWORD',
@@ -34,7 +35,7 @@ const DATABASE_SECRET_KEYS = [
 ];
 
 export function isDatabaseEnvironmentKey(key: string): boolean {
-  return /^(?:COS_PG|COS_TEST_PG|COS_TEST_TARGET_ID$|PG|DATABASE_URL$)/i.test(key);
+  return /^(?:COS_MODEL_|COS_PG|COS_TEST_PG|COS_TEST_TARGET_ID$|PG|DATABASE_URL$)/i.test(key);
 }
 
 export function databaseSecretValues(env: NodeJS.ProcessEnv = process.env): string[] {
@@ -77,7 +78,7 @@ export function assertNoDatabaseLaunchArguments(args: string[]): void {
   assertNoDatabaseMaterial(args);
   if (
     args.some((arg) =>
-      /(?:^|[\s"'])((?:COS_(?:TEST_)?PG|COS_TEST_TARGET_ID|PG|DATABASE_URL)[A-Z0-9_]*)(?:=|$)/i.test(arg),
+      /(?:^|[\s"'])((?:COS_MODEL_|COS_(?:TEST_)?PG|COS_TEST_TARGET_ID|PG|DATABASE_URL)[A-Z0-9_]*)(?:=|$)/i.test(arg),
     )
   ) {
     throw new Error('Database configuration cannot enter container launch arguments');
