@@ -8,6 +8,7 @@ import type { BindingRequest } from './bind.js';
 
 type TargetArguments =
   | { command: 'status'; settings: string }
+  | { command: 'runtime-test'; settings: string; owner: string }
   | { command: 'rollback'; settings: string; releaseId: string; fromReleaseId: string }
   | { command: 'deploy'; settings: string; releaseId: string; manifestHash: string; binding?: string };
 export function parseTargetArguments(args: string[]): TargetArguments {
@@ -15,11 +16,13 @@ export function parseTargetArguments(args: string[]): TargetArguments {
     throw new Error('invalid_target_arguments');
   };
   const [command, ...rest] = args;
-  if (!['status', 'deploy', 'rollback'].includes(command) || rest.length % 2 !== 0) return reject();
+  if (!['status', 'deploy', 'rollback', 'runtime-test'].includes(command) || rest.length % 2 !== 0) return reject();
   const values: Record<string, string> = {};
   for (let i = 0; i < rest.length; i += 2) {
     if (
-      !['--settings', '--release-id', '--manifest-sha256', '--binding', '--from-release-id'].includes(rest[i]) ||
+      !['--settings', '--release-id', '--manifest-sha256', '--binding', '--from-release-id', '--owner'].includes(
+        rest[i],
+      ) ||
       !rest[i + 1] ||
       values[rest[i]]
     )
@@ -32,6 +35,10 @@ export function parseTargetArguments(args: string[]): TargetArguments {
     return reject();
   if (command === 'status')
     return Object.keys(values).length === 1 ? { command, settings: values['--settings'] } : reject();
+  if (command === 'runtime-test') {
+    if (Object.keys(values).length !== 2 || !/^[a-zA-Z0-9_-]{1,120}$/.test(values['--owner'] ?? '')) return reject();
+    return { command, settings: values['--settings'], owner: values['--owner'] };
+  }
   if (command === 'rollback') {
     if (
       Object.keys(values).length !== 3 ||
@@ -46,7 +53,7 @@ export function parseTargetArguments(args: string[]): TargetArguments {
       fromReleaseId: values['--from-release-id'],
     };
   }
-  if (values['--from-release-id']) return reject();
+  if (values['--from-release-id'] || values['--owner']) return reject();
   if (
     !/^release-[a-zA-Z0-9_-]{1,120}$/.test(values['--release-id'] ?? '') ||
     !/^[a-f0-9]{64}$/.test(values['--manifest-sha256'] ?? '')
@@ -88,6 +95,20 @@ export async function targetCommand(args: string[]): Promise<Record<string, unkn
   const parent = path.dirname(settings.stateRoot);
   if (!fs.existsSync(parent)) throw new Error('target_state_parent_required');
   return withDeploymentLock(settings.stateRoot + '.operation.lock', async () => {
+    if (request.command === 'runtime-test') {
+      const { serveRuntimeTestSession } = await import('./runtime-test-session.js');
+      const { createRuntimeTestEffects } = await import('./runtime-test-effects.js');
+      const { runtimeTestMessages, writeRuntimeTestMessage } = await import('./runtime-test-wire.js');
+      await serveRuntimeTestSession({
+        root: settings.stateRoot,
+        binding,
+        owner: request.owner,
+        effects: createRuntimeTestEffects(settings, request.owner),
+        input: runtimeTestMessages(process.stdin),
+        send: (message) => writeRuntimeTestMessage(process.stdout, message),
+      });
+      return { status: 'session_closed' };
+    }
     if (request.command === 'status') {
       const service = await targetCommands(settings).observe();
       if (!fs.lstatSync(settings.stateRoot, { throwIfNoEntry: false }))
@@ -173,7 +194,9 @@ export async function targetCommand(args: string[]): Promise<Record<string, unkn
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   targetCommand(process.argv.slice(2))
-    .then((result) => console.log(JSON.stringify(result)))
+    .then((result) => {
+      if (result.status !== 'session_closed') console.log(JSON.stringify(result));
+    })
     .catch((error) => {
       const safe = new Set([
         'invalid_target_arguments',
@@ -192,6 +215,11 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
         'rollback_unverified',
         'rollback_receipt_conflict',
         'rollback_source_changed',
+        'protected_target',
+        'maintenance_owned',
+        'runtime_test_history_conflict',
+        'runtime_test_protocol_invalid',
+        'installed_runtime_test_helper_required',
       ]);
       console.error(
         JSON.stringify({

@@ -93,6 +93,8 @@ export function restrictedLaunch(input: RestrictedLaunchInput): { containerName:
       '--pull=never',
       '--label',
       'nanoclaw-install=' + getInstallSlug(process.cwd()),
+      '--label',
+      'nanoclaw.cos-protocol=cos-rpc/v1',
       '--name',
       containerName,
       '--network=none',

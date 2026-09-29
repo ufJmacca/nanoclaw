@@ -58,6 +58,7 @@ describe('S01 restricted coordinator launch', () => {
     ])
       expect(launch.args).toContain(flag);
     expect(launch.args).toContain(image);
+    expect(launch.args).toContain('nanoclaw.cos-protocol=cos-rpc/v1');
     expect(launch.args).toContain('/app/src/cos-runner.ts');
     expect(launch.args.filter((v) => v.startsWith('type=bind'))).toHaveLength(4);
     const text = launch.args.join(' ');
