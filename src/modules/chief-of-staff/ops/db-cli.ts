@@ -54,6 +54,7 @@ export async function databaseCommand(args: string[], env: NodeJS.ProcessEnv): P
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  process.env.NANOCLAW_LOG_STDERR = 'true';
   databaseCommand(process.argv.slice(2), process.env)
     .then((result) => console.log(JSON.stringify(result)))
     .catch((error) => {

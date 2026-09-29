@@ -82,6 +82,7 @@ export function macRuntimeFixtureCommand(args: string[]): string | void {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+  process.env.NANOCLAW_LOG_STDERR = 'true';
   try {
     const result = macRuntimeFixtureCommand(process.argv.slice(2));
     if (result !== undefined) process.stdout.write(result + '\n');

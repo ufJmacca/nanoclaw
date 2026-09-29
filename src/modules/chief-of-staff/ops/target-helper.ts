@@ -193,6 +193,7 @@ export async function targetCommand(args: string[]): Promise<Record<string, unkn
   });
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  process.env.NANOCLAW_LOG_STDERR = 'true';
   targetCommand(process.argv.slice(2))
     .then((result) => {
       if (result.status !== 'session_closed') console.log(JSON.stringify(result));

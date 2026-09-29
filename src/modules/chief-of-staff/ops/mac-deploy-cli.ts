@@ -253,7 +253,8 @@ async function hash(file){const fd=f.openSync(file,f.constants.O_RDONLY|f.consta
   }
   throw new Error('invalid_delivery_operation');
 }
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href)
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  process.env.NANOCLAW_LOG_STDERR = 'true';
   macDeployCommand(process.argv.slice(2))
     .then((value) => {
       if (value !== undefined) console.log(value);
@@ -267,3 +268,4 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href)
       );
       process.exitCode = 1;
     });
+}

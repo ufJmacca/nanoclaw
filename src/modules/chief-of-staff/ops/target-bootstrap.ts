@@ -194,6 +194,7 @@ export async function bootstrapCommand(args: string[]): Promise<Record<string, u
   });
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  process.env.NANOCLAW_LOG_STDERR = 'true';
   bootstrapCommand(process.argv.slice(2))
     .then((result) => console.log(JSON.stringify(result)))
     .catch(() => {

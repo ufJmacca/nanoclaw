@@ -276,6 +276,7 @@ export async function runRuntimeFixtureDriver(file: string) {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+  process.env.NANOCLAW_LOG_STDERR = 'true';
   runRuntimeFixtureDriver(process.argv[2]).catch(() => {
     process.stderr.write('{"status":"blocked","code":"runtime_fixture_failed_target_stays_paused"}\n');
     process.exitCode = 1;

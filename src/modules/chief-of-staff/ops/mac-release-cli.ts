@@ -325,6 +325,7 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
   throw new Error('invalid_release_operation');
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  process.env.NANOCLAW_LOG_STDERR = 'true';
   macReleaseCommand(process.argv.slice(2))
     .then((value) => {
       if (value !== undefined) console.log(value);

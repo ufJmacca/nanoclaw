@@ -189,6 +189,7 @@ function adminEnvironment(): NodeJS.ProcessEnv {
   return Object.fromEntries(keys.map((key) => [key, process.env[key] ?? file[key]]));
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  process.env.NANOCLAW_LOG_STDERR = 'true';
   Promise.resolve()
     .then(async () => {
       const args = parseAdminArguments(process.argv.slice(2)),

@@ -42,7 +42,8 @@ function ts(): string {
 function emit(level: Level, msg: string, data?: Record<string, unknown>): void {
   if (LEVELS[level] < threshold) return;
   const tag = `${COLORS[level]}${level.toUpperCase()}${level === 'fatal' ? FULL_RESET : RESET}`;
-  const stream = LEVELS[level] >= LEVELS.warn ? process.stderr : process.stdout;
+  const stream =
+    process.env.NANOCLAW_LOG_STDERR === 'true' || LEVELS[level] >= LEVELS.warn ? process.stderr : process.stdout;
   stream.write(`[${ts()}] ${tag} ${MSG_COLOR}${msg}${RESET}${data ? formatData(data) : ''}\n`);
 }
 
