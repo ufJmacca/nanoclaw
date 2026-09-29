@@ -109,8 +109,10 @@ export class CodexProvider implements AgentProvider {
   private readonly mcpServers: Record<string, { command: string; args: string[]; env: Record<string, string> }>;
   private readonly model: string;
   private readonly reasoningEffort: CodexReasoningEffort | undefined;
+  private readonly restrictedCos: boolean;
 
   constructor(options: ProviderOptions = {}) {
+    this.restrictedCos = options.restrictedCos === true;
     this.mcpServers = options.mcpServers ?? {};
     this.model = (options.env?.CODEX_MODEL as string | undefined) ?? 'gpt-6-astra';
     const configuredEffort = (options.env?.CODEX_REASONING_EFFORT as string | undefined)?.trim().toLowerCase();
@@ -142,8 +144,8 @@ export class CodexProvider implements AgentProvider {
       // One app-server per query invocation. The poll-loop keeps a single
       // query active per batch of pending messages and ends it on idle, so
       // spawn-per-query matches that cadence naturally.
-      writeCodexMcpConfigToml(self.mcpServers);
-      const server = spawnCodexAppServer(createCodexConfigOverrides());
+      writeCodexMcpConfigToml(self.mcpServers, self.restrictedCos);
+      const server = spawnCodexAppServer(createCodexConfigOverrides(self.restrictedCos));
       attachCodexAutoApproval(server);
 
       const decodedContinuation = decodeCodexContinuation(input.continuation);
@@ -152,7 +154,7 @@ export class CodexProvider implements AgentProvider {
 
       try {
         await initializeCodexAppServer(server);
-        const dynamicTools = await loadNanoclawWorkflowDynamicTools(server);
+        const dynamicTools = self.restrictedCos ? [] : await loadNanoclawWorkflowDynamicTools(server);
 
         if (decodedContinuation.refreshRequired) {
           console.error(
@@ -166,7 +168,9 @@ export class CodexProvider implements AgentProvider {
           sandbox: 'danger-full-access',
           approvalPolicy: 'never',
           personality: 'friendly',
-          baseInstructions: composeBaseInstructions(input.systemContext?.instructions),
+          baseInstructions: self.restrictedCos
+            ? input.systemContext?.instructions
+            : composeBaseInstructions(input.systemContext?.instructions),
           dynamicTools,
         };
 

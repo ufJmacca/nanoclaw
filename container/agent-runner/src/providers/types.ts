@@ -21,6 +21,8 @@ export interface AgentProvider {
  * providers; individual providers may ignore any they don't need.
  */
 export interface ProviderOptions {
+  /** Host-isolated CoS entry point only; never inherited from group configuration. */
+  restrictedCos?: boolean;
   assistantName?: string;
   mcpServers?: Record<string, McpServerConfig>;
   env?: Record<string, string | undefined>;

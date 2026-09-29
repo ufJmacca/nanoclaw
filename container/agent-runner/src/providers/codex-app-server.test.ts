@@ -375,6 +375,20 @@ describe('Codex dynamic MCP bridge', () => {
 });
 
 describe('Codex feature flags', () => {
+  it('keeps the restricted coordinator on the local model gateway without native goals or web tools', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-restricted-'));
+    tempDirs.push(home);
+    process.env.HOME = home;
+    writeCodexMcpConfigToml({ cos: { command: 'bun', args: ['/app/src/cos-mcp.ts'] } }, true);
+    const config = fs.readFileSync(path.join(home, '.codex', 'config.toml'), 'utf8');
+    expect(config).toContain('web_search = "disabled"');
+    expect(config).toContain('goals = false');
+    expect(config).toContain('base_url = "http://127.0.0.1:8787/v1"');
+    expect(config).toContain('[mcp_servers.cos]');
+    expect(config).not.toContain('[mcp_servers.nanoclaw]');
+    expect(createCodexConfigOverrides(true)).toContain('features.goals=false');
+    expect(createCodexConfigOverrides(true)).toContain('web_search="disabled"');
+  });
   it('enables goals in launch config overrides', () => {
     expect(createCodexConfigOverrides()).toContain('features.goals=true');
   });
