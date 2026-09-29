@@ -1,5 +1,7 @@
 # Mac-only Linux/ARM64 release build. Context is exported from an exact Git commit.
 # Debian snapshot pinning: https://snapshot.debian.org/#usage
+FROM docker@sha256:1c27de1f16ee894e6389586d8b58391f4b941f768cb5520cd2970c72d38a8e84 AS docker-cli
+
 FROM node@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5 AS tooling
 USER root
 RUN rm -f /etc/apt/sources.list.d/debian.sources && \
@@ -24,12 +26,14 @@ COPY src ./src
 COPY container ./container
 RUN pnpm build
 
-FROM node@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5 AS host
+FROM tooling AS host
 ARG SOURCE_COMMIT
 ARG WORKER_ASSETS_DIGEST
 LABEL org.opencontainers.image.revision=$SOURCE_COMMIT nanoclaw.worker-assets=$WORKER_ASSETS_DIGEST nanoclaw.release-role=host
 COPY --from=host-build /build /release
 COPY --from=host-build /usr/local/bin/node /release/node/bin/node
+# Used only by trusted Mac final-image fixtures. The extracted Pi payload uses its existing host Docker CLI.
+COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
 WORKDIR /release
 ENTRYPOINT ["/release/node/bin/node"]
 CMD ["/release/dist/index.js"]
