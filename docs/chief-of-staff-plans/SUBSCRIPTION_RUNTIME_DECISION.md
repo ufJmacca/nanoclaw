@@ -33,18 +33,24 @@ docker run --rm --network none --read-only \
   --tmpfs /tmp:rw,nosuid,nodev \
   --tmpfs /home/node:rw,nosuid,nodev \
   --tmpfs /workspace:rw,nosuid,nodev \
+  --tmpfs /run/cos:rw,nosuid,nodev,uid=1000,gid=1000 \
+  --tmpfs /etc/ssl/certs:rw,nosuid,nodev,uid=1000,gid=1000 \
   -e HOME=/home/node -e NANOCLAW_COS_OFFLINE_FIXTURE=1 \
+  -e NANOCLAW_COS_FIXTURE_SYSTEM_TRUST=1 \
   -e NANOCLAW_COS_FIXTURE_EGRESS_MODULE=file:///fixture/subscription-egress.ts \
   --mount "type=bind,src=$PWD/src/modules/chief-of-staff/bridge/subscription-egress.ts,dst=/fixture/subscription-egress.ts,readonly" \
   --mount "type=bind,src=$PWD/container/agent-runner/fixtures/cos-subscription-capability.ts,dst=/app/fixtures/cos-subscription-capability.ts,readonly" \
   --mount "type=bind,src=$PWD/container/agent-runner/src/cos-subscription-relay.ts,dst=/app/src/cos-subscription-relay.ts,readonly" \
+  --mount "type=bind,src=$PWD/container/agent-runner/src/codex-auth.ts,dst=/app/src/codex-auth.ts,readonly" \
+  --mount "type=bind,src=$PWD/container/agent-runner/src/providers/codex-subscription-check.ts,dst=/app/src/providers/codex-subscription-check.ts,readonly" \
+  --mount "type=bind,src=$PWD/container/agent-runner/src/providers/codex-app-server.ts,dst=/app/src/providers/codex-app-server.ts,readonly" \
   --mount "type=bind,src=$PWD/container/agent-runner/src/providers/codex-subscription-policy.ts,dst=/app/src/providers/codex-subscription-policy.ts,readonly" \
   --entrypoint bun \
   sha256:4b799b1d6c4cb086c9431a37c2eb79f84892bc2045efa277e0861e33bd360672 \
   /app/fixtures/cos-subscription-capability.ts
 ```
 
-Expected final receipt: `probe=passed`, six generating requests, retained context, only the admitted CoS dispatch, no escape file, no credential canaries, one native refresh, an access-only query cache and `fixedDestinationEgress=true`. The fixture intentionally does not supply a live model catalogue; catalogue warnings do not establish live model availability. Failed assertions or a timeout fail the process.
+Expected final receipt: `probe=passed`, six generating requests, retained context, only the admitted CoS dispatch, no escape file, no credential canaries, one native refresh, an access-only query cache, `fixedDestinationEgress=true` and `productionAuthEntry=true`. This variant supplies its synthetic root through a temporary system certificate directory and invokes the real authentication entry as a child; the native environment needs no custom CA variable. The fixture intentionally does not supply a live model catalogue; catalogue warnings do not establish live model availability. Failed assertions or a timeout fail the process.
 
 ## Restricted network transport
 
@@ -61,6 +67,10 @@ The new host-side `src/providers/codex-subscription-auth.ts` stages native check
 Its durable journal distinguishes a check with an uncertain outcome from an already checked candidate ready for publication. A later legitimate host owner can finish publication without rotating again. Incomplete native writes preserve the primary file and block automatic refresh retries. A forced refresh with unchanged access/refresh credentials is not reported as success: pinned `account/read` can return account information after an attempted refresh, so account type alone is insufficient evidence. Changed primary credentials are not overwritten. The store requires the native host execution lease and serializes operations for the same source within the process.
 
 Eight credential-store regressions cover access-only export, competing refreshes, stale generations, partial writes, recovery by a new store instance, changed login/account, host-authority loss, unsafe permissions and symlinks, and unconfirmed refresh. The native protocol fixture separately verifies actual Codex rotation and subsequent access-only execution. These are component proofs; the host store and native runner still need to be connected and tested together.
+
+The native check adapter now supplies the executable side of the store callback. Its host launcher admits only an immutable image, a private staged authentication file and the fixed authentication socket. It uses a network-disabled, read-only container with temporary HOME; the primary login and other session histories are not mounted. The new entry runs only app-server initialization and `account/read`, denies unexpected client requests and waits for the native writer to exit. The child receives a fixed environment without ambient API credentials, custom endpoints, CA overrides or proxy bypasses, and raw native diagnostics are suppressed. The offline fixture alone adds its synthetic CA.
+
+Six host-launch tests cover restricted mounts, authority, exact receipts and interrupted helper cleanup. Five native-check tests cover protocol selection, wrong authentication modes, unexpected requests, environment selection and an actual subprocess. Together with existing provider/transport/policy/relay checks, 16 host and 29 runner tests pass; root/runner typechecks and targeted host lint pass. The pinned binary completes the refresh and retained-context fixture through the new check helper and filtered environment. A second variant invokes the actual authentication entry with fixture system trust and no custom CA environment variable; its sanitized completion receipt and rotated credentials pass. The complete host Docker launcher has not yet been exercised against a newly baked image; ordinary and CoS launch registration remains pending. A successful cached account inspection still does not prove entitlement, model availability or live inference.
 
 Both ordinary and CoS launch paths must use this single refresh owner before enabling CoS subscription access. Existing ordinary runtimes still receive full per-session copies and have not yet been changed. Deployment must drain those older processes through the normal service path. Preserve ordinary session histories while replacing only credential preparation; test concurrent ordinary/CoS queries and bounded renewal after access expiry. No master refresh credential should enter an ordinary query runtime or a CoS tool runtime under the coordinated profile.
 

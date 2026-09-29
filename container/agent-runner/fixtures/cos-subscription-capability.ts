@@ -5,6 +5,7 @@ import { execFileSync } from 'node:child_process';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { startSubscriptionRelay } from '../src/cos-subscription-relay.js';
+import { checkSubscriptionAccount, subscriptionProcessEnvironment } from '../src/providers/codex-subscription-check.js';
 import assert from 'node:assert/strict';
 import {
   spawnCodexAppServer,
@@ -59,6 +60,8 @@ fs.writeFileSync(
 const requests: any[] = [];
 const dispatched: string[] = [];
 const proxied = process.env.NANOCLAW_COS_FIXTURE_EGRESS_MODULE;
+const systemTrust = process.env.NANOCLAW_COS_FIXTURE_SYSTEM_TRUST === '1';
+if (systemTrust && !proxied) throw new Error('system_trust_requires_offline_proxy');
 const destinations: Array<{ role: string; host: string }> = [];
 execFileSync(
   'openssl',
@@ -122,7 +125,11 @@ execFileSync(
   ],
   { stdio: 'ignore' },
 );
-process.env.CODEX_CA_CERTIFICATE = '/tmp/fixture-ca.pem';
+if (systemTrust) {
+  // This optional final-entry proof runs with an empty, writable fixture-only
+  // /etc/ssl/certs mount. The production process receives no CA override.
+  fs.writeFileSync('/etc/ssl/certs/ca-certificates.crt', fs.readFileSync('/tmp/fixture-ca.pem'));
+} else process.env.CODEX_CA_CERTIFICATE = '/tmp/fixture-ca.pem';
 if (!proxied) process.env.CODEX_REFRESH_TOKEN_URL_OVERRIDE = 'https://127.0.0.1:8787/fixture/oauth/token';
 function respond(body: any, send: (text: string) => void) {
   if (body.generate !== false) requests.push(body);
@@ -317,7 +324,7 @@ async function switchGateway(role: 'auth' | 'query') {
   process.env.NO_PROXY = '';
 }
 async function connect() {
-  server = spawnCodexAppServer([]);
+  server = spawnCodexAppServer([], { environment: nativeEnvironment() });
   server.serverRequestHandlers.push((req: any) => {
     dispatched.push(req.params.tool ?? req.method);
     console.log(JSON.stringify({ serverRequest: req.method, tool: req.params.tool }));
@@ -332,6 +339,15 @@ async function connect() {
     });
   });
   await initializeCodexAppServer(server);
+}
+function nativeEnvironment() {
+  // The only addition to the production environment is the offline fixture CA.
+  return relay
+    ? {
+        ...subscriptionProcessEnvironment(relay.proxyUrl),
+        ...(systemTrust ? {} : { CODEX_CA_CERTIFICATE: '/tmp/fixture-ca.pem' }),
+      }
+    : undefined;
 }
 const params = {
   ...subscriptionThreadParams('gpt-6-astra', 'You are a CoS fixture.'),
@@ -365,14 +381,30 @@ async function turn(threadId: string, text: string) {
 }
 try {
   await switchGateway('auth');
-  await connect();
-  const account = await sendCodexRequest(server, 'account/read', { refreshToken: true });
-  assert.equal((account.result as any)?.account?.type, 'chatgpt');
+  if (systemTrust) {
+    fs.symlinkSync('/tmp/fixture-egress/proxy.sock', '/run/cos/subscription.sock');
+    const config = fs.readFileSync('/home/node/.codex/config.toml');
+    fs.unlinkSync('/home/node/.codex/config.toml');
+    const child = Bun.spawn(['bun', '/app/src/codex-auth.ts', 'refresh', 'gpt-6-astra'], {
+      env: { HOME: '/home/node', PATH: process.env.PATH, NANOCLAW_NATIVE_AUTH: 'codex-subscription/v1' },
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    const [code, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+    assert.equal(code, 0, stderr);
+    assert.equal(stdout.trim(), '{"status":"native_check_completed"}');
+    fs.writeFileSync('/home/node/.codex/config.toml', config);
+  } else {
+    const accountServer = spawnCodexAppServer([], { environment: nativeEnvironment(), diagnostic: () => {} });
+    await checkSubscriptionAccount(accountServer, 'refresh');
+  }
   const refreshed = JSON.parse(fs.readFileSync('/home/node/.codex/auth.json', 'utf8'));
   assert.equal(refreshed.tokens.refresh_token, 'fixture-refresh-rotated');
   assert.equal(refreshed.tokens.access_token, rotatedToken);
-  killCodexAppServer(server);
-  await new Promise((resolve) => setTimeout(resolve, 500));
   await switchGateway('query');
   // The native refresh owner retains the rotating credential. Query runtimes
   // consume an access-only native cache and never receive a refresh credential.
@@ -450,6 +482,7 @@ try {
       nativeRefreshCalls: refreshCalls,
       accessOnlyQueryCache: true,
       fixedDestinationEgress: Boolean(proxied),
+      productionAuthEntry: systemTrust,
     }),
   );
 } finally {

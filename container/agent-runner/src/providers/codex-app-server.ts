@@ -177,16 +177,21 @@ export interface AppServer {
   pending: Map<number, { resolve: (r: JsonRpcResponse) => void; reject: (e: Error) => void }>;
   notificationHandlers: ((n: JsonRpcNotification) => void)[];
   serverRequestHandlers: ((r: JsonRpcServerRequest) => void)[];
+  diagnostic?: (message: string) => void;
 }
 
-export function spawnCodexAppServer(configOverrides: string[] = []): AppServer {
+export function spawnCodexAppServer(
+  configOverrides: string[] = [],
+  options: { environment?: NodeJS.ProcessEnv; diagnostic?: (message: string) => void } = {},
+): AppServer {
+  const diagnostic = options.diagnostic ?? log;
   const args = ['app-server', '--listen', 'stdio://'];
   for (const override of configOverrides) args.push('-c', override);
 
-  log(`Spawning: codex ${args.join(' ')}`);
+  diagnostic(`Spawning: codex ${args.join(' ')}`);
   const proc = spawn('codex', args, {
     stdio: ['pipe', 'pipe', 'pipe'],
-    env: { ...process.env },
+    env: { ...(options.environment ?? process.env) },
   });
 
   const rl = createInterface({ input: proc.stdout! });
@@ -197,11 +202,12 @@ export function spawnCodexAppServer(configOverrides: string[] = []): AppServer {
     pending: new Map(),
     notificationHandlers: [],
     serverRequestHandlers: [],
+    diagnostic,
   };
 
   proc.stderr?.on('data', (chunk: Buffer) => {
     const text = chunk.toString().trim();
-    if (text) log(`[stderr] ${text}`);
+    if (text) diagnostic(`[stderr] ${text}`);
   });
 
   rl.on('line', (line: string) => {
@@ -210,7 +216,7 @@ export function spawnCodexAppServer(configOverrides: string[] = []): AppServer {
     try {
       msg = JSON.parse(line);
     } catch {
-      log(`[parse-error] ${line.slice(0, 200)}`);
+      diagnostic(`[parse-error] ${line.slice(0, 200)}`);
       return;
     }
 
@@ -228,13 +234,13 @@ export function spawnCodexAppServer(configOverrides: string[] = []): AppServer {
   });
 
   proc.on('error', (err) => {
-    log(`[process-error] ${err.message}`);
+    diagnostic(`[process-error] ${err.message}`);
     for (const [, handler] of server.pending) handler.reject(err);
     server.pending.clear();
   });
 
   proc.on('exit', (code, signal) => {
-    log(`[exit] code=${code} signal=${signal}`);
+    diagnostic(`[exit] code=${code} signal=${signal}`);
     const err = new Error(`Codex app-server exited: code=${code} signal=${signal}`);
     for (const [, handler] of server.pending) handler.reject(err);
     server.pending.clear();
@@ -534,7 +540,8 @@ export function attachCodexAutoApproval(server: AppServer): void {
 // ── High-level helpers ──────────────────────────────────────────────────────
 
 export async function initializeCodexAppServer(server: AppServer): Promise<void> {
-  log('Sending initialize…');
+  const diagnostic = server.diagnostic ?? log;
+  diagnostic('Sending initialize…');
   const resp = await sendCodexRequest(
     server,
     'initialize',
@@ -545,7 +552,7 @@ export async function initializeCodexAppServer(server: AppServer): Promise<void>
     CODEX_INITIALIZE_TIMEOUT_MS,
   );
   if (resp.error) throw new Error(`Initialize failed: ${resp.error.message}`);
-  log('Initialize successful');
+  diagnostic('Initialize successful');
 }
 
 export interface ThreadParams {
