@@ -167,3 +167,11 @@ export function activeMaintenanceLease(root: string, binding: TargetBinding): Ma
   assertMaintenanceLease(root, binding, lease);
   return lease;
 }
+
+/** Read-only ownership check usable while the short target-state lock is already held. */
+export function maintenanceLeaseForOwner(root: string, binding: TargetBinding, owner: string): MaintenanceLease {
+  const lease = leaseFrom(receipt(root, binding));
+  owned(root, binding, lease);
+  if (lease.owner !== owner || lease.purpose !== 'deployment') throw new Error('maintenance_owned');
+  return lease;
+}
