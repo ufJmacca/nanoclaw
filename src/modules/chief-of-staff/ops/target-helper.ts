@@ -8,17 +8,18 @@ import type { BindingRequest } from './bind.js';
 
 type TargetArguments =
   | { command: 'status'; settings: string }
+  | { command: 'rollback'; settings: string; releaseId: string; fromReleaseId: string }
   | { command: 'deploy'; settings: string; releaseId: string; manifestHash: string; binding?: string };
 export function parseTargetArguments(args: string[]): TargetArguments {
   const reject = (): never => {
     throw new Error('invalid_target_arguments');
   };
   const [command, ...rest] = args;
-  if (!['status', 'deploy'].includes(command) || rest.length % 2 !== 0) return reject();
+  if (!['status', 'deploy', 'rollback'].includes(command) || rest.length % 2 !== 0) return reject();
   const values: Record<string, string> = {};
   for (let i = 0; i < rest.length; i += 2) {
     if (
-      !['--settings', '--release-id', '--manifest-sha256', '--binding'].includes(rest[i]) ||
+      !['--settings', '--release-id', '--manifest-sha256', '--binding', '--from-release-id'].includes(rest[i]) ||
       !rest[i + 1] ||
       values[rest[i]]
     )
@@ -31,6 +32,21 @@ export function parseTargetArguments(args: string[]): TargetArguments {
     return reject();
   if (command === 'status')
     return Object.keys(values).length === 1 ? { command, settings: values['--settings'] } : reject();
+  if (command === 'rollback') {
+    if (
+      Object.keys(values).length !== 3 ||
+      !/^release-[a-zA-Z0-9_-]{1,120}$/.test(values['--release-id'] ?? '') ||
+      !/^release-[a-zA-Z0-9_-]{1,120}$/.test(values['--from-release-id'] ?? '')
+    )
+      return reject();
+    return {
+      command,
+      settings: values['--settings'],
+      releaseId: values['--release-id'],
+      fromReleaseId: values['--from-release-id'],
+    };
+  }
+  if (values['--from-release-id']) return reject();
   if (
     !/^release-[a-zA-Z0-9_-]{1,120}$/.test(values['--release-id'] ?? '') ||
     !/^[a-f0-9]{64}$/.test(values['--manifest-sha256'] ?? '')
@@ -96,6 +112,40 @@ export async function targetCommand(args: string[]): Promise<Record<string, unkn
         modelActivation: 'not_verified',
       };
     }
+    if (request.command === 'rollback') {
+      const { artifactHash } = await import('./release-artifacts.js');
+      const { validateReleaseManifest } = await import('./release-manifest.js');
+      const { digest } = await import('../domain/contracts.js');
+      const { createTargetEffects } = await import('./target-effects.js');
+      const { rollbackRelease } = await import('./rollback.js');
+      const manifestFile = path.join(settings.releaseRoot, request.fromReleaseId, 'release.json');
+      const manifest = validateReleaseManifest(readPrivate(manifestFile));
+      const receiptRoot = path.join(settings.stateRoot, 'releases', request.fromReleaseId);
+      const deployed = readPrivate<{ status: string; manifestDigest: string; previousReleaseId: string | null }>(
+        path.join(receiptRoot, 'deployment.json'),
+      );
+      if (
+        manifest.releaseId !== request.fromReleaseId ||
+        deployed.status !== 'healthy' ||
+        deployed.manifestDigest !== digest(manifest) ||
+        deployed.previousReleaseId !== request.releaseId
+      )
+        throw new Error('rollback_not_compatible');
+      const bindingFile = path.join(receiptRoot, 'binding-setup.json');
+      const effects = createTargetEffects(
+        settings,
+        manifest,
+        await artifactHash(manifestFile),
+        fs.existsSync(bindingFile) ? privateBinding(bindingFile) : undefined,
+      );
+      return rollbackRelease({
+        root: settings.stateRoot,
+        binding,
+        manifest,
+        effects,
+        previousReleaseId: request.releaseId,
+      });
+    }
     const { verifyReleaseBundle } = await import('./release-artifacts.js');
     const bundle = await verifyReleaseBundle(path.join(settings.stagingRoot, request.releaseId), request.manifestHash);
     if (bundle.manifest.releaseId !== request.releaseId) throw new Error('release_identity_mismatch');
@@ -138,6 +188,10 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
         'release_identity_mismatch',
         'wrong_deployment_target',
         'unsafe_target_credentials',
+        'rollback_not_compatible',
+        'rollback_unverified',
+        'rollback_receipt_conflict',
+        'rollback_source_changed',
       ]);
       console.error(
         JSON.stringify({

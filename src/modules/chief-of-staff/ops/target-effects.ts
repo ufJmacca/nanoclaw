@@ -359,6 +359,11 @@ export function createTargetEffects(
         const prior = validateReleaseManifest(
           readPrivate(path.join(settings.releaseRoot, previousReleaseId, 'release.json')),
         );
+        const priorReceipt = readPrivate<{ status: string; manifestDigest: string }>(
+          path.join(settings.stateRoot, 'releases', previousReleaseId, 'deployment.json'),
+        );
+        if (priorReceipt.status !== 'healthy' || priorReceipt.manifestDigest !== digest(prior)) return false;
+        verifyInstalledProfiles(settings, prior);
         const version = await schema();
         if (
           prior.postgres.minimum > version ||
