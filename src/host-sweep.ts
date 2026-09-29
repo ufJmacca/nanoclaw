@@ -63,6 +63,13 @@ export type StuckDecision =
   | { action: 'kill-ceiling'; heartbeatAgeMs: number; ceilingMs: number }
   | { action: 'kill-claim'; messageId: string; claimAgeMs: number; toleranceMs: number };
 
+function parseDbTimestamp(value: string): number {
+  // SQLite datetime() emits UTC without a zone; Date.parse would use the
+  // host's local timezone. Preserve explicit ISO timestamps and offsets.
+  const sqliteUtc = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?$/;
+  return Date.parse(sqliteUtc.test(value) ? `${value.replace(' ', 'T')}Z` : value);
+}
+
 /**
  * Pure decision for whether a running container should be killed this sweep
  * tick. Inputs are all deterministic; filesystem + DB reads happen in the
@@ -95,7 +102,7 @@ export function decideStuckAction(args: {
 
   const tolerance = Math.max(CLAIM_STUCK_MS, declaredBashMs ?? 0);
   for (const claim of claims) {
-    const claimedAt = Date.parse(claim.status_changed);
+    const claimedAt = parseDbTimestamp(claim.status_changed);
     if (Number.isNaN(claimedAt)) continue;
     const claimAge = now - claimedAt;
     if (claimAge <= tolerance) continue;
@@ -274,7 +281,7 @@ function resetStuckProcessingRows(
     // Already rescheduled for a future retry — don't bump tries again. The
     // wake path (sweep step 2) will fire when process_after elapses and a
     // fresh container will clean the orphan claim on startup.
-    if (msg.processAfter && Date.parse(msg.processAfter) > now) continue;
+    if (msg.processAfter && parseDbTimestamp(msg.processAfter) > now) continue;
 
     if (msg.tries >= MAX_TRIES) {
       markMessageFailed(inDb, msg.id);
