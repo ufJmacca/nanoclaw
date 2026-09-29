@@ -1,3 +1,4 @@
+import { INITIAL_CHECKSUM } from '../store/migrations.js';
 export const REQUIRED_RELEASE_CHECKS = [
   'root',
   'runner',
@@ -24,7 +25,12 @@ export type ReleaseManifest = {
   workerAssetsDigest: string;
   rpc: 'cos-rpc/v1';
   postgres: { minimum: number; maximum: number };
-  images: Array<{ role: 'host' | 'agent'; profile: string; tag: string; id: string }>;
+  sqlite: { minimum: number; maximum: number };
+  migrations: Array<{ version: number; checksum: string }>;
+  previousReleaseIds: string[];
+  // id is the immutable local engine reference; containerd uses a manifest digest.
+  // configurationId is independently hashed from the saved configuration JSON.
+  images: Array<{ role: 'host' | 'agent'; profile: string; tag: string; id: string; configurationId: string }>;
   checks: Record<string, { status: 'passed' | 'failed'; at: string; sourceCommit: string; imageIds: string[] }>;
 };
 export function validateReleaseManifest(value: unknown): ReleaseManifest {
@@ -62,8 +68,20 @@ export function validateReleaseManifest(value: unknown): ReleaseManifest {
     !object(postgres) ||
     !Number.isSafeInteger(postgres.minimum) ||
     !Number.isSafeInteger(postgres.maximum) ||
-    Number(postgres.minimum) < 1 ||
-    Number(postgres.maximum) < Number(postgres.minimum)
+    postgres.minimum !== 1 ||
+    postgres.maximum !== 1 ||
+    !object(value.sqlite) ||
+    value.sqlite.minimum !== 21 ||
+    value.sqlite.maximum !== 21 ||
+    !Array.isArray(value.migrations) ||
+    value.migrations.length !== 1 ||
+    !object(value.migrations[0]) ||
+    value.migrations[0].version !== 1 ||
+    value.migrations[0].checksum !== INITIAL_CHECKSUM ||
+    !Array.isArray(value.previousReleaseIds) ||
+    value.previousReleaseIds.length > 20 ||
+    new Set(value.previousReleaseIds).size !== value.previousReleaseIds.length ||
+    value.previousReleaseIds.some((id) => !matches(id, /^release-[a-zA-Z0-9_-]{1,120}$/) || id === value.releaseId)
   )
     return reject();
   if (!Array.isArray(value.images) || value.images.length < 2 || value.images.length > 20) return reject();
@@ -76,6 +94,7 @@ export function validateReleaseManifest(value: unknown): ReleaseManifest {
       !['host', 'agent'].includes(String(image.role)) ||
       !matches(image.profile, /^[a-zA-Z0-9_-]{1,64}$/) ||
       !matches(image.id, /^sha256:[a-f0-9]{64}$/) ||
+      !matches(image.configurationId, /^sha256:[a-f0-9]{64}$/) ||
       !matches(image.tag, /^[a-z0-9][a-z0-9._/-]*:[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$/) ||
       String(image.tag).endsWith(':latest')
     )

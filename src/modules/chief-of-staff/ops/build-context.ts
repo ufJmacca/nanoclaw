@@ -53,6 +53,8 @@ export async function prepareBuildContext(
   files: number;
 }> {
   if (!/^[a-f0-9]{40}$/.test(commit)) throw new Error('pinned_commit_required');
+  if (!path.isAbsolute(destination) || path.resolve(destination) !== destination)
+    throw new Error('canonical_build_context_required');
   if (fs.lstatSync(destination, { throwIfNoEntry: false })) throw new Error('build_context_exists');
   const git = async (...args: string[]) =>
     (await execute('git', args, { cwd: repository, env: safeHostEnvironment('docker'), maxBuffer: 16 * 1024 * 1024 }))
@@ -102,8 +104,13 @@ export async function prepareBuildContext(
       build.update(identity);
       if (workerAsset(entry.name)) assets.update(identity);
       const file = path.join(destination, entry.name);
-      fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+      fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o755 });
+      // COPY preserves directory permissions; workers run as a non-root user.
+      // The enclosing context stays private, while packaged public code is traversable.
+      for (let directory = path.dirname(file); directory !== destination; directory = path.dirname(directory))
+        fs.chmodSync(directory, 0o755);
       fs.writeFileSync(file, bytes, { flag: 'wx', mode: entry.mode === '100755' ? 0o755 : 0o644 });
+      fs.chmodSync(file, entry.mode === '100755' ? 0o755 : 0o644);
     }
     const workerAssetsDigest = assets.digest('hex');
     const info = JSON.stringify({ commit, tree: sourceTree, workerAssetsDigest }) + '\n';

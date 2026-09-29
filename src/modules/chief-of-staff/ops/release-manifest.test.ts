@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { REQUIRED_RELEASE_CHECKS, validateReleaseManifest, type ReleaseManifest } from './release-manifest.js';
+import { INITIAL_CHECKSUM } from '../store/migrations.js';
 const sha = 'a'.repeat(40),
   tree = 'b'.repeat(40),
   image = 'sha256:' + 'c'.repeat(64),
@@ -22,9 +23,24 @@ function manifest(): ReleaseManifest {
     workerAssetsDigest: '1'.repeat(64),
     rpc: 'cos-rpc/v1',
     postgres: { minimum: 1, maximum: 1 },
+    sqlite: { minimum: 21, maximum: 21 },
+    migrations: [{ version: 1, checksum: INITIAL_CHECKSUM }],
+    previousReleaseIds: [],
     images: [
-      { role: 'host', profile: 'host', tag: 'nanoclaw-cos-host:fixture', id: image },
-      { role: 'agent', profile: 'codex', tag: 'nanoclaw-cos-agent:fixture', id: agent },
+      {
+        role: 'host',
+        profile: 'host',
+        tag: 'nanoclaw-cos-host:fixture',
+        id: image,
+        configurationId: 'sha256:' + '2'.repeat(64),
+      },
+      {
+        role: 'agent',
+        profile: 'codex',
+        tag: 'nanoclaw-cos-agent:fixture',
+        id: agent,
+        configurationId: 'sha256:' + '3'.repeat(64),
+      },
     ],
     checks: Object.fromEntries(
       REQUIRED_RELEASE_CHECKS.map((check) => [
@@ -40,6 +56,19 @@ function manifest(): ReleaseManifest {
   };
 }
 describe('S01-REL01 source and final-image evidence gate', () => {
+  it('records configuration digests separately and requires explicit schema/migration compatibility', () => {
+    for (const key of ['configurationId']) {
+      const value = manifest();
+      delete (value.images[0] as unknown as Record<string, unknown>)[key];
+      expect(() => validateReleaseManifest(value)).toThrow();
+    }
+    for (const patch of [
+      { sqlite: { minimum: 1, maximum: 20 } },
+      { migrations: [] },
+      { previousReleaseIds: ['../foreign'] },
+    ])
+      expect(() => validateReleaseManifest({ ...manifest(), ...patch })).toThrow();
+  });
   it('accepts only complete evidence for one exact source and final image pair', () =>
     expect(validateReleaseManifest(manifest())).toEqual(manifest()));
   it.each(REQUIRED_RELEASE_CHECKS)('refuses a failed or missing mandatory %s check', (check) => {

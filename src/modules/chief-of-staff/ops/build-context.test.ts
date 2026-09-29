@@ -45,6 +45,8 @@ describe('S01-REL03 pinned source-only build context', () => {
       out = path.join(f.root, 'context');
     fs.writeFileSync(path.join(f.repo, 'src/index.ts'), 'UNCOMMITTED_CANARY');
     const result = await prepareBuildContext(f.repo, f.commit, out);
+    expect(fs.statSync(path.join(out, 'container/agent-runner/src')).mode & 0o777).toBe(0o755);
+    expect(fs.statSync(path.join(out, 'container/agent-runner/src/index.ts')).mode & 0o777).toBe(0o644);
     expect(fs.readFileSync(path.join(out, 'src/index.ts'), 'utf8')).toBe('console.log("fixture")');
     expect(result.sourceCommit).toBe(f.commit);
     expect(result.sourceTree).toBe(f.git('rev-parse', f.commit + '^{tree}'));

@@ -4,6 +4,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { imageProfile, assertReleaseMounts, readReleaseAt, selectReleaseImage } from './release-runtime.js';
 import { REQUIRED_RELEASE_CHECKS, type ReleaseManifest } from './modules/chief-of-staff/ops/release-manifest.js';
+import { INITIAL_CHECKSUM } from './modules/chief-of-staff/store/migrations.js';
 const commit = 'a'.repeat(40),
   tree = 'b'.repeat(40),
   host = 'sha256:' + 'c'.repeat(64),
@@ -31,10 +32,19 @@ function fixture() {
     hostPayloadDigest: 'f'.repeat(64),
     rpc: 'cos-rpc/v1',
     postgres: { minimum: 1, maximum: 1 },
+    sqlite: { minimum: 21, maximum: 21 },
+    migrations: [{ version: 1, checksum: INITIAL_CHECKSUM }],
+    previousReleaseIds: [],
     workerAssetsDigest: '1'.repeat(64),
     images: [
-      { role: 'host', profile: 'host', tag: 'fixture:host', id: host },
-      { role: 'agent', profile: imageProfile('codex', { apt: [], npm: [] }), tag: 'fixture:agent', id: agent },
+      { role: 'host', profile: 'host', tag: 'fixture:host', id: host, configurationId: 'sha256:' + '2'.repeat(64) },
+      {
+        role: 'agent',
+        profile: imageProfile('codex', { apt: [], npm: [] }),
+        tag: 'fixture:agent',
+        id: agent,
+        configurationId: 'sha256:' + '3'.repeat(64),
+      },
     ],
     checks: Object.fromEntries(
       REQUIRED_RELEASE_CHECKS.map((name) => [
