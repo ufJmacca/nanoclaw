@@ -28,6 +28,7 @@ import { getAgentGroup, getAllAgentGroups } from './db/agent-groups.js';
 import { getDb, hasTable } from './db/connection.js';
 import { getSession } from './db/sessions.js';
 import { readEnvFile } from './env.js';
+import { assertNoDatabaseMaterial, assertNoDatabaseLaunchArguments, safeHostEnvironment } from './host-environment.js';
 import { initGroupFilesystem } from './group-init.js';
 import { stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
@@ -378,7 +379,10 @@ async function spawnContainer(session: Session): Promise<void> {
   // immediate kill before the new container touches the file itself.
   fs.rmSync(heartbeatPath(agentGroup.id, session.id), { force: true });
 
-  const container = spawn(CONTAINER_RUNTIME_BIN, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+  const container = spawn(CONTAINER_RUNTIME_BIN, args, {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: safeHostEnvironment('docker'),
+  });
 
   const activeEntry = { process: container, containerName, identity: executionIdentity(session) };
   activeContainers.set(session.id, activeEntry);
@@ -573,6 +577,7 @@ function assertNoMattermostCredentialsInContainerConfigArtifact(folder: string):
   const artifactPath = path.join(GROUPS_DIR, folder, 'container.json');
   if (!fs.existsSync(artifactPath)) return;
   const raw = fs.readFileSync(artifactPath, 'utf8');
+  assertNoDatabaseMaterial(JSON.parse(raw));
   if (/"MATTERMOST[^"]*(?:TOKEN|SECRET|PASSWORD|KEY)[^"]*"\s*:/i.test(raw)) {
     throw new Error('Mattermost credentials cannot enter mounted container configuration');
   }
@@ -597,7 +602,7 @@ function assertContainerConfigArtifactUnchanged(folder: string, expected: string
 function providerSafeHostEnv(): NodeJS.ProcessEnv {
   const credentials = hostMattermostCredentialValues();
   return Object.fromEntries(
-    Object.entries(process.env).filter(
+    Object.entries(safeHostEnvironment('provider')).filter(
       ([key, value]) =>
         !/^MATTERMOST(?:_|$)/i.test(key) &&
         (!value || ![...credentials].some((credential) => value.includes(credential))),
@@ -619,6 +624,7 @@ function hasMattermostCredentialKey(value: unknown): boolean {
 }
 
 function assertNoMattermostCredentialsInContainerConfig(containerConfig: ContainerConfig): void {
+  assertNoDatabaseMaterial(containerConfig);
   if (hasMattermostCredentialKey(containerConfig)) {
     throw new Error('Mattermost credentials cannot enter mounted container configuration');
   }
@@ -647,6 +653,7 @@ function assertSafeContainerSkillNames(containerConfig: ContainerConfig): void {
 }
 
 function assertNoMattermostContainerCredentials(contribution: ProviderContainerContribution): void {
+  assertNoDatabaseMaterial(contribution);
   for (const key of Object.keys(contribution.env ?? {})) {
     if (/^MATTERMOST(?:_|$)/i.test(key)) {
       throw new Error('Mattermost credentials cannot enter provider container environments');
@@ -661,6 +668,7 @@ function assertNoMattermostContainerCredentials(contribution: ProviderContainerC
 }
 
 function assertNoMattermostCredentialsInLaunchArgs(args: string[]): void {
+  assertNoDatabaseLaunchArguments(args);
   const credentials = hostMattermostCredentialValues();
   for (const arg of args) {
     if (/MATTERMOST[^=]*(?:TOKEN|SECRET|PASSWORD|KEY)/i.test(arg)) {
@@ -992,6 +1000,7 @@ export async function buildAgentGroupImage(agentGroupId: string): Promise<void> 
   try {
     execSync(`${CONTAINER_RUNTIME_BIN} build -t ${imageTag} -f ${tmpDockerfile} .`, {
       cwd: DATA_DIR,
+      env: safeHostEnvironment('docker'),
       stdio: 'pipe',
       timeout: 300_000,
     });
