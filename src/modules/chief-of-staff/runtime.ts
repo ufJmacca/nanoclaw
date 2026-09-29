@@ -1,3 +1,4 @@
+import { writeSessionMessage } from '../../session-manager.js';
 import type Database from 'better-sqlite3';
 import type { Session, MessagingGroup } from '../../types.js';
 import { cosBoundary, setCosBoundaryHooks, type CosBinding } from '../../cos-boundary.js';
@@ -18,6 +19,7 @@ export type RuntimeDependencies = {
   session(id: string): Session | undefined;
   destination(id: string): MessagingGroup | undefined;
   stop(sessionId: string): void;
+  wake(session: Session): Promise<void>;
 };
 export function createCosRuntime(dependencies: RuntimeDependencies) {
   const d = dependencies;
@@ -30,6 +32,20 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
     decide: (...args) => (d.store ? d.store.decide(...args) : Promise.resolve({ status: 'unavailable' })),
     acknowledge: (proposal) => deletePendingApproval('cos-' + proposal),
     stop: d.stop,
+    wake: d.wake,
+    project: (session, event) => {
+      writeSessionMessage(session.agent_group_id, session.id, {
+        id: `${event.message.id}:${session.agent_group_id}`,
+        kind: 'chat',
+        timestamp: event.message.timestamp,
+        platformId: event.platformId,
+        channelType: 'mattermost',
+        threadId: null,
+        content: event.message.content,
+        trigger: 1,
+        idempotent: true,
+      });
+    },
   });
   const admitted = async (binding: CosBinding): Promise<boolean> => {
     if (!enabled()) return false;

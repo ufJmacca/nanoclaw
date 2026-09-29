@@ -5,7 +5,7 @@ import type { CosBinding } from '../../../cos-boundary.js';
 import { cosBoundary } from '../../../cos-boundary.js';
 import type { ChannelFacts } from './identity.js';
 import { parseControl, verifyIngress, validPrivateChannel } from './identity.js';
-import type { Context, Result } from '../domain/contracts.js';
+import { digest, type Context, type Result } from '../domain/contracts.js';
 export type ControllerDependencies = {
   db: Database.Database;
   enabled(): boolean;
@@ -14,6 +14,9 @@ export type ControllerDependencies = {
   decide(context: Context, proposal: string, token: string, decision: 'approve' | 'reject'): Promise<Result>;
   acknowledge(proposal: string): void;
   stop(sessionId: string): void;
+  /** Synchronous idempotent write into the fresh native inbound SQLite. */
+  project(session: Session, event: InboundEvent): void;
+  wake(session: Session): Promise<void>;
   now?(): number;
 };
 export class CosController {
@@ -53,17 +56,50 @@ export class CosController {
     }
     // Keep malformed/quoted controls out of model history; they never become commands.
     if (/\bcos\s+(approve|reject|pause)\b/i.test(verified.text)) return true;
-    const admitted = d.db.transaction(() => {
-      const inserted = d.db
-        .prepare('INSERT OR IGNORE INTO cos_ingress_receipts(scope_id,ingress_id,received_at) VALUES(?,?,?)')
-        .run(binding.scopeId, verified.id, verified.timestamp).changes;
-      if (inserted)
-        d.db
-          .prepare('UPDATE cos_identity_boundaries SET ingress_id=?,ingress_at=? WHERE scope_id=? AND paused=0')
-          .run(verified.id, verified.timestamp, binding.scopeId);
-      return inserted === 1;
+    const payloadDigest = digest(verified);
+    const pending = d.db.transaction(() => {
+      d.db
+        .prepare(
+          `INSERT OR IGNORE INTO cos_ingress_receipts
+        (scope_id,ingress_id,received_at,payload_digest,projected) VALUES(?,?,?,?,0)`,
+        )
+        .run(binding.scopeId, verified.id, verified.timestamp, payloadDigest);
+      return d.db
+        .prepare(
+          `SELECT payload_digest,projected FROM cos_ingress_receipts
+        WHERE scope_id=? AND ingress_id=?`,
+        )
+        .get(binding.scopeId, verified.id) as {
+        payload_digest: string | null;
+        projected: number;
+      };
     })();
-    return !admitted;
+    if (pending.payload_digest !== payloadDigest || pending.projected !== 0) return true;
+    // The receipt stays pending if writing native SQLite fails. Exact retries finish the
+    // projection even after a crash between the two databases; native insertion is idempotent.
+    // No attachments, reply redirection or generic command routing cross this boundary.
+    d.project(session, {
+      channelType: 'mattermost',
+      platformId: `mattermost:${binding.instanceId}:${binding.channelId}`,
+      threadId: null,
+      message: {
+        id: verified.id,
+        kind: 'chat',
+        timestamp: verified.timestamp,
+        content: JSON.stringify({ senderId: `mattermost:${binding.ownerId}`, text: verified.text }),
+      },
+    });
+    d.db.transaction(() => {
+      d.db
+        .prepare('UPDATE cos_ingress_receipts SET projected=1 WHERE scope_id=? AND ingress_id=?')
+        .run(binding.scopeId, verified.id);
+      d.db
+        .prepare('UPDATE cos_identity_boundaries SET ingress_id=?,ingress_at=? WHERE scope_id=? AND paused=0')
+        .run(verified.id, verified.timestamp, binding.scopeId);
+    })();
+    // A wake failure leaves the durable trigger for the ordinary host sweep to retry.
+    await d.wake(session);
+    return true;
   }
   async context(session: Session): Promise<Context | null> {
     const d = this.dependencies;

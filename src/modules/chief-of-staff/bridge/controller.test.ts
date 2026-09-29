@@ -39,7 +39,9 @@ function fixture() {
   const decide = vi.fn().mockResolvedValue({ status: 'ok' }),
     acknowledge = vi.fn(),
     stop = vi.fn(),
-    enabled = vi.fn().mockReturnValue(true);
+    enabled = vi.fn().mockReturnValue(true),
+    project = vi.fn(),
+    wake = vi.fn().mockResolvedValue(undefined);
   return {
     db,
     facts,
@@ -47,6 +49,8 @@ function fixture() {
     acknowledge,
     stop,
     enabled,
+    project,
+    wake,
     controller: new CosController({
       db,
       facts,
@@ -54,6 +58,8 @@ function fixture() {
       acknowledge,
       stop,
       enabled,
+      project,
+      wake,
       session: () => session,
       now: () => now,
     }),
@@ -104,9 +110,12 @@ describe('S01 deterministic host control and replay authority', () => {
   });
   it('admits a normal owner event once, derives RPC authority from host state and rechecks privacy', async () => {
     const f = fixture();
-    expect(await f.controller.ingress(binding, event('what matters?'))).toBe(false);
+    expect(await f.controller.ingress(binding, event('what matters?'))).toBe(true);
+    expect(f.project).toHaveBeenCalledOnce();
+    expect(f.wake).toHaveBeenCalledOnce();
     expect(await f.controller.context(session)).toMatchObject({ ingressId: 'ingress', sessionId: 'session' });
     expect(await f.controller.ingress(binding, event('what matters?'))).toBe(true);
+    expect(f.project).toHaveBeenCalledOnce();
     f.facts.mockResolvedValue({
       id: 'private',
       type: 'O',
@@ -122,5 +131,41 @@ describe('S01 deterministic host control and replay authority', () => {
     await f.controller.ingress(binding, event('hello'));
     f.enabled.mockReturnValue(false);
     expect(await f.controller.context(session)).toBeNull();
+  });
+});
+
+describe('S01 ingress projection crash recovery', () => {
+  it('retries a pending projection after restart without admitting RPC prematurely', async () => {
+    const f = fixture();
+    f.project.mockImplementationOnce(() => {
+      throw new Error('injected_before_projection');
+    });
+    await expect(f.controller.ingress(binding, event('hello'))).rejects.toThrow('injected_before_projection');
+    expect(await f.controller.context(session)).toBeNull();
+    expect(f.wake).not.toHaveBeenCalled();
+    const restarted = new CosController(f.controller.dependencies);
+    await restarted.ingress(binding, event('hello'));
+    expect(f.project).toHaveBeenCalledTimes(2);
+    expect(await restarted.context(session)).toMatchObject({ ingressId: 'ingress' });
+    await restarted.ingress(binding, event('hello'));
+    expect(f.project).toHaveBeenCalledTimes(2);
+  });
+  it('rejects changed payloads with the same pending ingress ID', async () => {
+    const f = fixture();
+    f.project.mockImplementationOnce(() => {
+      throw new Error('injected_before_projection');
+    });
+    await expect(f.controller.ingress(binding, event('original'))).rejects.toThrow();
+    await f.controller.ingress(binding, event('changed'));
+    expect(f.project).toHaveBeenCalledOnce();
+    expect(await f.controller.context(session)).toBeNull();
+  });
+  it('does not reauthorize older delivered ingress when a newer message is current', async () => {
+    const f = fixture();
+    await f.controller.ingress(binding, event('first', 'first'));
+    await f.controller.ingress(binding, event('second', 'second'));
+    await f.controller.ingress(binding, event('first', 'first'));
+    expect(await f.controller.context(session)).toMatchObject({ ingressId: 'second' });
+    expect(f.project).toHaveBeenCalledTimes(2);
   });
 });

@@ -26,6 +26,7 @@ function fixture(enabled: boolean) {
     session: () => undefined,
     destination: () => undefined,
     stop: vi.fn(),
+    wake: vi.fn().mockResolvedValue(undefined),
   });
   services.push(service);
   return { service, connect, end, query };

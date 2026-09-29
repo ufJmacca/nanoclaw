@@ -86,6 +86,7 @@ test(
       session: getSession,
       destination: getMessagingGroup,
       stop: () => {},
+      wake: async () => {},
     };
     let runtime = createCosRuntime(dependencies);
     const ingress = async (text: string, id = randomUUID()) =>

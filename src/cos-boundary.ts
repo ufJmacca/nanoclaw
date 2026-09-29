@@ -25,6 +25,17 @@ export function ensureCosBoundarySchema(db: Database.Database): void {
     CREATE TABLE IF NOT EXISTS cos_ingress_receipts (
       scope_id TEXT NOT NULL, ingress_id TEXT NOT NULL, received_at TEXT NOT NULL,
       PRIMARY KEY(scope_id,ingress_id));`);
+  ensureCosIngressProjectionSchema(db);
+}
+export function ensureCosIngressProjectionSchema(db: Database.Database): void {
+  const columns = db.prepare('PRAGMA table_info(cos_ingress_receipts)').all() as Array<{ name: string }>;
+  if (!columns.some((column) => column.name === 'payload_digest'))
+    db.exec('ALTER TABLE cos_ingress_receipts ADD COLUMN payload_digest TEXT');
+  // Existing receipts must never grant a fresh replay capability after upgrade.
+  if (!columns.some((column) => column.name === 'projected'))
+    db.exec(
+      'ALTER TABLE cos_ingress_receipts ADD COLUMN projected INTEGER NOT NULL DEFAULT 1 CHECK(projected IN (0,1))',
+    );
 }
 type Row = {
   binding: string;

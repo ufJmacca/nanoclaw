@@ -2,7 +2,7 @@ import { readEnvFile } from '../../env.js';
 import { getDb } from '../../db/connection.js';
 import { getSession } from '../../db/sessions.js';
 import { getMessagingGroup } from '../../db/messaging-groups.js';
-import { killContainer } from '../../container-runner.js';
+import { killContainer, wakeContainer } from '../../container-runner.js';
 import { NodeMattermostTransport } from '../../channels/mattermost-client.js';
 import { validateMattermostSessionForExecution } from '../../channels/mattermost-subscription.js';
 import { createMattermostFacts } from './bridge/mattermost-facts.js';
@@ -67,6 +67,9 @@ export function startCosHostModule(): { service: CosService; stop(): Promise<voi
     session: getSession,
     destination: getMessagingGroup,
     stop: (id) => killContainer(id, 'CoS emergency pause'),
+    wake: async (session) => {
+      await wakeContainer(session);
+    },
     connect: async () => {
       const check = await connectChecked(selected, 'runtime');
       try {
