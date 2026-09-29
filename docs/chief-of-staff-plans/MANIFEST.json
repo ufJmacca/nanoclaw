@@ -1,0 +1,163 @@
+{
+  "format": "chief-of-staff-plan-bundle/v5",
+  "plan_revision": 5,
+  "repository": "ufJmacca/nanoclaw",
+  "reference_commit": "1a432912c00d96abf6c39cd19b1a312631d78a9c",
+  "postgres_contract": "cos-postgres/external-env-v3",
+  "implementation_authority_contract": "cos-implementation-authority/v2",
+  "implementation_authority": "IMPLEMENTATION_AUTHORITY.md",
+  "goal": "GOAL.md",
+  "deployment": "mac_development_pi_runtime_external_lan_postgres",
+  "slice_order": [
+    "S01",
+    "S02",
+    "S03",
+    "S04",
+    "S05",
+    "S06",
+    "S07",
+    "S08",
+    "S09",
+    "S10",
+    "S11"
+  ],
+  "files": [
+    {
+      "name": "00_START_HERE.md",
+      "bytes": 12461,
+      "sha256": "c36f837ab4204fa4b91d873de74ec60e6510a898c5574ee7321e57de1788c035"
+    },
+    {
+      "name": "01_FIRST_USE_AND_PRIORITIES.md",
+      "bytes": 17551,
+      "sha256": "82b956d9fc27abf6896fa4bb0fc42ef508ffe5e7dc73f079870ac737639a7949"
+    },
+    {
+      "name": "02_GROUNDED_KNOWLEDGE.md",
+      "bytes": 11475,
+      "sha256": "a2926eb5b56b28c7af7ee3bc888a0782a41746af307092572f6efbec3b5b8f55"
+    },
+    {
+      "name": "03_CALENDAR_AWARENESS.md",
+      "bytes": 11413,
+      "sha256": "8a94b2e46ff569c11128c569b6fc084595b7aad2923a7d3def5fd083c3b3e4a7"
+    },
+    {
+      "name": "04_DAILY_BRIEF_AND_COMMITMENTS.md",
+      "bytes": 11532,
+      "sha256": "e758309eda501d592df115c25d35bd93fb4741823d86a3f34a71cfbffc513cac"
+    },
+    {
+      "name": "05_ISOLATED_RESEARCH_MISSIONS.md",
+      "bytes": 12597,
+      "sha256": "933512a28f66f35664e145ac1eb0161c291cdeae5421c6be9a52b6598d90ceec"
+    },
+    {
+      "name": "06_SPECIALIST_TEAMS_AND_REVIEW.md",
+      "bytes": 11474,
+      "sha256": "5bcbbda6d82fb38ad68ba8ac1dd6079a04af9f02f5d1aac5173045870d21212a"
+    },
+    {
+      "name": "07_PROACTIVE_PROPOSALS.md",
+      "bytes": 10802,
+      "sha256": "d41d41b8fb6d95fce4eebef1528a64cb3d50666be1c29642681d964a56dc54d1"
+    },
+    {
+      "name": "08_STANDING_MANDATES.md",
+      "bytes": 11472,
+      "sha256": "2eda1ec2816ddcdd3614748755a5a85411085d1667125c935b8a8b751af40c98"
+    },
+    {
+      "name": "09_APPROVED_CALENDAR_ACTIONS.md",
+      "bytes": 12754,
+      "sha256": "886715188910b45c61eedc7b4b72d47effc0006f48850be37dbfbc918ad85ca1"
+    },
+    {
+      "name": "10_STRATEGIC_REVIEWS.md",
+      "bytes": 11828,
+      "sha256": "60c8b199c903088dc1080549e003a155a408a21913567d0c5cede79ac5b79387"
+    },
+    {
+      "name": "11_OPERATIONS_AND_RECOVERY.md",
+      "bytes": 16929,
+      "sha256": "b2a695ededb64ec40eac7f94b15923763332e6be8db47730468fbac5a38657d0"
+    },
+    {
+      "name": "ACCEPTANCE_MATRIX.md",
+      "bytes": 11069,
+      "sha256": "49aa5dc125e921419a84438f838d8a8c4c5b0ff62a3a80f2233736a5b58897a9"
+    },
+    {
+      "name": "ARCHITECTURE_AND_CONTRACTS.md",
+      "bytes": 27849,
+      "sha256": "1e765a68677a5ac6025ea4156e0ab53760e4218e09ba83c699e1d39b7578ed55"
+    },
+    {
+      "name": "BOOTSTRAP_PROMPT.md",
+      "bytes": 4368,
+      "sha256": "f46a9386ae5e2b77daa288afa176ebfb23e91aaaea7521845badec0ed889dbcf"
+    },
+    {
+      "name": "DEPLOYMENT_ENV.example",
+      "bytes": 1690,
+      "sha256": "1b28040a2bba7d8cbb8d9a012ddca55b5e33e230fa066eb9be0772f667a3c4e7"
+    },
+    {
+      "name": "EXECUTION_STATE.json",
+      "bytes": 21440,
+      "sha256": "2707b36a62300bceaf2cdbb47447ca78f6a18b88ad851384fe20140a6333cdb5"
+    },
+    {
+      "name": "EXTERNAL_POSTGRES.md",
+      "bytes": 31010,
+      "sha256": "a497225d18e1961bddcc96832a97fa1c41b6de6a39619a2b1fdcebfba07ce997"
+    },
+    {
+      "name": "GITHUB_SOURCE_SYNC.md",
+      "bytes": 11060,
+      "sha256": "f48bed72c59835cbe3f7d943cfd71dd3e030e8a0f553ea413fe7ed4f73b642ef"
+    },
+    {
+      "name": "GOAL.md",
+      "bytes": 11320,
+      "sha256": "f7fc32ab1159362c5ec576e4d4474710a66b8926cadb368c4604b79c6dc2c2d9"
+    },
+    {
+      "name": "IMPLEMENTATION_AUTHORITY.md",
+      "bytes": 12932,
+      "sha256": "2e3aca4a91565d7c7489876e0a5d61be613d55786ebf34d392ba53cbb075fceb"
+    },
+    {
+      "name": "INTERACTION_MODEL.md",
+      "bytes": 10815,
+      "sha256": "92e04831130934c31297c3f3b8b753dec6a1daf35b2913cb14fd5e5640f06739"
+    },
+    {
+      "name": "MAC_TO_PI_DELIVERY.md",
+      "bytes": 24052,
+      "sha256": "9f151b87802606cc894ac11fe0de2c914c3d9eea4c5c7eee4f3cd9ee160f3b4b"
+    },
+    {
+      "name": "POSTGRES_ENV.example",
+      "bytes": 2704,
+      "sha256": "711ba7046dd599029a5134b1873694c0c2cbc252acbaf3a78c4a462b5385c71c"
+    },
+    {
+      "name": "REPOSITORY_BASELINE.md",
+      "bytes": 13541,
+      "sha256": "3633a0b91cc1157b2156c83e0ef88a3e0f4c5ff17d7f9f5c19d237a6328215c6"
+    },
+    {
+      "name": "REVISION_NOTES.md",
+      "bytes": 6173,
+      "sha256": "39d88b0533dae54b5c3131e5f34b2bf0bfad29d6beda48320a6c1d7cb5798eeb"
+    }
+  ],
+  "delivery_contract": "cos-delivery/mac-to-pi-v2",
+  "delivery_spec": "MAC_TO_PI_DELIVERY.md",
+  "interaction_contract": "cos-interaction/mattermost-first-v1",
+  "interaction_spec": "INTERACTION_MODEL.md",
+  "publication_base_commit": "dea16302f904ef57cf10e91b687a289d76c149f8",
+  "source_sync_contract": "cos-source-sync/github-pinned-v1",
+  "source_sync_spec": "GITHUB_SOURCE_SYNC.md"
+}

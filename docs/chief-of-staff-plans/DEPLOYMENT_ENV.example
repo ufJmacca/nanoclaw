@@ -1,0 +1,28 @@
+# DOCUMENTATION ONLY: proposed Mac-to-Pi release configuration, not installed commands.
+# Set in the trusted MAC release coordinator environment or an ignored private file.
+# No secrets or real endpoints in this checked-in example.
+COS_DEPLOY_TARGET=pi
+COS_DEPLOY_SSH_ALIAS=nanoclaw-pi
+COS_DEPLOY_PLATFORM=linux/arm64
+COS_DEPLOY_RELEASE_MODE=prebuilt
+# Resolve exact private values during preflight; placeholders must fail validation.
+COS_DEPLOY_TARGET_ID=__PINNED_PI_INSTALLATION_ID__
+COS_DEPLOY_STAGING_DIR=__VERIFIED_REMOTE_STAGING_DIRECTORY__
+COS_DEPLOY_RELEASES_DIR=__VERIFIED_REMOTE_RELEASES_DIRECTORY__
+COS_DEPLOY_SERVICE=__EXISTING_SERVICE_NAME__
+COS_BUILD_DOCKER_CONTEXT=__MAC_LOCAL_DOCKER_CONTEXT__
+COS_BUILD_BUILDER=__MAC_LOCAL_BUILDX_BUILDER__
+
+# Use an existing configured SSH alias with a verified known_hosts entry.
+# Never set StrictHostKeyChecking=no or point the build context/DOCKER_HOST at the Pi.
+# Test DB variables COS_TEST_PG* are separately populated on the Mac: see POSTGRES_ENV.example.
+# Explicit runtime-disposable tests need the secured client profile on the Mac plus
+# the Pi's current lifecycle/quiescence/target lease. Do not copy/dump Pi secrets.
+# Actual Pi runtime and migration credentials remain in their scoped Pi processes.
+
+# Source sync: pinned GitHub source is separate from image transfer and activation.
+COS_SOURCE_REPOSITORY=ufJmacca/nanoclaw
+COS_PI_REPOSITORY_DIR=__VERIFIED_EXISTING_PI_REPOSITORY_DIRECTORY__
+COS_PI_RELEASE_SOURCE_DIR=__VERIFIED_DETACHED_RELEASE_SOURCE_ROOT__
+# source_commit/source_tree/source_fetch_ref come from the tested release manifest.
+# Use existing read-only GitHub access on Pi; never a secret-bearing remote URL.
