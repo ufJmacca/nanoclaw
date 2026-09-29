@@ -6,7 +6,7 @@
 
 Use the existing NanoClaw Codex app-server transport for the persistent CoS AgentGroup. The pinned Codex 0.158.0 binary supports `environments: []` on thread creation and turns, and persists that selection on resume. This allows a durable model conversation without granting an execution environment. Fixed CoS dynamic tools return through the trusted NanoClaw client, which must still validate actual scope, ingress and current authority.
 
-The proof uses the native `openai` provider and native cached `chatgpt` authentication with synthetic tokens. A loopback TLS/WebSocket server supplies account-routing, native OAuth refresh and model responses; Docker has no external network. Fixture endpoint overrides and its generated CA are confined to the test. Production policy selects native ChatGPT authentication and accepts no endpoint or provider override.
+The proof uses the native `openai` provider and native cached `chatgpt` authentication with synthetic tokens. A loopback TLS/WebSocket server supplies account-routing, native OAuth refresh and model responses; Docker has no external network. The proxied fixture preserves Codex's native production URLs and uses the actual Node host gateway, with a test-only DNS/dial replacement pointing to the loopback server. Its generated CA is confined to the test. Production policy selects native ChatGPT authentication and accepts no endpoint or provider override.
 
 The effective Astra tool catalogue is carried in structured `additional_tools` context. It exposes the isolated JavaScript wrapper, its wait helper and user-input helpers. The wrapper's callable tools in this fixture are the admitted `cos_context_get` and Codex's clock. The wrapper must remain functional: disabling `code_mode_host` leaves advertised tools unusable. Its V8 environment has no `process`, `require` or `fetch`. Do not confuse this pure computation wrapper with a shell or Node execution environment. Production must reject unsupported client requests and bound tool execution; helper prompts never authorize CoS changes.
 
@@ -19,9 +19,10 @@ Verified with the actual pinned binary:
 - A wrapper attempt to call `tools.exec_command` fails. Runtime inspection reports `process`, `fetch` and `require` as undefined.
 - Access/refresh credential canaries are absent from captured model context.
 - After terminating and starting a new app-server process, resuming the same thread retains the owner's earlier synthetic detail and tool results. It does not allocate a new conversation.
+- Native HTTPS and WebSocket traffic use the loopback-to-Unix relay and fixed-destination host gateway. Native refresh reaches `auth.openai.com` through the authentication role; the subsequent query role admits only `chatgpt.com`. The proxied proof uses no model base-URL or refresh-endpoint override.
 - Non-generating WebSocket warmups are separate from generating requests. Six generating requests implement the adversarial first turn and resumed follow-up; this is not a guarantee that one turn equals one provider request.
 
-The tested worker image is `sha256:4b799b1d6c4cb086c9431a37c2eb79f84892bc2045efa277e0861e33bd360672`. The new fixture and policy were mounted read-only for this development proof. This is not final-image acceptance; the final release must bake and rerun them against its own exact identities.
+The tested worker image is `sha256:4b799b1d6c4cb086c9431a37c2eb79f84892bc2045efa277e0861e33bd360672`. The new fixture, policy, relay and gateway were mounted read-only for this development proof. This is not final-image acceptance; the final release must bake and rerun them against its own exact identities.
 
 ## Reproduce the offline proof
 
@@ -33,14 +34,25 @@ docker run --rm --network none --read-only \
   --tmpfs /home/node:rw,nosuid,nodev \
   --tmpfs /workspace:rw,nosuid,nodev \
   -e HOME=/home/node -e NANOCLAW_COS_OFFLINE_FIXTURE=1 \
+  -e NANOCLAW_COS_FIXTURE_EGRESS_MODULE=file:///fixture/subscription-egress.ts \
+  --mount "type=bind,src=$PWD/src/modules/chief-of-staff/bridge/subscription-egress.ts,dst=/fixture/subscription-egress.ts,readonly" \
   --mount "type=bind,src=$PWD/container/agent-runner/fixtures/cos-subscription-capability.ts,dst=/app/fixtures/cos-subscription-capability.ts,readonly" \
+  --mount "type=bind,src=$PWD/container/agent-runner/src/cos-subscription-relay.ts,dst=/app/src/cos-subscription-relay.ts,readonly" \
   --mount "type=bind,src=$PWD/container/agent-runner/src/providers/codex-subscription-policy.ts,dst=/app/src/providers/codex-subscription-policy.ts,readonly" \
   --entrypoint bun \
   sha256:4b799b1d6c4cb086c9431a37c2eb79f84892bc2045efa277e0861e33bd360672 \
   /app/fixtures/cos-subscription-capability.ts
 ```
 
-Expected final receipt: `probe=passed`, six generating requests, retained context, only the admitted CoS dispatch, no escape file, no credential canaries, one native refresh and an access-only query cache. The fixture intentionally does not supply a live model catalogue; catalogue warnings do not establish live model availability. Failed assertions or a timeout fail the process.
+Expected final receipt: `probe=passed`, six generating requests, retained context, only the admitted CoS dispatch, no escape file, no credential canaries, one native refresh, an access-only query cache and `fixedDestinationEgress=true`. The fixture intentionally does not supply a live model catalogue; catalogue warnings do not establish live model availability. Failed assertions or a timeout fail the process.
+
+## Restricted network transport
+
+The native runtime has Docker networking disabled. Its loopback relay forwards only to a fixed private host Unix socket. The host accepts TLS CONNECT to exact permitted hostnames on port 443, validates every DNS answer as public and dials the selected resolved IP. Query traffic may reach `chatgpt.com`; only the trusted authentication role also admits `auth.openai.com`. API billing, arbitrary destinations, private/LAN addresses, other ports and ordinary proxy HTTP requests are refused.
+
+The gateway bounds connection count, lifetime and bytes. It rechecks authority before and during connections and closes active tunnels on revocation or an authorization error. Eight host tests cover these boundaries; two runner tests cover relay forwarding, shutdown and missing host sockets. Root/runner typechecks and targeted host lint pass. A Bun socket buffering issue found by the relay regression was fixed before the native proof passed.
+
+TLS stays end-to-end between native Codex and the provider. This gateway enforces destination policy, not message content or individual API operations within the permitted domain. It is safe only together with the proved no-execution-environment tool policy, immutable configuration, access-only query credentials and host-mediated CoS actions. It does not grant the model a general web/network tool, create another conversation context or authorize delivery. Production cancellation and launch integration still need their own end-to-end tests.
 
 ## Credential ownership implementation
 
@@ -58,7 +70,7 @@ The production runtime must retain a CoS-only provider state directory, reapply 
 
 Pinned native file storage truncates and writes `auth.json`; production must use the tested staging/publication path, not let native checks write the primary file directly. Do not mount the whole host `.codex` directory, enable simultaneous uncoordinated refresh writers, or overwrite refreshed credentials with old copies. An uncertain refresh requires explicit reconciliation or reauthentication; retaining the primary file does not prove an older refresh credential is still valid at the provider.
 
-Controlled model/authentication egress, durable activation limits, cancellation, production CoS RPC integration, explicit readiness, credential refresh/recovery, complete regression tests, baked ARM64 release checks, Pi deployment and bounded live acceptance remain unfinished. SUB01–SUB14 are not collectively satisfied by this proof. No real account call, Mattermost message or Pi change was made for it.
+The tested credential and egress components still need production launch integration. Durable activation limits, cancellation, production CoS RPC integration, explicit readiness, combined credential refresh/recovery, complete regression tests, baked ARM64 release checks, Pi deployment and bounded live acceptance remain unfinished. SUB01–SUB14 are not collectively satisfied by this proof. No real account call, Mattermost message or Pi change was made for it.
 
 ## Pinned source references
 

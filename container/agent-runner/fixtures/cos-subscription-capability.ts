@@ -2,6 +2,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import { subscriptionConfig, subscriptionThreadParams } from '../src/providers/codex-subscription-policy.js';
 import { execFileSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
+import { startSubscriptionRelay } from '../src/cos-subscription-relay.js';
 import assert from 'node:assert/strict';
 import {
   spawnCodexAppServer,
@@ -55,6 +58,8 @@ fs.writeFileSync(
 );
 const requests: any[] = [];
 const dispatched: string[] = [];
+const proxied = process.env.NANOCLAW_COS_FIXTURE_EGRESS_MODULE;
+const destinations: Array<{ role: string; host: string }> = [];
 execFileSync(
   'openssl',
   [
@@ -94,7 +99,7 @@ execFileSync(
 );
 fs.writeFileSync(
   '/tmp/fixture-extensions',
-  'basicConstraints=critical,CA:FALSE\nsubjectAltName=IP:127.0.0.1\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\n',
+  'basicConstraints=critical,CA:FALSE\nsubjectAltName=IP:127.0.0.1,DNS:chatgpt.com,DNS:auth.openai.com\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\n',
 );
 execFileSync(
   'openssl',
@@ -118,7 +123,7 @@ execFileSync(
   { stdio: 'ignore' },
 );
 process.env.CODEX_CA_CERTIFICATE = '/tmp/fixture-ca.pem';
-process.env.CODEX_REFRESH_TOKEN_URL_OVERRIDE = 'https://127.0.0.1:8787/fixture/oauth/token';
+if (!proxied) process.env.CODEX_REFRESH_TOKEN_URL_OVERRIDE = 'https://127.0.0.1:8787/fixture/oauth/token';
 function respond(body: any, send: (text: string) => void) {
   if (body.generate !== false) requests.push(body);
   console.log(
@@ -202,7 +207,7 @@ const upstream = Bun.serve({
       }),
     );
     if (server.upgrade(req)) return;
-    if (url.pathname === '/fixture/oauth/token') {
+    if (url.pathname === '/fixture/oauth/token' || url.pathname === '/oauth/token') {
       const raw = await req.text();
       const body = req.headers.get('content-type')?.includes('application/json')
         ? JSON.parse(raw)
@@ -223,7 +228,7 @@ const upstream = Bun.serve({
         accounts: [
           {
             id: 'fixture-account',
-            workspace_backend_origin: 'https://127.0.0.1:8787',
+            workspace_backend_origin: proxied ? 'https://chatgpt.com' : 'https://127.0.0.1:8787',
             account_routing_override: 'NO_CONSTRAINT',
           },
         ],
@@ -241,19 +246,76 @@ const upstream = Bun.serve({
     },
   },
 });
-// Fixture-only endpoint and CA overrides never appear in the production policy.
+// Direct mode uses fixture-only endpoints. Proxied mode retains native URLs;
+// the offline gateway redirects validated destinations to this TLS fixture.
 fs.writeFileSync(
   '/home/node/.codex/config.toml',
-  'chatgpt_base_url = "https://127.0.0.1:8787"\n' +
-    'openai_base_url = "https://127.0.0.1:8787/backend-api/codex"\n' +
+  (proxied
+    ? ''
+    : 'chatgpt_base_url = "https://127.0.0.1:8787"\n' +
+      'openai_base_url = "https://127.0.0.1:8787/backend-api/codex"\n') +
     subscriptionConfig('gpt-6-astra', 'low') +
     'enable_request_compression = false\n',
 );
 let server: any;
+let gateway: ReturnType<typeof spawn> | undefined;
+let relay: Awaited<ReturnType<typeof startSubscriptionRelay>> | undefined;
 const watchdog = setTimeout(() => {
   console.error('probe_timeout');
   process.exit(2);
 }, 45000);
+async function switchGateway(role: 'auth' | 'query') {
+  await relay?.close();
+  if (gateway) {
+    const exited = once(gateway, 'exit');
+    gateway.kill('SIGTERM');
+    await exited;
+  }
+  if (!proxied) return;
+  fs.mkdirSync('/tmp/fixture-egress', { recursive: true, mode: 0o700 });
+  // Exercise the actual Node host module. Only this offline fixture replaces
+  // DNS and the TCP dial target; Codex itself uses its native production URLs.
+  gateway = spawn(
+    'node',
+    [
+      '--experimental-strip-types',
+      '--input-type=module',
+      '-e',
+      `
+    import net from 'node:net';
+    const {startSubscriptionEgress} = await import(${JSON.stringify(proxied)});
+    const gateway = await startSubscriptionEgress({
+      socketPath:'/tmp/fixture-egress/proxy.sock',role:${JSON.stringify(role)},authorize:async()=>true,
+      dependencies:{resolve:async host=>{console.log(JSON.stringify({destination:host}));return [{address:'8.8.8.8',family:4}]},
+        connect:()=>net.createConnection({host:'127.0.0.1',port:8787})}
+    });
+    process.once('SIGTERM',()=>{void gateway.close().then(()=>process.exit(0))});
+    console.log('fixture_egress_ready');
+  `,
+    ],
+    { stdio: ['ignore', 'pipe', 'inherit'] },
+  );
+  await new Promise<void>((resolve, reject) => {
+    let output = '';
+    gateway!.once('error', reject);
+    gateway!.once('exit', () => reject(new Error('fixture_egress_exited')));
+    gateway!.stdout!.on('data', (data) => {
+      process.stdout.write(data);
+      output += String(data);
+      const lines = output.split('\n');
+      output = lines.pop()!;
+      for (const line of lines) {
+        if (line === 'fixture_egress_ready') resolve();
+        else if (line.startsWith('{')) destinations.push({ role, host: JSON.parse(line).destination });
+      }
+    });
+  });
+  relay = await startSubscriptionRelay('/tmp/fixture-egress/proxy.sock');
+  process.env.HTTPS_PROXY = relay.proxyUrl;
+  process.env.HTTP_PROXY = relay.proxyUrl;
+  process.env.ALL_PROXY = relay.proxyUrl;
+  process.env.NO_PROXY = '';
+}
 async function connect() {
   server = spawnCodexAppServer([]);
   server.serverRequestHandlers.push((req: any) => {
@@ -302,6 +364,7 @@ async function turn(threadId: string, text: string) {
   await finished;
 }
 try {
+  await switchGateway('auth');
   await connect();
   const account = await sendCodexRequest(server, 'account/read', { refreshToken: true });
   assert.equal((account.result as any)?.account?.type, 'chatgpt');
@@ -310,6 +373,7 @@ try {
   assert.equal(refreshed.tokens.access_token, rotatedToken);
   killCodexAppServer(server);
   await new Promise((resolve) => setTimeout(resolve, 500));
+  await switchGateway('query');
   // The native refresh owner retains the rotating credential. Query runtimes
   // consume an access-only native cache and never receive a refresh credential.
   refreshed.tokens.refresh_token = '';
@@ -334,6 +398,15 @@ try {
   assert.equal(JSON.stringify(requests).includes(rotatedToken), false);
   assert.equal(JSON.stringify(requests).includes('fixture-refresh'), false);
   assert.equal(refreshCalls, 1);
+  if (proxied) {
+    assert.ok(destinations.some(({ role, host }) => role === 'auth' && host === 'auth.openai.com'));
+    assert.ok(destinations.some(({ role, host }) => role === 'query' && host === 'chatgpt.com'));
+    assert.ok(
+      destinations.every(({ role, host }) => host === 'chatgpt.com' || (role === 'auth' && host === 'auth.openai.com')),
+    );
+    assert.equal(process.env.CODEX_REFRESH_TOKEN_URL_OVERRIDE, undefined);
+    assert.ok(!fs.readFileSync('/home/node/.codex/config.toml', 'utf8').includes('base_url'));
+  }
   const outputs = requests
     .flatMap((request) => request.input ?? [])
     .filter((item: any) => item.type.includes('call_output'));
@@ -376,10 +449,17 @@ try {
       credentialCanariesAbsent: true,
       nativeRefreshCalls: refreshCalls,
       accessOnlyQueryCache: true,
+      fixedDestinationEgress: Boolean(proxied),
     }),
   );
 } finally {
   clearTimeout(watchdog);
   if (server) killCodexAppServer(server);
+  await relay?.close();
+  if (gateway) {
+    const exited = once(gateway, 'exit');
+    gateway.kill('SIGTERM');
+    await exited;
+  }
   upstream.stop(true);
 }
