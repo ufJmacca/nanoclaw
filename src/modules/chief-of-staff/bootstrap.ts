@@ -15,12 +15,14 @@ import { migrationStatus } from './store/migrations.js';
 import { BoundedDatabase } from './store/client.js';
 import { PriorityStore } from './store/priorities.js';
 import { CosService } from './service.js';
+import { createCoordinatorLauncher } from './bridge/coordinator-launcher.js';
 
 /** Narrow host-service profile: never load migration or test credentials into this module. */
 export function startCosHostModule(): { service: CosService; stop(): Promise<void> } {
   const keys = [
     'COS_ENABLED',
     'COS_TARGET_STATE_DIR',
+    'COS_MODEL_API_KEY',
     ...[
       'HOST',
       'PORT',
@@ -73,7 +75,9 @@ export function startCosHostModule(): { service: CosService; stop(): Promise<voi
       return false;
     }
   };
+  const launcher = createCoordinatorLauncher({ targetRoot, apiKey: selected.COS_MODEL_API_KEY, db: getDb() });
   const service = new CosService({
+    launcher,
     db: getDb(),
     enabled: selected.COS_ENABLED === 'true',
     admission: admitted,
@@ -109,6 +113,7 @@ export function startCosHostModule(): { service: CosService; stop(): Promise<voi
     async stop() {
       clearInterval(timer);
       await service.stop();
+      await launcher.close();
     },
   };
 }

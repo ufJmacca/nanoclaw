@@ -91,8 +91,10 @@ export type Outbound = {
   thread_id: string | null;
   content: string;
 };
+export type CosLaunch = { containerName: string; args: string[] };
 type Hooks = {
   executionReady(binding: CosBinding): boolean;
+  launch?(binding: CosBinding, session: Session): Promise<CosLaunch>;
   validatePrivateDestination(binding: CosBinding): Promise<boolean>;
   ingress(binding: CosBinding, event: InboundEvent): Promise<boolean>;
 };
@@ -137,6 +139,26 @@ export function permitCosExecution(session: Session): boolean {
   const boundary = cosBoundary(session);
   if (!boundary.restricted) return true;
   return !!boundary.binding && !boundary.paused && !!hooks?.executionReady(boundary.binding);
+}
+/** Only ordinary identities may use the generic launcher. Recheck after every asynchronous preparation. */
+export async function prepareCosLaunch(session: Session): Promise<CosLaunch | null> {
+  const boundary = cosBoundary(session);
+  if (!boundary.restricted) return null;
+  const currentHooks = hooks;
+  if (!boundary.binding || boundary.paused || !currentHooks?.launch || !currentHooks.executionReady(boundary.binding))
+    throw new Error('restricted_launch_denied');
+  const launch = await currentHooks.launch(boundary.binding, session);
+  const current = cosBoundary(session);
+  if (
+    hooks !== currentHooks ||
+    !current.restricted ||
+    !current.binding ||
+    current.paused ||
+    current.binding.scopeId !== boundary.binding.scopeId ||
+    !currentHooks.executionReady(current.binding)
+  )
+    throw new Error('restricted_launch_denied');
+  return launch;
 }
 export async function interceptCosIngress(event: InboundEvent): Promise<boolean> {
   const db = getDb();

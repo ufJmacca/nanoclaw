@@ -13,7 +13,7 @@ import {
   assertReleaseMounts,
   selectReleaseImage,
 } from './release-runtime.js';
-import { permitCosExecution } from './cos-boundary.js';
+import { permitCosExecution, prepareCosLaunch } from './cos-boundary.js';
 
 import { OneCLI } from '@onecli-sh/sdk';
 
@@ -317,6 +317,11 @@ async function spawnContainer(session: Session): Promise<void> {
     log.error('Agent group not found', { agentGroupId: session.agent_group_id });
     return;
   }
+  const restricted = await prepareCosLaunch(session);
+  if (restricted) {
+    startTrackedContainer(session, agentGroup, restricted.containerName, restricted.args);
+    return;
+  }
   assertHostManagedPaths(agentGroup, session);
   assertNoAgentRootOverlap(agentGroup);
   assertNoMattermostCredentialsInContainerConfigArtifact(agentGroup.folder);
@@ -383,6 +388,12 @@ async function spawnContainer(session: Session): Promise<void> {
     throw new Error(`Mattermost execution session became invalid before spawn: ${finalMattermostBoundary.reason}`);
   }
 
+  startTrackedContainer(session, agentGroup, containerName, args);
+}
+
+function startTrackedContainer(session: Session, agentGroup: AgentGroup, containerName: string, args: string[]): void {
+  // Shared lifecycle only. Restricted preparation never calls generic mount, credential or provider hooks.
+  if (!permitCosExecution(session)) throw new Error('restricted_launch_denied');
   log.info('Spawning container', { sessionId: session.id, agentGroup: agentGroup.name, containerName });
 
   // Clear any orphan heartbeat from a previous container instance — the

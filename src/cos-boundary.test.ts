@@ -5,6 +5,7 @@ import {
   installCosBoundary,
   permitCosExecution,
   permitCosOutbound,
+  prepareCosLaunch,
   setCosBoundaryHooks,
   type CosBinding,
 } from './cos-boundary.js';
@@ -34,6 +35,22 @@ afterEach(() => {
   closeDb();
 });
 describe('S01-T08 permanent host restriction', () => {
+  it('never falls through to generic launch when the restricted launcher is absent or paused during preparation', async () => {
+    await expect(prepareCosLaunch(session)).rejects.toThrow('restricted_launch_denied');
+    getDb().exec('UPDATE cos_identity_boundaries SET paused=0');
+    setCosBoundaryHooks({
+      executionReady: () => true,
+      ingress: async () => true,
+      validatePrivateDestination: async () => true,
+      launch: async () => {
+        getDb().exec('UPDATE cos_identity_boundaries SET paused=1');
+        return { containerName: 'fixture', args: ['fixture'] };
+      },
+    });
+    await expect(prepareCosLaunch(session)).rejects.toThrow('restricted_launch_denied');
+    const other = { ...session, id: 'other', agent_group_id: 'ordinary', messaging_group_id: 'other' };
+    expect(await prepareCosLaunch(other)).toBeNull();
+  });
   it('rechecks the pause latch after asynchronous membership validation', async () => {
     getDb().exec('UPDATE cos_identity_boundaries SET paused=0');
     setCosBoundaryHooks({

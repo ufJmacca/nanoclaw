@@ -10,6 +10,7 @@ import { CosOutbox } from './bridge/outbox.js';
 import { createRpcHandler } from './bridge/rpc.js';
 import { validPrivateChannel, type ChannelFacts } from './bridge/identity.js';
 import type { PriorityStore } from './store/priorities.js';
+import type { CoordinatorLauncher } from './bridge/coordinator-launcher.js';
 
 export type RuntimeDependencies = {
   db: Database.Database;
@@ -21,10 +22,12 @@ export type RuntimeDependencies = {
   destination(id: string): MessagingGroup | undefined;
   stop(sessionId: string): void;
   wake(session: Session): Promise<void>;
+  launcher?: CoordinatorLauncher;
 };
 export function createCosRuntime(dependencies: RuntimeDependencies) {
   const d = dependencies;
-  const enabled = () => d.enabled && !!d.store && (d.admission?.() ?? true);
+  let disposed = false;
+  const enabled = () => !disposed && d.enabled && !!d.store && (d.admission?.() ?? true);
   const controller = new CosController({
     db: d.db,
     enabled,
@@ -85,8 +88,16 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
       })
     : null;
   setCosBoundaryHooks({
-    // Remains closed until the separately tested restricted launcher is installed.
-    executionReady: () => false,
+    executionReady: (binding) => enabled() && (d.launcher?.ready(binding) ?? false),
+    launch: async (binding, session) => {
+      if (!d.launcher || !enabled()) throw new Error('restricted_launch_denied');
+      return d.launcher.prepare(binding, session, async () => {
+        if (!enabled()) return null;
+        const context = await controller.context(session);
+        if (!context || !d.store || (await d.store.context(context)).status !== 'ok' || !enabled()) return null;
+        return context.ingressId;
+      });
+    },
     ingress: (binding, event) => controller.ingress(binding, event),
     validatePrivateDestination: async (binding) => {
       if (!(await admitted(binding))) return false;
@@ -106,6 +117,9 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
     pump: async (binding: CosBinding) => {
       if (enabled()) await outbox?.drain(binding);
     },
-    dispose: () => setCosBoundaryHooks(null),
+    dispose: () => {
+      disposed = true;
+      setCosBoundaryHooks(null);
+    },
   };
 }
