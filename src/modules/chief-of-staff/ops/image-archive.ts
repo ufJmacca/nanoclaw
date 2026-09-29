@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 export type SavedImage = {
   configurationId: string;
+  engineIds: string[];
   tags: string[];
   os: string;
   architecture: string;
@@ -39,7 +40,8 @@ export async function imageConfigurations(source: AsyncIterable<Uint8Array>): Pr
     if (!Number.isSafeInteger(number)) return reject();
     return number;
   };
-  const configs = new Map<string, Omit<SavedImage, 'tags'>>(),
+  const configs = new Map<string, Omit<SavedImage, 'tags' | 'engineIds'>>(),
+    manifests = new Map<string, string[]>(),
     names = new Set<string>();
   let manifest: unknown,
     ended = false;
@@ -85,6 +87,18 @@ export async function imageConfigurations(source: AsyncIterable<Uint8Array>): Pr
       manifest = value;
       continue;
     }
+    if (
+      value?.schemaVersion === 2 &&
+      ['application/vnd.oci.image.manifest.v1+json', 'application/vnd.docker.distribution.manifest.v2+json'].includes(
+        String(value.mediaType),
+      )
+    ) {
+      const hash = createHash('sha256').update(bytes).digest('hex'),
+        configuration = (value.config as { digest?: string })?.digest;
+      if (name !== 'blobs/sha256/' + hash || !configuration || !/^sha256:[a-f0-9]{64}$/.test(configuration))
+        return reject();
+      manifests.set(configuration, [...(manifests.get(configuration) ?? []), 'sha256:' + hash]);
+    }
     if (value && typeof value === 'object' && 'architecture' in value && 'rootfs' in value && 'config' in value) {
       const hash = createHash('sha256').update(bytes).digest('hex');
       if (![hash + '.json', 'blobs/sha256/' + hash].includes(name) || configs.size >= 20) return reject();
@@ -110,6 +124,10 @@ export async function imageConfigurations(source: AsyncIterable<Uint8Array>): Pr
     )
       return reject();
     seen.add(item.Config);
-    return { ...configuration, tags: item.RepoTags };
+    return {
+      ...configuration,
+      engineIds: [configuration.configurationId, ...(manifests.get(configuration.configurationId) ?? [])],
+      tags: item.RepoTags,
+    };
   });
 }

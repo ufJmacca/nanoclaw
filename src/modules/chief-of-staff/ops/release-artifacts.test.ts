@@ -13,6 +13,7 @@ function fixture() {
   const manifest = fixtureRelease();
   const saved: SavedImage[] = manifest.images.map((image) => ({
     configurationId: image.configurationId,
+    engineIds: [image.id],
     tags: [image.tag],
     os: 'linux',
     architecture: 'arm64',
@@ -33,6 +34,7 @@ it('checks configuration bytes, source labels, exact declared image set and plat
     saved.map((item) => ({ ...item, architecture: 'amd64' })),
     saved.map((item) => ({ ...item, labels: { ...item.labels, 'org.opencontainers.image.revision': 'wrong' } })),
     saved.map((item) => ({ ...item, tags: [...item.tags, 'foreign:tag'] })),
+    saved.map((item) => ({ ...item, engineIds: ['sha256:' + '9'.repeat(64)] })),
   ])
     expect(() => verifySavedImages(manifest, altered)).toThrow('release_archive_mismatch');
 });
@@ -56,11 +58,14 @@ it('rejects partial transfer, changed checksums and failed evidence before archi
       comment: image.role,
     });
     image.configurationId = 'sha256:' + hash(config);
+    image.id = image.configurationId;
     const file = hash(config) + '.json';
     files[file] = config;
     return { Config: file, RepoTags: [image.tag], Layers: [] };
   });
   files['manifest.json'] = JSON.stringify(entries);
+  for (const check of Object.values(manifest.checks))
+    if (check.imageIds.length) check.imageIds = manifest.images.map((image) => image.id);
   const blocks: Buffer[] = [];
   for (const [name, text] of Object.entries(files)) {
     const bytes = Buffer.from(text),

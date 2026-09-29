@@ -17,6 +17,7 @@ export function verifySavedImages(manifest: ReleaseManifest, saved: SavedImage[]
     const actual = saved.find((item) => item.configurationId === image.configurationId);
     if (
       !actual ||
+      !actual.engineIds.includes(image.id) ||
       actual.os !== 'linux' ||
       actual.architecture !== 'arm64' ||
       actual.tags.length !== 1 ||
