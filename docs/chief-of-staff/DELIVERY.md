@@ -3,7 +3,7 @@
 Run the host wrappers from the Mac checkout. They use the running repository devcontainer for project tools and the host's Docker, GitHub and SSH tools. They never install project dependencies on the Mac or build application code on the Pi.
 
 ```sh
-bash scripts/cos-release.sh --slice S01 --target pi --db-profile test
+bash scripts/cos-release.sh --slice S02 --target pi --db-profile test --local-only
 bash scripts/cos-deploy.sh status --target pi
 bash scripts/cos-deploy.sh --target pi --release-manifest /absolute/checkout/.cos-plan-state/releases/release-…/release.json
 bash scripts/cos-deploy.sh rollback --target pi --release-id release-…
@@ -19,11 +19,13 @@ After an interrupted delivery, rerun `cos:deploy` with the same manifest. The Pi
 
 Prefer `--db-profile test`. Explicit `--db-profile runtime-disposable` requires an already installed CoS helper and a Pi-owned disposable lifecycle record; it refuses an unbound or protected target. It selects only the Mac's `COS_PG*` runtime and migration settings. An authenticated live SSH session holds the Pi operation lock while the Mac fixture driver holds the database fence. Each database admission checks the live session. Connection loss stops the owned fixture processes and leaves CoS paused; ordinary NanoClaw service processes remain running. First delivery uses the separate test database.
 
-Private test logs and receipts remain under `.cos-plan-state`; only sanitised acceptance evidence belongs in Git. Runtime fixture retries must retain the same owner, source, image and request identity. A completed Pi receipt can reconcile a lost final reply only when the matching Mac receipt proves fixtures passed. S01 acceptance and Pi deployment are not yet claimed by this runbook.
+Private test logs and receipts remain under `.cos-plan-state`; only sanitised acceptance evidence belongs in Git. Runtime fixture retries must retain the same owner, source, image, slice and request identity. A completed Pi receipt can reconcile a lost final reply only when the matching Mac receipt proves fixtures passed. Historical requests without a slice retain their original S01 meaning and receipt identity. See the acceptance receipts for actual deployment status.
 
 ## S02 knowledge configuration — implementation in progress
 
-The S02 host source requires PostgreSQL schema 2 and checks its recorded checksums at startup. Startup never migrates the database. S02 release registration, final-image testing and Pi delivery remain pending; these settings do not make the existing S01 deployment an S02 deployment.
+The S02 host source requires PostgreSQL schema 2 and checks its recorded checksums at startup. Startup never migrates the database. The release command now selects S02 and records both exact migration checksums, PostgreSQL schema 2 and SQLite schema 22. It requires the private ledger to show S01's human merge and healthy delivery of that same merged source. Historical S01 manifests remain readable; this source cannot create a new S01 release.
+
+Final-image testing and Pi delivery remain pending. Use `--local-only` while preparing S02: compatible recovery after a schema-changing failed deployment still needs verification before transfer. Once schema 2 is installed, the old S01 manifest is incompatible and cannot be rolled back into service. Listing S01 as an upgrade predecessor does not make it a valid rollback target. Preserve the failed deployment receipt and maintenance lease; do not reset the database or clear the lease to force a retry.
 
 The trusted host runtime environment accepts `COS_KNOWLEDGE_ENABLED=true` to enable selected-source ingestion and retrieval. Its default is `false`. `COS_KNOWLEDGE_RETENTION_DAYS` is an integer from 0 through 365, defaulting to 30; approved deletion records its deadline when applied. Keep both settings in the host's scoped runtime environment, and restart the host to apply changes through the normal deployment/operational checks. No agent receives these settings or database credentials.
 
@@ -77,4 +79,4 @@ pnpm cos:demo --slice S02 --fixture --db-profile test
 
 The test command includes affected S01 contracts, S02 database contracts and the routed twelve-question knowledge conversation. The demo command runs that conversation independently and emits its delivered replies and bounded quality judgements. See [the recorded development demonstration](evidence/S02_DEMO.md). `COS_FIXTURE_HOST_ROOT` identifies the Mac checkout for Docker bind mounts; `COS_FIXTURE_IMAGE` identifies the explicitly selected local runner. Development may use the existing `COS_FIXTURE_RUNNER_VOLUME` with a source mount. Final release checks must omit that override and use the exact tested immutable image identity. Neither the whole private environment nor database credentials enter the runner.
 
-Runtime-disposable selection retains the existing live cross-host guard; there is no automatic fallback from the separate test database. S02 release/manifest registration and exact-image/Pi gates remain pending even when these development commands pass.
+Runtime-disposable selection retains the existing live cross-host guard; there is no automatic fallback from the separate test database. Source and packaged fixture requests now record their selected slice; packaged S02 tests run the complete S02 selector for each worker profile. Exact-image/Pi gates remain pending even when development commands pass.

@@ -3,7 +3,7 @@ import { isKnowledgeCommand, parseKnowledgeArguments } from './knowledge-admin.j
 import { pathToFileURL } from 'node:url';
 import { DatabaseConfigurationError, parseDatabaseConfig, externalDatabaseConfig } from '../store/config.js';
 import { connectChecked, DatabasePreflightError } from '../store/preflight.js';
-import { migrationStatus } from '../store/migrations.js';
+import { migrationStatus, SCHEMA_VERSION } from '../store/migrations.js';
 import { BoundedDatabase } from '../store/client.js';
 import { PriorityStore } from '../store/priorities.js';
 import { localTarget, databaseFingerprint } from './target-identity.js';
@@ -198,7 +198,7 @@ export async function adminStatus(
     const version = await dependencies.database(env);
     return {
       ...base,
-      status: version === 1 ? 'ready' : 'schema_incompatible',
+      status: version === SCHEMA_VERSION ? 'ready' : 'schema_incompatible',
       schema_version: version,
       lifecycle: target.lifecycle,
     };
@@ -220,7 +220,7 @@ export async function bindCommand(request: BindingRequest, env: NodeJS.ProcessEn
     if (!(await check.query('SELECT pg_try_advisory_lock(73101003) AS locked')).rows[0]?.locked)
       throw new DatabasePreflightError('maintenance_writer_active');
     assertMaintenanceLease(root, target.binding, lease);
-    if ((await migrationStatus(check)) !== 1) throw new DatabasePreflightError('schema_incompatible');
+    if ((await migrationStatus(check)) !== SCHEMA_VERSION) throw new DatabasePreflightError('schema_incompatible');
     const { initDb, closeDb } = await import('../../../db/connection.js');
     const { runMigrations } = await import('../../../db/migrations/index.js');
     const { getSession } = await import('../../../db/sessions.js');

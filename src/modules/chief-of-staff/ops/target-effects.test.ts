@@ -19,6 +19,11 @@ import { createTargetEffects } from './target-effects.js';
 import { fixtureRelease } from '../../../contracts/chief-of-staff/release-fixture.js';
 import type { DeploymentSettings } from './deployment-settings.js';
 import * as maintenance from './maintenance.js';
+import * as migrations from '../store/migrations.js';
+import * as nativeInstallation from './native-installation.js';
+import { targetBinding } from './target-host.js';
+import { writeAtomic } from './target-state.js';
+import { digest } from '../domain/contracts.js';
 it('cannot stop, migrate, activate or roll back without the current Pi-owned maintenance lease', async () => {
   const settings = {
     stateRoot: '/tmp/nonexistent-cos-target-fixture',
@@ -44,6 +49,84 @@ it('cannot stop, migrate, activate or roll back without the current Pi-owned mai
   expect(calls.service).not.toHaveBeenCalled();
   expect(calls.docker).not.toHaveBeenCalled();
   expect(calls.database).not.toHaveBeenCalled();
+});
+
+it('activates S02 only on schema 2 and refuses an S01 rollback after that migration', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-target-schema-'));
+  const settings = {
+    stateRoot: path.join(root, 'state'),
+    releaseRoot: path.join(root, 'releases'),
+    stagingRoot: path.join(root, 'staging'),
+    sourceRoot: path.join(root, 'source'),
+    userHome: root,
+    installationRoot: root,
+    dataRoot: path.join(root, 'data'),
+    service: 'nano.service',
+    hostFingerprint: '1'.repeat(64),
+    databaseFingerprint: '2'.repeat(64),
+  } as DeploymentSettings;
+  vi.spyOn(maintenance, 'maintenanceLeaseForOwner').mockReturnValue(
+    {} as ReturnType<typeof maintenance.maintenanceLeaseForOwner>,
+  );
+  vi.spyOn(maintenance, 'assertMaintenanceLease').mockReturnValue(
+    {} as ReturnType<typeof maintenance.assertMaintenanceLease>,
+  );
+  const schema = vi.spyOn(migrations, 'migrationStatus').mockResolvedValue(1);
+  const install = vi
+    .spyOn(nativeInstallation, 'installServiceOverride')
+    .mockReturnValue({ file: '/fixture/override', sha256: 'a'.repeat(64) });
+  const end = vi.fn();
+  calls.database.mockResolvedValue({ end });
+  calls.service.mockClear();
+  const previous = { ...fixtureRelease(), releaseId: 'release-prior' };
+  const manifest = { ...fixtureRelease('S02'), previousReleaseIds: [previous.releaseId] };
+  const receipt = path.join(settings.stateRoot, 'releases', manifest.releaseId);
+  try {
+    const effects = createTargetEffects(settings, manifest, digest(manifest));
+    const artifacts = vi.spyOn(effects, 'artifacts').mockResolvedValue(undefined);
+    await expect(effects.activate()).rejects.toThrow('schema_incompatible');
+    expect(artifacts).not.toHaveBeenCalled();
+    expect(install).not.toHaveBeenCalled();
+    expect(calls.service).not.toHaveBeenCalled();
+    schema.mockResolvedValue(2);
+    await effects.activate();
+    expect(artifacts).toHaveBeenCalledOnce();
+    expect(install).toHaveBeenCalledOnce();
+    expect(calls.service.mock.calls).toEqual([['daemon-reload'], ['restart']]);
+    expect(end).toHaveBeenCalledTimes(2);
+
+    for (const directory of [
+      receipt,
+      path.join(settings.releaseRoot, previous.releaseId),
+      path.join(settings.stateRoot, 'releases', previous.releaseId),
+      settings.dataRoot,
+    ])
+      fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+    writeAtomic(receipt, 'baseline.json', {
+      version: 1,
+      bindingDigest: digest(targetBinding(settings)),
+      releaseId: previous.releaseId,
+      executable: '/prior/node',
+      entryPoint: '/prior/index.js',
+      unit: 'prior unit',
+    });
+    writeAtomic(path.join(settings.releaseRoot, previous.releaseId), 'release.json', previous);
+    writeAtomic(path.join(settings.stateRoot, 'releases', previous.releaseId), 'deployment.json', {
+      status: 'healthy',
+      manifestDigest: digest(previous),
+    });
+    const db = new Database(path.join(settings.dataRoot, 'v2.db'));
+    db.exec('CREATE TABLE agent_groups(id TEXT,folder TEXT,agent_provider TEXT)');
+    db.close();
+    calls.service.mockClear();
+    await expect(effects.rollback(previous.releaseId)).resolves.toBe(false);
+    expect(calls.service).not.toHaveBeenCalled();
+  } finally {
+    vi.restoreAllMocks();
+    calls.database.mockReset();
+    calls.service.mockClear();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 it('refuses backup and migration if a container survives despite a stopped service and quiescent lease', async () => {
   vi.spyOn(maintenance, 'maintenanceLeaseForOwner').mockReturnValue(

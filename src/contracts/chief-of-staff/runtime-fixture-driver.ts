@@ -22,6 +22,8 @@ export type RuntimeFixtureRequest = {
   owner: string;
   execution: 'source' | 'packaged';
   mode: 'slice' | 'demo';
+  /** Absent only in historical S01 requests; never normalize their replay identity. */
+  slice?: 'S01' | 'S02';
   sourceCommit: string;
   sourceTree: string;
   hostImage: string;
@@ -47,6 +49,8 @@ export function validateRuntimeFixtureRequest(value: unknown): RuntimeFixtureReq
     'databaseFingerprint',
     'bindingDigest',
   ];
+  const explicitSlice = !!request && typeof request === 'object' && Object.hasOwn(request, 'slice');
+  if (explicitSlice) keys.push('slice');
   if (
     !request ||
     typeof request !== 'object' ||
@@ -56,6 +60,7 @@ export function validateRuntimeFixtureRequest(value: unknown): RuntimeFixtureReq
     !/^[a-zA-Z0-9_-]{1,100}$/.test(request.owner ?? '') ||
     !['source', 'packaged'].includes(request.execution) ||
     !['slice', 'demo'].includes(request.mode) ||
+    (explicitSlice && !['S01', 'S02'].includes(request.slice ?? '')) ||
     ![request.sourceCommit, request.sourceTree].every((v) => /^[a-f0-9]{40}$/.test(v ?? '')) ||
     ![request.hostImage, request.workerImage].every((v) => /^sha256:[a-f0-9]{64}$/.test(v ?? '')) ||
     ![request.databaseFingerprint, request.bindingDigest].every((v) => /^[a-f0-9]{64}$/.test(v ?? '')) ||
@@ -249,7 +254,7 @@ export async function runRuntimeFixtureDriver(file: string) {
             ...(source ? ['--import', 'tsx'] : []),
             (source ? 'src' : 'dist') + '/contracts/chief-of-staff/run.' + (source ? 'ts' : 'js'),
             '--slice',
-            'S01',
+            request.slice ?? 'S01',
             '--db-profile',
             'runtime-disposable',
             ...(request.mode === 'demo' ? ['--demo', '--fixture'] : []),

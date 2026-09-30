@@ -12,7 +12,7 @@ import { prepareBuildContext, validateMacBuilder } from './build-context.js';
 import { readPrivate, writeAtomic } from './target-state.js';
 import { deploymentSettings } from './deployment-settings.js';
 import { digest } from '../domain/contracts.js';
-import { INITIAL_CHECKSUM } from '../store/schema-definition.js';
+import { MIGRATIONS, SCHEMA_VERSION } from '../store/migrations.js';
 import { REQUIRED_RELEASE_CHECKS, type ReleaseManifest } from './release-manifest.js';
 import {
   completeLocalRelease,
@@ -48,6 +48,8 @@ function checkedPlan(id: string): { root: string; plan: Plan } {
     plan = readPrivate<Plan>(path.join(root, 'plan.json'));
   const current = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
   const dirty = execFileSync('git', ['status', '--porcelain'], { encoding: 'utf8' }).trim();
+  if (plan.slice !== readLocalExecution(path.resolve('.cos-plan-state')).active_slice)
+    throw new Error('active_slice_required');
   if (plan.source.commit !== current || dirty) throw new Error('clean_candidate_required');
   const target = deploymentSettings(readPrivate(path.resolve('.cos-plan-state/deployment-target.json')));
   if (digest(target) !== plan.targetDigest) throw new Error('deployment_target_changed');
@@ -67,19 +69,21 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
     if (!file || !path.isAbsolute(file) || /[\0\r\n]/.test(file)) throw new Error('test_certificate_required');
     return file;
   }
-  if (operation === 'init' && values.length === 2) {
-    const [commit, fetchRef] = values;
+  if (operation === 'init' && values.length === 3) {
+    const [commit, fetchRef, slice] = values;
+    if (slice !== 'S02' || SCHEMA_VERSION !== 2) throw new Error('current_release_slice_required');
     if (!/^[a-f0-9]{40}$/.test(commit) || !/^refs\/heads\/[a-zA-Z0-9_./-]+$/.test(fetchRef) || fetchRef.includes('..'))
       throw new Error('invalid_candidate_source');
     const root = releaseRoot(id);
     if (fs.existsSync(path.join(root, 'plan.json'))) throw new Error('release_already_exists');
     const target = deploymentSettings(readPrivate(path.resolve('.cos-plan-state/deployment-target.json')));
-    readLocalExecution(path.resolve('.cos-plan-state'), true);
+    if (readLocalExecution(path.resolve('.cos-plan-state'), true).active_slice !== slice)
+      throw new Error('active_slice_required');
     const metadata = await prepareBuildContext(process.cwd(), commit, path.join(root, 'context'));
     const plan: Plan = {
       contract: 'cos-release/v1',
       releaseId: id,
-      slice: 'S01',
+      slice,
       platform: 'linux/arm64',
       source: {
         repository: 'ufJmacca/nanoclaw',
@@ -92,9 +96,9 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
       workerAssetsDigest: metadata.workerAssetsDigest,
       hostPayloadDigest: '',
       rpc: 'cos-rpc/v1',
-      postgres: { minimum: 1, maximum: 1 },
+      postgres: { minimum: SCHEMA_VERSION, maximum: SCHEMA_VERSION },
       sqlite: { minimum: 22, maximum: 22 },
-      migrations: [{ version: 1, checksum: INITIAL_CHECKSUM }],
+      migrations: MIGRATIONS.map(({ version, checksum }) => ({ version, checksum })),
       previousReleaseIds: [],
       images: [],
       checks: {},
@@ -200,7 +204,7 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
         'src/contracts/chief-of-staff/run.ts',
         ...(mode === 'demo' ? ['--demo', '--fixture'] : []),
         '--slice',
-        'S01',
+        plan.slice,
         '--db-profile',
         'test',
       ],

@@ -118,3 +118,31 @@ describe('S01-REL01 source and final-image evidence gate', () => {
     expect(() => validateReleaseManifest(value)).toThrow();
   });
 });
+
+it('S02 requires the exact knowledge migration and schema 2 while historical S01 receipts remain readable', async () => {
+  const { KNOWLEDGE_CHECKSUM } = await import('../store/knowledge-schema.js');
+  const current = {
+    ...manifest(),
+    slice: 'S02',
+    postgres: { minimum: 2, maximum: 2 },
+    sqlite: { minimum: 22, maximum: 22 },
+    migrations: [
+      { version: 1, checksum: INITIAL_CHECKSUM },
+      { version: 2, checksum: KNOWLEDGE_CHECKSUM },
+    ],
+  };
+  expect(validateReleaseManifest(current)).toEqual(current);
+  expect(validateReleaseManifest(manifest()).slice).toBe('S01');
+  for (const patch of [
+    { postgres: { minimum: 1, maximum: 2 } },
+    { postgres: { minimum: 2, maximum: 3 } },
+    { sqlite: { minimum: 21, maximum: 22 } },
+    { migrations: current.migrations.slice(0, 1) },
+    { migrations: [...current.migrations].reverse() },
+    { migrations: [current.migrations[0], { version: 2, checksum: 'a'.repeat(64) }] },
+    { slice: 'S03' },
+    { slice: ['S02'] },
+  ])
+    expect(() => validateReleaseManifest({ ...current, ...patch })).toThrow('release_not_transferable');
+  expect(() => validateReleaseManifest({ ...current, slice: 'S01' })).toThrow();
+});

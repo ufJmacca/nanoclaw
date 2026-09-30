@@ -4,27 +4,48 @@ import { readPrivate, writeAtomic } from './target-state.js';
 
 type LocalExecution = {
   active_slice: string;
-  slices: Array<{ id: string; implementation_status?: string }>;
+  slices: Array<{
+    id: string;
+    implementation_status?: string;
+    review_status?: string;
+    merged_sha?: string;
+    deployed_source_sha?: string;
+    merged_source_delivery_status?: string;
+    pi_smoke_status?: string;
+  }>;
 };
 
 /** Programme history can outgrow a target receipt; retain its bounded private-file checks. */
 export function readLocalExecution(root: string, forRelease = false): LocalExecution {
   const ledger = readPrivate<LocalExecution>(path.join(root, 'execution.json'), 1024 * 1024);
-  const slice = ledger.slices?.find((item) => item.id === 'S01');
+  const slice = ledger.slices?.find((item) => item.id === ledger.active_slice);
   if (
-    ledger.active_slice !== 'S01' ||
+    !['S01', 'S02'].includes(ledger.active_slice) ||
     !slice ||
     (forRelease && !['in_progress', 'alignment_in_progress'].includes(slice.implementation_status ?? ''))
   )
     throw new Error('active_slice_required');
+  if (ledger.active_slice === 'S02') {
+    const previous = ledger.slices.find((item) => item.id === 'S01');
+    if (
+      !previous ||
+      previous.implementation_status !== 'merged' ||
+      previous.review_status !== 'human_merged' ||
+      !/^[a-f0-9]{40}$/.test(previous.merged_sha ?? '') ||
+      previous.deployed_source_sha !== previous.merged_sha ||
+      previous.merged_source_delivery_status !== 'passed' ||
+      previous.pi_smoke_status !== 'passed'
+    )
+      throw new Error('predecessor_acceptance_required');
+  }
   return ledger;
 }
 
 /** Preserve unrelated slices and unknown ledger fields; target lifecycle authority stays on the Pi. */
 export function checkpointLocalExecution(root: string, patch: Record<string, unknown>): void {
   const ledger = readLocalExecution(root);
-  const slice = ledger.slices.find((item) => item.id === 'S01');
-  if (ledger.active_slice !== 'S01' || !slice) throw new Error('active_slice_required');
+  const slice = ledger.slices.find((item) => item.id === ledger.active_slice);
+  if (!['S01', 'S02'].includes(ledger.active_slice) || !slice) throw new Error('active_slice_required');
   Object.assign(slice, patch, { checkpoint_at: new Date().toISOString() });
   writeAtomic(root, 'execution.json', ledger);
 }

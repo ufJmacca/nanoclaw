@@ -4,7 +4,7 @@ import Database from 'better-sqlite3';
 import { digest } from '../domain/contracts.js';
 import { runMigrations } from '../../../db/migrations/index.js';
 import { imageProfile, readReleaseAt } from '../../../release-runtime.js';
-import { migrationStatus } from '../store/migrations.js';
+import { migrationStatus, SCHEMA_VERSION } from '../store/migrations.js';
 import { databaseCommand } from './db-cli.js';
 import { readPrivate, readTarget, writeAtomic } from './target-state.js';
 import { maintenanceLeaseForOwner, assertMaintenanceLease } from './maintenance.js';
@@ -25,7 +25,7 @@ import {
   verifyInstalledProfiles,
 } from './target-host.js';
 import type { DeploymentSettings } from './deployment-settings.js';
-import { validateReleaseManifest, type ReleaseManifest } from './release-manifest.js';
+import { validateReleaseManifest, supportsReleaseSchema, type ReleaseManifest } from './release-manifest.js';
 import type { DeploymentEffects } from './deployment.js';
 import { bindCommand } from './admin.js';
 import type { BindingRequest } from './bind.js';
@@ -298,6 +298,7 @@ export function createTargetEffects(
         ...readTargetDatabaseEnvironment(settings, 'migration'),
         COS_TARGET_STATE_DIR: settings.stateRoot,
       };
+      if (manifest.postgres.maximum !== SCHEMA_VERSION) throw new Error('migration_manifest_mismatch');
       const result = await databaseCommand(
         ['migrate', '--profile', 'runtime', '--confirm-database', env.COS_PGDATABASE!],
         env,
@@ -331,7 +332,7 @@ export function createTargetEffects(
     },
     async activate() {
       lease();
-      if ((await schema()) !== 1) throw new Error('schema_incompatible');
+      if (!supportsReleaseSchema(manifest, await schema())) throw new Error('schema_incompatible');
       await effects.artifacts();
       installServiceOverride(override);
       await commands.service('daemon-reload');
@@ -349,7 +350,7 @@ export function createTargetEffects(
         }
       }
       if (!running) return false;
-      if ((await schema()) !== 1) return false;
+      if (!supportsReleaseSchema(manifest, await schema())) return false;
       verifyInstalledProfiles(settings, manifest);
       await verifyLoadedImages(manifest, commands.inspect);
       const image = manifest.images.find(
@@ -400,12 +401,7 @@ export function createTargetEffects(
         if (priorReceipt.status !== 'healthy' || priorReceipt.manifestDigest !== digest(prior)) return false;
         verifyInstalledProfiles(settings, prior);
         const version = await schema();
-        if (
-          prior.postgres.minimum > version ||
-          prior.postgres.maximum < version ||
-          prior.sqlite.maximum < manifest.sqlite.maximum
-        )
-          return false;
+        if (!supportsReleaseSchema(prior, version, manifest.sqlite.maximum)) return false;
         await verifyLoadedImages(prior, commands.inspect);
         if (
           (await payloadDigest(path.join(settings.releaseRoot, previousReleaseId, 'payload'))) !==
