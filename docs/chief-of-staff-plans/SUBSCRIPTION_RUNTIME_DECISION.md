@@ -34,23 +34,21 @@ docker run --rm --network none --read-only \
   --tmpfs /home/node:rw,nosuid,nodev \
   --tmpfs /workspace:rw,nosuid,nodev \
   --tmpfs /run/cos:rw,nosuid,nodev,uid=1000,gid=1000 \
+  --tmpfs /run/nanoclaw:rw,nosuid,nodev,uid=1000,gid=1000 \
   --tmpfs /etc/ssl/certs:rw,nosuid,nodev,uid=1000,gid=1000 \
   -e HOME=/home/node -e NANOCLAW_COS_OFFLINE_FIXTURE=1 \
   -e NANOCLAW_COS_FIXTURE_SYSTEM_TRUST=1 \
+  -e NANOCLAW_COS_FIXTURE_PRODUCTION_QUERY=1 \
   -e NANOCLAW_COS_FIXTURE_EGRESS_MODULE=file:///fixture/subscription-egress.ts \
   --mount "type=bind,src=$PWD/src/modules/chief-of-staff/bridge/subscription-egress.ts,dst=/fixture/subscription-egress.ts,readonly" \
   --mount "type=bind,src=$PWD/container/agent-runner/fixtures/cos-subscription-capability.ts,dst=/app/fixtures/cos-subscription-capability.ts,readonly" \
-  --mount "type=bind,src=$PWD/container/agent-runner/src/cos-subscription-relay.ts,dst=/app/src/cos-subscription-relay.ts,readonly" \
-  --mount "type=bind,src=$PWD/container/agent-runner/src/codex-auth.ts,dst=/app/src/codex-auth.ts,readonly" \
-  --mount "type=bind,src=$PWD/container/agent-runner/src/providers/codex-subscription-check.ts,dst=/app/src/providers/codex-subscription-check.ts,readonly" \
-  --mount "type=bind,src=$PWD/container/agent-runner/src/providers/codex-app-server.ts,dst=/app/src/providers/codex-app-server.ts,readonly" \
-  --mount "type=bind,src=$PWD/container/agent-runner/src/providers/codex-subscription-policy.ts,dst=/app/src/providers/codex-subscription-policy.ts,readonly" \
+  --mount "type=bind,src=$PWD/container/agent-runner/src,dst=/app/src,readonly" \
   --entrypoint bun \
   sha256:4b799b1d6c4cb086c9431a37c2eb79f84892bc2045efa277e0861e33bd360672 \
   /app/fixtures/cos-subscription-capability.ts
 ```
 
-Expected final receipt: `probe=passed`, six generating requests, retained context, only the admitted CoS dispatch, no escape file, no credential canaries, one native refresh, an access-only query cache, `fixedDestinationEgress=true` and `productionAuthEntry=true`. This variant supplies its synthetic root through a temporary system certificate directory and invokes the real authentication entry as a child; the native environment needs no custom CA variable. The fixture intentionally does not supply a live model catalogue; catalogue warnings do not establish live model availability. Failed assertions or a timeout fail the process.
+Expected final receipt: `probe=passed`, six generating requests, retained context, only the admitted CoS dispatch, no escape file, no credential canaries, one native refresh, an access-only query cache, `fixedDestinationEgress=true`, `productionAuthEntry=true` and `productionQueryProvider=true`. This variant supplies its synthetic root through a temporary system certificate directory and invokes the real authentication entry as a child; the native environment needs no custom CA variable. The production CoS provider obtains access-only credentials from a fixture Unix broker, dispatches the real SQLite RPC against a fixture responder and persists/resumes its continuation across native process restarts. The fixture intentionally does not supply a live model catalogue; catalogue warnings do not establish live model availability. Failed assertions or a timeout fail the process. This development command mounts source read-only; it is not a final-image gate.
 
 ## Restricted network transport
 
@@ -84,13 +82,21 @@ The ordinary provider fetches its snapshot before each turn. When the generation
 
 The complete development suites pass: **1,191 host tests in 130 files**, **144 runner tests**, root and runner typechecks. Affected lint reports **0 errors and 7 existing warnings**. Tests include session history preservation, actual launch socket contribution, current/replaced/released host leases, account and refresh bounds, rejected credential exports, terminal authentication notifications, cancellation before dispatch and no automatic turn replay. These do not establish final-image or live multi-session subscription acceptance; the new complete owner/broker/provider path still needs that executable fixture coverage alongside CoS integration.
 
+## Native CoS provider integration
+
+`CosCodexProvider` now uses the shared native app-server transport, credential client and turn pump with the fixed CoS policy. It never loads ordinary MCP discovery or automatic approvals. It reapplies an empty execution-environment list and read-only policy on creation, resume and turns, supplies only the fixed native environment, and rejects unsupported client requests. Its three dynamic tools validate requests before forwarding them through the existing CoS RPC. Dispatch is tied to the current native thread/turn, limited to one concurrent operation and 32 calls per turn, and cancelled at turn end. Duplicate calls, extra arguments, foreign scope, malformed proposals and late results are refused.
+
+The provider emits its scoped continuation before model dispatch, resumes the same native thread across queued inputs and later queries, and refuses foreign/legacy continuations or implicit fresh-thread fallback. Missing native history reports explicit recovery required. Credential failure may request one host renewal; the interrupted model turn is never replayed automatically. The shared turn pump filters foreign notifications for this profile and bounds result size and buffered events. Ordinary profiles retain their existing behavior.
+
+The full runner suite passes **154 tests in 19 files**, including ten new dispatch/provider/cancellation tests; all **1,191 host tests in 130 files** and both typechecks pass. The pinned ARM64 binary passes the complete query-adapter fixture described above: actual credential client, native thread creation/resume, real CoS RPC, rejected shell/file operations, retained history and excluded credential canaries. Its broker and RPC host are synthetic fixtures. This does not yet prove production launcher registration, persistent host mounts, native 401 recovery through the complete host credential owner, or concurrent ordinary/CoS execution.
+
 ## Work still required before integration is accepted
 
-The production runtime must retain a CoS-only provider state directory, reapply the no-environment policy on resume/turns and remove unconditional startup continuation clearing. Preserve the single native coordinator context across Mattermost reply threads; only specialist attempts receive separate contexts. Test restart, compaction, recovery, explicit invalidation and revoked-context exclusion.
+The production launcher must select the native adapter, retain a CoS-only provider state directory and remove unconditional startup continuation clearing. The adapter now reapplies the no-environment policy; host wiring must preserve the single native coordinator context across Mattermost reply threads. Only specialist attempts receive separate contexts. Test container/service restart, compaction, host-controlled recovery, explicit invalidation and revoked-context exclusion.
 
 Pinned native file storage truncates and writes `auth.json`; production must use the tested staging/publication path, not let native checks write the primary file directly. Do not mount the whole host `.codex` directory, enable simultaneous uncoordinated refresh writers, or overwrite refreshed credentials with old copies. An uncertain refresh requires explicit reconciliation or reauthentication; retaining the primary file does not prove an older refresh credential is still valid at the provider.
 
-CoS still needs the native launcher, no-environment dynamic RPC, durable provider HOME/continuation, explicit invalidation/recovery, and activation/cancellation integration. Explicit readiness, combined credential refresh/recovery and concurrent ordinary/CoS final-image fixtures, baked ARM64 release checks, Pi deployment and bounded live acceptance remain unfinished. SUB01–SUB14 are not collectively satisfied by this proof. No real account call, Mattermost message or Pi change was made for this correction.
+CoS still needs the native launcher and runner registration, durable provider HOME/continuation wiring, host-controlled invalidation/recovery, and activation/cancellation integration. Explicit readiness, combined credential refresh/recovery and concurrent ordinary/CoS final-image fixtures, baked ARM64 release checks, Pi deployment and bounded live acceptance remain unfinished. SUB01–SUB14 are not collectively satisfied by this proof. No real account call, Mattermost message or Pi change was made for this correction.
 
 ## Pinned source references
 

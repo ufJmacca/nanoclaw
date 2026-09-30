@@ -295,6 +295,7 @@ export async function* runOneTurn(
   markInit: () => void,
   renewSubscription?: () => Promise<void>,
   cancelled: () => boolean = () => false,
+  restrictedSubscription?: { started(threadId: string, turnId: string): void; finished(): void },
 ): AsyncGenerator<ProviderEvent> {
   if (cancelled()) return;
   // Mutable refs via object properties — TS can't track closure assignments
@@ -302,6 +303,7 @@ export async function* runOneTurn(
   const turnState: { error: Error | null; unauthorized: boolean } = { error: null, unauthorized: false };
   let resultText = '';
   let turnDone = false;
+  let nativeTurnId: string | undefined;
   const progressState: CodexProgressState = { functionCalls: new Map(), completedWebSearches: new Set() };
 
   // Buffered event queue so we can `yield` across the async notification
@@ -317,6 +319,23 @@ export async function* runOneTurn(
   const handler = (n: JsonRpcNotification): void => {
     const method = n.method;
     const params = n.params;
+
+    if (restrictedSubscription) {
+      if (turnDone || cancelled() || params.threadId !== threadId) return;
+      const turn = params.turn as { id?: unknown } | undefined;
+      if (method === 'turn/started') {
+        if (nativeTurnId || typeof turn?.id !== 'string' || !turn.id) return;
+        nativeTurnId = turn.id;
+        restrictedSubscription.started(threadId, nativeTurnId);
+      } else if (!nativeTurnId || (params.turnId ?? turn?.id) !== nativeTurnId) return;
+      if (buffer.length >= 256) {
+        turnState.error = new Error('CoS turn output limit reached');
+        turnDone = true;
+        restrictedSubscription.finished();
+        kick();
+        return;
+      }
+    }
 
     // Every inbound notification counts as activity for the poll-loop's
     // idle timer — yield before any event-specific translation so even
@@ -334,12 +353,17 @@ export async function* runOneTurn(
       }
       case 'item/agentMessage/delta': {
         const delta = params.delta as string;
-        if (delta) resultText += delta;
+        if (typeof delta === 'string') resultText += delta;
         break;
       }
       case 'item/completed': {
         const item = params.item as { type?: string; text?: string; phase?: string } | undefined;
-        if (item?.type === 'agentMessage' && item.text && item.phase !== 'commentary') {
+        if (
+          item?.type === 'agentMessage' &&
+          typeof item.text === 'string' &&
+          item.text &&
+          item.phase !== 'commentary'
+        ) {
           resultText = item.text;
         }
         for (const message of codexProgressMessages(n, progressState)) {
@@ -399,6 +423,15 @@ export async function* runOneTurn(
         break;
     }
 
+    if (restrictedSubscription) {
+      if (Buffer.byteLength(resultText) > 65536) {
+        resultText = '';
+        turnState.error = new Error('CoS turn output limit reached');
+        turnDone = true;
+      }
+      if (turnDone) restrictedSubscription.finished();
+    }
+
     kick();
   };
 
@@ -406,6 +439,7 @@ export async function* runOneTurn(
   const exited = () => {
     turnState.error = new Error('Codex process ended before turn completion');
     turnDone = true;
+    restrictedSubscription?.finished();
     kick();
   };
   server.process.once('exit', exited);
@@ -413,6 +447,7 @@ export async function* runOneTurn(
   const timer = setTimeout(() => {
     turnState.error = new Error(`Turn timed out after ${TURN_TIMEOUT_MS}ms`);
     turnDone = true;
+    restrictedSubscription?.finished();
     kick();
   }, TURN_TIMEOUT_MS);
 
@@ -424,9 +459,17 @@ export async function* runOneTurn(
       buffer.push({ type: 'init', continuation: encodeContinuation(threadId) });
     }
 
-    void startCodexTurn(server, { threadId, inputText, model, effort, cwd }).catch((err) => {
+    void startCodexTurn(server, {
+      threadId,
+      inputText,
+      model,
+      effort,
+      cwd,
+      restrictedSubscription: !!restrictedSubscription,
+    }).catch((err) => {
       turnState.error = err instanceof Error ? err : new Error(String(err));
       turnDone = true;
+      restrictedSubscription?.finished();
       kick();
     });
 
@@ -469,6 +512,7 @@ export async function* runOneTurn(
 
     yield { type: 'result', text: resultText || null };
   } finally {
+    restrictedSubscription?.finished();
     clearTimeout(timer);
     server.process.removeListener('exit', exited);
     const idx = server.notificationHandlers.indexOf(handler);

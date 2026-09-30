@@ -1,5 +1,10 @@
 import fs from 'node:fs';
+import http from 'node:http';
 import os from 'node:os';
+import { CosCodexProvider } from '../src/providers/codex-cos.js';
+import { initTestSessionDb, closeSessionDb } from '../src/db/connection.js';
+import { setContinuation, getContinuation } from '../src/db/session-state.js';
+import { digest } from '../src/mcp-tools/generated/cos-protocol.js';
 import { subscriptionConfig, subscriptionThreadParams } from '../src/providers/codex-subscription-policy.js';
 import { execFileSync } from 'node:child_process';
 import { spawn } from 'node:child_process';
@@ -61,6 +66,8 @@ const requests: any[] = [];
 const dispatched: string[] = [];
 const proxied = process.env.NANOCLAW_COS_FIXTURE_EGRESS_MODULE;
 const systemTrust = process.env.NANOCLAW_COS_FIXTURE_SYSTEM_TRUST === '1';
+const productionQuery = process.env.NANOCLAW_COS_FIXTURE_PRODUCTION_QUERY === '1';
+if (productionQuery && !systemTrust) throw new Error('production_query_requires_system_trust');
 if (systemTrust && !proxied) throw new Error('system_trust_requires_offline_proxy');
 const destinations: Array<{ role: string; host: string }> = [];
 execFileSync(
@@ -267,6 +274,8 @@ fs.writeFileSync(
 let server: any;
 let gateway: ReturnType<typeof spawn> | undefined;
 let relay: Awaited<ReturnType<typeof startSubscriptionRelay>> | undefined;
+let credentialBroker: http.Server | undefined;
+let rpcPoll: ReturnType<typeof setInterval> | undefined;
 const watchdog = setTimeout(() => {
   console.error('probe_timeout');
   process.exit(2);
@@ -318,10 +327,12 @@ async function switchGateway(role: 'auth' | 'query') {
     });
   });
   relay = await startSubscriptionRelay('/tmp/fixture-egress/proxy.sock');
-  process.env.HTTPS_PROXY = relay.proxyUrl;
-  process.env.HTTP_PROXY = relay.proxyUrl;
-  process.env.ALL_PROXY = relay.proxyUrl;
-  process.env.NO_PROXY = '';
+  if (!productionQuery) {
+    process.env.HTTPS_PROXY = relay.proxyUrl;
+    process.env.HTTP_PROXY = relay.proxyUrl;
+    process.env.ALL_PROXY = relay.proxyUrl;
+    process.env.NO_PROXY = '';
+  }
 }
 async function connect() {
   server = spawnCodexAppServer([], { environment: nativeEnvironment() });
@@ -410,18 +421,79 @@ try {
   // consume an access-only native cache and never receive a refresh credential.
   refreshed.tokens.refresh_token = '';
   fs.writeFileSync('/home/node/.codex/auth.json', JSON.stringify(refreshed));
-  await connect();
-  const created = await sendCodexRequest(server, 'thread/start', params);
-  if (created.error) throw Error(JSON.stringify(created.error));
-  const threadId = (created.result as any).thread.id;
-  await turn(threadId, 'Remember the synthetic colour is amber.');
-  killCodexAppServer(server);
-  await new Promise((r) => setTimeout(r, 500));
-  await connect();
-  const { dynamicTools, ...resumeParams } = params;
-  const resumed = await sendCodexRequest(server, 'thread/resume', { threadId, ...resumeParams });
-  if (resumed.error) throw Error(JSON.stringify(resumed.error));
-  await turn(threadId, 'Which synthetic colour did I mention?');
+  if (productionQuery) {
+    fs.chmodSync('/home/node/.codex', 0o700);
+    process.env.NANOCLAW_COS_PROTOCOL = 'cos-rpc/v1';
+    const { inbound, outbound } = initTestSessionDb();
+    inbound.exec(
+      'CREATE TABLE cos_rpc_responses(request_id TEXT,payload_hash TEXT,delivery_id TEXT,response TEXT,updated_at TEXT)',
+    );
+    const deliveries = new Set<string>();
+    rpcPoll = setInterval(() => {
+      for (const row of outbound.query("SELECT content FROM messages_out WHERE kind='system'").all() as {
+        content: string;
+      }[]) {
+        const { request, delivery_id } = JSON.parse(row.content);
+        if (deliveries.has(delivery_id)) continue;
+        deliveries.add(delivery_id);
+        dispatched.push(request.method);
+        assert.equal(request.method, 'cos_context_get');
+        const response = {
+          protocol: 'cos-rpc/v1',
+          request_id: request.request_id,
+          status: 'ok',
+          result: { records: ['Approved fixture priority'] },
+        };
+        inbound
+          .prepare('INSERT INTO cos_rpc_responses VALUES(?,?,?,?,?)')
+          .run(request.request_id, digest(request), delivery_id, JSON.stringify(response), 'fixture');
+      }
+    }, 10);
+    credentialBroker = http.createServer((request, response) => {
+      assert.equal(request.url, '/cached');
+      response.setHeader('content-type', 'application/json');
+      response.end(JSON.stringify({ version: 1, authJson: JSON.stringify(refreshed), generation: 'a'.repeat(64) }));
+    });
+    await new Promise<void>((resolve) => credentialBroker!.listen('/run/nanoclaw/codex-credentials.sock', resolve));
+    const run = async (prompt: string) => {
+      const provider = new CosCodexProvider({ model: 'gpt-6-astra', proxyUrl: relay!.proxyUrl });
+      const query = provider.query({
+        prompt,
+        cwd: '/workspace/agent',
+        continuation: getContinuation('cos-codex'),
+        systemContext: { instructions: 'You are a CoS fixture.' },
+      });
+      query.end();
+      let completed = false;
+      for await (const event of query.events) {
+        if (event.type === 'init') setContinuation('cos-codex', event.continuation);
+        if (event.type === 'error') throw new Error('production_provider_failed: ' + event.message);
+        if (event.type === 'result') {
+          assert.ok(event.text?.includes('Fixture answer'));
+          completed = true;
+        }
+      }
+      assert.ok(completed);
+    };
+    await run('Remember the synthetic colour is amber.');
+    const original = getContinuation('cos-codex');
+    assert.ok(original?.startsWith('cos-codex-subscription-v1:'));
+    await run('Which synthetic colour did I mention?');
+    assert.equal(getContinuation('cos-codex'), original);
+  } else {
+    await connect();
+    const created = await sendCodexRequest(server, 'thread/start', params);
+    if (created.error) throw Error(JSON.stringify(created.error));
+    const threadId = (created.result as any).thread.id;
+    await turn(threadId, 'Remember the synthetic colour is amber.');
+    killCodexAppServer(server);
+    await new Promise((r) => setTimeout(r, 500));
+    await connect();
+    const { dynamicTools, ...resumeParams } = params;
+    const resumed = await sendCodexRequest(server, 'thread/resume', { threadId, ...resumeParams });
+    if (resumed.error) throw Error(JSON.stringify(resumed.error));
+    await turn(threadId, 'Which synthetic colour did I mention?');
+  }
   assert.equal(requests.length, 6);
   assert.ok(JSON.stringify(requests.at(-1).input).includes('amber'));
   assert.deepEqual(dispatched, ['cos_context_get']);
@@ -470,7 +542,12 @@ try {
     .flatMap((tool: any) =>
       [...(tool.description ?? '').matchAll(/declare const tools: \{ (\w+)\(/g)].map((match: any) => match[1]),
     );
-  assert.deepEqual(declarations.sort(), ['clock__curr_time', 'cos_context_get']);
+  assert.deepEqual(
+    declarations.sort(),
+    productionQuery
+      ? ['clock__curr_time', 'cos_change_propose', 'cos_context_get', 'cos_request_status']
+      : ['clock__curr_time', 'cos_context_get'],
+  );
   console.log(
     JSON.stringify({
       probe: 'passed',
@@ -483,10 +560,16 @@ try {
       accessOnlyQueryCache: true,
       fixedDestinationEgress: Boolean(proxied),
       productionAuthEntry: systemTrust,
+      productionQueryProvider: productionQuery,
     }),
   );
 } finally {
-  clearTimeout(watchdog);
+  clearInterval(rpcPoll);
+  if (productionQuery) closeSessionDb();
+  if (credentialBroker) {
+    credentialBroker.closeAllConnections();
+    await new Promise<void>((resolve) => credentialBroker!.close(() => resolve()));
+  }
   if (server) killCodexAppServer(server);
   await relay?.close();
   if (gateway) {
@@ -495,4 +578,5 @@ try {
     await exited;
   }
   upstream.stop(true);
+  clearTimeout(watchdog);
 }

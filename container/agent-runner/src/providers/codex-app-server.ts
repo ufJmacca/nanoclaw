@@ -294,6 +294,17 @@ export function sendCodexResponse(server: AppServer, id: number, result: unknown
   }
 }
 
+/** Restricted clients fail closed on every unsupported server request. */
+export function rejectCodexRequest(server: AppServer, id: number): void {
+  try {
+    server.process.stdin!.write(
+      JSON.stringify({ id, error: { code: -32601, message: 'Request unavailable.' } }) + '\n',
+    );
+  } catch {
+    /* Closed native process; never log request payloads. */
+  }
+}
+
 // ── Dynamic MCP tool bridge ─────────────────────────────────────────────────
 // Codex app-server loads MCP servers from config.toml, but those MCP tools do
 // not automatically become direct Responses API tools for turns we start via
@@ -615,6 +626,7 @@ export interface TurnParams {
   model?: string;
   effort?: string;
   cwd?: string;
+  restrictedSubscription?: boolean;
 }
 
 export async function startCodexTurn(server: AppServer, params: TurnParams): Promise<void> {
@@ -624,6 +636,14 @@ export async function startCodexTurn(server: AppServer, params: TurnParams): Pro
     model: params.model,
     effort: params.effort,
     cwd: params.cwd,
+    ...(params.restrictedSubscription
+      ? {
+          environments: [],
+          approvalPolicy: 'never',
+          approvalsReviewer: 'user',
+          sandboxPolicy: { type: 'readOnly', networkAccess: false },
+        }
+      : {}),
   });
   if (resp.error) throw new Error(`turn/start failed: ${resp.error.message}`);
 }
