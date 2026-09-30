@@ -169,4 +169,15 @@ describe('S02 host-owned artifact publication', () => {
       expect(fs.readdirSync(root).filter((name) => name.endsWith('.blob'))).toHaveLength(0);
     });
   });
+  it('publishes bounded generated text in a distinct namespace under the same operation lease', async () => {
+    await artifacts.exclusive(async (lease) => {
+      const text = 'A synthetic answer with checked citations.';
+      const first = artifacts.publishText('answer-fixture', text, lease);
+      expect(artifacts.publishText('answer-fixture', text, lease)).toEqual(first);
+      expect(artifacts.read(first.id, first.digest)).toBe(text);
+      expect(artifacts.publishText('another-answer', text, lease).id).not.toBe(first.id);
+      expect(() => artifacts.publishText('../outside', text, lease)).toThrow();
+      expect(() => artifacts.publishText('answer-fixture', 'x'.repeat(1048577), lease)).toThrow();
+    });
+  });
 });

@@ -10,6 +10,7 @@ import {
   type KnowledgeArtifacts,
 } from './artifacts.js';
 import { purgeKnowledge, type PurgeHooks } from './purge.js';
+import { KnowledgeAnswers, type AnswerHooks } from './answer-store.js';
 export type KnowledgeContext = Context & { provider: string; generation: string };
 export type ImportSource = {
   sourceKey: string;
@@ -58,12 +59,21 @@ const candidateJoin = `FROM cos.sources s JOIN cos.source_revisions r ON r.scope
   AND a.lifecycle='published' AND NOT EXISTS(SELECT 1 FROM cos.revocation_tombstones t WHERE t.scope_id=s.scope_id AND t.source_id=s.id)`;
 export class KnowledgeStore {
   readonly retentionMs: number;
+  readonly answers: KnowledgeAnswers;
   constructor(
     readonly database: BoundedDatabase,
     readonly artifacts: KnowledgeArtifacts,
-    readonly hooks: { afterPublication?(): Promise<void>; beforeDisclosure?(): Promise<void> } & PurgeHooks = {},
+    readonly hooks: { afterPublication?(): Promise<void>; beforeDisclosure?(): Promise<void> } & PurgeHooks &
+      AnswerHooks = {},
     options: { retentionMs?: number } = {},
   ) {
+    this.answers = new KnowledgeAnswers({
+      artifacts,
+      hooks,
+      transaction: (operation, mutation) => this.transaction(operation, mutation),
+      exclusive: (operation) => this.exclusive(operation),
+      current: (client, context) => this.current(client, context),
+    });
     this.retentionMs = options.retentionMs ?? 30 * 24 * 60 * 60 * 1000;
     if (!Number.isSafeInteger(this.retentionMs) || this.retentionMs < 0 || this.retentionMs > 365 * 24 * 60 * 60 * 1000)
       throw new Error('invalid_knowledge_retention');

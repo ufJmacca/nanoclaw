@@ -21,8 +21,9 @@ import Database from 'better-sqlite3';
 import { KnowledgeInvalidation } from '../../modules/chief-of-staff/knowledge/invalidation.js';
 import { installCosBoundary, type CosBinding } from '../../cos-boundary.js';
 import { ensureConversationSchema } from '../../modules/chief-of-staff/bridge/conversation-state.js';
-import { digest } from '../../modules/chief-of-staff/domain/contracts.js';
+import { digest, type Change } from '../../modules/chief-of-staff/domain/contracts.js';
 import type { Session } from '../../types.js';
+import type { AnswerDraft } from '../../modules/chief-of-staff/knowledge/answers.js';
 
 const scope = 'knowledge-' + randomUUID(),
   other = scope + '-other';
@@ -72,6 +73,7 @@ after(async () => {
       'revocation_tombstones',
       'source_revisions',
       'sources',
+      'records',
       'artifacts',
       'outbox',
       'operations',
@@ -826,6 +828,232 @@ test('S02-PG02: a database outage blocks purge before byte removal and reconcile
     assert.ok(
       (await pool.query('SELECT delivered_at FROM cos.outbox WHERE id=$1', ['knowledge-purge-' + proposal])).rows[0]
         .delivered_at,
+    );
+  } finally {
+    await database.pool.end();
+    await relay.close();
+  }
+});
+test('S02-T02/T07: prepared answers carry checked citations and provenance without becoming approved direction', async () => {
+  const a = await imported(note('answer-source', 'AnswerCanary supplier approval is pending.'));
+  const ctx = { ...context, generation: randomUUID() },
+    read = await store.search(ctx, { query: 'AnswerCanary' }),
+    evidence = (read.items as Evidence[])[0];
+  const draft: AnswerDraft = {
+    kind: 'answer',
+    coverage: 'limited',
+    claims: [
+      {
+        kind: 'quote',
+        text: 'supplier approval is pending.',
+        citations: [{ kind: 'source', evidence_id: evidence.evidence_id }],
+      },
+      {
+        kind: 'inference',
+        text: 'Ask the supplier for a decision date.',
+        citations: [{ kind: 'source', evidence_id: evidence.evidence_id }],
+      },
+    ],
+  };
+  const request = randomUUID(),
+    prepared = await store.answers.prepare(ctx, request, draft);
+  assert.equal(prepared.status, 'ok');
+  assert.match(String(prepared.text), /Inference: Ask/);
+  assert.equal((await store.answers.authorizePublication(ctx, String(prepared.text))).status, 'ok');
+  assert.equal(
+    (await store.answers.authorizePublication(ctx, String(prepared.text) + ' Unsupported extra claim.')).status,
+    'denied',
+  );
+  assert.equal(
+    (await store.answers.authorizePublication({ ...ctx, ingressId: randomUUID() }, String(prepared.text))).status,
+    'denied',
+  );
+  assert.deepEqual(await store.answers.prepare(ctx, request, draft), prepared);
+  assert.equal((await store.answers.prepare(ctx, request, { ...draft, kind: 'summary' })).status, 'conflict');
+  assert.equal(
+    (
+      await pool.query('SELECT count(*)::int AS n FROM cos.derivation_links WHERE artifact_id=$1', [
+        prepared.artifact_id,
+      ])
+    ).rows[0].n,
+    1,
+  );
+  assert.equal(
+    (await pool.query('SELECT count(*)::int AS n FROM cos.records WHERE scope_id=$1', [scope])).rows[0].n,
+    0,
+  );
+  assert.equal(JSON.stringify(prepared).includes(artifacts.root), false);
+  assert.equal(
+    (
+      await store.answers.get(
+        { ...ctx, scopeId: other, agentGroupId: other, sessionId: other },
+        String(prepared.artifact_id),
+      )
+    ).status,
+    'denied',
+  );
+  assert.equal(
+    (
+      await store.answers.prepare(ctx, randomUUID(), {
+        ...draft,
+        claims: [{ ...draft.claims[0], text: 'The supplier approved it.' }],
+      })
+    ).status,
+    'denied',
+  );
+  assert.equal(
+    (await store.answers.prepare({ ...ctx, generation: randomUUID() }, randomUUID(), draft)).status,
+    'denied',
+  );
+  const fresh = { ...ctx, generation: randomUUID() };
+  assert.equal((await store.answers.authorizePublication(fresh, String(prepared.text))).status, 'denied');
+  assert.equal((await store.answers.get(fresh, String(prepared.artifact_id))).status, 'ok');
+  assert.equal((await store.answers.authorizePublication(fresh, String(prepared.text))).status, 'ok');
+  await imported(note('answer-source', 'AnswerCanary supplier approval has arrived.', { expectedVersion: 1 }));
+  assert.equal((await store.contextReady(fresh)).status, 'denied');
+  assert.equal((await store.answers.authorizePublication(fresh, String(prepared.text))).status, 'denied');
+  assert.equal(
+    (await store.answers.get({ ...ctx, generation: randomUUID() }, String(prepared.artifact_id))).status,
+    'denied',
+  );
+  assert.equal(
+    (await pool.query('SELECT lifecycle FROM cos.artifacts WHERE id=$1', [prepared.artifact_id])).rows[0].lifecycle,
+    'quarantined',
+  );
+  assert.notEqual(a.revision_id, undefined);
+});
+test('S02-T06: revocation during answer preparation cannot admit a publishable derivative', async () => {
+  await imported(note('answer-race', 'AnswerRaceCanary private source.'));
+  const ctx = { ...context, generation: randomUUID() },
+    read = await store.search(ctx, { query: 'AnswerRaceCanary' }),
+    evidence = (read.items as Evidence[])[0];
+  const guarded = new KnowledgeStore(store.database, artifacts, {
+    afterAnswerPublication: async () => {
+      await pool.query("UPDATE cos.sources SET status='revoked',version=version+1 WHERE scope_id=$1 AND id=$2", [
+        scope,
+        evidence.source_id,
+      ]);
+    },
+  });
+  const result = await guarded.answers.prepare(ctx, randomUUID(), {
+    kind: 'answer',
+    coverage: 'limited',
+    claims: [
+      { kind: 'quote', text: evidence.text, citations: [{ kind: 'source', evidence_id: evidence.evidence_id }] },
+    ],
+  });
+  assert.equal(result.status, 'denied');
+  assert.equal(JSON.stringify(result).includes('AnswerRaceCanary'), false);
+});
+test('S02-PG02: historical answer redisplay fails closed when current database policy is unavailable', async () => {
+  const ctx = { ...context, generation: randomUUID() };
+  const prepared = await store.answers.prepare(ctx, randomUUID(), {
+    kind: 'answer',
+    coverage: 'insufficient',
+    claims: [],
+  });
+  assert.equal(prepared.status, 'ok');
+  const relay = await connectionFault(await fixtureDatabaseConfig()),
+    database = new BoundedDatabase(new pg.Pool(relay.config), 350),
+    fault = new KnowledgeStore(database, artifacts);
+  try {
+    assert.equal((await fault.answers.get(ctx, String(prepared.artifact_id))).status, 'ok');
+    relay.partition();
+    const result = await fault.answers.get(ctx, String(prepared.artifact_id));
+    assert.equal(result.status, 'unavailable');
+    assert.equal(result.text, undefined);
+  } finally {
+    await database.pool.end();
+    await relay.close();
+  }
+});
+test('S02-T07: priority summaries cite approved record versions without changing them and reject stale publication', async () => {
+  const priorities = new PriorityStore(store.database, store),
+    ctx = { ...context, generation: randomUUID() };
+  const approve = async (change: Change) => {
+    const proposal = await priorities.propose(context, randomUUID(), change);
+    assert.equal(proposal.status, 'ok');
+    assert.equal(
+      (
+        await priorities.decide(
+          { ...context, ingressId: randomUUID() },
+          String(proposal.proposal_id),
+          String(proposal.confirmation_token),
+          'approve',
+        )
+      ).status,
+      'ok',
+    );
+    const result = await priorities.apply(scope, String(proposal.proposal_id));
+    assert.equal(result.status, 'ok');
+    return String(result.record_id);
+  };
+  const change: Change = {
+    kind: 'project',
+    title: 'Approved pilot',
+    description: 'Obtain a supplier decision.',
+    lifecycle: 'active',
+    reason: 'Synthetic priority citation fixture',
+    expected_version: 0,
+  };
+  const id = await approve(change);
+  const prepared = await store.answers.prepare(ctx, randomUUID(), {
+    kind: 'summary',
+    coverage: 'limited',
+    claims: [
+      {
+        kind: 'inference',
+        text: 'Focus attention on the approved pilot.',
+        citations: [{ kind: 'record', record_id: id, version: 1 }],
+      },
+    ],
+  });
+  assert.equal(prepared.status, 'ok');
+  assert.equal(prepared.kind, 'summary');
+  assert.match(String(prepared.text), /Approved project/);
+  assert.equal((await pool.query('SELECT version FROM cos.records WHERE id=$1', [id])).rows[0].version, 1);
+  assert.equal((await store.answers.authorizePublication(ctx, String(prepared.text))).status, 'ok');
+  await approve({
+    ...change,
+    record_id: id,
+    expected_version: 1,
+    description: 'Supplier has confirmed; schedule the pilot.',
+  });
+  assert.equal((await store.answers.authorizePublication(ctx, String(prepared.text))).status, 'denied');
+  assert.equal((await store.answers.get(ctx, String(prepared.artifact_id))).status, 'denied');
+});
+test('S02-PG01: answer publication losing database access admits no artifact and reconciles one retry', async () => {
+  const relay = await connectionFault(await fixtureDatabaseConfig()),
+    database = new BoundedDatabase(new pg.Pool(relay.config), 350);
+  let fail = true;
+  const fault = new KnowledgeStore(database, artifacts, {
+    afterAnswerPublication: async () => {
+      if (fail) relay.partition();
+    },
+  });
+  const ctx = { ...context, generation: randomUUID() },
+    request = randomUUID(),
+    draft: AnswerDraft = { kind: 'answer', coverage: 'insufficient', claims: [] };
+  try {
+    assert.ok(['unavailable', 'pending'].includes((await fault.answers.prepare(ctx, request, draft)).status));
+    assert.equal(
+      (
+        await pool.query('SELECT count(*)::int AS n FROM cos.operations WHERE session_id=$1 AND request_id=$2', [
+          ctx.sessionId,
+          request,
+        ])
+      ).rows[0].n,
+      0,
+    );
+    fail = false;
+    relay.restore();
+    await new Promise((resolve) => setTimeout(resolve, 1050));
+    const retry = await fault.answers.prepare(ctx, request, draft);
+    assert.equal(retry.status, 'ok');
+    assert.deepEqual(await fault.answers.prepare(ctx, request, draft), retry);
+    assert.equal(
+      (await pool.query('SELECT count(*)::int AS n FROM cos.artifacts WHERE id=$1', [retry.artifact_id])).rows[0].n,
+      1,
     );
   } finally {
     await database.pool.end();

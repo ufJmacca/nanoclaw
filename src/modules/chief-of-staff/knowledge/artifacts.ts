@@ -138,6 +138,24 @@ export class KnowledgeArtifacts {
   capture(scopeId: string, filename: string, lease: ArtifactLease, expectedDigest?: string) {
     const { id, digest, byteLength, text, chunks, bytes } = this.staged(scopeId, filename, lease);
     if (expectedDigest !== undefined && expectedDigest !== digest) throw new Error('staged_source_changed');
+    this.publishBytes(id, digest, bytes, lease);
+    return { id, digest, byteLength, text, chunks };
+  }
+  publishText(namespace: string, text: string, lease: ArtifactLease) {
+    this.requireLease(lease);
+    this.guard();
+    if (!/^[a-zA-Z0-9_-]{1,128}$/.test(namespace) || typeof text !== 'string') throw new Error('invalid_artifact');
+    const bytes = Buffer.from(text, 'utf8');
+    if (bytes.length > MAX_SOURCE_BYTES || bytes.toString('utf8') !== text) throw new Error('invalid_artifact');
+    decodeSource(bytes);
+    const digest = sourceDigest(bytes),
+      id = sourceDigest(Buffer.from(namespace)) + '-' + digest;
+    this.publishBytes(id, digest, bytes, lease);
+    return { id, digest, byteLength: bytes.length };
+  }
+  private publishBytes(id: string, digest: string, bytes: Buffer, lease: ArtifactLease): void {
+    this.requireLease(lease);
+    this.guard();
     const final = path.join(this.root, id + '.blob');
     if (fs.lstatSync(final, { throwIfNoEntry: false })) this.read(id, digest);
     else {
@@ -155,7 +173,6 @@ export class KnowledgeArtifacts {
       syncDirectory(this.root);
       this.read(id, digest);
     }
-    return { id, digest, byteLength, text, chunks };
   }
   read(id: string, digest: string): string {
     this.guard();
