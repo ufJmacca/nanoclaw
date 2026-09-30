@@ -25,6 +25,7 @@ type Options = {
   assertAuthority(): void;
   /** Runs pinned native Codex account/read, waits for process exit, and writes only this staged HOME. */
   nativeCheck(directory: string, mode: 'check' | 'refresh'): Promise<void>;
+  now?(): number;
 };
 
 const queues = new Map<string, Promise<unknown>>();
@@ -128,13 +129,32 @@ export function createSubscriptionAuthStore(options: Options) {
   const source = path.resolve(options.sourceFile);
   const journalFile = path.join(root, 'operation.json');
   const sourcePathHash = hash(source);
+  const bindAccount = (native: NativeAuth) => {
+    const file = path.join(root, 'account-binding.json'),
+      accountHash = hash(native.tokens.account_id);
+    if (!fs.existsSync(file)) {
+      atomicPrivate(file, JSON.stringify({ sourcePathHash, accountHash }));
+      return;
+    }
+    let existing: { sourcePathHash?: string; accountHash?: string };
+    try {
+      existing = JSON.parse(readPrivate(file));
+    } catch (cause) {
+      if (cause instanceof SyntaxError) return error('subscription_account_changed');
+      throw cause;
+    }
+    if (!existing || existing.sourcePathHash !== sourcePathHash || existing.accountHash !== accountHash)
+      return error('subscription_account_changed');
+  };
   const authority = () => {
     options.assertAuthority();
     privateDirectory(root);
   };
   const cached = () => {
     authority();
-    return snapshot(readPrivate(source));
+    const raw = readPrivate(source);
+    bindAccount(parseAuth(raw));
+    return snapshot(raw);
   };
 
   const clearJournal = (journal: Journal) => {
@@ -159,6 +179,7 @@ export function createSubscriptionAuthStore(options: Options) {
     )
       return error('subscription_refresh_uncertain');
     const result = snapshot(candidate);
+    bindAccount(parseAuth(candidate));
     authority();
     const current = readPrivate(source);
     if (hash(current) !== journal.sourceDigest && hash(current) !== journal.candidateDigest)
@@ -199,7 +220,27 @@ export function createSubscriptionAuthStore(options: Options) {
         if (recovered) return recovered;
         const original = readPrivate(source);
         const native = parseAuth(original);
+        bindAccount(native);
         if (mode === 'refresh' && hash(original) !== expectedGeneration) return snapshot(original);
+        if (mode === 'refresh') {
+          const attemptFile = path.join(root, 'refresh-attempt.json'),
+            now = (options.now ?? Date.now)();
+          if (!Number.isSafeInteger(now) || now < 0) return error('subscription_refresh_limited');
+          if (fs.existsSync(attemptFile)) {
+            let attempt: { sourcePathHash?: string; at?: number };
+            try {
+              attempt = JSON.parse(readPrivate(attemptFile));
+            } catch (cause) {
+              if (cause instanceof SyntaxError) return error('subscription_refresh_uncertain');
+              throw cause;
+            }
+            if (!attempt || attempt.sourcePathHash !== sourcePathHash || !Number.isSafeInteger(attempt.at))
+              return error('subscription_refresh_uncertain');
+            if (now - attempt.at! < 60000) return error('subscription_refresh_limited');
+          }
+          // Charge before native execution; reconstruction cannot erase an uncertain attempt.
+          atomicPrivate(attemptFile, JSON.stringify({ sourcePathHash, at: now }));
+        }
         const directory = fs.mkdtempSync(path.join(root, 'operation-'));
         atomicPrivate(path.join(directory, 'original.json'), original);
         atomicPrivate(path.join(directory, 'auth.json'), original);

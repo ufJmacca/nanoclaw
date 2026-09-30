@@ -30,6 +30,35 @@ afterEach(() => {
 });
 
 describe('native Codex subscription credential owner', () => {
+  it('keeps the admitted account binding across owner restarts and refuses an external account switch', () => {
+    const options = setup();
+    const owner = () => createSubscriptionAuthStore({ ...options, assertAuthority() {}, async nativeCheck() {} });
+    owner().cached();
+    fs.writeFileSync(options.sourceFile, JSON.stringify(nativeAuth('other', 'different-account')));
+    expect(() => owner().cached()).toThrow('subscription_account_changed');
+  });
+  it('persists a minimum interval between real refresh attempts across owner reconstruction', async () => {
+    const options = setup();
+    let now = 100000,
+      calls = 0;
+    const owner = () =>
+      createSubscriptionAuthStore({
+        ...options,
+        now: () => now,
+        assertAuthority() {},
+        async nativeCheck(directory) {
+          calls++;
+          fs.writeFileSync(path.join(directory, 'auth.json'), JSON.stringify(nativeAuth(String(calls))));
+        },
+      });
+    const first = owner();
+    const updated = await first.refresh(first.cached().generation);
+    await expect(owner().refresh(updated.generation)).rejects.toThrow('subscription_refresh_limited');
+    expect(calls).toBe(1);
+    now += 60000;
+    await owner().refresh(updated.generation);
+    expect(calls).toBe(2);
+  });
   it('does not report a forced refresh as successful when native account inspection returns an unchanged cache', async () => {
     const options = setup();
     const store = createSubscriptionAuthStore({ ...options, assertAuthority() {}, async nativeCheck() {} });
