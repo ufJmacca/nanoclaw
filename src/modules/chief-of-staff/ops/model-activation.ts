@@ -142,6 +142,139 @@ export function issueActivation(o: Options, value: unknown) {
     live_model: 'not_verified',
   };
 }
+type Rebinding = {
+  version: 1;
+  recoveryDigest: string;
+  bindingDigest: string;
+  issuance: Issuance;
+  next: SubscriptionActivation;
+  phase: 'prepared' | 'complete';
+};
+/** Rebinding is not consent issuance. Only the generation may change after a verified recovery;
+ * expiry, account, model, limits, usage and attempt/ingress ledgers remain unchanged. Never resumes. */
+export function rebindRecoveredActivation(o: Options, request: { expectedGeneration: string; recoveryId: string }) {
+  boundary(o, true);
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+  if (!uuid.test(request.expectedGeneration) || !uuid.test(request.recoveryId))
+    throw new Error('invalid_context_rebinding');
+  const recoveryDigest = digest({ binding: o.binding, accountFingerprint: o.accountFingerprint, ...request });
+  const recovery = readPrivate<{ version: number; requestDigest: string; generation: string; phase: string }>(
+    path.join(directory(o.root, 'context-recoveries'), request.recoveryId + '.json'),
+  );
+  const guard = () => {
+    boundary(o, true);
+    if (
+      recovery.version !== 1 ||
+      recovery.phase !== 'complete' ||
+      recovery.requestDigest !== recoveryDigest ||
+      !uuid.test(recovery.generation) ||
+      recovery.generation === request.expectedGeneration ||
+      !createConversationState(o.root, o.db).current(o.binding, o.accountFingerprint, recovery.generation)
+    )
+      throw new Error('context_rebinding_requires_completed_recovery');
+  };
+  guard();
+  const history = directory(o.root, 'model-context-rebindings'),
+    file = request.recoveryId + '.json';
+  let record: Rebinding;
+  if (fs.lstatSync(path.join(history, file), { throwIfNoEntry: false })) {
+    record = readPrivate<Rebinding>(path.join(history, file));
+  } else {
+    const current = active(o.root);
+    if (current === null) return { status: 'not_transferred', reason: 'missing' };
+    const policy = subscriptionActivation(current, o.binding.scopeId, o.accountFingerprint, 0);
+    if (!policy || policy.contextGeneration !== request.expectedGeneration)
+      return { status: 'not_transferred', reason: 'context_or_policy_mismatch' };
+    if (Date.parse(policy.expiresAt) <= Date.now()) return { status: 'not_transferred', reason: 'expired' };
+    const issuanceFile = path.join(directory(o.root, 'model-activations'), policy.activationId + '.json');
+    if (!fs.lstatSync(issuanceFile, { throwIfNoEntry: false }))
+      return { status: 'not_transferred', reason: 'unissued' };
+    const issuance = readPrivate<Issuance>(issuanceFile);
+    if (
+      issuance.version !== 1 ||
+      issuance.phase !== 'installed' ||
+      issuance.bindingDigest !== digest(o.binding) ||
+      digest(issuance.policy) !== digest(policy)
+    )
+      throw new Error('activation_conflict');
+    if (remaining(o, policy) < 1) return { status: 'not_transferred', reason: 'exhausted' };
+    record = {
+      version: 1,
+      recoveryDigest,
+      bindingDigest: digest(o.binding),
+      issuance,
+      next: { ...policy, contextGeneration: recovery.generation },
+      phase: 'prepared',
+    };
+    writeAtomic(history, file, record);
+  }
+  const prior = record.issuance?.policy,
+    next = record.next;
+  if (
+    record.version !== 1 ||
+    record.recoveryDigest !== recoveryDigest ||
+    record.bindingDigest !== digest(o.binding) ||
+    !['prepared', 'complete'].includes(record.phase) ||
+    record.issuance?.version !== 1 ||
+    record.issuance.phase !== 'installed' ||
+    record.issuance.bindingDigest !== digest(o.binding) ||
+    !subscriptionActivation(prior, o.binding.scopeId, o.accountFingerprint, 0) ||
+    prior.contextGeneration !== request.expectedGeneration ||
+    digest(next) !== digest({ ...prior, contextGeneration: recovery.generation })
+  )
+    throw new Error('activation_conflict');
+  const nextIssuance = { ...record.issuance, policy: next },
+    issuanceRoot = directory(o.root, 'model-activations');
+  const installed = () => readPrivate<Issuance>(path.join(issuanceRoot, next.activationId + '.json'));
+  const result = () => ({
+    status: 'rebound_paused',
+    activationId: next.activationId,
+    generation: next.contextGeneration,
+    remainingAttempts: remaining(o, next),
+    expiresAt: next.expiresAt,
+    activation:
+      Date.parse(next.expiresAt) <= Date.now() ? 'expired' : remaining(o, next) > 0 ? 'configured' : 'exhausted',
+    live_model: 'not_verified',
+  });
+  if (record.phase === 'complete') {
+    if (digest(active(o.root)) !== digest(next) || digest(installed()) !== digest(nextIssuance))
+      throw new Error('activation_superseded');
+    return result();
+  }
+  guard();
+  if (
+    ![digest(prior), digest(next)].includes(digest(active(o.root))) ||
+    ![digest(record.issuance), digest(nextIssuance)].includes(digest(installed()))
+  )
+    throw new Error('activation_superseded');
+  o.db
+    .transaction(() => {
+      guard();
+      const budget = o.db
+        .prepare('SELECT policy_digest,used FROM cos_model_budgets WHERE activation_id=?')
+        .get(next.activationId) as { policy_digest: string; used: number } | undefined;
+      if (
+        !budget ||
+        ![digest(prior), digest(next)].includes(budget.policy_digest) ||
+        !Number.isSafeInteger(budget.used) ||
+        budget.used < 0
+      )
+        throw new Error('activation_conflict');
+      // No INSERT and no writes to usage: even an interrupted transfer cannot refill or reset a budget.
+      o.db
+        .prepare('UPDATE cos_model_budgets SET policy_digest=? WHERE activation_id=?')
+        .run(digest(next), next.activationId);
+    })
+    .immediate();
+  guard();
+  if (digest(installed()) !== digest(nextIssuance))
+    writeAtomic(issuanceRoot, next.activationId + '.json', nextIssuance);
+  if (digest(active(o.root)) !== digest(next)) writeAtomic(o.root, 'model-activation.json', next);
+  guard();
+  remaining(o, next);
+  writeAtomic(history, file, { ...record, phase: 'complete' });
+  return result();
+}
 /** A repeated resume request observes the result; it can never undo a later pause. */
 export function resumeContext(
   o: Options & { inbound: Database.Database; outbound: Database.Database },

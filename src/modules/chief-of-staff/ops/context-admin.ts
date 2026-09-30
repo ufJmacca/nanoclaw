@@ -28,7 +28,7 @@ import { targetCommands } from './target-host.js';
 import { backupNativeDatabase } from './native-installation.js';
 import { backupConversations } from './conversation-backup.js';
 import { recoverConversation } from './conversation-recovery.js';
-import { issueActivation, resumeContext } from './model-activation.js';
+import { issueActivation, resumeContext, rebindRecoveredActivation } from './model-activation.js';
 
 export type ContextAdminArguments =
   | { command: 'context-status'; scopeId: string }
@@ -255,7 +255,7 @@ export async function contextAdminCommand(
       outbound = openOutboundDb(binding.agentGroupId, binding.sessionId);
       const input = inbound,
         output = outbound;
-      return await recoverConversation({
+      const recovered = await recoverConversation({
         root,
         db,
         inbound,
@@ -286,6 +286,12 @@ export async function contextAdminCommand(
           await check();
         },
       });
+      await check();
+      const activation = rebindRecoveredActivation(activationOptions, {
+        expectedGeneration: args.expectedGeneration,
+        recoveryId: args.recoveryId,
+      });
+      return { ...recovered, activation };
     })();
   } catch (error) {
     failure = error;

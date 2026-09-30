@@ -127,6 +127,48 @@ it('performs guarded recovery with protected native backups and leaves activatio
   expect(fs.existsSync(backup + '/inbound/native.sqlite')).toBe(true);
   expect(fs.existsSync(backup + '/outbound/native.sqlite')).toBe(true);
 });
+it('recovery preserves a valid remaining allowance through the actual owner command without resuming', async () => {
+  const prepared = await contextAdminCommand({ command: 'context-prepare', scopeId: 'fixture' }, env, dependencies);
+  const policy: SubscriptionActivation = {
+    version: 2,
+    runtime: 'codex-subscription/v1',
+    activationId: 'f'.repeat(32),
+    scopeId: 'fixture',
+    provider: 'codex',
+    model: 'fixture-model',
+    consentRef: 'fixture-only-authority',
+    expiresAt: new Date(Date.now() + 60000).toISOString(),
+    maxAttempts: 2,
+    accountFingerprint: 'c'.repeat(64),
+    contextGeneration: String(prepared.generation),
+  };
+  writeAtomic(state, 'fixture-consent.json', policy);
+  await contextAdminCommand(
+    { command: 'model-activate', scopeId: 'fixture', policyFile: state + '/fixture-consent.json' },
+    env,
+    dependencies,
+  );
+  const db = new Database(central);
+  expect(reserveSubscriptionAttempt(db, policy, 'fixture-ingress', randomUUID())).toBe(true);
+  db.close();
+  const result = await contextAdminCommand(
+    {
+      command: 'context-recover',
+      scopeId: 'fixture',
+      expectedGeneration: policy.contextGeneration,
+      recoveryId: randomUUID(),
+    },
+    env,
+    dependencies,
+  );
+  expect(result).toMatchObject({
+    status: 'recovered_paused',
+    activation: { status: 'rebound_paused', remainingAttempts: 1, expiresAt: policy.expiresAt },
+  });
+  expect(await contextAdminCommand({ command: 'context-status', scopeId: 'fixture' }, env, dependencies)).toMatchObject(
+    { paused: true, generation: result.generation, activation: 'configured', remainingAttempts: 1 },
+  );
+});
 it('refuses preparation when service/containers are active, a foreign host owns the lease or channel membership changed', async () => {
   quiescent.mockResolvedValueOnce(false);
   await expect(

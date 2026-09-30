@@ -28,6 +28,14 @@ import { ensureConversationSchema } from '../../modules/chief-of-staff/bridge/co
 import { digest, type Change } from '../../modules/chief-of-staff/domain/contracts.js';
 import type { Session } from '../../types.js';
 import type { AnswerDraft } from '../../modules/chief-of-staff/knowledge/answers.js';
+import { INBOUND_SCHEMA, OUTBOUND_SCHEMA } from '../../db/schema.js';
+import { recoverConversation } from '../../modules/chief-of-staff/ops/conversation-recovery.js';
+import { issueActivation, rebindRecoveredActivation } from '../../modules/chief-of-staff/ops/model-activation.js';
+import {
+  ensureModelBudget,
+  reserveSubscriptionAttempt,
+  type SubscriptionActivation,
+} from '../../modules/chief-of-staff/bridge/model-policy.js';
 
 const scope = 'knowledge-' + randomUUID(),
   other = scope + '-other';
@@ -496,7 +504,9 @@ test('S02-T10: the durable revocation job invalidates exposed native state while
     'ok',
   );
   assert.equal((await priorities.apply(scope, String(proposal.proposal_id))).status, 'ok');
-  const db = new Database(':memory:');
+  const db = new Database(':memory:'),
+    inbound = new Database(':memory:'),
+    outbound = new Database(':memory:');
   try {
     const binding: CosBinding = {
       scopeId: scope,
@@ -522,6 +532,52 @@ test('S02-T10: the durable revocation job invalidates exposed native state while
     db.prepare(
       "INSERT INTO cos_conversation_states(scope_id,binding_digest,account_fingerprint,generation,status,updated_at) VALUES(?,?,?,?,'active',?)",
     ).run(scope, digest(binding), 'a'.repeat(64), ctx.generation, new Date().toISOString());
+    const root = path.join(base, 'recovery-' + randomUUID());
+    fs.mkdirSync(root, { mode: 0o700 });
+    fs.mkdirSync(path.join(root, 'conversations'), { mode: 0o700 });
+    const oldHome = path.join(root, 'conversations', ctx.generation);
+    fs.mkdirSync(oldHome, { mode: 0o700 });
+    fs.writeFileSync(path.join(oldHome, 'history'), 'NativeInvalidationCanary retained source context.', {
+      mode: 0o600,
+    });
+    inbound.exec(INBOUND_SCHEMA);
+    outbound.exec(OUTBOUND_SCHEMA);
+    ensureModelBudget(db);
+    inbound.exec(
+      "INSERT INTO messages_in(id,kind,timestamp,content) VALUES('stale-input','chat','fixture','NativeInvalidationCanary stale prompt')",
+    );
+    outbound.exec(
+      "INSERT INTO messages_out(id,kind,timestamp,content) VALUES('stale-output','chat','fixture','NativeInvalidationCanary stale reply')",
+    );
+    outbound
+      .prepare('INSERT INTO session_state VALUES(?,?,?)')
+      .run('continuation:cos-codex-subscription:' + ctx.generation, 'old-native-thread', 'fixture');
+    const options = {
+      root,
+      db,
+      inbound,
+      outbound,
+      binding,
+      accountFingerprint: 'a'.repeat(64),
+      assertAuthority: () => {
+        assert.deepEqual(db.prepare('SELECT paused FROM cos_identity_boundaries').get(), { paused: 1 });
+      },
+    };
+    const policy: SubscriptionActivation = {
+      version: 2,
+      runtime: 'codex-subscription/v1',
+      activationId: randomUUID().replaceAll('-', ''),
+      scopeId: scope,
+      provider: 'codex',
+      model: 'fixture-model',
+      consentRef: 'synthetic recovery test only',
+      maxAttempts: 2,
+      expiresAt: new Date(Date.now() + 60000).toISOString(),
+      accountFingerprint: options.accountFingerprint,
+      contextGeneration: ctx.generation,
+    };
+    issueActivation(options, policy);
+    assert.equal(reserveSubscriptionAttempt(db, policy, 'fixture-ingress', randomUUID()), true);
     let stops = 0;
     const dependencies = {
       db,
@@ -543,11 +599,40 @@ test('S02-T10: the durable revocation job invalidates exposed native state while
     await new KnowledgeInvalidation(dependencies).drain(binding);
     assert.equal(stops, 1);
     assert.equal((await store.contextReady(ctx)).status, 'denied');
-    const clean = await store.search({ ...ctx, generation: randomUUID() }, { query: 'NativeInvalidationCanary' });
+    const request = { expectedGeneration: ctx.generation, recoveryId: randomUUID() };
+    const recovered = await recoverConversation({ ...options, ...request, backup: async () => {} });
+    assert.equal(rebindRecoveredActivation(options, request).status, 'rebound_paused');
+    assert.deepEqual(db.prepare('SELECT used FROM cos_model_budgets').get(), { used: 1 });
+    assert.deepEqual(fs.readdirSync(path.join(root, 'conversations', recovered.generation)), []);
+    assert.equal(
+      outbound
+        .prepare('SELECT value FROM session_state WHERE key=?')
+        .get('continuation:cos-codex-subscription:' + recovered.generation),
+      undefined,
+    );
+    assert.deepEqual(inbound.prepare("SELECT status,trigger FROM messages_in WHERE id='stale-input'").get(), {
+      status: 'failed',
+      trigger: 0,
+    });
+    assert.deepEqual(inbound.prepare("SELECT status FROM delivered WHERE message_out_id='stale-output'").get(), {
+      status: 'quarantined_context_recovery',
+    });
+    const cleanContext = { ...ctx, generation: recovered.generation, ingressId: randomUUID() };
+    const clean = await store.search(cleanContext, { query: 'NativeInvalidationCanary' });
     assert.equal(clean.status, 'ok');
     assert.deepEqual(clean.items, []);
+    const answer = await store.answers.prepare(cleanContext, randomUUID(), {
+      kind: 'answer',
+      coverage: 'insufficient',
+      claims: [],
+    });
+    assert.equal(answer.status, 'ok');
+    assert.equal(JSON.stringify(answer).includes('NativeInvalidationCanary'), false);
+    assert.deepEqual(db.prepare('SELECT paused FROM cos_identity_boundaries').get(), { paused: 1 });
   } finally {
     db.close();
+    inbound.close();
+    outbound.close();
   }
 });
 test('S02-T08: cleanup cannot pass an import awaiting metadata admission and preserves current references', async () => {
