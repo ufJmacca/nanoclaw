@@ -24,6 +24,7 @@ function fixture(options: { stale?: boolean; unauthorized?: boolean; forged?: bo
         },
       }),
       writeConfig: () => {},
+      attempts: () => ({ begin: async () => {}, end: async () => {} }),
       stop: async () => {
         stopped++;
       },

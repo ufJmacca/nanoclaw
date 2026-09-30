@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { createSubscriptionCredentialClient } from './codex-credential-client.js';
+import { createSubscriptionTurnClient } from './codex-turn-client.js';
 import { stopSubscriptionAppServer, subscriptionProcessEnvironment } from './codex-subscription-check.js';
 import { subscriptionConfig, subscriptionThreadParams } from './codex-subscription-policy.js';
 import { cosDynamicTools, createCosToolDispatch } from './codex-cos-tools.js';
@@ -49,6 +50,7 @@ const runtime = {
   spawn: spawnCodexAppServer,
   stop: stopSubscriptionAppServer,
   credentials: createSubscriptionCredentialClient,
+  attempts: createSubscriptionTurnClient,
   writeConfig,
 };
 
@@ -80,6 +82,7 @@ export class CosCodexProvider implements AgentProvider {
     async function* events(): AsyncGenerator<ProviderEvent> {
       let threadId: string | undefined;
       const credentials = self.dependencies.credentials({ signal: cancellation.signal });
+      const attempts = self.dependencies.attempts({ signal: cancellation.signal });
       try {
         if (cancelled()) return;
         try {
@@ -111,6 +114,7 @@ export class CosCodexProvider implements AgentProvider {
           try {
             if (input.cwd !== '/workspace/agent' || Buffer.byteLength(prompt) > 65536)
               throw new Error('cos_input_unavailable');
+            await attempts.begin();
             await credentials.prepare();
             if (cancelled()) return;
             self.dependencies.writeConfig(self.config);
@@ -182,10 +186,14 @@ export class CosCodexProvider implements AgentProvider {
             };
           } finally {
             dispatch.endTurn();
-            if (server) {
-              const current = server;
-              server = undefined;
-              await self.dependencies.stop(current);
+            try {
+              if (server) {
+                const current = server;
+                server = undefined;
+                await self.dependencies.stop(current);
+              }
+            } finally {
+              await attempts.end();
             }
           }
         }
