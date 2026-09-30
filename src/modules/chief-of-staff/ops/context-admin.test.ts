@@ -187,3 +187,44 @@ it('distinguishes configured consent, exhausted attempts, stale consent and unav
   expect(await status()).toMatchObject({ context: 'recovery_required' });
   expect(fs.existsSync(path.join(state, 'conversations', String(prepared.generation)))).toBe(false);
 });
+it('issues consent through the real host command and requires a separate resume; replay preserves a later pause', async () => {
+  const prepared = await contextAdminCommand({ command: 'context-prepare', scopeId: 'fixture' }, env, dependencies);
+  const policy: SubscriptionActivation = {
+    version: 2,
+    runtime: 'codex-subscription/v1',
+    activationId: 'e'.repeat(32),
+    scopeId: 'fixture',
+    provider: 'codex',
+    model: 'fixture-model',
+    consentRef: 'fixture-only-authority',
+    expiresAt: new Date(Date.now() + 60000).toISOString(),
+    maxAttempts: 2,
+    accountFingerprint: 'c'.repeat(64),
+    contextGeneration: String(prepared.generation),
+  };
+  writeAtomic(state, 'fixture-consent.json', policy);
+  const activated = await contextAdminCommand(
+    { command: 'model-activate', scopeId: 'fixture', policyFile: state + '/fixture-consent.json' },
+    env,
+    dependencies,
+  );
+  expect(activated).toMatchObject({ status: 'activation_configured_paused', remainingAttempts: 2 });
+  expect(await contextAdminCommand({ command: 'context-status', scopeId: 'fixture' }, env, dependencies)).toMatchObject(
+    { paused: true, activation: 'configured', live_model: 'not_verified' },
+  );
+  const request = {
+    command: 'context-resume' as const,
+    scopeId: 'fixture',
+    activationId: policy.activationId,
+    resumeId: randomUUID(),
+  };
+  expect(await contextAdminCommand(request, env, dependencies)).toMatchObject({ status: 'resumed', paused: false });
+  const db = new Database(central);
+  db.exec('UPDATE cos_identity_boundaries SET paused=1');
+  db.close();
+  expect(await contextAdminCommand(request, env, dependencies)).toMatchObject({
+    status: 'resume_replayed',
+    paused: true,
+  });
+  expect(readTarget(state, targetBinding).maintenance).toBe(true);
+});

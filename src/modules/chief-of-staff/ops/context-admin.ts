@@ -28,10 +28,13 @@ import { targetCommands } from './target-host.js';
 import { backupNativeDatabase } from './native-installation.js';
 import { backupConversations } from './conversation-backup.js';
 import { recoverConversation } from './conversation-recovery.js';
+import { issueActivation, resumeContext } from './model-activation.js';
 
 export type ContextAdminArguments =
   | { command: 'context-status'; scopeId: string }
   | { command: 'context-prepare'; scopeId: string }
+  | { command: 'model-activate'; scopeId: string; policyFile: string }
+  | { command: 'context-resume'; scopeId: string; activationId: string; resumeId: string }
   | { command: 'context-recover'; scopeId: string; expectedGeneration: string; recoveryId: string };
 type Dependencies = {
   target(root: string): TargetState;
@@ -216,7 +219,8 @@ export async function contextAdminCommand(
         assertHostExecutionLease(native, lease);
         if (!nativeBinding(binding)) throw new Error('context_binding_changed');
         const boundary = cosBoundary(getSession(binding.sessionId)!);
-        if (!boundary.restricted || !boundary.paused) throw new Error('context_recovery_requires_paused_binding');
+        if (!boundary.restricted || (args.command !== 'context-resume' && !boundary.paused))
+          throw new Error('context_recovery_requires_paused_binding');
       };
       const check = async () => {
         assertAuthority();
@@ -227,6 +231,13 @@ export async function contextAdminCommand(
       await check();
       const accountFingerprint = accountBinding(root);
       if (!accountFingerprint) throw new Error('subscription_account_binding_unavailable');
+      const activationOptions = { root, db, binding, accountFingerprint, assertAuthority };
+      if (args.command === 'model-activate') {
+        if (!path.isAbsolute(args.policyFile) || fs.realpathSync(args.policyFile) !== args.policyFile)
+          throw new Error('unsafe_activation_state');
+        return issueActivation(activationOptions, readPrivate(args.policyFile));
+      }
+      if (args.command === 'context-resume') return resumeContext(activationOptions, args.activationId, args.resumeId);
       if (args.command === 'context-prepare') {
         const context = createConversationState(root, db).prepare(binding, accountFingerprint);
         return {

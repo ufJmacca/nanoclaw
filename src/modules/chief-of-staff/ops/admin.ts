@@ -14,10 +14,16 @@ import { contextAdminCommand, type ContextAdminArguments } from './context-admin
 type AdminArguments = { command: 'status' } | { command: 'bind'; binding: BindingRequest } | ContextAdminArguments;
 export function parseAdminArguments(args: string[]): AdminArguments {
   if (args.length === 1 && args[0] === 'status') return { command: 'status' };
-  if (['context-status', 'context-prepare', 'context-recover'].includes(args[0])) {
+  if (['context-status', 'context-prepare', 'context-recover', 'model-activate', 'context-resume'].includes(args[0])) {
     const values: Record<string, string> = {};
     const recovery = args[0] === 'context-recover';
-    const allowed = recovery ? ['--scope', '--expected-generation', '--recovery-id'] : ['--scope'];
+    const allowed = recovery
+      ? ['--scope', '--expected-generation', '--recovery-id']
+      : args[0] === 'model-activate'
+        ? ['--scope', '--policy']
+        : args[0] === 'context-resume'
+          ? ['--scope', '--activation-id', '--resume-id']
+          : ['--scope'];
     if (args.length !== 1 + allowed.length * 2) throw new Error('invalid_admin_arguments');
     for (let i = 1; i < args.length; i += 2) {
       if (!allowed.includes(args[i]) || values[args[i]] !== undefined || !args[i + 1])
@@ -25,8 +31,27 @@ export function parseAdminArguments(args: string[]): AdminArguments {
       values[args[i]] = args[i + 1];
     }
     if (!/^[a-zA-Z0-9_-]{1,128}$/.test(values['--scope'])) throw new Error('invalid_admin_arguments');
+    const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+    if (args[0] === 'model-activate') {
+      if (
+        !path.isAbsolute(values['--policy']) ||
+        path.resolve(values['--policy']) !== values['--policy'] ||
+        /[\0\r\n]/.test(values['--policy'])
+      )
+        throw new Error('invalid_admin_arguments');
+      return { command: 'model-activate', scopeId: values['--scope'], policyFile: values['--policy'] };
+    }
+    if (args[0] === 'context-resume') {
+      if (!/^[a-f0-9]{32}$/.test(values['--activation-id']) || !uuid.test(values['--resume-id']))
+        throw new Error('invalid_admin_arguments');
+      return {
+        command: 'context-resume',
+        scopeId: values['--scope'],
+        activationId: values['--activation-id'],
+        resumeId: values['--resume-id'],
+      };
+    }
     if (recovery) {
-      const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
       if (!uuid.test(values['--expected-generation']) || !uuid.test(values['--recovery-id']))
         throw new Error('invalid_admin_arguments');
       return {
@@ -111,6 +136,15 @@ export function safeAdminError(error: unknown): string {
         'conversation_backup_changed',
         'conversation_backup_conflict',
         'unsafe_conversation_backup',
+        'unsafe_activation_state',
+        'activation_requires_paused_binding',
+        'activation_context_mismatch',
+        'activation_conflict',
+        'activation_superseded',
+        'activation_exhausted',
+        'invalid_resume_request',
+        'resume_conflict',
+        'resume_outcome_uncertain',
       ].includes(error.message)
     )
       return error.message;

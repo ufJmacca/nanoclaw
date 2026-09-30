@@ -3,6 +3,32 @@ import { parseAdminArguments, adminStatus, safeAdminError } from './admin.js';
 import { DatabasePreflightError } from '../store/preflight.js';
 import { DatabaseConfigurationError } from '../store/config.js';
 describe('S01 owner administration', () => {
+  it('requires a private policy path for activation and stable identities for explicit resume', () => {
+    expect(parseAdminArguments(['model-activate', '--scope', 'fixture', '--policy', '/private/fixture.json'])).toEqual({
+      command: 'model-activate',
+      scopeId: 'fixture',
+      policyFile: '/private/fixture.json',
+    });
+    const activationId = 'a'.repeat(32),
+      resumeId = '11111111-1111-4111-8111-111111111111';
+    expect(
+      parseAdminArguments([
+        'context-resume',
+        '--scope',
+        'fixture',
+        '--activation-id',
+        activationId,
+        '--resume-id',
+        resumeId,
+      ]),
+    ).toEqual({ command: 'context-resume', scopeId: 'fixture', activationId, resumeId });
+    for (const args of [
+      ['model-activate', '--scope', 'fixture', '--policy', 'relative.json'],
+      ['context-resume', '--scope', 'fixture'],
+      ['context-resume', '--scope', 'fixture', '--activation-id', activationId, '--resume-id', 'invalid'],
+    ])
+      expect(() => parseAdminArguments(args)).toThrow('invalid_admin_arguments');
+  });
   it('reports actionable context errors without passing through raw account or filesystem text', () => {
     expect(safeAdminError(new Error('context_recovery_stale_generation'))).toBe('context_recovery_stale_generation');
     expect(safeAdminError(new Error('NanoClaw host execution lease is already held by a live process'))).toBe(
