@@ -58,6 +58,7 @@ export class KnowledgeAnswers {
       transaction: Transaction;
       exclusive(operation: (lease: ArtifactLease) => Promise<Result>): Promise<Result>;
       current(client: PoolClient, context: KnowledgeContext): Promise<boolean>;
+      retrievalEnabled(): boolean;
       hooks: AnswerHooks;
     },
   ) {}
@@ -68,6 +69,7 @@ export class KnowledgeAnswers {
     historical = false,
   ): Promise<ResolvedCitation[] | null> {
     if (!Array.isArray(refs) || refs.length > 10 || !refs.every(validAnswerCitation)) return null;
+    if (!this.dependencies.retrievalEnabled() && refs.some((ref) => ref.kind === 'source')) return null;
     const rows: ResolvedCitation[] = [];
     for (const ref of refs) {
       const row =
@@ -245,11 +247,11 @@ export class KnowledgeAnswers {
       JOIN cos.source_revisions r ON r.scope_id=e.scope_id AND r.id=e.revision_id AND r.source_id=e.source_id
       JOIN cos.artifacts a ON a.scope_id=r.scope_id AND a.id=r.artifact_id
       WHERE d.scope_id=$1 AND d.artifact_id=$2 AND (
-        e.session_id<>$3 OR e.processing_provider<>$4 OR NOT $4=ANY(s.processing_providers)
+        NOT $5::boolean OR e.session_id<>$3 OR e.processing_provider<>$4 OR NOT $4=ANY(s.processing_providers)
         OR s.version<>e.source_version OR s.current_revision_id IS DISTINCT FROM e.revision_id
         OR r.digest<>e.revision_digest OR s.status NOT IN ('current','stale') OR a.lifecycle<>'published'
         OR EXISTS(SELECT 1 FROM cos.revocation_tombstones t WHERE t.scope_id=s.scope_id AND t.source_id=s.id)) LIMIT 1`,
-      [context.scopeId, id, context.sessionId, context.provider],
+      [context.scopeId, id, context.sessionId, context.provider, this.dependencies.retrievalEnabled()],
     );
     if (invalid.rowCount) return null;
     const resolved = await this.resolve(client, context, metadata.provenance.citations, true);

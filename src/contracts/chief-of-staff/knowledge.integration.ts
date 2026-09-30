@@ -1240,3 +1240,80 @@ test('S02-T06/T10: conversational artifacts retain context-source dependencies t
   assert.equal((await purge.purgeDue(scope)).status, 'ok');
   assert.equal(fs.existsSync(path.join(artifacts.root, String(answer.artifact_id) + '.blob')), false);
 });
+test('S02 rollback: retrieval disable preserves priority replies, revocation checks and due deletion', async () => {
+  let enabled = true;
+  const guarded = new KnowledgeStore(
+    store.database,
+    artifacts,
+    {},
+    { retentionMs: 0, retrievalEnabled: () => enabled },
+  );
+  const source = await imported(note('retrieval-switch', 'SwitchCanary supplier approval is pending.'));
+  const ctx = { ...context, generation: randomUUID() };
+  const found = await guarded.search(ctx, { query: 'SwitchCanary' });
+  assert.equal(found.status, 'ok');
+  const evidence = (found.items as Evidence[])[0];
+  const answer = await guarded.answers.prepare(ctx, randomUUID(), {
+    kind: 'answer',
+    coverage: 'limited',
+    claims: [
+      { kind: 'quote', text: evidence.text, citations: [{ kind: 'source', evidence_id: evidence.evidence_id }] },
+    ],
+  });
+  assert.equal(answer.status, 'ok');
+  enabled = false;
+  const fresh = { ...ctx, generation: randomUUID() };
+  assert.equal((await guarded.search(fresh, { query: 'SwitchCanary' })).status, 'unavailable');
+  assert.equal(
+    (await guarded.get(fresh, String(source.source_id), String(source.revision_id), 0)).status,
+    'unavailable',
+  );
+  assert.equal(
+    (await guarded.importSource(context, randomUUID(), note('disabled-import', 'Never publish this.'))).status,
+    'unavailable',
+  );
+  assert.equal((await guarded.answers.get(fresh, String(answer.artifact_id))).status, 'denied');
+  assert.equal((await guarded.contextReady(ctx)).status, 'denied');
+  assert.equal((await guarded.contextReady(fresh)).status, 'ok');
+  const priorities = new PriorityStore(store.database, guarded);
+  const approved = await priorities.context(fresh);
+  assert.equal(approved.status, 'ok');
+  const record = (approved.records as Array<{ id: string; version: number; title: string }>)[0];
+  assert.ok(record);
+  const reply = await guarded.answers.prepare(fresh, randomUUID(), {
+    kind: 'answer',
+    coverage: 'limited',
+    claims: [
+      {
+        kind: 'quote',
+        text: record.title,
+        citations: [{ kind: 'record', record_id: record.id, version: record.version }],
+      },
+    ],
+  });
+  assert.equal(reply.status, 'ok');
+  assert.equal((await guarded.answers.authorizePublication(fresh, String(reply.text))).status, 'ok');
+  await approveDeletion(guarded, String(source.source_id));
+  assert.equal((await guarded.purgeDue(scope)).status, 'ok');
+  assert.equal(fs.existsSync(path.join(artifacts.root, String(answer.artifact_id) + '.blob')), false);
+  enabled = true;
+  assert.equal((await guarded.answers.get(fresh, String(answer.artifact_id))).status, 'denied');
+  assert.equal((await guarded.get(fresh, String(source.source_id), String(source.revision_id), 0)).status, 'denied');
+});
+test('S02 rollback: a retrieval switch closed during disclosure returns no private content', async () => {
+  let enabled = true;
+  await imported(note('switch-race', 'SwitchRaceCanary private note.'));
+  const guarded = new KnowledgeStore(
+    store.database,
+    artifacts,
+    {
+      beforeDisclosure: async () => {
+        enabled = false;
+      },
+    },
+    { retrievalEnabled: () => enabled },
+  );
+  const result = await guarded.search({ ...context, generation: randomUUID() }, { query: 'SwitchRaceCanary' });
+  assert.equal(result.status, 'unavailable');
+  assert.equal(JSON.stringify(result).includes('SwitchRaceCanary'), false);
+});

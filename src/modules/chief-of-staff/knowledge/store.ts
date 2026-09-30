@@ -60,19 +60,22 @@ const candidateJoin = `FROM cos.sources s JOIN cos.source_revisions r ON r.scope
 export class KnowledgeStore {
   readonly retentionMs: number;
   readonly answers: KnowledgeAnswers;
+  readonly retrievalEnabled: () => boolean;
   constructor(
     readonly database: BoundedDatabase,
     readonly artifacts: KnowledgeArtifacts,
     readonly hooks: { afterPublication?(): Promise<void>; beforeDisclosure?(): Promise<void> } & PurgeHooks &
       AnswerHooks = {},
-    options: { retentionMs?: number } = {},
+    options: { retentionMs?: number; retrievalEnabled?(): boolean } = {},
   ) {
+    this.retrievalEnabled = options.retrievalEnabled ?? (() => true);
     this.answers = new KnowledgeAnswers({
       artifacts,
       hooks,
       transaction: (operation, mutation) => this.transaction(operation, mutation),
       exclusive: (operation) => this.exclusive(operation),
       current: (client, context) => this.current(client, context),
+      retrievalEnabled: this.retrievalEnabled,
     });
     this.retentionMs = options.retentionMs ?? 30 * 24 * 60 * 60 * 1000;
     if (!Number.isSafeInteger(this.retentionMs) || this.retentionMs < 0 || this.retentionMs > 365 * 24 * 60 * 60 * 1000)
@@ -133,6 +136,7 @@ export class KnowledgeStore {
   }
   /** Trusted owner setup/import only. Paths and processing policy are never accepted through model RPC. */
   async importSource(context: Context, requestId: string, input: ImportSource): Promise<Result> {
+    if (!this.retrievalEnabled()) return { status: 'unavailable' };
     if (
       !uuid.test(requestId) ||
       !input ||
@@ -160,6 +164,7 @@ export class KnowledgeStore {
     });
     if (access.status !== 'ok') return access;
     return this.exclusive(async (lease) => {
+      if (!this.retrievalEnabled()) return { status: 'unavailable' };
       const inspected = this.artifacts.inspect(context.scopeId, input.filename, lease);
       const eligible = await this.transaction(async (client) => {
         await client.query('SELECT pg_advisory_xact_lock(73101004)');
@@ -171,11 +176,13 @@ export class KnowledgeStore {
         return { status: deleted.rowCount ? 'conflict' : 'ok' };
       });
       if (eligible.status !== 'ok') return eligible;
+      if (!this.retrievalEnabled()) return { status: 'unavailable' };
       const captured = this.artifacts.capture(context.scopeId, input.filename, lease, inspected.digest);
       await this.hooks.afterPublication?.();
       const hash = digest({ method: 'cos_source_import', input, content: captured.digest });
       const result = await this.transaction(async (client) => {
         await client.query('SELECT pg_advisory_xact_lock(73101004)');
+        if (!this.retrievalEnabled()) return { status: 'unavailable' };
         if (!(await authorised(client, context, true))) return { status: 'denied' };
         const inserted = await client.query(
           `INSERT INTO cos.operations(session_id,request_id,scope_id,method,payload_hash)
@@ -342,9 +349,9 @@ export class KnowledgeStore {
     const invalid = await client.query(
       `SELECT 1 FROM cos.evidence_refs e JOIN cos.sources s ON s.scope_id=e.scope_id AND s.id=e.source_id
       WHERE e.scope_id=$1 AND e.session_id=$2 AND e.context_generation=$3 AND
-      (s.version<>e.source_version OR s.current_revision_id<>e.revision_id OR s.status NOT IN ('current','stale')
+      (NOT $5::boolean OR s.version<>e.source_version OR s.current_revision_id<>e.revision_id OR s.status NOT IN ('current','stale')
         OR NOT $4=ANY(s.processing_providers) OR e.processing_provider<>$4 OR EXISTS(SELECT 1 FROM cos.revocation_tombstones t WHERE t.scope_id=s.scope_id AND t.source_id=s.id)) LIMIT 1`,
-      [context.scopeId, context.sessionId, context.generation, context.provider],
+      [context.scopeId, context.sessionId, context.generation, context.provider, this.retrievalEnabled()],
     );
     return !invalid.rowCount;
   }
@@ -380,6 +387,7 @@ export class KnowledgeStore {
     );
   }
   async search(context: KnowledgeContext, input: Search): Promise<Result> {
+    if (!this.retrievalEnabled()) return { status: 'unavailable' };
     if (
       typeof input?.query !== 'string' ||
       input.query.length > 400 ||
@@ -418,6 +426,7 @@ export class KnowledgeStore {
     return this.disclose(context, selected.items as Candidate[]);
   }
   async get(context: KnowledgeContext, sourceId: string, revisionId: string, ordinal: number): Promise<Result> {
+    if (!this.retrievalEnabled()) return { status: 'unavailable' };
     if (
       !idPattern.test(sourceId) ||
       !uuid.test(revisionId) ||
@@ -443,6 +452,7 @@ export class KnowledgeStore {
     return this.disclose(context, selected.items as Candidate[]);
   }
   private async disclose(context: KnowledgeContext, candidates: Candidate[]): Promise<Result> {
+    if (!this.retrievalEnabled()) return { status: 'unavailable' };
     try {
       for (const row of candidates) {
         const text = this.artifacts.read(row.artifact_id, row.revision_digest);
@@ -460,6 +470,7 @@ export class KnowledgeStore {
       return { status: 'unavailable' };
     }
     const result = await this.transaction(async (client) => {
+      if (!this.retrievalEnabled()) return { status: 'unavailable' };
       if (!(await this.current(client, context))) return { status: 'denied' };
       const items: Evidence[] = [];
       for (const row of candidates) {
@@ -493,6 +504,7 @@ export class KnowledgeStore {
         const { artifact_id: _privatePath, ...safe } = row;
         items.push({ ...safe, evidence_id: ref.id, locator_format: 'normalized-utf8-lines/v1' });
       }
+      if (!this.retrievalEnabled()) return { status: 'unavailable' };
       return {
         status: 'ok',
         items,
