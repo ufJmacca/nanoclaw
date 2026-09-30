@@ -24,6 +24,7 @@ export function extractChunks(text: string): TextChunk[] {
     heading = '',
     selected: string[] = [];
   const flush = () => {
+    if (selected.length && chunks.length >= 512) throw new Error('source_too_many_chunks');
     if (selected.length)
       chunks.push({ text: selected.join('\n'), startLine: start + 1, endLine: start + selected.length, heading });
     selected = [];

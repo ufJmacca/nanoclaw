@@ -37,6 +37,11 @@ describe('S02 deterministic admitted text', () => {
   it('S02-T02: a long line is rejected rather than inventing a truncated line citation', () => {
     expect(() => extractChunks('a'.repeat(2001))).toThrow('source_line_too_long');
   });
+  it('bounds heading-driven chunk expansion before indexing', () => {
+    expect(() => extractChunks(Array.from({ length: 513 }, (_, index) => '# Heading ' + index).join('\n'))).toThrow(
+      'source_too_many_chunks',
+    );
+  });
   it('preserves UTF-8, normalizes line endings and bounds each chunk', () => {
     const text = decodeSource(Buffer.from('\ufeff# Status\r\nCafé ✓\r\n'));
     expect(text).toBe('# Status\nCafé ✓\n');
