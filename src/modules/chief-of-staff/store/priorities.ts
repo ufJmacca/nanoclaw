@@ -1,5 +1,6 @@
-import type { Context, Change, Result } from '../domain/contracts.js';
-import { digest, validChange } from '../domain/contracts.js';
+import type { Context, ProposalChange, Result } from '../domain/contracts.js';
+import { digest, validProposalChange, validSourceChange } from '../domain/contracts.js';
+import type { KnowledgeStore } from '../knowledge/store.js';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { PoolClient } from 'pg';
 import { BoundedDatabase, DatabaseUnavailable } from './client.js';
@@ -31,7 +32,10 @@ async function event(
 }
 
 export class PriorityStore {
-  constructor(readonly database: BoundedDatabase) {}
+  constructor(
+    readonly database: BoundedDatabase,
+    readonly knowledge?: KnowledgeStore,
+  ) {}
   /** Trusted setup only; deliberately absent from the agent RPC method table. */
   async bindScope(binding: CosBinding): Promise<Result> {
     return this.transaction(async (client) => {
@@ -93,15 +97,16 @@ export class PriorityStore {
     }
   }
 
-  async propose(context: Context, requestId: string, change: Change): Promise<Result> {
-    if (!uuid.test(requestId) || !validChange(change)) return { status: 'denied' };
-    const hash = digest({ method: 'cos_change_propose', change });
+  async propose(context: Context, requestId: string, change: ProposalChange): Promise<Result> {
+    if (!uuid.test(requestId) || !validProposalChange(change)) return { status: 'denied' };
+    const method = validSourceChange(change) ? 'cos_source_change_propose' : 'cos_change_propose';
+    const hash = digest({ method, change });
     const result = await this.transaction(async (client) => {
       if (!(await authorised(client, context))) return { status: 'denied' };
       const inserted = await client.query(
         `INSERT INTO cos.operations(session_id,request_id,scope_id,method,payload_hash)
-        VALUES($1,$2,$3,'cos_change_propose',$4) ON CONFLICT DO NOTHING RETURNING request_id`,
-        [context.sessionId, requestId, context.scopeId, hash],
+        VALUES($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING RETURNING request_id`,
+        [context.sessionId, requestId, context.scopeId, method, hash],
       );
       if (inserted.rowCount === 0) {
         // Unique insertion waits for the original, even when its commit acknowledgement was lost.
@@ -113,6 +118,18 @@ export class PriorityStore {
         ).rows[0];
         if (existing?.scope_id !== context.scopeId || existing?.payload_hash !== hash) return { status: 'conflict' };
         return existing.result ?? { status: 'pending', request_id: requestId };
+      }
+      if (
+        validSourceChange(change) &&
+        (!this.knowledge || !(await this.knowledge.validateChange(client, context.scopeId, change)))
+      ) {
+        const receipt: Result = { status: 'denied' };
+        await client.query('UPDATE cos.operations SET result=$3 WHERE session_id=$1 AND request_id=$2', [
+          context.sessionId,
+          requestId,
+          JSON.stringify(receipt),
+        ]);
+        return receipt;
       }
       const id = randomUUID();
       const token = randomBytes(24).toString('base64url');
@@ -218,8 +235,24 @@ export class PriorityStore {
       if (!proposal || !['approved', 'applied', 'conflict'].includes(proposal.state)) return { status: 'denied' };
       if (proposal.state === 'applied') return { status: 'ok', record_id: proposal.applied_record_id };
       if (proposal.state === 'conflict') return { status: 'conflict' };
-      const change = proposal.change as Change;
-      if (!validChange(change) || digest(change) !== proposal.payload_hash) return { status: 'denied' };
+      const change = proposal.change as ProposalChange;
+      if (!validProposalChange(change) || digest(change) !== proposal.payload_hash) return { status: 'denied' };
+      if (validSourceChange(change)) {
+        if (!this.knowledge) return { status: 'unavailable' };
+        const result = await this.knowledge.applyApproved(client, scopeId, proposalId, change);
+        if (!['ok', 'conflict'].includes(result.status)) return result;
+        const changed = result.status === 'ok';
+        await client.query(
+          'UPDATE cos.proposals SET state=$2,applied_record_id=$3,updated_at=clock_timestamp() WHERE id=$1',
+          [proposalId, changed ? 'applied' : 'conflict', changed ? change.source_id : null],
+        );
+        await client.query('UPDATE cos.outbox SET delivered_at=clock_timestamp() WHERE id=$1', ['apply-' + proposalId]);
+        await event(client, scopeId, changed ? 'applied' : 'conflict', proposalId, {
+          owner_id: proposal.owner_id,
+          ingress_id: proposal.decision_ingress_id,
+        });
+        return result;
+      }
       const recordId = change.record_id ?? randomUUID();
       const provenance = {
         proposal_id: proposalId,

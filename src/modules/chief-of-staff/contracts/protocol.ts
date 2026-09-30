@@ -18,7 +18,13 @@ export function canonical(value: unknown): string {
   return JSON.stringify(value);
 }
 export const digest = (value: unknown): string => createHash('sha256').update(canonical(value)).digest('hex');
-export type CosMethod = 'cos_context_get' | 'cos_change_propose' | 'cos_request_status';
+export type CosMethod =
+  | 'cos_context_get'
+  | 'cos_change_propose'
+  | 'cos_request_status'
+  | 'cos_knowledge_search'
+  | 'cos_source_get'
+  | 'cos_source_change_propose';
 export type CosRequest = {
   protocol: typeof COS_PROTOCOL;
   request_id: string;
@@ -55,7 +61,59 @@ export function validRequest(value: unknown): value is CosRequest {
       uuid.test(value.params.request_id)
     );
   if (value.method === 'cos_change_propose') return keys(value.params, ['change']) && validChange(value.params.change);
+  if (value.method === 'cos_source_change_propose')
+    return keys(value.params, ['change']) && validSourceChange(value.params.change);
+  const identifier = (id: unknown) => typeof id === 'string' && /^[a-zA-Z0-9_-]{1,128}$/.test(id);
+  if (value.method === 'cos_knowledge_search')
+    return (
+      keys(value.params, ['query', 'limit', 'offset', 'source_id', 'project_id']) &&
+      typeof value.params.query === 'string' &&
+      value.params.query.length <= 400 &&
+      (value.params.limit === undefined ||
+        (Number.isInteger(value.params.limit) && Number(value.params.limit) >= 1 && Number(value.params.limit) <= 5)) &&
+      (value.params.offset === undefined ||
+        (Number.isInteger(value.params.offset) &&
+          Number(value.params.offset) >= 0 &&
+          Number(value.params.offset) <= 10000)) &&
+      (value.params.source_id === undefined || identifier(value.params.source_id)) &&
+      (value.params.project_id === undefined || identifier(value.params.project_id))
+    );
+  if (value.method === 'cos_source_get')
+    return (
+      keys(value.params, ['source_id', 'revision_id', 'ordinal']) &&
+      identifier(value.params.source_id) &&
+      typeof value.params.revision_id === 'string' &&
+      uuid.test(value.params.revision_id) &&
+      Number.isInteger(value.params.ordinal) &&
+      Number(value.params.ordinal) >= 0 &&
+      Number(value.params.ordinal) <= 1000000
+    );
   return false;
+}
+
+export type SourceChange = {
+  kind: 'source_revoke' | 'source_delete';
+  source_id: string;
+  expected_version: number;
+  reason: string;
+};
+export function validSourceChange(value: unknown): value is SourceChange {
+  return (
+    object(value) &&
+    keys(value, ['kind', 'source_id', 'expected_version', 'reason']) &&
+    ['source_revoke', 'source_delete'].includes(String(value.kind)) &&
+    typeof value.source_id === 'string' &&
+    /^[a-zA-Z0-9_-]{1,128}$/.test(value.source_id) &&
+    Number.isSafeInteger(value.expected_version) &&
+    Number(value.expected_version) > 0 &&
+    typeof value.reason === 'string' &&
+    value.reason.trim().length > 0 &&
+    value.reason.length <= 2000
+  );
+}
+export type ProposalChange = Change | SourceChange;
+export function validProposalChange(value: unknown): value is ProposalChange {
+  return validChange(value) || validSourceChange(value);
 }
 
 export type CosResponse = {

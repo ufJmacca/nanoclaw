@@ -4,8 +4,9 @@ import type { Session } from '../../../types.js';
 import type { Context } from '../domain/contracts.js';
 import { digest } from '../domain/contracts.js';
 import { COS_PROTOCOL, validRequest, validResponse, type CosResponse } from '../contracts/protocol.js';
-import type { Change, Result } from '../domain/contracts.js';
+import type { Change, SourceChange, Result } from '../domain/contracts.js';
 import type { PriorityStore } from '../store/priorities.js';
+import type { KnowledgeStore, KnowledgeContext } from '../knowledge/store.js';
 
 export function ensureRpcSchema(db: Database.Database): void {
   db.exec(`CREATE TABLE IF NOT EXISTS cos_rpc_responses (
@@ -16,6 +17,8 @@ export function ensureRpcSchema(db: Database.Database): void {
 export function createRpcHandler(dependencies: {
   resolveContext(session: Session, db: Database.Database): Promise<Context | null>;
   store: PriorityStore;
+  knowledge?: KnowledgeStore;
+  resolveKnowledgeContext?(session: Session, context: Context, db: Database.Database): Promise<KnowledgeContext | null>;
 }): DeliveryActionHandler {
   return async (content, session, db) => {
     ensureRpcSchema(db);
@@ -30,12 +33,50 @@ export function createRpcHandler(dependencies: {
     let result: Result;
     try {
       const context = await dependencies.resolveContext(session, db);
+      const knowledgeContext =
+        context && dependencies.knowledge
+          ? ((await dependencies.resolveKnowledgeContext?.(session, context, db)) ?? null)
+          : null;
+      const access =
+        dependencies.knowledge && knowledgeContext ? await dependencies.knowledge.contextReady(knowledgeContext) : null;
       if (!context) result = { status: 'denied' };
+      else if (dependencies.knowledge && !knowledgeContext) result = { status: 'denied' };
+      else if (access && access.status !== 'ok') result = { status: access.status };
       else if (request.method === 'cos_context_get') result = await dependencies.store.context(context);
       else if (request.method === 'cos_change_propose')
         result = await dependencies.store.propose(context, request.request_id, request.params.change as Change);
-      else result = await dependencies.store.status(context, String(request.params.request_id));
-      if (result.status === 'ok' && !(await dependencies.resolveContext(session, db))) result = { status: 'denied' };
+      else if (request.method === 'cos_request_status')
+        result = await dependencies.store.status(context, String(request.params.request_id));
+      else if (!dependencies.knowledge || !knowledgeContext) result = { status: 'unavailable' };
+      else if (request.method === 'cos_knowledge_search')
+        result = await dependencies.knowledge.search(knowledgeContext, {
+          query: String(request.params.query),
+          limit: request.params.limit as number | undefined,
+          offset: request.params.offset as number | undefined,
+          sourceId: request.params.source_id as string | undefined,
+          projectId: request.params.project_id as string | undefined,
+        });
+      else if (request.method === 'cos_source_get')
+        result = await dependencies.knowledge.get(
+          knowledgeContext,
+          String(request.params.source_id),
+          String(request.params.revision_id),
+          Number(request.params.ordinal),
+        );
+      else
+        result = await dependencies.store.propose(context, request.request_id, request.params.change as SourceChange);
+      if (result.status === 'ok') {
+        const fresh = await dependencies.resolveContext(session, db);
+        if (!fresh || digest(fresh) !== digest(context)) result = { status: 'denied' };
+        else if (dependencies.knowledge) {
+          const current = await dependencies.resolveKnowledgeContext?.(session, fresh, db);
+          if (!current || digest(current) !== digest(knowledgeContext)) result = { status: 'denied' };
+          else {
+            const checked = await dependencies.knowledge.contextReady(current);
+            if (checked.status !== 'ok') result = { status: checked.status };
+          }
+        }
+      }
     } catch {
       result = { status: 'unavailable' };
     }

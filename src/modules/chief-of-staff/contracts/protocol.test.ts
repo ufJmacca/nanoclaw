@@ -14,6 +14,64 @@ describe('S01-T09 canonical bounded RPC contract', () => {
     );
   });
   it('accepts the versioned on-demand context request', () => expect(validRequest(request)).toBe(true));
+  it('S02 accepts bounded source retrieval and an exact owner-controlled revocation proposal', () => {
+    expect(
+      validRequest({
+        ...request,
+        method: 'cos_knowledge_search',
+        params: { query: 'Pilot Alpha', limit: 5, offset: 0 },
+      }),
+    ).toBe(true);
+    expect(
+      validRequest({
+        ...request,
+        method: 'cos_source_get',
+        params: { source_id: 'source-a', revision_id: request.request_id, ordinal: 0 },
+      }),
+    ).toBe(true);
+    expect(
+      validRequest({
+        ...request,
+        method: 'cos_source_change_propose',
+        params: {
+          change: {
+            kind: 'source_revoke',
+            source_id: 'source-a',
+            expected_version: 1,
+            reason: 'Owner withdrew access',
+          },
+        },
+      }),
+    ).toBe(true);
+  });
+  it.each([
+    { method: 'cos_knowledge_search', params: { query: 'Pilot', scope_id: 'foreign' } },
+    { method: 'cos_knowledge_search', params: { query: 'Pilot', provider: 'claude' } },
+    { method: 'cos_knowledge_search', params: { query: 'Pilot', limit: 6 } },
+    { method: 'cos_source_get', params: { source_id: '../private', revision_id: request.request_id, ordinal: 0 } },
+    {
+      method: 'cos_source_get',
+      params: { source_id: 'source-a', revision_id: request.request_id, ordinal: 0, generation: 'forged' },
+    },
+    {
+      method: 'cos_source_change_propose',
+      params: { change: { kind: 'source_delete', source_id: 'source-a', expected_version: 0, reason: 'bad version' } },
+    },
+    {
+      method: 'cos_source_change_propose',
+      params: {
+        change: {
+          kind: 'source_delete',
+          source_id: 'source-a',
+          expected_version: 1,
+          reason: 'bad authority',
+          approved: true,
+        },
+      },
+    },
+  ])('S02 rejects retrieval authority overrides and malformed source operations', (value) =>
+    expect(validRequest({ ...request, ...value })).toBe(false),
+  );
   it('rejects malformed change payloads at both wire endpoints', () => {
     expect(validRequest({ ...request, method: 'cos_change_propose', params: { change: { kind: 'goal' } } })).toBe(
       false,

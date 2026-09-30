@@ -1,4 +1,4 @@
-import type { Context, Result } from '../domain/contracts.js';
+import type { Context, Result, SourceChange } from '../domain/contracts.js';
 import { digest } from '../domain/contracts.js';
 import { randomUUID } from 'node:crypto';
 import type { PoolClient } from 'pg';
@@ -51,11 +51,17 @@ const candidateJoin = `FROM cos.sources s JOIN cos.source_revisions r ON r.scope
   WHERE s.scope_id=$1 AND s.status IN ('current','stale') AND $2=ANY(s.processing_providers)
   AND a.lifecycle='published' AND NOT EXISTS(SELECT 1 FROM cos.revocation_tombstones t WHERE t.scope_id=s.scope_id AND t.source_id=s.id)`;
 export class KnowledgeStore {
+  readonly retentionMs: number;
   constructor(
     readonly database: BoundedDatabase,
     readonly artifacts: KnowledgeArtifacts,
     readonly hooks: { afterPublication?(): Promise<void>; beforeDisclosure?(): Promise<void> } = {},
-  ) {}
+    options: { retentionMs?: number } = {},
+  ) {
+    this.retentionMs = options.retentionMs ?? 30 * 24 * 60 * 60 * 1000;
+    if (!Number.isSafeInteger(this.retentionMs) || this.retentionMs < 0 || this.retentionMs > 365 * 24 * 60 * 60 * 1000)
+      throw new Error('invalid_knowledge_retention');
+  }
   private async transaction(operation: (client: PoolClient) => Promise<Result>, mutation = false): Promise<Result> {
     try {
       return await this.database.run(async (client) => {
@@ -405,5 +411,78 @@ export class KnowledgeStore {
       ).rows;
       return { status: 'ok', items };
     });
+  }
+  /** Called within the existing proposal transaction; source existence grants no approval. */
+  async validateChange(client: PoolClient, scopeId: string, change: SourceChange): Promise<boolean> {
+    return (
+      (
+        await client.query(
+          `SELECT s.id FROM cos.sources s WHERE s.scope_id=$1 AND s.id=$2 AND s.version=$3
+      AND (s.status<>'revoked' OR $4='source_delete') AND NOT EXISTS(SELECT 1 FROM cos.revocation_tombstones t
+        WHERE t.scope_id=s.scope_id AND t.source_id=s.id AND t.kind='delete')`,
+          [scopeId, change.source_id, change.expected_version, change.kind],
+        )
+      ).rowCount === 1
+    );
+  }
+  /** Existing outbox application owns the transaction and scope lock. Never exposed as RPC. */
+  async applyApproved(client: PoolClient, scopeId: string, proposalId: string, change: SourceChange): Promise<Result> {
+    const proposal = (
+      await client.query(
+        `SELECT p.owner_id,p.decision_ingress_id,p.payload_hash,p.change FROM cos.proposals p
+      JOIN cos.scopes s ON s.id=p.scope_id AND s.owner_id=p.owner_id AND s.status='active'
+      WHERE p.scope_id=$1 AND p.id=$2 AND p.state='approved' FOR UPDATE OF p`,
+        [scopeId, proposalId],
+      )
+    ).rows[0];
+    if (!proposal || proposal.payload_hash !== digest(change) || digest(proposal.change) !== digest(change))
+      return { status: 'denied' };
+    if (!(await this.validateChange(client, scopeId, change))) return { status: 'conflict' };
+    const updated = await client.query(
+      `UPDATE cos.sources SET status='revoked',processing_providers='{}',version=version+1,updated_at=clock_timestamp()
+      WHERE scope_id=$1 AND id=$2 AND version=$3 RETURNING version`,
+      [scopeId, change.source_id, change.expected_version],
+    );
+    if (!updated.rowCount) return { status: 'conflict' };
+    const version = updated.rows[0].version;
+    const provenance = {
+      proposal_id: proposalId,
+      owner_id: proposal.owner_id,
+      ingress_id: proposal.decision_ingress_id,
+      reason: change.reason,
+    };
+    // Access closes immediately. Deletion keeps a tombstone and allows a bounded retention window for local bytes.
+    await client.query(
+      `INSERT INTO cos.revocation_tombstones(scope_id,source_id,kind,version,provenance,purge_after)
+      VALUES($1,$2,$3,$4,$5,CASE WHEN $3='delete' THEN clock_timestamp()+$6*interval '1 millisecond' ELSE NULL END)
+      ON CONFLICT(scope_id,source_id) DO UPDATE SET kind=excluded.kind,version=excluded.version,provenance=excluded.provenance,
+        updated_at=clock_timestamp(),purge_after=excluded.purge_after`,
+      [
+        scopeId,
+        change.source_id,
+        change.kind === 'source_delete' ? 'delete' : 'revoke',
+        version,
+        JSON.stringify(provenance),
+        this.retentionMs,
+      ],
+    );
+    await client.query(
+      `UPDATE cos.artifacts a SET lifecycle='quarantined',version=version+1,updated_at=clock_timestamp()
+      WHERE a.scope_id=$1 AND a.kind<>'source' AND a.lifecycle='published' AND EXISTS(SELECT 1 FROM cos.derivation_links d
+        JOIN cos.evidence_refs e ON e.scope_id=d.scope_id AND e.id=d.evidence_id
+        WHERE d.scope_id=a.scope_id AND d.artifact_id=a.id AND e.source_id=$2)`,
+      [scopeId, change.source_id],
+    );
+    const payload = JSON.stringify({ source_id: change.source_id, source_version: version });
+    await client.query(
+      `INSERT INTO cos.outbox(id,scope_id,kind,payload) VALUES($1,$2,'knowledge_invalidate',$3) ON CONFLICT DO NOTHING`,
+      ['knowledge-proposal-' + proposalId, scopeId, payload],
+    );
+    if (change.kind === 'source_delete')
+      await client.query(
+        `INSERT INTO cos.outbox(id,scope_id,kind,payload) VALUES($1,$2,'knowledge_purge',$3) ON CONFLICT DO NOTHING`,
+        ['knowledge-purge-' + proposalId, scopeId, payload],
+      );
+    return { status: 'ok', source_id: change.source_id, version };
   }
 }

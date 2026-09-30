@@ -16,6 +16,7 @@ import {
   type Evidence,
 } from '../../modules/chief-of-staff/knowledge/store.js';
 import { connectionFault } from './connection-fault.js';
+import { PriorityStore } from '../../modules/chief-of-staff/store/priorities.js';
 
 const scope = 'knowledge-' + randomUUID(),
   other = scope + '-other';
@@ -40,6 +41,7 @@ const imported = async (input: ImportSource, ctx = context) => {
   return result;
 };
 before(async () => {
+  console.log(JSON.stringify({ fixtureRun: scope }));
   admin = await connectFixtureDatabase(process.env, 'migration');
   assert.equal((await admin.query('SELECT pg_try_advisory_lock(73101002) AS locked')).rows[0].locked, true);
   assert.equal(await migrate(admin, fixtureRuntimeUser()), 2);
@@ -67,6 +69,7 @@ after(async () => {
       'artifacts',
       'outbox',
       'operations',
+      'proposals',
       'events',
     ])
       await pool.query(`DELETE FROM cos.${table} WHERE scope_id=ANY($1)`, [[scope, other]]);
@@ -257,5 +260,190 @@ test('S02-T03: concurrent corrections honour the reviewed source version and pre
     (await pool.query('SELECT count(*)::int AS n FROM cos.source_revisions WHERE source_id=$1', [a.source_id])).rows[0]
       .n,
     2,
+  );
+});
+test('S02-T06: source revocation reuses exact owner approval, fences context and quarantines derivatives', async () => {
+  const a = await imported(note('approval-revoke', 'ApprovalRevokeCanary private source.')),
+    ctx = { ...context, generation: randomUUID() };
+  const read = await store.search(ctx, { query: 'ApprovalRevokeCanary' });
+  assert.equal(read.status, 'ok');
+  const evidence = (read.items as Evidence[])[0],
+    artifactId = 'answer-' + randomUUID();
+  await pool.query(
+    "INSERT INTO cos.artifacts(id,scope_id,kind,digest,byte_length,lifecycle,provenance) VALUES($1,$2,'answer',$3,0,'published','{}')",
+    [artifactId, scope, 'a'.repeat(64)],
+  );
+  await pool.query('INSERT INTO cos.derivation_links(scope_id,artifact_id,evidence_id) VALUES($1,$2,$3)', [
+    scope,
+    artifactId,
+    evidence.evidence_id,
+  ]);
+  const priorities = new PriorityStore(store.database, store);
+  const request = randomUUID(),
+    change = {
+      kind: 'source_revoke' as const,
+      source_id: String(a.source_id),
+      expected_version: 1,
+      reason: 'Owner withdrew the selected source',
+    };
+  const proposed = await priorities.propose(context, request, change);
+  assert.equal(proposed.status, 'ok');
+  assert.deepEqual(await priorities.propose(context, request, change), proposed);
+  assert.equal((await store.get(ctx, String(a.source_id), String(a.revision_id), 0)).status, 'ok');
+  assert.equal(
+    (
+      await priorities.decide(
+        { ...context, ownerId: 'foreign', ingressId: randomUUID() },
+        String(proposed.proposal_id),
+        String(proposed.confirmation_token),
+        'approve',
+      )
+    ).status,
+    'denied',
+  );
+  assert.equal(
+    (
+      await priorities.decide(
+        { ...context, ingressId: randomUUID() },
+        String(proposed.proposal_id),
+        String(proposed.confirmation_token),
+        'approve',
+      )
+    ).status,
+    'ok',
+  );
+  assert.equal((await priorities.apply(scope, String(proposed.proposal_id))).status, 'ok');
+  assert.equal((await priorities.apply(scope, String(proposed.proposal_id))).status, 'ok');
+  assert.deepEqual(await priorities.propose(context, request, change), proposed);
+  assert.equal((await store.contextReady(ctx)).status, 'denied');
+  assert.equal(
+    (await store.get({ ...ctx, generation: randomUUID() }, String(a.source_id), String(a.revision_id), 0)).status,
+    'denied',
+  );
+  assert.equal(
+    (await pool.query('SELECT lifecycle FROM cos.artifacts WHERE id=$1', [artifactId])).rows[0].lifecycle,
+    'quarantined',
+  );
+  assert.equal((await pool.query('SELECT version FROM cos.sources WHERE id=$1', [a.source_id])).rows[0].version, 2);
+  assert.equal(
+    (
+      await pool.query('SELECT kind FROM cos.revocation_tombstones WHERE scope_id=$1 AND source_id=$2', [
+        scope,
+        a.source_id,
+      ])
+    ).rows[0].kind,
+    'revoke',
+  );
+});
+test('S02-T06: deletion requires the exact current owner proposal and preserves its retention deadline on replay', async () => {
+  const a = await imported(note('approval-delete', 'DeleteCanary private source.'));
+  const retentionMs = 7200000;
+  const knowledge = new KnowledgeStore(store.database, artifacts, {}, { retentionMs });
+  const priorities = new PriorityStore(store.database, knowledge);
+  const change = {
+    kind: 'source_delete' as const,
+    source_id: String(a.source_id),
+    expected_version: 1,
+    reason: 'Remove the selected synthetic note',
+  };
+  assert.equal(
+    (await priorities.propose({ ...context, scopeId: other, agentGroupId: other }, randomUUID(), change)).status,
+    'denied',
+  );
+  const rejected = await priorities.propose(context, randomUUID(), change);
+  assert.equal(rejected.status, 'ok');
+  assert.equal(
+    (
+      await priorities.decide(
+        { ...context, ingressId: randomUUID() },
+        String(rejected.proposal_id),
+        String(rejected.confirmation_token),
+        'reject',
+      )
+    ).status,
+    'ok',
+  );
+  assert.equal((await priorities.apply(scope, String(rejected.proposal_id))).status, 'denied');
+  const request = randomUUID(),
+    proposal = await priorities.propose(context, request, change);
+  assert.equal(proposal.status, 'ok');
+  assert.equal((await priorities.apply(scope, String(proposal.proposal_id))).status, 'denied');
+  assert.equal(
+    (
+      await priorities.decide(
+        { ...context, ingressId: randomUUID() },
+        String(proposal.proposal_id),
+        String(proposal.confirmation_token),
+        'approve',
+      )
+    ).status,
+    'ok',
+  );
+  assert.equal((await priorities.apply(scope, String(proposal.proposal_id))).status, 'ok');
+  const tombstone = (
+    await pool.query(
+      'SELECT kind,purge_after,EXTRACT(EPOCH FROM (purge_after-created_at))*1000 AS retention FROM cos.revocation_tombstones WHERE scope_id=$1 AND source_id=$2',
+      [scope, a.source_id],
+    )
+  ).rows[0];
+  assert.equal(tombstone.kind, 'delete');
+  assert.ok(Math.abs(Number(tombstone.retention) - retentionMs) < 1000);
+  assert.equal((await priorities.apply(scope, String(proposal.proposal_id))).status, 'ok');
+  assert.deepEqual(await priorities.propose(context, request, change), proposal);
+  assert.equal(
+    (
+      await pool.query('SELECT purge_after FROM cos.revocation_tombstones WHERE scope_id=$1 AND source_id=$2', [
+        scope,
+        a.source_id,
+      ])
+    ).rows[0].purge_after.toISOString(),
+    tombstone.purge_after.toISOString(),
+  );
+  assert.equal(
+    (
+      await pool.query(
+        "SELECT count(*)::int AS n FROM cos.outbox WHERE scope_id=$1 AND kind='knowledge_purge' AND payload->>'source_id'=$2",
+        [scope, a.source_id],
+      )
+    ).rows[0].n,
+    1,
+  );
+  assert.equal(
+    (await store.get({ ...context, generation: randomUUID() }, String(a.source_id), String(a.revision_id), 0)).status,
+    'denied',
+  );
+  assert.equal(
+    (await priorities.propose(context, randomUUID(), { ...change, kind: 'source_revoke', expected_version: 2 })).status,
+    'denied',
+  );
+});
+test('S02-T06: a correction after preview makes the approved source action conflict without removing the new revision', async () => {
+  const a = await imported(note('stale-approval', 'StaleApprovalCanary original note.'));
+  const priorities = new PriorityStore(store.database, store);
+  const proposal = await priorities.propose(context, randomUUID(), {
+    kind: 'source_revoke',
+    source_id: String(a.source_id),
+    expected_version: 1,
+    reason: 'Revoke the reviewed version',
+  });
+  assert.equal(proposal.status, 'ok');
+  const revised = await imported(note('stale-approval', 'StaleApprovalCanary corrected note.', { expectedVersion: 1 }));
+  assert.equal(
+    (
+      await priorities.decide(
+        { ...context, ingressId: randomUUID() },
+        String(proposal.proposal_id),
+        String(proposal.confirmation_token),
+        'approve',
+      )
+    ).status,
+    'ok',
+  );
+  assert.equal((await priorities.apply(scope, String(proposal.proposal_id))).status, 'conflict');
+  assert.equal((await priorities.apply(scope, String(proposal.proposal_id))).status, 'conflict');
+  assert.equal(
+    (await store.get({ ...context, generation: randomUUID() }, String(a.source_id), String(revised.revision_id), 0))
+      .status,
+    'ok',
   );
 });
