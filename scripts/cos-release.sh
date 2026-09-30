@@ -152,7 +152,10 @@ isolation_checks() {
       --mount type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock \
       -e "COS_FIXTURE_IMAGE=$worker" -e "COS_FIXTURE_HOST_ROOT=$volume_root" \
       -e COS_SMOKE_ROOT=/fixture/s -e "COS_SMOKE_HOST_ROOT=$volume_root/s" \
-      "$host_image" --test /release/dist/contracts/chief-of-staff/native-smoke.integration.js || return
+      -e COS_SUBSCRIPTION_ROOT=/fixture/s -e "COS_SUBSCRIPTION_HOST_ROOT=$volume_root/s" \
+      "$host_image" --test --test-concurrency=1 \
+      /release/dist/contracts/chief-of-staff/native-smoke.integration.js \
+      /release/dist/contracts/chief-of-staff/subscription-native.integration.js || return
   done
 }
 check host_image host_checks

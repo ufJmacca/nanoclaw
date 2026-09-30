@@ -105,6 +105,8 @@ export function createSubscriptionNativeCheck(options: {
   assertAuthority(): void;
   /** Trusted test seam; production invokes only the local Docker engine. */
   run?: Run;
+  /** Trusted offline test seam; production always uses fixed public-destination egress. */
+  egress?: typeof startSubscriptionEgress;
 }) {
   return async (directory: string, mode: Mode): Promise<void> => {
     options.assertAuthority();
@@ -117,7 +119,7 @@ export function createSubscriptionNativeCheck(options: {
     const run = options.run ?? docker;
     try {
       const socketPath = path.join(transport, 'auth.sock');
-      gateway = await startSubscriptionEgress({
+      gateway = await (options.egress ?? startSubscriptionEgress)({
         socketPath,
         role: 'auth',
         authorize: async () => {
