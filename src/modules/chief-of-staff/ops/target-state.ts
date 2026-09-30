@@ -43,11 +43,13 @@ function privateRoot(root: string): void {
   )
     throw new Error('unsafe_target_state');
 }
-export function readPrivate<T>(file: string): T {
+export function readPrivate<T>(file: string, maximumBytes = 65536): T {
+  if (!Number.isSafeInteger(maximumBytes) || maximumBytes < 1 || maximumBytes > 1024 * 1024)
+    throw new Error('unsafe_target_state');
   const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
   try {
     const stat = fs.fstatSync(fd);
-    if (!stat.isFile() || (stat.mode & 0o777) !== 0o600 || stat.uid !== process.getuid?.() || stat.size > 65536)
+    if (!stat.isFile() || (stat.mode & 0o777) !== 0o600 || stat.uid !== process.getuid?.() || stat.size > maximumBytes)
       throw new Error('unsafe_target_state');
     return JSON.parse(fs.readFileSync(fd, 'utf8')) as T;
   } finally {

@@ -1,6 +1,54 @@
 import { expect, it } from 'vitest';
-import { completeLocalRelease, selectTestEnvironment, selectRuntimeEnvironment } from './mac-release.js';
+import {
+  completeLocalRelease,
+  selectTestEnvironment,
+  selectRuntimeEnvironment,
+  checkpointLocalExecution,
+  readLocalExecution,
+} from './mac-release.js';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { readPrivate } from './target-state.js';
 import { fixtureRelease } from '../../../contracts/chief-of-staff/release-fixture.js';
+
+it('preserves a large programme ledger while accepting an active S01 alignment correction', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-release-ledger-'));
+  try {
+    const ledger = {
+      active_slice: 'S01',
+      slices: [
+        { id: 'S01', implementation_status: 'alignment_in_progress' },
+        { id: 'S02', implementation_status: 'not_started' },
+      ],
+      prior_evidence: 'x'.repeat(70000),
+      unknown: { preserved: true },
+    };
+    const file = path.join(root, 'execution.json');
+    fs.writeFileSync(file, JSON.stringify(ledger), { mode: 0o600 });
+    expect(readLocalExecution(root, true)).toEqual(ledger);
+    checkpointLocalExecution(root, { release_status: 'local_checks_pending' });
+    expect(JSON.parse(fs.readFileSync(file, 'utf8'))).toMatchObject({
+      ...ledger,
+      slices: [
+        { id: 'S01', implementation_status: 'alignment_in_progress', release_status: 'local_checks_pending' },
+        ledger.slices[1],
+      ],
+    });
+    expect(() => readPrivate(file)).toThrow('unsafe_target_state');
+    fs.chmodSync(file, 0o644);
+    expect(() => readLocalExecution(root)).toThrow('unsafe_target_state');
+    fs.chmodSync(file, 0o600);
+    fs.writeFileSync(file, JSON.stringify({ ...ledger, slices: [{ id: 'S01', implementation_status: 'complete' }] }));
+    expect(() => readLocalExecution(root, true)).toThrow('active_slice_required');
+    fs.writeFileSync(file, JSON.stringify({ ...ledger, active_slice: 'S02' }));
+    expect(() => readLocalExecution(root, true)).toThrow('active_slice_required');
+    fs.writeFileSync(file, JSON.stringify({ ...ledger, prior_evidence: 'x'.repeat(1024 * 1024) }));
+    expect(() => readLocalExecution(root)).toThrow('unsafe_target_state');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
 
 it('cannot produce a transferable manifest from failed, missing or differently built checks', () => {
   const manifest = fixtureRelease();

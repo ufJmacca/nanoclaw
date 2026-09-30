@@ -2,11 +2,27 @@ import { validateReleaseManifest, type ReleaseManifest } from './release-manifes
 import path from 'node:path';
 import { readPrivate, writeAtomic } from './target-state.js';
 
+type LocalExecution = {
+  active_slice: string;
+  slices: Array<{ id: string; implementation_status?: string }>;
+};
+
+/** Programme history can outgrow a target receipt; retain its bounded private-file checks. */
+export function readLocalExecution(root: string, forRelease = false): LocalExecution {
+  const ledger = readPrivate<LocalExecution>(path.join(root, 'execution.json'), 1024 * 1024);
+  const slice = ledger.slices?.find((item) => item.id === 'S01');
+  if (
+    ledger.active_slice !== 'S01' ||
+    !slice ||
+    (forRelease && !['in_progress', 'alignment_in_progress'].includes(slice.implementation_status ?? ''))
+  )
+    throw new Error('active_slice_required');
+  return ledger;
+}
+
 /** Preserve unrelated slices and unknown ledger fields; target lifecycle authority stays on the Pi. */
 export function checkpointLocalExecution(root: string, patch: Record<string, unknown>): void {
-  const ledger = readPrivate<{ active_slice: string; slices: Array<{ id: string }> }>(
-    path.join(root, 'execution.json'),
-  );
+  const ledger = readLocalExecution(root);
   const slice = ledger.slices.find((item) => item.id === 'S01');
   if (ledger.active_slice !== 'S01' || !slice) throw new Error('active_slice_required');
   Object.assign(slice, patch, { checkpoint_at: new Date().toISOString() });

@@ -19,6 +19,7 @@ import {
   selectTestEnvironment,
   TEST_ENVIRONMENT_KEYS,
   checkpointLocalExecution,
+  readLocalExecution,
 } from './mac-release.js';
 import { imageConfigurations } from './image-archive.js';
 import { artifactHash, verifyReleaseBundle } from './release-artifacts.js';
@@ -73,14 +74,7 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
     const root = releaseRoot(id);
     if (fs.existsSync(path.join(root, 'plan.json'))) throw new Error('release_already_exists');
     const target = deploymentSettings(readPrivate(path.resolve('.cos-plan-state/deployment-target.json')));
-    const ledger = readPrivate<{ active_slice: string; slices: Array<{ id: string; implementation_status: string }> }>(
-      path.resolve('.cos-plan-state/execution.json'),
-    );
-    if (
-      ledger.active_slice !== 'S01' ||
-      ledger.slices.find((slice) => slice.id === 'S01')?.implementation_status !== 'in_progress'
-    )
-      throw new Error('active_slice_required');
+    readLocalExecution(path.resolve('.cos-plan-state'), true);
     const metadata = await prepareBuildContext(process.cwd(), commit, path.join(root, 'context'));
     const plan: Plan = {
       contract: 'cos-release/v1',
