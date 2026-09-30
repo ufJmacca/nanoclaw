@@ -11,7 +11,11 @@ import type { KnowledgeStore, KnowledgeContext } from '../knowledge/store.js';
 export function ensureRpcSchema(db: Database.Database): void {
   db.exec(`CREATE TABLE IF NOT EXISTS cos_rpc_responses (
     request_id TEXT NOT NULL, payload_hash TEXT NOT NULL, delivery_id TEXT NOT NULL, response TEXT NOT NULL,
-    updated_at TEXT NOT NULL, PRIMARY KEY(request_id,payload_hash,delivery_id))`);
+    updated_at TEXT NOT NULL, PRIMARY KEY(request_id,payload_hash,delivery_id));
+    CREATE TABLE IF NOT EXISTS cos_rpc_contexts (
+      request_id TEXT NOT NULL,payload_hash TEXT NOT NULL,delivery_id TEXT NOT NULL,
+      scope_id TEXT NOT NULL,session_id TEXT NOT NULL,generation TEXT NOT NULL,
+      PRIMARY KEY(request_id,payload_hash,delivery_id));`);
 }
 
 export function createRpcHandler(dependencies: {
@@ -31,12 +35,14 @@ export function createRpcHandler(dependencies: {
     )
       return;
     let result: Result;
+    let retainedContext: KnowledgeContext | null = null;
     try {
       const context = await dependencies.resolveContext(session, db);
       const knowledgeContext =
         context && dependencies.knowledge
           ? ((await dependencies.resolveKnowledgeContext?.(session, context, db)) ?? null)
           : null;
+      retainedContext = knowledgeContext;
       const access =
         dependencies.knowledge && knowledgeContext ? await dependencies.knowledge.contextReady(knowledgeContext) : null;
       if (!context) result = { status: 'denied' };
@@ -94,9 +100,26 @@ export function createRpcHandler(dependencies: {
     let response: CosResponse = { protocol: COS_PROTOCOL, request_id: request.request_id, status, result: safeResult };
     if (!validResponse(response, request.request_id))
       response = { protocol: COS_PROTOCOL, request_id: request.request_id, status: 'unavailable' };
-    db.prepare(
-      `INSERT INTO cos_rpc_responses(request_id,payload_hash,delivery_id,response,updated_at) VALUES(?,?,?,?,?)
-      ON CONFLICT(request_id,payload_hash,delivery_id) DO UPDATE SET response=excluded.response,updated_at=excluded.updated_at`,
-    ).run(request.request_id, digest(request), content.delivery_id, JSON.stringify(response), new Date().toISOString());
+    db.transaction(() => {
+      const hash = digest(request);
+      db.prepare(
+        `INSERT INTO cos_rpc_responses(request_id,payload_hash,delivery_id,response,updated_at) VALUES(?,?,?,?,?)
+        ON CONFLICT(request_id,payload_hash,delivery_id) DO UPDATE SET response=excluded.response,updated_at=excluded.updated_at`,
+      ).run(request.request_id, hash, content.delivery_id, JSON.stringify(response), new Date().toISOString());
+      db.prepare('DELETE FROM cos_rpc_contexts WHERE request_id=? AND payload_hash=? AND delivery_id=?').run(
+        request.request_id,
+        hash,
+        content.delivery_id,
+      );
+      if (retainedContext)
+        db.prepare('INSERT INTO cos_rpc_contexts VALUES(?,?,?,?,?,?)').run(
+          request.request_id,
+          hash,
+          content.delivery_id,
+          retainedContext.scopeId,
+          retainedContext.sessionId,
+          retainedContext.generation,
+        );
+    })();
   };
 }

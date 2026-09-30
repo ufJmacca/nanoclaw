@@ -75,6 +75,16 @@ it('accepts only a selected flat filename and explicit processing policy without
   expect(safeAdminError(new Error('unsupported_source: SECRET'))).toBe('unreachable');
 });
 
+it('accepts only a scoped due-purge command without bypassing retention', () => {
+  expect(parseAdminArguments(['source-purge', '--scope', 'fixture'])).toEqual({
+    command: 'source-purge',
+    scopeId: 'fixture',
+  });
+  expect(() => parseAdminArguments(['source-purge', '--scope', 'fixture', '--force', 'true'])).toThrow(
+    'invalid_admin_arguments',
+  );
+});
+
 it('reads only a bounded private regular manifest with no symbolic or hard links', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-source-manifest-'));
   const file = path.join(root, 'manifest.json');

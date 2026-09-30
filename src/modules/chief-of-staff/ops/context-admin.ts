@@ -232,9 +232,12 @@ export async function contextAdminCommand(
         assertAuthority();
       };
       await check();
-      if (isKnowledgeCommand(args))
+      if (isKnowledgeCommand(args)) {
+        if (args.command === 'source-purge') inbound = openInboundDb(binding.agentGroupId, binding.sessionId);
         return runKnowledgeAdmin({
           args,
+          db,
+          inbound,
           env,
           roots: {
             targetRoot: root,
@@ -245,6 +248,7 @@ export async function contextAdminCommand(
           check,
           assertAuthority,
         });
+      }
       const accountFingerprint = accountBinding(root);
       if (!accountFingerprint) throw new Error('subscription_account_binding_unavailable');
       const activationOptions = { root, db, binding, accountFingerprint, assertAuthority };

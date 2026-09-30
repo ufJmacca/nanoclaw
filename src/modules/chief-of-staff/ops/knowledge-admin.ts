@@ -1,6 +1,8 @@
 /** Owner-selected local setup inputs, never model RPC arguments. */
 import path from 'node:path';
 import fs from 'node:fs';
+import type Database from 'better-sqlite3';
+import { purgeRetiredContexts } from './conversation-purge.js';
 import { randomUUID } from 'node:crypto';
 import type { CosBinding } from '../../../cos-boundary.js';
 import type { ImportSource, InventoryPage } from '../knowledge/store.js';
@@ -10,11 +12,11 @@ import { connectCosHostStore } from '../host-store.js';
 export type KnowledgeAdminArguments =
   | { command: 'source-import'; scopeId: string; requestId: string; manifestFile: string }
   | { command: 'source-inventory'; scopeId: string; page: InventoryPage }
-  | { command: 'source-reconcile'; scopeId: string };
+  | { command: 'source-reconcile' | 'source-purge'; scopeId: string };
 const identifier = /^[a-zA-Z0-9_-]{1,128}$/;
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 export function isKnowledgeCommand(args: { command: string }): args is KnowledgeAdminArguments {
-  return ['source-import', 'source-inventory', 'source-reconcile'].includes(args.command);
+  return ['source-import', 'source-inventory', 'source-reconcile', 'source-purge'].includes(args.command);
 }
 export function parseKnowledgeArguments(args: string[]): KnowledgeAdminArguments {
   const values: Record<string, string> = {};
@@ -56,7 +58,7 @@ export function parseKnowledgeArguments(args: string[]): KnowledgeAdminArguments
     if (!validInventoryPage(page)) throw invalid();
     return { command: 'source-inventory', scopeId, page };
   }
-  return { command: 'source-reconcile', scopeId };
+  return { command: args[0] as 'source-reconcile' | 'source-purge', scopeId };
 }
 export function parseSourceImport(value: unknown): ImportSource {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('invalid_source_manifest');
@@ -124,6 +126,8 @@ export async function runKnowledgeAdmin(options: {
   env: NodeJS.ProcessEnv;
   roots: { targetRoot: string; installationRoot: string; dataRoot: string };
   binding: CosBinding;
+  db: Database.Database;
+  inbound?: Database.Database;
   check(): Promise<void>;
   assertAuthority(): void;
 }): Promise<Record<string, unknown>> {
@@ -131,10 +135,30 @@ export async function runKnowledgeAdmin(options: {
   if (args.scopeId !== binding.scopeId) throw new Error('context_binding_changed');
   await options.check();
   const input = args.command === 'source-import' ? readSourceManifest(args.manifestFile) : undefined;
-  const store = await connectCosHostStore(options.env, options.roots, () => {
-    options.assertAuthority();
-    return true;
-  });
+  const store = await connectCosHostStore(
+    options.env,
+    options.roots,
+    () => {
+      options.assertAuthority();
+      return true;
+    },
+    args.command === 'source-purge'
+      ? {
+          purgeContexts: async (job) => {
+            if (job.scopeId !== binding.scopeId || !options.inbound) throw new Error('context_binding_changed');
+            return purgeRetiredContexts({
+              root: options.roots.targetRoot,
+              db: options.db,
+              inbound: options.inbound,
+              binding,
+              contexts: job.contexts,
+              check: options.check,
+              assertAuthority: options.assertAuthority,
+            });
+          },
+        }
+      : {},
+  );
   try {
     await options.check();
     const knowledge = store.knowledge;
@@ -151,7 +175,12 @@ export async function runKnowledgeAdmin(options: {
     else if (args.command === 'source-inventory') result = await knowledge.inventory(context, args.page);
     else {
       const allowed = await knowledge.inventory(context, { limit: 1 });
-      result = allowed.status === 'ok' ? await knowledge.reconcileArtifacts() : { status: allowed.status };
+      result =
+        allowed.status === 'ok'
+          ? args.command === 'source-purge'
+            ? await knowledge.purgeDue(binding.scopeId)
+            : await knowledge.reconcileArtifacts()
+          : { status: allowed.status };
     }
     await options.check();
     return { ...result, scope_id: binding.scopeId, paused: true, live_model: 'not_invoked' };

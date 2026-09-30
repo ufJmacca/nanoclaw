@@ -390,3 +390,47 @@ it('source setup requires quiescence and private owner membership, and closes th
   ).rejects.toThrow('unsupported_source');
   expect(end).toHaveBeenCalledOnce();
 });
+it('the owner purge command supplies native ownership and cache cleanup only after guarded recovery', async () => {
+  const old = await contextAdminCommand({ command: 'context-prepare', scopeId: 'fixture' }, env, dependencies);
+  const generation = String(old.generation),
+    directory = state + '/conversations/' + generation;
+  fs.writeFileSync(directory + '/history.jsonl', 'DELETE_CANARY', { mode: 0o600 });
+  await contextAdminCommand(
+    { command: 'context-recover', scopeId: 'fixture', expectedGeneration: generation, recoveryId: randomUUID() },
+    env,
+    dependencies,
+  );
+  const native = new Database(central, { readonly: true });
+  const binding = JSON.parse(
+    (native.prepare('SELECT binding FROM cos_identity_boundaries').get() as { binding: string }).binding,
+  );
+  native.close();
+  const end = vi.fn(async () => {}),
+    purgeDue = vi.fn(async () => ({ status: 'ok' }));
+  vi.mocked(connectCosHostStore).mockImplementation(
+    async (_env, _roots, _admitted, retention) =>
+      ({
+        database: { pool: { end } },
+        knowledge: {
+          inventory: async () => ({ status: 'ok', items: [] }),
+          purgeDue: async (scope: string) => {
+            expect(scope).toBe('fixture');
+            expect(retention?.purgeContexts).toBeTypeOf('function');
+            const result = await retention!.purgeContexts!({
+              scopeId: scope,
+              sourceId: 'fixture-source',
+              contexts: [{ sessionId: binding.sessionId, generation }],
+            });
+            await purgeDue();
+            return result;
+          },
+        },
+      }) as unknown as PriorityStore,
+  );
+  const result = await contextAdminCommand({ command: 'source-purge', scopeId: 'fixture' }, env, dependencies);
+  expect(result).toMatchObject({ status: 'ok', paused: true, generations: 1, live_model: 'not_invoked' });
+  expect(fs.existsSync(directory)).toBe(false);
+  expect(fs.existsSync(state + '/context-recovery-backups')).toBe(true);
+  expect(purgeDue).toHaveBeenCalledOnce();
+  expect(end).toHaveBeenCalledOnce();
+});

@@ -139,6 +139,11 @@ describe('S02 knowledge RPC host authority', () => {
         JSON.parse((db.prepare('SELECT response FROM cos_rpc_responses').get() as { response: string }).response);
       await handler(content, {} as Session, db);
       expect(response()).toMatchObject({ status: 'ok', result: { text: 'private answer canary' } });
+      expect(db.prepare('SELECT scope_id,session_id,generation FROM cos_rpc_contexts').get()).toEqual({
+        scope_id: context.scopeId,
+        session_id: context.sessionId,
+        generation: knowledgeContext.generation,
+      });
       if (method === 'cos_answer_prepare')
         expect(knowledge.answers.prepare).toHaveBeenCalledWith(knowledgeContext, request.request_id, draft);
       else expect(knowledge.answers.get).toHaveBeenCalledWith(knowledgeContext, artifactId);

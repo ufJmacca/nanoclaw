@@ -24,11 +24,15 @@ import { initTestDb, closeDb } from '../../db/connection.js';
 import { createCosRuntime } from '../../modules/chief-of-staff/runtime.js';
 import { createRpcHandler } from '../../modules/chief-of-staff/bridge/rpc.js';
 import { resolveKnowledgeContext } from '../../modules/chief-of-staff/knowledge/context.js';
-import { ensureConversationSchema } from '../../modules/chief-of-staff/bridge/conversation-state.js';
+import {
+  createConversationState,
+  ensureConversationSchema,
+} from '../../modules/chief-of-staff/bridge/conversation-state.js';
 import { digest, type Change } from '../../modules/chief-of-staff/domain/contracts.js';
 import type { Session } from '../../types.js';
 import type { AnswerDraft } from '../../modules/chief-of-staff/knowledge/answers.js';
 import { INBOUND_SCHEMA, OUTBOUND_SCHEMA } from '../../db/schema.js';
+import { purgeRetiredContexts } from '../../modules/chief-of-staff/ops/conversation-purge.js';
 import { recoverConversation } from '../../modules/chief-of-staff/ops/conversation-recovery.js';
 import { issueActivation, rebindRecoveredActivation } from '../../modules/chief-of-staff/ops/model-activation.js';
 import {
@@ -271,10 +275,11 @@ test('S02-T03: concurrent corrections honour the reviewed source version and pre
     sourceKey: 'concurrent',
     expectedVersion: 1,
   });
-  const outcomes = await Promise.all([
-    store.importSource(context, randomUUID(), first),
-    store.importSource(context, randomUUID(), second),
-  ]);
+  const requests = [randomUUID(), randomUUID()],
+    inputs = [first, second];
+  const outcomes = await Promise.all(inputs.map((input, i) => store.importSource(context, requests[i], input)));
+  for (let i = 0; i < outcomes.length; i++)
+    if (outcomes[i].status === 'unavailable') outcomes[i] = await store.importSource(context, requests[i], inputs[i]);
   assert.deepEqual(outcomes.map((r) => r.status).sort(), ['conflict', 'ok']);
   assert.equal(
     (await pool.query('SELECT count(*)::int AS n FROM cos.source_revisions WHERE source_id=$1', [a.source_id])).rows[0]
@@ -760,6 +765,7 @@ async function approveDeletion(knowledge: KnowledgeStore, sourceId: string, expe
   assert.equal((await priorities.apply(scope, String(proposal.proposal_id))).status, 'ok');
   return String(proposal.proposal_id);
 }
+const fixtureNoNativeHistory = async () => ({ status: 'ok' as const });
 test('S02-T06: due deletion purges raw capture, full-text chunks and linked derivatives but retains the tombstone', async () => {
   const a = await imported(note('purge-source', 'PurgeSourceCanary private text.'));
   const read = await store.search({ ...context, generation: randomUUID() }, { query: 'PurgeSourceCanary' }),
@@ -778,7 +784,12 @@ test('S02-T06: due deletion purges raw capture, full-text chunks and linked deri
   ]);
   const sourceArtifact = (await pool.query('SELECT artifact_id FROM cos.source_revisions WHERE id=$1', [a.revision_id]))
     .rows[0].artifact_id;
-  const purge = new KnowledgeStore(store.database, artifacts, {}, { retentionMs: 0 });
+  const purge = new KnowledgeStore(
+    store.database,
+    artifacts,
+    { purgeContexts: fixtureNoNativeHistory },
+    { retentionMs: 0 },
+  );
   const proposal = await approveDeletion(purge, String(a.source_id));
   assert.equal(fs.existsSync(path.join(artifacts.root, sourceArtifact + '.blob')), true);
   assert.deepEqual(await purge.purgeDue(other), { status: 'ok', processed: 0 });
@@ -830,7 +841,12 @@ test('S02-T06: retention deadlines and other admitted references prevent prematu
     b = await imported(note('purge-shared-b', text));
   const artifactId = (await pool.query('SELECT artifact_id FROM cos.source_revisions WHERE id=$1', [a.revision_id]))
     .rows[0].artifact_id;
-  const purge = new KnowledgeStore(store.database, artifacts, {}, { retentionMs: 0 });
+  const purge = new KnowledgeStore(
+    store.database,
+    artifacts,
+    { purgeContexts: fixtureNoNativeHistory },
+    { retentionMs: 0 },
+  );
   await approveDeletion(purge, String(a.source_id));
   assert.equal((await purge.purgeDue(scope)).status, 'ok');
   assert.equal(fs.existsSync(path.join(artifacts.root, artifactId + '.blob')), true);
@@ -855,6 +871,7 @@ test('S02-T08: interrupted purge resumes from committed metadata and missing byt
     store.database,
     artifacts,
     {
+      purgeContexts: fixtureNoNativeHistory,
       afterPurgeUnlink: async () => {
         if (fail) throw new Error('fixture interrupted after unlink');
       },
@@ -890,6 +907,7 @@ test('S02-PG02: a database outage blocks purge before byte removal and reconcile
     database,
     artifacts,
     {
+      purgeContexts: fixtureNoNativeHistory,
       afterPurgeUnlink: async () => {
         if (fail) relay.partition();
       },
@@ -1310,7 +1328,12 @@ test('S02-T06/T10: conversational artifacts retain context-source dependencies t
     source.source_id,
   ]);
   assert.equal((await store.answers.get(fresh, String(answer.artifact_id))).status, 'ok');
-  const purge = new KnowledgeStore(store.database, artifacts, {}, { retentionMs: 0 });
+  const purge = new KnowledgeStore(
+    store.database,
+    artifacts,
+    { purgeContexts: fixtureNoNativeHistory },
+    { retentionMs: 0 },
+  );
   await approveDeletion(purge, String(source.source_id));
   assert.equal((await store.contextReady(ctx)).status, 'denied');
   assert.equal((await store.contextReady(fresh)).status, 'denied');
@@ -1330,7 +1353,7 @@ test('S02 rollback: retrieval disable preserves priority replies, revocation che
   const guarded = new KnowledgeStore(
     store.database,
     artifacts,
-    {},
+    { purgeContexts: fixtureNoNativeHistory },
     { retentionMs: 0, retrievalEnabled: () => enabled },
   );
   const source = await imported(note('retrieval-switch', 'SwitchCanary supplier approval is pending.'));
@@ -1446,4 +1469,90 @@ test('S02 owner inventory pages every state without bodies, foreign scope or ret
     { scopeId: other },
   ])
     assert.deepEqual(await store.inventory(owner, page), { status: 'denied' });
+});
+
+test('S02 deletion stays pending until owned exposed native history is retired and purged', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-native-purge-integration-'));
+  const db = new Database(':memory:'),
+    inbound = new Database(':memory:'),
+    outbound = new Database(':memory:');
+  const binding = {
+    scopeId: scope,
+    ownerId: context.ownerId,
+    agentGroupId: scope,
+    sessionId: scope,
+    provider: 'codex',
+    botId: 'bot',
+    instanceId: 'instance',
+    channelId: 'channel',
+    messagingGroupId: 'messages',
+  } as CosBinding;
+  const assertAuthority = () => {},
+    check = async () => {};
+  try {
+    db.exec(
+      'CREATE TABLE cos_identity_boundaries(scope_id TEXT PRIMARY KEY,binding TEXT,paused INTEGER,ingress_id TEXT,ingress_at TEXT); CREATE TABLE cos_ingress_receipts(scope_id TEXT,projected INTEGER)',
+    );
+    db.prepare('INSERT INTO cos_identity_boundaries(scope_id,binding,paused) VALUES(?,?,1)').run(
+      scope,
+      JSON.stringify(binding),
+    );
+    inbound.exec(INBOUND_SCHEMA);
+    outbound.exec(OUTBOUND_SCHEMA);
+    const old = createConversationState(root, db).prepare(binding, 'a'.repeat(64));
+    fs.writeFileSync(old.directory + '/history.jsonl', 'NATIVE_PURGE_CANARY', { mode: 0o600 });
+    const a = await imported(note('native-purge', 'NATIVE_PURGE_CANARY selected note.'));
+    const read = await store.search(
+      { ...context, generation: old.generation },
+      { query: 'NATIVE_PURGE_CANARY', sourceId: String(a.source_id) },
+    );
+    assert.equal(read.status, 'ok');
+    assert.ok((read.items as Evidence[]).length);
+    const noNativeConsumer = new KnowledgeStore(store.database, artifacts, {}, { retentionMs: 0 });
+    const proposal = await approveDeletion(noNativeConsumer, String(a.source_id));
+    assert.equal((await noNativeConsumer.purgeDue(scope)).status, 'pending');
+    assert.equal(
+      (await pool.query('SELECT delivered_at FROM cos.outbox WHERE id=$1', ['knowledge-purge-' + proposal])).rows[0]
+        .delivered_at,
+      null,
+    );
+    const consumer = new KnowledgeStore(
+      store.database,
+      artifacts,
+      {
+        purgeContexts: async (job) => {
+          assert.equal(job.scopeId, scope);
+          return purgeRetiredContexts({ root, db, inbound, binding, contexts: job.contexts, assertAuthority, check });
+        },
+      },
+      { retentionMs: 0 },
+    );
+    assert.equal((await consumer.purgeDue(scope)).status, 'pending');
+    assert.equal(fs.existsSync(old.directory + '/history.jsonl'), true);
+    const recovered = await recoverConversation({
+      root,
+      db,
+      inbound,
+      outbound,
+      binding,
+      accountFingerprint: 'a'.repeat(64),
+      expectedGeneration: old.generation,
+      recoveryId: randomUUID(),
+      assertAuthority,
+      backup: async () => {},
+    });
+    assert.equal((await consumer.purgeDue(scope)).status, 'ok');
+    assert.equal(fs.existsSync(old.directory), false);
+    assert.equal(fs.existsSync(path.join(root, 'conversations', recovered.generation)), true);
+    assert.ok(
+      (await pool.query('SELECT delivered_at FROM cos.outbox WHERE id=$1', ['knowledge-purge-' + proposal])).rows[0]
+        .delivered_at,
+    );
+    assert.equal((await consumer.purgeDue(scope)).status, 'ok');
+  } finally {
+    db.close();
+    inbound.close();
+    outbound.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });

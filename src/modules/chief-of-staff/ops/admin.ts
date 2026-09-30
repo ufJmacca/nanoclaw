@@ -116,6 +116,10 @@ export function safeAdminError(error: unknown): string {
       [
         'invalid_admin_arguments',
         'invalid_source_manifest',
+        'unsafe_conversation_ownership',
+        'unsafe_conversation_purge',
+        'conversation_purge_conflict',
+        'conversation_purge_authority_required',
         'unsupported_source',
         'source_line_too_long',
         'source_too_many_chunks',

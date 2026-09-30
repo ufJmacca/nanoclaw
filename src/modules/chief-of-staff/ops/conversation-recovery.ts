@@ -8,6 +8,7 @@ import { randomUUID } from 'node:crypto';
 import type Database from 'better-sqlite3';
 import type { CosBinding } from '../../../cos-boundary.js';
 import { digest } from '../domain/contracts.js';
+import { rememberConversationOwner } from './conversation-ownership.js';
 import { readPrivate, writeAtomic } from './target-state.js';
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -103,7 +104,12 @@ export async function recoverConversation(options: {
     )
       throw new Error('context_recovery_conflict');
   } else {
-    if (read().generation !== o.expectedGeneration) throw new Error('context_recovery_stale_generation');
+    const old = read();
+    if (old.generation !== o.expectedGeneration) throw new Error('context_recovery_stale_generation');
+    // Record the identity already held by the old generation, including across an account change.
+    if (old.binding_digest !== bindingDigest) throw new Error('context_recovery_conflict');
+    if (fs.lstatSync(path.join(o.root, 'conversations', old.generation), { throwIfNoEntry: false }))
+      rememberConversationOwner(o.root, o.binding, old.account_fingerprint, old.generation);
     record = { version: 1, requestDigest, generation: randomUUID(), phase: 'prepared' };
     // Fence first. Interruption before the journal write remains explicitly recoverable,
     // while old consent and queued work can no longer acquire this conversation.
@@ -132,6 +138,7 @@ export async function recoverConversation(options: {
   if (current.generation === record.generation && current.status === 'active' && record.phase !== 'prepared') {
     if (current.binding_digest !== bindingDigest || current.account_fingerprint !== o.accountFingerprint)
       throw new Error('context_recovery_conflict');
+    rememberConversationOwner(o.root, o.binding, o.accountFingerprint, record.generation);
     // Lost acknowledgement after completion must not reset a newer conversation or queue.
     if (record.phase !== 'complete') {
       record = { ...record, phase: 'complete' };
@@ -232,6 +239,7 @@ export async function recoverConversation(options: {
         .run(new Date().toISOString(), o.binding.scopeId);
     })
     .immediate();
+  rememberConversationOwner(o.root, o.binding, o.accountFingerprint, record.generation);
   record = { ...record, phase: 'complete' };
   writeAtomic(journal, name, record);
   return complete();

@@ -4,6 +4,7 @@ import { externalDatabaseConfig, parseDatabaseConfig } from './store/config.js';
 import { migrationStatus, SCHEMA_VERSION } from './store/migrations.js';
 import { BoundedDatabase } from './store/client.js';
 import { PriorityStore } from './store/priorities.js';
+import type { PurgeHooks } from './knowledge/purge.js';
 import { KnowledgeStore } from './knowledge/store.js';
 import { knowledgeSettings, openKnowledgeArtifacts } from './knowledge/config.js';
 
@@ -12,6 +13,7 @@ export async function connectCosHostStore(
   env: NodeJS.ProcessEnv,
   roots: { targetRoot: string; installationRoot: string; dataRoot: string },
   admitted: () => boolean,
+  retention: Pick<PurgeHooks, 'purgeContexts'> = {},
 ): Promise<PriorityStore> {
   const settings = knowledgeSettings(env);
   const check = await connectChecked(env, 'runtime');
@@ -28,14 +30,9 @@ export async function connectCosHostStore(
   // Keep the store and its denial/retention obligations active when ingestion/retrieval are switched off.
   return new PriorityStore(
     database,
-    new KnowledgeStore(
-      database,
-      artifacts,
-      {},
-      {
-        retentionMs: settings.retentionMs,
-        retrievalEnabled: () => settings.enabled,
-      },
-    ),
+    new KnowledgeStore(database, artifacts, retention, {
+      retentionMs: settings.retentionMs,
+      retrievalEnabled: () => settings.enabled,
+    }),
   );
 }

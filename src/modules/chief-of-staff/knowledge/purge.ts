@@ -2,9 +2,25 @@ import type { PoolClient } from 'pg';
 import type { Result } from '../domain/contracts.js';
 import { isArtifactIdentity, type ArtifactLease, type KnowledgeArtifacts } from './artifacts.js';
 
-export type PurgeHooks = { afterPurgeMetadata?(): Promise<void>; afterPurgeUnlink?(): Promise<void> };
+export type RetentionContexts = {
+  scopeId: string;
+  sourceId: string;
+  contexts: Array<{ sessionId: string; generation: string }>;
+};
+export type PurgeHooks = {
+  afterPurgeMetadata?(): Promise<void>;
+  afterPurgeUnlink?(): Promise<void>;
+  purgeContexts?(job: RetentionContexts): Promise<Result>;
+};
+
 type Transaction = (operation: (client: PoolClient) => Promise<Result>, mutation?: boolean) => Promise<Result>;
-type Job = { id: string; source_id: string; source_version: number; artifacts: string[] };
+type Job = {
+  id: string;
+  source_id: string;
+  source_version: number;
+  artifacts: string[];
+  contexts: RetentionContexts['contexts'];
+};
 /** Host-only, restartable deletion. Remote denial commits before any filesystem removal. */
 export async function purgeKnowledge(options: {
   scopeId: string;
@@ -34,6 +50,14 @@ export async function purgeKnowledge(options: {
         )
       ).rows[0];
       if (!row) return { status: 'ok', job: null };
+      const contexts = (
+        await client.query(
+          `SELECT DISTINCT session_id AS "sessionId",context_generation AS generation
+        FROM cos.evidence_refs WHERE scope_id=$1 AND source_id=$2 ORDER BY session_id,context_generation LIMIT 1001`,
+          [scopeId, row.source_id],
+        )
+      ).rows;
+      if (contexts.length > 1000) return { status: 'unavailable' };
       if (row.payload.stage === 'metadata_removed') {
         const ids = row.payload.artifact_ids;
         if (!Array.isArray(ids) || ids.some((id) => typeof id !== 'string' || !isArtifactIdentity(id)))
@@ -45,7 +69,7 @@ export async function purgeKnowledge(options: {
         if (kept.rowCount !== ids.length) return { status: 'unavailable' };
         return {
           status: 'ok',
-          job: { id: row.id, source_id: row.source_id, source_version: row.source_version, artifacts: ids },
+          job: { id: row.id, source_id: row.source_id, source_version: row.source_version, artifacts: ids, contexts },
         };
       }
       const candidates = (
@@ -94,7 +118,7 @@ export async function purgeKnowledge(options: {
       );
       return {
         status: 'ok',
-        job: { id: row.id, source_id: row.source_id, source_version: row.source_version, artifacts: ids },
+        job: { id: row.id, source_id: row.source_id, source_version: row.source_version, artifacts: ids, contexts },
       };
     }, true);
     if (prepared.status !== 'ok') return prepared;
@@ -103,12 +127,17 @@ export async function purgeKnowledge(options: {
     await options.hooks.afterPurgeMetadata?.();
     for (const id of job.artifacts) options.artifacts.remove(id, options.lease);
     await options.hooks.afterPurgeUnlink?.();
+    if (job.contexts.length) {
+      if (!options.hooks.purgeContexts) return { status: 'pending', code: 'retained_history_requires_maintenance' };
+      const history = await options.hooks.purgeContexts({ scopeId, sourceId: job.source_id, contexts: job.contexts });
+      if (history.status !== 'ok') return history;
+    }
     const completed = await transaction(async (client) => {
       await client.query('SELECT pg_advisory_xact_lock(73101004)');
       const changed = await client.query(
         `WITH completed AS (
           UPDATE cos.revocation_tombstones t SET provenance=jsonb_set(provenance,'{content_purge}',
-            (provenance->'content_purge') || jsonb_build_object('state','completed','completed_at',clock_timestamp())),updated_at=clock_timestamp()
+            (provenance->'content_purge') || jsonb_build_object('state','completed','completed_at',clock_timestamp(),'local_history','purged_or_not_present','external_disclosures','not_retractable','backups','separate_retention')),updated_at=clock_timestamp()
           WHERE t.scope_id=$1 AND t.source_id=$3 AND t.kind='delete' AND t.version::text=$4
             AND t.provenance#>>'{content_purge,state}'='metadata_removed'
             AND EXISTS(SELECT 1 FROM cos.outbox o WHERE o.scope_id=$1 AND o.id=$2 AND o.kind='knowledge_purge'
