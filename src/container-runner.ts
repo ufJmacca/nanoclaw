@@ -6,6 +6,14 @@
 import { ChildProcess, execSync, spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
+import {
+  releaseMode,
+  currentRelease,
+  codeAssetRoot,
+  assertReleaseMounts,
+  selectReleaseImage,
+} from './release-runtime.js';
+import { permitCosExecution, prepareCosLaunch } from './cos-boundary.js';
 
 import { OneCLI } from '@onecli-sh/sdk';
 
@@ -28,6 +36,7 @@ import { getAgentGroup, getAllAgentGroups } from './db/agent-groups.js';
 import { getDb, hasTable } from './db/connection.js';
 import { getSession } from './db/sessions.js';
 import { readEnvFile } from './env.js';
+import { assertNoDatabaseMaterial, assertNoDatabaseLaunchArguments, safeHostEnvironment } from './host-environment.js';
 import { initGroupFilesystem } from './group-init.js';
 import { stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
@@ -35,6 +44,7 @@ import { validateAdditionalMounts } from './modules/mount-security/index.js';
 // Provider host-side config barrel — each provider that needs host-side
 // container setup self-registers on import.
 import './providers/index.js';
+import { subscriptionCoordinator } from './providers/codex-subscription-coordinator.js';
 import {
   getProviderContainerConfig,
   type ProviderContainerContribution,
@@ -106,6 +116,9 @@ let containerAdmissionsOpen = false;
 function releaseActiveContainer(sessionId: string, expected: ActiveContainerEntry): boolean {
   if (activeContainers.get(sessionId) !== expected) return false;
   activeContainers.delete(sessionId);
+  void subscriptionCoordinator()
+    ?.closeSession(sessionId)
+    .catch(() => log.warn('Subscription session cleanup failed', { sessionId }));
   markContainerStopped(sessionId);
   stopTypingRefresh(sessionId);
   drainQueuedWakes();
@@ -195,6 +208,10 @@ export async function shutdownContainers(): Promise<void> {
  * (e.g. the router's typing indicator) can branch on the boolean.
  */
 export function wakeContainer(session: Session): Promise<boolean> {
+  if (!permitCosExecution(session)) {
+    killContainer(session.id, 'Restricted CoS execution denied');
+    return Promise.resolve(false);
+  }
   if (!containerAdmissionsOpen) {
     log.debug('Container admission closed — leaving session inbox pending', { sessionId: session.id });
     return Promise.resolve(false);
@@ -249,7 +266,10 @@ export function wakeContainer(session: Session): Promise<boolean> {
   }
   const promise = spawnContainer(session)
     .then(() => true)
-    .catch((err) => {
+    .catch(async (err) => {
+      await subscriptionCoordinator()
+        ?.closeSession(session.id)
+        .catch(() => log.warn('Subscription session cleanup failed', { sessionId: session.id }));
       log.warn('wakeContainer failed — host-sweep will retry', { sessionId: session.id, err });
       return false;
     })
@@ -304,6 +324,11 @@ async function spawnContainer(session: Session): Promise<void> {
     log.error('Agent group not found', { agentGroupId: session.agent_group_id });
     return;
   }
+  const restricted = await prepareCosLaunch(session);
+  if (restricted) {
+    startTrackedContainer(session, agentGroup, restricted.containerName, restricted.args);
+    return;
+  }
   assertHostManagedPaths(agentGroup, session);
   assertNoAgentRootOverlap(agentGroup);
   assertNoMattermostCredentialsInContainerConfigArtifact(agentGroup.folder);
@@ -345,6 +370,10 @@ async function spawnContainer(session: Session): Promise<void> {
   assertProviderMountIsolation(agentGroup, session, contribution);
 
   const mounts = buildMounts(agentGroup, session, containerConfig, provider, contribution, mattermostBoundary.strict);
+  // This host-created socket is outside worker state. It is contributed directly
+  // by the installed credential owner, never by a provider or agent configuration.
+  const credentials = subscriptionCoordinator();
+  if (provider === 'codex' && credentials) mounts.push(await credentials.prepare(session));
   const containerName = `nanoclaw-v2-${agentGroup.folder}-${Date.now()}`;
   // OneCLI agent identifier is always the agent group id — stable across
   // sessions and reversible via getAgentGroup() for approval routing.
@@ -370,6 +399,12 @@ async function spawnContainer(session: Session): Promise<void> {
     throw new Error(`Mattermost execution session became invalid before spawn: ${finalMattermostBoundary.reason}`);
   }
 
+  startTrackedContainer(session, agentGroup, containerName, args);
+}
+
+function startTrackedContainer(session: Session, agentGroup: AgentGroup, containerName: string, args: string[]): void {
+  // Shared lifecycle only. Restricted preparation never calls generic mount, credential or provider hooks.
+  if (!permitCosExecution(session)) throw new Error('restricted_launch_denied');
   log.info('Spawning container', { sessionId: session.id, agentGroup: agentGroup.name, containerName });
 
   // Clear any orphan heartbeat from a previous container instance — the
@@ -378,7 +413,10 @@ async function spawnContainer(session: Session): Promise<void> {
   // immediate kill before the new container touches the file itself.
   fs.rmSync(heartbeatPath(agentGroup.id, session.id), { force: true });
 
-  const container = spawn(CONTAINER_RUNTIME_BIN, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+  const container = spawn(CONTAINER_RUNTIME_BIN, args, {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: safeHostEnvironment('docker'),
+  });
 
   const activeEntry = { process: container, containerName, identity: executionIdentity(session) };
   activeContainers.set(session.id, activeEntry);
@@ -573,6 +611,7 @@ function assertNoMattermostCredentialsInContainerConfigArtifact(folder: string):
   const artifactPath = path.join(GROUPS_DIR, folder, 'container.json');
   if (!fs.existsSync(artifactPath)) return;
   const raw = fs.readFileSync(artifactPath, 'utf8');
+  assertNoDatabaseMaterial(JSON.parse(raw));
   if (/"MATTERMOST[^"]*(?:TOKEN|SECRET|PASSWORD|KEY)[^"]*"\s*:/i.test(raw)) {
     throw new Error('Mattermost credentials cannot enter mounted container configuration');
   }
@@ -597,7 +636,7 @@ function assertContainerConfigArtifactUnchanged(folder: string, expected: string
 function providerSafeHostEnv(): NodeJS.ProcessEnv {
   const credentials = hostMattermostCredentialValues();
   return Object.fromEntries(
-    Object.entries(process.env).filter(
+    Object.entries(safeHostEnvironment('provider')).filter(
       ([key, value]) =>
         !/^MATTERMOST(?:_|$)/i.test(key) &&
         (!value || ![...credentials].some((credential) => value.includes(credential))),
@@ -619,6 +658,7 @@ function hasMattermostCredentialKey(value: unknown): boolean {
 }
 
 function assertNoMattermostCredentialsInContainerConfig(containerConfig: ContainerConfig): void {
+  assertNoDatabaseMaterial(containerConfig);
   if (hasMattermostCredentialKey(containerConfig)) {
     throw new Error('Mattermost credentials cannot enter mounted container configuration');
   }
@@ -647,6 +687,7 @@ function assertSafeContainerSkillNames(containerConfig: ContainerConfig): void {
 }
 
 function assertNoMattermostContainerCredentials(contribution: ProviderContainerContribution): void {
+  assertNoDatabaseMaterial(contribution);
   for (const key of Object.keys(contribution.env ?? {})) {
     if (/^MATTERMOST(?:_|$)/i.test(key)) {
       throw new Error('Mattermost credentials cannot enter provider container environments');
@@ -661,6 +702,7 @@ function assertNoMattermostContainerCredentials(contribution: ProviderContainerC
 }
 
 function assertNoMattermostCredentialsInLaunchArgs(args: string[]): void {
+  assertNoDatabaseLaunchArguments(args);
   const credentials = hostMattermostCredentialValues();
   for (const arg of args) {
     if (/MATTERMOST[^=]*(?:TOKEN|SECRET|PASSWORD|KEY)/i.test(arg)) {
@@ -680,7 +722,7 @@ function buildMounts(
   providerContribution: ProviderContainerContribution,
   strictMattermost: boolean,
 ): VolumeMount[] {
-  const projectRoot = process.cwd();
+  const projectRoot = codeAssetRoot();
   const sessDir = sessionDir(agentGroup.id, session.id);
 
   // Per-group filesystem state lives forever after first creation. Init is
@@ -747,8 +789,8 @@ function buildMounts(
 
   // Shared CLAUDE.md — read-only, imported by the composed entry point via
   // the `.claude-shared.md` symlink inside the group dir.
-  const sharedClaudeMd = path.join(process.cwd(), 'container', 'CLAUDE.md');
-  if (fs.existsSync(sharedClaudeMd)) {
+  const sharedClaudeMd = path.join(projectRoot, 'container', 'CLAUDE.md');
+  if (!releaseMode() && fs.existsSync(sharedClaudeMd)) {
     mounts.push({ hostPath: sharedClaudeMd, containerPath: '/app/CLAUDE.md', readonly: true });
   }
 
@@ -758,16 +800,16 @@ function buildMounts(
 
   // Shared agent-runner source — read-only, same code for all groups.
   const agentRunnerSrc = path.join(projectRoot, 'container', 'agent-runner', 'src');
-  mounts.push({ hostPath: agentRunnerSrc, containerPath: '/app/src', readonly: true });
+  if (!releaseMode()) mounts.push({ hostPath: agentRunnerSrc, containerPath: '/app/src', readonly: true });
 
   const workflowMount = buildDeepResearchWorkflowMount(projectRoot);
-  if (workflowMount) {
+  if (!releaseMode() && workflowMount) {
     mounts.push(workflowMount);
   }
 
   // Shared skills — read-only, symlinks in .claude-shared/skills/ point here.
   const skillsSrc = path.join(projectRoot, 'container', 'skills');
-  if (fs.existsSync(skillsSrc)) {
+  if (!releaseMode() && fs.existsSync(skillsSrc)) {
     mounts.push({ hostPath: skillsSrc, containerPath: '/app/skills', readonly: true });
   }
 
@@ -787,14 +829,14 @@ function buildMounts(
   return mounts;
 }
 
-export function buildDeepResearchWorkflowMount(projectRoot: string = process.cwd()): VolumeMount | null {
+export function buildDeepResearchWorkflowMount(projectRoot: string = codeAssetRoot()): VolumeMount | null {
   const workflowSrc = path.join(projectRoot, 'src', 'deep-research-workflow');
   if (!fs.existsSync(workflowSrc)) return null;
   return { hostPath: workflowSrc, containerPath: '/app/deep-research-workflow', readonly: true };
 }
 
 export function selectedContainerSkills(containerConfig: ContainerConfig): string[] {
-  const projectRoot = process.cwd();
+  const projectRoot = codeAssetRoot();
   const sharedSkillsDir = path.join(projectRoot, 'container', 'skills');
   if (containerConfig.skills !== 'all') return containerConfig.skills;
 
@@ -887,11 +929,17 @@ async function buildContainerArgs(
   containerName: string,
   agentGroup: AgentGroup,
   containerConfig: ContainerConfig,
-  _provider: string,
+  provider: string,
   providerContribution: ProviderContainerContribution,
   agentIdentifier?: string,
 ): Promise<string[]> {
+  const release = currentRelease();
+  if (release) assertReleaseMounts(mounts);
+  const imageTag = release
+    ? await selectReleaseImage(release, provider, containerConfig.packages)
+    : containerConfig.imageTag || CONTAINER_IMAGE;
   const args: string[] = ['run', '--rm', '--name', containerName, '--label', CONTAINER_INSTALL_LABEL];
+  if (release) args.push('--pull=never');
 
   // Environment — only vars read by code we don't own.
   // Everything NanoClaw-specific is in container.json (read by runner at startup).
@@ -947,7 +995,7 @@ async function buildContainerArgs(
   args.push('--entrypoint', 'bash');
 
   // Use per-agent-group image if one has been built, otherwise base image
-  const imageTag = containerConfig.imageTag || CONTAINER_IMAGE;
+  if (release) assertReleaseMounts(mounts);
   args.push(imageTag);
 
   args.push('-c', 'exec bun run /app/src/index.ts');
@@ -957,6 +1005,7 @@ async function buildContainerArgs(
 
 /** Build a per-agent-group Docker image with custom packages. */
 export async function buildAgentGroupImage(agentGroupId: string): Promise<void> {
+  if (releaseMode()) throw new Error('release_build_forbidden');
   const agentGroup = getAgentGroup(agentGroupId);
   if (!agentGroup) throw new Error('Agent group not found');
 
@@ -992,6 +1041,7 @@ export async function buildAgentGroupImage(agentGroupId: string): Promise<void> 
   try {
     execSync(`${CONTAINER_RUNTIME_BIN} build -t ${imageTag} -f ${tmpDockerfile} .`, {
       cwd: DATA_DIR,
+      env: safeHostEnvironment('docker'),
       stdio: 'pipe',
       timeout: 300_000,
     });

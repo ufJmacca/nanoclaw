@@ -7,6 +7,7 @@ import os from 'os';
 
 import { CONTAINER_INSTALL_LABEL } from './config.js';
 import { log } from './log.js';
+import { safeHostEnvironment } from './host-environment.js';
 
 /** The container runtime binary name. */
 export const CONTAINER_RUNTIME_BIN = 'docker';
@@ -30,13 +31,18 @@ export function stopContainer(name: string): void {
   if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(name)) {
     throw new Error(`Invalid container name: ${name}`);
   }
-  execSync(`${CONTAINER_RUNTIME_BIN} stop -t 1 ${name}`, { stdio: 'pipe', timeout: 10_000 });
+  execSync(`${CONTAINER_RUNTIME_BIN} stop -t 1 ${name}`, {
+    stdio: 'pipe',
+    timeout: 10_000,
+    env: safeHostEnvironment('docker'),
+  });
 }
 
 /** Ensure the container runtime is running, starting it if needed. */
 export function ensureContainerRuntimeRunning(): void {
   try {
     execSync(`${CONTAINER_RUNTIME_BIN} info`, {
+      env: safeHostEnvironment('docker'),
       stdio: 'pipe',
       timeout: 10000,
     });
@@ -71,6 +77,7 @@ function listOrphanContainers(): string[] {
       {
         stdio: ['pipe', 'pipe', 'pipe'],
         encoding: 'utf-8',
+        env: safeHostEnvironment('docker'),
       },
     );
     return output.trim().split('\n').filter(Boolean);

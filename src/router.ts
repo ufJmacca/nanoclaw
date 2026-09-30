@@ -18,6 +18,7 @@
  * for policy refusals.
  */
 import { getChannelAdapter } from './channels/channel-registry.js';
+import { interceptCosIngress } from './cos-boundary.js';
 import { gateCommand } from './command-gate.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { recordDroppedMessage } from './db/dropped-messages.js';
@@ -202,6 +203,7 @@ function safeParseContent(raw: string): { text?: string; sender?: string; sender
  * Creates messaging group + session if they don't exist yet.
  */
 export async function routeInbound(event: InboundEvent): Promise<void> {
+  if (await interceptCosIngress(event)) return;
   // Pre-route interceptor — lets modules consume messages before any routing
   // (e.g. free-text replies during multi-step approval flows).
   if (messageInterceptor && (await messageInterceptor(event))) return;

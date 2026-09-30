@@ -14,6 +14,8 @@ Use TypeScript and existing repository conventions. Connect to an externally hos
 
 One dedicated private **Mattermost channel** is the initial user interface, as specified by [INTERACTION_MODEL.md](INTERACTION_MODEL.md). A dedicated persistent CoS AgentGroup serves that scope. Do not silently merge contexts from several channels. Preserve strict Mattermost wiring where applicable. Other private domains require separately approved scopes; no cross-domain federation is implemented here.
 
+The coordinator retains its own scoped provider conversation across ordinary restarts, using NanoClaw's session lifecycle and supported provider resume/compaction. A clean initial CoS binding excludes pre-existing and cross-group histories; it is not a requirement to discard the coordinator's subsequent conversation. Its durable conversational context is distinct from approved PostgreSQL records and from the fresh specialist attempt identities in section 8. Explicit access/revocation changes can invalidate context; process restart alone must not. Runtime isolation protects tools and credentials within NanoClaw, not a separate product interface.
+
 ## 2. Proposed repository layout
 
 All paths below are **new/proposed**, except existing files explicitly listed in the baseline.

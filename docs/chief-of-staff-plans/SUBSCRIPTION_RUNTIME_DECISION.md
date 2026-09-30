@@ -1,0 +1,235 @@
+# S01 subscription runtime: capability evidence
+
+2026-09-30. The native subscription runtime is implemented and deployed as an unreviewed S01 candidate. Authorized live subscription inference and Mattermost acceptance passed using `gpt-6-astra`, ten bounded attempts and synthetic records; CoS is paused after the test. The [current S01 receipt](../chief-of-staff/evidence/S01.md) records exact tested source, deployment, protected-data checks, compatible contract-22 rollback and the later authorization-polling review correction. The sections below retain the development proofs and their original limitations.
+
+## Native conversation and tool execution
+
+Use the existing NanoClaw Codex app-server transport for the persistent CoS AgentGroup. The pinned Codex 0.158.0 binary supports `environments: []` on thread creation and turns, and persists that selection on resume. This allows a durable model conversation without granting an execution environment. Fixed CoS dynamic tools return through the trusted NanoClaw client, which must still validate actual scope, ingress and current authority.
+
+The proof uses the native `openai` provider and native cached `chatgpt` authentication with synthetic tokens. A loopback TLS/WebSocket server supplies account-routing, native OAuth refresh and model responses; Docker has no external network. The proxied fixture preserves Codex's native production URLs and uses the actual Node host gateway, with a test-only DNS/dial replacement pointing to the loopback server. Its generated CA is confined to the test. Production policy selects native ChatGPT authentication and accepts no endpoint or provider override.
+
+The effective Astra tool catalogue is carried in structured `additional_tools` context. It exposes the isolated JavaScript wrapper, its wait helper and user-input helpers. The wrapper's callable tools in this fixture are the admitted `cos_context_get` and Codex's clock. The wrapper must remain functional: disabling `code_mode_host` leaves advertised tools unusable. Its V8 environment has no `process`, `require` or `fetch`. Do not confuse this pure computation wrapper with a shell or Node execution environment. Production must reject unsupported client requests and bound tool execution; helper prompts never authorize CoS changes.
+
+Verified with the actual pinned binary:
+
+- Native cached-account inspection reports `chatgpt`; fixture requests carry the synthetic subscription credential, with no API key.
+- Native `account/read` with proactive refresh rotates the synthetic refresh/access credentials exactly once. Subsequent query processes use an access-only native cache with an empty refresh token. They complete tool calls and conversation resume without another refresh.
+- The advertised tool wrapper successfully invokes `cos_context_get` through app-server's client dispatch.
+- Forged `exec_command` and `apply_patch` calls receive unsupported-call results. They do not reach the client dispatcher or create the escape sentinel.
+- A wrapper attempt to call `tools.exec_command` fails. Runtime inspection reports `process`, `fetch` and `require` as undefined.
+- Access/refresh credential canaries are absent from captured model context.
+- After terminating and starting a new app-server process, resuming the same thread retains the owner's earlier synthetic detail and tool results. It does not allocate a new conversation.
+- Native HTTPS and WebSocket traffic use the loopback-to-Unix relay and fixed-destination host gateway. Native refresh reaches `auth.openai.com` through the authentication role; the subsequent query role admits only `chatgpt.com`. The proxied proof uses no model base-URL or refresh-endpoint override.
+- Non-generating WebSocket warmups are separate from generating requests. Six generating requests implement the adversarial first turn and resumed follow-up; this is not a guarantee that one turn equals one provider request.
+
+The tested worker image is `sha256:4b799b1d6c4cb086c9431a37c2eb79f84892bc2045efa277e0861e33bd360672`. The new fixture, policy, relay and gateway were mounted read-only for this development proof. This is not final-image acceptance; the final release must bake and rerun them against its own exact identities.
+
+## Reproduce the offline proof
+
+Run from the repository root using host Docker. The fixture refuses an existing auth file or a non-loopback network interface. It creates only synthetic authentication and temporary certificates inside the disposable container.
+
+```sh
+docker run --rm --network none --read-only \
+  --tmpfs /tmp:rw,nosuid,nodev \
+  --tmpfs /home/node:rw,nosuid,nodev \
+  --tmpfs /workspace:rw,nosuid,nodev,uid=1000,gid=1000 \
+  --tmpfs /run/cos:rw,nosuid,nodev,uid=1000,gid=1000 \
+  --tmpfs /run/nanoclaw:rw,nosuid,nodev,uid=1000,gid=1000 \
+  --tmpfs /etc/ssl/certs:rw,nosuid,nodev,uid=1000,gid=1000 \
+  -e HOME=/home/node -e NANOCLAW_COS_OFFLINE_FIXTURE=1 \
+  -e NANOCLAW_COS_FIXTURE_SYSTEM_TRUST=1 \
+  -e NANOCLAW_COS_FIXTURE_PRODUCTION_QUERY=1 \
+  -e NANOCLAW_COS_FIXTURE_RUNNER_ENTRY=1 \
+  -e NANOCLAW_COS_FIXTURE_EGRESS_MODULE=file:///fixture/subscription-egress.ts \
+  --mount "type=bind,src=$PWD/src/modules/chief-of-staff/bridge/subscription-egress.ts,dst=/fixture/subscription-egress.ts,readonly" \
+  --mount "type=bind,src=$PWD/src/modules/chief-of-staff/bridge/subscription-turns.ts,dst=/fixture/subscription-turns.ts,readonly" \
+  --mount "type=bind,src=$PWD/container/agent-runner/fixtures/cos-subscription-capability.ts,dst=/app/fixtures/cos-subscription-capability.ts,readonly" \
+  --mount "type=bind,src=$PWD/container/agent-runner/src,dst=/app/src,readonly" \
+  --workdir /workspace --entrypoint bun \
+  sha256:4b799b1d6c4cb086c9431a37c2eb79f84892bc2045efa277e0861e33bd360672 \
+  /app/fixtures/cos-subscription-capability.ts
+```
+
+Expected final receipt: `probe=passed`, six generating requests, retained context, only the admitted CoS dispatch, no escape file, no credential canaries, one native refresh, an access-only query cache, `fixedDestinationEgress=true`, `productionAuthEntry=true`, `productionQueryProvider=true`, `reservedAttempts=2` and `runnerEntry=true`. This variant supplies its synthetic root through a temporary system certificate directory and invokes the real authentication entry as a child; the native environment needs no custom CA variable. It starts and stops the actual CoS runner entry twice, with synthetic messages in different visual reply threads. The provider obtains access-only credentials from a fixture Unix broker, reserves attempts through the real host turn controller, dispatches real SQLite RPC against a fixture responder and resumes the same scoped continuation after restart. Ordinary and legacy continuation canaries remain untouched. The fixture intentionally does not supply a live model catalogue; catalogue warnings do not establish live model availability. Failed assertions or a timeout fail the process. This development command mounts source read-only and uses synthetic SQLite paths; it is not a final-image or deployed mount-isolation gate.
+
+## Development history-backup proof
+
+The command above can additionally exercise the host snapshot code against the actual native history after both runner processes stop. Add these Docker options before the image identity:
+
+```sh
+-e NANOCLAW_COS_FIXTURE_BACKUP_MODULE=file:///hostsrc/modules/chief-of-staff/ops/conversation-backup.ts \
+--mount "type=bind,src=$PWD/src,dst=/hostsrc,readonly"
+```
+
+The additional receipt reports `nativeHistoryBackup=passed` with nonzero file and byte counts. The fixture moves its synthetic provider directory into the host generation layout, then creates and verifies a private snapshot using the real backup implementation under Bun. This proves compatibility with files produced by the pinned native runner; host Node tests separately exercise backup and deployment integration. It is still a development check with source overlays, not final-image, restore, compaction or Pi acceptance.
+
+Deployment now snapshots every retained CoS generation alongside the existing SQLite backups while the service and all installation containers are stopped. The private snapshot preserves history and WAL bytes, omits the replaceable access cache and interrupted cache writes, rejects links/unsafe permissions and missing database-referenced generations, bounds size, checks available space and verifies hashes before atomic publication. Replays verify the saved baseline without overwriting newer live history; migrations revalidate the snapshot before changing either database. No snapshot automatically restores a conversation or its authority. Operator recovery and compatible schema-22 rollback remain pending.
+
+## Native compaction fixture
+
+Add `-e NANOCLAW_COS_FIXTURE_COMPACTION=1` to the runner-entry command above to exercise native automatic compaction. The fixture reports high synthetic token usage, supplies a native opaque compaction item and restarts the real runner again. Nine generating requests, one compaction and three reserved turns passed. The final request retains the compaction item and the same continuation; permitted CoS context lookup still executes, shell execution remains denied, and credential canaries are absent from both normal and compaction requests. The baseline six-request runner fixture also passes.
+
+This follows the [pinned upstream compaction tests](https://github.com/openai/codex/blob/rust-v0.158.0/codex-rs/app-server/tests/suite/v2/compaction.rs). It proves protocol and history retention across compaction and restart with the development source overlay. The opaque summary is synthetic: this does not prove live summarization quality, semantic recall, final-image behavior or Pi acceptance.
+
+## Native cancellation fixture
+
+Use the runner-entry command above with `-e NANOCLAW_COS_FIXTURE_CANCELLATION=shutdown`, `membership` or `rpc`, without the compaction flag. Add these read-only fixture mounts:
+
+```sh
+--mount "type=bind,src=$PWD/src/modules/chief-of-staff/bridge/conversation-access.ts,dst=/fixture/conversation-access.ts,readonly" \
+--mount "type=bind,src=$PWD/src/modules/chief-of-staff/bridge/identity.ts,dst=/fixture/identity.ts,readonly" \
+--mount "type=bind,src=$PWD/src/modules/chief-of-staff/bridge/mattermost-facts.ts,dst=/fixture/mattermost-facts.ts,readonly"
+```
+
+Each scenario first completes two ordinary fixture turns, then interrupts the actual native runner during a third. Shutdown sends the runner its normal termination signal while a model response is withheld. Membership uses the real conversation-access guard with an additional synthetic channel member and a runner-stop callback. RPC withholds an admitted context-tool response. The pending response is released after signalling cancellation. Assertions check native app-server exit, no late reply, no automatic model retry, retained continuation, three charged fixture attempts and refusal of another turn by the real host turn controller. All responses and credentials are synthetic; no network access to external services is enabled.
+
+The fixture uses production's bounded SQLite busy timeout for its separate host/runner processes. A compaction regression exposed the previous zero-wait test connection; the repaired fixture also propagates background RPC failures before reporting success. These development checks do not exercise Docker's host stop command, the complete deployed Mattermost pause route, durable context invalidation or final-image isolation. Those remain part of release/Pi acceptance.
+
+## Shared owner and native 401 fixture
+
+Use the runner-entry command with `-e NANOCLAW_COS_FIXTURE_SHARED_OWNER=1`, without cancellation or compaction flags, and these extra read-only mounts:
+
+```sh
+--mount "type=bind,src=$PWD/container/agent-runner/fixtures/subscription-owner.ts,dst=/app/fixtures/subscription-owner.ts,readonly" \
+--mount "type=bind,src=$PWD/src/providers/codex-subscription-auth.ts,dst=/fixture/codex-subscription-auth.ts,readonly" \
+--mount "type=bind,src=$PWD/src/providers/codex-subscription-broker.ts,dst=/fixture/codex-subscription-broker.ts,readonly"
+```
+
+After two successful turns, the synthetic backend rejects the old access credential with HTTP 401. The real CoS runner asks the real session broker/store to renew; a second session credential client concurrently requests renewal of that same generation. One native account-check writer rotates the staged credential. Both clients receive the same new access-only cache, the owner retains the refresh credential, the second client's history canary survives, and the publication journal closes. CoS reports that the interrupted turn was not replayed; a new explicit turn resumes the same conversation and succeeds. The passing receipt records seven generating requests, four reserved attempts and two OAuth refreshes total: the fixture's initial authentication proof plus the single shared-owner renewal. Native transport makes multiple rejected HTTP attempts before reporting its terminal error; these are not successful generating requests.
+
+The first combined run exposed a production gap: native 0.158.0 reports its blocked access-only OAuth refresh as `codexErrorInfo=other` with an exact transport error, losing the original 401 category. The shared turn handler now recognizes that pinned error and the exact native expired/reused/revoked/unknown refresh messages from [the pinned authentication source](https://github.com/openai/codex/blob/rust-v0.158.0/codex-rs/login/src/auth/manager.rs). It asks the coordinated owner to renew once, without replaying the turn. General model-network errors, account-switch errors, quota errors and merely similar text do not rotate credentials. Five added cases failed before the repair; all 13 turn-renewal tests and all 165 runner tests now pass. Future Codex upgrades must repeat this native error-shape proof. The internal-only external-token login mode is not used.
+
+This development fixture runs the real store/brokers under Bun and maps staged `CODEX_HOME` for the native check instead of invoking the production Docker helper. It verifies two concurrent credential clients, not two complete concurrently generating ordinary/CoS providers. Existing Node component tests remain relevant; full production helper mounts, ordinary-provider concurrency, interruption and final-image/Pi gates remain required. No real login, provider request or Mattermost message is made.
+
+## Operator context inspection and recovery
+
+The packaged host admin entry now supports these commands from the bound installation directory, using the selected trusted Pi service environment:
+
+```text
+context-status --scope SCOPE
+context-prepare --scope SCOPE
+context-recover --scope SCOPE --expected-generation UUID --recovery-id UUID
+```
+
+Pass these arguments to the release's Node executable and `dist/modules/chief-of-staff/ops/admin.js`. Development tests invoke the same command functions in the devcontainer with fixture target/channel facts. Do not run the Pi's live configuration on the Mac.
+
+`context-status` reads local configuration without creating a context, refreshing credentials or contacting a model/channel. It reports context generation, pause state, recorded account fingerprint, activation validity and remaining attempts. Its `live_model=not_verified` and `private_channel=not_checked` fields are deliberate: cached account metadata and configured consent do not prove current entitlement or channel access.
+
+Preparation and recovery require an already-quiescent Pi maintenance lease, the target lock, a stopped service and installation containers, an exclusive host execution lease, the paused native binding and freshly verified private membership. They do not stop/restart services or reopen maintenance themselves. Preparation creates only the initial empty native generation; existing history is retained or explicit recovery is required.
+
+Recovery must name the exact current generation and a stable recovery UUID. It fences the old context, records an operation journal, backs up central/session SQLite and remaining provider history privately, creates an empty generation, and quarantines pending inbound work plus undelivered outbound messages. Message contents, ordinary continuation keys, canonical approved records, old native history and charged usage remain preserved. The old activation's generation no longer matches; recovery neither writes new consent nor unpauses the binding. Retrying the same request reconciles interruptions and lost completion receipts without resetting the new context or reprocessing later arrivals. A subsequently revoked or superseded generation cannot be revived by replaying an old recovery.
+
+The recovery checkpoint passed nine recovery tests, four host command integration/status tests and six admin parser/status/diagnostic tests, with **1,231 host tests / 137 files** and the host TypeScript build passing. These are development checks, with fixture channel observations and actual local SQLite backups. Final-image operator execution, compatible schema-22 rollback and Pi acceptance remain pending. These controls perform no model inference or message send.
+
+### Finite activation and deliberate resumption
+
+The admin entry additionally supports:
+
+```text
+model-activate --scope SCOPE --policy /private/consent.json
+context-resume --scope SCOPE --activation-id HEX32 --resume-id UUID
+```
+
+The policy must be an owner-owned regular file with mode `0600`, an absolute canonical path and the exact version-2 subscription fields defined by `SubscriptionActivation`. It must specify an explicit consent reference, scope, model, expiry, finite attempt limit, account fingerprint, context generation and stable activation ID. Preparation/status supplies the recorded account fingerprint and generation; neither constitutes consent or live entitlement verification. No default live policy is generated by deployment.
+
+Activation uses the same quiescent maintenance, target lock, host lease and fresh membership checks as context preparation. It freezes the policy digest before any attempt and records a private issuance receipt. Repeated issuance preserves all charged usage; changing an existing ID's policy or replaying superseded consent is refused. Replaced consent is retained privately. Issuance leaves the coordinator paused.
+
+Resumption names the exact issued activation and a fresh operation UUID. It requires valid current account/context binding and remaining attempts, clears the old ingress authorization and unpauses only the bound coordinator. It does not restart the service, reopen maintenance, wake a runner or perform a model call/message send. Finishing the existing maintenance workflow and receiving fresh verified ingress remain separate runtime prerequisites. A completed resume replay observes current state without unpausing again. If a lost receipt leaves it ambiguous whether an emergency pause followed the resume, the old request returns `resume_outcome_uncertain`; a deliberate new resume requires a new operation UUID. Old requests cannot silently override a later pause.
+
+Before explicit resumption, the quiescent host retires pending/processing input and all undelivered output, including tool requests and future-scheduled replies. It closes old ingress projection receipts. Otherwise a fresh owner message could make pre-pause work eligible again. This preserves message contents, existing delivery outcomes, native continuation/history and charged attempts. Queue failure or failure to reopen the boundary leaves CoS paused; completed or uncertain resume replays never quarantine later arrivals. A failing delivery-selection regression established the gap before the fix; interruption, replay and actual operator-command tests now pass. Normal process restart does not run this resumption operation or retire queues.
+
+Fifteen activation/resumption tests, five host command integration/status tests and seven admin tests pass, including interrupted policy publication, lost completion receipts, exhausted attempts and emergency-pause replay. The full host suite passes **1,248 tests / 138 files** and the host TypeScript build passes. Affected lint reports zero errors and three warnings. No real account/model invocation, message send or Pi mutation occurred. These remain development checks; final-image/live acceptance is not implied.
+
+## Production authentication-helper fixture
+
+`src/contracts/chief-of-staff/subscription-native.integration.ts` now exercises the real Node credential store and Docker helper launcher with the pinned native authentication entry. Three offline tests pass: competing refresh requests produce one rotation; killing the helper while its OAuth response is pending preserves the primary login; and losing the result after native exit also preserves the primary login. Reconstructing the owner after either uncertain outcome refuses another rotation. Preservation of the local file does not establish that its old refresh token remains valid at the provider.
+
+The fixture inspects the running helper before releasing its synthetic response. It verifies the exact image, disabled networking, read-only root, non-root identity, dropped capabilities, no-new-privileges, one writable staged credential file and the read-only authentication socket. Neither the primary credential file nor the Docker socket enters the helper. The trusted test controller alone uses Docker; its loopback TLS service supplies synthetic account and refresh responses through the production gateway with a test-only DNS/dial substitution and fixture CA.
+
+Development verification used baked helper image `sha256:ca7b5e8e6689ea4b9aaf569cd35c77803fb3c797f284818d782b87f14d5280dc`, containing runner source from `8f04780d4c5b79459a0bb6cd9e1f17ae3cc9aa3e`, with current host source mounted into the trusted controller. The three integration tests, 16 credential store/launcher unit tests, host build and affected lint pass. This is not a final release identity or full ordinary/CoS provider-concurrency proof. The release coordinator now requires these tests against both final worker profiles using the compiled final host image, without source overlays, before artifact export.
+
+## Concurrent ordinary and CoS providers
+
+The same Docker integration fixture now runs the complete `CodexProvider` and `CosCodexProvider` in separate containers with independent HOME directories, continuation files and credential sockets. A response barrier proves both native clients are querying concurrently. Synthetic 401 responses then make both clients request renewal from the real Node owner/brokers. One production Docker helper rotates the credential once. Neither failed turn is replayed; new explicit turns resume each original conversation, with its own remembered canary and no other session's canary or credential bytes in model input. Both query caches remain access-only, and CoS charges three distinct attempts.
+
+The fixture uses the same baked development helper/runner image recorded above and a host-source overlay in its trusted controller. An ordinary test driver supplies the loopback proxy only to the native child; applying HTTP proxy settings to the Bun parent interfered with its Unix credential client. Temporary native app-discovery suppression used during diagnosis was removed: the passing ordinary provider retains its default feature profile. Auxiliary remote services have no configured fixture account and return unavailable responses. The fixture changes no production provider source or feature settings and does not exercise ordinary external tools or the full Mattermost/container-launch route.
+
+All four native integration tests pass, along with the host build and affected lint. They are included in the mandatory final-image gate for both worker profiles. Newly built final-image execution, full pause/invalidation/operator acceptance, schema-22 recovery, Pi deployment and live subscription acceptance remain outstanding.
+
+## Final-artifact and operator gates
+
+Local release `release-9fc067159699-20260930033629` passed the full Mac pipeline: 1,253 host tests, 165 runner tests, external test-database integration and demonstration, builds and both final ARM64 worker profiles. Each profile passed the four native helper/concurrency tests and the packaged RPC/isolation probe without checkout overrides. Its manifest digest is `8e0067448991a45a15df5b8fa5cdeeccbe06664b73c5fa07474854f8ac8359d4`. The optional `--local-only` release mode stopped before source sync, transfer or deployment; the default still deploys automatically after local gates.
+
+The first preflight refused the accumulated programme ledger because it exceeded the target-receipt reader's 64 KB limit. The repaired execution-ledger reader preserves up to 1 MiB with the same private-file checks; other receipts retain the 64 KB default. It also admits the existing `alignment_in_progress` status. Ten focused tests, typechecking and affected lint pass, followed by the full pipeline above. No ledger history was removed to make the build pass.
+
+The compiled ARM64 host then passed the offline operator walkthrough now checked in as `subscription-operator.integration.mjs`. It uses isolated native databases and synthetic target/quiescence/channel facts. Actual commands prepare context, issue finite consent, quarantine pre-pause output, preserve charged usage and refuse replay that would override a later owner pause. A transient membership observation preserves history; confirmed membership change fences it. Explicit recovery verifies protected backups, preserves the old generation and creates an empty paused generation without valid new consent. The test imports baked compiled application modules and is now required by `host_image`.
+
+The native concurrency fixture additionally delivers the owner's exact pause command through the real controller while a CoS model response is pending. The controller persists pause and invokes actual Docker stop. The test confirms container exit, no completed late result, retained continuation, charged cancelled work and rejection of another model attempt. This uses a fixture stop callback and synthetic channel facts; the live Mattermost adapter, full production container lifecycle and Pi recovery remain separate acceptance.
+
+Release `release-73b19862ef25-20260930034717` subsequently passed those compiled-operator and owner-pause gates in the complete pipeline. Release `release-ea0d9ccb1c8f-20260930035611` passed them again and adds five mandatory native scenarios for each final worker profile: restart, compaction, shutdown with a pending model response, membership revocation and cancellation with a pending tool response. All ten pass against baked application code. The fixture and actual host transport modules are extracted from the same immutable host image; no checkout application code replaces the tested bytes. Only synthetic tokens, loopback transport and temporary trust are used. Compaction proves protocol continuity with a synthetic opaque summary, not live summarization quality. Exact source, manifest and image identities are recorded in the [S01 receipt](../chief-of-staff/evidence/S01.md).
+
+The `ea0d9cc` release is now deployed healthy on the Pi. Its compiled operator, native RPC/isolation, helper interruption, provider concurrency, owner pause and ten continuity/cancellation scenarios also pass natively there. Protected messages and identities are unchanged. Readiness inspection exposed the existing credential directory's group-writable mode; changing only that directory to owner-only access preserved the credential file exactly. Binding through a subsequent normal startup, compatible contract-22 rollback and live subscription inference remain separate work.
+
+## Restricted network transport
+
+The native runtime has Docker networking disabled. Its loopback relay forwards only to a fixed private host Unix socket. The host accepts TLS CONNECT to exact permitted hostnames on port 443, validates every DNS answer as public and dials the selected resolved IP. Query traffic may reach `chatgpt.com`; only the trusted authentication role also admits `auth.openai.com`. API billing, arbitrary destinations, private/LAN addresses, other ports and ordinary proxy HTTP requests are refused.
+
+The gateway bounds connection count, lifetime and bytes. It rechecks authority before and during connections and closes active tunnels on revocation or an authorization error. Eight host tests cover these boundaries; two runner tests cover relay forwarding, shutdown and missing host sockets. Root/runner typechecks and targeted host lint pass. A Bun socket buffering issue found by the relay regression was fixed before the native proof passed.
+
+TLS stays end-to-end between native Codex and the provider. This gateway enforces destination policy, not message content or individual API operations within the permitted domain. It is safe only together with the proved no-execution-environment tool policy, immutable configuration, access-only query credentials and host-mediated CoS actions. It does not grant the model a general web/network tool, create another conversation context or authorize delivery. Production cancellation and launch integration still need their own end-to-end tests.
+
+## Credential ownership implementation
+
+The new host-side `src/providers/codex-subscription-auth.ts` stages native checks in a private directory, outside the primary login. It does not implement OAuth requests, decode JWTs to refresh them, or change native cache timestamps. Native Codex owns refresh; the store validates the resulting account and publishes completed updates atomically. Query snapshots retain only access/id credentials, account binding and the native timestamp, with no refresh token or API key.
+
+Its durable journal distinguishes a check with an uncertain outcome from an already checked candidate ready for publication. A later legitimate host owner can finish publication without rotating again. Incomplete native writes preserve the primary file and block automatic refresh retries. A forced refresh with unchanged access/refresh credentials is not reported as success: pinned `account/read` can return account information after an attempted refresh, so account type alone is insufficient evidence. Changed primary credentials are not overwritten. The store requires the native host execution lease and serializes operations for the same source within the process.
+
+Ten credential-store regressions cover access-only export, competing refreshes, stale generations, partial writes, recovery by a new store instance, changed login/account, host-authority loss, unsafe permissions and symlinks, unconfirmed refresh, durable refresh-rate bounds and account binding across restarts. The native protocol fixture separately verifies actual Codex rotation and subsequent access-only execution. These are component proofs; the complete host store/native container path still needs final-image execution.
+
+The native check adapter now supplies the executable side of the store callback. Its host launcher admits only an immutable image, a private staged authentication file and the fixed authentication socket. It uses a network-disabled, read-only container with temporary HOME; the primary login and other session histories are not mounted. The new entry runs only app-server initialization and `account/read`, denies unexpected client requests and waits for the native writer to exit. The child receives a fixed environment without ambient API credentials, custom endpoints, CA overrides or proxy bypasses, and raw native diagnostics are suppressed. The offline fixture alone adds its synthetic CA.
+
+Six host-launch tests cover restricted mounts, authority, exact receipts and interrupted helper cleanup. Five native-check tests cover protocol selection, wrong authentication modes, unexpected requests, environment selection and an actual subprocess. Together with existing provider/transport/policy/relay checks, 16 host and 29 runner tests pass; root/runner typechecks and targeted host lint pass. The pinned binary completes the refresh and retained-context fixture through the new check helper and filtered environment. A second variant invokes the actual authentication entry with fixture system trust and no custom CA environment variable; its sanitized completion receipt and rotated credentials pass. The complete host Docker launcher has not yet been exercised against a newly baked image; ordinary and CoS launch registration remains pending. A successful cached account inspection still does not prove entitlement, model availability or live inference.
+
+Both ordinary and CoS launch paths must use this single refresh owner before enabling CoS subscription access. Ordinary launch and provider integration is now implemented as described below; CoS launcher integration remains pending. Deployment must drain older processes through the normal service path. Preserve ordinary session histories while replacing only credential preparation; final-image tests must cover concurrent ordinary/CoS queries and bounded renewal after access expiry. No master refresh credential should enter an ordinary query runtime or a CoS tool runtime under the coordinated profile.
+
+## Shared host lifecycle and ordinary sessions
+
+For an enabled CoS installation in release mode, host startup now attempts to install the credential owner after exclusive host ownership and orphan cleanup. It validates the existing private login without making a model request, creates private credential state under the bound target directory, and fences every operation with the exact current host lease. Missing or unsafe credential setup is reported without stopping unrelated startup. CoS subscription launch must require the installed owner; ordinary legacy behavior remains available when coordination was never installed. Once installed, closing the owner does not silently restore legacy credential copying.
+
+The host replaces only each ordinary Codex session's authentication cache with an access-only snapshot, preserves its history, and adds a host-created session credential socket. Generic provider mounts retain their existing isolation rules; the socket is added directly by the trusted container lifecycle. Session identity and current execution permission are checked for credential access. The socket exposes only cached snapshots and generation-bound renewal, accepts no account/scope/path selection, rejects master refresh/API credentials and suppresses private error details. Account identity is persisted as a private fingerprint; later login changes cannot silently switch it. A durable one-minute minimum separates actual refresh attempts, including after owner reconstruction.
+
+The ordinary provider fetches its snapshot before each turn. When the generation changes it replaces the native process and resumes the existing thread. A terminal native authentication failure requests one bounded host renewal, reports the interrupted turn and does not replay it. Queued later turns remain in the existing conversation. Quota failures do not rotate credentials. Cancellation aborts credential requests, prevents dispatch when already cancelled, stops the native process and suppresses late turn output. The coordinated profile explicitly selects native ChatGPT authentication and removes API-key/base-URL fallback. Ordinary tool capabilities otherwise retain their existing profile; CoS still requires its separate no-environment policy.
+
+The complete development suites pass: **1,191 host tests in 130 files**, **144 runner tests**, root and runner typechecks. Affected lint reports **0 errors and 7 existing warnings**. Tests include session history preservation, actual launch socket contribution, current/replaced/released host leases, account and refresh bounds, rejected credential exports, terminal authentication notifications, cancellation before dispatch and no automatic turn replay. These do not establish final-image or live multi-session subscription acceptance; the new complete owner/broker/provider path still needs that executable fixture coverage alongside CoS integration.
+
+## Native CoS provider integration
+
+`CosCodexProvider` now uses the shared native app-server transport, credential client and turn pump with the fixed CoS policy. It never loads ordinary MCP discovery or automatic approvals. It reapplies an empty execution-environment list and read-only policy on creation, resume and turns, supplies only the fixed native environment, and rejects unsupported client requests. Its three dynamic tools validate requests before forwarding them through the existing CoS RPC. Dispatch is tied to the current native thread/turn, limited to one concurrent operation and 32 calls per turn, and cancelled at turn end. Duplicate calls, extra arguments, foreign scope, malformed proposals and late results are refused.
+
+The provider emits its scoped continuation before model dispatch, resumes the same native thread across queued inputs and later queries, and refuses foreign/legacy continuations or implicit fresh-thread fallback. Missing native history reports explicit recovery required. Credential failure may request one host renewal; the interrupted model turn is never replayed automatically. The shared turn pump filters foreign notifications for this profile and bounds result size and buffered events. Ordinary profiles retain their existing behavior.
+
+The full runner suite passes **154 tests in 19 files**, including ten new dispatch/provider/cancellation tests; all **1,191 host tests in 130 files** and both typechecks pass. The pinned ARM64 binary passes the complete query-adapter fixture described above: actual credential client, native thread creation/resume, real CoS RPC, rejected shell/file operations, retained history and excluded credential canaries. Its broker and RPC host are synthetic fixtures. This does not yet prove production launcher registration, persistent host mounts, native 401 recovery through the complete host credential owner, or concurrent ordinary/CoS execution.
+
+## Work still required before integration is accepted
+
+The production launcher now selects the native adapter and no longer reads an API key. It requires the installed credential owner and version-2 activation bound to account fingerprint, conversation generation, model, scope, consent reference, expiry and a finite attempt budget. Its private turn socket reserves usage durably before native startup; unknown outcomes remain charged and repeated attempt IDs cannot reopen a reservation. Query egress is available only during a live authorized attempt, with a five-minute ceiling. Credentials, turn control and model transport use separate fixed sockets.
+
+CoS provider state now lives in a private generation directory outside worker-visible session storage and survives ordinary restarts. A central SQLite record binds that generation to the exact CoS identity and account. Missing or unsafe state, observed identity/account changes and confirmed access revocation fence the old context; existing history is retained. Temporary Mattermost observation failures close admission without erasing history. The actual runner uses the host generation as its continuation key, never adopts legacy context and no longer clears native continuation on startup or through generic `/clear`. Host-scoped polling also skips ordinary scheduled-script execution.
+
+The native schema addition is migration `cos-subscription-context` (contract version 22). It adds conversation and attempt records without resetting existing budgets. New candidate manifests declare SQLite contract 22; older contract-21 receipts retain their original identity and are not automatically treated as compatible rollback targets. The final delivery must include tested recovery for the new contract and protected provider history.
+
+Current development verification: **1,206 host tests in 134 files**, **156 runner tests in 20 files**, both typechecks, and the pinned runner-entry fixture above pass. These tests cover ordinary/legacy continuation preservation, actual runner restart across visual threads, account/context-bound consent, durable attempt accounting, host-only mounts, access fencing and missing-state refusal. They do not replace complete final-image, container/service restart, compaction, recovery, revocation and Pi acceptance.
+
+Pinned native file storage truncates and writes `auth.json`; production must use the tested staging/publication path, not let native checks write the primary file directly. Do not mount the whole host `.codex` directory, enable simultaneous uncoordinated refresh writers, or overwrite refreshed credentials with old copies. An uncertain refresh requires explicit reconciliation or reauthentication; retaining the primary file does not prove an older refresh credential is still valid at the provider.
+
+At this development checkpoint, operator context recovery, activation/resumption, protected history backups and offline native compaction had evidence, while final-image and deployment checks remained pending. The current S01 receipt supersedes those pending checks with their actual later results. SUB01–SUB14 are not collectively satisfied by this protocol proof: live subscription/Mattermost acceptance remains a separate requirement. Development fixtures did not call real account services or send messages.
+
+## Pinned source references
+
+- [Thread/environment protocol](https://github.com/openai/codex/blob/rust-v0.158.0/codex-rs/app-server/tests/suite/v2/thread_environments.rs).
+- [Synthetic native authentication and account-routing fixtures](https://github.com/openai/codex/blob/rust-v0.158.0/codex-rs/app-server/tests/common/auth_fixtures.rs).
+- [Dynamic tool dispatch tests](https://github.com/openai/codex/blob/rust-v0.158.0/codex-rs/app-server/tests/suite/v2/dynamic_tools.rs).
+- [Tool registration and environment selection](https://github.com/openai/codex/blob/rust-v0.158.0/codex-rs/core/src/tools/spec_plan.rs).
+- [Native credential persistence](https://github.com/openai/codex/blob/rust-v0.158.0/codex-rs/login/src/auth/storage.rs).
+
+Generated schemas from the actual image were also inspected; source references complement executable evidence rather than replace it.

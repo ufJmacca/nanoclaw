@@ -14,6 +14,7 @@
  *
  * See `docs/claude-md-composition.md` for the full design.
  */
+import { codeAssetRoot } from './release-runtime.js';
 import fs from 'fs';
 import path from 'path';
 
@@ -59,7 +60,7 @@ export function composeGroupClaudeMd(group: AgentGroup): void {
 
   // Skill fragments — every skill that ships an `instructions.md`.
   // TODO (shared-source refactor): respect `container.json` skill selection.
-  const skillsHostDir = path.join(process.cwd(), 'container', 'skills');
+  const skillsHostDir = path.join(codeAssetRoot(), 'container', 'skills');
   if (fs.existsSync(skillsHostDir)) {
     for (const skillName of fs.readdirSync(skillsHostDir)) {
       const hostFragment = path.join(skillsHostDir, skillName, 'instructions.md');
@@ -76,7 +77,7 @@ export function composeGroupClaudeMd(group: AgentGroup): void {
   // sibling `<name>.instructions.md`. These describe how the agent should
   // use that module's MCP tools (schedule_task, install_packages, etc.).
   // Always included — these are built-in, not toggleable.
-  const mcpToolsHostDir = path.join(process.cwd(), MCP_TOOLS_HOST_SUBPATH);
+  const mcpToolsHostDir = path.join(codeAssetRoot(), MCP_TOOLS_HOST_SUBPATH);
   if (fs.existsSync(mcpToolsHostDir)) {
     for (const entry of fs.readdirSync(mcpToolsHostDir)) {
       const match = entry.match(/^(.+)\.instructions\.md$/);

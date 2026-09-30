@@ -6,6 +6,12 @@
   "packageManager": "pnpm@10.33.0",
   "main": "dist/index.js",
   "scripts": {
+    "cos:release": "bash scripts/cos-release.sh",
+    "cos:deploy": "bash scripts/cos-deploy.sh",
+    "cos:admin": "tsx src/modules/chief-of-staff/ops/admin.ts",
+    "cos:db": "tsx src/modules/chief-of-staff/ops/db-cli.ts",
+    "cos:test": "tsx src/contracts/chief-of-staff/run.ts",
+    "cos:demo": "tsx src/contracts/chief-of-staff/run.ts --demo",
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
@@ -35,12 +41,14 @@
     "chat": "^4.24.0",
     "cron-parser": "5.5.0",
     "kleur": "^4.1.5",
+    "pg": "8.16.3",
     "ws": "8.21.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.35.0",
     "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^22.10.0",
+    "@types/pg": "8.15.5",
     "@types/ws": "8.18.1",
     "eslint": "^9.35.0",
     "eslint-plugin-no-catch-all": "^1.1.0",

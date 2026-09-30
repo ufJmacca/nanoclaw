@@ -10,9 +10,13 @@ Use a private channel such as `chief-of-staff`, with the designated owner and bo
 
 The channel connects to the **Pi's NanoClaw**, which runs one persistent coordinator for that scope. Approved records, missions and decisions are held in PostgreSQL, not in Mattermost messages. Restarting a session does not delete the work model. The Mac is a development machine, not the chat backend. Use the existing Mattermost deployment; installing a new server or moving one onto the Pi is not required by these plans.
 
+The coordinator is a native NanoClaw AgentGroup with its own persistent conversation and provider context. Retain its CoS-only history/continuation across ordinary container and service restarts, with supported compaction as the context grows. Initial binding excludes pre-existing ordinary or cross-group history; that clean start does not require resetting subsequent CoS conversation. Conversation may contain tentative ideas without making them approved records. Access changes and source revocation require explicit context invalidation and safe reconstruction. See the [subscription runtime correction](SUBSCRIPTION_CODEX_RUNTIME.md) for implementation and continuity acceptance.
+
 The current fork includes a native Mattermost adapter and strict channel-specific wiring. The inspected strict subscription sets `session_mode='shared'`, identifies threaded sessions as invalid, and maintains an exclusive channel/agent mapping [I01–I03]. Therefore **a Mattermost thread is not an isolated agent session in this plan**.
 
 Start with one shared coordinator conversation and stable mission/decision IDs. Replies may be visually grouped in Mattermost threads only where the existing adapter supports this without changing strict session semantics. Thread presentation is optional; it is not an S01 prerequisite and must never be used as a security boundary. Do not change the strict topology to implement it. Specialist attempts get their own isolated execution AgentGroups under S05 and return results through the host, not through other Mattermost channels.
+
+The owner explicitly confirmed this topology: channel messages and reply threads share the main CoS context; only specialist agents have their own execution contexts outside that conversation. Verify that replying in a Mattermost thread reuses the coordinator session rather than creating a new context.
 
 ## 2. What the owner sees
 

@@ -15,6 +15,8 @@
  */
 import fs from 'fs';
 import path from 'path';
+import { createSubscriptionCredentialClient } from './codex-credential-client.js';
+import { stopSubscriptionAppServer } from './codex-subscription-check.js';
 
 import { registerProvider } from './provider-registry.js';
 import type { AgentProvider, AgentQuery, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
@@ -109,8 +111,12 @@ export class CodexProvider implements AgentProvider {
   private readonly mcpServers: Record<string, { command: string; args: string[]; env: Record<string, string> }>;
   private readonly model: string;
   private readonly reasoningEffort: CodexReasoningEffort | undefined;
+  private readonly restrictedCos: boolean;
+  private readonly coordinatedSubscription: boolean;
 
   constructor(options: ProviderOptions = {}) {
+    this.restrictedCos = options.restrictedCos === true;
+    this.coordinatedSubscription = options.env?.NANOCLAW_CODEX_SUBSCRIPTION === '1';
     this.mcpServers = options.mcpServers ?? {};
     this.model = (options.env?.CODEX_MODEL as string | undefined) ?? 'gpt-6-astra';
     const configuredEffort = (options.env?.CODEX_REASONING_EFFORT as string | undefined)?.trim().toLowerCase();
@@ -130,6 +136,8 @@ export class CodexProvider implements AgentProvider {
     let waiting: (() => void) | null = null;
     let ended = false;
     let aborted = false;
+    let activeServer: AppServer | undefined;
+    const credentialCancellation = new AbortController();
     const kick = (): void => {
       waiting?.();
     };
@@ -139,38 +147,23 @@ export class CodexProvider implements AgentProvider {
     const self = this;
 
     async function* gen(): AsyncGenerator<ProviderEvent> {
-      // One app-server per query invocation. The poll-loop keeps a single
-      // query active per batch of pending messages and ends it on idle, so
-      // spawn-per-query matches that cadence naturally.
-      writeCodexMcpConfigToml(self.mcpServers);
-      const server = spawnCodexAppServer(createCodexConfigOverrides());
-      attachCodexAutoApproval(server);
+      // Keep the native process warm across turns; replace it only when the
+      // coordinated credential generation changes, resuming the same thread.
+      const credentials = self.coordinatedSubscription
+        ? createSubscriptionCredentialClient({ signal: credentialCancellation.signal })
+        : undefined;
+      let restart = false;
 
       const decodedContinuation = decodeCodexContinuation(input.continuation);
       let threadId: string | undefined = decodedContinuation.threadId;
       let initYielded = false;
 
       try {
-        await initializeCodexAppServer(server);
-        const dynamicTools = await loadNanoclawWorkflowDynamicTools(server);
-
         if (decodedContinuation.refreshRequired) {
           console.error(
             '[codex-provider] Refreshing pre-bridge Codex continuation so dynamic MCP workflow tools are attached',
           );
         }
-
-        const threadParams = {
-          model: self.model,
-          cwd: input.cwd,
-          sandbox: 'danger-full-access',
-          approvalPolicy: 'never',
-          personality: 'friendly',
-          baseInstructions: composeBaseInstructions(input.systemContext?.instructions),
-          dynamicTools,
-        };
-
-        threadId = await startOrResumeCodexThread(server, threadId, threadParams);
 
         while (!aborted) {
           while (pending.length === 0 && !ended && !aborted) {
@@ -183,13 +176,64 @@ export class CodexProvider implements AgentProvider {
           if (pending.length === 0 && ended) return;
 
           const text = pending.shift()!;
+          try {
+            const changed = await credentials?.prepare();
+            if (aborted) return;
+            if (activeServer && (changed || restart)) {
+              await stopSubscriptionAppServer(activeServer);
+              activeServer = undefined;
+            }
+            if (!activeServer) {
+              writeCodexMcpConfigToml(self.mcpServers, self.restrictedCos);
+              const overrides = createCodexConfigOverrides(self.restrictedCos);
+              if (credentials)
+                overrides.push(
+                  'forced_login_method="chatgpt"',
+                  'model_provider="openai"',
+                  'cli_auth_credentials_store="file"',
+                );
+              activeServer = spawnCodexAppServer(overrides, credentials ? { diagnostic: () => {} } : {});
+              attachCodexAutoApproval(activeServer);
+              await initializeCodexAppServer(activeServer);
+              const dynamicTools = self.restrictedCos ? [] : await loadNanoclawWorkflowDynamicTools(activeServer);
+              if (aborted) return;
+              const previousThread = threadId;
+              threadId = await startOrResumeCodexThread(activeServer, threadId, {
+                model: self.model,
+                cwd: input.cwd,
+                sandbox: 'danger-full-access',
+                approvalPolicy: 'never',
+                personality: 'friendly',
+                baseInstructions: self.restrictedCos
+                  ? input.systemContext?.instructions
+                  : composeBaseInstructions(input.systemContext?.instructions),
+                dynamicTools,
+              });
+              if (previousThread !== threadId) initYielded = false;
+              restart = false;
+            }
+          } catch (error) {
+            if (!credentials) throw error;
+            if (activeServer) {
+              await stopSubscriptionAppServer(activeServer);
+              activeServer = undefined;
+            }
+            if (aborted) return;
+            yield { type: 'error', message: 'Codex subscription is unavailable.', retryable: false };
+            yield {
+              type: 'result',
+              text: 'Codex could not start this turn. The subscription runtime needs attention; this turn was not run.',
+            };
+            continue;
+          }
+          if (aborted) return;
 
           // One turn = one channel of streaming events. Each notification
           // from the app-server yields an `activity` first (so the
           // poll-loop's idle timer stays honest) and then, where relevant,
           // an init / result / progress event.
           yield* runOneTurn(
-            server,
+            activeServer,
             threadId!,
             text,
             self.model,
@@ -200,10 +244,17 @@ export class CodexProvider implements AgentProvider {
             () => {
               initYielded = true;
             },
+            credentials
+              ? async () => {
+                  restart = true;
+                  await credentials.refresh();
+                }
+              : undefined,
+            () => aborted,
           );
         }
       } finally {
-        killCodexAppServer(server);
+        if (activeServer) killCodexAppServer(activeServer);
       }
     }
 
@@ -218,6 +269,8 @@ export class CodexProvider implements AgentProvider {
       },
       abort: () => {
         aborted = true;
+        credentialCancellation.abort();
+        if (activeServer) killCodexAppServer(activeServer);
         kick();
       },
       events: gen(),
@@ -230,7 +283,7 @@ export class CodexProvider implements AgentProvider {
 // and because it's a natural seam for future unit tests that drive it with
 // a fake notification stream.
 
-async function* runOneTurn(
+export async function* runOneTurn(
   server: AppServer,
   threadId: string,
   inputText: string,
@@ -240,12 +293,17 @@ async function* runOneTurn(
   encodeContinuation: (threadId: string) => string,
   hasInit: () => boolean,
   markInit: () => void,
+  renewSubscription?: () => Promise<void>,
+  cancelled: () => boolean = () => false,
+  restrictedSubscription?: { started(threadId: string, turnId: string): void; finished(): void },
 ): AsyncGenerator<ProviderEvent> {
+  if (cancelled()) return;
   // Mutable refs via object properties — TS can't track closure assignments
   // for narrowing, but property access keeps the declared type visible.
-  const turnState: { error: Error | null } = { error: null };
+  const turnState: { error: Error | null; unauthorized: boolean } = { error: null, unauthorized: false };
   let resultText = '';
   let turnDone = false;
+  let nativeTurnId: string | undefined;
   const progressState: CodexProgressState = { functionCalls: new Map(), completedWebSearches: new Set() };
 
   // Buffered event queue so we can `yield` across the async notification
@@ -261,6 +319,23 @@ async function* runOneTurn(
   const handler = (n: JsonRpcNotification): void => {
     const method = n.method;
     const params = n.params;
+
+    if (restrictedSubscription) {
+      if (turnDone || cancelled() || params.threadId !== threadId) return;
+      const turn = params.turn as { id?: unknown } | undefined;
+      if (method === 'turn/started') {
+        if (nativeTurnId || typeof turn?.id !== 'string' || !turn.id) return;
+        nativeTurnId = turn.id;
+        restrictedSubscription.started(threadId, nativeTurnId);
+      } else if (!nativeTurnId || (params.turnId ?? turn?.id) !== nativeTurnId) return;
+      if (buffer.length >= 256) {
+        turnState.error = new Error('CoS turn output limit reached');
+        turnDone = true;
+        restrictedSubscription.finished();
+        kick();
+        return;
+      }
+    }
 
     // Every inbound notification counts as activity for the poll-loop's
     // idle timer — yield before any event-specific translation so even
@@ -278,12 +353,17 @@ async function* runOneTurn(
       }
       case 'item/agentMessage/delta': {
         const delta = params.delta as string;
-        if (delta) resultText += delta;
+        if (typeof delta === 'string') resultText += delta;
         break;
       }
       case 'item/completed': {
         const item = params.item as { type?: string; text?: string; phase?: string } | undefined;
-        if (item?.type === 'agentMessage' && item.text && item.phase !== 'commentary') {
+        if (
+          item?.type === 'agentMessage' &&
+          typeof item.text === 'string' &&
+          item.text &&
+          item.phase !== 'commentary'
+        ) {
           resultText = item.text;
         }
         for (const message of codexProgressMessages(n, progressState)) {
@@ -298,13 +378,30 @@ async function* runOneTurn(
         }
         break;
       }
-      case 'turn/completed':
+      case 'turn/completed': {
+        const turn = params.turn as
+          | { status?: string; error?: { message?: string; codexErrorInfo?: unknown } }
+          | undefined;
+        if (turn?.status === 'failed' || turn?.status === 'interrupted') {
+          turnState.error = new Error(turn.error?.message ?? 'Turn did not complete');
+          if (turn.error?.codexErrorInfo !== undefined)
+            turnState.unauthorized = nativeUnauthorized(turn.error.codexErrorInfo, turn.error.message);
+        }
         turnDone = true;
         break;
+      }
       case 'turn/failed': {
-        const e = params.error as { message?: string } | undefined;
+        const e = params.error as { message?: string; codexErrorInfo?: unknown } | undefined;
         turnState.error = new Error(e?.message || 'Turn failed');
+        turnState.unauthorized = nativeUnauthorized(e?.codexErrorInfo, e?.message);
         turnDone = true;
+        break;
+      }
+      case 'error': {
+        if (params.willRetry === true || (params.threadId && params.threadId !== threadId)) break;
+        const error = params.error as { message?: string; codexErrorInfo?: unknown } | undefined;
+        turnState.error = new Error(error?.message ?? 'Turn failed');
+        turnState.unauthorized = nativeUnauthorized(error?.codexErrorInfo, error?.message);
         break;
       }
       case 'thread/status/changed': {
@@ -326,14 +423,31 @@ async function* runOneTurn(
         break;
     }
 
+    if (restrictedSubscription) {
+      if (Buffer.byteLength(resultText) > 65536) {
+        resultText = '';
+        turnState.error = new Error('CoS turn output limit reached');
+        turnDone = true;
+      }
+      if (turnDone) restrictedSubscription.finished();
+    }
+
     kick();
   };
 
   server.notificationHandlers.push(handler);
+  const exited = () => {
+    turnState.error = new Error('Codex process ended before turn completion');
+    turnDone = true;
+    restrictedSubscription?.finished();
+    kick();
+  };
+  server.process.once('exit', exited);
 
   const timer = setTimeout(() => {
     turnState.error = new Error(`Turn timed out after ${TURN_TIMEOUT_MS}ms`);
     turnDone = true;
+    restrictedSubscription?.finished();
     kick();
   }, TURN_TIMEOUT_MS);
 
@@ -345,14 +459,23 @@ async function* runOneTurn(
       buffer.push({ type: 'init', continuation: encodeContinuation(threadId) });
     }
 
-    void startCodexTurn(server, { threadId, inputText, model, effort, cwd }).catch((err) => {
+    void startCodexTurn(server, {
+      threadId,
+      inputText,
+      model,
+      effort,
+      cwd,
+      restrictedSubscription: !!restrictedSubscription,
+    }).catch((err) => {
       turnState.error = err instanceof Error ? err : new Error(String(err));
       turnDone = true;
+      restrictedSubscription?.finished();
       kick();
     });
 
     while (true) {
       while (buffer.length > 0) {
+        if (cancelled()) return;
         const ev = buffer.shift()!;
         yield ev;
       }
@@ -363,19 +486,64 @@ async function* runOneTurn(
       waker = null;
     }
 
+    if (cancelled()) return;
     while (buffer.length > 0) yield buffer.shift()!;
 
     if (turnState.error) {
-      yield { type: 'error', message: turnState.error.message, retryable: false };
+      if (renewSubscription) {
+        let renewed = false;
+        if (turnState.unauthorized) {
+          try {
+            await renewSubscription();
+            renewed = true;
+          } catch {
+            /* The host retains exact private failure state. */
+          }
+        }
+        if (cancelled()) return;
+        const message = renewed
+          ? 'Subscription credentials were renewed. This interrupted turn was not replayed.'
+          : 'Codex could not complete this turn. It has not been replayed.';
+        yield { type: 'error', message, retryable: false };
+        yield { type: 'result', text: message };
+      } else yield { type: 'error', message: turnState.error.message, retryable: false };
       return;
     }
 
     yield { type: 'result', text: resultText || null };
   } finally {
+    restrictedSubscription?.finished();
     clearTimeout(timer);
+    server.process.removeListener('exit', exited);
     const idx = server.notificationHandlers.indexOf(handler);
     if (idx >= 0) server.notificationHandlers.splice(idx, 1);
   }
+}
+
+// Pinned 0.158.0 turns a managed-cache 401 into these terminal refresh errors.
+// Access-only workers cannot refresh themselves. Only the coordinated owner's
+// native helper may rotate; the failed turn is never automatically replayed.
+// Match exact native errors, not endpoint substrings or arbitrary provider text.
+const NATIVE_REFRESH_FAILURES = new Set([
+  'error sending request for url (https://auth.openai.com/oauth/token)',
+  'Your access token could not be refreshed. Please log out and sign in again.',
+  'Your access token could not be refreshed because your refresh token has expired. Please log out and sign in again.',
+  'Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.',
+  'Your access token could not be refreshed because your refresh token was revoked. Please log out and sign in again.',
+]);
+function nativeUnauthorized(info: unknown, message?: string): boolean {
+  if (info === 'unauthorized') return true;
+  if (info === 'other' && typeof message === 'string' && NATIVE_REFRESH_FAILURES.has(message)) return true;
+  if (!info || typeof info !== 'object') return false;
+  return [
+    'httpConnectionFailed',
+    'responseStreamConnectionFailed',
+    'responseStreamDisconnected',
+    'responseTooManyFailedAttempts',
+  ].some((key) => {
+    const value = (info as Record<string, unknown>)[key];
+    return value && typeof value === 'object' && (value as { httpStatusCode?: number }).httpStatusCode === 401;
+  });
 }
 
 interface CodexReasoningItem {

@@ -9,6 +9,15 @@ export interface HostExecutionLease {
   pid: number;
 }
 
+/** Credential ownership must be fenced by the exact live host generation. */
+export function assertHostExecutionLease(db: Database.Database, lease: HostExecutionLease): void {
+  const current = db.prepare('SELECT owner_id, pid FROM host_execution_lease WHERE singleton_id = 1').get() as
+    | HostExecutionLeaseRow
+    | undefined;
+  if (!current || lease.pid !== process.pid || current.owner_id !== lease.ownerId || current.pid !== lease.pid)
+    throw new Error('host_execution_authority_lost');
+}
+
 export interface HostExecutionLeaseOptions {
   pid?: number;
   ownerId?: string;

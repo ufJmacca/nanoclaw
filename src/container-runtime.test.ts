@@ -46,6 +46,7 @@ describe('stopContainer', () => {
     expect(mockExecSync).toHaveBeenCalledWith(`${CONTAINER_RUNTIME_BIN} stop -t 1 nanoclaw-test-123`, {
       stdio: 'pipe',
       timeout: 10_000,
+      env: expect.any(Object),
     });
   });
 
@@ -69,6 +70,7 @@ describe('ensureContainerRuntimeRunning', () => {
     expect(mockExecSync).toHaveBeenCalledWith(`${CONTAINER_RUNTIME_BIN} info`, {
       stdio: 'pipe',
       timeout: 10000,
+      env: expect.any(Object),
     });
     expect(log.debug).toHaveBeenCalledWith('Container runtime already running');
   });
@@ -110,10 +112,12 @@ describe('cleanupOrphans', () => {
     expect(mockExecSync).toHaveBeenNthCalledWith(2, `${CONTAINER_RUNTIME_BIN} stop -t 1 nanoclaw-group1-111`, {
       stdio: 'pipe',
       timeout: 10_000,
+      env: expect.any(Object),
     });
     expect(mockExecSync).toHaveBeenNthCalledWith(3, `${CONTAINER_RUNTIME_BIN} stop -t 1 nanoclaw-group2-222`, {
       stdio: 'pipe',
       timeout: 10_000,
+      env: expect.any(Object),
     });
     expect(mockExecSync).toHaveBeenNthCalledWith(
       4,

@@ -6,6 +6,10 @@ import path from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { AgentGroup, Session } from './types.js';
+import {
+  createSubscriptionCoordinator,
+  installSubscriptionCoordinator,
+} from './providers/codex-subscription-coordinator.js';
 
 const runnerMocks = vi.hoisted(() => ({
   testRoot: `/tmp/nanoclaw-container-runner-isolation-${process.pid}`,
@@ -206,11 +210,100 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.unstubAllEnvs();
   for (const child of runnerMocks.spawned) child.emit('close', 0);
   fs.rmSync(runnerMocks.testRoot, { recursive: true, force: true });
 });
 
 describe('container execution isolation', () => {
+  it('mounts the host-managed credential socket for a coordinated ordinary Codex launch', async () => {
+    const root = path.join(runnerMocks.testRoot, 'credential-owner');
+    fs.mkdirSync(root, { mode: 0o700 });
+    const coordinator = createSubscriptionCoordinator({
+      root,
+      store: {
+        cached: () => {
+          throw Error('unused');
+        },
+        refresh: async () => {
+          throw Error('unused');
+        },
+      },
+      assertAuthority() {},
+      authorizeSession: async () => true,
+    });
+    const uninstall = installSubscriptionCoordinator(coordinator);
+    try {
+      const group = agentGroup('agent-subscription', 'subscription');
+      runnerMocks.groups.set(group.id, group);
+      const current = { ...session('session-subscription', group.id), agent_provider: 'codex' };
+      expect(await wakeContainer(current)).toBe(true);
+      const args = runnerMocks.spawn.mock.calls[0][1] as string[];
+      expect(args.some((arg) => arg.includes(root) && arg.includes('/run/nanoclaw/codex-credentials.sock'))).toBe(true);
+    } finally {
+      uninstall();
+      await coordinator.close();
+    }
+  });
+  it('S01-PG06 excludes database profiles and aliases from provider and helper environments for ordinary groups', async () => {
+    vi.stubEnv('COS_PGPASSWORD', 'cos-runtime-secret-canary');
+    vi.stubEnv('COS_TEST_PGPASSWORD', 'cos-test-secret-canary');
+    vi.stubEnv('COS_PG_MIGRATION_PASSWORD', 'cos-admin-secret-canary');
+    vi.stubEnv('PGHOST', 'db-private-canary');
+    vi.stubEnv('DATABASE_URL', 'postgres://db-secret-canary');
+    vi.stubEnv('OPENAI_BASE_URL', 'https://proxy/cos-runtime-secret-canary');
+    const group = agentGroup('agent-cos-env', 'cos-env');
+    runnerMocks.groups.set(group.id, group);
+    const provider = vi.fn(() => ({}));
+    runnerMocks.getProviderContainerConfig.mockReturnValue(provider);
+    await expect(wakeContainer(session('session-cos-env', group.id))).resolves.toBe(true);
+    const hostEnv = (provider.mock.calls as unknown as Array<[{ hostEnv: NodeJS.ProcessEnv }]>)[0][0].hostEnv;
+    const helperEnv = runnerMocks.spawn.mock.calls[0][2].env;
+    expect(helperEnv).toBeDefined();
+    for (const env of [hostEnv, helperEnv]) {
+      expect(Object.keys(env).some((key) => /^(COS_(TEST_)?PG|PG|DATABASE_URL)/.test(key))).toBe(false);
+      expect(JSON.stringify(env)).not.toContain('secret-canary');
+    }
+  });
+
+  it.each(['COS_PGPASSWORD', 'COS_TEST_PGHOST', 'COS_TEST_TARGET_ID', 'PGPASSWORD', 'DATABASE_URL'])(
+    'S01-PG06 rejects provider injection of %s before host gateway configuration',
+    async (key) => {
+      const group = agentGroup('agent-cos-inject', 'cos-inject');
+      runnerMocks.groups.set(group.id, group);
+      runnerMocks.getProviderContainerConfig.mockReturnValue(() => ({ env: { [key]: 'fixture-value' } }));
+      await expect(wakeContainer(session('session-cos-inject', group.id))).resolves.toBe(false);
+      expect(runnerMocks.applyContainerConfig).not.toHaveBeenCalled();
+      expect(runnerMocks.spawn).not.toHaveBeenCalled();
+    },
+  );
+
+  it('S01-PG06 rejects an aliased database password in mounted instructions', async () => {
+    vi.stubEnv('COS_PGPASSWORD', 'cos-instructions-secret-canary');
+    const group = agentGroup('agent-cos-config', 'cos-config');
+    runnerMocks.groups.set(group.id, group);
+    runnerMocks.readContainerConfig.mockReturnValue({
+      mcpServers: { helper: { command: 'node', instructions: 'Bearer cos-instructions-secret-canary' } },
+      packages: { apt: [], npm: [] },
+      additionalMounts: [],
+      skills: [],
+    });
+    await expect(wakeContainer(session('session-cos-config', group.id))).resolves.toBe(false);
+    expect(runnerMocks.spawn).not.toHaveBeenCalled();
+  });
+
+  it('S01-PG06 rejects a database credential inserted into final launch arguments', async () => {
+    vi.stubEnv('COS_PG_MIGRATION_PASSWORD', 'cos-gateway-secret-canary');
+    const group = agentGroup('agent-cos-gateway', 'cos-gateway');
+    runnerMocks.groups.set(group.id, group);
+    runnerMocks.applyContainerConfig.mockImplementation(async (_id: string, _config: unknown, args: string[]) => {
+      args.push('-e', 'CUSTOM=cos-gateway-secret-canary');
+      return true;
+    });
+    await expect(wakeContainer(session('session-cos-gateway', group.id))).resolves.toBe(false);
+    expect(runnerMocks.spawn).not.toHaveBeenCalled();
+  });
+
   it('uses disjoint writable mount sources for distinct agent groups', async () => {
     const alpha = agentGroup('agent-alpha', 'alpha');
     const beta = agentGroup('agent-beta', 'beta');
