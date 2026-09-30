@@ -32,23 +32,25 @@ Run from the repository root using host Docker. The fixture refuses an existing 
 docker run --rm --network none --read-only \
   --tmpfs /tmp:rw,nosuid,nodev \
   --tmpfs /home/node:rw,nosuid,nodev \
-  --tmpfs /workspace:rw,nosuid,nodev \
+  --tmpfs /workspace:rw,nosuid,nodev,uid=1000,gid=1000 \
   --tmpfs /run/cos:rw,nosuid,nodev,uid=1000,gid=1000 \
   --tmpfs /run/nanoclaw:rw,nosuid,nodev,uid=1000,gid=1000 \
   --tmpfs /etc/ssl/certs:rw,nosuid,nodev,uid=1000,gid=1000 \
   -e HOME=/home/node -e NANOCLAW_COS_OFFLINE_FIXTURE=1 \
   -e NANOCLAW_COS_FIXTURE_SYSTEM_TRUST=1 \
   -e NANOCLAW_COS_FIXTURE_PRODUCTION_QUERY=1 \
+  -e NANOCLAW_COS_FIXTURE_RUNNER_ENTRY=1 \
   -e NANOCLAW_COS_FIXTURE_EGRESS_MODULE=file:///fixture/subscription-egress.ts \
   --mount "type=bind,src=$PWD/src/modules/chief-of-staff/bridge/subscription-egress.ts,dst=/fixture/subscription-egress.ts,readonly" \
+  --mount "type=bind,src=$PWD/src/modules/chief-of-staff/bridge/subscription-turns.ts,dst=/fixture/subscription-turns.ts,readonly" \
   --mount "type=bind,src=$PWD/container/agent-runner/fixtures/cos-subscription-capability.ts,dst=/app/fixtures/cos-subscription-capability.ts,readonly" \
   --mount "type=bind,src=$PWD/container/agent-runner/src,dst=/app/src,readonly" \
-  --entrypoint bun \
+  --workdir /workspace --entrypoint bun \
   sha256:4b799b1d6c4cb086c9431a37c2eb79f84892bc2045efa277e0861e33bd360672 \
   /app/fixtures/cos-subscription-capability.ts
 ```
 
-Expected final receipt: `probe=passed`, six generating requests, retained context, only the admitted CoS dispatch, no escape file, no credential canaries, one native refresh, an access-only query cache, `fixedDestinationEgress=true`, `productionAuthEntry=true` and `productionQueryProvider=true`. This variant supplies its synthetic root through a temporary system certificate directory and invokes the real authentication entry as a child; the native environment needs no custom CA variable. The production CoS provider obtains access-only credentials from a fixture Unix broker, dispatches the real SQLite RPC against a fixture responder and persists/resumes its continuation across native process restarts. The fixture intentionally does not supply a live model catalogue; catalogue warnings do not establish live model availability. Failed assertions or a timeout fail the process. This development command mounts source read-only; it is not a final-image gate.
+Expected final receipt: `probe=passed`, six generating requests, retained context, only the admitted CoS dispatch, no escape file, no credential canaries, one native refresh, an access-only query cache, `fixedDestinationEgress=true`, `productionAuthEntry=true`, `productionQueryProvider=true`, `reservedAttempts=2` and `runnerEntry=true`. This variant supplies its synthetic root through a temporary system certificate directory and invokes the real authentication entry as a child; the native environment needs no custom CA variable. It starts and stops the actual CoS runner entry twice, with synthetic messages in different visual reply threads. The provider obtains access-only credentials from a fixture Unix broker, reserves attempts through the real host turn controller, dispatches real SQLite RPC against a fixture responder and resumes the same scoped continuation after restart. Ordinary and legacy continuation canaries remain untouched. The fixture intentionally does not supply a live model catalogue; catalogue warnings do not establish live model availability. Failed assertions or a timeout fail the process. This development command mounts source read-only and uses synthetic SQLite paths; it is not a final-image or deployed mount-isolation gate.
 
 ## Restricted network transport
 
@@ -92,11 +94,17 @@ The full runner suite passes **154 tests in 19 files**, including ten new dispat
 
 ## Work still required before integration is accepted
 
-The production launcher must select the native adapter, retain a CoS-only provider state directory and remove unconditional startup continuation clearing. The adapter now reapplies the no-environment policy; host wiring must preserve the single native coordinator context across Mattermost reply threads. Only specialist attempts receive separate contexts. Test container/service restart, compaction, host-controlled recovery, explicit invalidation and revoked-context exclusion.
+The production launcher now selects the native adapter and no longer reads an API key. It requires the installed credential owner and version-2 activation bound to account fingerprint, conversation generation, model, scope, consent reference, expiry and a finite attempt budget. Its private turn socket reserves usage durably before native startup; unknown outcomes remain charged and repeated attempt IDs cannot reopen a reservation. Query egress is available only during a live authorized attempt, with a five-minute ceiling. Credentials, turn control and model transport use separate fixed sockets.
+
+CoS provider state now lives in a private generation directory outside worker-visible session storage and survives ordinary restarts. A central SQLite record binds that generation to the exact CoS identity and account. Missing or unsafe state, observed identity/account changes and confirmed access revocation fence the old context; existing history is retained. Temporary Mattermost observation failures close admission without erasing history. The actual runner uses the host generation as its continuation key, never adopts legacy context and no longer clears native continuation on startup or through generic `/clear`. Host-scoped polling also skips ordinary scheduled-script execution.
+
+The native schema addition is migration `cos-subscription-context` (contract version 22). It adds conversation and attempt records without resetting existing budgets. New candidate manifests declare SQLite contract 22; older contract-21 receipts retain their original identity and are not automatically treated as compatible rollback targets. The final delivery must include tested recovery for the new contract and protected provider history.
+
+Current development verification: **1,206 host tests in 134 files**, **156 runner tests in 20 files**, both typechecks, and the pinned runner-entry fixture above pass. These tests cover ordinary/legacy continuation preservation, actual runner restart across visual threads, account/context-bound consent, durable attempt accounting, host-only mounts, access fencing and missing-state refusal. They do not replace complete final-image, container/service restart, compaction, recovery, revocation and Pi acceptance.
 
 Pinned native file storage truncates and writes `auth.json`; production must use the tested staging/publication path, not let native checks write the primary file directly. Do not mount the whole host `.codex` directory, enable simultaneous uncoordinated refresh writers, or overwrite refreshed credentials with old copies. An uncertain refresh requires explicit reconciliation or reauthentication; retaining the primary file does not prove an older refresh credential is still valid at the provider.
 
-CoS still needs the native launcher and runner registration, durable provider HOME/continuation wiring, host-controlled invalidation/recovery, and activation/cancellation integration. Explicit readiness, combined credential refresh/recovery and concurrent ordinary/CoS final-image fixtures, baked ARM64 release checks, Pi deployment and bounded live acceptance remain unfinished. SUB01–SUB14 are not collectively satisfied by this proof. No real account call, Mattermost message or Pi change was made for this correction.
+CoS still needs operator-facing context recovery and activation/readiness controls, protected provider-history backup/recovery, complete membership/pause cancellation acceptance and compaction verification. Combined credential refresh/recovery and concurrent ordinary/CoS final-image fixtures, baked ARM64 release checks, compatible schema-22 recovery, Pi deployment and bounded live acceptance remain unfinished. SUB01–SUB14 are not collectively satisfied by this proof. No real account call, Mattermost message or Pi change was made for this correction.
 
 ## Pinned source references
 

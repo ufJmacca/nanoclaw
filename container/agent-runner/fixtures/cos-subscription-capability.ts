@@ -67,7 +67,11 @@ const dispatched: string[] = [];
 const proxied = process.env.NANOCLAW_COS_FIXTURE_EGRESS_MODULE;
 const systemTrust = process.env.NANOCLAW_COS_FIXTURE_SYSTEM_TRUST === '1';
 const productionQuery = process.env.NANOCLAW_COS_FIXTURE_PRODUCTION_QUERY === '1';
+const runnerEntry = process.env.NANOCLAW_COS_FIXTURE_RUNNER_ENTRY === '1';
+if (runnerEntry && !productionQuery) throw new Error('runner_entry_requires_production_query');
+let reservedAttempts = 0;
 if (productionQuery && !systemTrust) throw new Error('production_query_requires_system_trust');
+if (productionQuery) fs.chmodSync('/run/cos', 0o700);
 if (systemTrust && !proxied) throw new Error('system_trust_requires_offline_proxy');
 const destinations: Array<{ role: string; host: string }> = [];
 execFileSync(
@@ -276,6 +280,7 @@ let gateway: ReturnType<typeof spawn> | undefined;
 let relay: Awaited<ReturnType<typeof startSubscriptionRelay>> | undefined;
 let credentialBroker: http.Server | undefined;
 let rpcPoll: ReturnType<typeof setInterval> | undefined;
+let stopRunner: (() => Promise<void>) | undefined;
 const watchdog = setTimeout(() => {
   console.error('probe_timeout');
   process.exit(2);
@@ -300,12 +305,21 @@ async function switchGateway(role: 'auth' | 'query') {
       `
     import net from 'node:net';
     const {startSubscriptionEgress} = await import(${JSON.stringify(proxied)});
+    let turns;
+    if (${productionQuery && role === 'query'}) {
+      const {startSubscriptionTurns} = await import('file:///fixture/subscription-turns.ts');
+      const attempts = new Set();
+      turns = await startSubscriptionTurns({socket:'/run/cos/turn.sock',authorize:async()=>true,reserve:id=>{
+        if(attempts.has(id)||attempts.size>=2)return false;
+        attempts.add(id);console.log(JSON.stringify({turnReserved:true}));return true;
+      }});
+    }
     const gateway = await startSubscriptionEgress({
-      socketPath:'/tmp/fixture-egress/proxy.sock',role:${JSON.stringify(role)},authorize:async()=>true,
+      socketPath:'/tmp/fixture-egress/proxy.sock',role:${JSON.stringify(role)},authorize:async()=>turns?turns.allowed():true,
       dependencies:{resolve:async host=>{console.log(JSON.stringify({destination:host}));return [{address:'8.8.8.8',family:4}]},
         connect:()=>net.createConnection({host:'127.0.0.1',port:8787})}
     });
-    process.once('SIGTERM',()=>{void gateway.close().then(()=>process.exit(0))});
+    process.once('SIGTERM',()=>{void gateway.close().then(()=>turns?.close()).then(()=>process.exit(0))});
     console.log('fixture_egress_ready');
   `,
     ],
@@ -322,7 +336,11 @@ async function switchGateway(role: 'auth' | 'query') {
       output = lines.pop()!;
       for (const line of lines) {
         if (line === 'fixture_egress_ready') resolve();
-        else if (line.startsWith('{')) destinations.push({ role, host: JSON.parse(line).destination });
+        else if (line.startsWith('{')) {
+          const event = JSON.parse(line);
+          if (event.turnReserved) reservedAttempts++;
+          else destinations.push({ role, host: event.destination });
+        }
       }
     });
   });
@@ -455,18 +473,100 @@ try {
       response.end(JSON.stringify({ version: 1, authJson: JSON.stringify(refreshed), generation: 'a'.repeat(64) }));
     });
     await new Promise<void>((resolve) => credentialBroker!.listen('/run/nanoclaw/codex-credentials.sock', resolve));
+    const contextGeneration = '11111111-1111-4111-8111-111111111111';
+    const continuationKey = runnerEntry ? 'cos-codex-subscription:' + contextGeneration : 'cos-codex';
+    if (runnerEntry) {
+      for (const [db, destination] of [
+        [inbound, '/workspace/inbound.db'],
+        [outbound, '/workspace/outbound.db'],
+      ] as const) {
+        const file = (db.query('PRAGMA database_list').all() as { name: string; file: string }[]).find(
+          (row) => row.name === 'main',
+        )!.file;
+        fs.symlinkSync(file, destination);
+      }
+      fs.writeFileSync(
+        '/workspace/agent/container.json',
+        JSON.stringify({
+          provider: 'codex',
+          model: 'gpt-6-astra',
+          runtime: 'codex-subscription/v1',
+          contextGeneration,
+          agentGroupId: 'fixture',
+          assistantName: 'CoS',
+          groupName: 'CoS',
+          maxMessagesPerPrompt: 10,
+          mcpServers: {},
+        }),
+      );
+      setContinuation('codex', 'ordinary-context-canary');
+      outbound
+        .prepare(
+          "INSERT INTO session_state(key,value,updated_at) VALUES('sdk_session_id','legacy-context-canary','fixture')",
+        )
+        .run();
+    }
+    let inputNumber = 0;
     const run = async (prompt: string) => {
+      if (runnerEntry) {
+        inputNumber++;
+        const previous = (
+          outbound.query("SELECT count(*) AS n FROM messages_out WHERE kind='chat'").get() as { n: number }
+        ).n;
+        inbound
+          .prepare(
+            "INSERT INTO messages_in(id,seq,kind,timestamp,status,trigger,platform_id,channel_type,thread_id,content) VALUES(?,?,'chat',?,'pending',1,'mattermost:fixture:private','mattermost',?,?)",
+          )
+          .run(
+            'input-' + inputNumber,
+            inputNumber * 2,
+            new Date().toISOString(),
+            'visual-thread-' + inputNumber,
+            JSON.stringify({ sender: 'Owner', text: prompt }),
+          );
+        const child = Bun.spawn(['bun', '/app/src/cos-runner.ts'], {
+          env: { HOME: '/home/node', PATH: process.env.PATH, NANOCLAW_COS_PROTOCOL: 'cos-rpc/v1' },
+          stdout: 'pipe',
+          stderr: 'pipe',
+        });
+        const stdout = new Response(child.stdout).text(),
+          stderr = new Response(child.stderr).text();
+        stopRunner = async () => {
+          child.kill('SIGTERM');
+          const code = await child.exited;
+          assert.equal(code, 0, await stderr);
+          await stdout;
+        };
+        const until = Date.now() + 20000;
+        while (Date.now() < until) {
+          const replies = outbound.query("SELECT content FROM messages_out WHERE kind='chat' ORDER BY seq").all() as {
+            content: string;
+          }[];
+          if (replies.length > previous) {
+            assert.ok(JSON.parse(replies.at(-1)!.content).text.includes('Fixture answer'));
+            await stopRunner();
+            stopRunner = undefined;
+            assert.equal(getContinuation('codex'), 'ordinary-context-canary');
+            assert.deepEqual(outbound.query("SELECT value FROM session_state WHERE key='sdk_session_id'").get(), {
+              value: 'legacy-context-canary',
+            });
+            return;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+        throw new Error('runner_entry_reply_timeout');
+      }
       const provider = new CosCodexProvider({ model: 'gpt-6-astra', proxyUrl: relay!.proxyUrl });
       const query = provider.query({
         prompt,
         cwd: '/workspace/agent',
-        continuation: getContinuation('cos-codex'),
+        continuation: getContinuation(continuationKey),
         systemContext: { instructions: 'You are a CoS fixture.' },
       });
       query.end();
       let completed = false;
       for await (const event of query.events) {
-        if (event.type === 'init') setContinuation('cos-codex', event.continuation);
+        if (event.type === 'init') setContinuation(continuationKey, event.continuation);
         if (event.type === 'error') throw new Error('production_provider_failed: ' + event.message);
         if (event.type === 'result') {
           assert.ok(event.text?.includes('Fixture answer'));
@@ -476,10 +576,11 @@ try {
       assert.ok(completed);
     };
     await run('Remember the synthetic colour is amber.');
-    const original = getContinuation('cos-codex');
+    const original = getContinuation(continuationKey);
     assert.ok(original?.startsWith('cos-codex-subscription-v1:'));
     await run('Which synthetic colour did I mention?');
-    assert.equal(getContinuation('cos-codex'), original);
+    assert.equal(getContinuation(continuationKey), original);
+    assert.equal(reservedAttempts, 2);
   } else {
     await connect();
     const created = await sendCodexRequest(server, 'thread/start', params);
@@ -561,9 +662,12 @@ try {
       fixedDestinationEgress: Boolean(proxied),
       productionAuthEntry: systemTrust,
       productionQueryProvider: productionQuery,
+      reservedAttempts,
+      runnerEntry,
     }),
   );
 } finally {
+  await stopRunner?.();
   clearInterval(rpcPoll);
   if (productionQuery) closeSessionDb();
   if (credentialBroker) {

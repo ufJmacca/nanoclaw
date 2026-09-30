@@ -18,7 +18,7 @@ The dedicated Mattermost channel maps to one persistent coordinator session. Its
 
 Conversation is working context, not approval or canonical truth. Unapproved ideas remain usable in discussion but cannot become approved goals without the existing owner confirmation. Read current approved records when answering priorities. On scope/access changes or later source revocation, fence the old continuation and reconstruct an allowed context; do not resume stale sensitive content. Ordinary restarts alone must not trigger that reset. Missing/corrupt provider state needs an explicit, tested recovery path rather than silently claiming full recall.
 
-The current S01 runner calls `clearContinuation('codex')` at startup and uses ephemeral provider HOME. That does not satisfy the continuity requirement and must be corrected alongside subscription transport. Persisting PostgreSQL records alone is not evidence of conversational continuity.
+The original S01 runner called `clearContinuation('codex')` at startup and used ephemeral provider HOME. That did not satisfy the continuity requirement. The native correction now uses durable provider state and a host-scoped continuation; complete release acceptance remains pending. Persisting PostgreSQL records alone is not evidence of conversational continuity.
 
 ## Verified starting point
 
@@ -132,4 +132,6 @@ Update `docs/chief-of-staff/evidence/S01.md`, the PR description and the private
 
 Completion of this correction requires the SUB evidence, a tested deployment, and an accurately reported live-test status. Subscription-backed live readiness cannot be claimed until SUB11 passes. Human review/merge and a release rebuilt against the actual merged source remain prerequisites for S02. Full programme completion still requires S01–S11 and the final Pi-owned protected-data transition.
 
-Next implementation action: reproduce the API-key-only limitation as a failing regression, inspect the pinned Codex runtime, and complete the capability proof before choosing the transport implementation. This plan itself authorizes no new real account action and changes no running service.
+Implementation checkpoint: the native credential owner, ordinary-session coordination, restricted CoS provider, production launcher/runner wiring, durable conversation identity, account-bound attempt consent and access fencing have development tests. The pinned ARM64 fixture passes native refresh and actual CoS runner restart across visual reply threads, retaining the same conversation without importing ordinary/legacy state. See the decision record for exact evidence and limits; the Pi still runs the earlier candidate.
+
+Next implementation action: provide explicit operator context recovery and activation/readiness controls; include native provider history in protected backup/recovery; verify compaction and complete revocation/pause cancellation; run combined native renewal/concurrency fixtures and final-image gates. Deliver and verify a compatible schema-22 recovery path before claiming release acceptance, then deploy the exact tested artifacts and perform separately authorized live acceptance. This plan itself authorizes no new real account action and changes no running service.

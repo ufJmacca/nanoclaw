@@ -2,29 +2,92 @@ import { describe, it, expect, vi } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import net from 'node:net';
 import Database from 'better-sqlite3';
 import type { Session } from '../../../types.js';
 import type { CosBinding } from '../../../cos-boundary.js';
 import { ensureModelBudget } from './model-policy.js';
-const state = vi.hoisted(() => ({ session: '', authorize: undefined as undefined | (() => Promise<boolean>) }));
+const state = vi.hoisted(() => ({ session: '' }));
 vi.mock('../../../release-runtime.js', () => ({
   releaseMode: () => true,
   currentRelease: () => ({}),
   selectReleaseImage: async () => 'sha256:' + 'a'.repeat(64),
 }));
 vi.mock('../../../session-manager.js', () => ({ sessionDir: () => state.session }));
-vi.mock('./model-gateway.js', () => ({
-  startModelGateway: async (options: { socket: string; authorize(): Promise<boolean> }) => {
-    state.authorize = options.authorize;
-    const server = net.createServer();
-    await new Promise<void>((resolve) => server.listen(options.socket, resolve));
-    return { close: () => new Promise<void>((resolve) => server.close(() => resolve())) };
-  },
-}));
 import { createCoordinatorLauncher } from './coordinator-launcher.js';
+import {
+  createSubscriptionCoordinator,
+  installSubscriptionCoordinator,
+} from '../../../providers/codex-subscription-coordinator.js';
 describe('S01 coordinator admission', () => {
-  it('requires separate consent, pins the safe launch, and rechecks ingress, quota and revocation on every model call', async () => {
+  it('uses the existing subscription owner and durable context with no API credential', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-native-coordinator-'));
+    const target = path.join(root, 'target'),
+      credentialRoot = path.join(root, 'credentials');
+    fs.mkdirSync(target, { mode: 0o700 });
+    fs.mkdirSync(credentialRoot, { mode: 0o700 });
+    state.session = path.join(root, 'cos-v1');
+    fs.mkdirSync(state.session, { mode: 0o700 });
+    fs.writeFileSync(path.join(state.session, 'inbound.db'), 'fixture');
+    const db = new Database(':memory:');
+    ensureModelBudget(db);
+    const binding = { scopeId: 'native', provider: 'codex', agentGroupId: 'group', sessionId: 'session' } as CosBinding;
+    const credentials = createSubscriptionCoordinator({
+      root: credentialRoot,
+      assertAuthority() {},
+      authorizeSession: async () => true,
+      store: {
+        cached: () => ({
+          generation: 'a'.repeat(64),
+          authJson: JSON.stringify({
+            auth_mode: 'chatgpt',
+            tokens: {
+              account_id: 'fixture-account',
+              access_token: 'fixture-access',
+              id_token: 'fixture-id',
+              refresh_token: '',
+            },
+          }),
+        }),
+        refresh: async () => {
+          throw Error('unused');
+        },
+      },
+    });
+    const uninstall = installSubscriptionCoordinator(credentials);
+    const launcher = createCoordinatorLauncher({ targetRoot: target, db });
+    try {
+      const context = launcher.context(binding);
+      const policy = {
+        version: 2,
+        runtime: 'codex-subscription/v1',
+        activationId: 'c'.repeat(32),
+        consentRef: 'fixture',
+        scopeId: binding.scopeId,
+        provider: 'codex',
+        model: 'fixture-model',
+        maxAttempts: 1,
+        accountFingerprint: context.accountFingerprint,
+        contextGeneration: context.generation,
+        expiresAt: '2030-01-01T00:00:00Z',
+      };
+      fs.writeFileSync(path.join(target, 'model-activation.json'), JSON.stringify(policy), { mode: 0o600 });
+      expect(launcher.ready(binding)).toBe(true);
+      const launch = await launcher.prepare(binding, { id: 'session' } as Session, async () => 'ingress');
+      expect(launch.args).toContain(`type=bind,src=${context.directory},dst=/home/node/.codex`);
+      expect(launch.args.some((arg) => arg.includes('dst=/run/cos/turn.sock'))).toBe(true);
+      expect(launch.args.join(' ')).not.toContain('fixture-access');
+      expect(launcher.context(binding)).toEqual(context);
+      launcher.invalidate(binding.scopeId);
+      expect(launcher.ready(binding)).toBe(false);
+    } finally {
+      await launcher.close();
+      uninstall();
+      await credentials.close();
+      db.close();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+  it('refuses a legacy API-only activation without a bound subscription owner and context', async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-coordinator-'));
     const target = path.join(root, 'target');
     fs.mkdirSync(target, { mode: 0o700 });
@@ -36,7 +99,7 @@ describe('S01 coordinator admission', () => {
     const binding = { scopeId: 'fixture', provider: 'codex', agentGroupId: 'fixture-group' } as CosBinding;
     const session = { id: 'fixture-session' } as Session;
     const authorize = vi.fn().mockResolvedValue('fixture-ingress');
-    const launcher = createCoordinatorLauncher({ targetRoot: target, apiKey: 'SYNTHETIC_KEY', db });
+    const launcher = createCoordinatorLauncher({ targetRoot: target, db });
     try {
       expect(launcher.ready(binding)).toBe(false);
       await expect(launcher.prepare(binding, session, authorize)).rejects.toThrow('restricted_launch_denied');
@@ -52,17 +115,9 @@ describe('S01 coordinator admission', () => {
         expiresAt: '2030-01-01T00:00:00Z',
       };
       fs.writeFileSync(file, JSON.stringify(policy), { mode: 0o600 });
-      const launch = await launcher.prepare(binding, session, authorize);
-      expect(launch.args).toContain('--network=none');
-      expect(launch.args.join(' ')).not.toContain('SYNTHETIC_KEY');
-      authorize.mockResolvedValue(null);
-      expect(await state.authorize!()).toBe(false);
-      authorize.mockResolvedValue('fixture-ingress');
-      expect(await state.authorize!()).toBe(true);
-      expect(await state.authorize!()).toBe(false);
+      await expect(launcher.prepare(binding, session, authorize)).rejects.toThrow('restricted_launch_denied');
       fs.unlinkSync(file);
       expect(launcher.ready(binding)).toBe(false);
-      expect(await state.authorize!()).toBe(false);
     } finally {
       await launcher.close();
       db.close();

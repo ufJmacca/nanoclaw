@@ -46,6 +46,31 @@ function input() {
   };
 }
 describe('S01 restricted coordinator launch', () => {
+  it('mounts durable native context and only the fixed credential and attempt sockets for subscription execution', () => {
+    const providerDirectory = path.join(root, 'native-context');
+    fs.mkdirSync(providerDirectory, { mode: 0o700 });
+    const generation = '11111111-1111-4111-8111-111111111111';
+    fs.writeFileSync(
+      config,
+      JSON.stringify({
+        ...JSON.parse(fs.readFileSync(config, 'utf8')),
+        runtime: 'codex-subscription/v1',
+        contextGeneration: generation,
+      }),
+    );
+    const profile = { providerDirectory, credentialSocket: socket, turnSocket: socket, contextGeneration: generation };
+    const launch = restrictedLaunch({ ...input(), subscription: profile });
+    expect(launch.args).toContain(`type=bind,src=${providerDirectory},dst=/home/node/.codex`);
+    expect(launch.args).toContain(`type=bind,src=${socket},dst=/run/cos/subscription.sock,readonly`);
+    expect(launch.args).toContain(`type=bind,src=${socket},dst=/run/nanoclaw/codex-credentials.sock,readonly`);
+    expect(launch.args).toContain(`type=bind,src=${socket},dst=/run/cos/turn.sock,readonly`);
+    expect(() => restrictedLaunch(input())).toThrow('invalid_restricted_config');
+    expect(() =>
+      restrictedLaunch({ ...input(), subscription: { ...profile, contextGeneration: 'changed' } }),
+    ).toThrow();
+    fs.chmodSync(providerDirectory, 0o755);
+    expect(() => restrictedLaunch({ ...input(), subscription: profile })).toThrow();
+  });
   it('launches a pinned baked entry with no network, credentials, Docker socket, global history or checkout overlays', () => {
     const launch = restrictedLaunch(input());
     expect(launch.args).toContain('nanoclaw-install=' + getInstallSlug(process.cwd()));

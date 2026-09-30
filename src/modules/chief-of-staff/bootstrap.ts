@@ -12,6 +12,8 @@ import { killContainer, wakeContainer } from '../../container-runner.js';
 import { NodeMattermostTransport } from '../../channels/mattermost-client.js';
 import { validateMattermostSessionForExecution } from '../../channels/mattermost-subscription.js';
 import { createMattermostFacts } from './bridge/mattermost-facts.js';
+import { guardConversationAccess } from './bridge/conversation-access.js';
+import type { CosBinding } from '../../cos-boundary.js';
 import { connectChecked, DatabasePreflightError } from './store/preflight.js';
 import { externalDatabaseConfig, parseDatabaseConfig } from './store/config.js';
 import { migrationStatus } from './store/migrations.js';
@@ -25,7 +27,6 @@ export function startCosHostModule(assertHostAuthority: () => void): { service: 
   const keys = [
     'COS_ENABLED',
     'COS_TARGET_STATE_DIR',
-    'COS_MODEL_API_KEY',
     'CODEX_MODEL',
     ...[
       'HOST',
@@ -51,24 +52,25 @@ export function startCosHostModule(assertHostAuthority: () => void): { service: 
   ];
   const file = readEnvFile(keys);
   const selected = Object.fromEntries(keys.map((key) => [key, process.env[key] ?? file[key]]));
-  const facts = createMattermostFacts(
+  const activeBinding = (binding: CosBinding) => {
+    const session = getSession(binding.sessionId);
+    if (!session) return false;
+    const boundary = validateMattermostSessionForExecution(session);
+    return (
+      boundary.strict &&
+      boundary.valid &&
+      boundary.value.agentGroup.id === binding.agentGroupId &&
+      boundary.value.messagingGroup.id === binding.messagingGroupId
+    );
+  };
+  const transportFacts = createMattermostFacts(
     {
       baseUrl: selected.MATTERMOST_URL ?? '',
       botToken: selected.MATTERMOST_BOT_TOKEN ?? '',
       instanceKey: selected.MATTERMOST_INSTANCE ?? '',
     },
     new NodeMattermostTransport(),
-    (binding) => {
-      const session = getSession(binding.sessionId);
-      if (!session) return false;
-      const boundary = validateMattermostSessionForExecution(session);
-      return (
-        boundary.strict &&
-        boundary.valid &&
-        boundary.value.agentGroup.id === binding.agentGroupId &&
-        boundary.value.messagingGroup.id === binding.messagingGroupId
-      );
-    },
+    activeBinding,
   );
   const targetRoot = selected.COS_TARGET_STATE_DIR ?? '';
   let credentials: ReturnType<typeof startHostSubscriptionCredentials> | undefined;
@@ -112,7 +114,18 @@ export function startCosHostModule(assertHostAuthority: () => void): { service: 
       return false;
     }
   };
-  const launcher = createCoordinatorLauncher({ targetRoot, apiKey: selected.COS_MODEL_API_KEY, db: getDb() });
+  const launcher = createCoordinatorLauncher({ targetRoot, db: getDb() });
+  const facts = guardConversationAccess({
+    active: activeBinding,
+    facts: transportFacts,
+    revoke: (binding) => {
+      try {
+        launcher.invalidate(binding.scopeId);
+      } finally {
+        killContainer(binding.sessionId, 'CoS conversation access revoked');
+      }
+    },
+  });
   const service = new CosService({
     launcher,
     db: getDb(),

@@ -2,7 +2,7 @@ import { findByName, getAllDestinations, type DestinationEntry } from './destina
 import { getPendingMessages, markProcessing, markCompleted, type MessageInRow } from './db/messages-in.js';
 import { writeMessageOut } from './db/messages-out.js';
 import { touchHeartbeat, clearStaleProcessingAcks } from './db/connection.js';
-import { clearContinuation, migrateLegacyContinuation, setContinuation } from './db/session-state.js';
+import { clearContinuation, getContinuation, migrateLegacyContinuation, setContinuation } from './db/session-state.js';
 import {
   formatMessages,
   extractRouting,
@@ -33,6 +33,8 @@ export interface PollLoopConfig {
    * resurrect a stale id from a different backend.
    */
   providerName: string;
+  /** Host-owned contexts never adopt legacy sessions or accept generic reset commands. */
+  continuationPolicy?: 'host-scoped';
   cwd: string;
   /** Optional cancellation for callers that own the loop lifecycle. */
   signal?: AbortSignal;
@@ -80,7 +82,10 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
   // provider decides how to use it (Claude resumes a .jsonl transcript,
   // other providers may reload a thread ID, etc.). Keyed per-provider so
   // a Codex thread id never gets handed to Claude or vice versa.
-  let continuation: string | undefined = migrateLegacyContinuation(config.providerName);
+  let continuation: string | undefined =
+    config.continuationPolicy === 'host-scoped'
+      ? getContinuation(config.providerName)
+      : migrateLegacyContinuation(config.providerName);
 
   if (continuation) {
     log(`Resuming agent session ${continuation}`);
@@ -132,16 +137,23 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
 
     for (const msg of messages) {
       if ((msg.kind === 'chat' || msg.kind === 'chat-sdk') && isClearCommand(msg)) {
-        log('Clearing session (resetting continuation)');
-        continuation = undefined;
-        clearContinuation(config.providerName);
+        if (config.continuationPolicy !== 'host-scoped') {
+          log('Clearing session (resetting continuation)');
+          continuation = undefined;
+          clearContinuation(config.providerName);
+        }
         writeMessageOut({
           id: generateId(),
           kind: 'chat',
           platform_id: routing.platformId,
           channel_type: routing.channelType,
           thread_id: routing.threadId,
-          content: JSON.stringify({ text: 'Session cleared.' }),
+          content: JSON.stringify({
+            text:
+              config.continuationPolicy === 'host-scoped'
+                ? 'CoS conversation recovery must be performed through its host controls. This conversation was retained.'
+                : 'Session cleared.',
+          }),
         });
         commandIds.push(msg.id);
         continue;
@@ -168,10 +180,12 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     let keep: MessageInRow[] = normalMessages;
     let skipped: string[] = [];
     // MODULE-HOOK:scheduling-pre-task:start
-    const { applyPreTaskScripts } = await import('./scheduling/task-script.js');
-    const preTask = await applyPreTaskScripts(normalMessages);
-    keep = preTask.keep;
-    skipped = preTask.skipped;
+    if (config.continuationPolicy !== 'host-scoped') {
+      const { applyPreTaskScripts } = await import('./scheduling/task-script.js');
+      const preTask = await applyPreTaskScripts(normalMessages);
+      keep = preTask.keep;
+      skipped = preTask.skipped;
+    }
     if (skipped.length > 0) {
       markCompleted(skipped);
       log(`Pre-task script skipped ${skipped.length} task(s): ${skipped.join(', ')}`);
@@ -217,7 +231,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       // Stale/corrupt continuation recovery: ask the provider whether
       // this error means the stored continuation is unusable, and clear
       // it so the next attempt starts fresh.
-      if (continuation && config.provider.isSessionInvalid(err)) {
+      if (config.continuationPolicy !== 'host-scoped' && continuation && config.provider.isSessionInvalid(err)) {
         log(`Stale session detected (${continuation}) — clearing for next retry`);
         continuation = undefined;
         clearContinuation(config.providerName);

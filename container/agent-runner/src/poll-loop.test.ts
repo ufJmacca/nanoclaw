@@ -7,7 +7,8 @@ import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from '
 import { getPendingMessages, markCompleted } from './db/messages-in.js';
 import { getUndeliveredMessages } from './db/messages-out.js';
 import { formatMessages, extractRouting } from './formatter.js';
-import { dispatchResultText, processQuery, selectNextRoutingTurn } from './poll-loop.js';
+import { dispatchResultText, processQuery, selectNextRoutingTurn, runPollLoop } from './poll-loop.js';
+import { getContinuation, setContinuation } from './db/session-state.js';
 import { sendMessage } from './mcp-tools/core.js';
 import { sendCard } from './mcp-tools/interactive.js';
 import { scheduleTask } from './mcp-tools/scheduling.js';
@@ -32,6 +33,47 @@ function insertMessage(id: string, kind: string, content: object, opts?: { proce
     )
     .run(id, kind, opts?.processAfter ?? null, opts?.trigger ?? 1, JSON.stringify(content));
 }
+
+it('host-scoped CoS continuation survives /clear without importing or consuming a legacy context', async () => {
+  const key = 'cos-codex-subscription:fixture-generation';
+  setContinuation(key, 'cos-codex-subscription-v1:retained');
+  getOutboundDb()
+    .prepare("INSERT INTO session_state(key,value,updated_at) VALUES('sdk_session_id','foreign-legacy','fixture')")
+    .run();
+  insertMessage('clear', 'chat', { text: '/clear' });
+  insertMessage('reply', 'chat', { text: 'Remember our earlier priorities.' });
+  const cancellation = new AbortController();
+  let continuation: string | undefined;
+  await runPollLoop({
+    providerName: key,
+    continuationPolicy: 'host-scoped',
+    cwd: '/workspace/agent',
+    signal: cancellation.signal,
+    provider: {
+      supportsNativeSlashCommands: false,
+      isSessionInvalid: () => false,
+      query(input) {
+        continuation = input.continuation;
+        return {
+          push() {},
+          end() {},
+          abort() {},
+          events: {
+            async *[Symbol.asyncIterator]() {
+              yield { type: 'result' as const, text: null };
+              cancellation.abort();
+            },
+          },
+        };
+      },
+    },
+  });
+  expect(continuation).toBe('cos-codex-subscription-v1:retained');
+  expect(getContinuation(key)).toBe(continuation);
+  expect(getOutboundDb().query("SELECT value FROM session_state WHERE key='sdk_session_id'").get()).toEqual({
+    value: 'foreign-legacy',
+  });
+});
 
 describe('formatter', () => {
   it('should format a single chat message', () => {
