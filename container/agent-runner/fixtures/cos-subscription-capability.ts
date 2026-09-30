@@ -684,3 +684,25 @@ try {
   upstream.stop(true);
   clearTimeout(watchdog);
 }
+
+// Optional development proof against the history left by the stopped native runners.
+// Run after teardown: copying a live native SQLite/WAL tree would not prove a valid backup.
+if (process.env.NANOCLAW_COS_FIXTURE_BACKUP_MODULE) {
+  assert.ok(runnerEntry);
+  const cache = JSON.parse(fs.readFileSync('/home/node/.codex/auth.json', 'utf8'));
+  assert.equal(cache.tokens.account_id, 'fixture-account');
+  assert.equal(cache.tokens.refresh_token, '');
+  const { backupConversations, verifyConversationBackup } = await import(
+    process.env.NANOCLAW_COS_FIXTURE_BACKUP_MODULE
+  );
+  const root = fs.mkdtempSync('/home/node/cos-history-proof-');
+  const source = root + '/conversations',
+    receipt = root + '/receipt';
+  fs.mkdirSync(source, { mode: 0o700 });
+  fs.mkdirSync(receipt, { mode: 0o700 });
+  fs.renameSync('/home/node/.codex', source + '/11111111-1111-4111-8111-111111111111');
+  const result = await backupConversations(source, receipt);
+  assert.deepEqual(await verifyConversationBackup(source, receipt), result);
+  assert.ok(result.files > 0 && result.bytes > 0);
+  console.log(JSON.stringify({ nativeHistoryBackup: 'passed', files: result.files, bytes: result.bytes }));
+}

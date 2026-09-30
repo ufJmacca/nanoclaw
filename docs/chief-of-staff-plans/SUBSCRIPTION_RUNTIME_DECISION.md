@@ -52,6 +52,19 @@ docker run --rm --network none --read-only \
 
 Expected final receipt: `probe=passed`, six generating requests, retained context, only the admitted CoS dispatch, no escape file, no credential canaries, one native refresh, an access-only query cache, `fixedDestinationEgress=true`, `productionAuthEntry=true`, `productionQueryProvider=true`, `reservedAttempts=2` and `runnerEntry=true`. This variant supplies its synthetic root through a temporary system certificate directory and invokes the real authentication entry as a child; the native environment needs no custom CA variable. It starts and stops the actual CoS runner entry twice, with synthetic messages in different visual reply threads. The provider obtains access-only credentials from a fixture Unix broker, reserves attempts through the real host turn controller, dispatches real SQLite RPC against a fixture responder and resumes the same scoped continuation after restart. Ordinary and legacy continuation canaries remain untouched. The fixture intentionally does not supply a live model catalogue; catalogue warnings do not establish live model availability. Failed assertions or a timeout fail the process. This development command mounts source read-only and uses synthetic SQLite paths; it is not a final-image or deployed mount-isolation gate.
 
+## Development history-backup proof
+
+The command above can additionally exercise the host snapshot code against the actual native history after both runner processes stop. Add these Docker options before the image identity:
+
+```sh
+-e NANOCLAW_COS_FIXTURE_BACKUP_MODULE=file:///hostsrc/modules/chief-of-staff/ops/conversation-backup.ts \
+--mount "type=bind,src=$PWD/src,dst=/hostsrc,readonly"
+```
+
+The additional receipt reports `nativeHistoryBackup=passed` with nonzero file and byte counts. The fixture moves its synthetic provider directory into the host generation layout, then creates and verifies a private snapshot using the real backup implementation under Bun. This proves compatibility with files produced by the pinned native runner; host Node tests separately exercise backup and deployment integration. It is still a development check with source overlays, not final-image, restore, compaction or Pi acceptance.
+
+Deployment now snapshots every retained CoS generation alongside the existing SQLite backups while the service and all installation containers are stopped. The private snapshot preserves history and WAL bytes, omits the replaceable access cache and interrupted cache writes, rejects links/unsafe permissions and missing database-referenced generations, bounds size, checks available space and verifies hashes before atomic publication. Replays verify the saved baseline without overwriting newer live history; migrations revalidate the snapshot before changing either database. No snapshot automatically restores a conversation or its authority. Operator recovery and compatible schema-22 rollback remain pending.
+
 ## Restricted network transport
 
 The native runtime has Docker networking disabled. Its loopback relay forwards only to a fixed private host Unix socket. The host accepts TLS CONNECT to exact permitted hostnames on port 443, validates every DNS answer as public and dials the selected resolved IP. Query traffic may reach `chatgpt.com`; only the trusted authentication role also admits `auth.openai.com`. API billing, arbitrary destinations, private/LAN addresses, other ports and ordinary proxy HTTP requests are refused.

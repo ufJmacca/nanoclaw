@@ -9,6 +9,7 @@ import { databaseCommand } from './db-cli.js';
 import { readPrivate, readTarget, writeAtomic } from './target-state.js';
 import { maintenanceLeaseForOwner, assertMaintenanceLease } from './maintenance.js';
 import { backupNativeDatabase, installServiceOverride, restoreServiceOverride } from './native-installation.js';
+import { backupConversations, verifyConversationBackup } from './conversation-backup.js';
 import { fenceLegacyCoordinators } from './legacy-rollback.js';
 import { artifactHash, verifyReleaseBundle, verifyLoadedImages } from './release-artifacts.js';
 import { payloadDigest } from './payload.js';
@@ -67,6 +68,18 @@ export function createTargetEffects(
     const current = maintenanceLeaseForOwner(settings.stateRoot, binding, manifest.releaseId);
     if (quiescent) assertMaintenanceLease(settings.stateRoot, binding, current);
     return current;
+  };
+  const verifyQuiescent = async () => {
+    lease();
+    const observed = await commands.observe();
+    if (
+      observed.pid !== 0 ||
+      observed.cwd !== settings.installationRoot ||
+      !['inactive', 'failed'].includes(observed.activeState) ||
+      (await commands.ownedContainers()).length
+    )
+      throw new Error('target_not_quiescent');
+    lease();
   };
   const observeProcess = async (expectedPayload?: string) => {
     const observed = await commands.observe();
@@ -216,13 +229,30 @@ export function createTargetEffects(
       }
     },
     async backup() {
-      lease();
-      if ((await commands.observe()).pid !== 0) throw new Error('target_not_quiescent');
+      await verifyQuiescent();
       await backupNativeDatabase(central, receipt);
       const db = new Database(central, { readonly: true, fileMustExist: true });
       let sessions: Array<{ id: string; agent_group_id: string }>;
       try {
         sessions = db.prepare('SELECT id,agent_group_id FROM sessions ORDER BY id').all() as typeof sessions;
+        if (db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='cos_conversation_states'").get()) {
+          const contexts = db.prepare('SELECT generation FROM cos_conversation_states').all() as Array<{
+            generation: string;
+          }>;
+          for (const context of contexts) {
+            if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(context.generation))
+              throw new Error('conversation_backup_missing_history');
+            const directory = path.join(settings.stateRoot, 'conversations', context.generation);
+            const stat = fs.lstatSync(directory, { throwIfNoEntry: false });
+            if (
+              !stat?.isDirectory() ||
+              fs.realpathSync(directory) !== directory ||
+              stat.uid !== process.getuid?.() ||
+              (stat.mode & 0o777) !== 0o700
+            )
+              throw new Error('conversation_backup_missing_history');
+          }
+        }
       } finally {
         db.close();
       }
@@ -246,20 +276,24 @@ export function createTargetEffects(
             backups.push(await backupNativeDatabase(source, destination));
           }
       }
+      const conversations = await backupConversations(path.join(settings.stateRoot, 'conversations'), receipt);
+      await verifyQuiescent();
       writeAtomic(receipt, 'native-state.json', {
         version: 1,
         installationRoot: settings.installationRoot,
         dataRoot: settings.dataRoot,
         groupsRoot: path.join(settings.installationRoot, 'groups'),
         sessions: backups,
+        conversations,
         configurationPreserved: true,
       });
     },
     async migrate() {
-      lease();
-      if ((await commands.observe()).pid !== 0) throw new Error('target_not_quiescent');
+      await verifyQuiescent();
       // Revalidate the preserved central backup before either store is changed.
       await backupNativeDatabase(central, receipt);
+      await verifyConversationBackup(path.join(settings.stateRoot, 'conversations'), receipt);
+      await verifyQuiescent();
       const env: NodeJS.ProcessEnv = {
         ...readTargetDatabaseEnvironment(settings, 'migration'),
         COS_TARGET_STATE_DIR: settings.stateRoot,
