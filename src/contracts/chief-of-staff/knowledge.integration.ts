@@ -67,7 +67,7 @@ before(async () => {
   console.log(JSON.stringify({ fixtureRun: scope }));
   admin = await connectFixtureDatabase(process.env, 'migration');
   assert.equal((await admin.query('SELECT pg_try_advisory_lock(73101002) AS locked')).rows[0].locked, true);
-  assert.equal(await migrate(admin, fixtureRuntimeUser()), 2);
+  assert.equal(await migrate(admin, fixtureRuntimeUser()), 3);
   pool = new pg.Pool(await fixtureDatabaseConfig());
   base = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-knowledge-integration-'));
   for (const directory of ['artifacts', 'staging']) fs.mkdirSync(path.join(base, directory), { mode: 0o700 });

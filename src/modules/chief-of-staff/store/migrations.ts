@@ -5,11 +5,13 @@ import { DatabasePreflightError } from './preflight.js';
 // the ledger. DDL runs solely through the explicit migration command.
 import { INITIAL_SCHEMA, INITIAL_CHECKSUM } from './schema-definition.js';
 import { KNOWLEDGE_SCHEMA, KNOWLEDGE_CHECKSUM } from './knowledge-schema.js';
+import { CALENDAR_SCHEMA, CALENDAR_CHECKSUM } from './calendar-schema.js';
 export { INITIAL_SCHEMA, INITIAL_CHECKSUM } from './schema-definition.js';
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 export const MIGRATIONS = [
   { version: 1, checksum: INITIAL_CHECKSUM, sql: INITIAL_SCHEMA },
   { version: 2, checksum: KNOWLEDGE_CHECKSUM, sql: KNOWLEDGE_SCHEMA },
+  { version: 3, checksum: CALENDAR_CHECKSUM, sql: CALENDAR_SCHEMA },
 ] as const;
 const LOCK_ID = 73101001;
 const identifier = (value: string) => '"' + value.replaceAll('"', '""') + '"';
@@ -51,6 +53,9 @@ export async function migrate(client: pg.Client, runtimeRole: string): Promise<n
     );
     await client.query(
       `GRANT SELECT,INSERT,UPDATE,DELETE ON cos.artifacts,cos.sources,cos.source_revisions,cos.chunks,cos.evidence_refs,cos.derivation_links,cos.revocation_tombstones TO ${identifier(runtimeRole)}`,
+    );
+    await client.query(
+      `GRANT SELECT,INSERT,UPDATE,DELETE ON cos.calendar_bindings,cos.calendar_states,cos.calendar_snapshots,cos.calendar_observations,cos.calendar_event_revisions TO ${identifier(runtimeRole)}`,
     );
     await client.query('COMMIT');
     return SCHEMA_VERSION;

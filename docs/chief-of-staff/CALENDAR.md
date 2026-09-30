@@ -1,6 +1,6 @@
 # Calendar awareness implementation
 
-S03 is in progress. The calendar reader and snapshot collector exist; account linking, durable snapshots, evidence integration and conversational coverage are not connected yet. No real calendar account has been linked or queried.
+S03 is in progress. The calendar readers, snapshot collector and PostgreSQL snapshot store exist; account linking, evidence integration and conversational coverage are not connected yet. No real calendar account has been linked or queried.
 
 ## Read contract
 
@@ -16,7 +16,15 @@ All-day values remain dates with an exclusive end date. Timed values become inst
 
 Each page is bounded to 250 events and a 1 MiB response; a snapshot is bounded to 20 pages, 5,000 distinct events and 8 MiB of normalized content. Each request permits at most three HTTP attempts, a 10-second per-attempt transport deadline and a 30-second overall request deadline. Rate limits and selected transient server errors use bounded backoff. A provider retry hint above the available wait budget stops the operation rather than retrying early. Authentication and access failures are not retried. [Google error handling](https://developers.google.com/workspace/calendar/api/guides/errors).
 
-These are local capture limits, not a claim that Google's pages form a transactionally consistent external snapshot. Database publication and retirement of unseen observations must be atomic and are still outstanding. The collector alone does not provide that guarantee.
+These are local capture limits, not a claim that Google's pages form a transactionally consistent external snapshot.
+
+## Durable publication
+
+Schema 3 records operator bindings, credential references, selected calendars, processing permissions, refresh attempts, completed snapshots and event revisions. Network collection runs outside database transactions. A single transaction publishes a complete capture, records its observed access role and retires missing observations within its coverage window. Events outside that window are retained. An incomplete or failed attempt keeps the previous completed view and reports incomplete coverage. No successful snapshot means unknown coverage, even when the returned event list is empty.
+
+Stable snapshot identities reconcile retries and lost acknowledgements. Concurrent duplicate publication creates one revision per changed event; an older refresh cannot overwrite a newer attempt. Revoked, expired or disconnected bindings hide cached observations immediately at this store boundary. Reconnection requires a newly authorised binding. Integration with S02 source/answer invalidation remains pending, so this store is not yet exposed to the coordinator.
+
+The external test database has schema 3. The Pi remains on the accepted S02 schema 2 release. S03 release registration stays closed until its full acceptance flow exists.
 
 ## Pending operator flow
 

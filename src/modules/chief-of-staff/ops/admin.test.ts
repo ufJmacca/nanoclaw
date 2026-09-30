@@ -114,6 +114,8 @@ describe('S01 owner administration', () => {
     database.mockResolvedValue(1);
     expect(await adminStatus(env, { target, database })).toMatchObject({ status: 'schema_incompatible' });
     database.mockResolvedValue(2);
+    expect(await adminStatus(env, { target, database })).toMatchObject({ status: 'schema_incompatible' });
+    database.mockResolvedValue(3);
     expect(await adminStatus(env, { target, database })).toMatchObject({
       status: 'ready',
       model_activation: 'not_verified',

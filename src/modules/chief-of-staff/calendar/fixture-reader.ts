@@ -1,28 +1,7 @@
-import { Temporal } from '@js-temporal/polyfill';
+import { calendarEventOverlaps } from './window.js';
 import { digest } from '../domain/contracts.js';
 import { CalendarReadError, hasCalendarReadScope, type CalendarReader, type CalendarAccess } from './reader.js';
-import {
-  normalizeEvent,
-  validateCalendarWindow,
-  type CalendarEvent,
-  type CalendarWindow,
-  type CalendarTime,
-} from './normalization.js';
-
-/** Comparison only: an all-day event remains a date in all persisted and returned content. */
-export function calendarEventOverlaps(event: CalendarEvent, window: CalendarWindow): boolean {
-  if (event.status === 'cancelled') return true;
-  const instant = (time: CalendarTime) =>
-    time.kind === 'instant'
-      ? Temporal.Instant.from(time.instant)
-      : Temporal.PlainDate.from(time.date).toZonedDateTime(window.timeZone).toInstant();
-  return (
-    !!event.start &&
-    !!event.end &&
-    Temporal.Instant.compare(instant(event.end), window.timeMin) > 0 &&
-    Temporal.Instant.compare(instant(event.start), window.timeMax) < 0
-  );
-}
+import { normalizeEvent, validateCalendarWindow, type CalendarWindow } from './normalization.js';
 
 /** Synthetic host fixture only; this object has no account credentials or network capability. */
 export function fixtureCalendarReader(options: {

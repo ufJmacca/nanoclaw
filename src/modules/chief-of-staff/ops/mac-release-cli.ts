@@ -71,7 +71,8 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
   }
   if (operation === 'init' && values.length === 3) {
     const [commit, fetchRef, slice] = values;
-    if (slice !== 'S02' || SCHEMA_VERSION !== 2) throw new Error('current_release_slice_required');
+    // S03 delivery registration is deliberately closed until its acceptance flow exists.
+    if (slice !== 'S02' || Number(SCHEMA_VERSION) !== 2) throw new Error('current_release_slice_required');
     if (!/^[a-f0-9]{40}$/.test(commit) || !/^refs\/heads\/[a-zA-Z0-9_./-]+$/.test(fetchRef) || fetchRef.includes('..'))
       throw new Error('invalid_candidate_source');
     const root = releaseRoot(id);
