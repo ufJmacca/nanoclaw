@@ -6,6 +6,8 @@ import { fixtureRelease } from '../../../contracts/chief-of-staff/release-fixtur
 import { deployRelease, type DeploymentEffects } from './deployment.js';
 import { initializeTarget, readTarget, type TargetBinding } from './target-state.js';
 import { admittedGeneration } from './maintenance.js';
+import { readPrivate } from './target-state.js';
+import type { DeploymentReceipt } from './deployment.js';
 
 const roots: string[] = [];
 afterEach(() => {
@@ -115,4 +117,53 @@ it('attempts compatible recovery when service activation fails after migration',
   await expect(deployRelease(f)).rejects.toThrow('deployment_rolled_back');
   expect(f.effects.rollback).toHaveBeenCalledWith(null);
   expect(readTarget(f.root, f.binding)).toMatchObject({ releaseId: null, maintenance: true, maintenanceId: null });
+});
+
+it.each(['activate', 'health'] as const)(
+  'retries the exact migrated candidate after failed %s when rollback is incompatible',
+  async (failure) => {
+    const f = fixture();
+    f.manifest = fixtureRelease('S02');
+    const receipt = () =>
+      readPrivate<DeploymentReceipt>(path.join(f.root, 'releases', f.manifest.releaseId, 'deployment.json'));
+    if (failure === 'activate')
+      vi.mocked(f.effects.activate).mockRejectedValueOnce(new Error('transient start failure'));
+    else vi.mocked(f.effects.health).mockResolvedValueOnce(false);
+    await expect(deployRelease(f)).rejects.toThrow('deployment_health_failed');
+    expect(receipt().status).toBe('health_failed');
+    const lease = receipt().lease;
+    f.calls.length = 0;
+    f.effects.quiesce = vi.fn(async () => {
+      f.calls.push('quiesce');
+      expect(admittedGeneration(f.root, f.binding)).toBeNull();
+      expect(receipt().lease).toEqual(lease);
+      return { activeCoordinators: 0, activeDatabaseOperations: 0 };
+    });
+    await expect(deployRelease(f)).resolves.toMatchObject({ status: 'healthy', lease, activationRetries: 1 });
+    expect(f.calls).toEqual(['verify', 'quiesce', 'activate', 'health']);
+    expect(f.effects.migrate).toHaveBeenCalledOnce();
+    expect(f.effects.backup).toHaveBeenCalledOnce();
+    expect(f.effects.activate).toHaveBeenCalledTimes(2);
+  },
+);
+
+it('does not retry activation when fresh recovery quiescence fails', async () => {
+  const f = fixture();
+  vi.mocked(f.effects.activate).mockRejectedValueOnce(new Error('transient start failure'));
+  await expect(deployRelease(f)).rejects.toThrow('deployment_health_failed');
+  vi.mocked(f.effects.quiesce).mockResolvedValue({ activeCoordinators: 1, activeDatabaseOperations: 0 });
+  await expect(deployRelease(f)).rejects.toThrow('target_not_quiescent');
+  expect(f.effects.activate).toHaveBeenCalledOnce();
+  expect(admittedGeneration(f.root, f.binding)).toBeNull();
+});
+
+it('refuses changed candidate evidence on a failed-activation retry', async () => {
+  const f = fixture();
+  vi.mocked(f.effects.activate).mockRejectedValueOnce(new Error('transient start failure'));
+  await expect(deployRelease(f)).rejects.toThrow('deployment_health_failed');
+  f.manifest.source.tree = '9'.repeat(40);
+  await expect(deployRelease(f)).rejects.toThrow('deployment_receipt_conflict');
+  expect(f.effects.activate).toHaveBeenCalledOnce();
+  expect(f.effects.quiesce).toHaveBeenCalledOnce();
+  expect(admittedGeneration(f.root, f.binding)).toBeNull();
 });

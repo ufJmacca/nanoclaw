@@ -39,6 +39,7 @@ export type DeploymentReceipt = {
   pending: DeploymentPhase | null;
   status: 'in_progress' | 'failed' | 'health_failed' | 'rolled_back' | 'reopening' | 'healthy';
   lease: MaintenanceLease | null;
+  activationRetries?: number;
   updatedAt: string;
 };
 function receiptDirectory(root: string, releaseId: string): string {
@@ -85,6 +86,8 @@ export async function deployRelease(request: {
       record.completed.some((phase, index) => phases[index] !== phase) ||
       (record.pending !== null && record.pending !== phases[record.completed.length]) ||
       !['in_progress', 'failed', 'health_failed', 'rolled_back', 'reopening', 'healthy'].includes(record.status) ||
+      (record.activationRetries !== undefined &&
+        (!Number.isSafeInteger(record.activationRetries) || record.activationRetries < 0)) ||
       (record.previousReleaseId !== null && !manifest.previousReleaseIds.includes(record.previousReleaseId))
     )
       throw new Error('deployment_receipt_conflict');
@@ -146,9 +149,7 @@ export async function deployRelease(request: {
     const resumed = beginMaintenance(root, binding, manifest.releaseId, 'deployment');
     if (digest(resumed) !== digest(record.lease)) throw new Error('deployment_receipt_conflict');
   }
-  const rollback = async (): Promise<never> => {
-    record.status = 'health_failed';
-    save();
+  const tryPreviousRelease = async (): Promise<void> => {
     if (!record.lease) throw new Error('deployment_receipt_conflict');
     assertMaintenanceLease(root, binding, record.lease);
     if (await effects.rollback(record.previousReleaseId).catch(() => false)) {
@@ -161,9 +162,25 @@ export async function deployRelease(request: {
       await finishMaintenance(root, binding, record.lease, async () => true, false);
       throw new Error('deployment_rolled_back');
     }
+  };
+  const rollback = async (): Promise<never> => {
+    record.status = 'health_failed';
+    save();
+    await tryPreviousRelease();
     throw new Error('deployment_health_failed');
   };
-  if (record.status === 'health_failed') return rollback();
+  if (record.status === 'health_failed') {
+    // A new invocation may recover a transient start/health failure using the same
+    // tested artifacts. Never reopen admission or rerun migrations to force it.
+    if (!record.lease || !record.completed.includes('migrate')) throw new Error('deployment_receipt_conflict');
+    await tryPreviousRelease();
+    await confirmQuiescence(root, binding, record.lease, effects.quiesce);
+    record.completed = phases.slice(0, phases.indexOf('activate'));
+    record.pending = 'activate';
+    record.activationRetries = (record.activationRetries ?? 0) + 1;
+    record.status = 'in_progress';
+    save();
+  }
   save();
   for (const phase of phases.slice(record.completed.length)) {
     if (phase === 'quiesce' && !record.lease) {
@@ -187,7 +204,7 @@ export async function deployRelease(request: {
       // Quiescence and health are observations and always refreshed, even after a lost reply.
       if (phase === 'quiesce') await confirmQuiescence(root, binding, record.lease!, effects.quiesce);
       else if (phase === 'health') {
-        if (!(await effects.health().catch(() => false))) return rollback();
+        if (!(await effects.health().catch(() => false))) throw new Error('release_health_failed');
       } else if (!reconciled) await effects[phase]();
       if (phase === 'activate')
         withTargetLock(root, () => {
@@ -200,7 +217,7 @@ export async function deployRelease(request: {
     } catch (error) {
       // Migration has completed before activation. A failed service start must attempt
       // compatible recovery rather than leave ordinary NanoClaw stopped indefinitely.
-      if (phase === 'activate') return rollback();
+      if (phase === 'activate' || phase === 'health') return rollback();
       record.status = 'failed';
       save();
       throw new Error('deployment_incomplete', { cause: error });
