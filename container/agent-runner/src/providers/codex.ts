@@ -15,6 +15,8 @@
  */
 import fs from 'fs';
 import path from 'path';
+import { createSubscriptionCredentialClient } from './codex-credential-client.js';
+import { stopSubscriptionAppServer } from './codex-subscription-check.js';
 
 import { registerProvider } from './provider-registry.js';
 import type { AgentProvider, AgentQuery, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
@@ -110,9 +112,11 @@ export class CodexProvider implements AgentProvider {
   private readonly model: string;
   private readonly reasoningEffort: CodexReasoningEffort | undefined;
   private readonly restrictedCos: boolean;
+  private readonly coordinatedSubscription: boolean;
 
   constructor(options: ProviderOptions = {}) {
     this.restrictedCos = options.restrictedCos === true;
+    this.coordinatedSubscription = options.env?.NANOCLAW_CODEX_SUBSCRIPTION === '1';
     this.mcpServers = options.mcpServers ?? {};
     this.model = (options.env?.CODEX_MODEL as string | undefined) ?? 'gpt-6-astra';
     const configuredEffort = (options.env?.CODEX_REASONING_EFFORT as string | undefined)?.trim().toLowerCase();
@@ -132,6 +136,8 @@ export class CodexProvider implements AgentProvider {
     let waiting: (() => void) | null = null;
     let ended = false;
     let aborted = false;
+    let activeServer: AppServer | undefined;
+    const credentialCancellation = new AbortController();
     const kick = (): void => {
       waiting?.();
     };
@@ -141,40 +147,23 @@ export class CodexProvider implements AgentProvider {
     const self = this;
 
     async function* gen(): AsyncGenerator<ProviderEvent> {
-      // One app-server per query invocation. The poll-loop keeps a single
-      // query active per batch of pending messages and ends it on idle, so
-      // spawn-per-query matches that cadence naturally.
-      writeCodexMcpConfigToml(self.mcpServers, self.restrictedCos);
-      const server = spawnCodexAppServer(createCodexConfigOverrides(self.restrictedCos));
-      attachCodexAutoApproval(server);
+      // Keep the native process warm across turns; replace it only when the
+      // coordinated credential generation changes, resuming the same thread.
+      const credentials = self.coordinatedSubscription
+        ? createSubscriptionCredentialClient({ signal: credentialCancellation.signal })
+        : undefined;
+      let restart = false;
 
       const decodedContinuation = decodeCodexContinuation(input.continuation);
       let threadId: string | undefined = decodedContinuation.threadId;
       let initYielded = false;
 
       try {
-        await initializeCodexAppServer(server);
-        const dynamicTools = self.restrictedCos ? [] : await loadNanoclawWorkflowDynamicTools(server);
-
         if (decodedContinuation.refreshRequired) {
           console.error(
             '[codex-provider] Refreshing pre-bridge Codex continuation so dynamic MCP workflow tools are attached',
           );
         }
-
-        const threadParams = {
-          model: self.model,
-          cwd: input.cwd,
-          sandbox: 'danger-full-access',
-          approvalPolicy: 'never',
-          personality: 'friendly',
-          baseInstructions: self.restrictedCos
-            ? input.systemContext?.instructions
-            : composeBaseInstructions(input.systemContext?.instructions),
-          dynamicTools,
-        };
-
-        threadId = await startOrResumeCodexThread(server, threadId, threadParams);
 
         while (!aborted) {
           while (pending.length === 0 && !ended && !aborted) {
@@ -187,13 +176,64 @@ export class CodexProvider implements AgentProvider {
           if (pending.length === 0 && ended) return;
 
           const text = pending.shift()!;
+          try {
+            const changed = await credentials?.prepare();
+            if (aborted) return;
+            if (activeServer && (changed || restart)) {
+              await stopSubscriptionAppServer(activeServer);
+              activeServer = undefined;
+            }
+            if (!activeServer) {
+              writeCodexMcpConfigToml(self.mcpServers, self.restrictedCos);
+              const overrides = createCodexConfigOverrides(self.restrictedCos);
+              if (credentials)
+                overrides.push(
+                  'forced_login_method="chatgpt"',
+                  'model_provider="openai"',
+                  'cli_auth_credentials_store="file"',
+                );
+              activeServer = spawnCodexAppServer(overrides, credentials ? { diagnostic: () => {} } : {});
+              attachCodexAutoApproval(activeServer);
+              await initializeCodexAppServer(activeServer);
+              const dynamicTools = self.restrictedCos ? [] : await loadNanoclawWorkflowDynamicTools(activeServer);
+              if (aborted) return;
+              const previousThread = threadId;
+              threadId = await startOrResumeCodexThread(activeServer, threadId, {
+                model: self.model,
+                cwd: input.cwd,
+                sandbox: 'danger-full-access',
+                approvalPolicy: 'never',
+                personality: 'friendly',
+                baseInstructions: self.restrictedCos
+                  ? input.systemContext?.instructions
+                  : composeBaseInstructions(input.systemContext?.instructions),
+                dynamicTools,
+              });
+              if (previousThread !== threadId) initYielded = false;
+              restart = false;
+            }
+          } catch (error) {
+            if (!credentials) throw error;
+            if (activeServer) {
+              await stopSubscriptionAppServer(activeServer);
+              activeServer = undefined;
+            }
+            if (aborted) return;
+            yield { type: 'error', message: 'Codex subscription is unavailable.', retryable: false };
+            yield {
+              type: 'result',
+              text: 'Codex could not start this turn. The subscription runtime needs attention; this turn was not run.',
+            };
+            continue;
+          }
+          if (aborted) return;
 
           // One turn = one channel of streaming events. Each notification
           // from the app-server yields an `activity` first (so the
           // poll-loop's idle timer stays honest) and then, where relevant,
           // an init / result / progress event.
           yield* runOneTurn(
-            server,
+            activeServer,
             threadId!,
             text,
             self.model,
@@ -204,10 +244,17 @@ export class CodexProvider implements AgentProvider {
             () => {
               initYielded = true;
             },
+            credentials
+              ? async () => {
+                  restart = true;
+                  await credentials.refresh();
+                }
+              : undefined,
+            () => aborted,
           );
         }
       } finally {
-        killCodexAppServer(server);
+        if (activeServer) killCodexAppServer(activeServer);
       }
     }
 
@@ -222,6 +269,8 @@ export class CodexProvider implements AgentProvider {
       },
       abort: () => {
         aborted = true;
+        credentialCancellation.abort();
+        if (activeServer) killCodexAppServer(activeServer);
         kick();
       },
       events: gen(),
@@ -234,7 +283,7 @@ export class CodexProvider implements AgentProvider {
 // and because it's a natural seam for future unit tests that drive it with
 // a fake notification stream.
 
-async function* runOneTurn(
+export async function* runOneTurn(
   server: AppServer,
   threadId: string,
   inputText: string,
@@ -244,10 +293,13 @@ async function* runOneTurn(
   encodeContinuation: (threadId: string) => string,
   hasInit: () => boolean,
   markInit: () => void,
+  renewSubscription?: () => Promise<void>,
+  cancelled: () => boolean = () => false,
 ): AsyncGenerator<ProviderEvent> {
+  if (cancelled()) return;
   // Mutable refs via object properties — TS can't track closure assignments
   // for narrowing, but property access keeps the declared type visible.
-  const turnState: { error: Error | null } = { error: null };
+  const turnState: { error: Error | null; unauthorized: boolean } = { error: null, unauthorized: false };
   let resultText = '';
   let turnDone = false;
   const progressState: CodexProgressState = { functionCalls: new Map(), completedWebSearches: new Set() };
@@ -302,13 +354,30 @@ async function* runOneTurn(
         }
         break;
       }
-      case 'turn/completed':
+      case 'turn/completed': {
+        const turn = params.turn as
+          | { status?: string; error?: { message?: string; codexErrorInfo?: unknown } }
+          | undefined;
+        if (turn?.status === 'failed' || turn?.status === 'interrupted') {
+          turnState.error = new Error(turn.error?.message ?? 'Turn did not complete');
+          if (turn.error?.codexErrorInfo !== undefined)
+            turnState.unauthorized = nativeUnauthorized(turn.error.codexErrorInfo);
+        }
         turnDone = true;
         break;
+      }
       case 'turn/failed': {
-        const e = params.error as { message?: string } | undefined;
+        const e = params.error as { message?: string; codexErrorInfo?: unknown } | undefined;
         turnState.error = new Error(e?.message || 'Turn failed');
+        turnState.unauthorized = nativeUnauthorized(e?.codexErrorInfo);
         turnDone = true;
+        break;
+      }
+      case 'error': {
+        if (params.willRetry === true || (params.threadId && params.threadId !== threadId)) break;
+        const error = params.error as { message?: string; codexErrorInfo?: unknown } | undefined;
+        turnState.error = new Error(error?.message ?? 'Turn failed');
+        turnState.unauthorized = nativeUnauthorized(error?.codexErrorInfo);
         break;
       }
       case 'thread/status/changed': {
@@ -334,6 +403,12 @@ async function* runOneTurn(
   };
 
   server.notificationHandlers.push(handler);
+  const exited = () => {
+    turnState.error = new Error('Codex process ended before turn completion');
+    turnDone = true;
+    kick();
+  };
+  server.process.once('exit', exited);
 
   const timer = setTimeout(() => {
     turnState.error = new Error(`Turn timed out after ${TURN_TIMEOUT_MS}ms`);
@@ -357,6 +432,7 @@ async function* runOneTurn(
 
     while (true) {
       while (buffer.length > 0) {
+        if (cancelled()) return;
         const ev = buffer.shift()!;
         yield ev;
       }
@@ -367,19 +443,51 @@ async function* runOneTurn(
       waker = null;
     }
 
+    if (cancelled()) return;
     while (buffer.length > 0) yield buffer.shift()!;
 
     if (turnState.error) {
-      yield { type: 'error', message: turnState.error.message, retryable: false };
+      if (renewSubscription) {
+        let renewed = false;
+        if (turnState.unauthorized) {
+          try {
+            await renewSubscription();
+            renewed = true;
+          } catch {
+            /* The host retains exact private failure state. */
+          }
+        }
+        if (cancelled()) return;
+        const message = renewed
+          ? 'Subscription credentials were renewed. This interrupted turn was not replayed.'
+          : 'Codex could not complete this turn. It has not been replayed.';
+        yield { type: 'error', message, retryable: false };
+        yield { type: 'result', text: message };
+      } else yield { type: 'error', message: turnState.error.message, retryable: false };
       return;
     }
 
     yield { type: 'result', text: resultText || null };
   } finally {
     clearTimeout(timer);
+    server.process.removeListener('exit', exited);
     const idx = server.notificationHandlers.indexOf(handler);
     if (idx >= 0) server.notificationHandlers.splice(idx, 1);
   }
+}
+
+function nativeUnauthorized(info: unknown): boolean {
+  if (info === 'unauthorized') return true;
+  if (!info || typeof info !== 'object') return false;
+  return [
+    'httpConnectionFailed',
+    'responseStreamConnectionFailed',
+    'responseStreamDisconnected',
+    'responseTooManyFailedAttempts',
+  ].some((key) => {
+    const value = (info as Record<string, unknown>)[key];
+    return value && typeof value === 'object' && (value as { httpStatusCode?: number }).httpStatusCode === 401;
+  });
 }
 
 interface CodexReasoningItem {

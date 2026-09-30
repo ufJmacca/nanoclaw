@@ -44,6 +44,7 @@ import { validateAdditionalMounts } from './modules/mount-security/index.js';
 // Provider host-side config barrel — each provider that needs host-side
 // container setup self-registers on import.
 import './providers/index.js';
+import { subscriptionCoordinator } from './providers/codex-subscription-coordinator.js';
 import {
   getProviderContainerConfig,
   type ProviderContainerContribution,
@@ -115,6 +116,9 @@ let containerAdmissionsOpen = false;
 function releaseActiveContainer(sessionId: string, expected: ActiveContainerEntry): boolean {
   if (activeContainers.get(sessionId) !== expected) return false;
   activeContainers.delete(sessionId);
+  void subscriptionCoordinator()
+    ?.closeSession(sessionId)
+    .catch(() => log.warn('Subscription session cleanup failed', { sessionId }));
   markContainerStopped(sessionId);
   stopTypingRefresh(sessionId);
   drainQueuedWakes();
@@ -262,7 +266,10 @@ export function wakeContainer(session: Session): Promise<boolean> {
   }
   const promise = spawnContainer(session)
     .then(() => true)
-    .catch((err) => {
+    .catch(async (err) => {
+      await subscriptionCoordinator()
+        ?.closeSession(session.id)
+        .catch(() => log.warn('Subscription session cleanup failed', { sessionId: session.id }));
       log.warn('wakeContainer failed — host-sweep will retry', { sessionId: session.id, err });
       return false;
     })
@@ -363,6 +370,10 @@ async function spawnContainer(session: Session): Promise<void> {
   assertProviderMountIsolation(agentGroup, session, contribution);
 
   const mounts = buildMounts(agentGroup, session, containerConfig, provider, contribution, mattermostBoundary.strict);
+  // This host-created socket is outside worker state. It is contributed directly
+  // by the installed credential owner, never by a provider or agent configuration.
+  const credentials = subscriptionCoordinator();
+  if (provider === 'codex' && credentials) mounts.push(await credentials.prepare(session));
   const containerName = `nanoclaw-v2-${agentGroup.folder}-${Date.now()}`;
   // OneCLI agent identifier is always the agent group id — stable across
   // sessions and reversible via getAgentGroup() for approval routing.

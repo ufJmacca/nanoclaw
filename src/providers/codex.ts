@@ -21,9 +21,11 @@
  */
 import fs from 'fs';
 import path from 'path';
+import { randomUUID } from 'node:crypto';
 
 import { readEnvFile } from '../env.js';
 import { registerProviderContainerConfig } from './provider-container-registry.js';
+import { subscriptionCoordinator } from './codex-subscription-coordinator.js';
 
 const CODEX_PROJECT_DEFAULT_KEYS = ['CODEX_MODEL', 'CODEX_REASONING_EFFORT'] as const;
 
@@ -46,19 +48,35 @@ export function resolveCodexContainerEnvironment(
 registerProviderContainerConfig('codex', (ctx) => {
   const codexDir = path.join(ctx.sessionDir, 'codex');
   fs.mkdirSync(codexDir, { recursive: true });
+  const coordinator = subscriptionCoordinator();
+  const env = resolveCodexContainerEnvironment(ctx.hostEnv, readEnvFile([...CODEX_PROJECT_DEFAULT_KEYS]));
+  if (coordinator) {
+    if (fs.realpathSync(codexDir) !== codexDir || fs.lstatSync(codexDir).uid !== process.getuid?.())
+      throw new Error('unsafe_codex_state');
+    const snapshot = coordinator.cached();
+    fs.chmodSync(codexDir, 0o700);
+    const temporary = path.join(codexDir, '.auth-' + randomUUID());
+    try {
+      fs.writeFileSync(temporary, snapshot.authJson, { flag: 'wx', mode: 0o600 });
+      fs.renameSync(temporary, path.join(codexDir, 'auth.json'));
+    } finally {
+      fs.rmSync(temporary, { force: true });
+    }
+    delete env.OPENAI_API_KEY;
+    delete env.OPENAI_BASE_URL;
+    env.NANOCLAW_CODEX_SUBSCRIPTION = '1';
+  }
 
   // Copy the host's auth.json into the per-session dir if it exists.
   // We only copy auth.json, not the full ~/.codex — config.toml would
   // get clobbered by the container on every wake anyway.
   const hostHome = ctx.hostEnv.HOME;
-  if (hostHome) {
+  if (!coordinator && hostHome) {
     const hostAuth = path.join(hostHome, '.codex', 'auth.json');
     if (fs.existsSync(hostAuth)) {
       fs.copyFileSync(hostAuth, path.join(codexDir, 'auth.json'));
     }
   }
-
-  const env = resolveCodexContainerEnvironment(ctx.hostEnv, readEnvFile([...CODEX_PROJECT_DEFAULT_KEYS]));
 
   return {
     mounts: [{ hostPath: codexDir, containerPath: '/home/node/.codex', readonly: false }],

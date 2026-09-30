@@ -6,6 +6,10 @@ import path from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { AgentGroup, Session } from './types.js';
+import {
+  createSubscriptionCoordinator,
+  installSubscriptionCoordinator,
+} from './providers/codex-subscription-coordinator.js';
 
 const runnerMocks = vi.hoisted(() => ({
   testRoot: `/tmp/nanoclaw-container-runner-isolation-${process.pid}`,
@@ -212,6 +216,35 @@ afterEach(() => {
 });
 
 describe('container execution isolation', () => {
+  it('mounts the host-managed credential socket for a coordinated ordinary Codex launch', async () => {
+    const root = path.join(runnerMocks.testRoot, 'credential-owner');
+    fs.mkdirSync(root, { mode: 0o700 });
+    const coordinator = createSubscriptionCoordinator({
+      root,
+      store: {
+        cached: () => {
+          throw Error('unused');
+        },
+        refresh: async () => {
+          throw Error('unused');
+        },
+      },
+      assertAuthority() {},
+      authorizeSession: async () => true,
+    });
+    const uninstall = installSubscriptionCoordinator(coordinator);
+    try {
+      const group = agentGroup('agent-subscription', 'subscription');
+      runnerMocks.groups.set(group.id, group);
+      const current = { ...session('session-subscription', group.id), agent_provider: 'codex' };
+      expect(await wakeContainer(current)).toBe(true);
+      const args = runnerMocks.spawn.mock.calls[0][1] as string[];
+      expect(args.some((arg) => arg.includes(root) && arg.includes('/run/nanoclaw/codex-credentials.sock'))).toBe(true);
+    } finally {
+      uninstall();
+      await coordinator.close();
+    }
+  });
   it('S01-PG06 excludes database profiles and aliases from provider and helper environments for ordinary groups', async () => {
     vi.stubEnv('COS_PGPASSWORD', 'cos-runtime-secret-canary');
     vi.stubEnv('COS_TEST_PGPASSWORD', 'cos-test-secret-canary');

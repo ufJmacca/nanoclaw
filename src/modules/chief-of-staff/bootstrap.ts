@@ -1,4 +1,7 @@
 import { DATA_DIR } from '../../config.js';
+import { log } from '../../log.js';
+import { currentRelease, releaseMode, selectReleaseImage } from '../../release-runtime.js';
+import { startHostSubscriptionCredentials } from '../../providers/codex-subscription-runtime.js';
 import { localTarget, databaseFingerprint } from './ops/target-identity.js';
 import { admittedGeneration } from './ops/maintenance.js';
 import { readEnvFile } from '../../env.js';
@@ -18,11 +21,12 @@ import { CosService } from './service.js';
 import { createCoordinatorLauncher } from './bridge/coordinator-launcher.js';
 
 /** Narrow host-service profile: never load migration or test credentials into this module. */
-export function startCosHostModule(): { service: CosService; stop(): Promise<void> } {
+export function startCosHostModule(assertHostAuthority: () => void): { service: CosService; stop(): Promise<void> } {
   const keys = [
     'COS_ENABLED',
     'COS_TARGET_STATE_DIR',
     'COS_MODEL_API_KEY',
+    'CODEX_MODEL',
     ...[
       'HOST',
       'PORT',
@@ -67,6 +71,39 @@ export function startCosHostModule(): { service: CosService; stop(): Promise<voi
     },
   );
   const targetRoot = selected.COS_TARGET_STATE_DIR ?? '';
+  let credentials: ReturnType<typeof startHostSubscriptionCredentials> | undefined;
+  if (selected.COS_ENABLED === 'true' && releaseMode()) {
+    try {
+      localTarget(targetRoot, process.cwd(), DATA_DIR);
+      credentials = startHostSubscriptionCredentials({
+        root: targetRoot,
+        home: process.env.HOME ?? '',
+        model: selected.CODEX_MODEL ?? 'gpt-6-astra',
+        assertAuthority: assertHostAuthority,
+        image: async () => {
+          const release = currentRelease();
+          if (!release) throw new Error('subscription_release_required');
+          return selectReleaseImage(release, 'codex', { apt: [], npm: [] });
+        },
+        authorizeSession: async (session) => {
+          const current = getSession(session.id);
+          if (
+            !current ||
+            current.status !== 'active' ||
+            current.agent_group_id !== session.agent_group_id ||
+            current.messaging_group_id !== session.messaging_group_id ||
+            current.thread_id !== session.thread_id
+          )
+            return false;
+          const boundary = validateMattermostSessionForExecution(current);
+          return !boundary.strict || boundary.valid;
+        },
+      });
+      // eslint-disable-next-line no-catch-all/no-catch-all -- Missing/unsafe CoS credentials must not stop unrelated startup or expose credential paths/errors.
+    } catch {
+      log.warn('CoS subscription credential coordination is unavailable');
+    }
+  }
   const admitted = () => {
     try {
       const target = localTarget(targetRoot, process.cwd(), DATA_DIR);
@@ -112,6 +149,7 @@ export function startCosHostModule(): { service: CosService; stop(): Promise<voi
     service,
     async stop() {
       clearInterval(timer);
+      await credentials?.coordinator.close();
       await service.stop();
       await launcher.close();
     },

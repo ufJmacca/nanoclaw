@@ -12,6 +12,7 @@ import { migrateGroupsToClaudeLocal } from './claude-md-compose.js';
 import { initDb } from './db/connection.js';
 import {
   acquireHostExecutionLease,
+  assertHostExecutionLease,
   releaseHostExecutionLease as releaseHostLease,
   type HostExecutionLease,
 } from './db/host-execution-lease.js';
@@ -117,7 +118,10 @@ async function main(): Promise<void> {
         // event as soon as setup authenticates, and owner-approval cards must be
         // deliverable before that event can create pending state.
         setDeliveryAdapter(createChannelDeliveryBridge());
-        const cos = startCosHostModule();
+        const cos = startCosHostModule(() => {
+          if (!hostExecutionOwnership) throw new Error('host_execution_authority_lost');
+          assertHostExecutionLease(hostExecutionOwnership.db, hostExecutionOwnership.lease);
+        });
         onShutdown(() => cos.stop());
       },
       async () => {
