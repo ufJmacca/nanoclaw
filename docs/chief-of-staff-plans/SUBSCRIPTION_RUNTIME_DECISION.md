@@ -65,6 +65,12 @@ The additional receipt reports `nativeHistoryBackup=passed` with nonzero file an
 
 Deployment now snapshots every retained CoS generation alongside the existing SQLite backups while the service and all installation containers are stopped. The private snapshot preserves history and WAL bytes, omits the replaceable access cache and interrupted cache writes, rejects links/unsafe permissions and missing database-referenced generations, bounds size, checks available space and verifies hashes before atomic publication. Replays verify the saved baseline without overwriting newer live history; migrations revalidate the snapshot before changing either database. No snapshot automatically restores a conversation or its authority. Operator recovery and compatible schema-22 rollback remain pending.
 
+## Native compaction fixture
+
+Add `-e NANOCLAW_COS_FIXTURE_COMPACTION=1` to the runner-entry command above to exercise native automatic compaction. The fixture reports high synthetic token usage, supplies a native opaque compaction item and restarts the real runner again. Nine generating requests, one compaction and three reserved turns passed. The final request retains the compaction item and the same continuation; permitted CoS context lookup still executes, shell execution remains denied, and credential canaries are absent from both normal and compaction requests. The baseline six-request runner fixture also passes.
+
+This follows the [pinned upstream compaction tests](https://github.com/openai/codex/blob/rust-v0.158.0/codex-rs/app-server/tests/suite/v2/compaction.rs). It proves protocol and history retention across compaction and restart with the development source overlay. The opaque summary is synthetic: this does not prove live summarization quality, semantic recall, final-image behavior or Pi acceptance.
+
 ## Operator context inspection and recovery
 
 The packaged host admin entry now supports these commands from the bound installation directory, using the selected trusted Pi service environment:

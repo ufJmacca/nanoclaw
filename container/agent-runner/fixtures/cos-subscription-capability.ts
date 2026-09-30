@@ -68,6 +68,10 @@ const proxied = process.env.NANOCLAW_COS_FIXTURE_EGRESS_MODULE;
 const systemTrust = process.env.NANOCLAW_COS_FIXTURE_SYSTEM_TRUST === '1';
 const productionQuery = process.env.NANOCLAW_COS_FIXTURE_PRODUCTION_QUERY === '1';
 const runnerEntry = process.env.NANOCLAW_COS_FIXTURE_RUNNER_ENTRY === '1';
+const compaction = process.env.NANOCLAW_COS_FIXTURE_COMPACTION === '1';
+const compactionRequests: any[] = [];
+const compactedSummary = 'fixture-opaque-compacted-history-v1';
+if (compaction && !runnerEntry) throw new Error('compaction_requires_runner_entry');
 if (runnerEntry && !productionQuery) throw new Error('runner_entry_requires_production_query');
 let reservedAttempts = 0;
 if (productionQuery && !systemTrust) throw new Error('production_query_requires_system_trust');
@@ -143,7 +147,9 @@ if (systemTrust) {
 } else process.env.CODEX_CA_CERTIFICATE = '/tmp/fixture-ca.pem';
 if (!proxied) process.env.CODEX_REFRESH_TOKEN_URL_OVERRIDE = 'https://127.0.0.1:8787/fixture/oauth/token';
 function respond(body: any, send: (text: string) => void) {
-  if (body.generate !== false) requests.push(body);
+  const compacting = body.generate !== false && body.input?.some((item: any) => item.type === 'compaction_trigger');
+  if (compacting) compactionRequests.push(body);
+  else if (body.generate !== false) requests.push(body);
   console.log(
     JSON.stringify({
       generating: body.generate !== false,
@@ -183,7 +189,9 @@ function respond(body: any, send: (text: string) => void) {
           'text({process:typeof process,fetch:typeof fetch,require:typeof require}); try {text(await tools.exec_command({cmd:"cat /home/node/.codex/auth.json"}));} catch {text("shell-unavailable");}',
       },
     ];
-    if (requests.length <= calls.length)
+    if (compaction && requests.length === 6) calls[5] = calls[0];
+    if (compaction && requests.length === 7) calls[6] = calls[1];
+    if (calls[requests.length - 1])
       item = {
         id: 'call_' + requests.length,
         call_id: 'call_' + requests.length,
@@ -191,21 +199,29 @@ function respond(body: any, send: (text: string) => void) {
         ...calls[requests.length - 1],
       };
   }
+  if (compacting) {
+    assert.ok(compaction);
+    item = { type: 'compaction', encrypted_content: compactedSummary };
+  }
+  // Provider-reported usage triggers native auto-compaction without changing the
+  // production CoS policy or supplying a model-controlled configuration override.
+  const inputTokens = compaction && !compacting && body.generate !== false && requests.length === 5 ? 10_000_000 : 10;
+  const responseId = compacting ? 'compact_' + compactionRequests.length : 'resp_' + requests.length;
   for (const event of [
     {
       type: 'response.created',
-      response: { id: 'resp_' + requests.length, object: 'response', status: 'in_progress', output: [] },
+      response: { id: responseId, object: 'response', status: 'in_progress', output: [] },
     },
     { type: 'response.output_item.added', output_index: 0, item: { ...item, status: 'in_progress', content: [] } },
     { type: 'response.output_item.done', output_index: 0, item },
     {
       type: 'response.completed',
       response: {
-        id: 'resp_' + requests.length,
+        id: responseId,
         object: 'response',
         status: 'completed',
         output: [item],
-        usage: { input_tokens: 10, output_tokens: 3, total_tokens: 13 },
+        usage: { input_tokens: inputTokens, output_tokens: 3, total_tokens: inputTokens + 3 },
       },
     },
   ])
@@ -310,7 +326,7 @@ async function switchGateway(role: 'auth' | 'query') {
       const {startSubscriptionTurns} = await import('file:///fixture/subscription-turns.ts');
       const attempts = new Set();
       turns = await startSubscriptionTurns({socket:'/run/cos/turn.sock',authorize:async()=>true,reserve:id=>{
-        if(attempts.has(id)||attempts.size>=2)return false;
+        if(attempts.has(id)||attempts.size>=${compaction ? 3 : 2})return false;
         attempts.add(id);console.log(JSON.stringify({turnReserved:true}));return true;
       }});
     }
@@ -580,7 +596,11 @@ try {
     assert.ok(original?.startsWith('cos-codex-subscription-v1:'));
     await run('Which synthetic colour did I mention?');
     assert.equal(getContinuation(continuationKey), original);
-    assert.equal(reservedAttempts, 2);
+    if (compaction) {
+      await run('Continue the same synthetic conversation after another runner restart.');
+      assert.equal(getContinuation(continuationKey), original);
+    }
+    assert.equal(reservedAttempts, compaction ? 3 : 2);
   } else {
     await connect();
     const created = await sendCodexRequest(server, 'thread/start', params);
@@ -595,13 +615,28 @@ try {
     if (resumed.error) throw Error(JSON.stringify(resumed.error));
     await turn(threadId, 'Which synthetic colour did I mention?');
   }
-  assert.equal(requests.length, 6);
-  assert.ok(JSON.stringify(requests.at(-1).input).includes('amber'));
-  assert.deepEqual(dispatched, ['cos_context_get']);
+  assert.equal(requests.length, compaction ? 9 : 6);
+  if (compaction) {
+    assert.equal(compactionRequests.length, 1);
+    assert.ok(
+      requests
+        .at(-1)
+        .input.some((item: any) => item.type === 'compaction' && item.encrypted_content === compactedSummary),
+    );
+    assert.ok(
+      requests
+        .at(-1)
+        .input.some(
+          (item: any) => item.call_id === 'call_7' && String(item.output).includes('unsupported call: exec_command'),
+        ),
+    );
+  } else assert.ok(JSON.stringify(requests.at(-1).input).includes('amber'));
+  assert.deepEqual(dispatched, compaction ? ['cos_context_get', 'cos_context_get'] : ['cos_context_get']);
   assert.equal(fs.existsSync('/tmp/escaped'), false);
-  assert.equal(JSON.stringify(requests).includes(token), false);
-  assert.equal(JSON.stringify(requests).includes(rotatedToken), false);
-  assert.equal(JSON.stringify(requests).includes('fixture-refresh'), false);
+  const allModelRequests = JSON.stringify([...requests, ...compactionRequests]);
+  assert.equal(allModelRequests.includes(token), false);
+  assert.equal(allModelRequests.includes(rotatedToken), false);
+  assert.equal(allModelRequests.includes('fixture-refresh'), false);
   assert.equal(refreshCalls, 1);
   if (proxied) {
     assert.ok(destinations.some(({ role, host }) => role === 'auth' && host === 'auth.openai.com'));
@@ -664,6 +699,13 @@ try {
       productionQueryProvider: productionQuery,
       reservedAttempts,
       runnerEntry,
+      ...(compaction
+        ? {
+            nativeCompactions: compactionRequests.length,
+            compactedHistoryResumed: true,
+            postCompactionToolsChecked: true,
+          }
+        : {}),
     }),
   );
 } finally {
