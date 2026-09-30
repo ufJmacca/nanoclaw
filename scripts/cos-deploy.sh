@@ -11,10 +11,15 @@ elif [[ "$mode" == rollback ]]; then
   [[ $# == 4 && "$1" == --target && "$2" == pi && "$3" == --release-id ]] || exit 1
   rollback_id=$4
 else
-  [[ $# == 4 && "$1" == --target && "$2" == pi && "$3" == --release-manifest ]] || {
-    echo 'Usage: cos:deploy [status] --target pi [--release-manifest path]' >&2; exit 1;
+  [[ ( $# == 4 || ( $# == 6 && "${5:-}" == --recover-from ) ) && "$1" == --target && "$2" == pi && "$3" == --release-manifest ]] || {
+    echo 'Usage: cos:deploy [status] --target pi [--release-manifest path] [--recover-from failed-release-id]' >&2; exit 1;
   }
   manifest=$4
+  recovery_args=()
+  if [[ $# == 6 ]]; then
+    [[ "$6" =~ ^release-[a-zA-Z0-9_-]{1,120}$ ]] || exit 1
+    recovery_args=("$6")
+  fi
 fi
 root=$(git rev-parse --show-toplevel)
 cd "$root"
@@ -27,7 +32,10 @@ mkdir "$lock" || { echo 'Another delivery owns the Mac lock; reconcile it before
 printf '%s\n' "$$" > "$lock/pid"
 trap 'rm -f "$lock/pid"; rmdir "$lock"' EXIT
 ssh_options=(-o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3)
-remote() { ssh "${ssh_options[@]}" "$alias_name" "$1"; }
+remote() {
+  [[ $# == 1 && -n "$1" ]] || { echo 'Empty remote command refused.' >&2; return 1; }
+  ssh "${ssh_options[@]}" "$alias_name" "$1"
+}
 if [[ "$mode" == status || "$mode" == rollback ]]; then
   id=status
   directory="$root/.cos-plan-state/deployment-status"
@@ -83,6 +91,7 @@ cli checkpoint "$id" transferred
 remote "$(cli bootstrap-command "$id" prepare)" > "$directory/prepare-result.json"
 cli checkpoint "$id" prepared
 printf 'Activating %s. The existing NanoClaw service will briefly stop while protected state is backed up and migrated.\n' "$id"
-remote "$(cli deploy-command "$id")" > "$directory/deploy-result.json"
+command=$(cli deploy-command "$id" ${recovery_args[@]+"${recovery_args[@]}"})
+remote "$command" > "$directory/deploy-result.json"
 cli checkpoint "$id" healthy
 cat "$directory/deploy-result.json"

@@ -4,7 +4,7 @@ import Database from 'better-sqlite3';
 import { digest } from '../domain/contracts.js';
 import { runMigrations } from '../../../db/migrations/index.js';
 import { imageProfile, readReleaseAt } from '../../../release-runtime.js';
-import { migrationStatus } from '../store/migrations.js';
+import { migrationStatus, SCHEMA_VERSION } from '../store/migrations.js';
 import { databaseCommand } from './db-cli.js';
 import { readPrivate, readTarget, writeAtomic } from './target-state.js';
 import { maintenanceLeaseForOwner, assertMaintenanceLease } from './maintenance.js';
@@ -25,8 +25,8 @@ import {
   verifyInstalledProfiles,
 } from './target-host.js';
 import type { DeploymentSettings } from './deployment-settings.js';
-import { validateReleaseManifest, type ReleaseManifest } from './release-manifest.js';
-import type { DeploymentEffects } from './deployment.js';
+import { validateReleaseManifest, supportsReleaseSchema, type ReleaseManifest } from './release-manifest.js';
+import type { DeploymentEffects, DeploymentReceipt } from './deployment.js';
 import { bindCommand } from './admin.js';
 import type { BindingRequest } from './bind.js';
 import { readEnvFile } from '../../../env.js';
@@ -38,6 +38,7 @@ type Baseline = {
   executable: string;
   entryPoint: string;
   unit: string;
+  recoveryFrom?: string;
 };
 /** Concrete Pi operations. The CLI holds an OS lock; mutations additionally require its durable maintenance lease. */
 export function createTargetEffects(
@@ -165,9 +166,57 @@ export function createTargetEffects(
       !path.isAbsolute(value.entryPoint)
     )
       throw new Error('baseline_conflict');
+    if (value.recoveryFrom !== undefined) {
+      if (!/^release-[a-zA-Z0-9_-]{1,120}$/.test(value.recoveryFrom)) throw new Error('baseline_conflict');
+      const own = readPrivate<DeploymentReceipt>(path.join(receipt, 'deployment.json'));
+      const previous = readPrivate<DeploymentReceipt>(
+        path.join(settings.stateRoot, 'releases', value.recoveryFrom, 'deployment.json'),
+      );
+      if (
+        own.recoveryFrom !== value.recoveryFrom ||
+        previous.status !== 'superseded' ||
+        previous.supersededBy !== manifest.releaseId ||
+        previous.bindingDigest !== digest(binding)
+      )
+        throw new Error('baseline_conflict');
+    }
     return value;
   };
   const effects: DeploymentEffects = {
+    async prepareRecovery(previous) {
+      if (
+        !/^release-[a-zA-Z0-9_-]{1,120}$/.test(previous.releaseId) ||
+        previous.releaseId === manifest.releaseId ||
+        previous.bindingDigest !== digest(binding)
+      )
+        throw new Error('deployment_recovery_denied');
+      const priorManifest = validateReleaseManifest(
+        readPrivate(path.join(settings.releaseRoot, previous.releaseId, 'release.json')),
+      );
+      if (
+        priorManifest.releaseId !== previous.releaseId ||
+        digest(priorManifest) !== previous.manifestDigest ||
+        !supportsReleaseSchema(manifest, await schema())
+      )
+        throw new Error('deployment_recovery_denied');
+      const priorEffects = createTargetEffects(settings, priorManifest, previous.manifestDigest);
+      const result = await priorEffects.quiesce();
+      if (result.activeCoordinators !== 0 || result.activeDatabaseOperations !== 0) return result;
+      const original = readPrivate<Baseline>(
+        path.join(settings.stateRoot, 'releases', previous.releaseId, 'baseline.json'),
+      );
+      const recovered: Baseline = {
+        ...original,
+        releaseId: readTarget(settings.stateRoot, binding).releaseId,
+        recoveryFrom: previous.releaseId,
+        unit: await commands.service('cat'),
+      };
+      const file = path.join(receipt, 'baseline.json');
+      if (fs.lstatSync(file, { throwIfNoEntry: false }) && digest(readPrivate(file)) !== digest(recovered))
+        throw new Error('baseline_conflict');
+      writeAtomic(receipt, 'baseline.json', recovered);
+      return result;
+    },
     async verify() {
       const bundle = await verifyReleaseBundle(stage, manifestHash);
       if (digest(bundle.manifest) !== digest(manifest)) throw new Error('release_manifest_mismatch');
@@ -298,6 +347,7 @@ export function createTargetEffects(
         ...readTargetDatabaseEnvironment(settings, 'migration'),
         COS_TARGET_STATE_DIR: settings.stateRoot,
       };
+      if (manifest.postgres.maximum !== SCHEMA_VERSION) throw new Error('migration_manifest_mismatch');
       const result = await databaseCommand(
         ['migrate', '--profile', 'runtime', '--confirm-database', env.COS_PGDATABASE!],
         env,
@@ -331,7 +381,7 @@ export function createTargetEffects(
     },
     async activate() {
       lease();
-      if ((await schema()) !== 1) throw new Error('schema_incompatible');
+      if (!supportsReleaseSchema(manifest, await schema())) throw new Error('schema_incompatible');
       await effects.artifacts();
       installServiceOverride(override);
       await commands.service('daemon-reload');
@@ -349,7 +399,7 @@ export function createTargetEffects(
         }
       }
       if (!running) return false;
-      if ((await schema()) !== 1) return false;
+      if (!supportsReleaseSchema(manifest, await schema())) return false;
       verifyInstalledProfiles(settings, manifest);
       await verifyLoadedImages(manifest, commands.inspect);
       const image = manifest.images.find(
@@ -389,6 +439,8 @@ export function createTargetEffects(
       lease(false);
       const previous = baseline();
       if (previous.releaseId !== previousReleaseId) throw new Error('rollback_identity_mismatch');
+      // A failed predecessor is retained as recovery evidence, never promoted to known-good rollback code.
+      if (previous.recoveryFrom) return false;
       if (previousReleaseId) {
         if (!manifest.previousReleaseIds.includes(previousReleaseId)) return false;
         const prior = validateReleaseManifest(
@@ -400,12 +452,7 @@ export function createTargetEffects(
         if (priorReceipt.status !== 'healthy' || priorReceipt.manifestDigest !== digest(prior)) return false;
         verifyInstalledProfiles(settings, prior);
         const version = await schema();
-        if (
-          prior.postgres.minimum > version ||
-          prior.postgres.maximum < version ||
-          prior.sqlite.maximum < manifest.sqlite.maximum
-        )
-          return false;
+        if (!supportsReleaseSchema(prior, version, manifest.sqlite.maximum)) return false;
         await verifyLoadedImages(prior, commands.inspect);
         if (
           (await payloadDigest(path.join(settings.releaseRoot, previousReleaseId, 'payload'))) !==

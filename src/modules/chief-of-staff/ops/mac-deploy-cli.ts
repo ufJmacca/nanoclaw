@@ -195,7 +195,10 @@ async function hash(file){const fd=f.openSync(file,f.constants.O_RDONLY|f.consta
       .map(shellArgument)
       .join(' ');
   }
-  if (operation === 'deploy-command' && !values.length) {
+  if (operation === 'deploy-command' && values.length <= 1) {
+    const recoverFrom = values[0];
+    if (recoverFrom !== undefined && (!/^release-[a-zA-Z0-9_-]{1,120}$/.test(recoverFrom) || recoverFrom === id))
+      throw new Error('deployment_recovery_denied');
     const payload = path.join(settings.releaseRoot, id, 'payload');
     return [
       payload + '/node/bin/node',
@@ -208,6 +211,7 @@ async function hash(file){const fd=f.openSync(file,f.constants.O_RDONLY|f.consta
       '--manifest-sha256',
       local.manifestHash,
       ...(fs.existsSync(path.join(root, 'binding.json')) ? ['--binding', stage + '/binding.json'] : []),
+      ...(recoverFrom ? ['--recover-from', recoverFrom] : []),
     ]
       .map(shellArgument)
       .join(' ');

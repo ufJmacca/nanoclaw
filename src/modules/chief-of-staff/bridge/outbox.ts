@@ -1,12 +1,12 @@
 import type { CosBinding } from '../../../cos-boundary.js';
 import type { PriorityStore } from '../store/priorities.js';
-import type { Change } from '../domain/contracts.js';
-import { validChange, digest } from '../domain/contracts.js';
+import type { ProposalChange } from '../domain/contracts.js';
+import { validProposalChange, digest } from '../domain/contracts.js';
 export type Preview = {
   id: string;
   proposalId: string;
   token: string;
-  change: Change;
+  change: ProposalChange;
   expiresAt: string;
   sessionId: string;
   text: string;
@@ -37,7 +37,7 @@ export class CosOutbox {
         }
         if (
           item.kind !== 'approval_preview' ||
-          !validChange(item.payload.change) ||
+          !validProposalChange(item.payload.change) ||
           typeof item.payload.confirmation_token !== 'string' ||
           !/^[A-Za-z0-9_-]{32}$/.test(item.payload.confirmation_token)
         )

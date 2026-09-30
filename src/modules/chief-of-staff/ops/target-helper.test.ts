@@ -35,6 +35,20 @@ it('accepts only fixed target operations, canonical private settings, and exact 
       'a'.repeat(64),
     ]),
   ).toMatchObject({ command: 'deploy', releaseId: 'release-test', manifestHash: 'a'.repeat(64) });
+  const recovery = [
+    'deploy',
+    '--settings',
+    '/tmp/settings',
+    '--release-id',
+    'release-corrected',
+    '--manifest-sha256',
+    'a'.repeat(64),
+    '--recover-from',
+    'release-failed',
+  ];
+  expect(parseTargetArguments(recovery)).toMatchObject({ command: 'deploy', recoverFrom: 'release-failed' });
+  for (const value of ['../failed', 'release-corrected', ''])
+    expect(() => parseTargetArguments([...recovery.slice(0, -1), value])).toThrow();
   for (const args of [
     ['shell'],
     ['status', '--settings', 'relative'],

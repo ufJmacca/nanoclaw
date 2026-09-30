@@ -2,7 +2,7 @@ import { DATA_DIR } from '../../config.js';
 import { log } from '../../log.js';
 import { currentRelease, releaseMode, selectReleaseImage } from '../../release-runtime.js';
 import { startHostSubscriptionCredentials } from '../../providers/codex-subscription-runtime.js';
-import { localTarget, databaseFingerprint } from './ops/target-identity.js';
+import { localTarget } from './ops/target-identity.js';
 import { admittedGeneration } from './ops/maintenance.js';
 import { readEnvFile } from '../../env.js';
 import { getDb } from '../../db/connection.js';
@@ -14,11 +14,7 @@ import { validateMattermostSessionForExecution } from '../../channels/mattermost
 import { createMattermostFacts } from './bridge/mattermost-facts.js';
 import { guardConversationAccess } from './bridge/conversation-access.js';
 import type { CosBinding } from '../../cos-boundary.js';
-import { connectChecked, DatabasePreflightError } from './store/preflight.js';
-import { externalDatabaseConfig, parseDatabaseConfig } from './store/config.js';
-import { migrationStatus } from './store/migrations.js';
-import { BoundedDatabase } from './store/client.js';
-import { PriorityStore } from './store/priorities.js';
+import { connectCosHostStore } from './host-store.js';
 import { CosService } from './service.js';
 import { createCoordinatorLauncher } from './bridge/coordinator-launcher.js';
 
@@ -26,6 +22,8 @@ import { createCoordinatorLauncher } from './bridge/coordinator-launcher.js';
 export function startCosHostModule(assertHostAuthority: () => void): { service: CosService; stop(): Promise<void> } {
   const keys = [
     'COS_ENABLED',
+    'COS_KNOWLEDGE_ENABLED',
+    'COS_KNOWLEDGE_RETENTION_DAYS',
     'COS_TARGET_STATE_DIR',
     'CODEX_MODEL',
     ...[
@@ -138,21 +136,8 @@ export function startCosHostModule(assertHostAuthority: () => void): { service: 
     wake: async (session) => {
       await wakeContainer(session);
     },
-    connect: async () => {
-      const check = await connectChecked(selected, 'runtime');
-      try {
-        const target = localTarget(targetRoot, process.cwd(), DATA_DIR);
-        if (
-          (await databaseFingerprint(check, parseDatabaseConfig(selected, 'runtime'))) !==
-          target.binding.databaseFingerprint
-        )
-          throw new DatabasePreflightError('database_identity_mismatch');
-        if ((await migrationStatus(check)) !== 1) throw new DatabasePreflightError('schema_incompatible');
-      } finally {
-        await check.end();
-      }
-      return new PriorityStore(BoundedDatabase.fromConfig(await externalDatabaseConfig(selected, 'runtime'), admitted));
-    },
+    connect: () =>
+      connectCosHostStore(selected, { targetRoot, installationRoot: process.cwd(), dataRoot: DATA_DIR }, admitted),
   });
   // PostgreSQL availability never holds up unrelated channel startup.
   void service.tick();

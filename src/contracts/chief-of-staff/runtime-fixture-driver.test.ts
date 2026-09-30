@@ -2,6 +2,7 @@ import { expect, it } from 'vitest';
 import { startRuntimeFixtureGuard, validateRuntimeFixtureRequest } from './runtime-fixture-driver.js';
 import { assertRuntimeFixtureGuard } from './fixture-database.js';
 import type { RuntimeTestReply } from '../../modules/chief-of-staff/ops/runtime-test-client.js';
+import { digest } from '../../modules/chief-of-staff/domain/contracts.js';
 const request = {
   version: 1,
   owner: 'fixture-run',
@@ -21,6 +22,17 @@ it('binds a runtime fixture run to explicit source, image, target and execution 
   expect(validateRuntimeFixtureRequest({ ...request, execution: 'packaged', runnerVolume: '' })).toMatchObject({
     execution: 'packaged',
   });
+});
+
+it('binds new runs to their slice without changing historical request identities', () => {
+  const historical = digest(request);
+  expect(digest(validateRuntimeFixtureRequest(request))).toBe(historical);
+  const current = { ...request, slice: 'S02' };
+  expect(validateRuntimeFixtureRequest(current)).toEqual(current);
+  expect(digest(validateRuntimeFixtureRequest(current))).not.toBe(historical);
+  expect(validateRuntimeFixtureRequest({ ...request, slice: 'S01' }).slice).toBe('S01');
+  for (const slice of ['S03', '', null, undefined])
+    expect(() => validateRuntimeFixtureRequest({ ...request, slice })).toThrow('invalid_runtime_fixture_request');
 });
 
 it('requires the private capability and a fresh live control check for every database admission', async () => {

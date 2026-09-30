@@ -4,16 +4,25 @@ import { DatabasePreflightError } from './preflight.js';
 // Versioned source is part of the immutable host payload; startup only reads
 // the ledger. DDL runs solely through the explicit migration command.
 import { INITIAL_SCHEMA, INITIAL_CHECKSUM } from './schema-definition.js';
+import { KNOWLEDGE_SCHEMA, KNOWLEDGE_CHECKSUM } from './knowledge-schema.js';
 export { INITIAL_SCHEMA, INITIAL_CHECKSUM } from './schema-definition.js';
+export const SCHEMA_VERSION = 2;
+export const MIGRATIONS = [
+  { version: 1, checksum: INITIAL_CHECKSUM, sql: INITIAL_SCHEMA },
+  { version: 2, checksum: KNOWLEDGE_CHECKSUM, sql: KNOWLEDGE_SCHEMA },
+] as const;
 const LOCK_ID = 73101001;
 const identifier = (value: string) => '"' + value.replaceAll('"', '""') + '"';
 
 function validateHistory(rows: Array<{ version: number; checksum: string }>): number {
   if (!rows.length) return 0;
-  if (rows.length !== 1 || rows[0].version !== 1 || rows[0].checksum !== INITIAL_CHECKSUM) {
+  if (
+    rows.length > MIGRATIONS.length ||
+    rows.some((row, index) => row.version !== MIGRATIONS[index].version || row.checksum !== MIGRATIONS[index].checksum)
+  ) {
     throw new DatabasePreflightError('migration_checksum');
   }
-  return 1;
+  return rows.length;
 }
 
 export async function migrate(client: pg.Client, runtimeRole: string): Promise<number> {
@@ -29,16 +38,22 @@ export async function migrate(client: pg.Client, runtimeRole: string): Promise<n
     const status = validateHistory(
       (await client.query('SELECT version,checksum FROM cos.schema_migrations ORDER BY version')).rows,
     );
-    if (status === 0) {
-      await client.query(INITIAL_SCHEMA);
-      await client.query('INSERT INTO cos.schema_migrations(version,checksum) VALUES ($1,$2)', [1, INITIAL_CHECKSUM]);
+    for (const migration of MIGRATIONS.slice(status)) {
+      await client.query(migration.sql);
+      await client.query('INSERT INTO cos.schema_migrations(version,checksum) VALUES ($1,$2)', [
+        migration.version,
+        migration.checksum,
+      ]);
     }
     await client.query(`GRANT SELECT ON cos.schema_migrations TO ${identifier(runtimeRole)}`);
     await client.query(
       `GRANT SELECT,INSERT,UPDATE,DELETE ON cos.scopes,cos.records,cos.proposals,cos.operations,cos.events,cos.outbox TO ${identifier(runtimeRole)}`,
     );
+    await client.query(
+      `GRANT SELECT,INSERT,UPDATE,DELETE ON cos.artifacts,cos.sources,cos.source_revisions,cos.chunks,cos.evidence_refs,cos.derivation_links,cos.revocation_tombstones TO ${identifier(runtimeRole)}`,
+    );
     await client.query('COMMIT');
-    return 1;
+    return SCHEMA_VERSION;
   } catch (error) {
     await client.query('ROLLBACK');
     throw error;

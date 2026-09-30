@@ -3,10 +3,10 @@
 set -euo pipefail
 umask 077
 [[ "$(uname -s)" == Darwin ]] || { echo 'cos:release requires the Mac host' >&2; exit 1; }
-[[ ( $# == 6 || ( $# == 7 && "${7:-}" == --local-only ) ) && "$1" == --slice && "$2" == S01 && "$3" == --target && "$4" == pi && "$5" == --db-profile ]] || {
-  echo 'Usage: cos:release --slice S01 --target pi --db-profile test|runtime-disposable [--local-only]' >&2; exit 1;
+[[ ( $# == 6 || ( $# == 7 && "${7:-}" == --local-only ) ) && "$1" == --slice && "$2" == S02 && "$3" == --target && "$4" == pi && "$5" == --db-profile ]] || {
+  echo 'Usage: cos:release --slice S02 --target pi --db-profile test|runtime-disposable [--local-only]' >&2; exit 1;
 }
-profile=$6
+slice=$2 profile=$6
 [[ "$profile" == test || "$profile" == runtime-disposable ]] || exit 1
 [[ -z "${DOCKER_HOST:-}${DOCKER_CONTEXT:-}${DOCKER_TLS_VERIFY:-}${DOCKER_CERT_PATH:-}${BUILDX_BUILDER:-}" ]] || {
   echo 'Explicit Docker endpoint overrides are not accepted for releases.' >&2; exit 1;
@@ -36,7 +36,7 @@ dev=${COS_DEVCONTAINER_ID:-$(docker compose -f .devcontainer/compose.yaml -p nan
 [[ "$dev" =~ ^[a-zA-Z0-9_.-]+$ ]] || { echo 'The repository devcontainer must be running.' >&2; exit 1; }
 docker inspect "$dev" > "$directory/devcontainer.json"
 cli() { docker exec -w /workspace "$dev" node --import tsx src/modules/chief-of-staff/ops/mac-release-cli.ts "$@"; }
-cli init "$id" "$commit" "$branch"
+cli init "$id" "$commit" "$branch" "$slice"
 docker context inspect --format '{{json .}}' > "$directory/context.json"
 docker info --format '{{json .}}' > "$directory/engine.json"
 docker buildx ls --format '{{json .}}' > "$directory/builders.jsonl"
@@ -130,9 +130,7 @@ host_checks() {
       --mount "type=volume,src=$volume,dst=/release/.cos-plan-state,volume-subpath=.cos-plan-state" \
       --mount type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock \
       -e "COS_FIXTURE_IMAGE=$worker" -e "COS_FIXTURE_HOST_ROOT=$volume_root" \
-      "$host_image" --test --test-concurrency=1 \
-      /release/dist/contracts/chief-of-staff/priorities.integration.js \
-      /release/dist/contracts/chief-of-staff/flow.integration.js || return
+      "$host_image" /release/dist/contracts/chief-of-staff/run.js --slice "$slice" --db-profile test || return
   done
   docker run --rm --pull=never --network=none "$host_image" --input-type=module \
     -e 'import {payloadDigest} from "/release/dist/modules/chief-of-staff/ops/payload.js";console.log(await payloadDigest("/release"))' > "$directory/payload.sha256"

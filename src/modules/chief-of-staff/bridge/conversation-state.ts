@@ -4,6 +4,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type Database from 'better-sqlite3';
 import type { CosBinding } from '../../../cos-boundary.js';
+import { rememberConversationOwner } from '../ops/conversation-ownership.js';
 import { digest } from '../domain/contracts.js';
 
 type Row = { binding_digest: string; account_fingerprint: string; generation: string; status: string };
@@ -61,7 +62,9 @@ export function createConversationState(targetRoot: string, db: Database.Databas
           throw new Error('cos_context_recovery_required');
         }
         try {
-          return verify(binding, accountFingerprint, previous);
+          const context = verify(binding, accountFingerprint, previous);
+          rememberConversationOwner(targetRoot, binding, accountFingerprint, context.generation);
+          return context;
         } catch (error) {
           db.prepare(
             "UPDATE cos_conversation_states SET status='invalidated',reason=COALESCE(reason,'operator_recovery'),updated_at=? WHERE scope_id=?",
@@ -88,6 +91,7 @@ export function createConversationState(targetRoot: string, db: Database.Databas
       db.prepare(
         "UPDATE cos_conversation_states SET status='active',updated_at=? WHERE scope_id=? AND generation=? AND status='preparing'",
       ).run(new Date().toISOString(), binding.scopeId, generation);
+      rememberConversationOwner(targetRoot, binding, accountFingerprint, generation);
       return verify(binding, accountFingerprint, read(binding.scopeId));
     },
     current(binding: CosBinding, accountFingerprint: string, generation: string) {

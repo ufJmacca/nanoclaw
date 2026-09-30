@@ -64,6 +64,8 @@ export function beginMaintenance(
     throw new Error('invalid_maintenance_request');
   return withTargetLock(root, () => {
     const state = readTarget(root, binding);
+    if (state.recoveryOwner && (state.recoveryOwner !== owner || purpose !== 'deployment'))
+      throw new Error('maintenance_owned');
     if (purpose === 'runtime-disposable' && state.lifecycle !== 'implementation_disposable')
       throw new Error('protected_target');
     if (state.maintenanceId) {
@@ -139,12 +141,14 @@ export async function finishMaintenance(
     owned(root, binding, lease);
     // Completion first; an interrupted final state write retains closed admission.
     writeAtomic(root, 'maintenance.json', { ...record, phase: 'complete', reopen });
-    writeAtomic(root, 'state.json', {
+    const completedState = {
       ...state,
       maintenance: !reopen,
       maintenanceId: null,
       generation: state.generation + 1,
-    });
+    };
+    if (completedState.recoveryOwner === lease.owner) delete completedState.recoveryOwner;
+    writeAtomic(root, 'state.json', completedState);
   } finally {
     release();
   }

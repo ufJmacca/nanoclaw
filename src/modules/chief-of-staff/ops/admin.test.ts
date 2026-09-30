@@ -111,9 +111,9 @@ describe('S01 owner administration', () => {
     expect(await adminStatus(env, { target, database })).toMatchObject({ status: 'maintenance' });
     expect(database).not.toHaveBeenCalled();
     target.mockReturnValue({ maintenance: false, lifecycle: 'implementation_disposable' });
-    database.mockResolvedValue(2);
-    expect(await adminStatus(env, { target, database })).toMatchObject({ status: 'schema_incompatible' });
     database.mockResolvedValue(1);
+    expect(await adminStatus(env, { target, database })).toMatchObject({ status: 'schema_incompatible' });
+    database.mockResolvedValue(2);
     expect(await adminStatus(env, { target, database })).toMatchObject({
       status: 'ready',
       model_activation: 'not_verified',

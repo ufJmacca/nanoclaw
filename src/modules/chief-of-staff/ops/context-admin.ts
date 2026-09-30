@@ -28,9 +28,12 @@ import { targetCommands } from './target-host.js';
 import { backupNativeDatabase } from './native-installation.js';
 import { backupConversations } from './conversation-backup.js';
 import { recoverConversation } from './conversation-recovery.js';
-import { issueActivation, resumeContext } from './model-activation.js';
+import { issueActivation, resumeContext, rebindRecoveredActivation } from './model-activation.js';
+
+import { isKnowledgeCommand, runKnowledgeAdmin, type KnowledgeAdminArguments } from './knowledge-admin.js';
 
 export type ContextAdminArguments =
+  | KnowledgeAdminArguments
   | { command: 'context-status'; scopeId: string }
   | { command: 'context-prepare'; scopeId: string }
   | { command: 'model-activate'; scopeId: string; policyFile: string }
@@ -229,6 +232,23 @@ export async function contextAdminCommand(
         assertAuthority();
       };
       await check();
+      if (isKnowledgeCommand(args)) {
+        if (args.command === 'source-purge') inbound = openInboundDb(binding.agentGroupId, binding.sessionId);
+        return runKnowledgeAdmin({
+          args,
+          db,
+          inbound,
+          env,
+          roots: {
+            targetRoot: root,
+            installationRoot: target.binding.installationRoot,
+            dataRoot: target.binding.dataRoot,
+          },
+          binding,
+          check,
+          assertAuthority,
+        });
+      }
       const accountFingerprint = accountBinding(root);
       if (!accountFingerprint) throw new Error('subscription_account_binding_unavailable');
       const activationOptions = { root, db, binding, accountFingerprint, assertAuthority };
@@ -255,7 +275,7 @@ export async function contextAdminCommand(
       outbound = openOutboundDb(binding.agentGroupId, binding.sessionId);
       const input = inbound,
         output = outbound;
-      return await recoverConversation({
+      const recovered = await recoverConversation({
         root,
         db,
         inbound,
@@ -286,6 +306,12 @@ export async function contextAdminCommand(
           await check();
         },
       });
+      await check();
+      const activation = rebindRecoveredActivation(activationOptions, {
+        expectedGeneration: args.expectedGeneration,
+        recoveryId: args.recoveryId,
+      });
+      return { ...recovered, activation };
     })();
   } catch (error) {
     failure = error;

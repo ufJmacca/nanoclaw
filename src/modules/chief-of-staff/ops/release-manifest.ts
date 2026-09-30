@@ -1,3 +1,4 @@
+import { KNOWLEDGE_CHECKSUM } from '../store/knowledge-schema.js';
 import { INITIAL_CHECKSUM } from '../store/schema-definition.js';
 export const REQUIRED_RELEASE_CHECKS = [
   'root',
@@ -11,7 +12,7 @@ export const REQUIRED_RELEASE_CHECKS = [
 export type ReleaseManifest = {
   contract: 'cos-release/v1';
   releaseId: string;
-  slice: 'S01';
+  slice: 'S01' | 'S02';
   platform: 'linux/arm64';
   source: {
     repository: 'ufJmacca/nanoclaw';
@@ -43,7 +44,7 @@ export function validateReleaseManifest(value: unknown): ReleaseManifest {
   if (
     !object(value) ||
     value.contract !== 'cos-release/v1' ||
-    value.slice !== 'S01' ||
+    (value.slice !== 'S01' && value.slice !== 'S02') ||
     value.platform !== 'linux/arm64' ||
     value.rpc !== 'cos-rpc/v1' ||
     !matches(value.releaseId, /^release-[a-zA-Z0-9_-]{1,120}$/) ||
@@ -68,17 +69,21 @@ export function validateReleaseManifest(value: unknown): ReleaseManifest {
     !object(postgres) ||
     !Number.isSafeInteger(postgres.minimum) ||
     !Number.isSafeInteger(postgres.maximum) ||
-    postgres.minimum !== 1 ||
-    postgres.maximum !== 1 ||
+    postgres.minimum !== (value.slice === 'S01' ? 1 : 2) ||
+    postgres.maximum !== (value.slice === 'S01' ? 1 : 2) ||
     !object(value.sqlite) ||
-    ![21, 22].includes(value.sqlite.minimum as number) ||
-    ![21, 22].includes(value.sqlite.maximum as number) ||
+    !(value.slice === 'S01' ? [21, 22] : [22]).includes(value.sqlite.minimum as number) ||
+    !(value.slice === 'S01' ? [21, 22] : [22]).includes(value.sqlite.maximum as number) ||
     Number(value.sqlite.minimum) > Number(value.sqlite.maximum) ||
     !Array.isArray(value.migrations) ||
-    value.migrations.length !== 1 ||
+    value.migrations.length !== (value.slice === 'S01' ? 1 : 2) ||
     !object(value.migrations[0]) ||
     value.migrations[0].version !== 1 ||
     value.migrations[0].checksum !== INITIAL_CHECKSUM ||
+    (value.slice === 'S02' &&
+      (!object(value.migrations[1]) ||
+        value.migrations[1].version !== 2 ||
+        value.migrations[1].checksum !== KNOWLEDGE_CHECKSUM)) ||
     !Array.isArray(value.previousReleaseIds) ||
     value.previousReleaseIds.length > 20 ||
     new Set(value.previousReleaseIds).size !== value.previousReleaseIds.length ||
@@ -126,4 +131,15 @@ export function validateReleaseManifest(value: unknown): ReleaseManifest {
       return reject();
   }
   return value as ReleaseManifest;
+}
+
+/** Historical manifests remain immutable; live compatibility is checked against the observed schema. */
+export function supportsReleaseSchema(manifest: ReleaseManifest, postgres: number, sqlite?: number): boolean {
+  return (
+    Number.isSafeInteger(postgres) &&
+    postgres >= manifest.postgres.minimum &&
+    postgres <= manifest.postgres.maximum &&
+    (sqlite === undefined ||
+      (Number.isSafeInteger(sqlite) && sqlite >= manifest.sqlite.minimum && sqlite <= manifest.sqlite.maximum))
+  );
 }

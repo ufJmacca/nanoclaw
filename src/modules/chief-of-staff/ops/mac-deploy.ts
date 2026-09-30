@@ -78,6 +78,17 @@ export function validateTargetObservation(
   return state;
 }
 
+/** Read-only corrective builds may inspect a stopped bound target; deployment still owns recovery. */
+export function validateBuildTargetObservation(settings: DeploymentSettings, value: unknown): TargetState | null {
+  const state = validateTargetObservation(settings, value, true);
+  if (
+    (value as { service: string }).service !== 'active' &&
+    (!state?.maintenance || !/^[a-f0-9-]{36}$/.test(state.maintenanceId ?? ''))
+  )
+    throw new Error('wrong_deployment_target');
+  return state;
+}
+
 /** Fixed read-only inspection using the installed Node executable; no environment or provider state is emitted. */
 export function targetPreflightCommand(input: DeploymentSettings): string {
   const settings = deploymentSettings(input);

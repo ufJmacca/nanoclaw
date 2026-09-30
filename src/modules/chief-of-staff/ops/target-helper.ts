@@ -10,7 +10,14 @@ type TargetArguments =
   | { command: 'status'; settings: string }
   | { command: 'runtime-test'; settings: string; owner: string }
   | { command: 'rollback'; settings: string; releaseId: string; fromReleaseId: string }
-  | { command: 'deploy'; settings: string; releaseId: string; manifestHash: string; binding?: string };
+  | {
+      command: 'deploy';
+      settings: string;
+      releaseId: string;
+      manifestHash: string;
+      binding?: string;
+      recoverFrom?: string;
+    };
 export function parseTargetArguments(args: string[]): TargetArguments {
   const reject = (): never => {
     throw new Error('invalid_target_arguments');
@@ -20,9 +27,15 @@ export function parseTargetArguments(args: string[]): TargetArguments {
   const values: Record<string, string> = {};
   for (let i = 0; i < rest.length; i += 2) {
     if (
-      !['--settings', '--release-id', '--manifest-sha256', '--binding', '--from-release-id', '--owner'].includes(
-        rest[i],
-      ) ||
+      ![
+        '--settings',
+        '--release-id',
+        '--manifest-sha256',
+        '--binding',
+        '--from-release-id',
+        '--owner',
+        '--recover-from',
+      ].includes(rest[i]) ||
       !rest[i + 1] ||
       values[rest[i]]
     )
@@ -55,6 +68,12 @@ export function parseTargetArguments(args: string[]): TargetArguments {
   }
   if (values['--from-release-id'] || values['--owner']) return reject();
   if (
+    values['--recover-from'] !== undefined &&
+    (!/^release-[a-zA-Z0-9_-]{1,120}$/.test(values['--recover-from']) ||
+      values['--recover-from'] === values['--release-id'])
+  )
+    return reject();
+  if (
     !/^release-[a-zA-Z0-9_-]{1,120}$/.test(values['--release-id'] ?? '') ||
     !/^[a-f0-9]{64}$/.test(values['--manifest-sha256'] ?? '')
   )
@@ -65,6 +84,7 @@ export function parseTargetArguments(args: string[]): TargetArguments {
     releaseId: values['--release-id'],
     manifestHash: values['--manifest-sha256'],
     ...(values['--binding'] ? { binding: values['--binding'] } : {}),
+    ...(values['--recover-from'] ? { recoverFrom: values['--recover-from'] } : {}),
   };
 }
 function privateBinding(file: string): BindingRequest {
@@ -180,7 +200,13 @@ export async function targetCommand(args: string[]): Promise<Record<string, unkn
     await effects.verify();
     initializeTarget(settings.stateRoot, binding);
     const { deployRelease } = await import('./deployment.js');
-    const receipt = await deployRelease({ root: settings.stateRoot, binding, manifest: bundle.manifest, effects });
+    const receipt = await deployRelease({
+      root: settings.stateRoot,
+      binding,
+      manifest: bundle.manifest,
+      effects,
+      recoverFrom: request.recoverFrom,
+    });
     return {
       status: receipt.status,
       releaseId: receipt.releaseId,
@@ -203,6 +229,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
         'invalid_target_arguments',
         'target_deployment_locked',
         'deployment_verification_failed',
+        'deployment_recovery_denied',
+        'deployment_superseded',
         'deployment_incomplete',
         'deployment_reconciliation_required',
         'deployment_health_failed',

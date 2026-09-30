@@ -6,7 +6,7 @@ import { digest } from '../domain/contracts.js';
 import { deploymentSettings, shellArgument, type DeploymentSettings } from './deployment-settings.js';
 import { validateTargetObservation } from './mac-deploy.js';
 import { readPrivate, writeAtomic } from './target-state.js';
-import { RUNTIME_ENVIRONMENT_KEYS, selectRuntimeEnvironment } from './mac-release.js';
+import { RUNTIME_ENVIRONMENT_KEYS, readLocalExecution, selectRuntimeEnvironment } from './mac-release.js';
 import { readEnvFile } from '../../../env.js';
 import { safeHostEnvironment } from '../../../host-environment.js';
 import { validateRuntimeFixtureRequest } from '../../../contracts/chief-of-staff/runtime-fixture-driver.js';
@@ -58,11 +58,13 @@ export function macRuntimeFixtureCommand(args: string[]): string | void {
   const git = (args: string[]) =>
     execFileSync('git', args, { encoding: 'utf8', env: safeHostEnvironment('docker') }).trim();
   if (git(['status', '--porcelain'])) throw new Error('clean_candidate_required');
+  const ledger = readLocalExecution(path.resolve('.cos-plan-state'), true);
   const request = validateRuntimeFixtureRequest({
     version: 1,
     owner,
     execution,
     mode,
+    slice: ledger.active_slice,
     hostRoot,
     hostImage,
     workerImage,

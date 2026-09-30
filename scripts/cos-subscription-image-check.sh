@@ -18,9 +18,10 @@ for module in subscription-egress subscription-turns conversation-access identit
 done
 chmod 755 "$directory"
 chmod 644 "$directory/"*.ts
-for scenario in restart compaction shutdown membership rpc; do
+for scenario in restart compaction shutdown membership rpc tool-refresh; do
   extra=()
   case "$scenario" in
+    tool-refresh) extra+=(-e NANOCLAW_COS_FIXTURE_TOOL_REFRESH=1) ;;
     compaction) extra+=(-e NANOCLAW_COS_FIXTURE_COMPACTION=1) ;;
     shutdown|membership|rpc) extra+=(-e "NANOCLAW_COS_FIXTURE_CANCELLATION=$scenario") ;;
   esac

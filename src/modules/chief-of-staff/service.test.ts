@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { initTestDb, closeDb } from '../../db/connection.js';
-import { ensureCosBoundarySchema } from '../../cos-boundary.js';
+import { ensureCosBoundarySchema, installCosBoundary, type CosBinding } from '../../cos-boundary.js';
 import { CosService } from './service.js';
 import type { PriorityStore } from './store/priorities.js';
 const services: CosService[] = [];
@@ -32,7 +32,7 @@ function fixture(enabled: boolean) {
     wake: vi.fn().mockResolvedValue(undefined),
   });
   services.push(service);
-  return { service, connect, end, query, admission, stop };
+  return { db, service, connect, end, query, admission, stop };
 }
 describe('S01-T01 host startup and dependency service', () => {
   it('disabled operation starts and ticks without connecting to PostgreSQL', async () => {
@@ -76,6 +76,26 @@ describe('S01-T01 host startup and dependency service', () => {
     expect(f.end).toHaveBeenCalledOnce();
     expect(f.connect).toHaveBeenCalledOnce();
   });
+});
+it('S02 reconciles durable denial work for paused bindings without reactivating them', async () => {
+  const f = fixture(true);
+  await f.service.tick();
+  const binding: CosBinding = {
+    scopeId: 'scope',
+    agentGroupId: 'group',
+    messagingGroupId: 'mg',
+    sessionId: 'session',
+    provider: 'codex',
+    instanceId: 'fixture',
+    channelId: 'private',
+    ownerId: 'owner',
+    botId: 'bot',
+  };
+  installCosBoundary(binding, f.db);
+  const pump = vi.spyOn(f.service.runtime, 'pump');
+  await f.service.tick();
+  expect(pump).toHaveBeenCalledWith(binding);
+  expect(f.db.prepare('SELECT paused FROM cos_identity_boundaries').get()).toEqual({ paused: 1 });
 });
 
 it('closes only CoS admission during maintenance and reconnects after verified reopening', async () => {

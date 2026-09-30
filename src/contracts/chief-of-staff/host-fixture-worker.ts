@@ -1,4 +1,7 @@
 import path from 'node:path';
+import os from 'node:os';
+import { KnowledgeStore } from '../../modules/chief-of-staff/knowledge/store.js';
+import { KnowledgeArtifacts } from '../../modules/chief-of-staff/knowledge/artifacts.js';
 import pg from 'pg';
 import type { CosBinding } from '../../cos-boundary.js';
 import { fixtureDatabaseConfig, connectFixtureDatabase } from './fixture-database.js';
@@ -8,7 +11,7 @@ import { connectionFault } from './connection-fault.js';
 
 if (process.env.COS_FIXTURE_HOST_PROCESS !== 'S01' || !process.send) throw new Error('fixture_only');
 let handle: ((command: string, value: any) => Promise<unknown>) | undefined;
-async function start(input: { root: string; binding: CosBinding; ordinarySessionId: string }) {
+async function start(input: { root: string; binding: CosBinding; ordinarySessionId: string; knowledgeRoot?: string }) {
   if (!path.isAbsolute(input.root) || !input.root.includes('/.cos-plan-state/fixtures/flow-'))
     throw new Error('fixture_root_required');
   process.chdir(input.root);
@@ -27,7 +30,21 @@ async function start(input: { root: string; binding: CosBinding; ordinarySession
   const check = await connectFixtureDatabase(process.env);
   await check.end();
   const relay = await connectionFault(await fixtureDatabaseConfig(process.env));
-  const store = new PriorityStore(new BoundedDatabase(new pg.Pool(relay.config), 600));
+  if (
+    input.knowledgeRoot &&
+    (!path.isAbsolute(input.knowledgeRoot) ||
+      path.resolve(input.knowledgeRoot) !== input.knowledgeRoot ||
+      !input.knowledgeRoot.startsWith(path.join(os.tmpdir(), 'cos-knowledge-demo-')))
+  )
+    throw new Error('fixture_knowledge_root_required');
+  const database = new BoundedDatabase(new pg.Pool(relay.config), 600);
+  const knowledge = input.knowledgeRoot
+    ? new KnowledgeStore(
+        database,
+        new KnowledgeArtifacts(path.join(input.knowledgeRoot, 'artifacts'), path.join(input.knowledgeRoot, 'staging')),
+      )
+    : undefined;
+  const store = new PriorityStore(database, knowledge);
   let crashAfterDecision = false;
   const decide = store.decide.bind(store);
   store.decide = async (...args: Parameters<PriorityStore['decide']>) => {

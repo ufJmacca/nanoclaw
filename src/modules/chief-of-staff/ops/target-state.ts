@@ -18,6 +18,8 @@ export type TargetState = {
   maintenance: boolean;
   maintenanceId?: string | null;
   maintenanceHistory?: boolean;
+  /** A durable replacement reservation spanning the closed interval between deployment leases. */
+  recoveryOwner?: string;
   releaseId: string | null;
 };
 
@@ -106,6 +108,10 @@ export function readTarget(root: string, binding: TargetBinding): TargetState {
     state.generation < 1 ||
     typeof state.maintenance !== 'boolean' ||
     (state.maintenanceHistory !== undefined && typeof state.maintenanceHistory !== 'boolean') ||
+    (state.recoveryOwner !== undefined &&
+      (typeof state.recoveryOwner !== 'string' ||
+        !/^release-[a-zA-Z0-9_-]{1,120}$/.test(state.recoveryOwner) ||
+        !state.maintenance)) ||
     (state.maintenanceId != null &&
       (typeof state.maintenanceId !== 'string' ||
         !/^[a-f0-9-]{36}$/.test(state.maintenanceId) ||

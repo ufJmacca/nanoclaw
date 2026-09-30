@@ -1,8 +1,9 @@
 import path from 'node:path';
+import { isKnowledgeCommand, parseKnowledgeArguments } from './knowledge-admin.js';
 import { pathToFileURL } from 'node:url';
 import { DatabaseConfigurationError, parseDatabaseConfig, externalDatabaseConfig } from '../store/config.js';
 import { connectChecked, DatabasePreflightError } from '../store/preflight.js';
-import { migrationStatus } from '../store/migrations.js';
+import { migrationStatus, SCHEMA_VERSION } from '../store/migrations.js';
 import { BoundedDatabase } from '../store/client.js';
 import { PriorityStore } from '../store/priorities.js';
 import { localTarget, databaseFingerprint } from './target-identity.js';
@@ -13,6 +14,7 @@ import { contextAdminCommand, type ContextAdminArguments } from './context-admin
 
 type AdminArguments = { command: 'status' } | { command: 'bind'; binding: BindingRequest } | ContextAdminArguments;
 export function parseAdminArguments(args: string[]): AdminArguments {
+  if (isKnowledgeCommand({ command: args[0] })) return parseKnowledgeArguments(args);
   if (args.length === 1 && args[0] === 'status') return { command: 'status' };
   if (['context-status', 'context-prepare', 'context-recover', 'model-activate', 'context-resume'].includes(args[0])) {
     const values: Record<string, string> = {};
@@ -113,6 +115,19 @@ export function safeAdminError(error: unknown): string {
     if (
       [
         'invalid_admin_arguments',
+        'invalid_source_manifest',
+        'unsafe_conversation_ownership',
+        'unsafe_conversation_purge',
+        'conversation_purge_conflict',
+        'conversation_purge_authority_required',
+        'unsupported_source',
+        'source_line_too_long',
+        'source_too_many_chunks',
+        'unsafe_knowledge_file',
+        'unstable_knowledge_file',
+        'staged_source_changed',
+        'unsafe_knowledge_configuration',
+        'unowned_knowledge_configuration',
         'target_not_quiescent',
         'target_locked',
         'stale_maintenance_lease',
@@ -183,7 +198,7 @@ export async function adminStatus(
     const version = await dependencies.database(env);
     return {
       ...base,
-      status: version === 1 ? 'ready' : 'schema_incompatible',
+      status: version === SCHEMA_VERSION ? 'ready' : 'schema_incompatible',
       schema_version: version,
       lifecycle: target.lifecycle,
     };
@@ -205,7 +220,7 @@ export async function bindCommand(request: BindingRequest, env: NodeJS.ProcessEn
     if (!(await check.query('SELECT pg_try_advisory_lock(73101003) AS locked')).rows[0]?.locked)
       throw new DatabasePreflightError('maintenance_writer_active');
     assertMaintenanceLease(root, target.binding, lease);
-    if ((await migrationStatus(check)) !== 1) throw new DatabasePreflightError('schema_incompatible');
+    if ((await migrationStatus(check)) !== SCHEMA_VERSION) throw new DatabasePreflightError('schema_incompatible');
     const { initDb, closeDb } = await import('../../../db/connection.js');
     const { runMigrations } = await import('../../../db/migrations/index.js');
     const { getSession } = await import('../../../db/sessions.js');
@@ -259,6 +274,8 @@ function adminEnvironment(): NodeJS.ProcessEnv {
   const keys = [
     'COS_ENABLED',
     'COS_TARGET_STATE_DIR',
+    'COS_KNOWLEDGE_ENABLED',
+    'COS_KNOWLEDGE_RETENTION_DAYS',
     'MATTERMOST_URL',
     'MATTERMOST_BOT_TOKEN',
     'MATTERMOST_INSTANCE',
