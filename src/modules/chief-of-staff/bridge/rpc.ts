@@ -63,8 +63,17 @@ export function createRpcHandler(dependencies: {
           String(request.params.revision_id),
           Number(request.params.ordinal),
         );
-      else
+      else if (request.method === 'cos_answer_prepare')
+        result = await dependencies.knowledge.answers.prepare(
+          knowledgeContext,
+          request.request_id,
+          request.params.draft,
+        );
+      else if (request.method === 'cos_answer_get')
+        result = await dependencies.knowledge.answers.get(knowledgeContext, String(request.params.artifact_id));
+      else if (request.method === 'cos_source_change_propose')
         result = await dependencies.store.propose(context, request.request_id, request.params.change as SourceChange);
+      else result = { status: 'denied' };
       if (result.status === 'ok') {
         const fresh = await dependencies.resolveContext(session, db);
         if (!fresh || digest(fresh) !== digest(context)) result = { status: 'denied' };

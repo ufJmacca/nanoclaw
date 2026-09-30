@@ -1,5 +1,6 @@
 /** Canonical CoS wire contract; copied verbatim into the runner and checked for drift. */
 import { createHash } from 'node:crypto';
+import { validAnswerDraft } from './answer-protocol.js';
 export const COS_PROTOCOL = 'cos-rpc/v1';
 export const COS_MAX_BYTES = 65536;
 export const COS_WAIT_MS = 15000;
@@ -24,7 +25,9 @@ export type CosMethod =
   | 'cos_request_status'
   | 'cos_knowledge_search'
   | 'cos_source_get'
-  | 'cos_source_change_propose';
+  | 'cos_source_change_propose'
+  | 'cos_answer_prepare'
+  | 'cos_answer_get';
 export type CosRequest = {
   protocol: typeof COS_PROTOCOL;
   request_id: string;
@@ -63,6 +66,14 @@ export function validRequest(value: unknown): value is CosRequest {
   if (value.method === 'cos_change_propose') return keys(value.params, ['change']) && validChange(value.params.change);
   if (value.method === 'cos_source_change_propose')
     return keys(value.params, ['change']) && validSourceChange(value.params.change);
+  if (value.method === 'cos_answer_prepare')
+    return keys(value.params, ['draft']) && validAnswerDraft(value.params.draft);
+  if (value.method === 'cos_answer_get')
+    return (
+      keys(value.params, ['artifact_id']) &&
+      typeof value.params.artifact_id === 'string' &&
+      /^[0-9a-f]{64}-[0-9a-f]{64}$/.test(value.params.artifact_id)
+    );
   const identifier = (id: unknown) => typeof id === 'string' && /^[a-zA-Z0-9_-]{1,128}$/.test(id);
   if (value.method === 'cos_knowledge_search')
     return (

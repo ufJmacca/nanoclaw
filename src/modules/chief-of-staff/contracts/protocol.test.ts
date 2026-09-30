@@ -8,6 +8,59 @@ const request = {
   params: { view: 'today' },
 };
 describe('S01-T09 canonical bounded RPC contract', () => {
+  it('S02 packages the same answer contract into the runner', () => {
+    expect(fs.readFileSync('container/agent-runner/src/mcp-tools/generated/answer-protocol.ts', 'utf8')).toBe(
+      fs.readFileSync('src/modules/chief-of-staff/contracts/answer-protocol.ts', 'utf8'),
+    );
+  });
+  it('S02 accepts bounded answer preparation and artifact redisplay', () => {
+    expect(
+      validRequest({
+        ...request,
+        method: 'cos_answer_prepare',
+        params: {
+          draft: {
+            kind: 'answer',
+            coverage: 'limited',
+            claims: [
+              { kind: 'quote', text: 'Pilot Alpha', citations: [{ kind: 'source', evidence_id: request.request_id }] },
+            ],
+          },
+        },
+      }),
+    ).toBe(true);
+    expect(
+      validRequest({
+        ...request,
+        method: 'cos_answer_get',
+        params: { artifact_id: 'a'.repeat(64) + '-' + 'b'.repeat(64) },
+      }),
+    ).toBe(true);
+  });
+  it.each([
+    {
+      method: 'cos_answer_prepare',
+      params: {
+        draft: {
+          kind: 'answer',
+          coverage: 'limited',
+          claims: [{ kind: 'inference', text: 'Uncited claim', citations: [] }],
+        },
+      },
+    },
+    {
+      method: 'cos_answer_prepare',
+      params: { draft: { kind: 'answer', coverage: 'insufficient', claims: [] }, scope_id: 'foreign' },
+    },
+    {
+      method: 'cos_answer_prepare',
+      params: { draft: { kind: 'answer', coverage: 'insufficient', claims: [], approved: true } },
+    },
+    { method: 'cos_answer_get', params: { artifact_id: '../private' } },
+    { method: 'cos_answer_get', params: { artifact_id: 'a'.repeat(64) + '-' + 'b'.repeat(64), generation: 'forged' } },
+  ])('S02 rejects uncited answers, host paths and answer authority overrides', (value) => {
+    expect(validRequest({ ...request, ...value })).toBe(false);
+  });
   it('packages the same canonical contract into the runner', () => {
     expect(fs.readFileSync('container/agent-runner/src/mcp-tools/generated/cos-protocol.ts', 'utf8')).toBe(
       fs.readFileSync('src/modules/chief-of-staff/contracts/protocol.ts', 'utf8'),

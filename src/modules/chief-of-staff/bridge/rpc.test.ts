@@ -98,6 +98,59 @@ describe('S01 host-owned SQLite RPC response bridge', () => {
   });
 });
 describe('S02 knowledge RPC host authority', () => {
+  it.each(['cos_answer_prepare', 'cos_answer_get'])(
+    'routes %s with host context and suppresses output when the generation changes',
+    async (method) => {
+      const { db, store } = fixture();
+      const context = {
+        scopeId: 'fixture',
+        ownerId: 'owner',
+        sessionId: 'session',
+        agentGroupId: 'group',
+        ingressId: 'verified',
+      };
+      const knowledgeContext = { ...context, provider: 'codex', generation: '33333333-3333-4333-8333-333333333333' };
+      const artifactId = 'a'.repeat(64) + '-' + 'b'.repeat(64);
+      const draft = { kind: 'answer', coverage: 'insufficient', claims: [] };
+      const knowledge = {
+        contextReady: vi.fn().mockResolvedValue({ status: 'ok' }),
+        answers: {
+          prepare: vi.fn().mockResolvedValue({ status: 'ok', artifact_id: artifactId, text: 'private answer canary' }),
+          get: vi.fn().mockResolvedValue({ status: 'ok', artifact_id: artifactId, text: 'private answer canary' }),
+        },
+      };
+      const resolveKnowledgeContext = vi.fn().mockResolvedValue(knowledgeContext);
+      const handler = createRpcHandler({
+        resolveContext: async () => context,
+        store: store as unknown as PriorityStore,
+        knowledge: knowledge as unknown as KnowledgeStore,
+        resolveKnowledgeContext,
+      });
+      const content = {
+        action: 'cos_rpc',
+        delivery_id: '22222222-2222-4222-8222-222222222222',
+        request: {
+          ...request,
+          method,
+          params: method === 'cos_answer_prepare' ? { draft } : { artifact_id: artifactId },
+        },
+      };
+      const response = () =>
+        JSON.parse((db.prepare('SELECT response FROM cos_rpc_responses').get() as { response: string }).response);
+      await handler(content, {} as Session, db);
+      expect(response()).toMatchObject({ status: 'ok', result: { text: 'private answer canary' } });
+      if (method === 'cos_answer_prepare')
+        expect(knowledge.answers.prepare).toHaveBeenCalledWith(knowledgeContext, request.request_id, draft);
+      else expect(knowledge.answers.get).toHaveBeenCalledWith(knowledgeContext, artifactId);
+      expect(store.propose).not.toHaveBeenCalled();
+      resolveKnowledgeContext
+        .mockResolvedValueOnce(knowledgeContext)
+        .mockResolvedValue({ ...knowledgeContext, generation: '44444444-4444-4444-8444-444444444444' });
+      await handler(content, {} as Session, db);
+      expect(response().status).toBe('denied');
+      expect(JSON.stringify(response())).not.toContain('private answer canary');
+    },
+  );
   it('derives provider and generation on the host, and rejects a prepared response after revocation', async () => {
     const db = new Database(':memory:');
     databases.push(db);

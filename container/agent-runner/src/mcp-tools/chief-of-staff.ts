@@ -5,6 +5,7 @@ import { writeMessageOut } from '../db/messages-out.js';
 import { randomUUID } from 'node:crypto';
 import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
+import { answerDraftSchema } from './generated/answer-protocol.js';
 
 export async function executeCosRequest(
   request: CosRequest,
@@ -180,5 +181,38 @@ const knowledgeTools: McpToolDefinition[] = (
     return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
   },
 }));
-export const cosTools: McpToolDefinition[] = [...priorityTools, ...knowledgeTools];
+const answerTools: McpToolDefinition[] = (['cos_answer_prepare', 'cos_answer_get'] as const).map((method) => ({
+  tool: {
+    name: method,
+    description:
+      method === 'cos_answer_prepare'
+        ? 'Prepare a candidate answer or summary with checked citations. Quotes must exactly match one reference; label deductions as inference. Use insufficient coverage with no claims when evidence is missing, and conflicting coverage with at least two distinct references when it disagrees. This never changes approved priorities. Retry a pending preparation with the same request ID and unchanged draft. Send only the returned text, unchanged.'
+        : 'Redisplay an answer artifact after checking current source access and record versions. Use this before reusing any earlier answer; cached text is not permission to publish.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: (method === 'cos_answer_prepare'
+        ? { request_id: { type: 'string', format: 'uuid' }, draft: answerDraftSchema }
+        : { artifact_id: { type: 'string', pattern: '^[0-9a-f]{64}-[0-9a-f]{64}$' } }) as Record<string, object>,
+      required: method === 'cos_answer_prepare' ? ['draft'] : ['artifact_id'],
+    },
+  },
+  async handler(args) {
+    const allowed = method === 'cos_answer_prepare' ? ['request_id', 'draft'] : ['artifact_id'];
+    const requestId = typeof args.request_id === 'string' ? args.request_id : randomUUID();
+    // Reject authority fields rather than silently dropping them before wire validation.
+    const result =
+      Object.keys(args).some((key) => !allowed.includes(key)) ||
+      (args.request_id !== undefined && typeof args.request_id !== 'string')
+        ? { protocol: COS_PROTOCOL, request_id: requestId, status: 'denied' }
+        : await executeCosRequest({
+            protocol: COS_PROTOCOL,
+            request_id: requestId,
+            method,
+            params: method === 'cos_answer_prepare' ? { draft: args.draft } : args,
+          });
+    return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
+  },
+}));
+export const cosTools: McpToolDefinition[] = [...priorityTools, ...knowledgeTools, ...answerTools];
 if (process.env.NANOCLAW_COS_PROTOCOL === COS_PROTOCOL) registerTools(cosTools);

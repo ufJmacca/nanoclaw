@@ -27,6 +27,7 @@ function requestFor(tool: unknown, args: unknown): CosRequest | null {
   if (!args || typeof args !== 'object' || Array.isArray(args)) return null;
   const values = args as Record<string, unknown>;
   const proposal = tool === 'cos_change_propose' || tool === 'cos_source_change_propose';
+  const prepare = tool === 'cos_answer_prepare';
   const allowed =
     tool === 'cos_context_get'
       ? ['view']
@@ -38,11 +39,15 @@ function requestFor(tool: unknown, args: unknown): CosRequest | null {
             ? ['query', 'limit', 'offset', 'source_id', 'project_id']
             : tool === 'cos_source_get'
               ? ['source_id', 'revision_id', 'ordinal']
-              : null;
+              : prepare
+                ? ['request_id', 'draft']
+                : tool === 'cos_answer_get'
+                  ? ['artifact_id']
+                  : null;
   if (!allowed || Object.keys(values).some((key) => !allowed.includes(key))) return null;
   const request = {
     protocol: COS_PROTOCOL,
-    request_id: proposal && values.request_id !== undefined ? values.request_id : randomUUID(),
+    request_id: (proposal || prepare) && values.request_id !== undefined ? values.request_id : randomUUID(),
     method: tool,
     params:
       tool === 'cos_context_get'
@@ -51,7 +56,9 @@ function requestFor(tool: unknown, args: unknown): CosRequest | null {
           ? { change: values.change }
           : tool === 'cos_request_status'
             ? { request_id: values.request_id }
-            : values,
+            : prepare
+              ? { draft: values.draft }
+              : values,
   };
   return validRequest(request) ? request : null;
 }

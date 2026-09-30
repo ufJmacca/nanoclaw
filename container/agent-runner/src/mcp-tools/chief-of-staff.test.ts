@@ -9,6 +9,22 @@ const request: CosRequest = {
   params: { view: 'today' },
 };
 const previous = process.env.NANOCLAW_COS_PROTOCOL;
+test('S02 answer tool requires a cited draft and advertises no caller authority', () => {
+  const schema = cosTools.find((definition) => definition.tool.name === 'cos_answer_prepare')!.tool.inputSchema;
+  expect(schema.required).toEqual(['draft']);
+  expect(Object.keys(schema.properties!)).toEqual(['request_id', 'draft']);
+  expect(schema.additionalProperties).toBe(false);
+});
+test('S02 answer tool rejects extra authority before writing an RPC message', async () => {
+  initTestSessionDb();
+  const tool = cosTools.find((definition) => definition.tool.name === 'cos_answer_prepare')!;
+  const result = await tool.handler({
+    draft: { kind: 'answer', coverage: 'insufficient', claims: [] },
+    provider: 'foreign',
+  });
+  expect(JSON.stringify(result)).toContain('denied');
+  expect(getOutboundDb().query('SELECT count(*) AS n FROM messages_out').get()).toEqual({ n: 0 });
+});
 test('proposal tool advertises the complete exact-change contract to the provider', () => {
   const schema = cosTools.find((definition) => definition.tool.name === 'cos_change_propose')!.tool.inputSchema;
   const change = schema.properties!.change as {

@@ -25,12 +25,45 @@ test('native CoS exposes only its fixed approved tools and dispatches validated 
     'cos_knowledge_search',
     'cos_source_get',
     'cos_source_change_propose',
+    'cos_answer_prepare',
+    'cos_answer_get',
   ]);
   expect((await dispatch.handle(call())).success).toBe(true);
   expect(calls).toHaveLength(1);
   expect(calls[0]).toMatchObject({ method: 'cos_context_get', params: { view: 'today' } });
   expect((await dispatch.handle(call())).success).toBe(false);
   expect(calls).toHaveLength(1);
+  dispatch.close();
+});
+test('S02 dispatches answer preparation with a stable request ID and rejects forged authority', async () => {
+  const { dispatch, calls } = fixture();
+  const requestId = '11111111-1111-4111-8111-111111111111';
+  const draft = { kind: 'answer', coverage: 'insufficient', claims: [] };
+  const artifactId = 'a'.repeat(64) + '-' + 'b'.repeat(64);
+  expect(
+    (await dispatch.handle(call({ tool: 'cos_answer_prepare', arguments: { request_id: requestId, draft } }))).success,
+  ).toBe(true);
+  expect(calls[0]).toMatchObject({ request_id: requestId, method: 'cos_answer_prepare', params: { draft } });
+  expect(
+    (
+      await dispatch.handle(
+        call({ callId: 'redisplay', tool: 'cos_answer_get', arguments: { artifact_id: artifactId } }),
+      )
+    ).success,
+  ).toBe(true);
+  expect(calls[1]).toMatchObject({ method: 'cos_answer_get', params: { artifact_id: artifactId } });
+  for (const [index, args] of [
+    { draft, provider: 'claude' },
+    { draft, generation: 'forged' },
+    { draft, destination: 'foreign' },
+    { draft: { ...draft, claims: [{ kind: 'inference', text: 'unsupported', citations: [] }] } },
+    { draft, request_id: 'invalid' },
+  ].entries())
+    expect(
+      (await dispatch.handle(call({ callId: 'forged-answer-' + index, tool: 'cos_answer_prepare', arguments: args })))
+        .success,
+    ).toBe(false);
+  expect(calls).toHaveLength(2);
   dispatch.close();
 });
 test('S02 dispatches bounded knowledge queries without accepting model authority or direct source mutations', async () => {
