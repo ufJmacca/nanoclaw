@@ -3,7 +3,12 @@ import { digest } from '../domain/contracts.js';
 import { randomUUID } from 'node:crypto';
 import type { PoolClient } from 'pg';
 import { BoundedDatabase, DatabaseUnavailable } from '../store/client.js';
-import type { KnowledgeArtifacts } from './artifacts.js';
+import {
+  KnowledgeArtifactsBusy,
+  isArtifactIdentity,
+  type ArtifactLease,
+  type KnowledgeArtifacts,
+} from './artifacts.js';
 export type KnowledgeContext = Context & { provider: string; generation: string };
 export type ImportSource = {
   sourceKey: string;
@@ -76,6 +81,34 @@ export class KnowledgeStore {
       throw error;
     }
   }
+  private async exclusive(operation: (lease: ArtifactLease) => Promise<Result>): Promise<Result> {
+    try {
+      return await this.artifacts.exclusive(operation);
+    } catch (error) {
+      if (error instanceof KnowledgeArtifactsBusy) return { status: 'unavailable' };
+      throw error;
+    }
+  }
+  /** Trusted host cleanup only. Preserve quarantined captures until their separate retention purge. */
+  async reconcileArtifacts(graceMs = 24 * 60 * 60 * 1000): Promise<Result> {
+    if (!Number.isSafeInteger(graceMs) || graceMs < 0 || graceMs > 365 * 24 * 60 * 60 * 1000)
+      return { status: 'denied' };
+    return this.exclusive(async (lease) => {
+      const references = await this.transaction(async (client) => {
+        // A timed-out metadata commit may still be resolving remotely. This barrier
+        // waits for it before taking a READ COMMITTED snapshot of references.
+        await client.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED');
+        await client.query('SELECT pg_advisory_xact_lock(73101004)');
+        const rows = (await client.query("SELECT id FROM cos.artifacts WHERE lifecycle<>'deleted'")).rows as Array<{
+          id: string;
+        }>;
+        return { status: 'ok', references: rows.map((row) => row.id).filter(isArtifactIdentity) };
+      });
+      if (references.status !== 'ok') return { status: references.status };
+      const removed = this.artifacts.reconcile(new Set(references.references as string[]), Date.now() - graceMs, lease);
+      return { status: 'ok', removed };
+    });
+  }
   /** Trusted owner setup/import only. Paths and processing policy are never accepted through model RPC. */
   async importSource(context: Context, requestId: string, input: ImportSource): Promise<Result> {
     if (
@@ -98,168 +131,171 @@ export class KnowledgeStore {
       status: (await authorised(client, context)) ? 'ok' : 'denied',
     }));
     if (access.status !== 'ok') return access;
-    const captured = this.artifacts.capture(context.scopeId, input.filename);
-    await this.hooks.afterPublication?.();
-    const hash = digest({ method: 'cos_source_import', input, content: captured.digest });
-    const result = await this.transaction(async (client) => {
-      if (!(await authorised(client, context, true))) return { status: 'denied' };
-      const inserted = await client.query(
-        `INSERT INTO cos.operations(session_id,request_id,scope_id,method,payload_hash)
+    return this.exclusive(async (lease) => {
+      const captured = this.artifacts.capture(context.scopeId, input.filename, lease);
+      await this.hooks.afterPublication?.();
+      const hash = digest({ method: 'cos_source_import', input, content: captured.digest });
+      const result = await this.transaction(async (client) => {
+        await client.query('SELECT pg_advisory_xact_lock(73101004)');
+        if (!(await authorised(client, context, true))) return { status: 'denied' };
+        const inserted = await client.query(
+          `INSERT INTO cos.operations(session_id,request_id,scope_id,method,payload_hash)
         VALUES($1,$2,$3,'cos_source_import',$4) ON CONFLICT DO NOTHING RETURNING request_id`,
-        [context.sessionId, requestId, context.scopeId, hash],
-      );
-      if (!inserted.rowCount) {
-        const old = (
-          await client.query(
-            'SELECT scope_id,payload_hash,result FROM cos.operations WHERE session_id=$1 AND request_id=$2',
-            [context.sessionId, requestId],
-          )
-        ).rows[0];
-        return old?.scope_id === context.scopeId && old?.payload_hash === hash
-          ? (old.result ?? { status: 'pending', request_id: requestId })
-          : { status: 'conflict' };
-      }
-      const receipt: Result = await (async () => {
-        if (
-          input.projectId &&
-          !(
-            await client.query(
-              "SELECT id FROM cos.records WHERE scope_id=$1 AND id=$2 AND kind='project' AND lifecycle='active'",
-              [context.scopeId, input.projectId],
-            )
-          ).rowCount
-        )
-          return { status: 'denied' };
-        const previous = (
-          await client.query(
-            `SELECT s.*,r.digest AS current_digest FROM cos.sources s LEFT JOIN cos.source_revisions r ON r.id=s.current_revision_id AND r.scope_id=s.scope_id
-          WHERE s.scope_id=$1 AND s.source_key=$2 FOR UPDATE OF s`,
-            [context.scopeId, input.sourceKey],
-          )
-        ).rows[0];
-        if (
-          previous?.status === 'revoked' ||
-          (previous &&
-            (
-              await client.query('SELECT 1 FROM cos.revocation_tombstones WHERE scope_id=$1 AND source_id=$2', [
-                context.scopeId,
-                previous.id,
-              ])
-            ).rowCount)
-        )
-          return { status: 'denied' };
-        if (
-          previous?.current_digest === captured.digest &&
-          previous.title === input.title &&
-          previous.project_id === (input.projectId ?? null) &&
-          digest([...previous.processing_providers].sort()) === digest([...input.processingProviders].sort())
-        )
-          return {
-            status: 'ok',
-            source_id: previous.id,
-            revision_id: previous.current_revision_id,
-            digest: captured.digest,
-            version: previous.version,
-          };
-        if ((previous?.version ?? 0) !== input.expectedVersion) return { status: 'conflict' };
-        const sourceId = previous?.id ?? randomUUID(),
-          revisionId = randomUUID(),
-          version = (previous?.version ?? 0) + 1;
-        const provenance = {
-          owner_id: context.ownerId,
-          ingress_id: context.ingressId,
-          request_id: requestId,
-          processing_providers: input.processingProviders,
-          origin: 'selected_staging_file',
-        };
-        await client.query(
-          `INSERT INTO cos.artifacts(id,scope_id,kind,digest,byte_length,lifecycle,provenance) VALUES($1,$2,'source',$3,$4,'published',$5) ON CONFLICT DO NOTHING`,
-          [captured.id, context.scopeId, captured.digest, captured.byteLength, JSON.stringify(provenance)],
+          [context.sessionId, requestId, context.scopeId, hash],
         );
-        const artifact = (
-          await client.query('SELECT lifecycle,digest,byte_length FROM cos.artifacts WHERE scope_id=$1 AND id=$2', [
-            context.scopeId,
-            captured.id,
-          ])
-        ).rows[0];
-        if (
-          artifact?.lifecycle !== 'published' ||
-          artifact.digest !== captured.digest ||
-          artifact.byte_length !== captured.byteLength
-        )
-          return { status: 'conflict' };
-        if (!previous)
+        if (!inserted.rowCount) {
+          const old = (
+            await client.query(
+              'SELECT scope_id,payload_hash,result FROM cos.operations WHERE session_id=$1 AND request_id=$2',
+              [context.sessionId, requestId],
+            )
+          ).rows[0];
+          return old?.scope_id === context.scopeId && old?.payload_hash === hash
+            ? (old.result ?? { status: 'pending', request_id: requestId })
+            : { status: 'conflict' };
+        }
+        const receipt: Result = await (async () => {
+          if (
+            input.projectId &&
+            !(
+              await client.query(
+                "SELECT id FROM cos.records WHERE scope_id=$1 AND id=$2 AND kind='project' AND lifecycle='active'",
+                [context.scopeId, input.projectId],
+              )
+            ).rowCount
+          )
+            return { status: 'denied' };
+          const previous = (
+            await client.query(
+              `SELECT s.*,r.digest AS current_digest FROM cos.sources s LEFT JOIN cos.source_revisions r ON r.id=s.current_revision_id AND r.scope_id=s.scope_id
+          WHERE s.scope_id=$1 AND s.source_key=$2 FOR UPDATE OF s`,
+              [context.scopeId, input.sourceKey],
+            )
+          ).rows[0];
+          if (
+            previous?.status === 'revoked' ||
+            (previous &&
+              (
+                await client.query('SELECT 1 FROM cos.revocation_tombstones WHERE scope_id=$1 AND source_id=$2', [
+                  context.scopeId,
+                  previous.id,
+                ])
+              ).rowCount)
+          )
+            return { status: 'denied' };
+          if (
+            previous?.current_digest === captured.digest &&
+            previous.title === input.title &&
+            previous.project_id === (input.projectId ?? null) &&
+            digest([...previous.processing_providers].sort()) === digest([...input.processingProviders].sort())
+          )
+            return {
+              status: 'ok',
+              source_id: previous.id,
+              revision_id: previous.current_revision_id,
+              digest: captured.digest,
+              version: previous.version,
+            };
+          if ((previous?.version ?? 0) !== input.expectedVersion) return { status: 'conflict' };
+          const sourceId = previous?.id ?? randomUUID(),
+            revisionId = randomUUID(),
+            version = (previous?.version ?? 0) + 1;
+          const provenance = {
+            owner_id: context.ownerId,
+            ingress_id: context.ingressId,
+            request_id: requestId,
+            processing_providers: input.processingProviders,
+            origin: 'selected_staging_file',
+          };
           await client.query(
-            `INSERT INTO cos.sources(id,scope_id,source_key,title,project_id,status,processing_providers,access_policy,provenance)
-          VALUES($1,$2,$3,$4,$5,'indexing',$6,$7,$8)`,
-            [
-              sourceId,
+            `INSERT INTO cos.artifacts(id,scope_id,kind,digest,byte_length,lifecycle,provenance) VALUES($1,$2,'source',$3,$4,'published',$5) ON CONFLICT DO NOTHING`,
+            [captured.id, context.scopeId, captured.digest, captured.byteLength, JSON.stringify(provenance)],
+          );
+          const artifact = (
+            await client.query('SELECT lifecycle,digest,byte_length FROM cos.artifacts WHERE scope_id=$1 AND id=$2', [
               context.scopeId,
-              input.sourceKey,
-              input.title,
-              input.projectId ?? null,
-              input.processingProviders,
-              JSON.stringify({ scope_owner_only: true }),
+              captured.id,
+            ])
+          ).rows[0];
+          if (
+            artifact?.lifecycle !== 'published' ||
+            artifact.digest !== captured.digest ||
+            artifact.byte_length !== captured.byteLength
+          )
+            return { status: 'conflict' };
+          if (!previous)
+            await client.query(
+              `INSERT INTO cos.sources(id,scope_id,source_key,title,project_id,status,processing_providers,access_policy,provenance)
+          VALUES($1,$2,$3,$4,$5,'indexing',$6,$7,$8)`,
+              [
+                sourceId,
+                context.scopeId,
+                input.sourceKey,
+                input.title,
+                input.projectId ?? null,
+                input.processingProviders,
+                JSON.stringify({ scope_owner_only: true }),
+                JSON.stringify(provenance),
+              ],
+            );
+          await client.query(
+            `INSERT INTO cos.source_revisions(id,scope_id,source_id,artifact_id,digest,version,supersedes,locator_format,provenance)
+          VALUES($1,$2,$3,$4,$5,$6,$7,'normalized-utf8-lines/v1',$8)`,
+            [
+              revisionId,
+              context.scopeId,
+              sourceId,
+              captured.id,
+              captured.digest,
+              version,
+              previous?.current_revision_id ?? null,
               JSON.stringify(provenance),
             ],
           );
-        await client.query(
-          `INSERT INTO cos.source_revisions(id,scope_id,source_id,artifact_id,digest,version,supersedes,locator_format,provenance)
-          VALUES($1,$2,$3,$4,$5,$6,$7,'normalized-utf8-lines/v1',$8)`,
-          [
-            revisionId,
-            context.scopeId,
-            sourceId,
-            captured.id,
-            captured.digest,
-            version,
-            previous?.current_revision_id ?? null,
-            JSON.stringify(provenance),
-          ],
-        );
-        for (const [ordinal, chunk] of captured.chunks.entries())
+          for (const [ordinal, chunk] of captured.chunks.entries())
+            await client.query(
+              `INSERT INTO cos.chunks(scope_id,revision_id,ordinal,start_line,end_line,heading,text) VALUES($1,$2,$3,$4,$5,$6,$7)`,
+              [context.scopeId, revisionId, ordinal, chunk.startLine, chunk.endLine, chunk.heading, chunk.text],
+            );
           await client.query(
-            `INSERT INTO cos.chunks(scope_id,revision_id,ordinal,start_line,end_line,heading,text) VALUES($1,$2,$3,$4,$5,$6,$7)`,
-            [context.scopeId, revisionId, ordinal, chunk.startLine, chunk.endLine, chunk.heading, chunk.text],
-          );
-        await client.query(
-          `UPDATE cos.sources SET current_revision_id=$3,title=$4,project_id=$5,status='current',processing_providers=$6,version=$7,provenance=$8,updated_at=clock_timestamp() WHERE scope_id=$1 AND id=$2`,
-          [
-            context.scopeId,
-            sourceId,
-            revisionId,
-            input.title,
-            input.projectId ?? null,
-            input.processingProviders,
-            version,
-            JSON.stringify(provenance),
-          ],
-        );
-        if (previous) {
-          await client.query(
-            `UPDATE cos.artifacts a SET lifecycle='quarantined',version=version+1,updated_at=clock_timestamp() WHERE a.scope_id=$1 AND a.kind<>'source' AND a.lifecycle='published' AND EXISTS(
-            SELECT 1 FROM cos.derivation_links d JOIN cos.evidence_refs e ON e.scope_id=d.scope_id AND e.id=d.evidence_id WHERE d.scope_id=a.scope_id AND d.artifact_id=a.id AND e.source_id=$2)`,
-            [context.scopeId, sourceId],
-          );
-          await client.query(
-            `INSERT INTO cos.outbox(id,scope_id,kind,payload) VALUES($1,$2,'knowledge_invalidate',$3)`,
+            `UPDATE cos.sources SET current_revision_id=$3,title=$4,project_id=$5,status='current',processing_providers=$6,version=$7,provenance=$8,updated_at=clock_timestamp() WHERE scope_id=$1 AND id=$2`,
             [
-              'knowledge-' + requestId,
               context.scopeId,
-              JSON.stringify({ source_id: sourceId, source_version: version }),
+              sourceId,
+              revisionId,
+              input.title,
+              input.projectId ?? null,
+              input.processingProviders,
+              version,
+              JSON.stringify(provenance),
             ],
           );
-        }
-        return { status: 'ok', source_id: sourceId, revision_id: revisionId, digest: captured.digest, version };
-      })();
-      await client.query('UPDATE cos.operations SET result=$3 WHERE session_id=$1 AND request_id=$2', [
-        context.sessionId,
-        requestId,
-        JSON.stringify(receipt),
-      ]);
-      return receipt;
-    }, true);
-    return result.status === 'pending' ? { ...result, request_id: requestId } : result;
+          if (previous) {
+            await client.query(
+              `UPDATE cos.artifacts a SET lifecycle='quarantined',version=version+1,updated_at=clock_timestamp() WHERE a.scope_id=$1 AND a.kind<>'source' AND a.lifecycle='published' AND EXISTS(
+            SELECT 1 FROM cos.derivation_links d JOIN cos.evidence_refs e ON e.scope_id=d.scope_id AND e.id=d.evidence_id WHERE d.scope_id=a.scope_id AND d.artifact_id=a.id AND e.source_id=$2)`,
+              [context.scopeId, sourceId],
+            );
+            await client.query(
+              `INSERT INTO cos.outbox(id,scope_id,kind,payload) VALUES($1,$2,'knowledge_invalidate',$3)`,
+              [
+                'knowledge-' + requestId,
+                context.scopeId,
+                JSON.stringify({ source_id: sourceId, source_version: version }),
+              ],
+            );
+          }
+          return { status: 'ok', source_id: sourceId, revision_id: revisionId, digest: captured.digest, version };
+        })();
+        await client.query('UPDATE cos.operations SET result=$3 WHERE session_id=$1 AND request_id=$2', [
+          context.sessionId,
+          requestId,
+          JSON.stringify(receipt),
+        ]);
+        return receipt;
+      }, true);
+      return result.status === 'pending' ? { ...result, request_id: requestId } : result;
+    });
   }
   private async current(client: PoolClient, context: KnowledgeContext): Promise<boolean> {
     if (!providers.includes(context.provider) || !uuid.test(context.generation) || !(await authorised(client, context)))

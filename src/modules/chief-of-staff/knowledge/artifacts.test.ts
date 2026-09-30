@@ -1,6 +1,8 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { KnowledgeArtifacts, sourceDigest } from './artifacts.js';
 
@@ -19,53 +21,123 @@ describe('S02 host-owned artifact publication', () => {
     vi.restoreAllMocks();
     fs.rmSync(base, { recursive: true, force: true });
   });
-  it('S02-T03/T08: publishes durable checksummed raw bytes before metadata, with idempotent replay and scope separation', () => {
-    const a = artifacts.capture('scope-a', 'note.md'),
-      b = artifacts.capture('scope-a', 'note.md');
-    expect(a).toEqual(b);
-    expect(artifacts.read(a.id, a.digest)).toBe(a.text);
-    expect(fs.readFileSync(path.join(root, a.id + '.blob'))).toEqual(fs.readFileSync(path.join(staging, 'note.md')));
-    expect(artifacts.capture('scope-b', 'note.md').id).not.toBe(a.id);
-    fs.writeFileSync(path.join(staging, 'note.md'), '# Pilot Alpha\nSupplier approved.');
-    const c = artifacts.capture('scope-a', 'note.md');
-    expect(c.id).not.toBe(a.id);
-    expect(artifacts.read(a.id, a.digest)).toBe(a.text);
-  });
-  it('S02-T04: rejects traversal, symlink/hardlink escape, unknown binary format and public staging files', () => {
-    fs.writeFileSync(path.join(base, 'outside.md'), 'private canary', { mode: 0o600 });
-    fs.symlinkSync(path.join(base, 'outside.md'), path.join(staging, 'link.md'));
-    fs.linkSync(path.join(base, 'outside.md'), path.join(staging, 'hard.md'));
-    fs.copyFileSync(path.join(staging, 'note.md'), path.join(staging, 'note.pdf'));
-    fs.writeFileSync(path.join(staging, 'public.md'), 'wrong permissions', { mode: 0o644 });
-    for (const name of ['../outside.md', path.join(base, 'outside.md'), 'link.md', 'hard.md', 'note.pdf', 'public.md'])
-      expect(() => artifacts.capture('scope-a', name)).toThrow();
-    expect(fs.readdirSync(root).filter((x) => x.endsWith('.blob'))).toHaveLength(0);
-  });
-  it('S02-T08: reconciles only owned orphan blobs after a grace period, preserving references and unrelated files', () => {
-    const a = artifacts.capture('scope-a', 'note.md'),
-      b = artifacts.capture('scope-b', 'note.md');
-    fs.writeFileSync(path.join(root, 'unrelated.txt'), 'keep');
-    expect(artifacts.reconcile(new Set([a.id]), 0)).toBe(0);
-    expect(artifacts.reconcile(new Set([a.id]), Date.now() + 1000)).toBe(1);
-    expect(artifacts.read(a.id, a.digest)).toBe(a.text);
-    expect(fs.existsSync(path.join(root, b.id + '.blob'))).toBe(false);
-    expect(fs.readFileSync(path.join(root, 'unrelated.txt'), 'utf8')).toBe('keep');
-  });
-  it('rejects a changed blob rather than returning unchecked cached text', () => {
-    const a = artifacts.capture('scope-a', 'note.md');
-    fs.writeFileSync(path.join(root, a.id + '.blob'), 'tampered', { mode: 0o600 });
-    expect(() => artifacts.read(a.id, a.digest)).toThrow('artifact_integrity');
-    expect(() => artifacts.read('../outside', sourceDigest(Buffer.from('tampered')))).toThrow();
-  });
-  it('S02-T08: interruption at atomic publication leaves recoverable bytes, never a partial complete artifact', () => {
-    vi.spyOn(fs, 'renameSync').mockImplementationOnce(() => {
-      throw new Error('injected_crash');
+  it('requires an active owner lease and excludes another importer or garbage collector until remote work finishes', async () => {
+    const second = new KnowledgeArtifacts(root, staging);
+    let stale: unknown;
+    await artifacts.exclusive(async (lease) => {
+      stale = lease;
+      expect(artifacts.capture('scope-a', 'note.md', lease).text).toContain('Pilot Alpha');
+      await expect(second.exclusive(async () => undefined)).rejects.toThrow('knowledge_artifacts_busy');
+      expect(() => second.capture('scope-a', 'note.md', lease)).toThrow('knowledge_artifacts_lease_required');
+      expect(() => artifacts.reconcile(new Set(), Date.now() + 1000, {} as typeof lease)).toThrow(
+        'knowledge_artifacts_lease_required',
+      );
     });
-    expect(() => artifacts.capture('scope-a', 'note.md')).toThrow('injected_crash');
-    expect(fs.readdirSync(root).filter((name) => name.endsWith('.blob'))).toHaveLength(0);
-    const retry = artifacts.capture('scope-a', 'note.md');
-    expect(artifacts.read(retry.id, retry.digest)).toBe(retry.text);
-    expect(artifacts.reconcile(new Set([retry.id]), Date.now() + 1000)).toBe(1);
+    expect(() => artifacts.capture('scope-a', 'note.md', stale as never)).toThrow('knowledge_artifacts_lease_required');
+    await expect(second.exclusive(async () => 42)).resolves.toBe(42);
+  });
+  it('releases exclusion after failure without deleting the persistent lock inode', async () => {
+    await expect(
+      artifacts.exclusive(async () => {
+        throw new Error('fixture interrupted');
+      }),
+    ).rejects.toThrow('fixture interrupted');
+    const inode = fs.statSync(path.join(root, '.operation.lock')).ino;
+    await expect(new KnowledgeArtifacts(root, staging).exclusive(async () => 42)).resolves.toBe(42);
+    expect(fs.statSync(path.join(root, '.operation.lock')).ino).toBe(inode);
+  });
+  it('S02-T08: a killed publisher releases the kernel lock and leaves complete orphan bytes recoverable', async () => {
+    const script = `import {KnowledgeArtifacts} from ${JSON.stringify(new URL('./artifacts.ts', import.meta.url).href)};
+      const artifacts=new KnowledgeArtifacts(process.argv[1],process.argv[2]);
+      await artifacts.exclusive(async lease=>{artifacts.capture('scope-crash','note.md',lease);process.stdout.write('published\\n');await new Promise(()=>setInterval(()=>{},1000));});`;
+    const child = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '--eval', script, root, staging], {
+      stdio: ['ignore', 'pipe', 'ignore'],
+      env: { PATH: process.env.PATH ?? '/usr/bin:/bin' },
+    });
+    const exited = once(child, 'exit');
+    try {
+      const ready = await Promise.race([
+        once(child.stdout, 'data').then(([data]) => String(data)),
+        exited.then(() => {
+          throw new Error('fixture publisher exited before publication');
+        }),
+      ]);
+      expect(ready).toBe('published\n');
+      await expect(artifacts.exclusive(async () => undefined)).rejects.toThrow('knowledge_artifacts_busy');
+      child.kill('SIGKILL');
+      await exited;
+      await artifacts.exclusive(async (lease) => {
+        expect(artifacts.reconcile(new Set(), Date.now() + 1000, lease)).toBe(1);
+      });
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+      await exited;
+    }
+  });
+  it('S02-T03/T08: publishes durable checksummed raw bytes before metadata, with idempotent replay and scope separation', async () => {
+    await artifacts.exclusive(async (lease) => {
+      const a = artifacts.capture('scope-a', 'note.md', lease),
+        b = artifacts.capture('scope-a', 'note.md', lease);
+      expect(a).toEqual(b);
+      expect(artifacts.read(a.id, a.digest)).toBe(a.text);
+      expect(fs.readFileSync(path.join(root, a.id + '.blob'))).toEqual(fs.readFileSync(path.join(staging, 'note.md')));
+      expect(artifacts.capture('scope-b', 'note.md', lease).id).not.toBe(a.id);
+      fs.writeFileSync(path.join(staging, 'note.md'), '# Pilot Alpha\nSupplier approved.');
+      const c = artifacts.capture('scope-a', 'note.md', lease);
+      expect(c.id).not.toBe(a.id);
+      expect(artifacts.read(a.id, a.digest)).toBe(a.text);
+    });
+  });
+  it('S02-T04: rejects traversal, symlink/hardlink escape, unknown binary format and public staging files', async () => {
+    await artifacts.exclusive(async (lease) => {
+      fs.writeFileSync(path.join(base, 'outside.md'), 'private canary', { mode: 0o600 });
+      fs.symlinkSync(path.join(base, 'outside.md'), path.join(staging, 'link.md'));
+      fs.linkSync(path.join(base, 'outside.md'), path.join(staging, 'hard.md'));
+      fs.copyFileSync(path.join(staging, 'note.md'), path.join(staging, 'note.pdf'));
+      fs.writeFileSync(path.join(staging, 'public.md'), 'wrong permissions', { mode: 0o644 });
+      for (const name of [
+        '../outside.md',
+        path.join(base, 'outside.md'),
+        'link.md',
+        'hard.md',
+        'note.pdf',
+        'public.md',
+      ])
+        expect(() => artifacts.capture('scope-a', name, lease)).toThrow();
+      expect(fs.readdirSync(root).filter((x) => x.endsWith('.blob'))).toHaveLength(0);
+    });
+  });
+  it('S02-T08: reconciles only owned orphan blobs after a grace period, preserving references and unrelated files', async () => {
+    await artifacts.exclusive(async (lease) => {
+      const a = artifacts.capture('scope-a', 'note.md', lease),
+        b = artifacts.capture('scope-b', 'note.md', lease);
+      fs.writeFileSync(path.join(root, 'unrelated.txt'), 'keep');
+      expect(artifacts.reconcile(new Set([a.id]), 0, lease)).toBe(0);
+      expect(artifacts.reconcile(new Set([a.id]), Date.now() + 1000, lease)).toBe(1);
+      expect(artifacts.read(a.id, a.digest)).toBe(a.text);
+      expect(fs.existsSync(path.join(root, b.id + '.blob'))).toBe(false);
+      expect(fs.readFileSync(path.join(root, 'unrelated.txt'), 'utf8')).toBe('keep');
+    });
+  });
+  it('rejects a changed blob rather than returning unchecked cached text', async () => {
+    await artifacts.exclusive(async (lease) => {
+      const a = artifacts.capture('scope-a', 'note.md', lease);
+      fs.writeFileSync(path.join(root, a.id + '.blob'), 'tampered', { mode: 0o600 });
+      expect(() => artifacts.read(a.id, a.digest)).toThrow('artifact_integrity');
+      expect(() => artifacts.read('../outside', sourceDigest(Buffer.from('tampered')))).toThrow();
+    });
+  });
+  it('S02-T08: interruption at atomic publication leaves recoverable bytes, never a partial complete artifact', async () => {
+    await artifacts.exclusive(async (lease) => {
+      vi.spyOn(fs, 'renameSync').mockImplementationOnce(() => {
+        throw new Error('injected_crash');
+      });
+      expect(() => artifacts.capture('scope-a', 'note.md', lease)).toThrow('injected_crash');
+      expect(fs.readdirSync(root).filter((name) => name.endsWith('.blob'))).toHaveLength(0);
+      const retry = artifacts.capture('scope-a', 'note.md', lease);
+      expect(artifacts.read(retry.id, retry.digest)).toBe(retry.text);
+      expect(artifacts.reconcile(new Set([retry.id]), Date.now() + 1000, lease)).toBe(1);
+    });
   });
   it('refuses symlink roots, nonprivate roots and roots inside a Git checkout', () => {
     fs.symlinkSync(root, path.join(base, 'link'));

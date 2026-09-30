@@ -544,3 +544,105 @@ test('S02-T10: the durable revocation job invalidates exposed native state while
     db.close();
   }
 });
+test('S02-T08: cleanup cannot pass an import awaiting metadata admission and preserves current references', async () => {
+  let reached!: () => void, release!: () => void;
+  const published = new Promise<void>((resolve) => {
+    reached = resolve;
+  });
+  const hold = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const importer = new KnowledgeStore(store.database, artifacts, {
+    afterPublication: async () => {
+      reached();
+      await hold;
+    },
+  });
+  const input = note('gc-import', 'GarbageCollectionCanary admitted note.'),
+    request = randomUUID();
+  const importing = importer.importSource(context, request, input);
+  try {
+    await published;
+    assert.equal((await store.reconcileArtifacts(0)).status, 'unavailable');
+    assert.equal(
+      (await store.importSource(context, randomUUID(), note('gc-competing', 'Competing import.'))).status,
+      'unavailable',
+    );
+  } finally {
+    release();
+  }
+  const admitted = await importing;
+  assert.equal(admitted.status, 'ok');
+  const orphan = await artifacts.exclusive(async (lease) =>
+    artifacts.capture(scope, note('gc-orphan', 'Orphan not admitted.').filename, lease),
+  );
+  fs.utimesSync(path.join(artifacts.root, orphan.id + '.blob'), 0, 0);
+  fs.writeFileSync(path.join(artifacts.root, 'unrelated.txt'), 'keep', { mode: 0o600 });
+  const cleaned = await store.reconcileArtifacts(0);
+  assert.equal(cleaned.status, 'ok');
+  assert.equal(fs.existsSync(path.join(artifacts.root, orphan.id + '.blob')), false);
+  assert.equal(fs.readFileSync(path.join(artifacts.root, 'unrelated.txt'), 'utf8'), 'keep');
+  assert.equal(
+    (
+      await store.get(
+        { ...context, generation: randomUUID() },
+        String(admitted.source_id),
+        String(admitted.revision_id),
+        0,
+      )
+    ).status,
+    'ok',
+  );
+  assert.deepEqual(await store.importSource(context, request, input), admitted);
+});
+test('S02-PG02: artifact cleanup never deletes from an unavailable reference snapshot', async () => {
+  const orphan = await artifacts.exclusive(async (lease) =>
+    artifacts.capture(scope, note('gc-outage', 'Orphan outage canary.').filename, lease),
+  );
+  fs.utimesSync(path.join(artifacts.root, orphan.id + '.blob'), 0, 0);
+  const relay = await connectionFault(await fixtureDatabaseConfig()),
+    database = new BoundedDatabase(new pg.Pool(relay.config), 350);
+  const fault = new KnowledgeStore(database, artifacts);
+  try {
+    await database.run((client) => client.query('SELECT 1'));
+    relay.partition();
+    assert.equal((await fault.reconcileArtifacts(0)).status, 'unavailable');
+    assert.equal(artifacts.read(orphan.id, orphan.digest), 'Orphan outage canary.');
+  } finally {
+    await database.pool.end();
+    await relay.close();
+  }
+});
+test('S02-PG01: cleanup waits for an uncertain remote metadata commit before taking its reference snapshot', async () => {
+  const captured = await artifacts.exclusive(async (lease) =>
+    artifacts.capture(scope, note('gc-commit', 'Commit barrier canary.').filename, lease),
+  );
+  fs.utimesSync(path.join(artifacts.root, captured.id + '.blob'), 0, 0);
+  await admin.query('BEGIN');
+  let cleaning: ReturnType<KnowledgeStore['reconcileArtifacts']> | undefined;
+  try {
+    await admin.query('SELECT pg_advisory_xact_lock(73101004)');
+    await admin.query(
+      "INSERT INTO cos.artifacts(id,scope_id,kind,digest,byte_length,lifecycle,provenance) VALUES($1,$2,'source',$3,$4,'published','{}')",
+      [captured.id, scope, captured.digest, captured.byteLength],
+    );
+    cleaning = store.reconcileArtifacts(0);
+    let waiting = false;
+    for (let attempt = 0; attempt < 50; attempt++) {
+      waiting = (
+        await admin.query(
+          "SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND objid=73101004 AND NOT granted) AS waiting",
+        )
+      ).rows[0].waiting;
+      if (waiting) break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(waiting, true);
+    await admin.query('COMMIT');
+    assert.equal((await cleaning).status, 'ok');
+    assert.equal(artifacts.read(captured.id, captured.digest), 'Commit barrier canary.');
+  } finally {
+    await admin.query('ROLLBACK');
+    await cleaning;
+  }
+});

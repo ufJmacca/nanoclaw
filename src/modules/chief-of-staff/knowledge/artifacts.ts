@@ -2,9 +2,17 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { decodeSource, extractChunks, MAX_SOURCE_BYTES } from './text.js';
+import { withDeploymentLock } from '../ops/deployment-lock.js';
 export const sourceDigest = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
 const identity = /^[a-f0-9]{64}-[a-f0-9]{64}$/;
 const marker = 'cos-knowledge-artifacts/v1\n';
+export type ArtifactLease = Readonly<{ kind: 'knowledge-artifact-operation' }>;
+export class KnowledgeArtifactsBusy extends Error {
+  constructor() {
+    super('knowledge_artifacts_busy');
+  }
+}
+export const isArtifactIdentity = (id: string): boolean => identity.test(id);
 
 function privateRoot(root: string): void {
   const stat = fs.lstatSync(root);
@@ -59,6 +67,7 @@ function privateBytes(file: string, maximum = MAX_SOURCE_BYTES): Buffer {
 
 /** Only trusted host import/admin code can construct this store. Never mount either root in a worker. */
 export class KnowledgeArtifacts {
+  private readonly leases = new WeakSet<ArtifactLease>();
   constructor(
     readonly root: string,
     readonly staging: string,
@@ -86,7 +95,30 @@ export class KnowledgeArtifacts {
     if (privateBytes(path.join(this.root, '.cos-artifacts'), 128).toString('utf8') !== marker)
       throw new Error('unowned_knowledge_root');
   }
-  capture(scopeId: string, filename: string) {
+  /** One kernel lock covers publication, remote admission, and fresh-reference cleanup across processes. */
+  async exclusive<T>(operation: (lease: ArtifactLease) => Promise<T>): Promise<T> {
+    this.guard();
+    try {
+      return await withDeploymentLock(path.join(this.root, '.operation.lock'), async () => {
+        this.guard();
+        const lease = Object.freeze({ kind: 'knowledge-artifact-operation' as const });
+        this.leases.add(lease);
+        try {
+          return await operation(lease);
+        } finally {
+          this.leases.delete(lease);
+        }
+      });
+    } catch (error) {
+      if (error instanceof Error && error.message === 'target_deployment_locked') throw new KnowledgeArtifactsBusy();
+      throw error;
+    }
+  }
+  private requireLease(lease: ArtifactLease): void {
+    if (!lease || !this.leases.has(lease)) throw new Error('knowledge_artifacts_lease_required');
+  }
+  capture(scopeId: string, filename: string, lease: ArtifactLease) {
+    this.requireLease(lease);
     this.guard();
     privateRoot(this.staging);
     if (!/^[a-zA-Z0-9_-]{1,128}$/.test(scopeId) || !/^[a-zA-Z0-9][a-zA-Z0-9 ._-]{0,120}\.(md|txt)$/i.test(filename))
@@ -123,8 +155,9 @@ export class KnowledgeArtifacts {
     if (sourceDigest(bytes) !== digest) throw new Error('artifact_integrity');
     return decodeSource(bytes);
   }
-  /** Caller must hold import/GC exclusion and obtain a complete current DB reference set first. */
-  reconcile(referenced: Set<string>, before: number): number {
+  /** Caller obtains the complete current DB reference set while holding this same lease. */
+  reconcile(referenced: Set<string>, before: number, lease: ArtifactLease): number {
+    this.requireLease(lease);
     this.guard();
     if (!Number.isFinite(before) || before < 0 || [...referenced].some((id) => !identity.test(id)))
       throw new Error('invalid_artifact_reconciliation');
