@@ -3,8 +3,8 @@
 set -euo pipefail
 umask 077
 [[ "$(uname -s)" == Darwin ]] || { echo 'cos:release requires the Mac host' >&2; exit 1; }
-[[ $# == 6 && "$1" == --slice && "$2" == S01 && "$3" == --target && "$4" == pi && "$5" == --db-profile ]] || {
-  echo 'Usage: cos:release --slice S01 --target pi --db-profile test|runtime-disposable' >&2; exit 1;
+[[ ( $# == 6 || ( $# == 7 && "${7:-}" == --local-only ) ) && "$1" == --slice && "$2" == S01 && "$3" == --target && "$4" == pi && "$5" == --db-profile ]] || {
+  echo 'Usage: cos:release --slice S01 --target pi --db-profile test|runtime-disposable [--local-only]' >&2; exit 1;
 }
 profile=$6
 [[ "$profile" == test || "$profile" == runtime-disposable ]] || exit 1
@@ -172,4 +172,8 @@ docker rm "$carrier" > /dev/null
 carrier=''
 cli finish "$id" > "$directory/manifest.sha256"
 printf 'Transferable release: %s/release.json\n' "$directory"
+if [[ "${7:-}" == --local-only ]]; then
+  printf 'Local verification complete; source sync, transfer and deployment have not run.\n'
+  exit 0
+fi
 bash "$root/scripts/cos-deploy.sh" --target pi --release-manifest "$directory/release.json"
