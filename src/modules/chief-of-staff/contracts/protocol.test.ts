@@ -21,6 +21,21 @@ describe('S01-T09 canonical bounded RPC contract', () => {
         params: {
           draft: {
             kind: 'answer',
+            coverage: 'not_applicable',
+            claims: [],
+            questions: ['Which project should we focus on?'],
+            notice: 'approval_required',
+          },
+        },
+      }),
+    ).toBe(true);
+    expect(
+      validRequest({
+        ...request,
+        method: 'cos_answer_prepare',
+        params: {
+          draft: {
+            kind: 'answer',
             coverage: 'limited',
             claims: [
               { kind: 'quote', text: 'Pilot Alpha', citations: [{ kind: 'source', evidence_id: request.request_id }] },

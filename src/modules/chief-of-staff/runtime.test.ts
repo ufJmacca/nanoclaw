@@ -50,7 +50,10 @@ it('S02 checks current source authority before native admission and prepared pri
   db.prepare(
     "INSERT INTO cos_conversation_states(scope_id,binding_digest,account_fingerprint,generation,status,updated_at) VALUES(?,?,?,?,'active',?)",
   ).run(binding.scopeId, digest(binding), 'a'.repeat(64), randomUUID(), new Date().toISOString());
-  const knowledge = { contextReady: vi.fn().mockResolvedValue({ status: 'ok' }) };
+  const knowledge = {
+    contextReady: vi.fn().mockResolvedValue({ status: 'ok' }),
+    answers: { authorizePublication: vi.fn().mockResolvedValue({ status: 'ok' }) },
+  };
   let authorize!: (mode?: 'poll') => Promise<string | null>;
   runtime = createCosRuntime({
     db,
@@ -85,6 +88,23 @@ it('S02 checks current source authority before native admission and prepared pri
     content: JSON.stringify({ text: 'Previously prepared source answer' }),
   };
   expect(await permitCosOutbound(session, message)).toBe(true);
+  expect(knowledge.answers.authorizePublication).toHaveBeenCalledWith(
+    expect.objectContaining({ scopeId: 'scope', sessionId: 'session', ingressId: 'ingress', provider: 'codex' }),
+    'Previously prepared source answer',
+  );
+  knowledge.answers.authorizePublication.mockResolvedValue({ status: 'denied' });
+  expect(
+    await permitCosOutbound(session, { ...message, content: JSON.stringify({ text: 'Unprepared private canary' }) }),
+  ).toBe(false);
+  knowledge.answers.authorizePublication.mockResolvedValue({ status: 'unavailable' });
+  expect(await permitCosOutbound(session, message)).toBe(false);
+  knowledge.answers.authorizePublication.mockResolvedValue({ status: 'ok' });
+  knowledge.answers.authorizePublication.mockImplementationOnce(async () => {
+    db.prepare('UPDATE cos_identity_boundaries SET ingress_id=?').run('new-ingress');
+    return { status: 'ok' };
+  });
+  expect(await permitCosOutbound(session, message)).toBe(false);
+  db.prepare('UPDATE cos_identity_boundaries SET ingress_id=?').run('ingress');
   knowledge.contextReady.mockResolvedValue({ status: 'denied' });
   expect(await authorize()).toBeNull();
   expect(await permitCosOutbound(session, message)).toBe(false);

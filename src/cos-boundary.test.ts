@@ -35,6 +35,41 @@ afterEach(() => {
   closeDb();
 });
 describe('S01-T08 permanent host restriction', () => {
+  it('passes exact chat text to the final policy check and never treats an RPC as chat', async () => {
+    getDb().exec('UPDATE cos_identity_boundaries SET paused=0');
+    const seen: unknown[][] = [];
+    setCosBoundaryHooks({
+      executionReady: () => true,
+      ingress: async () => true,
+      validatePrivateDestination: async (...args) => {
+        seen.push(args);
+        return true;
+      },
+    });
+    const text = 'Prepared text\nwith exact whitespace. ';
+    expect(
+      await permitCosOutbound(session, {
+        kind: 'chat',
+        channel_type: 'mattermost',
+        platform_id: 'mattermost:fixture:private',
+        thread_id: 'visual-thread',
+        content: JSON.stringify({ text }),
+      }),
+    ).toBe(true);
+    expect(
+      await permitCosOutbound(session, {
+        kind: 'system',
+        channel_type: null,
+        platform_id: null,
+        thread_id: null,
+        content: JSON.stringify({ action: 'cos_rpc' }),
+      }),
+    ).toBe(true);
+    expect(seen).toEqual([
+      [binding, 'chat', text],
+      [binding, 'rpc', undefined],
+    ]);
+  });
   it('never falls through to generic launch when the restricted launcher is absent or paused during preparation', async () => {
     await expect(prepareCosLaunch(session)).rejects.toThrow('restricted_launch_denied');
     getDb().exec('UPDATE cos_identity_boundaries SET paused=0');

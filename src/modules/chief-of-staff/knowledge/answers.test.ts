@@ -82,3 +82,28 @@ it('blocks an invented quotation or a missing reference instead of rendering a p
     'invalid_answer_quotation',
   );
 });
+it('supports clarifying questions and a fixed approval notice without treating them as factual claims', () => {
+  const value = {
+    kind: 'answer',
+    coverage: 'not_applicable',
+    claims: [],
+    questions: ['Which project should we focus on?'],
+    notice: 'approval_required',
+  };
+  expect(validAnswerDraft(value)).toBe(true);
+  if (!validAnswerDraft(value)) throw new Error('invalid fixture');
+  expect(renderAnswer(value, [])).toBe(
+    'Proposed changes require your approval before they take effect.\n\nQuestion: Which project should we focus on?',
+  );
+  for (const invalid of [
+    { ...value, claims: draft.claims },
+    { ...value, notice: 'already_approved' },
+    { ...value, questions: ['The project is approved.'] },
+    { ...value, questions: ['x'.repeat(501) + '?'] },
+    { ...value, questions: ['a?', 'b?', 'c?', 'd?'] },
+    { ...value, questions: ['Injected\nassertion?'] },
+    { ...value, kind: 'summary' },
+    { kind: 'answer', coverage: 'not_applicable', claims: [] },
+  ])
+    expect(validAnswerDraft(invalid)).toBe(false);
+});

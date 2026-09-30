@@ -32,10 +32,12 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
   const d = dependencies;
   let disposed = false;
   const enabled = () => !disposed && d.enabled && !!d.store && (d.admission?.() ?? true);
-  const knowledgeAllowed = async (session: Session, context: Context): Promise<boolean> => {
+  const knowledgeAllowed = async (session: Session, context: Context, text?: string): Promise<boolean> => {
     if (!d.store?.knowledge) return true;
     const retained = resolveKnowledgeContext(session, context, d.db);
     if (!retained || (await d.store.knowledge.contextReady(retained)).status !== 'ok') return false;
+    if (text !== undefined && (await d.store.knowledge.answers.authorizePublication(retained, text)).status !== 'ok')
+      return false;
     const current = resolveKnowledgeContext(session, context, d.db);
     return !!current && digest(current) === digest(retained);
   };
@@ -123,7 +125,7 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
       );
     },
     ingress: (binding, event) => controller.ingress(binding, event),
-    validatePrivateDestination: async (binding, purpose) => {
+    validatePrivateDestination: async (binding, purpose, text) => {
       if (!(await admitted(binding))) return false;
       const session = d.session(binding.sessionId);
       if (!session || !d.store) return false;
@@ -133,7 +135,9 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
       return (
         !!context &&
         (purpose === 'rpc' ||
-          ((await d.store.context(context)).status === 'ok' && (await knowledgeAllowed(session, context))))
+          (typeof text === 'string' &&
+            (await d.store.context(context)).status === 'ok' &&
+            (await knowledgeAllowed(session, context, text))))
       );
     },
   });

@@ -186,7 +186,7 @@ const answerTools: McpToolDefinition[] = (['cos_answer_prepare', 'cos_answer_get
     name: method,
     description:
       method === 'cos_answer_prepare'
-        ? 'Prepare a candidate answer or summary with checked citations. Quotes must exactly match one reference; label deductions as inference. Use insufficient coverage with no claims when evidence is missing, and conflicting coverage with at least two distinct references when it disagrees. This never changes approved priorities. Retry a pending preparation with the same request ID and unchanged draft. Send only the returned text, unchanged.'
+        ? 'Prepare a reply or candidate summary with checked citations. Quotes must exactly match one reference; label deductions as inference. Use insufficient coverage with no claims when evidence is missing, and conflicting coverage with at least two distinct references when it disagrees. For clarification use kind answer, coverage not_applicable, no claims and bounded questions or the fixed approval_required notice. This never changes approved priorities. Retry a pending preparation with the same request ID and unchanged draft. Send only the returned text, unchanged.'
         : 'Redisplay an answer artifact after checking current source access and record versions. Use this before reusing any earlier answer; cached text is not permission to publish.',
     inputSchema: {
       type: 'object',

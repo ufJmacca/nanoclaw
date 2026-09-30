@@ -199,6 +199,15 @@ export class KnowledgeAnswers {
               captured.id,
               ref.evidence_id,
             ]);
+        // Any part of a reply can be influenced by previously seen evidence, including a question.
+        // Keep those dependencies even when they are not displayed as explicit claim citations.
+        await client.query(
+          `INSERT INTO cos.derivation_links(scope_id,artifact_id,evidence_id)
+          SELECT scope_id,$1,id FROM cos.evidence_refs
+          WHERE scope_id=$2 AND session_id=$3 AND context_generation=$4 AND processing_provider=$5
+          ON CONFLICT DO NOTHING`,
+          [captured.id, context.scopeId, context.sessionId, context.generation, context.provider],
+        );
         const receipt = { status: 'ok', artifact_id: captured.id };
         await client.query('UPDATE cos.operations SET result=$3 WHERE session_id=$1 AND request_id=$2', [
           context.sessionId,
@@ -229,6 +238,20 @@ export class KnowledgeAnswers {
       metadata.provenance.processing_provider !== context.provider
     )
       return null;
+    const invalid = await client.query(
+      `SELECT 1 FROM cos.derivation_links d
+      JOIN cos.evidence_refs e ON e.scope_id=d.scope_id AND e.id=d.evidence_id
+      JOIN cos.sources s ON s.scope_id=e.scope_id AND s.id=e.source_id
+      JOIN cos.source_revisions r ON r.scope_id=e.scope_id AND r.id=e.revision_id AND r.source_id=e.source_id
+      JOIN cos.artifacts a ON a.scope_id=r.scope_id AND a.id=r.artifact_id
+      WHERE d.scope_id=$1 AND d.artifact_id=$2 AND (
+        e.session_id<>$3 OR e.processing_provider<>$4 OR NOT $4=ANY(s.processing_providers)
+        OR s.version<>e.source_version OR s.current_revision_id IS DISTINCT FROM e.revision_id
+        OR r.digest<>e.revision_digest OR s.status NOT IN ('current','stale') OR a.lifecycle<>'published'
+        OR EXISTS(SELECT 1 FROM cos.revocation_tombstones t WHERE t.scope_id=s.scope_id AND t.source_id=s.id)) LIMIT 1`,
+      [context.scopeId, id, context.sessionId, context.provider],
+    );
+    if (invalid.rowCount) return null;
     const resolved = await this.resolve(client, context, metadata.provenance.citations, true);
     return resolved ? { metadata, resolved } : null;
   }
@@ -285,6 +308,15 @@ export class KnowledgeAnswers {
               context.provider,
             ],
           );
+      // Re-exposure includes implicit context dependencies, not only rendered footnotes.
+      await client.query(
+        `INSERT INTO cos.evidence_refs(id,scope_id,source_id,revision_id,revision_digest,source_version,start_line,end_line,session_id,context_generation,processing_provider)
+        SELECT gen_random_uuid()::text,e.scope_id,e.source_id,e.revision_id,e.revision_digest,e.source_version,e.start_line,e.end_line,$3,$4,$5
+        FROM cos.derivation_links d JOIN cos.evidence_refs e ON e.scope_id=d.scope_id AND e.id=d.evidence_id
+        WHERE d.scope_id=$1 AND d.artifact_id=$2
+        ON CONFLICT(scope_id,session_id,context_generation,revision_id,start_line,end_line,source_version) DO NOTHING`,
+        [context.scopeId, id, context.sessionId, context.generation, context.provider],
+      );
       const receipt = {
         status: 'ok',
         artifact_id: id,

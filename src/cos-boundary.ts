@@ -95,7 +95,7 @@ export type CosLaunch = { containerName: string; args: string[] };
 type Hooks = {
   executionReady(binding: CosBinding): boolean;
   launch?(binding: CosBinding, session: Session): Promise<CosLaunch>;
-  validatePrivateDestination(binding: CosBinding, purpose?: 'chat' | 'rpc'): Promise<boolean>;
+  validatePrivateDestination(binding: CosBinding, purpose?: 'chat' | 'rpc', text?: string): Promise<boolean>;
   ingress(binding: CosBinding, event: InboundEvent): Promise<boolean>;
 };
 let hooks: Hooks | null = null;
@@ -126,7 +126,13 @@ export async function permitCosOutbound(session: Session, message: Outbound): Pr
       Object.keys(content).some((key) => key !== 'text')
     )
       return false;
-    if (!(await hooks.validatePrivateDestination(boundary.binding, message.kind === 'system' ? 'rpc' : 'chat')))
+    if (
+      !(await hooks.validatePrivateDestination(
+        boundary.binding,
+        message.kind === 'system' ? 'rpc' : 'chat',
+        message.kind === 'chat' ? content.text : undefined,
+      ))
+    )
       return false;
     const current = cosBoundary(session);
     return (

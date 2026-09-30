@@ -4,8 +4,10 @@ export type AnswerCitation =
   | { kind: 'record'; record_id: string; version: number };
 export type AnswerDraft = {
   kind: 'answer' | 'summary';
-  coverage: 'limited' | 'conflicting' | 'insufficient';
+  coverage: 'limited' | 'conflicting' | 'insufficient' | 'not_applicable';
   claims: Array<{ kind: 'quote' | 'inference'; text: string; citations: AnswerCitation[] }>;
+  questions?: string[];
+  notice?: 'approval_required';
 };
 /** Provider guidance; validAnswerDraft additionally enforces byte, Unicode and cross-field limits. */
 export const answerDraftSchema = {
@@ -14,7 +16,21 @@ export const answerDraftSchema = {
   required: ['kind', 'coverage', 'claims'],
   properties: {
     kind: { type: 'string', enum: ['answer', 'summary'] },
-    coverage: { type: 'string', enum: ['limited', 'conflicting', 'insufficient'] },
+    coverage: { type: 'string', enum: ['limited', 'conflicting', 'insufficient', 'not_applicable'] },
+    questions: {
+      type: 'array',
+      minItems: 1,
+      maxItems: 3,
+      items: { type: 'string', minLength: 2, maxLength: 500, pattern: '\\?$' },
+      description:
+        'Clarifying questions only. Put any source-derived assertion in a cited claim instead. Questions are not evidence.',
+    },
+    notice: {
+      type: 'string',
+      enum: ['approval_required'],
+      description:
+        'Fixed reminder that proposals need owner approval; this makes no claim about a particular proposal status.',
+    },
     claims: {
       type: 'array',
       maxItems: 8,
@@ -87,15 +103,34 @@ export function validAnswerCitation(citation: unknown): citation is AnswerCitati
 export function validAnswerDraft(value: unknown): value is AnswerDraft {
   if (
     !object(value) ||
-    !keys(value, ['kind', 'coverage', 'claims']) ||
+    !keys(value, ['kind', 'coverage', 'claims', 'questions', 'notice']) ||
     !['answer', 'summary'].includes(String(value.kind)) ||
-    !['limited', 'conflicting', 'insufficient'].includes(String(value.coverage)) ||
+    !['limited', 'conflicting', 'insufficient', 'not_applicable'].includes(String(value.coverage)) ||
     !Array.isArray(value.claims) ||
     value.claims.length > 8
   )
     return false;
+  if (value.notice !== undefined && value.notice !== 'approval_required') return false;
   if (
-    value.coverage === 'insufficient'
+    value.questions !== undefined &&
+    (!Array.isArray(value.questions) ||
+      value.questions.length < 1 ||
+      value.questions.length > 3 ||
+      value.questions.some(
+        (question) =>
+          typeof question !== 'string' ||
+          question.trim().length < 2 ||
+          question.length > 500 ||
+          !question.endsWith('?') ||
+          [...question].some(control) ||
+          Buffer.from(question).toString('utf8') !== question,
+      ))
+  )
+    return false;
+  if (value.coverage === 'not_applicable' && (value.kind !== 'answer' || (!value.notice && !value.questions)))
+    return false;
+  if (
+    value.coverage === 'insufficient' || value.coverage === 'not_applicable'
       ? value.claims.length !== 0
       : value.claims.length < (value.coverage === 'conflicting' ? 2 : 1)
   )

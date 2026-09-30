@@ -35,8 +35,18 @@ const label = (value: string) =>
 /** Reference correctness is blocking; whether an inference follows is a separate quality judgement. */
 export function renderAnswer(draft: AnswerDraft, resolved: ResolvedCitation[]): string {
   if (!validAnswerDraft(draft)) throw new Error('invalid_answer_draft');
+  const conversation = [
+    ...(draft.notice === 'approval_required'
+      ? ['Proposed changes require your approval before they take effect.']
+      : []),
+    ...(draft.questions ?? []).map((question) => 'Question: ' + question),
+  ];
+  if (draft.coverage === 'not_applicable') return conversation.join('\n\n');
   if (draft.coverage === 'insufficient')
-    return 'The admitted evidence is insufficient to answer this question. No supported conclusion is available.';
+    return [
+      'The admitted evidence is insufficient to answer this question. No supported conclusion is available.',
+      ...conversation,
+    ].join('\n\n');
   const found = new Map(resolved.map((item) => [citationKey(item), item])),
     used = new Map<string, number>(),
     footnotes: string[] = [];
@@ -79,5 +89,6 @@ export function renderAnswer(draft: AnswerDraft, resolved: ResolvedCitation[]): 
       : 'This answer has limited coverage of the admitted evidence.',
     ...sections,
     ...footnotes,
+    ...conversation,
   ].join('\n\n');
 }

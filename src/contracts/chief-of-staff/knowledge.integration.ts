@@ -19,7 +19,11 @@ import { connectionFault } from './connection-fault.js';
 import { PriorityStore } from '../../modules/chief-of-staff/store/priorities.js';
 import Database from 'better-sqlite3';
 import { KnowledgeInvalidation } from '../../modules/chief-of-staff/knowledge/invalidation.js';
-import { installCosBoundary, type CosBinding } from '../../cos-boundary.js';
+import { installCosBoundary, permitCosOutbound, type CosBinding } from '../../cos-boundary.js';
+import { initTestDb, closeDb } from '../../db/connection.js';
+import { createCosRuntime } from '../../modules/chief-of-staff/runtime.js';
+import { createRpcHandler } from '../../modules/chief-of-staff/bridge/rpc.js';
+import { resolveKnowledgeContext } from '../../modules/chief-of-staff/knowledge/context.js';
 import { ensureConversationSchema } from '../../modules/chief-of-staff/bridge/conversation-state.js';
 import { digest, type Change } from '../../modules/chief-of-staff/domain/contracts.js';
 import type { Session } from '../../types.js';
@@ -922,6 +926,140 @@ test('S02-T02/T07: prepared answers carry checked citations and provenance witho
   );
   assert.notEqual(a.revision_id, undefined);
 });
+test('S02-T02/T06: actual RPC and final private chat boundary enforce exact prepared answers and current revocation', async () => {
+  const ctx = { ...context, generation: randomUUID() };
+  const importedSource = await imported(note('answer-delivery', 'DeliveryCanary supplier approval is pending.'));
+  const db = initTestDb();
+  const binding: CosBinding = {
+    scopeId: scope,
+    ownerId: ctx.ownerId,
+    sessionId: ctx.sessionId,
+    agentGroupId: ctx.agentGroupId,
+    messagingGroupId: scope,
+    instanceId: 'fixture-instance',
+    channelId: scope,
+    botId: 'fixture-bot',
+    provider: 'codex',
+  };
+  const session = {
+    id: ctx.sessionId,
+    agent_group_id: ctx.agentGroupId,
+    messaging_group_id: scope,
+    thread_id: null,
+    agent_provider: 'codex',
+    status: 'active',
+  } as Session;
+  installCosBoundary(binding, db);
+  ensureConversationSchema(db);
+  db.prepare('UPDATE cos_identity_boundaries SET paused=0,ingress_id=?,ingress_at=?').run(
+    ctx.ingressId,
+    new Date().toISOString(),
+  );
+  db.prepare(
+    "INSERT INTO cos_conversation_states(scope_id,binding_digest,account_fingerprint,generation,status,updated_at) VALUES(?,?,?,?,'active',?)",
+  ).run(scope, digest(binding), 'a'.repeat(64), ctx.generation, new Date().toISOString());
+  const priorities = new PriorityStore(store.database, store);
+  const runtime = createCosRuntime({
+    db,
+    enabled: true,
+    store: priorities,
+    facts: async () => ({
+      id: scope,
+      type: 'P',
+      delete_at: 0,
+      members: [binding.botId, binding.ownerId],
+      activeSubscription: true,
+    }),
+    session: () => session,
+    destination: () => undefined,
+    stop: () => {},
+    wake: async () => {},
+  });
+  const handler = createRpcHandler({
+    store: priorities,
+    knowledge: store,
+    resolveContext: () => runtime.controller.context(session),
+    resolveKnowledgeContext: async (actualSession, actualContext) =>
+      resolveKnowledgeContext(actualSession, actualContext, db),
+  });
+  const rpc = async (method: string, params: Record<string, unknown>) => {
+    const requestId = randomUUID();
+    await handler(
+      {
+        action: 'cos_rpc',
+        delivery_id: randomUUID(),
+        request: { protocol: 'cos-rpc/v1', request_id: requestId, method, params },
+      },
+      session,
+      db,
+    );
+    const row = db.prepare('SELECT response FROM cos_rpc_responses WHERE request_id=?').get(requestId) as {
+      response: string;
+    };
+    const response = JSON.parse(row.response);
+    assert.equal(response.status, 'ok');
+    return response.result;
+  };
+  const message = (text: string) => ({
+    kind: 'chat',
+    channel_type: 'mattermost',
+    platform_id: `mattermost:fixture-instance:${scope}`,
+    thread_id: 'visual-reply',
+    content: JSON.stringify({ text }),
+  });
+  try {
+    const clarification = await rpc('cos_answer_prepare', {
+      draft: {
+        kind: 'answer',
+        coverage: 'not_applicable',
+        claims: [],
+        questions: ['Which project should we focus on?'],
+        notice: 'approval_required',
+      },
+    });
+    assert.equal(await permitCosOutbound(session, message(clarification.text)), true);
+    assert.match(clarification.text, /Question: Which project/);
+    assert.match(clarification.text, /require your approval/);
+    assert.equal(
+      (db.prepare('SELECT generation FROM cos_conversation_states').get() as { generation: string }).generation,
+      ctx.generation,
+    );
+    const evidence = (await rpc('cos_knowledge_search', { query: 'DeliveryCanary' })).items[0];
+    const prepared = await rpc('cos_answer_prepare', {
+      draft: {
+        kind: 'answer',
+        coverage: 'limited',
+        claims: [
+          { kind: 'quote', text: evidence.text, citations: [{ kind: 'source', evidence_id: evidence.evidence_id }] },
+        ],
+      },
+    });
+    assert.equal(await permitCosOutbound(session, message(prepared.text)), true);
+    assert.equal(
+      await permitCosOutbound(session, { ...message(prepared.text), thread_id: 'another-visual-thread' }),
+      true,
+    );
+    assert.equal(await permitCosOutbound(session, message(prepared.text + '\nUncited extra claim.')), false);
+    assert.equal(
+      await permitCosOutbound(session, {
+        ...message(prepared.text),
+        platform_id: 'mattermost:fixture-instance:foreign',
+      }),
+      false,
+    );
+    db.prepare('UPDATE cos_identity_boundaries SET ingress_id=?').run(randomUUID());
+    assert.equal(await permitCosOutbound(session, message(prepared.text)), false);
+    await rpc('cos_answer_get', { artifact_id: prepared.artifact_id });
+    assert.equal(await permitCosOutbound(session, message(prepared.text)), true);
+    await approveDeletion(store, String(importedSource.source_id));
+    assert.equal(await permitCosOutbound(session, message(prepared.text)), false);
+    const ordinary = { ...session, id: 'ordinary', agent_group_id: 'ordinary', messaging_group_id: 'ordinary' };
+    assert.equal(await permitCosOutbound(ordinary, message('Ordinary chat remains available.')), true);
+  } finally {
+    runtime.dispose();
+    closeDb();
+  }
+});
 test('S02-T06: revocation during answer preparation cannot admit a publishable derivative', async () => {
   await imported(note('answer-race', 'AnswerRaceCanary private source.'));
   const ctx = { ...context, generation: randomUUID() },
@@ -1059,4 +1197,46 @@ test('S02-PG01: answer publication losing database access admits no artifact and
     await database.pool.end();
     await relay.close();
   }
+});
+test('S02-T06/T10: conversational artifacts retain context-source dependencies through redisplay and deletion', async () => {
+  const source = await imported(note('context-dependency', 'ContextDependencyCanary needs supplier approval.'));
+  const ctx = { ...context, generation: randomUUID() };
+  assert.equal((await store.search(ctx, { query: 'ContextDependencyCanary' })).status, 'ok');
+  const answer = await store.answers.prepare(ctx, randomUUID(), {
+    kind: 'answer',
+    coverage: 'not_applicable',
+    claims: [],
+    questions: ['What should we do about ContextDependencyCanary?'],
+  });
+  assert.equal(answer.status, 'ok');
+  assert.equal(
+    (await pool.query('SELECT count(*)::int AS n FROM cos.derivation_links WHERE artifact_id=$1', [answer.artifact_id]))
+      .rows[0].n,
+    1,
+  );
+  const fresh = { ...ctx, generation: randomUUID() };
+  await pool.query("UPDATE cos.sources SET processing_providers=ARRAY['claude'] WHERE scope_id=$1 AND id=$2", [
+    scope,
+    source.source_id,
+  ]);
+  assert.equal((await store.answers.get(fresh, String(answer.artifact_id))).status, 'denied');
+  await pool.query("UPDATE cos.sources SET processing_providers=ARRAY['codex'] WHERE scope_id=$1 AND id=$2", [
+    scope,
+    source.source_id,
+  ]);
+  assert.equal((await store.answers.get(fresh, String(answer.artifact_id))).status, 'ok');
+  const purge = new KnowledgeStore(store.database, artifacts, {}, { retentionMs: 0 });
+  await approveDeletion(purge, String(source.source_id));
+  assert.equal((await store.contextReady(ctx)).status, 'denied');
+  assert.equal((await store.contextReady(fresh)).status, 'denied');
+  assert.equal(
+    (await store.answers.get({ ...ctx, generation: randomUUID() }, String(answer.artifact_id))).status,
+    'denied',
+  );
+  assert.equal(
+    (await pool.query('SELECT lifecycle FROM cos.artifacts WHERE id=$1', [answer.artifact_id])).rows[0].lifecycle,
+    'quarantined',
+  );
+  assert.equal((await purge.purgeDue(scope)).status, 'ok');
+  assert.equal(fs.existsSync(path.join(artifacts.root, String(answer.artifact_id) + '.blob')), false);
 });
