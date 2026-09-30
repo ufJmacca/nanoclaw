@@ -119,6 +119,24 @@ describe('S02 host-owned artifact publication', () => {
       expect(fs.readFileSync(path.join(root, 'unrelated.txt'), 'utf8')).toBe('keep');
     });
   });
+  it('due-purge cleanup removes only unreferenced owned bytes regardless of timestamps and requires a lease', async () => {
+    await artifacts.exclusive(async (lease) => {
+      const retained = artifacts.capture('retained', 'note.md', lease);
+      const orphan = artifacts.publishText('interrupted-answer', 'Source canary in unpublished answer.', lease);
+      fs.utimesSync(path.join(root, orphan.id + '.blob'), new Date('2099-01-01'), new Date('2099-01-01'));
+      fs.writeFileSync(path.join(root, '.pending-11111111-1111-4111-8111-111111111111'), 'partial source bytes', {
+        mode: 0o600,
+      });
+      fs.writeFileSync(path.join(root, 'unrelated.txt'), 'keep');
+      expect(() => artifacts.purgeUnreferenced(new Set(), {} as typeof lease)).toThrow(
+        'knowledge_artifacts_lease_required',
+      );
+      expect(artifacts.purgeUnreferenced(new Set([retained.id]), lease)).toBe(2);
+      expect(artifacts.read(retained.id, retained.digest)).toBe(retained.text);
+      expect(fs.readFileSync(path.join(root, 'unrelated.txt'), 'utf8')).toBe('keep');
+      expect(artifacts.purgeUnreferenced(new Set([retained.id]), lease)).toBe(0);
+    });
+  });
   it('rejects a changed blob rather than returning unchecked cached text', async () => {
     await artifacts.exclusive(async (lease) => {
       const a = artifacts.capture('scope-a', 'note.md', lease);

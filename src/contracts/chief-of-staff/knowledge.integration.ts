@@ -900,6 +900,9 @@ test('S02-PG02: a database outage blocks purge before byte removal and reconcile
   const a = await imported(note('purge-outage', 'PurgeOutageCanary private text.'));
   const artifactId = (await pool.query('SELECT artifact_id FROM cos.source_revisions WHERE id=$1', [a.revision_id]))
     .rows[0].artifact_id;
+  const orphan = await artifacts.exclusive(async (lease) =>
+    artifacts.publishText(randomUUID(), 'PurgeOutageCanary unpublished answer.', lease),
+  );
   const relay = await connectionFault(await fixtureDatabaseConfig()),
     database = new BoundedDatabase(new pg.Pool(relay.config), 350);
   let fail = true;
@@ -923,6 +926,7 @@ test('S02-PG02: a database outage blocks purge before byte removal and reconcile
     await new Promise((resolve) => setTimeout(resolve, 1050));
     assert.ok(['unavailable', 'pending'].includes((await purge.purgeDue(scope)).status));
     assert.equal(fs.existsSync(path.join(artifacts.root, artifactId + '.blob')), false);
+    assert.equal(fs.existsSync(path.join(artifacts.root, orphan.id + '.blob')), true);
     assert.equal(
       (await pool.query('SELECT delivered_at FROM cos.outbox WHERE id=$1', ['knowledge-purge-' + proposal])).rows[0]
         .delivered_at,
@@ -932,6 +936,7 @@ test('S02-PG02: a database outage blocks purge before byte removal and reconcile
     relay.restore();
     await new Promise((resolve) => setTimeout(resolve, 1050));
     assert.equal((await purge.purgeDue(scope)).status, 'ok');
+    assert.equal(fs.existsSync(path.join(artifacts.root, orphan.id + '.blob')), false);
     assert.ok(
       (await pool.query('SELECT delivered_at FROM cos.outbox WHERE id=$1', ['knowledge-purge-' + proposal])).rows[0]
         .delivered_at,
@@ -1347,6 +1352,69 @@ test('S02-T06/T10: conversational artifacts retain context-source dependencies t
   );
   assert.equal((await purge.purgeDue(scope)).status, 'ok');
   assert.equal(fs.existsSync(path.join(artifacts.root, String(answer.artifact_id) + '.blob')), false);
+});
+test('S02-T06/T08: deletion cannot complete while an interrupted unpublished answer retains source bytes', async () => {
+  const source = await imported(note('orphan-answer-source', 'UnpublishedAnswerCanary supplier approval is pending.'));
+  const ctx = { ...context, generation: randomUUID() };
+  const found = await store.search(ctx, { query: 'UnpublishedAnswerCanary' });
+  const evidence = (found.items as Evidence[])[0];
+  const before = new Set(fs.readdirSync(artifacts.root));
+  const interrupted = new KnowledgeStore(store.database, artifacts, {
+    afterAnswerPublication: async () => {
+      throw new Error('fixture interrupted before metadata');
+    },
+  });
+  await assert.rejects(
+    interrupted.answers.prepare(ctx, randomUUID(), {
+      kind: 'answer',
+      coverage: 'limited',
+      claims: [
+        { kind: 'quote', text: evidence.text, citations: [{ kind: 'source', evidence_id: evidence.evidence_id }] },
+      ],
+    }),
+    /fixture interrupted/,
+  );
+  const orphan = fs.readdirSync(artifacts.root).find((name) => name.endsWith('.blob') && !before.has(name))!;
+  assert.ok(orphan);
+  assert.match(fs.readFileSync(path.join(artifacts.root, orphan), 'utf8'), /UnpublishedAnswerCanary/);
+  assert.equal(
+    (await pool.query('SELECT count(*)::int AS n FROM cos.artifacts WHERE id=$1', [orphan.slice(0, -5)])).rows[0].n,
+    0,
+  );
+  // A future timestamp cannot exempt an unreferenced partial capture from a due deletion.
+  fs.utimesSync(path.join(artifacts.root, orphan), new Date('2099-01-01'), new Date('2099-01-01'));
+  const pending = '.pending-' + randomUUID();
+  fs.writeFileSync(path.join(artifacts.root, pending), 'UnpublishedAnswerCanary partial publication', { mode: 0o600 });
+  const retained = await imported(note('orphan-foreign-retained', 'OtherScopeRetainedCanary must survive.'), {
+    ...context,
+    scopeId: other,
+    agentGroupId: other,
+    sessionId: other,
+  });
+  const retainedId = (
+    await pool.query('SELECT artifact_id FROM cos.source_revisions WHERE id=$1', [retained.revision_id])
+  ).rows[0].artifact_id;
+  fs.writeFileSync(path.join(artifacts.root, 'unrelated-retention.txt'), 'preserved', { mode: 0o600 });
+  const purge = new KnowledgeStore(
+    store.database,
+    artifacts,
+    { purgeContexts: fixtureNoNativeHistory },
+    { retentionMs: 0 },
+  );
+  const proposal = await approveDeletion(purge, String(source.source_id));
+  assert.equal((await purge.purgeDue(scope)).status, 'ok');
+  assert.equal(fs.existsSync(path.join(artifacts.root, orphan)), false);
+  assert.equal(fs.existsSync(path.join(artifacts.root, pending)), false);
+  assert.equal(fs.existsSync(path.join(artifacts.root, retainedId + '.blob')), true);
+  assert.equal(fs.readFileSync(path.join(artifacts.root, 'unrelated-retention.txt'), 'utf8'), 'preserved');
+  assert.match(
+    fs.readFileSync(path.join(base, 'staging', 'orphan-answer-source.md'), 'utf8'),
+    /UnpublishedAnswerCanary/,
+  );
+  assert.ok(
+    (await pool.query('SELECT delivered_at FROM cos.outbox WHERE id=$1', ['knowledge-purge-' + proposal])).rows[0]
+      .delivered_at,
+  );
 });
 test('S02 rollback: retrieval disable preserves priority replies, revocation checks and due deletion', async () => {
   let enabled = true;

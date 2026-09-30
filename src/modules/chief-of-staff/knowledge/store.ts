@@ -124,6 +124,7 @@ export class KnowledgeStore {
         artifacts: this.artifacts,
         hooks: this.hooks,
         transaction: (operation, mutation) => this.transaction(operation, mutation),
+        reconcileOrphans: () => this.reconcileWithLease(lease, null),
       }),
     );
   }
@@ -131,21 +132,27 @@ export class KnowledgeStore {
   async reconcileArtifacts(graceMs = 24 * 60 * 60 * 1000): Promise<Result> {
     if (!Number.isSafeInteger(graceMs) || graceMs < 0 || graceMs > 365 * 24 * 60 * 60 * 1000)
       return { status: 'denied' };
-    return this.exclusive(async (lease) => {
-      const references = await this.transaction(async (client) => {
-        // A timed-out metadata commit may still be resolving remotely. This barrier
-        // waits for it before taking a READ COMMITTED snapshot of references.
-        await client.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED');
-        await client.query('SELECT pg_advisory_xact_lock(73101004)');
-        const rows = (await client.query("SELECT id FROM cos.artifacts WHERE lifecycle<>'deleted'")).rows as Array<{
-          id: string;
-        }>;
-        return { status: 'ok', references: rows.map((row) => row.id).filter(isArtifactIdentity) };
-      });
-      if (references.status !== 'ok') return { status: references.status };
-      const removed = this.artifacts.reconcile(new Set(references.references as string[]), Date.now() - graceMs, lease);
-      return { status: 'ok', removed };
+    return this.exclusive((lease) => this.reconcileWithLease(lease, graceMs));
+  }
+  private async reconcileWithLease(lease: ArtifactLease, graceMs: number | null): Promise<Result> {
+    const references = await this.transaction(async (client) => {
+      // A timed-out metadata commit may still be resolving remotely. This barrier
+      // waits for it before taking a READ COMMITTED snapshot of references.
+      await client.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED');
+      await client.query('SELECT pg_advisory_xact_lock(73101004)');
+      const rows = (await client.query("SELECT id FROM cos.artifacts WHERE lifecycle<>'deleted'")).rows as Array<{
+        id: string;
+      }>;
+      // Only this store's encoded filenames are eligible for filesystem cleanup.
+      return { status: 'ok', references: rows.map((row) => row.id).filter(isArtifactIdentity) };
     });
+    if (references.status !== 'ok') return { status: references.status };
+    const retained = new Set(references.references as string[]);
+    const removed =
+      graceMs === null
+        ? this.artifacts.purgeUnreferenced(retained, lease)
+        : this.artifacts.reconcile(retained, Date.now() - graceMs, lease);
+    return { status: 'ok', removed };
   }
   /** Trusted owner setup/import only. Paths and processing policy are never accepted through model RPC. */
   async importSource(context: Context, requestId: string, input: ImportSource): Promise<Result> {

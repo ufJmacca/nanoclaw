@@ -199,10 +199,17 @@ export class KnowledgeArtifacts {
   }
   /** Caller obtains the complete current DB reference set while holding this same lease. */
   reconcile(referenced: Set<string>, before: number, lease: ArtifactLease): number {
+    if (!Number.isFinite(before) || before < 0) throw new Error('invalid_artifact_reconciliation');
+    return this.sweepUnreferenced(referenced, before, lease);
+  }
+  /** Due deletion cannot acknowledge while unreferenced captures remain, even with future mtimes. */
+  purgeUnreferenced(referenced: Set<string>, lease: ArtifactLease): number {
+    return this.sweepUnreferenced(referenced, null, lease);
+  }
+  private sweepUnreferenced(referenced: Set<string>, before: number | null, lease: ArtifactLease): number {
     this.requireLease(lease);
     this.guard();
-    if (!Number.isFinite(before) || before < 0 || [...referenced].some((id) => !identity.test(id)))
-      throw new Error('invalid_artifact_reconciliation');
+    if ([...referenced].some((id) => !identity.test(id))) throw new Error('invalid_artifact_reconciliation');
     let removed = 0;
     for (const name of fs.readdirSync(this.root)) {
       const blob = name.endsWith('.blob') && identity.test(name.slice(0, -5));
@@ -210,12 +217,13 @@ export class KnowledgeArtifacts {
       if (blob && referenced.has(name.slice(0, -5))) continue;
       const file = path.join(this.root, name),
         stat = fs.lstatSync(file);
-      if (stat.mtimeMs >= before) continue;
+      if (before !== null && stat.mtimeMs >= before) continue;
       privateBytes(file);
       fs.unlinkSync(file);
       removed++;
     }
-    if (removed) syncDirectory(this.root);
+    // Also persist a retry after interrupted unlink, even when no files remain now.
+    syncDirectory(this.root);
     return removed;
   }
 }

@@ -28,6 +28,7 @@ export async function purgeKnowledge(options: {
   lease: ArtifactLease;
   transaction: Transaction;
   hooks: PurgeHooks;
+  reconcileOrphans(): Promise<Result>;
 }): Promise<Result> {
   const { scopeId, transaction } = options;
   if (!/^[a-zA-Z0-9_-]{1,128}$/.test(scopeId)) return { status: 'denied' };
@@ -127,6 +128,10 @@ export async function purgeKnowledge(options: {
     await options.hooks.afterPurgeMetadata?.();
     for (const id of job.artifacts) options.artifacts.remove(id, options.lease);
     await options.hooks.afterPurgeUnlink?.();
+    // Publication can outlive a crash or denied metadata admission without any
+    // derivation rows. The same artifact lease and commit barrier cover this sweep.
+    const reconciled = await options.reconcileOrphans();
+    if (reconciled.status !== 'ok') return reconciled;
     if (job.contexts.length) {
       if (!options.hooks.purgeContexts) return { status: 'pending', code: 'retained_history_requires_maintenance' };
       const history = await options.hooks.purgeContexts({ scopeId, sourceId: job.source_id, contexts: job.contexts });
@@ -137,7 +142,7 @@ export async function purgeKnowledge(options: {
       const changed = await client.query(
         `WITH completed AS (
           UPDATE cos.revocation_tombstones t SET provenance=jsonb_set(provenance,'{content_purge}',
-            (provenance->'content_purge') || jsonb_build_object('state','completed','completed_at',clock_timestamp(),'local_history','purged_or_not_present','external_disclosures','not_retractable','backups','separate_retention')),updated_at=clock_timestamp()
+            (provenance->'content_purge') || jsonb_build_object('state','completed','completed_at',clock_timestamp(),'local_history','purged_or_not_present','orphan_bytes','reconciled','external_disclosures','not_retractable','backups','separate_retention')),updated_at=clock_timestamp()
           WHERE t.scope_id=$1 AND t.source_id=$3 AND t.kind='delete' AND t.version::text=$4
             AND t.provenance#>>'{content_purge,state}'='metadata_removed'
             AND EXISTS(SELECT 1 FROM cos.outbox o WHERE o.scope_id=$1 AND o.id=$2 AND o.kind='knowledge_purge'
