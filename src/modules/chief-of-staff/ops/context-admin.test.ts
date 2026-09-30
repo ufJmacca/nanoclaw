@@ -9,6 +9,9 @@ vi.mock('../../../config.js', async () => ({
   DATA_DIR: '/tmp/nanoclaw-context-admin/data',
   GROUPS_DIR: '/tmp/nanoclaw-context-admin/groups',
 }));
+vi.mock('../host-store.js', () => ({ connectCosHostStore: vi.fn() }));
+import { connectCosHostStore } from '../host-store.js';
+import type { PriorityStore } from '../store/priorities.js';
 import { initDb, closeDb } from '../../../db/connection.js';
 import { runMigrations } from '../../../db/migrations/index.js';
 import { subscribeMattermostChannelStrict } from '../../../channels/mattermost-subscription.js';
@@ -284,4 +287,106 @@ it('issues consent through the real host command and requires a separate resume;
     paused: true,
   });
   expect(readTarget(state, targetBinding).maintenance).toBe(true);
+});
+
+it('owner source commands derive scope and identity from the paused binding without needing model credentials', async () => {
+  fs.rmSync(state + '/codex-auth', { recursive: true });
+  const knowledge = {
+    importSource: vi.fn(async () => ({ status: 'ok', source_id: 'fixture-source' })),
+    inventory: vi.fn(async () => ({ status: 'ok', items: [], next_after: null })),
+    reconcileArtifacts: vi.fn(async () => ({ status: 'ok', removed: 0 })),
+  };
+  const end = vi.fn(async () => {});
+  vi.mocked(connectCosHostStore).mockResolvedValue({
+    knowledge,
+    database: { pool: { end } },
+  } as unknown as PriorityStore);
+  const requestId = randomUUID();
+  const manifest = {
+    sourceKey: 'fixture-note',
+    filename: 'note.md',
+    title: 'Note',
+    processingProviders: ['codex'],
+    expectedVersion: 0,
+  };
+  writeAtomic(state, 'import.json', manifest);
+  const result = await contextAdminCommand(
+    { command: 'source-import', scopeId: 'fixture', requestId, manifestFile: state + '/import.json' },
+    env,
+    dependencies,
+  );
+  expect(result).toMatchObject({ status: 'ok', paused: true, live_model: 'not_invoked' });
+  expect(knowledge.importSource).toHaveBeenCalledWith(
+    expect.objectContaining({ scopeId: 'fixture', ownerId: 'owner', ingressId: 'owner-import-' + requestId }),
+    requestId,
+    manifest,
+  );
+  expect(end).toHaveBeenCalledOnce();
+  const [, roots, admitted] = vi.mocked(connectCosHostStore).mock.calls.at(-1)!;
+  expect(roots).toEqual({ targetRoot: state, installationRoot: root, dataRoot: root + '/data' });
+  // The admission callback cannot outlive its host execution lease.
+  expect(() => admitted()).toThrow();
+  const listed = await contextAdminCommand(
+    { command: 'source-inventory', scopeId: 'fixture', page: { limit: 2, status: 'failed' } },
+    env,
+    dependencies,
+  );
+  expect(listed).toMatchObject({ status: 'ok', items: [], next_after: null });
+  expect(knowledge.inventory).toHaveBeenLastCalledWith(
+    expect.objectContaining({ scopeId: 'fixture', ownerId: 'owner' }),
+    { limit: 2, status: 'failed' },
+  );
+  await contextAdminCommand({ command: 'source-reconcile', scopeId: 'fixture' }, env, dependencies);
+  expect(knowledge.reconcileArtifacts).toHaveBeenCalledWith();
+  expect(fs.existsSync(state + '/conversations')).toBe(false);
+  expect(fs.existsSync(state + '/model-activation.json')).toBe(false);
+});
+it('source setup requires quiescence and private owner membership, and closes the pool on import failure', async () => {
+  const connect = vi.mocked(connectCosHostStore);
+  connect.mockClear();
+  quiescent.mockResolvedValue(false);
+  const args = { command: 'source-inventory', scopeId: 'fixture', page: {} } as const;
+  await expect(contextAdminCommand(args, env, dependencies)).rejects.toThrow('target_not_quiescent');
+  expect(connect).not.toHaveBeenCalled();
+  quiescent.mockResolvedValue(true);
+  facts.mockResolvedValue({
+    id: 'private',
+    type: 'P',
+    delete_at: 0,
+    members: ['bot', 'owner', 'outsider'],
+    activeSubscription: true,
+  });
+  await expect(contextAdminCommand(args, env, dependencies)).rejects.toThrow('private_owner_membership_required');
+  expect(connect).not.toHaveBeenCalled();
+  facts.mockResolvedValue({
+    id: 'private',
+    type: 'P',
+    delete_at: 0,
+    members: ['bot', 'owner'],
+    activeSubscription: true,
+  });
+  const end = vi.fn(async () => {});
+  connect.mockResolvedValue({
+    knowledge: {
+      importSource: vi.fn(async () => {
+        throw new Error('unsupported_source');
+      }),
+    },
+    database: { pool: { end } },
+  } as unknown as PriorityStore);
+  writeAtomic(state, 'import.json', {
+    sourceKey: 'fixture',
+    filename: 'binary.txt',
+    title: 'Fixture',
+    processingProviders: ['codex'],
+    expectedVersion: 0,
+  });
+  await expect(
+    contextAdminCommand(
+      { command: 'source-import', scopeId: 'fixture', requestId: randomUUID(), manifestFile: state + '/import.json' },
+      env,
+      dependencies,
+    ),
+  ).rejects.toThrow('unsupported_source');
+  expect(end).toHaveBeenCalledOnce();
 });

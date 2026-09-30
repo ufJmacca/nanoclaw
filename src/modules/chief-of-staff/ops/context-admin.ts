@@ -30,7 +30,10 @@ import { backupConversations } from './conversation-backup.js';
 import { recoverConversation } from './conversation-recovery.js';
 import { issueActivation, resumeContext, rebindRecoveredActivation } from './model-activation.js';
 
+import { isKnowledgeCommand, runKnowledgeAdmin, type KnowledgeAdminArguments } from './knowledge-admin.js';
+
 export type ContextAdminArguments =
+  | KnowledgeAdminArguments
   | { command: 'context-status'; scopeId: string }
   | { command: 'context-prepare'; scopeId: string }
   | { command: 'model-activate'; scopeId: string; policyFile: string }
@@ -229,6 +232,19 @@ export async function contextAdminCommand(
         assertAuthority();
       };
       await check();
+      if (isKnowledgeCommand(args))
+        return runKnowledgeAdmin({
+          args,
+          env,
+          roots: {
+            targetRoot: root,
+            installationRoot: target.binding.installationRoot,
+            dataRoot: target.binding.dataRoot,
+          },
+          binding,
+          check,
+          assertAuthority,
+        });
       const accountFingerprint = accountBinding(root);
       if (!accountFingerprint) throw new Error('subscription_account_binding_unavailable');
       const activationOptions = { root, db, binding, accountFingerprint, assertAuthority };

@@ -27,7 +27,7 @@ The S02 host source requires PostgreSQL schema 2 and checks its recorded checksu
 
 The trusted host runtime environment accepts `COS_KNOWLEDGE_ENABLED=true` to enable selected-source ingestion and retrieval. Its default is `false`. `COS_KNOWLEDGE_RETENTION_DAYS` is an integer from 0 through 365, defaulting to 30; approved deletion records its deadline when applied. Keep both settings in the host's scoped runtime environment, and restart the host to apply changes through the normal deployment/operational checks. No agent receives these settings or database credentials.
 
-The authenticated target state root owns `knowledge/artifacts` and `knowledge/staging`. The host creates these private directories outside Git, the installation and native data roots. It refuses symlinks, permissive paths and unowned existing content. Neither directory is mounted in a worker. Imports must later select an individual staged file through the owner administration path; adding a file to staging alone does not admit it.
+The authenticated target state root owns `knowledge/artifacts` and `knowledge/staging`. The host creates these private directories outside Git, the installation and native data roots. It refuses symlinks, permissive paths and unowned existing content. Neither directory is mounted in a worker. Imports select an individual staged file through the owner administration path; adding a file to staging alone does not admit it.
 
 Use the knowledge switch to disable ingestion/retrieval while keeping the CoS host enabled. Current-policy checks, revocation, quarantine and due deletion remain active. Stored replies with source dependencies cannot be redisplayed while retrieval is disabled. A context previously exposed to sources remains fenced; disabling retrieval does not erase that history or reset model consent. Approved-priority replies work in a clean context.
 
@@ -36,3 +36,22 @@ The guarded `context-recover` owner command rebuilds the same CoS AgentGroup's c
 Recovery can carry an already-issued, unexpired allowance into that replacement context. Only the context generation changes: activation ID, account, model, consent reference, expiry, maximum attempts and all charged usage remain unchanged. Missing, expired or exhausted consent is not transferred. A private journal reconciles interrupted updates without replenishing usage. Recovery always leaves CoS paused; the separate guarded resume operation remains necessary. This code path performs no model call or message send, and it does not reactivate the completed S01 live-test allowance.
 
 Old provider history and protected recovery backups still remain for their separate retention boundary. Deletion of eligible retained native history is under implementation; a successful context recovery is not proof of byte erasure.
+
+### Owner source management in S02 source
+
+After S02 deployment, use `pnpm cos:admin` on the trusted host with the existing target maintenance lease, stopped service/owned workers, paused CoS binding and verified private membership. The command acquires the target and host execution locks, validates the bound database/schema and derives owner/session/group identity from the binding. It does not activate a model. These commands are not available in the existing S01 Pi release yet.
+
+Place only an explicitly selected UTF-8 `.md` or `.txt` file in the target's private `knowledge/staging` directory, mode `0600`. Write a separate private JSON manifest with `sourceKey`, `filename` (one flat filename), `title`, `processingProviders` (for example `["codex"]`), and `expectedVersion` (`0` for a new source; the current inventory version for a correction). An optional `projectId` must refer to an existing approved project. No scope, owner, host path or other authority override is accepted in the manifest. An empty provider list permits no model processing.
+
+```sh
+pnpm cos:admin source-import --scope SCOPE --request-id STABLE_UUID --manifest /absolute/private/import.json
+pnpm cos:admin source-inventory --scope SCOPE --limit 50
+pnpm cos:admin source-inventory --scope SCOPE --limit 50 --after LAST_RETURNED_NEXT_AFTER --status current
+pnpm cos:admin source-reconcile --scope SCOPE
+```
+
+Keep the same request ID, manifest and staged bytes when reconciling an uncertain import. A changed intended import needs a new request ID and the expected source version. A conflict requires inspecting the current inventory before trying again. `COS_KNOWLEDGE_ENABLED=true` is required for ingestion. Inventory and cleanup remain available when ingestion/retrieval is disabled. Nothing automatically resumes CoS after these commands.
+
+Inventory returns at most 100 records (50 by default), metadata and a `next_after` cursor, without source bodies or artifact paths. It supports the seven stored states: admitted, indexing, current, stale, revoked, failed and unsupported. Pagination checks current owner authority on each page; it is not a frozen snapshot across separate invocations. Rejected files that were never admitted do not become inventory records. Unsupported formats, malformed manifests, unsafe files and text extraction limits produce fixed error codes without raw file contents or paths. Inspect and correct the selected input; rejected corrections do not overwrite an existing source revision.
+
+`source-reconcile` removes only recognised unreferenced bytes in this target's owned artifact root after a fixed 24-hour grace period. It takes the publication lock and refreshes the complete database reference set before removing anything. It is host-root maintenance, not a source-delete request: referenced or quarantined artifacts remain protected by their separate retention policy. No staging original, delivered chat, provider history, credential or backup is removed by this command. Source revocation/deletion still uses the exact owner proposal/approval flow.

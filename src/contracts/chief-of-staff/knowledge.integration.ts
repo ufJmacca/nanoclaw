@@ -1402,3 +1402,48 @@ test('S02 rollback: a retrieval switch closed during disclosure returns no priva
   assert.equal(result.status, 'unavailable');
   assert.equal(JSON.stringify(result).includes('SwitchRaceCanary'), false);
 });
+
+test('S02 owner inventory pages every state without bodies, foreign scope or retrieval access', async () => {
+  const states = ['admitted', 'indexing', 'current', 'stale', 'revoked', 'failed', 'unsupported'];
+  const ids: string[] = [];
+  for (const [index, status] of states.entries()) {
+    const id = randomUUID();
+    ids.push(id);
+    await pool.query(
+      `INSERT INTO cos.sources(id,scope_id,source_key,title,status,processing_providers,access_policy,provenance)
+      VALUES($1,$2,$3,$4,$5,'{}','{}','{}')`,
+      [id, other, 'inventory-' + index, 'Inventory ' + status, status],
+    );
+  }
+  const owner = { ...context, scopeId: other, agentGroupId: other, sessionId: other };
+  const disabled = new KnowledgeStore(store.database, artifacts, {}, { retrievalEnabled: () => false });
+  const found: Array<Record<string, unknown>> = [];
+  let after: string | undefined;
+  do {
+    const result = await disabled.inventory(owner, { limit: 2, ...(after ? { after } : {}) });
+    assert.equal(result.status, 'ok');
+    assert.ok(Array.isArray(result.items));
+    assert.ok(result.items.length <= 2);
+    found.push(...result.items);
+    after = result.next_after as string | undefined;
+  } while (after);
+  assert.equal(new Set(found.map((row) => row.id)).size, found.length);
+  for (const id of ids) assert.ok(found.some((row) => row.id === id));
+  for (const status of states) {
+    const result = await disabled.inventory(owner, { status, limit: 100 });
+    assert.equal(result.status, 'ok');
+    assert.ok((result.items as Array<{ status: string }>).every((row) => row.status === status));
+  }
+  assert.equal(JSON.stringify(found).includes('FOREIGN_CANARY'), false);
+  assert.ok(found.every((row) => !('text' in row) && !('provenance' in row) && !('artifact_id' in row)));
+  assert.deepEqual(await store.inventory({ ...context, scopeId: other }, { limit: 2 }), { status: 'denied' });
+  for (const page of [
+    { limit: 0 },
+    { limit: 101 },
+    { limit: 1.5 },
+    { after: '../escape' },
+    { status: 'missing' },
+    { scopeId: other },
+  ])
+    assert.deepEqual(await store.inventory(owner, page), { status: 'denied' });
+});

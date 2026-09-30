@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { isKnowledgeCommand, parseKnowledgeArguments } from './knowledge-admin.js';
 import { pathToFileURL } from 'node:url';
 import { DatabaseConfigurationError, parseDatabaseConfig, externalDatabaseConfig } from '../store/config.js';
 import { connectChecked, DatabasePreflightError } from '../store/preflight.js';
@@ -13,6 +14,7 @@ import { contextAdminCommand, type ContextAdminArguments } from './context-admin
 
 type AdminArguments = { command: 'status' } | { command: 'bind'; binding: BindingRequest } | ContextAdminArguments;
 export function parseAdminArguments(args: string[]): AdminArguments {
+  if (isKnowledgeCommand({ command: args[0] })) return parseKnowledgeArguments(args);
   if (args.length === 1 && args[0] === 'status') return { command: 'status' };
   if (['context-status', 'context-prepare', 'context-recover', 'model-activate', 'context-resume'].includes(args[0])) {
     const values: Record<string, string> = {};
@@ -113,6 +115,15 @@ export function safeAdminError(error: unknown): string {
     if (
       [
         'invalid_admin_arguments',
+        'invalid_source_manifest',
+        'unsupported_source',
+        'source_line_too_long',
+        'source_too_many_chunks',
+        'unsafe_knowledge_file',
+        'unstable_knowledge_file',
+        'staged_source_changed',
+        'unsafe_knowledge_configuration',
+        'unowned_knowledge_configuration',
         'target_not_quiescent',
         'target_locked',
         'stale_maintenance_lease',
@@ -259,6 +270,8 @@ function adminEnvironment(): NodeJS.ProcessEnv {
   const keys = [
     'COS_ENABLED',
     'COS_TARGET_STATE_DIR',
+    'COS_KNOWLEDGE_ENABLED',
+    'COS_KNOWLEDGE_RETENTION_DAYS',
     'MATTERMOST_URL',
     'MATTERMOST_BOT_TOKEN',
     'MATTERMOST_INSTANCE',

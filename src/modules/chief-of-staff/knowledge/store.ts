@@ -24,6 +24,19 @@ export type Search = { query: string; limit?: number; offset?: number; sourceId?
 const idPattern = /^[a-zA-Z0-9_-]{1,128}$/;
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const providers = ['codex', 'claude'];
+export type InventoryPage = { limit?: number; after?: string; status?: string };
+export function validInventoryPage(page: unknown): page is InventoryPage {
+  if (!page || typeof page !== 'object' || Array.isArray(page)) return false;
+  const p = page as Record<string, unknown>;
+  return (
+    Object.keys(p).every((key) => ['limit', 'after', 'status'].includes(key)) &&
+    (p.limit === undefined || (Number.isSafeInteger(p.limit) && Number(p.limit) >= 1 && Number(p.limit) <= 100)) &&
+    (p.after === undefined || (typeof p.after === 'string' && uuid.test(p.after))) &&
+    (p.status === undefined ||
+      (typeof p.status === 'string' &&
+        ['admitted', 'indexing', 'current', 'stale', 'revoked', 'failed', 'unsupported'].includes(p.status)))
+  );
+}
 async function authorised(client: PoolClient, context: Context, mutation = false): Promise<boolean> {
   return (
     (
@@ -515,16 +528,24 @@ export class KnowledgeStore {
     return result.status === 'pending' ? { status: 'unavailable' } : result;
   }
   /** Owner inventory; model search/get apply the additional processing-provider policy. */
-  async inventory(context: Context): Promise<Result> {
+  async inventory(context: Context, page: InventoryPage = {}): Promise<Result> {
+    if (!validInventoryPage(page)) return { status: 'denied' };
+    const limit = page.limit ?? 50;
     return this.transaction(async (client) => {
       if (!(await authorised(client, context))) return { status: 'denied' };
       const items = (
         await client.query(
-          'SELECT id,title,status,version,current_revision_id,processing_providers FROM cos.sources WHERE scope_id=$1 ORDER BY id LIMIT 100',
-          [context.scopeId],
+          `SELECT s.id,s.source_key,s.title,s.status,s.version,s.current_revision_id,s.processing_providers,
+          r.digest AS revision_digest,r.captured_at FROM cos.sources s
+        LEFT JOIN cos.source_revisions r ON r.scope_id=s.scope_id AND r.id=s.current_revision_id
+        WHERE s.scope_id=$1 AND ($2::text IS NULL OR s.id>$2) AND ($3::text IS NULL OR s.status=$3)
+        ORDER BY s.id LIMIT $4`,
+          [context.scopeId, page.after ?? null, page.status ?? null, limit + 1],
         )
       ).rows;
-      return { status: 'ok', items };
+      const more = items.length > limit;
+      if (more) items.pop();
+      return { status: 'ok', items, next_after: more ? items.at(-1)!.id : null };
     });
   }
   /** Called within the existing proposal transaction; source existence grants no approval. */
