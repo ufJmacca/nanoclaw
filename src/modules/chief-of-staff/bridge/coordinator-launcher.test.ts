@@ -84,7 +84,9 @@ describe('S01 coordinator admission', () => {
       authorize.mockImplementation(async (mode) => (mode === 'poll' ? 'ingress' : null));
       const turnSocket = path.join(
         target,
-        fs.readdirSync(target).find((name) => name.startsWith('model-'))!,
+        fs
+          .readdirSync(target, { withFileTypes: true })
+          .find((entry) => entry.isDirectory() && entry.name.startsWith('model-'))!.name,
         'turn.sock',
       );
       const status = await new Promise<number | undefined>((resolve, reject) => {
