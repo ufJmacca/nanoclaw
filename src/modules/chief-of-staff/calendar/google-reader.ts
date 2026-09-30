@@ -1,7 +1,7 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import { digest } from '../domain/contracts.js';
 import { calendarZone, normalizeEvent, object, hasCalendarControl, validateCalendarWindow } from './normalization.js';
-import { GOOGLE_EVENT_READ_SCOPE, CalendarReadError, type CalendarAccess, type CalendarReader } from './reader.js';
+import { hasCalendarReadScope, CalendarReadError, type CalendarAccess, type CalendarReader } from './reader.js';
 
 type Options = {
   access: () => Promise<CalendarAccess>;
@@ -14,14 +14,6 @@ type Options = {
 const fail = (code: string): never => {
   throw new CalendarReadError(code);
 };
-const readScopes = new Set([
-  GOOGLE_EVENT_READ_SCOPE,
-  'https://www.googleapis.com/auth/calendar.events.owned.readonly',
-  'https://www.googleapis.com/auth/calendar.readonly',
-  'https://www.googleapis.com/auth/calendar',
-  'https://www.googleapis.com/auth/calendar.events',
-  'https://www.googleapis.com/auth/calendar.events.owned',
-]);
 const calendarIdValid = (id: unknown): id is string =>
   typeof id === 'string' &&
   id.length > 0 &&
@@ -96,7 +88,7 @@ export function googleCalendarReader(options: Options): CalendarReader {
     const a = await access();
     if (a.auth !== 'ready') return fail('calendar_auth_' + a.auth);
     if (!a.calendarIds.includes(calendarId)) return fail('calendar_not_selected');
-    if (!a.scopes.some((s) => readScopes.has(s))) return fail('calendar_scope_denied');
+    if (!hasCalendarReadScope(a.scopes)) return fail('calendar_scope_denied');
     if (expected && digest(expected) !== digest(a)) return fail('calendar_access_changed');
     return a;
   };
