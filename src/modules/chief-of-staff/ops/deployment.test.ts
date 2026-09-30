@@ -8,10 +8,184 @@ import { initializeTarget, readTarget, type TargetBinding } from './target-state
 import { admittedGeneration } from './maintenance.js';
 import { readPrivate } from './target-state.js';
 import type { DeploymentReceipt } from './deployment.js';
+import * as targetState from './target-state.js';
+import { maintenanceLeaseForOwner, beginMaintenance } from './maintenance.js';
 
 const roots: string[] = [];
 afterEach(() => {
+  vi.restoreAllMocks();
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
+});
+
+it.each(['activate', 'health'] as const)(
+  'rolls forward a failed %s release only through an explicit tested replacement',
+  async (failure) => {
+    const f = fixture();
+    await deployRelease(f);
+    const good = f.manifest.releaseId;
+    f.manifest = { ...fixtureRelease('S02'), releaseId: 'release-failed', previousReleaseIds: [good] };
+    if (failure === 'activate') vi.mocked(f.effects.activate).mockRejectedValueOnce(new Error('failed start'));
+    else vi.mocked(f.effects.health).mockResolvedValueOnce(false);
+    await expect(deployRelease(f)).rejects.toThrow('deployment_health_failed');
+    const old = readPrivate<DeploymentReceipt>(path.join(f.root, 'releases', f.manifest.releaseId, 'deployment.json'));
+    const replacement = {
+      ...fixtureRelease('S02'),
+      releaseId: 'release-corrected',
+      previousReleaseIds: [readTarget(f.root, f.binding).releaseId!],
+    };
+    const prepareRecovery = vi.fn(async (record: DeploymentReceipt) => {
+      expect(record.releaseId).toBe(old.releaseId);
+      expect(maintenanceLeaseForOwner(f.root, f.binding, old.releaseId)).toEqual(old.lease);
+      expect(admittedGeneration(f.root, f.binding)).toBeNull();
+      return { activeCoordinators: 0, activeDatabaseOperations: 0 };
+    });
+    const recovery = {
+      ...f,
+      manifest: replacement,
+      recoverFrom: old.releaseId,
+      effects: { ...f.effects, prepareRecovery },
+    };
+    await expect(deployRelease(recovery)).resolves.toMatchObject({ status: 'healthy', recoveryFrom: old.releaseId });
+    expect(prepareRecovery).toHaveBeenCalled();
+    const superseded = readPrivate<DeploymentReceipt>(path.join(f.root, 'releases', old.releaseId, 'deployment.json'));
+    expect(superseded).toMatchObject({
+      status: 'superseded',
+      supersededBy: replacement.releaseId,
+      lease: old.lease,
+      completed: old.completed,
+    });
+    expect(readTarget(f.root, f.binding)).toMatchObject({ releaseId: replacement.releaseId, maintenance: false });
+    await expect(deployRelease(f)).rejects.toThrow('deployment_superseded');
+  },
+);
+
+it.each(['intent-save', 'old-lease-close', 'closed-before-new', 'new-lease-save'] as const)(
+  'reconciles an interrupted recovery handoff at %s without opening admission',
+  async (interruption) => {
+    const f = fixture();
+    f.manifest = fixtureRelease('S02');
+    vi.mocked(f.effects.activate).mockRejectedValueOnce(new Error('failed start'));
+    await expect(deployRelease(f)).rejects.toThrow('deployment_health_failed');
+    const replacement = { ...fixtureRelease('S02'), releaseId: 'release-corrected' };
+    const recovery = {
+      ...f,
+      manifest: replacement,
+      recoverFrom: f.manifest.releaseId,
+      effects: {
+        ...f.effects,
+        prepareRecovery: vi.fn(async () => ({ activeCoordinators: 0, activeDatabaseOperations: 0 })),
+      },
+    };
+    const original = targetState.writeAtomic;
+    let interrupted = false;
+    vi.spyOn(targetState, 'writeAtomic').mockImplementation((root, name, value) => {
+      const record = value as Record<string, unknown>;
+      if (
+        !interrupted &&
+        interruption === 'closed-before-new' &&
+        name === 'state.json' &&
+        record.maintenanceId === null
+      ) {
+        interrupted = true;
+        original(root, name, value);
+        throw new Error('interrupted_handoff');
+      }
+      if (
+        !interrupted &&
+        (interruption === 'intent-save'
+          ? name === 'deployment.json' && record.status === 'superseded'
+          : interruption === 'old-lease-close'
+            ? name === 'state.json' && record.maintenanceId === null
+            : root.endsWith(replacement.releaseId) && name === 'deployment.json' && !!record.lease)
+      ) {
+        interrupted = true;
+        throw new Error('interrupted_handoff');
+      }
+      return original(root, name, value);
+    });
+    await expect(deployRelease(recovery)).rejects.toThrow('interrupted_handoff');
+    expect(interrupted).toBe(true);
+    expect(admittedGeneration(f.root, f.binding)).toBeNull();
+    expect(() => beginMaintenance(f.root, f.binding, 'release-competing', 'deployment')).toThrow('maintenance_owned');
+    expect(() => beginMaintenance(f.root, f.binding, replacement.releaseId, 'runtime-disposable')).toThrow(
+      'maintenance_owned',
+    );
+    await expect(deployRelease(recovery)).resolves.toMatchObject({ status: 'healthy' });
+    expect(readTarget(f.root, f.binding).releaseId).toBe(replacement.releaseId);
+    expect(readTarget(f.root, f.binding).recoveryOwner).toBeUndefined();
+  },
+);
+
+it.each(['healthy', 'uncertain-migration', 'foreign-binding', 'runtime-lease', 'other-successor'] as const)(
+  'refuses to take over %s history',
+  async (kind) => {
+    const f = fixture();
+    vi.mocked(f.effects.activate).mockRejectedValueOnce(new Error('failed start'));
+    await expect(deployRelease(f)).rejects.toThrow('deployment_health_failed');
+    const directory = path.join(f.root, 'releases', f.manifest.releaseId);
+    const previous = readPrivate<DeploymentReceipt>(path.join(directory, 'deployment.json'));
+    const changes = {
+      healthy: { status: 'healthy' },
+      'uncertain-migration': {
+        status: 'failed',
+        completed: ['source', 'artifacts', 'quiesce', 'backup'],
+        pending: 'migrate',
+      },
+      'foreign-binding': { bindingDigest: '0'.repeat(64) },
+      'runtime-lease': { lease: { ...previous.lease, purpose: 'runtime-disposable' } },
+      'other-successor': { status: 'superseded', supersededBy: 'release-other' },
+    }[kind];
+    targetState.writeAtomic(directory, 'deployment.json', { ...previous, ...changes });
+    const prepareRecovery = vi.fn(async () => ({ activeCoordinators: 0, activeDatabaseOperations: 0 }));
+    await expect(
+      deployRelease({
+        ...f,
+        manifest: { ...fixtureRelease('S02'), releaseId: 'release-corrected' },
+        recoverFrom: f.manifest.releaseId,
+        effects: { ...f.effects, prepareRecovery },
+      }),
+    ).rejects.toThrow('deployment_recovery_denied');
+    expect(prepareRecovery).not.toHaveBeenCalled();
+    expect(admittedGeneration(f.root, f.binding)).toBeNull();
+  },
+);
+
+it('does not implicitly retire another deployment when recovery was not selected', async () => {
+  const f = fixture();
+  vi.mocked(f.effects.activate).mockRejectedValueOnce(new Error('failed start'));
+  await expect(deployRelease(f)).rejects.toThrow('deployment_health_failed');
+  await expect(
+    deployRelease({ ...f, manifest: { ...fixtureRelease('S02'), releaseId: 'release-corrected' } }),
+  ).rejects.toThrow('maintenance_owned');
+  expect(
+    readPrivate<DeploymentReceipt>(path.join(f.root, 'releases', f.manifest.releaseId, 'deployment.json')).status,
+  ).toBe('health_failed');
+});
+
+it('can replace a failed recovery candidate without releasing its reservation to another operation', async () => {
+  const f = fixture();
+  f.manifest = fixtureRelease('S02');
+  vi.mocked(f.effects.activate).mockRejectedValueOnce(new Error('failed initial start'));
+  await expect(deployRelease(f)).rejects.toThrow('deployment_health_failed');
+  const first = {
+    ...f,
+    manifest: { ...fixtureRelease('S02'), releaseId: 'release-first-correction' },
+    recoverFrom: f.manifest.releaseId,
+    effects: {
+      ...f.effects,
+      prepareRecovery: vi.fn(async () => ({ activeCoordinators: 0, activeDatabaseOperations: 0 })),
+    },
+  };
+  vi.mocked(f.effects.activate).mockRejectedValueOnce(new Error('failed corrected start'));
+  await expect(deployRelease(first)).rejects.toThrow('deployment_health_failed');
+  expect(readTarget(f.root, f.binding).recoveryOwner).toBe(first.manifest.releaseId);
+  const next = {
+    ...first,
+    manifest: { ...fixtureRelease('S02'), releaseId: 'release-next-correction' },
+    recoverFrom: first.manifest.releaseId,
+  };
+  await expect(deployRelease(next)).resolves.toMatchObject({ status: 'healthy' });
+  expect(readTarget(f.root, f.binding).recoveryOwner).toBeUndefined();
 });
 function fixture() {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-deploy-'));

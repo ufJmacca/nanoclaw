@@ -11,10 +11,15 @@ elif [[ "$mode" == rollback ]]; then
   [[ $# == 4 && "$1" == --target && "$2" == pi && "$3" == --release-id ]] || exit 1
   rollback_id=$4
 else
-  [[ $# == 4 && "$1" == --target && "$2" == pi && "$3" == --release-manifest ]] || {
-    echo 'Usage: cos:deploy [status] --target pi [--release-manifest path]' >&2; exit 1;
+  [[ ( $# == 4 || ( $# == 6 && "${5:-}" == --recover-from ) ) && "$1" == --target && "$2" == pi && "$3" == --release-manifest ]] || {
+    echo 'Usage: cos:deploy [status] --target pi [--release-manifest path] [--recover-from failed-release-id]' >&2; exit 1;
   }
   manifest=$4
+  recovery_args=()
+  if [[ $# == 6 ]]; then
+    [[ "$6" =~ ^release-[a-zA-Z0-9_-]{1,120}$ ]] || exit 1
+    recovery_args=("$6")
+  fi
 fi
 root=$(git rev-parse --show-toplevel)
 cd "$root"
@@ -83,6 +88,6 @@ cli checkpoint "$id" transferred
 remote "$(cli bootstrap-command "$id" prepare)" > "$directory/prepare-result.json"
 cli checkpoint "$id" prepared
 printf 'Activating %s. The existing NanoClaw service will briefly stop while protected state is backed up and migrated.\n' "$id"
-remote "$(cli deploy-command "$id")" > "$directory/deploy-result.json"
+remote "$(cli deploy-command "$id" "${recovery_args[@]}")" > "$directory/deploy-result.json"
 cli checkpoint "$id" healthy
 cat "$directory/deploy-result.json"

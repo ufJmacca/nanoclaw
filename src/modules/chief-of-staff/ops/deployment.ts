@@ -11,6 +11,7 @@ import {
   type MaintenanceLease,
 } from './maintenance.js';
 import { validateReleaseManifest, type ReleaseManifest } from './release-manifest.js';
+import { recoverFailedDeployment } from './deployment-recovery.js';
 
 const phases = ['source', 'artifacts', 'quiesce', 'backup', 'migrate', 'activate', 'health'] as const;
 export type DeploymentPhase = (typeof phases)[number];
@@ -28,6 +29,10 @@ export type DeploymentEffects = {
   reconcile(phase: DeploymentPhase): Promise<'done' | 'retry_safe' | 'blocked'>;
   /** Must prove schema compatibility and restored service health; never restore the native DB. */
   rollback(previousReleaseId: string | null): Promise<boolean>;
+  /** Verify the failed candidate's provenance, quiesce its service, and retain a recovery baseline. */
+  prepareRecovery?(
+    previous: DeploymentReceipt,
+  ): Promise<{ activeCoordinators: number; activeDatabaseOperations: number }>;
 };
 export type DeploymentReceipt = {
   version: 1;
@@ -37,9 +42,11 @@ export type DeploymentReceipt = {
   previousReleaseId: string | null;
   completed: DeploymentPhase[];
   pending: DeploymentPhase | null;
-  status: 'in_progress' | 'failed' | 'health_failed' | 'rolled_back' | 'reopening' | 'healthy';
+  status: 'in_progress' | 'failed' | 'health_failed' | 'rolled_back' | 'reopening' | 'healthy' | 'superseded';
   lease: MaintenanceLease | null;
   activationRetries?: number;
+  recoveryFrom?: string;
+  supersededBy?: string;
   updatedAt: string;
 };
 function receiptDirectory(root: string, releaseId: string): string {
@@ -62,9 +69,15 @@ export async function deployRelease(request: {
   binding: TargetBinding;
   manifest: ReleaseManifest;
   effects: DeploymentEffects;
+  recoverFrom?: string;
 }): Promise<DeploymentReceipt> {
   const { root, binding, effects } = request,
     manifest = validateReleaseManifest(request.manifest);
+  if (
+    request.recoverFrom !== undefined &&
+    (!/^release-[a-zA-Z0-9_-]{1,120}$/.test(request.recoverFrom) || request.recoverFrom === manifest.releaseId)
+  )
+    throw new Error('deployment_recovery_denied');
   try {
     await effects.verify();
   } catch (error) {
@@ -85,7 +98,13 @@ export async function deployRelease(request: {
       record.completed.length > phases.length ||
       record.completed.some((phase, index) => phases[index] !== phase) ||
       (record.pending !== null && record.pending !== phases[record.completed.length]) ||
-      !['in_progress', 'failed', 'health_failed', 'rolled_back', 'reopening', 'healthy'].includes(record.status) ||
+      !['in_progress', 'failed', 'health_failed', 'rolled_back', 'reopening', 'healthy', 'superseded'].includes(
+        record.status,
+      ) ||
+      record.recoveryFrom !== request.recoverFrom ||
+      (record.status === 'superseded'
+        ? !/^release-[a-zA-Z0-9_-]{1,120}$/.test(record.supersededBy ?? '')
+        : record.supersededBy !== undefined) ||
       (record.activationRetries !== undefined &&
         (!Number.isSafeInteger(record.activationRetries) || record.activationRetries < 0)) ||
       (record.previousReleaseId !== null && !manifest.previousReleaseIds.includes(record.previousReleaseId))
@@ -105,12 +124,14 @@ export async function deployRelease(request: {
       status: 'in_progress',
       lease: null,
       updatedAt: new Date().toISOString(),
+      ...(request.recoverFrom ? { recoveryFrom: request.recoverFrom } : {}),
     };
   }
   const save = () => {
     record.updatedAt = new Date().toISOString();
     writeAtomic(directory, 'deployment.json', record);
   };
+  if (record.status === 'superseded') throw new Error('deployment_superseded');
   if (record.status === 'healthy') {
     if (
       state.releaseId !== manifest.releaseId ||
@@ -184,6 +205,7 @@ export async function deployRelease(request: {
   save();
   for (const phase of phases.slice(record.completed.length)) {
     if (phase === 'quiesce' && !record.lease) {
+      if (record.recoveryFrom) await recoverFailedDeployment({ root, binding, replacement: record, effects });
       record.lease = beginMaintenance(root, binding, manifest.releaseId, 'deployment');
       save();
     }

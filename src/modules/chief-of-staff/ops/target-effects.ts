@@ -26,7 +26,7 @@ import {
 } from './target-host.js';
 import type { DeploymentSettings } from './deployment-settings.js';
 import { validateReleaseManifest, supportsReleaseSchema, type ReleaseManifest } from './release-manifest.js';
-import type { DeploymentEffects } from './deployment.js';
+import type { DeploymentEffects, DeploymentReceipt } from './deployment.js';
 import { bindCommand } from './admin.js';
 import type { BindingRequest } from './bind.js';
 import { readEnvFile } from '../../../env.js';
@@ -38,6 +38,7 @@ type Baseline = {
   executable: string;
   entryPoint: string;
   unit: string;
+  recoveryFrom?: string;
 };
 /** Concrete Pi operations. The CLI holds an OS lock; mutations additionally require its durable maintenance lease. */
 export function createTargetEffects(
@@ -165,9 +166,57 @@ export function createTargetEffects(
       !path.isAbsolute(value.entryPoint)
     )
       throw new Error('baseline_conflict');
+    if (value.recoveryFrom !== undefined) {
+      if (!/^release-[a-zA-Z0-9_-]{1,120}$/.test(value.recoveryFrom)) throw new Error('baseline_conflict');
+      const own = readPrivate<DeploymentReceipt>(path.join(receipt, 'deployment.json'));
+      const previous = readPrivate<DeploymentReceipt>(
+        path.join(settings.stateRoot, 'releases', value.recoveryFrom, 'deployment.json'),
+      );
+      if (
+        own.recoveryFrom !== value.recoveryFrom ||
+        previous.status !== 'superseded' ||
+        previous.supersededBy !== manifest.releaseId ||
+        previous.bindingDigest !== digest(binding)
+      )
+        throw new Error('baseline_conflict');
+    }
     return value;
   };
   const effects: DeploymentEffects = {
+    async prepareRecovery(previous) {
+      if (
+        !/^release-[a-zA-Z0-9_-]{1,120}$/.test(previous.releaseId) ||
+        previous.releaseId === manifest.releaseId ||
+        previous.bindingDigest !== digest(binding)
+      )
+        throw new Error('deployment_recovery_denied');
+      const priorManifest = validateReleaseManifest(
+        readPrivate(path.join(settings.releaseRoot, previous.releaseId, 'release.json')),
+      );
+      if (
+        priorManifest.releaseId !== previous.releaseId ||
+        digest(priorManifest) !== previous.manifestDigest ||
+        !supportsReleaseSchema(manifest, await schema())
+      )
+        throw new Error('deployment_recovery_denied');
+      const priorEffects = createTargetEffects(settings, priorManifest, previous.manifestDigest);
+      const result = await priorEffects.quiesce();
+      if (result.activeCoordinators !== 0 || result.activeDatabaseOperations !== 0) return result;
+      const original = readPrivate<Baseline>(
+        path.join(settings.stateRoot, 'releases', previous.releaseId, 'baseline.json'),
+      );
+      const recovered: Baseline = {
+        ...original,
+        releaseId: readTarget(settings.stateRoot, binding).releaseId,
+        recoveryFrom: previous.releaseId,
+        unit: await commands.service('cat'),
+      };
+      const file = path.join(receipt, 'baseline.json');
+      if (fs.lstatSync(file, { throwIfNoEntry: false }) && digest(readPrivate(file)) !== digest(recovered))
+        throw new Error('baseline_conflict');
+      writeAtomic(receipt, 'baseline.json', recovered);
+      return result;
+    },
     async verify() {
       const bundle = await verifyReleaseBundle(stage, manifestHash);
       if (digest(bundle.manifest) !== digest(manifest)) throw new Error('release_manifest_mismatch');
@@ -390,6 +439,8 @@ export function createTargetEffects(
       lease(false);
       const previous = baseline();
       if (previous.releaseId !== previousReleaseId) throw new Error('rollback_identity_mismatch');
+      // A failed predecessor is retained as recovery evidence, never promoted to known-good rollback code.
+      if (previous.recoveryFrom) return false;
       if (previousReleaseId) {
         if (!manifest.previousReleaseIds.includes(previousReleaseId)) return false;
         const prior = validateReleaseManifest(

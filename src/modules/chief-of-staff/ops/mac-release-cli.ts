@@ -23,7 +23,7 @@ import {
 } from './mac-release.js';
 import { imageConfigurations } from './image-archive.js';
 import { artifactHash, verifyReleaseBundle } from './release-artifacts.js';
-import { validateTargetObservation } from './mac-deploy.js';
+import { validateBuildTargetObservation } from './mac-deploy.js';
 
 export const BUILD_TARGETS = ['host', 'agent-standard', 'agent-documents'] as const;
 type BuildTarget = (typeof BUILD_TARGETS)[number];
@@ -117,7 +117,7 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
   const { root, plan } = checkedPlan(id);
   if (operation === 'target' && !values.length) {
     const settings = deploymentSettings(readPrivate(path.resolve('.cos-plan-state/deployment-target.json')));
-    const state = validateTargetObservation(settings, readPrivate(path.join(root, 'target-observation.json')));
+    const state = validateBuildTargetObservation(settings, readPrivate(path.join(root, 'target-observation.json')));
     plan.previousReleaseIds = state?.releaseId ? [state.releaseId] : [];
     writeAtomic(root, 'plan.json', plan);
     return;
