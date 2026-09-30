@@ -3,6 +3,8 @@ import http from 'node:http';
 import os from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { CosCodexProvider } from '../src/providers/codex-cos.js';
+import { cosDynamicTools } from '../src/providers/codex-cos-tools.js';
+import { createSubscriptionTurnClient } from '../src/providers/codex-turn-client.js';
 import { initTestSessionDb, closeSessionDb } from '../src/db/connection.js';
 import { setContinuation, getContinuation } from '../src/db/session-state.js';
 import { digest } from '../src/mcp-tools/generated/cos-protocol.js';
@@ -76,8 +78,12 @@ const systemTrust = process.env.NANOCLAW_COS_FIXTURE_SYSTEM_TRUST === '1';
 const productionQuery = process.env.NANOCLAW_COS_FIXTURE_PRODUCTION_QUERY === '1';
 const runnerEntry = process.env.NANOCLAW_COS_FIXTURE_RUNNER_ENTRY === '1';
 const compaction = process.env.NANOCLAW_COS_FIXTURE_COMPACTION === '1';
+const toolRefresh = process.env.NANOCLAW_COS_FIXTURE_TOOL_REFRESH === '1';
 const cancellation = process.env.NANOCLAW_COS_FIXTURE_CANCELLATION;
 const sharedOwner = process.env.NANOCLAW_COS_FIXTURE_SHARED_OWNER === '1';
+if (toolRefresh && (!runnerEntry || cancellation || compaction || sharedOwner))
+  throw new Error('invalid_tool_refresh_fixture');
+const s01Tools = ['cos_change_propose', 'cos_context_get', 'cos_request_status'];
 if (sharedOwner && (!runnerEntry || cancellation || compaction)) throw new Error('invalid_shared_owner_fixture');
 let owner: Awaited<ReturnType<typeof import('./subscription-owner.js').startFixtureOwner>> | undefined;
 let ownerReceipt: { nativeOwnerChecks: number; concurrentClients: number; sourceRefreshRetained: boolean } | undefined;
@@ -210,6 +216,13 @@ function respond(body: any, send: (text: string) => void) {
     if (compaction && requests.length === 6) calls[5] = calls[0];
     if (compaction && requests.length === 7) calls[6] = calls[1];
     if (cancellation === 'rpc' && requests.length === 7) calls[6] = calls[0];
+    if (toolRefresh && requests.length === 7)
+      calls[6] = {
+        type: 'custom_tool_call',
+        namespace: 'functions',
+        name: 'exec',
+        input: 'text(await tools.cos_knowledge_search({query:"replacement"}));',
+      };
     if (calls[requests.length - 1])
       item = {
         id: 'call_' + requests.length,
@@ -366,7 +379,7 @@ async function switchGateway(role: 'auth' | 'query') {
       const {startSubscriptionTurns} = await import('file:///fixture/subscription-turns.ts');
       const attempts = new Set();
       turns = await startSubscriptionTurns({socket:'/run/cos/turn.sock',authorize:async()=>!fs.existsSync('/tmp/fixture-revoked'),reserve:id=>{
-        if(attempts.has(id)||attempts.size>=${sharedOwner ? 4 : compaction || cancellation ? 3 : 2})return false;
+        if(attempts.has(id)||attempts.size>=${toolRefresh || sharedOwner ? 4 : compaction || cancellation ? 3 : 2})return false;
         attempts.add(id);console.log(JSON.stringify({turnReserved:true}));return true;
       }});
     }
@@ -517,7 +530,7 @@ try {
           if (deliveries.has(delivery_id)) continue;
           deliveries.add(delivery_id);
           dispatched.push(request.method);
-          assert.equal(request.method, 'cos_context_get');
+          assert.ok(request.method === 'cos_context_get' || (toolRefresh && request.method === 'cos_knowledge_search'));
           const response = {
             protocol: 'cos-rpc/v1',
             request_id: request.request_id,
@@ -545,7 +558,7 @@ try {
       await new Promise<void>((resolve) => credentialBroker!.listen('/run/nanoclaw/codex-credentials.sock', resolve));
     }
     const contextGeneration = '11111111-1111-4111-8111-111111111111';
-    const continuationKey = runnerEntry ? 'cos-codex-subscription:' + contextGeneration : 'cos-codex';
+    let continuationKey = runnerEntry ? 'cos-codex-subscription:' + contextGeneration : 'cos-codex';
     if (runnerEntry) {
       for (const [db, destination] of [
         [inbound, '/workspace/inbound.db'],
@@ -731,11 +744,56 @@ try {
       }
       assert.ok(completed);
     };
-    await run('Remember the synthetic colour is amber.');
+    if (toolRefresh) {
+      // Seed a native S01 conversation through the offline model fixture.
+      // Subsequent turns all use the actual current production runner.
+      const seed = createSubscriptionTurnClient();
+      await seed.begin();
+      try {
+        await connect();
+        const created = await sendCodexRequest(server, 'thread/start', {
+          ...params,
+          dynamicTools: cosDynamicTools.filter((tool) => s01Tools.includes(tool.name)),
+        });
+        assert.equal(created.error, undefined);
+        const legacyThread = (created.result as any).thread.id;
+        setContinuation(continuationKey, 'cos-codex-subscription-v1:' + legacyThread);
+        await turn(legacyThread, 'Remember the synthetic colour is amber.');
+      } finally {
+        killCodexAppServer(server);
+        await seed.end();
+      }
+    } else await run('Remember the synthetic colour is amber.');
     const original = getContinuation(continuationKey);
     assert.ok(original?.startsWith('cos-codex-subscription-v1:'));
     await run('Which synthetic colour did I mention?');
     assert.equal(getContinuation(continuationKey), original);
+    if (toolRefresh) {
+      const oldKey = continuationKey;
+      assert.ok(JSON.stringify(requests.at(-1).input).includes('amber'));
+      // The guarded host recovery is tested by subscription-operator.integration.
+      // Here exercise its runner-facing result: a new host-bound generation.
+      // Keep the old native files present to prove they are never auto-adopted.
+      const replacementGeneration = '22222222-2222-4222-8222-222222222222';
+      const configPath = '/workspace/agent/container.json';
+      fs.writeFileSync(
+        configPath,
+        JSON.stringify({
+          ...JSON.parse(fs.readFileSync(configPath, 'utf8')),
+          contextGeneration: replacementGeneration,
+        }),
+      );
+      continuationKey = 'cos-codex-subscription:' + replacementGeneration;
+      assert.equal(getContinuation(continuationKey), undefined);
+      await run('Start with current admitted knowledge after explicit recovery.');
+      const replacement = getContinuation(continuationKey);
+      assert.ok(replacement?.startsWith('cos-codex-subscription-v1:'));
+      assert.notEqual(replacement, original, 'recovery must create a fresh native thread');
+      assert.equal(getContinuation(oldKey), original, 'old retained history must not be rewritten');
+      await run('Continue the replacement conversation.');
+      assert.equal(getContinuation(continuationKey), replacement);
+      assert.ok(requests.slice(6).every((request) => !JSON.stringify(request.input).includes('amber')));
+    }
     if (compaction) {
       await run('Continue the same synthetic conversation after another runner restart.');
       assert.equal(getContinuation(continuationKey), original);
@@ -756,7 +814,7 @@ try {
       await run('A new explicit turn after renewal.');
       assert.equal(getContinuation(continuationKey), original);
     }
-    assert.equal(reservedAttempts, sharedOwner ? 4 : compaction || cancellation ? 3 : 2);
+    assert.equal(reservedAttempts, toolRefresh || sharedOwner ? 4 : compaction || cancellation ? 3 : 2);
   } else {
     await connect();
     const created = await sendCodexRequest(server, 'thread/start', params);
@@ -771,7 +829,7 @@ try {
     if (resumed.error) throw Error(JSON.stringify(resumed.error));
     await turn(threadId, 'Which synthetic colour did I mention?');
   }
-  assert.equal(requests.length, compaction ? 9 : cancellation || sharedOwner ? 7 : 6);
+  assert.equal(requests.length, compaction || toolRefresh ? 9 : cancellation || sharedOwner ? 7 : 6);
   if (compaction) {
     assert.equal(compactionRequests.length, 1);
     assert.ok(
@@ -786,10 +844,14 @@ try {
           (item: any) => item.call_id === 'call_7' && String(item.output).includes('unsupported call: exec_command'),
         ),
     );
-  } else assert.ok(JSON.stringify(requests.at(-1).input).includes('amber'));
+  } else if (!toolRefresh) assert.ok(JSON.stringify(requests.at(-1).input).includes('amber'));
   assert.deepEqual(
     dispatched,
-    compaction || cancellation === 'rpc' ? ['cos_context_get', 'cos_context_get'] : ['cos_context_get'],
+    toolRefresh
+      ? ['cos_context_get', 'cos_knowledge_search']
+      : compaction || cancellation === 'rpc'
+        ? ['cos_context_get', 'cos_context_get']
+        : ['cos_context_get'],
   );
   assert.equal(fs.existsSync('/tmp/escaped'), false);
   const allModelRequests = JSON.stringify([...requests, ...compactionRequests]);
@@ -840,10 +902,38 @@ try {
     );
   assert.deepEqual(
     declarations.sort(),
-    productionQuery
-      ? ['clock__curr_time', 'cos_change_propose', 'cos_context_get', 'cos_request_status']
-      : ['clock__curr_time', 'cos_context_get'],
+    toolRefresh
+      ? ['clock__curr_time', ...s01Tools]
+      : productionQuery
+        ? [
+            'clock__curr_time',
+            'cos_answer_get',
+            'cos_answer_prepare',
+            'cos_change_propose',
+            'cos_context_get',
+            'cos_knowledge_search',
+            'cos_request_status',
+            'cos_source_change_propose',
+            'cos_source_get',
+          ]
+        : ['clock__curr_time', 'cos_context_get'],
   );
+  if (toolRefresh) {
+    const declared = (request: any) =>
+      request.input
+        .filter((item: any) => item.type === 'additional_tools')
+        .flatMap((item: any) => item.tools)
+        .flatMap((tool: any) => tool.tools ?? [])
+        .flatMap((tool: any) =>
+          [...(tool.description ?? '').matchAll(/declare const tools: \{ (\w+)\(/g)].map((match: any) => match[1]),
+        )
+        .sort();
+    assert.deepEqual(declared(requests[5]), ['clock__curr_time', ...s01Tools]);
+    const expected = ['clock__curr_time', ...cosDynamicTools.map((tool) => tool.name)].sort();
+    assert.equal(expected.length, 9);
+    assert.deepEqual(declared(requests[6]), expected);
+    assert.deepEqual(declared(requests.at(-1)), expected);
+  }
   clearInterval(rpcPoll);
   if (rpcFailure) throw rpcFailure;
   console.log(
@@ -861,6 +951,14 @@ try {
       productionQueryProvider: productionQuery,
       reservedAttempts,
       runnerEntry,
+      ...(toolRefresh
+        ? {
+            legacyToolsRetainedOnResume: true,
+            recoveredThreadHasKnowledgeTools: true,
+            retiredHistoryAbsent: true,
+            replacementResumed: true,
+          }
+        : {}),
       ...(sharedOwner
         ? { sharedOwner: ownerReceipt, native401Observed: rejectedQueries, interruptedTurnNotReplayed: true }
         : {}),

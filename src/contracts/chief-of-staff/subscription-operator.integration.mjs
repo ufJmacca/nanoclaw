@@ -192,7 +192,13 @@ test(
       assert.deepEqual(fs.readdirSync(state + '/conversations/' + recovered.generation), []);
       const status = await admin({ command: 'context-status' });
       assert.equal(status.paused, true);
-      assert.equal(status.activation, 'invalid_or_expired');
+      assert.equal(status.activation, 'configured');
+      assert.equal(status.remainingAttempts, 2);
+      assert.equal(recovered.activation.status, 'rebound_paused');
+      assert.deepEqual(JSON.parse(fs.readFileSync(state + '/model-activation.json', 'utf8')), {
+        ...policy,
+        contextGeneration: recovered.generation,
+      });
       assert.equal(status.live_model, 'not_verified');
       assert.equal(readTarget(state, target).maintenance, true);
       console.log(
@@ -206,6 +212,7 @@ test(
           revocationFenced: true,
           recoveryBackupVerified: true,
           newGenerationEmptyPaused: true,
+          remainingConsentPreservedWithoutRefill: true,
           modelCalls: 0,
           messagesSent: 0,
           hostAndChannelFacts: 'synthetic',
