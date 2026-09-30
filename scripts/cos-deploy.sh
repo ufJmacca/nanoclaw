@@ -32,7 +32,10 @@ mkdir "$lock" || { echo 'Another delivery owns the Mac lock; reconcile it before
 printf '%s\n' "$$" > "$lock/pid"
 trap 'rm -f "$lock/pid"; rmdir "$lock"' EXIT
 ssh_options=(-o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3)
-remote() { ssh "${ssh_options[@]}" "$alias_name" "$1"; }
+remote() {
+  [[ $# == 1 && -n "$1" ]] || { echo 'Empty remote command refused.' >&2; return 1; }
+  ssh "${ssh_options[@]}" "$alias_name" "$1"
+}
 if [[ "$mode" == status || "$mode" == rollback ]]; then
   id=status
   directory="$root/.cos-plan-state/deployment-status"
@@ -88,6 +91,7 @@ cli checkpoint "$id" transferred
 remote "$(cli bootstrap-command "$id" prepare)" > "$directory/prepare-result.json"
 cli checkpoint "$id" prepared
 printf 'Activating %s. The existing NanoClaw service will briefly stop while protected state is backed up and migrated.\n' "$id"
-remote "$(cli deploy-command "$id" "${recovery_args[@]}")" > "$directory/deploy-result.json"
+command=$(cli deploy-command "$id" ${recovery_args[@]+"${recovery_args[@]}"})
+remote "$command" > "$directory/deploy-result.json"
 cli checkpoint "$id" healthy
 cat "$directory/deploy-result.json"
