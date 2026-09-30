@@ -132,9 +132,14 @@ export async function nativeFixtureSmoke(options: { root: string; hostRoot: stri
     await client.start();
     const tools = await client.request('tools/list', {});
     assert.deepEqual(tools.tools.map((tool: { name: string }) => tool.name).sort(), [
+      'cos_answer_get',
+      'cos_answer_prepare',
       'cos_change_propose',
       'cos_context_get',
+      'cos_knowledge_search',
       'cos_request_status',
+      'cos_source_change_propose',
+      'cos_source_get',
     ]);
     const inspected = JSON.parse(await docker(['inspect', client.name]))[0];
     assert.equal(inspected.HostConfig.NetworkMode, 'none');
