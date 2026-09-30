@@ -1,8 +1,44 @@
 import { describe, it, expect, vi } from 'vitest';
-import { parseAdminArguments, adminStatus } from './admin.js';
+import { parseAdminArguments, adminStatus, safeAdminError } from './admin.js';
 import { DatabasePreflightError } from '../store/preflight.js';
 import { DatabaseConfigurationError } from '../store/config.js';
 describe('S01 owner administration', () => {
+  it('reports actionable context errors without passing through raw account or filesystem text', () => {
+    expect(safeAdminError(new Error('context_recovery_stale_generation'))).toBe('context_recovery_stale_generation');
+    expect(safeAdminError(new Error('NanoClaw host execution lease is already held by a live process'))).toBe(
+      'host_writer_active',
+    );
+    expect(safeAdminError(new Error('context_recovery_conflict: secret-canary'))).toBe('unreachable');
+  });
+  it('parses explicit context inspection, preparation and generation-bound recovery without accepting implicit reset', () => {
+    expect(parseAdminArguments(['context-status', '--scope', 'fixture'])).toEqual({
+      command: 'context-status',
+      scopeId: 'fixture',
+    });
+    expect(parseAdminArguments(['context-prepare', '--scope', 'fixture'])).toEqual({
+      command: 'context-prepare',
+      scopeId: 'fixture',
+    });
+    const generation = '11111111-1111-4111-8111-111111111111',
+      recovery = '22222222-2222-4222-8222-222222222222';
+    expect(
+      parseAdminArguments([
+        'context-recover',
+        '--scope',
+        'fixture',
+        '--expected-generation',
+        generation,
+        '--recovery-id',
+        recovery,
+      ]),
+    ).toEqual({ command: 'context-recover', scopeId: 'fixture', expectedGeneration: generation, recoveryId: recovery });
+    for (const args of [
+      ['context-recover', '--scope', 'fixture'],
+      ['context-status', '--scope', 'fixture', '--reset', 'yes'],
+      ['context-prepare', '--scope', '../foreign'],
+    ])
+      expect(() => parseAdminArguments(args)).toThrow('invalid_admin_arguments');
+  });
   it('requires an exact complete private binding and refuses unknown commands or providers', () => {
     const args = [
       'bind',

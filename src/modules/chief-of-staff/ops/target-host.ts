@@ -92,7 +92,7 @@ export function targetBinding(settings: DeploymentSettings): TargetBinding {
     dataRoot: settings.dataRoot,
   };
 }
-export function targetCommands(settings: DeploymentSettings) {
+export function targetCommands(settings: Pick<DeploymentSettings, 'userHome' | 'installationRoot' | 'service'>) {
   const uid = process.getuid?.();
   if (uid === undefined || uid === 0) throw new Error('target_user_required');
   const env = {

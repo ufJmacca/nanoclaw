@@ -9,10 +9,35 @@ import { localTarget, databaseFingerprint } from './target-identity.js';
 import { activeMaintenanceLease, assertMaintenanceLease, admittedGeneration } from './maintenance.js';
 import type { BindingRequest } from './bind.js';
 import { readEnvFile } from '../../../env.js';
+import { contextAdminCommand, type ContextAdminArguments } from './context-admin.js';
 
-type AdminArguments = { command: 'status' } | { command: 'bind'; binding: BindingRequest };
+type AdminArguments = { command: 'status' } | { command: 'bind'; binding: BindingRequest } | ContextAdminArguments;
 export function parseAdminArguments(args: string[]): AdminArguments {
   if (args.length === 1 && args[0] === 'status') return { command: 'status' };
+  if (['context-status', 'context-prepare', 'context-recover'].includes(args[0])) {
+    const values: Record<string, string> = {};
+    const recovery = args[0] === 'context-recover';
+    const allowed = recovery ? ['--scope', '--expected-generation', '--recovery-id'] : ['--scope'];
+    if (args.length !== 1 + allowed.length * 2) throw new Error('invalid_admin_arguments');
+    for (let i = 1; i < args.length; i += 2) {
+      if (!allowed.includes(args[i]) || values[args[i]] !== undefined || !args[i + 1])
+        throw new Error('invalid_admin_arguments');
+      values[args[i]] = args[i + 1];
+    }
+    if (!/^[a-zA-Z0-9_-]{1,128}$/.test(values['--scope'])) throw new Error('invalid_admin_arguments');
+    if (recovery) {
+      const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+      if (!uuid.test(values['--expected-generation']) || !uuid.test(values['--recovery-id']))
+        throw new Error('invalid_admin_arguments');
+      return {
+        command: 'context-recover',
+        scopeId: values['--scope'],
+        expectedGeneration: values['--expected-generation'],
+        recoveryId: values['--recovery-id'],
+      };
+    }
+    return { command: args[0] as 'context-status' | 'context-prepare', scopeId: values['--scope'] };
+  }
   const keys = ['--scope', '--instance', '--channel', '--owner', '--bot', '--provider'];
   if (args[0] !== 'bind' || args.length !== 13) throw new Error('invalid_admin_arguments');
   const values: Record<string, string> = {};
@@ -54,6 +79,43 @@ export function safeDependencyStatus(error: unknown): string {
       return error.code;
   }
   return 'unreachable';
+}
+/** Exact local codes only; never emit filesystem, transport or credential error text. */
+export function safeAdminError(error: unknown): string {
+  if (error instanceof Error) {
+    if (error.message === 'NanoClaw host execution lease is already held by a live process')
+      return 'host_writer_active';
+    if (
+      [
+        'invalid_admin_arguments',
+        'target_not_quiescent',
+        'target_locked',
+        'stale_maintenance_lease',
+        'maintenance_history_conflict',
+        'host_execution_authority_lost',
+        'private_owner_membership_required',
+        'subscription_account_binding_unavailable',
+        'context_binding_required',
+        'context_binding_changed',
+        'unsafe_context_admin_state',
+        'context_recovery_requires_paused_binding',
+        'context_recovery_stale_generation',
+        'context_recovery_superseded',
+        'context_recovery_conflict',
+        'context_recovery_requires_existing_generation',
+        'context_recovery_not_empty',
+        'unsafe_context_recovery',
+        'context_admin_lease_release_failed',
+        'cos_context_recovery_required',
+        'conversation_backup_space',
+        'conversation_backup_changed',
+        'conversation_backup_conflict',
+        'unsafe_conversation_backup',
+      ].includes(error.message)
+    )
+      return error.message;
+  }
+  return safeDependencyStatus(error);
 }
 export async function adminStatus(
   env: NodeJS.ProcessEnv,
@@ -194,11 +256,13 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     .then(async () => {
       const args = parseAdminArguments(process.argv.slice(2)),
         env = adminEnvironment();
-      return args.command === 'status' ? adminStatus(env) : bindCommand(args.binding, env);
+      if (args.command === 'status') return adminStatus(env);
+      if (args.command === 'bind') return bindCommand(args.binding, env);
+      return contextAdminCommand(args, env);
     })
     .then((result) => console.log(JSON.stringify(result)))
     .catch((error) => {
-      console.error(JSON.stringify({ status: 'unavailable', code: safeDependencyStatus(error) }));
+      console.error(JSON.stringify({ status: 'unavailable', code: safeAdminError(error) }));
       process.exitCode = 1;
     });
 }

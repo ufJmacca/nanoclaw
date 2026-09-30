@@ -65,6 +65,26 @@ The additional receipt reports `nativeHistoryBackup=passed` with nonzero file an
 
 Deployment now snapshots every retained CoS generation alongside the existing SQLite backups while the service and all installation containers are stopped. The private snapshot preserves history and WAL bytes, omits the replaceable access cache and interrupted cache writes, rejects links/unsafe permissions and missing database-referenced generations, bounds size, checks available space and verifies hashes before atomic publication. Replays verify the saved baseline without overwriting newer live history; migrations revalidate the snapshot before changing either database. No snapshot automatically restores a conversation or its authority. Operator recovery and compatible schema-22 rollback remain pending.
 
+## Operator context inspection and recovery
+
+The packaged host admin entry now supports these commands from the bound installation directory, using the selected trusted Pi service environment:
+
+```text
+context-status --scope SCOPE
+context-prepare --scope SCOPE
+context-recover --scope SCOPE --expected-generation UUID --recovery-id UUID
+```
+
+Pass these arguments to the release's Node executable and `dist/modules/chief-of-staff/ops/admin.js`. Development tests invoke the same command functions in the devcontainer with fixture target/channel facts. Do not run the Pi's live configuration on the Mac.
+
+`context-status` reads local configuration without creating a context, refreshing credentials or contacting a model/channel. It reports context generation, pause state, recorded account fingerprint, activation validity and remaining attempts. Its `live_model=not_verified` and `private_channel=not_checked` fields are deliberate: cached account metadata and configured consent do not prove current entitlement or channel access.
+
+Preparation and recovery require an already-quiescent Pi maintenance lease, the target lock, a stopped service and installation containers, an exclusive host execution lease, the paused native binding and freshly verified private membership. They do not stop/restart services or reopen maintenance themselves. Preparation creates only the initial empty native generation; existing history is retained or explicit recovery is required.
+
+Recovery must name the exact current generation and a stable recovery UUID. It fences the old context, records an operation journal, backs up central/session SQLite and remaining provider history privately, creates an empty generation, and quarantines pending inbound work plus undelivered outbound messages. Message contents, ordinary continuation keys, canonical approved records, old native history and charged usage remain preserved. The old activation's generation no longer matches; recovery neither writes new consent nor unpauses the binding. Retrying the same request reconciles interruptions and lost completion receipts without resetting the new context or reprocessing later arrivals. A subsequently revoked or superseded generation cannot be revived by replaying an old recovery.
+
+Nine recovery tests, four host command integration/status tests and six admin parser/status/diagnostic tests pass. The full host suite passes **1,231 tests / 137 files**, and the host TypeScript build passes; affected lint has zero errors and three warnings. These are development checks, with fixture channel observations and actual local SQLite backups. Activation issuance/resumption, final-image operator execution, compatible schema-22 rollback and Pi acceptance remain pending. These controls perform no model inference or message send.
+
 ## Restricted network transport
 
 The native runtime has Docker networking disabled. Its loopback relay forwards only to a fixed private host Unix socket. The host accepts TLS CONNECT to exact permitted hostnames on port 443, validates every DNS answer as public and dials the selected resolved IP. Query traffic may reach `chatgpt.com`; only the trusted authentication role also admits `auth.openai.com`. API billing, arbitrary destinations, private/LAN addresses, other ports and ordinary proxy HTTP requests are refused.
