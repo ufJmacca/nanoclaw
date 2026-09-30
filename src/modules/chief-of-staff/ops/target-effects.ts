@@ -279,7 +279,7 @@ export function createTargetEffects(
         ...result,
         sourceCommit: manifest.source.commit,
         migrations: manifest.migrations,
-        native: 'cos-model-budget',
+        native: 'cos-subscription-context',
       });
       if (coordinatorBinding) {
         writeAtomic(receipt, 'binding-setup.json', coordinatorBinding);

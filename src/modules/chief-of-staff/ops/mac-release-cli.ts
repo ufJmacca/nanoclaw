@@ -99,7 +99,7 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
       hostPayloadDigest: '',
       rpc: 'cos-rpc/v1',
       postgres: { minimum: 1, maximum: 1 },
-      sqlite: { minimum: 21, maximum: 21 },
+      sqlite: { minimum: 22, maximum: 22 },
       migrations: [{ version: 1, checksum: INITIAL_CHECKSUM }],
       previousReleaseIds: [],
       images: [],

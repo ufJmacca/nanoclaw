@@ -56,6 +56,16 @@ function manifest(): ReleaseManifest {
   };
 }
 describe('S01-REL01 source and final-image evidence gate', () => {
+  it('recognizes the new native schema while retaining immutable older receipt identities', () => {
+    expect(validateReleaseManifest(manifest()).sqlite).toEqual({ minimum: 21, maximum: 21 });
+    const current = { ...manifest(), sqlite: { minimum: 22, maximum: 22 } };
+    expect(validateReleaseManifest(current).sqlite).toEqual(current.sqlite);
+    for (const sqlite of [
+      { minimum: 22, maximum: 21 },
+      { minimum: 22, maximum: 23 },
+    ])
+      expect(() => validateReleaseManifest({ ...manifest(), sqlite })).toThrow();
+  });
   it('records configuration digests separately and requires explicit schema/migration compatibility', () => {
     for (const key of ['configurationId']) {
       const value = manifest();

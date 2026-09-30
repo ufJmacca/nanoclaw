@@ -71,8 +71,9 @@ export function validateReleaseManifest(value: unknown): ReleaseManifest {
     postgres.minimum !== 1 ||
     postgres.maximum !== 1 ||
     !object(value.sqlite) ||
-    value.sqlite.minimum !== 21 ||
-    value.sqlite.maximum !== 21 ||
+    ![21, 22].includes(value.sqlite.minimum as number) ||
+    ![21, 22].includes(value.sqlite.maximum as number) ||
+    Number(value.sqlite.minimum) > Number(value.sqlite.maximum) ||
     !Array.isArray(value.migrations) ||
     value.migrations.length !== 1 ||
     !object(value.migrations[0]) ||

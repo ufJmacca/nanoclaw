@@ -21,7 +21,7 @@ export function fixtureRelease(): ReleaseManifest {
     workerAssetsDigest: '1'.repeat(64),
     rpc: 'cos-rpc/v1',
     postgres: { minimum: 1, maximum: 1 },
-    sqlite: { minimum: 21, maximum: 21 },
+    sqlite: { minimum: 22, maximum: 22 },
     migrations: [{ version: 1, checksum: INITIAL_CHECKSUM }],
     previousReleaseIds: [],
     images: [
