@@ -286,6 +286,7 @@ export class CalendarStore {
           snapshot_id: id,
           access_generation: bindingId + ':' + b.version,
           snapshot_status: old.status,
+          ...(old.status === 'complete' ? { result: old.result } : {}),
         };
       }
       await client.query(

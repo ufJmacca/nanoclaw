@@ -12,6 +12,12 @@ import { collectCalendarSnapshot } from '../../modules/chief-of-staff/calendar/s
 import { GOOGLE_EVENT_READ_SCOPE } from '../../modules/chief-of-staff/calendar/reader.js';
 import { connectionFault } from './connection-fault.js';
 import { normalizeEvent } from '../../modules/chief-of-staff/calendar/normalization.js';
+import { refreshCalendar } from '../../modules/chief-of-staff/calendar/refresh.js';
+import { CalendarReadError } from '../../modules/chief-of-staff/calendar/reader.js';
+import { CalendarAccessFences } from '../../modules/chief-of-staff/calendar/access-fences.js';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 const scope = 'calendar-' + randomUUID();
 const context = {
@@ -331,4 +337,76 @@ test('S03-T08: source text stays inert and private operational error text is nev
     (await store.bind(context, { ...s.input, id: randomUUID(), credentialRef: '/private/token.json' })).status,
     'denied',
   );
+});
+
+test('S03-T01/T03: host refresh runs fixture pages through PostgreSQL and reconciles a complete identity without refetching', async () => {
+  const s = await setup();
+  const options = {
+    store,
+    context,
+    reader: s.fixture.reader,
+    bindingId: s.id,
+    calendarId: 'selected',
+    snapshotId: randomUUID(),
+    window,
+    accessLoss: async () => {
+      throw new Error('unexpected_fixture_access_loss');
+    },
+  };
+  const first = await refreshCalendar(options);
+  assert.equal(first.result.status, 'ok');
+  assert.equal((await store.read(context, s.id, 'selected')).coverage, 'complete');
+  const second = await refreshCalendar({
+    ...options,
+    reader: {
+      ...s.fixture.reader,
+      access: async () => {
+        throw new Error('must_not_refetch');
+      },
+    },
+  });
+  assert.deepEqual(second.result, first.result);
+});
+
+test('S03-T05/PG01: access denial survives reconstruction when the database partitions before revocation persistence', async () => {
+  const s = await setup();
+  await publish(s);
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-calendar-fence-integration-'));
+  fs.chmodSync(root, 0o700);
+  const fence = CalendarAccessFences.initialize(root);
+  const relay = await connectionFault(await fixtureDatabaseConfig());
+  const database = new BoundedDatabase(new pg.Pool(relay.config), 350);
+  const fault = new CalendarStore(database);
+  try {
+    const result = await refreshCalendar({
+      store: fault,
+      context,
+      bindingId: s.id,
+      calendarId: 'selected',
+      snapshotId: randomUUID(),
+      window,
+      reader: {
+        ...s.fixture.reader,
+        list: async () => {
+          relay.partition();
+          throw new CalendarReadError('calendar_auth_revoked');
+        },
+      },
+      accessLoss: async (auth) => {
+        if (auth === 'ready') throw new Error('unexpected_ready');
+        fence.deny(scope, s.id, auth);
+      },
+    });
+    assert.equal(result.result.status, 'pending');
+    assert.throws(() => new CalendarAccessFences(root).assertOpen(scope, s.id), /calendar_auth_revoked/);
+    relay.restore();
+    assert.equal((await store.setAuth(context, s.id, 'revoked')).status, 'ok');
+    const read = await store.read(context, s.id, 'selected');
+    assert.equal(read.coverage, 'unavailable');
+    assert.deepEqual(read.items, []);
+  } finally {
+    await database.pool.end();
+    await relay.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });

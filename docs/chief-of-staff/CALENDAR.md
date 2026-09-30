@@ -26,6 +26,8 @@ Stable snapshot identities reconcile retries and lost acknowledgements. Concurre
 
 The external test database has schema 3. The Pi remains on the accepted S02 schema 2 release. S03 release registration stays closed until its full acceptance flow exists.
 
+The host refresh coordinator checks the durable binding before fetching pages, reconciles an already committed request without refetching, and retains a prepared capture for an uncertain publication retry. Prepared captures are private recovery material, never model responses or logs. Detected access loss requires a host denial before the database update. The append-only denial journal survives reconstruction; unsafe, missing or corrupt journals fail closed. Runtime startup cannot initialize or reset it. Explicit setup and inclusion in protected host backups are still part of the pending operator integration. The journal contains binding references and denial reasons, never OAuth tokens. Actual coordinator/knowledge disclosure must consult this journal before S03 can be enabled.
+
 ## Pending operator flow
 
 The planned operator flow uses a desktop OAuth client, a loopback callback, PKCE S256 and a single-use state bound to the exact callback. Host-only token storage, refresh/revocation and the Pi administration path still need implementation and fixtures. The operator runbook will document account consent, selected-calendar admission and revocation before any live connection is offered. Google supports loopback callbacks for desktop clients and documents the PKCE exchange. [Installed-app authorization](https://developers.google.com/identity/protocols/oauth2/native-app).
