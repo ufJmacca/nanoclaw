@@ -1,6 +1,6 @@
 # S01 subscription runtime: capability evidence
 
-2026-09-30. Partial implementation decision. This is an offline protocol proof, not live subscription acceptance or a completed production runtime.
+2026-09-30. The native subscription runtime is implemented and deployed as an unreviewed S01 candidate. Live subscription inference and Mattermost acceptance remain unverified. The [current S01 receipt](../chief-of-staff/evidence/S01.md) records exact final artifacts, deployment, protected-data checks and compatible contract-22 rollback; the sections below retain the development proofs and their original limitations.
 
 ## Native conversation and tool execution
 
@@ -222,7 +222,7 @@ Current development verification: **1,206 host tests in 134 files**, **156 runne
 
 Pinned native file storage truncates and writes `auth.json`; production must use the tested staging/publication path, not let native checks write the primary file directly. Do not mount the whole host `.codex` directory, enable simultaneous uncoordinated refresh writers, or overwrite refreshed credentials with old copies. An uncertain refresh requires explicit reconciliation or reauthentication; retaining the primary file does not prove an older refresh credential is still valid at the provider.
 
-Operator context recovery, activation/resumption, protected history backups and offline native compaction now have development evidence. Explicit resumption also retires pre-pause work. Complete membership/pause cancellation acceptance, combined credential refresh/recovery and concurrent ordinary/CoS final-image fixtures, baked ARM64 release checks, compatible schema-22 recovery, Pi deployment and bounded live acceptance remain unfinished. SUB01–SUB14 are not collectively satisfied by this proof. No real account call, Mattermost message or Pi change was made for this correction.
+At this development checkpoint, operator context recovery, activation/resumption, protected history backups and offline native compaction had evidence, while final-image and deployment checks remained pending. The current S01 receipt supersedes those pending checks with their actual later results. SUB01–SUB14 are not collectively satisfied by this protocol proof: live subscription/Mattermost acceptance remains a separate requirement. Development fixtures did not call real account services or send messages.
 
 ## Pinned source references
 
