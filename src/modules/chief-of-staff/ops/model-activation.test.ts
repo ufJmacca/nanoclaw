@@ -5,6 +5,8 @@ import { randomUUID } from 'node:crypto';
 import Database from 'better-sqlite3';
 import { afterEach, expect, it, vi } from 'vitest';
 import { ensureCosBoundarySchema, installCosBoundary, type CosBinding } from '../../../cos-boundary.js';
+import { INBOUND_SCHEMA, OUTBOUND_SCHEMA } from '../../../db/schema.js';
+import { getDeliveredIds, getDueOutboundMessages } from '../../../db/session-db.js';
 import { createConversationState } from '../bridge/conversation-state.js';
 import { ensureModelBudget, reserveSubscriptionAttempt, type SubscriptionActivation } from '../bridge/model-policy.js';
 import { issueActivation, resumeContext } from './model-activation.js';
@@ -15,9 +17,15 @@ afterEach(() => {
 });
 function fixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-model-activation-')),
-    db = new Database(':memory:');
+    db = new Database(':memory:'),
+    inbound = new Database(':memory:'),
+    outbound = new Database(':memory:');
+  inbound.exec(INBOUND_SCHEMA);
+  outbound.exec(OUTBOUND_SCHEMA);
   cleanup.push(() => {
     db.close();
+    inbound.close();
+    outbound.close();
     fs.rmSync(root, { recursive: true, force: true });
   });
   ensureCosBoundarySchema(db);
@@ -50,9 +58,61 @@ function fixture() {
     accountFingerprint,
     contextGeneration: context.generation,
   };
-  const options = { root, db, binding, accountFingerprint, assertAuthority: vi.fn() };
-  return { root, db, binding, state, context, policy, options };
+  const options = { root, db, inbound, outbound, binding, accountFingerprint, assertAuthority: vi.fn() };
+  return { root, db, inbound, outbound, binding, state, context, policy, options };
 }
+it('resumes retained context without reviving cancelled inputs, unsent replies, scheduled output or RPC work', () => {
+  const f = fixture();
+  issueActivation(f.options, f.policy);
+  reserveSubscriptionAttempt(f.db, f.policy, 'old-ingress', randomUUID());
+  fs.writeFileSync(path.join(f.context.directory, 'history'), 'retained discussion');
+  f.inbound.exec(
+    "INSERT INTO messages_in(id,kind,timestamp,content) VALUES('old-input','chat','fixture','cancelled prompt')",
+  );
+  f.outbound.exec(`INSERT INTO messages_out(id,kind,timestamp,content) VALUES
+    ('old-reply','chat','fixture','cancelled answer'),
+    ('old-rpc','system','fixture','cancelled proposal'),
+    ('sent','chat','fixture','already sent');
+    INSERT INTO messages_out(id,kind,timestamp,content,deliver_after) VALUES('scheduled','chat','fixture','later','2999-01-01');
+    INSERT INTO session_state VALUES('continuation','same native thread','fixture')`);
+  f.inbound.exec("INSERT INTO delivered VALUES('sent','platform-id','delivered','original')");
+  f.db
+    .prepare('INSERT INTO cos_ingress_receipts(scope_id,ingress_id,received_at,projected) VALUES(?,?,?,0)')
+    .run(f.binding.scopeId, 'old-ingress', 'fixture');
+  const resumeId = randomUUID();
+  resumeContext(f.options, f.policy.activationId, resumeId);
+  // Fresh owner ingress must not make any pre-pause work deliverable again.
+  f.db.exec("UPDATE cos_identity_boundaries SET ingress_id='fresh',ingress_at='fixture'");
+  const pending = () => getDueOutboundMessages(f.outbound).filter((m) => !getDeliveredIds(f.inbound).has(m.id));
+  expect(pending()).toEqual([]);
+  expect(getDeliveredIds(f.inbound).has('scheduled')).toBe(true);
+  expect(f.inbound.prepare("SELECT status,trigger,content FROM messages_in WHERE id='old-input'").get()).toEqual({
+    status: 'failed',
+    trigger: 0,
+    content: 'cancelled prompt',
+  });
+  expect(f.inbound.prepare("SELECT * FROM delivered WHERE message_out_id='sent'").get()).toMatchObject({
+    platform_message_id: 'platform-id',
+    status: 'delivered',
+    delivered_at: 'original',
+  });
+  expect(f.db.prepare('SELECT projected FROM cos_ingress_receipts').get()).toEqual({ projected: 1 });
+  expect(f.db.prepare('SELECT used FROM cos_model_budgets').get()).toEqual({ used: 1 });
+  expect(f.outbound.prepare('SELECT value FROM session_state').get()).toEqual({ value: 'same native thread' });
+  expect(fs.readFileSync(path.join(f.context.directory, 'history'), 'utf8')).toBe('retained discussion');
+  expect(f.state.current(f.binding, f.policy.accountFingerprint, f.context.generation)).toBe(true);
+  f.outbound.exec(
+    "INSERT INTO messages_out(id,kind,timestamp,content) VALUES('fresh-reply','chat','fixture','fresh answer')",
+  );
+  f.inbound.exec(
+    "INSERT INTO messages_in(id,kind,timestamp,content) VALUES('fresh-input','chat','fixture','fresh prompt')",
+  );
+  resumeContext(f.options, f.policy.activationId, resumeId);
+  expect(pending().map((m) => m.id)).toEqual(['fresh-reply']);
+  expect(f.inbound.prepare("SELECT status FROM messages_in WHERE id='fresh-input'").get()).toEqual({
+    status: 'pending',
+  });
+});
 it('issues exact bounded consent while paused, retains history and never refills charged usage on retry', () => {
   const f = fixture();
   fs.writeFileSync(path.join(f.context.directory, 'history'), 'retained context');
@@ -66,6 +126,46 @@ it('issues exact bounded consent while paused, retains history and never refills
   expect(() => issueActivation(f.options, { ...f.policy, maxAttempts: 3 })).toThrow('activation_conflict');
   expect(fs.readFileSync(path.join(f.context.directory, 'history'), 'utf8')).toBe('retained context');
   expect(fs.statSync(path.join(f.root, 'model-activation.json')).mode & 0o777).toBe(0o600);
+});
+it.each(['queue', 'boundary'])('leaves CoS paused after a %s failure and requires a new deliberate resume', (stage) => {
+  const f = fixture();
+  issueActivation(f.options, f.policy);
+  f.outbound.exec("INSERT INTO messages_out(id,kind,timestamp,content) VALUES('old','chat','fixture','old answer')");
+  const target = stage === 'queue' ? f.inbound : f.db;
+  target.exec(
+    stage === 'queue'
+      ? "CREATE TRIGGER fail_resume BEFORE INSERT ON delivered BEGIN SELECT RAISE(ABORT,'fixture interruption'); END"
+      : "CREATE TRIGGER fail_resume BEFORE UPDATE OF paused ON cos_identity_boundaries WHEN NEW.paused=0 BEGIN SELECT RAISE(ABORT,'fixture interruption'); END",
+  );
+  const id = randomUUID();
+  expect(() => resumeContext(f.options, f.policy.activationId, id)).toThrow('fixture interruption');
+  expect(f.db.prepare('SELECT paused FROM cos_identity_boundaries').get()).toEqual({ paused: 1 });
+  target.exec('DROP TRIGGER fail_resume');
+  expect(() => resumeContext(f.options, f.policy.activationId, id)).toThrow('resume_outcome_uncertain');
+  expect(resumeContext(f.options, f.policy.activationId, randomUUID())).toMatchObject({ status: 'resumed' });
+  expect(getDeliveredIds(f.inbound).has('old')).toBe(true);
+});
+it('reconciles a lost completion receipt without cancelling later work', () => {
+  const f = fixture();
+  issueActivation(f.options, f.policy);
+  const id = randomUUID(),
+    rename = fs.renameSync;
+  vi.spyOn(fs, 'renameSync').mockImplementation((from, to) => {
+    if (
+      String(to) === path.join(f.root, 'context-resumptions', id + '.json') &&
+      JSON.parse(fs.readFileSync(from, 'utf8')).phase === 'complete'
+    )
+      throw new Error('lost receipt');
+    return rename(from, to);
+  });
+  expect(() => resumeContext(f.options, f.policy.activationId, id)).toThrow('lost receipt');
+  vi.restoreAllMocks();
+  f.outbound.exec("INSERT INTO messages_out(id,kind,timestamp,content) VALUES('new','chat','fixture','new answer')");
+  expect(resumeContext(f.options, f.policy.activationId, id)).toMatchObject({
+    status: 'resume_replayed',
+    paused: false,
+  });
+  expect(getDeliveredIds(f.inbound).has('new')).toBe(false);
 });
 it.each(['account', 'generation', 'expiry', 'unbounded', 'extra', 'revoked', 'unpaused', 'authority'])(
   'refuses %s consent before writing activation',

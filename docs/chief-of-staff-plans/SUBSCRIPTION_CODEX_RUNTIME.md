@@ -142,4 +142,6 @@ Finite activation issuance and deliberate resumption now pass development tests.
 
 The pinned native runner now passes an offline compaction fixture: one automatic compaction, retained opaque history after another runner restart, permitted context lookup and denied shell execution. This verifies native protocol behavior with synthetic responses, not live summarization quality or final-image/Pi acceptance.
 
+Explicit resumption now retires cancelled input and undelivered replies/tool requests before reopening the boundary. Tests cover the former stale-delivery gap, queue/boundary interruption and lost receipts. The retained conversation and charged usage remain intact, and replay leaves later work untouched. Complete running-process cancellation acceptance remains required.
+
 Next implementation action: complete revocation/pause cancellation; run combined native renewal/concurrency fixtures and final-image operator gates. Deliver and verify a compatible schema-22 recovery path before claiming release acceptance, then deploy the exact tested artifacts and perform separately authorized live acceptance. This plan itself authorizes no new real account action and changes no running service.

@@ -237,7 +237,11 @@ export async function contextAdminCommand(
           throw new Error('unsafe_activation_state');
         return issueActivation(activationOptions, readPrivate(args.policyFile));
       }
-      if (args.command === 'context-resume') return resumeContext(activationOptions, args.activationId, args.resumeId);
+      if (args.command === 'context-resume') {
+        inbound = openInboundDb(binding.agentGroupId, binding.sessionId);
+        outbound = openOutboundDb(binding.agentGroupId, binding.sessionId);
+        return resumeContext({ ...activationOptions, inbound, outbound }, args.activationId, args.resumeId);
+      }
       if (args.command === 'context-prepare') {
         const context = createConversationState(root, db).prepare(binding, accountFingerprint);
         return {

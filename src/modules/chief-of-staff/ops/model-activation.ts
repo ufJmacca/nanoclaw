@@ -143,7 +143,11 @@ export function issueActivation(o: Options, value: unknown) {
   };
 }
 /** A repeated resume request observes the result; it can never undo a later pause. */
-export function resumeContext(o: Options, activationId: string, resumeId: string) {
+export function resumeContext(
+  o: Options & { inbound: Database.Database; outbound: Database.Database },
+  activationId: string,
+  resumeId: string,
+) {
   boundary(o, false);
   if (
     !/^[a-f0-9]{32}$/.test(activationId) ||
@@ -188,12 +192,33 @@ export function resumeContext(o: Options, activationId: string, resumeId: string
   }
   boundary(o, true);
   writeAtomic(history, file, { version: 1, requestDigest, phase: 'prepared' });
+  // The caller holds quiescent maintenance and the exclusive host lease: no old
+  // worker can append after this snapshot. Retire its work before reopening the
+  // boundary. A crash here leaves CoS paused; a new deliberate resume is required.
+  // Completed/uncertain resume retries above never touch queues again.
+  o.inbound
+    .transaction(() => {
+      boundary(o, true);
+      o.inbound
+        .prepare("UPDATE messages_in SET status='failed',trigger=0 WHERE status IN ('pending','processing')")
+        .run();
+      const insert = o.inbound.prepare(
+        "INSERT OR IGNORE INTO delivered(message_out_id,platform_message_id,status,delivered_at) VALUES(?,NULL,'quarantined_pause',?)",
+      );
+      const now = new Date().toISOString();
+      for (const row of o.outbound.prepare('SELECT id FROM messages_out').iterate() as Iterable<{ id: string }>)
+        insert.run(row.id, now);
+      boundary(o, true);
+    })
+    .immediate();
   o.db
     .transaction(() => {
       boundary(o, true);
       policyFor(o, active(o.root));
       if (digest(active(o.root)) !== digest(policy)) throw new Error('activation_superseded');
       if (remaining(o, policy) < 1) throw new Error('activation_exhausted');
+      // Interrupted pre-pause projection must not recreate cancelled inputs.
+      o.db.prepare('UPDATE cos_ingress_receipts SET projected=1 WHERE scope_id=?').run(o.binding.scopeId);
       o.db
         .prepare(
           'UPDATE cos_identity_boundaries SET paused=0,ingress_id=NULL,ingress_at=NULL WHERE scope_id=? AND paused=1',

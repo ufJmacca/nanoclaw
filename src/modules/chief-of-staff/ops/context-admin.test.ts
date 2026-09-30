@@ -12,7 +12,7 @@ vi.mock('../../../config.js', async () => ({
 import { initDb, closeDb } from '../../../db/connection.js';
 import { runMigrations } from '../../../db/migrations/index.js';
 import { subscribeMattermostChannelStrict } from '../../../channels/mattermost-subscription.js';
-import { resolveSession } from '../../../session-manager.js';
+import { resolveSession, openInboundDb, openOutboundDb } from '../../../session-manager.js';
 import { bindCoordinator } from './bind.js';
 import { initializeTarget, writeAtomic, readTarget } from './target-state.js';
 import { beginMaintenance, confirmQuiescence } from './maintenance.js';
@@ -218,7 +218,22 @@ it('issues consent through the real host command and requires a separate resume;
     activationId: policy.activationId,
     resumeId: randomUUID(),
   };
+  const native = initDb(central);
+  const binding = JSON.parse(
+    (native.prepare('SELECT binding FROM cos_identity_boundaries').get() as { binding: string }).binding,
+  );
+  const output = openOutboundDb(binding.agentGroupId, binding.sessionId, { readonly: false });
+  output.exec("INSERT INTO messages_out(id,kind,timestamp,content) VALUES('cancelled','chat','fixture','old answer')");
+  output.close();
+  closeDb();
   expect(await contextAdminCommand(request, env, dependencies)).toMatchObject({ status: 'resumed', paused: false });
+  initDb(central);
+  const input = openInboundDb(binding.agentGroupId, binding.sessionId);
+  expect(input.prepare("SELECT status FROM delivered WHERE message_out_id='cancelled'").get()).toEqual({
+    status: 'quarantined_pause',
+  });
+  input.close();
+  closeDb();
   const db = new Database(central);
   db.exec('UPDATE cos_identity_boundaries SET paused=1');
   db.close();
