@@ -156,6 +156,16 @@ The fixture uses the same baked development helper/runner image recorded above a
 
 All four native integration tests pass, along with the host build and affected lint. They are included in the mandatory final-image gate for both worker profiles. Newly built final-image execution, full pause/invalidation/operator acceptance, schema-22 recovery, Pi deployment and live subscription acceptance remain outstanding.
 
+## Final-artifact and operator gates
+
+Local release `release-9fc067159699-20260930033629` passed the full Mac pipeline: 1,253 host tests, 165 runner tests, external test-database integration and demonstration, builds and both final ARM64 worker profiles. Each profile passed the four native helper/concurrency tests and the packaged RPC/isolation probe without checkout overrides. Its manifest digest is `8e0067448991a45a15df5b8fa5cdeeccbe06664b73c5fa07474854f8ac8359d4`. The optional `--local-only` release mode stopped before source sync, transfer or deployment; the default still deploys automatically after local gates.
+
+The first preflight refused the accumulated programme ledger because it exceeded the target-receipt reader's 64 KB limit. The repaired execution-ledger reader preserves up to 1 MiB with the same private-file checks; other receipts retain the 64 KB default. It also admits the existing `alignment_in_progress` status. Ten focused tests, typechecking and affected lint pass, followed by the full pipeline above. No ledger history was removed to make the build pass.
+
+The compiled ARM64 host then passed the offline operator walkthrough now checked in as `subscription-operator.integration.mjs`. It uses isolated native databases and synthetic target/quiescence/channel facts. Actual commands prepare context, issue finite consent, quarantine pre-pause output, preserve charged usage and refuse replay that would override a later owner pause. A transient membership observation preserves history; confirmed membership change fences it. Explicit recovery verifies protected backups, preserves the old generation and creates an empty paused generation without valid new consent. The test imports baked compiled application modules and is now required by `host_image`.
+
+The native concurrency fixture additionally delivers the owner's exact pause command through the real controller while a CoS model response is pending. The controller persists pause and invokes actual Docker stop. The test confirms container exit, no completed late result, retained continuation, charged cancelled work and rejection of another model attempt. This uses a fixture stop callback and synthetic channel facts; the live Mattermost adapter, full production container lifecycle and Pi recovery remain separate acceptance. These added gates must pass again in the next complete release identity before deployment.
+
 ## Restricted network transport
 
 The native runtime has Docker networking disabled. Its loopback relay forwards only to a fixed private host Unix socket. The host accepts TLS CONNECT to exact permitted hostnames on port 443, validates every DNS answer as public and dials the selected resolved IP. Query traffic may reach `chatgpt.com`; only the trusted authentication role also admits `auth.openai.com`. API billing, arbitrary destinations, private/LAN addresses, other ports and ordinary proxy HTTP requests are refused.

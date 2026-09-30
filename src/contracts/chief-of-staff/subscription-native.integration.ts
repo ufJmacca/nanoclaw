@@ -9,6 +9,10 @@ import net from 'node:net';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { zstdDecompressSync } from 'node:zlib';
 import { WebSocketServer } from 'ws';
+import Database from 'better-sqlite3';
+import { CosController } from '../../modules/chief-of-staff/bridge/controller.js';
+import { installCosBoundary, type CosBinding } from '../../cos-boundary.js';
+import type { Session } from '../../types.js';
 import { once } from 'node:events';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -393,11 +397,35 @@ try {
 `;
 
 test(
-  'ordinary and CoS native providers share one renewal and retain separate conversations',
+  'ordinary and CoS providers share renewal, retain separate history and stop on owner pause',
   { timeout: 180000 },
   async () => {
     const f = await fixture();
     const closers: Array<() => Promise<void>> = [];
+    const boundary = new Database(':memory:');
+    const binding: CosBinding = {
+      scopeId: 'fixture',
+      agentGroupId: 'group',
+      messagingGroupId: 'messaging',
+      sessionId: 'session',
+      instanceId: 'fixture',
+      channelId: 'private',
+      ownerId: 'owner',
+      botId: 'bot',
+      provider: 'codex',
+    };
+    const session = {
+      id: binding.sessionId,
+      agent_group_id: binding.agentGroupId,
+      messaging_group_id: binding.messagingGroupId,
+      thread_id: null,
+      status: 'active',
+      agent_provider: 'codex',
+    } as Session;
+    installCosBoundary(binding, boundary);
+    boundary.exec('UPDATE cos_identity_boundaries SET paused=0');
+    const admitted = async () =>
+      (boundary.prepare('SELECT paused FROM cos_identity_boundaries').get() as { paused: number }).paused === 0;
     try {
       const store = f.create();
       let renewals = 0;
@@ -411,6 +439,7 @@ test(
       let expired = false;
       const requests: Array<{ role: string; input: string; accepted: boolean }> = [];
       const firstReplies: Array<() => void> = [];
+      let lateReply: (() => void) | undefined;
       const respond = (body: { input?: unknown; generate?: boolean }, send: (events: unknown[]) => void) => {
         if (body.generate === false) {
           send([
@@ -460,7 +489,8 @@ test(
         if (!expired) {
           firstReplies.push(reply);
           if (firstReplies.length === 2) firstReplies.forEach((send) => send());
-        } else reply();
+        } else if (input.includes('cancelled explicit follow-up.')) lateReply = reply;
+        else reply();
       };
       const accepted = (request: IncomingMessage) => !expired || request.headers.authorization === 'Bearer ' + jwt(1);
       const failure = JSON.stringify({
@@ -502,7 +532,7 @@ test(
         websocket.handleUpgrade(request, socket, head, (client) => {
           client.on('message', (message) =>
             respond(JSON.parse(message.toString()), (events) =>
-              events.forEach((event) => client.send(JSON.stringify(event))),
+              events.forEach((event) => client.send(JSON.stringify(event), () => {})),
             ),
           );
         });
@@ -515,9 +545,9 @@ test(
       const attempts = new Set<string>();
       const turns = await startSubscriptionTurns({
         socket: path.join(f.root, 'turns.sock'),
-        authorize: async () => true,
+        authorize: admitted,
         reserve: (id) => {
-          if (attempts.has(id) || attempts.size >= 3) return false;
+          if (attempts.has(id) || attempts.size >= 4) return false;
           attempts.add(id);
           return true;
         },
@@ -528,7 +558,7 @@ test(
         const broker = await startSubscriptionBroker({
           socket: path.join(f.root, role + '.sock'),
           store: shared,
-          authorize: async () => true,
+          authorize: role === 'cos' ? admitted : async () => true,
         });
         closers.push(() => broker.close());
         const gateway = await f.gateway(
@@ -625,9 +655,65 @@ test(
       assert.equal(attempts.size, 3);
       assert.equal(requests.filter((request) => request.accepted).length, 4);
       assert.equal(fs.existsSync(path.join(f.state, 'operation.json')), false);
+
+      const cancelled = run('cos', 'cancelled');
+      void cancelled.catch(() => {});
+      const deadline = Date.now() + 15000;
+      while (!lateReply && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
+      assert.ok(lateReply, 'native CoS turn did not reach the pending-response barrier');
+      const container = 'cos-provider-fixture-' + path.basename(f.root).toLowerCase() + '-cos-cancelled';
+      let stopped: Promise<unknown> | undefined;
+      const unexpected = () => {
+        throw new Error('pause attempted a model or database effect');
+      };
+      const controller = new CosController({
+        db: boundary,
+        enabled: () => false,
+        facts: async () => ({
+          id: 'private',
+          type: 'P',
+          delete_at: 0,
+          members: ['owner', 'bot'],
+          activeSubscription: true,
+        }),
+        session: () => session,
+        decide: unexpected,
+        acknowledge: unexpected,
+        project: unexpected,
+        wake: unexpected,
+        stop: (id) => {
+          assert.equal(id, binding.sessionId);
+          stopped = docker(['stop', '--time', '2', container]);
+          void stopped.catch(() => {});
+        },
+      });
+      await controller.ingress(binding, {
+        channelType: 'mattermost',
+        platformId: 'mattermost:fixture:private',
+        threadId: null,
+        message: {
+          id: 'pause-fixture',
+          kind: 'chat',
+          timestamp: new Date().toISOString(),
+          content: JSON.stringify({ senderId: 'mattermost:owner', text: 'cos pause automation' }),
+        },
+      });
+      assert.ok(stopped, 'verified owner pause must stop the active native container');
+      assert.equal(await admitted(), false);
+      await stopped;
+      await assert.rejects(cancelled);
+      await assert.rejects(docker(['inspect', container]));
+      lateReply();
+      assert.equal(fs.existsSync(path.join(f.root, 'cos', 'result-cancelled.json')), false);
+      assert.equal(fs.readFileSync(path.join(f.root, 'cos', 'continuation'), 'utf8'), identities[1]);
+      const denied = await run('cos', 'paused');
+      assert.ok(denied.some((event) => event.type === 'error'));
+      assert.equal(requests.length, 5, 'pause must prevent a new model request or a replay');
+      assert.equal(attempts.size, 4, 'cancelled outcome remains charged; refused attempts do not refill usage');
     } finally {
       await Promise.all(closers.map((close) => close()));
       await f.close();
+      boundary.close();
     }
   },
 );
