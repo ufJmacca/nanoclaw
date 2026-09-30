@@ -6,6 +6,9 @@ import path from 'node:path';
 import os from 'node:os';
 import https from 'node:https';
 import net from 'node:net';
+import type { IncomingMessage, ServerResponse } from 'node:http';
+import { zstdDecompressSync } from 'node:zlib';
+import { WebSocketServer } from 'ws';
 import { once } from 'node:events';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -13,10 +16,17 @@ import { createSubscriptionAuthStore } from '../../providers/codex-subscription-
 import { createSubscriptionNativeCheck } from '../../providers/codex-subscription-runner.js';
 import { startSubscriptionEgress } from '../../modules/chief-of-staff/bridge/subscription-egress.js';
 import { safeHostEnvironment } from '../../host-environment.js';
+import { startSubscriptionBroker } from '../../providers/codex-subscription-broker.js';
+import { startSubscriptionTurns } from '../../modules/chief-of-staff/bridge/subscription-turns.js';
 
 const execute = promisify(execFile);
 const docker = (args: string[]) =>
-  execute('docker', args, { env: safeHostEnvironment('docker'), timeout: 45000, maxBuffer: 16384 });
+  execute('docker', args, {
+    env: safeHostEnvironment('docker'),
+    timeout: 45000,
+    killSignal: 'SIGKILL',
+    maxBuffer: 16384,
+  });
 const jwt = (generation: number) =>
   Buffer.from('{}').toString('base64url') +
   '.' +
@@ -119,6 +129,7 @@ async function fixture() {
   let refreshes = 0,
     held: (() => void) | undefined,
     holdRefresh = false;
+  let modelResponse: ((request: IncomingMessage, response: ServerResponse) => Promise<void>) | undefined;
   const backend = https.createServer(
     { key: fs.readFileSync(key), cert: fs.readFileSync(path.join(root, 'server.pem')) },
     async (request, response) => {
@@ -126,7 +137,9 @@ async function fixture() {
         response.writeHead(status, { 'content-type': 'application/json' });
         response.end(JSON.stringify(value));
       };
-      if (request.url === '/oauth/token') {
+      if (request.url?.endsWith('/responses') && modelResponse) {
+        await modelResponse(request, response);
+      } else if (request.url === '/oauth/token') {
         let raw = '';
         for await (const chunk of request) raw += String(chunk);
         const body = request.headers['content-type']?.includes('application/json')
@@ -246,11 +259,31 @@ async function fixture() {
     createSubscriptionAuthStore({ sourceFile: source, stateDirectory: state, assertAuthority() {}, nativeCheck });
   return {
     root,
+    hostRoot,
+    image: image!,
+    backend,
+    trackContainer(name: string) {
+      names.add(name);
+    },
     source,
     state,
     inspections,
     create,
     refreshes: () => refreshes,
+    modelResponse(handler: (request: IncomingMessage, response: ServerResponse) => Promise<void>) {
+      modelResponse = handler;
+    },
+    gateway(socketPath: string, authorize: () => Promise<boolean>) {
+      return startSubscriptionEgress({
+        socketPath,
+        role: 'query',
+        authorize,
+        dependencies: {
+          resolve: async () => [{ address: '8.8.8.8', family: 4 }],
+          connect: () => net.createConnection({ host: '127.0.0.1', port }),
+        },
+      });
+    },
     interrupt: (stage: 'in-flight' | 'after-exit') => {
       interrupt = stage;
     },
@@ -306,3 +339,295 @@ for (const stage of ['in-flight', 'after-exit'] as const)
       }
     },
   );
+
+// Test driver only: providers and the pinned executable remain baked in /app/src.
+// Each role gets a separate container, HOME, broker socket and continuation file.
+// Ordinary networking is mapped to the fixture relay only in its native child;
+// proxying Bun's parent HTTP client would also intercept the credential socket.
+const providerDriver = `
+import fs from 'node:fs';
+import assert from 'node:assert/strict';
+import { CodexProvider } from '/app/src/providers/codex.ts';
+import { CosCodexProvider } from '/app/src/providers/codex-cos.ts';
+import { startSubscriptionRelay } from '/app/src/cos-subscription-relay.ts';
+const [role, stage] = process.argv.slice(2);
+fs.mkdirSync('/home/node/.codex', { recursive: true, mode: 0o700 });
+const relay = await startSubscriptionRelay('/run/cos/subscription.sock');
+if (role === 'ordinary') {
+  const executable = Bun.which('codex');
+  assert.ok(executable && /^[a-zA-Z0-9/_.-]+$/.test(executable));
+  fs.mkdirSync('/home/node/fixture-bin', { recursive: true });
+  fs.writeFileSync('/home/node/fixture-bin/codex', '#!/bin/sh\\nexport HTTPS_PROXY=' + relay.proxyUrl + ' HTTP_PROXY=' + relay.proxyUrl + ' ALL_PROXY=' + relay.proxyUrl + ' NO_PROXY=\\nexec ' + executable + ' "$@"\\n', { mode: 0o700 });
+  process.env.PATH = '/home/node/fixture-bin:' + process.env.PATH;
+  const version = Bun.spawnSync(['codex', '--version'], { env: { ...process.env }, stdout: 'pipe', stderr: 'pipe' });
+  assert.equal(version.exitCode, 0, version.stderr.toString());
+}
+fs.mkdirSync('/workspace/agent', { recursive: true });
+const saved = '/home/node/continuation';
+const before = fs.existsSync(saved) ? fs.readFileSync(saved, 'utf8') : undefined;
+assert.equal(!!before, stage !== 'initial');
+const provider = role === 'cos'
+  ? new CosCodexProvider({ model: 'gpt-6-astra', proxyUrl: relay.proxyUrl })
+  : new CodexProvider({ env: { NANOCLAW_CODEX_SUBSCRIPTION: '1', CODEX_MODEL: 'gpt-6-astra' } });
+const query = provider.query({
+  prompt: stage === 'initial' ? 'Remember the ' + role + '-private-canary.' : stage + ' explicit follow-up.',
+  cwd: '/workspace/agent', continuation: before,
+  systemContext: { instructions: 'Offline fixture. Return one short answer. Do not call tools.' }
+});
+query.end();
+const events = [];
+try {
+  for await (const event of query.events) {
+    events.push(event);
+    if (event.type === 'init') {
+      if (before) assert.equal(event.continuation, before);
+      fs.writeFileSync(saved, event.continuation, { mode: 0o600 });
+    }
+  }
+  assert.ok(fs.existsSync(saved), JSON.stringify(events));
+  fs.writeFileSync('/home/node/result-' + stage + '.json', JSON.stringify(events), { mode: 0o600 });
+} finally {
+  query.abort();
+  await relay.close();
+}
+`;
+
+test(
+  'ordinary and CoS native providers share one renewal and retain separate conversations',
+  { timeout: 180000 },
+  async () => {
+    const f = await fixture();
+    const closers: Array<() => Promise<void>> = [];
+    try {
+      const store = f.create();
+      let renewals = 0;
+      const shared = {
+        ...store,
+        refresh: async (generation: string) => {
+          renewals++;
+          return store.refresh(generation);
+        },
+      };
+      let expired = false;
+      const requests: Array<{ role: string; input: string; accepted: boolean }> = [];
+      const firstReplies: Array<() => void> = [];
+      const respond = (body: { input?: unknown; generate?: boolean }, send: (events: unknown[]) => void) => {
+        if (body.generate === false) {
+          send([
+            {
+              type: 'response.completed',
+              response: { id: 'warmup', object: 'response', status: 'completed', output: [] },
+            },
+          ]);
+          return;
+        }
+        const input = JSON.stringify(body.input);
+        assert.equal(input.includes(jwt(0)) || input.includes(jwt(1)) || input.includes('fixture-refresh-'), false);
+        const role = input.includes('ordinary-private-canary') ? 'ordinary' : 'cos';
+        assert.ok(input.includes(role + '-private-canary'));
+        assert.equal(input.includes((role === 'cos' ? 'ordinary' : 'cos') + '-private-canary'), false);
+        requests.push({ role, input, accepted: true });
+        const id = 'fixture-' + requests.length;
+        const item = {
+          id,
+          type: 'message',
+          role: 'assistant',
+          status: 'completed',
+          content: [{ type: 'output_text', text: 'Fixture answer', annotations: [] }],
+        };
+        const events = [
+          { type: 'response.created', response: { id, object: 'response', status: 'in_progress', output: [] } },
+          {
+            type: 'response.output_item.added',
+            output_index: 0,
+            item: { ...item, status: 'in_progress', content: [] },
+          },
+          { type: 'response.output_item.done', output_index: 0, item },
+          {
+            type: 'response.completed',
+            response: {
+              id,
+              object: 'response',
+              status: 'completed',
+              output: [item],
+              usage: { input_tokens: 10, output_tokens: 3, total_tokens: 13 },
+            },
+          },
+        ];
+        const reply = () => send(events);
+        // Neither first query can finish until both native providers have reached
+        // the synthetic endpoint, proving overlap rather than sequential clients.
+        if (!expired) {
+          firstReplies.push(reply);
+          if (firstReplies.length === 2) firstReplies.forEach((send) => send());
+        } else reply();
+      };
+      const accepted = (request: IncomingMessage) => !expired || request.headers.authorization === 'Bearer ' + jwt(1);
+      const failure = JSON.stringify({
+        error: { message: 'Synthetic expired access', type: 'invalid_request_error', code: 'invalid_api_key' },
+      });
+      f.modelResponse(async (request, response) => {
+        if (!accepted(request)) {
+          response.writeHead(401, { 'content-type': 'application/json' });
+          response.end(failure);
+          return;
+        }
+        if (request.method !== 'POST') {
+          response.writeHead(400);
+          response.end();
+          return;
+        }
+        const chunks: Buffer[] = [];
+        for await (const chunk of request) chunks.push(Buffer.from(chunk));
+        const raw = Buffer.concat(chunks);
+        respond(
+          JSON.parse((request.headers['content-encoding'] === 'zstd' ? zstdDecompressSync(raw) : raw).toString()),
+          (events) => {
+            response.writeHead(200, { 'content-type': 'text/event-stream' });
+            response.end(events.map((event) => 'data: ' + JSON.stringify(event) + '\n\n').join(''));
+          },
+        );
+      });
+      const websocket = new WebSocketServer({ noServer: true });
+      f.backend.on('upgrade', (request, socket, head) => {
+        if (!accepted(request)) {
+          socket.end(
+            'HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: ' +
+              Buffer.byteLength(failure) +
+              '\r\nConnection: close\r\n\r\n' +
+              failure,
+          );
+          return;
+        }
+        websocket.handleUpgrade(request, socket, head, (client) => {
+          client.on('message', (message) =>
+            respond(JSON.parse(message.toString()), (events) =>
+              events.forEach((event) => client.send(JSON.stringify(event))),
+            ),
+          );
+        });
+      });
+      closers.push(async () => {
+        for (const client of websocket.clients) client.terminate();
+        await new Promise<void>((resolve) => websocket.close(() => resolve()));
+      });
+      fs.writeFileSync(path.join(f.root, 'driver.ts'), providerDriver);
+      const attempts = new Set<string>();
+      const turns = await startSubscriptionTurns({
+        socket: path.join(f.root, 'turns.sock'),
+        authorize: async () => true,
+        reserve: (id) => {
+          if (attempts.has(id) || attempts.size >= 3) return false;
+          attempts.add(id);
+          return true;
+        },
+      });
+      closers.push(() => turns.close());
+      for (const role of ['ordinary', 'cos']) {
+        fs.mkdirSync(path.join(f.root, role), { mode: 0o700 });
+        const broker = await startSubscriptionBroker({
+          socket: path.join(f.root, role + '.sock'),
+          store: shared,
+          authorize: async () => true,
+        });
+        closers.push(() => broker.close());
+        const gateway = await f.gateway(
+          path.join(f.root, role + '-egress.sock'),
+          role === 'cos' ? turns.allowed : async () => true,
+        );
+        closers.push(() => gateway.close());
+      }
+      const run = async (role: string, stage: string) => {
+        const mounts = [
+          `src=${f.hostRoot}/${role},dst=/home/node`,
+          `src=${f.hostRoot}/driver.ts,dst=/fixture/driver.ts,readonly`,
+          `src=${f.hostRoot}/ca.pem,dst=/etc/ssl/certs/ca-certificates.crt,readonly`,
+          `src=${f.hostRoot}/${role}.sock,dst=/run/nanoclaw/codex-credentials.sock,readonly`,
+          `src=${f.hostRoot}/${role}-egress.sock,dst=/run/cos/subscription.sock,readonly`,
+          ...(role === 'cos' ? [`src=${f.hostRoot}/turns.sock,dst=/run/cos/turn.sock,readonly`] : []),
+        ];
+        const name = 'cos-provider-fixture-' + path.basename(f.root).toLowerCase() + '-' + role + '-' + stage;
+        f.trackContainer(name);
+        await docker([
+          'run',
+          '--rm',
+          '--name',
+          name,
+          '--pull=never',
+          '--network',
+          'none',
+          '--read-only',
+          '--user',
+          '1000:1000',
+          '-w',
+          '/tmp',
+          '--cap-drop=ALL',
+          '--security-opt=no-new-privileges',
+          '--tmpfs',
+          '/tmp:rw,nosuid,nodev',
+          '--tmpfs',
+          '/workspace:rw,nosuid,nodev,uid=1000,gid=1000',
+          ...mounts.flatMap((mount) => ['--mount', 'type=bind,' + mount]),
+          '-e',
+          'HOME=/home/node',
+          '--entrypoint',
+          'bun',
+          f.image,
+          '/fixture/driver.ts',
+          role,
+          stage,
+        ]);
+        return JSON.parse(fs.readFileSync(path.join(f.root, role, 'result-' + stage + '.json'), 'utf8')) as Array<{
+          type: string;
+          text?: string;
+        }>;
+      };
+      const initial = await Promise.all(['ordinary', 'cos'].map((role) => run(role, 'initial')));
+      assert.equal(firstReplies.length, 2);
+      initial.forEach((events) => {
+        assert.equal(
+          events.some((event) => event.type === 'error'),
+          false,
+        );
+        assert.ok(events.some((event) => event.type === 'result' && event.text?.includes('Fixture answer')));
+      });
+      const identities = ['ordinary', 'cos'].map((role) =>
+        fs.readFileSync(path.join(f.root, role, 'continuation'), 'utf8'),
+      );
+      assert.notEqual(identities[0].split(':').at(-1), identities[1].split(':').at(-1));
+      expired = true;
+      const interrupted = await Promise.all(['ordinary', 'cos'].map((role) => run(role, 'expired')));
+      interrupted.forEach((events) => assert.ok(events.some((event) => event.type === 'error')));
+      assert.equal(renewals, 2);
+      assert.equal(f.refreshes(), 1);
+      assert.equal(f.inspections.length, 1);
+      assert.equal(requests.filter((request) => request.accepted).length, 2, 'failed turns must not be replayed');
+      const resumed = await Promise.all(['ordinary', 'cos'].map((role) => run(role, 'resumed')));
+      resumed.forEach((events) => {
+        assert.equal(
+          events.some((event) => event.type === 'error'),
+          false,
+        );
+        assert.ok(events.some((event) => event.type === 'result' && event.text?.includes('Fixture answer')));
+      });
+      for (const [index, role] of ['ordinary', 'cos'].entries()) {
+        assert.equal(fs.readFileSync(path.join(f.root, role, 'continuation'), 'utf8'), identities[index]);
+        const cache = JSON.parse(fs.readFileSync(path.join(f.root, role, '.codex/auth.json'), 'utf8'));
+        assert.equal(cache.tokens.refresh_token, '');
+        assert.equal(cache.tokens.access_token, jwt(1));
+        assert.ok(
+          requests.some(
+            (request) =>
+              request.role === role && request.accepted && request.input.includes('resumed explicit follow-up.'),
+          ),
+        );
+      }
+      assert.equal(attempts.size, 3);
+      assert.equal(requests.filter((request) => request.accepted).length, 4);
+      assert.equal(fs.existsSync(path.join(f.state, 'operation.json')), false);
+    } finally {
+      await Promise.all(closers.map((close) => close()));
+      await f.close();
+    }
+  },
+);
