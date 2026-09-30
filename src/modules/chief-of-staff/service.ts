@@ -43,9 +43,9 @@ export class CosService {
         await this.store.database.run((client) => client.query('SELECT 1'));
         if (this.stopped) return;
         this.status = 'ready';
-        const rows = this.dependencies.db
-          .prepare('SELECT binding FROM cos_identity_boundaries WHERE paused=0')
-          .all() as Array<{ binding: string }>;
+        const rows = this.dependencies.db.prepare('SELECT binding FROM cos_identity_boundaries').all() as Array<{
+          binding: string;
+        }>;
         for (const row of rows) {
           if (this.stopped) return;
           await this.runtime.pump(JSON.parse(row.binding) as CosBinding);

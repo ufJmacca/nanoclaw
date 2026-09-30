@@ -12,6 +12,9 @@ import { validPrivateChannel, type ChannelFacts } from './bridge/identity.js';
 import type { PriorityStore } from './store/priorities.js';
 import type { CoordinatorLauncher } from './bridge/coordinator-launcher.js';
 import { createTurnAuthorization } from './bridge/turn-authorization.js';
+import { resolveKnowledgeContext } from './knowledge/context.js';
+import { digest, type Context } from './domain/contracts.js';
+import { KnowledgeInvalidation } from './knowledge/invalidation.js';
 
 export type RuntimeDependencies = {
   db: Database.Database;
@@ -29,6 +32,13 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
   const d = dependencies;
   let disposed = false;
   const enabled = () => !disposed && d.enabled && !!d.store && (d.admission?.() ?? true);
+  const knowledgeAllowed = async (session: Session, context: Context): Promise<boolean> => {
+    if (!d.store?.knowledge) return true;
+    const retained = resolveKnowledgeContext(session, context, d.db);
+    if (!retained || (await d.store.knowledge.contextReady(retained)).status !== 'ok') return false;
+    const current = resolveKnowledgeContext(session, context, d.db);
+    return !!current && digest(current) === digest(retained);
+  };
   const controller = new CosController({
     db: d.db,
     enabled,
@@ -88,6 +98,9 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
         },
       })
     : null;
+  const invalidations = d.store?.knowledge
+    ? new KnowledgeInvalidation({ db: d.db, store: d.store.knowledge, session: d.session, stop: d.stop })
+    : null;
   setCosBoundaryHooks({
     executionReady: (binding) => enabled() && (d.launcher?.ready(binding) ?? false),
     launch: async (binding, session) => {
@@ -99,7 +112,12 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
           local: () => controller.localContext(session),
           verify: async () => {
             const context = await controller.context(session);
-            return context && d.store && (await d.store.context(context)).status === 'ok' ? context : null;
+            return context &&
+              d.store &&
+              (await d.store.context(context)).status === 'ok' &&
+              (await knowledgeAllowed(session, context))
+              ? context
+              : null;
           },
         }),
       );
@@ -112,18 +130,30 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
       const context = await controller.context(session);
       // The authenticated private RPC may return an unavailable receipt during a DB outage.
       // Ordinary model text still requires a successful current scoped store check.
-      return !!context && (purpose === 'rpc' || (await d.store.context(context)).status === 'ok');
+      return (
+        !!context &&
+        (purpose === 'rpc' ||
+          ((await d.store.context(context)).status === 'ok' && (await knowledgeAllowed(session, context))))
+      );
     },
   });
   if (enabled())
     registerDeliveryAction(
       'cos_rpc',
-      createRpcHandler({ resolveContext: (session) => controller.context(session), store: d.store! }),
+      createRpcHandler({
+        resolveContext: (session) => controller.context(session),
+        store: d.store!,
+        knowledge: d.store!.knowledge,
+        resolveKnowledgeContext: async (session, context) => resolveKnowledgeContext(session, context, d.db),
+      }),
     );
   return {
     controller,
     pump: async (binding: CosBinding) => {
+      if (enabled()) await invalidations?.drain(binding);
       if (enabled()) await outbox?.drain(binding);
+      // An approved source change may enqueue invalidation in this same pump.
+      if (enabled()) await invalidations?.drain(binding);
     },
     dispose: () => {
       disposed = true;

@@ -17,6 +17,12 @@ import {
 } from '../../modules/chief-of-staff/knowledge/store.js';
 import { connectionFault } from './connection-fault.js';
 import { PriorityStore } from '../../modules/chief-of-staff/store/priorities.js';
+import Database from 'better-sqlite3';
+import { KnowledgeInvalidation } from '../../modules/chief-of-staff/knowledge/invalidation.js';
+import { installCosBoundary, type CosBinding } from '../../cos-boundary.js';
+import { ensureConversationSchema } from '../../modules/chief-of-staff/bridge/conversation-state.js';
+import { digest } from '../../modules/chief-of-staff/domain/contracts.js';
+import type { Session } from '../../types.js';
 
 const scope = 'knowledge-' + randomUUID(),
   other = scope + '-other';
@@ -314,6 +320,19 @@ test('S02-T06: source revocation reuses exact owner approval, fences context and
   );
   assert.equal((await priorities.apply(scope, String(proposed.proposal_id))).status, 'ok');
   assert.equal((await priorities.apply(scope, String(proposed.proposal_id))).status, 'ok');
+  const invalidations = await store.pendingInvalidations(scope);
+  assert.equal(invalidations.status, 'ok');
+  const job = (invalidations.items as Array<{ id: string }>).find(
+    (item) => item.id === 'knowledge-proposal-' + proposed.proposal_id,
+  );
+  assert.ok(job);
+  assert.equal((await store.acknowledgeInvalidation(other, job.id)).status, 'denied');
+  assert.equal((await store.acknowledgeInvalidation(scope, job.id)).status, 'ok');
+  assert.equal((await store.acknowledgeInvalidation(scope, job.id)).status, 'ok');
+  assert.equal(
+    ((await store.pendingInvalidations(scope)).items as Array<{ id: string }>).some((item) => item.id === job.id),
+    false,
+  );
   assert.deepEqual(await priorities.propose(context, request, change), proposed);
   assert.equal((await store.contextReady(ctx)).status, 'denied');
   assert.equal(
@@ -446,4 +465,82 @@ test('S02-T06: a correction after preview makes the approved source action confl
       .status,
     'ok',
   );
+});
+test('S02-T10: the durable revocation job invalidates exposed native state while preserving pause and retry safety', async () => {
+  const a = await imported(note('native-invalidation', 'NativeInvalidationCanary source.'));
+  const ctx = { ...context, generation: randomUUID() };
+  assert.equal((await store.search(ctx, { query: 'NativeInvalidationCanary' })).status, 'ok');
+  const priorities = new PriorityStore(store.database, store);
+  const proposal = await priorities.propose(context, randomUUID(), {
+    kind: 'source_revoke',
+    source_id: String(a.source_id),
+    expected_version: 1,
+    reason: 'Withdraw synthetic source from context',
+  });
+  assert.equal(proposal.status, 'ok');
+  assert.equal(
+    (
+      await priorities.decide(
+        { ...context, ingressId: randomUUID() },
+        String(proposal.proposal_id),
+        String(proposal.confirmation_token),
+        'approve',
+      )
+    ).status,
+    'ok',
+  );
+  assert.equal((await priorities.apply(scope, String(proposal.proposal_id))).status, 'ok');
+  const db = new Database(':memory:');
+  try {
+    const binding: CosBinding = {
+      scopeId: scope,
+      agentGroupId: scope,
+      messagingGroupId: scope,
+      sessionId: scope,
+      provider: 'codex',
+      instanceId: 'fixture-instance',
+      channelId: scope,
+      ownerId: 'fixture-owner',
+      botId: 'fixture-bot',
+    };
+    const session = {
+      id: scope,
+      agent_group_id: scope,
+      messaging_group_id: scope,
+      thread_id: null,
+      status: 'active',
+      agent_provider: 'codex',
+    } as Session;
+    installCosBoundary(binding, db);
+    ensureConversationSchema(db);
+    db.prepare(
+      "INSERT INTO cos_conversation_states(scope_id,binding_digest,account_fingerprint,generation,status,updated_at) VALUES(?,?,?,?,'active',?)",
+    ).run(scope, digest(binding), 'a'.repeat(64), ctx.generation, new Date().toISOString());
+    let stops = 0;
+    const dependencies = {
+      db,
+      store,
+      session: () => session,
+      stop: (id: string) => {
+        assert.equal(id, scope);
+        stops++;
+        assert.deepEqual(db.prepare('SELECT status,generation FROM cos_conversation_states').get(), {
+          status: 'invalidated',
+          generation: ctx.generation,
+        });
+        assert.deepEqual(db.prepare('SELECT paused FROM cos_identity_boundaries').get(), { paused: 1 });
+      },
+    };
+    await new KnowledgeInvalidation(dependencies).drain(binding);
+    assert.equal(stops, 1);
+    assert.deepEqual((await store.pendingInvalidations(scope)).items, []);
+    await new KnowledgeInvalidation(dependencies).drain(binding);
+    assert.equal(stops, 1);
+    assert.equal((await store.contextReady(ctx)).status, 'denied');
+    const clean = await store.search({ ...ctx, generation: randomUUID() }, { query: 'NativeInvalidationCanary' });
+    assert.equal(clean.status, 'ok');
+    assert.deepEqual(clean.items, []);
+  } finally {
+    db.close();
+  }
 });

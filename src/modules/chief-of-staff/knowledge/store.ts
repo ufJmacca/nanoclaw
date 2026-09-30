@@ -276,6 +276,34 @@ export class KnowledgeStore {
   async contextReady(context: KnowledgeContext): Promise<Result> {
     return this.transaction(async (client) => ({ status: (await this.current(client, context)) ? 'ok' : 'denied' }));
   }
+  /** Trusted host reconciliation, including paused scopes. No agent RPC exposes these methods. */
+  async pendingInvalidations(scopeId: string): Promise<Result> {
+    return this.transaction(async (client) => ({
+      status: 'ok',
+      items: (
+        await client.query(
+          "SELECT id FROM cos.outbox WHERE scope_id=$1 AND kind='knowledge_invalidate' AND delivered_at IS NULL ORDER BY created_at,id LIMIT 20",
+          [scopeId],
+        )
+      ).rows,
+    }));
+  }
+  async acknowledgeInvalidation(scopeId: string, id: string): Promise<Result> {
+    return this.transaction(
+      async (client) => ({
+        status:
+          (
+            await client.query(
+              "UPDATE cos.outbox SET delivered_at=COALESCE(delivered_at,clock_timestamp()) WHERE scope_id=$1 AND id=$2 AND kind='knowledge_invalidate' RETURNING id",
+              [scopeId, id],
+            )
+          ).rowCount === 1
+            ? 'ok'
+            : 'denied',
+      }),
+      true,
+    );
+  }
   async search(context: KnowledgeContext, input: Search): Promise<Result> {
     if (
       typeof input?.query !== 'string' ||
