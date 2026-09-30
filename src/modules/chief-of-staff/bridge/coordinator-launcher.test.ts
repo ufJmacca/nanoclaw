@@ -2,6 +2,8 @@ import { describe, it, expect, vi } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import http from 'node:http';
+import { randomUUID } from 'node:crypto';
 import Database from 'better-sqlite3';
 import type { Session } from '../../../types.js';
 import type { CosBinding } from '../../../cos-boundary.js';
@@ -72,11 +74,28 @@ describe('S01 coordinator admission', () => {
       };
       fs.writeFileSync(path.join(target, 'model-activation.json'), JSON.stringify(policy), { mode: 0o600 });
       expect(launcher.ready(binding)).toBe(true);
-      const launch = await launcher.prepare(binding, { id: 'session' } as Session, async () => 'ingress');
+      const authorize = vi.fn(async (_mode?: 'poll'): Promise<string | null> => 'ingress');
+      const launch = await launcher.prepare(binding, { id: 'session' } as Session, authorize);
       expect(launch.args).toContain(`type=bind,src=${context.directory},dst=/home/node/.codex`);
       expect(launch.args.some((arg) => arg.includes('dst=/run/cos/turn.sock'))).toBe(true);
       expect(launch.args.join(' ')).not.toContain('fixture-access');
       expect(launcher.context(binding)).toEqual(context);
+      // A still-valid polling snapshot must not admit a new turn after remote revocation.
+      authorize.mockImplementation(async (mode) => (mode === 'poll' ? 'ingress' : null));
+      const turnSocket = path.join(
+        target,
+        fs.readdirSync(target).find((name) => name.startsWith('model-'))!,
+        'turn.sock',
+      );
+      const status = await new Promise<number | undefined>((resolve, reject) => {
+        const request = http.request({ socketPath: turnSocket, path: '/begin', method: 'POST' }, (response) => {
+          response.resume();
+          response.once('end', () => resolve(response.statusCode));
+        });
+        request.once('error', reject);
+        request.end(JSON.stringify({ attemptId: randomUUID() }));
+      });
+      expect(status).toBe(403);
       launcher.invalidate(binding.scopeId);
       expect(launcher.ready(binding)).toBe(false);
     } finally {

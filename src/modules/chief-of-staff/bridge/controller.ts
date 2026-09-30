@@ -101,7 +101,8 @@ export class CosController {
     await d.wake(session);
     return true;
   }
-  async context(session: Session): Promise<Context | null> {
+  /** Synchronous fence for pause, current ingress, binding and module admission. */
+  localContext(session: Session): Context | null {
     const d = this.dependencies;
     if (!d.enabled()) return null;
     const boundary = cosBoundary(session, d.db);
@@ -111,11 +112,6 @@ export class CosController {
       at = Date.parse(boundary.ingressAt);
     if (!Number.isFinite(at) || at < now - 300_000 || at > now + 30_000) return null;
     const binding = boundary.binding;
-    if (!validPrivateChannel(binding, await d.facts(binding))) return null;
-    // A pause may have arrived while the remote membership check was in flight.
-    const current = cosBoundary(session, d.db);
-    if (!current.restricted || current.paused || !current.binding || current.ingressId !== boundary.ingressId)
-      return null;
     return {
       scopeId: binding.scopeId,
       ownerId: binding.ownerId,
@@ -123,5 +119,19 @@ export class CosController {
       agentGroupId: binding.agentGroupId,
       ingressId: boundary.ingressId,
     };
+  }
+  async context(session: Session): Promise<Context | null> {
+    const context = this.localContext(session);
+    if (!context) return null;
+    const boundary = cosBoundary(session, this.dependencies.db);
+    if (
+      !boundary.restricted ||
+      !boundary.binding ||
+      !validPrivateChannel(boundary.binding, await this.dependencies.facts(boundary.binding))
+    )
+      return null;
+    // A pause, disabled module or newer ingress may arrive during the remote check.
+    const current = this.localContext(session);
+    return current && digest(current) === digest(context) ? current : null;
   }
 }

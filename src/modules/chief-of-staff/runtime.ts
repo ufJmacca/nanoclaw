@@ -11,6 +11,7 @@ import { createRpcHandler } from './bridge/rpc.js';
 import { validPrivateChannel, type ChannelFacts } from './bridge/identity.js';
 import type { PriorityStore } from './store/priorities.js';
 import type { CoordinatorLauncher } from './bridge/coordinator-launcher.js';
+import { createTurnAuthorization } from './bridge/turn-authorization.js';
 
 export type RuntimeDependencies = {
   db: Database.Database;
@@ -91,14 +92,17 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
     executionReady: (binding) => enabled() && (d.launcher?.ready(binding) ?? false),
     launch: async (binding, session) => {
       if (!d.launcher || !enabled()) throw new Error('restricted_launch_denied');
-      return d.launcher.prepare(binding, session, async () => {
-        if (!enabled()) return null;
-        const context = await controller.context(session);
-        if (!context || !d.store || (await d.store.context(context)).status !== 'ok' || !enabled()) return null;
-        // A pause or newer ingress may arrive while PostgreSQL is responding.
-        const current = await controller.context(session);
-        return enabled() && current?.ingressId === context.ingressId ? context.ingressId : null;
-      });
+      return d.launcher.prepare(
+        binding,
+        session,
+        createTurnAuthorization({
+          local: () => controller.localContext(session),
+          verify: async () => {
+            const context = await controller.context(session);
+            return context && d.store && (await d.store.context(context)).status === 'ok' ? context : null;
+          },
+        }),
+      );
     },
     ingress: (binding, event) => controller.ingress(binding, event),
     validatePrivateDestination: async (binding, purpose) => {

@@ -14,10 +14,11 @@ import { createConversationState } from './conversation-state.js';
 import { startSubscriptionEgress } from './subscription-egress.js';
 import { startSubscriptionTurns } from './subscription-turns.js';
 import { restrictedLaunch } from './restricted-launch.js';
+import type { TurnAuthorization } from './turn-authorization.js';
 
 export type CoordinatorLauncher = {
   ready(binding: CosBinding): boolean;
-  prepare(binding: CosBinding, session: Session, authorize: () => Promise<string | null>): Promise<CosLaunch>;
+  prepare(binding: CosBinding, session: Session, authorize: TurnAuthorization): Promise<CosLaunch>;
 };
 /** Native subscription only. Deployment never creates a model activation. */
 export function createCoordinatorLauncher(options: { targetRoot: string; db: Database.Database }) {
@@ -53,7 +54,7 @@ export function createCoordinatorLauncher(options: { targetRoot: string; db: Dat
       contexts().invalidate(scopeId, 'access_changed');
     },
     ready: (binding: CosBinding) => activation(binding) !== null,
-    async prepare(binding: CosBinding, session: Session, authorize: () => Promise<string | null>): Promise<CosLaunch> {
+    async prepare(binding: CosBinding, session: Session, authorize: TurnAuthorization): Promise<CosLaunch> {
       const admitted = activation(binding),
         release = currentRelease(),
         owner = subscriptionCoordinator();
@@ -70,7 +71,7 @@ export function createCoordinatorLauncher(options: { targetRoot: string; db: Dat
       let entryClosed = false;
       const allowed = async () => {
         if (entryClosed || closed || subscriptionCoordinator() !== owner) return false;
-        if (!(await authorize())) return false;
+        if (!(await authorize('poll'))) return false;
         const fresh = activation(binding);
         return (
           !entryClosed &&
