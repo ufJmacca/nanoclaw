@@ -117,7 +117,7 @@ export class KnowledgeArtifacts {
   private requireLease(lease: ArtifactLease): void {
     if (!lease || !this.leases.has(lease)) throw new Error('knowledge_artifacts_lease_required');
   }
-  capture(scopeId: string, filename: string, lease: ArtifactLease) {
+  private staged(scopeId: string, filename: string, lease: ArtifactLease) {
     this.requireLease(lease);
     this.guard();
     privateRoot(this.staging);
@@ -128,6 +128,16 @@ export class KnowledgeArtifacts {
     const digest = sourceDigest(bytes),
       id = sourceDigest(Buffer.from(scopeId)) + '-' + digest,
       chunks = extractChunks(text);
+    return { id, digest, byteLength: bytes.length, text, chunks, bytes };
+  }
+  /** Inspect selected input before checking whether its digest is already tombstoned. No bytes are published. */
+  inspect(scopeId: string, filename: string, lease: ArtifactLease) {
+    const { bytes: _bytes, ...metadata } = this.staged(scopeId, filename, lease);
+    return metadata;
+  }
+  capture(scopeId: string, filename: string, lease: ArtifactLease, expectedDigest?: string) {
+    const { id, digest, byteLength, text, chunks, bytes } = this.staged(scopeId, filename, lease);
+    if (expectedDigest !== undefined && expectedDigest !== digest) throw new Error('staged_source_changed');
     const final = path.join(this.root, id + '.blob');
     if (fs.lstatSync(final, { throwIfNoEntry: false })) this.read(id, digest);
     else {
@@ -145,7 +155,7 @@ export class KnowledgeArtifacts {
       syncDirectory(this.root);
       this.read(id, digest);
     }
-    return { id, digest, byteLength: bytes.length, text, chunks };
+    return { id, digest, byteLength, text, chunks };
   }
   read(id: string, digest: string): string {
     this.guard();
@@ -154,6 +164,21 @@ export class KnowledgeArtifacts {
     const bytes = privateBytes(path.join(this.root, id + '.blob'));
     if (sourceDigest(bytes) !== digest) throw new Error('artifact_integrity');
     return decodeSource(bytes);
+  }
+  /** Metadata must already deny this artifact and prove it is no longer retained by another source. */
+  remove(id: string, lease: ArtifactLease): boolean {
+    this.requireLease(lease);
+    this.guard();
+    if (!identity.test(id)) throw new Error('invalid_artifact');
+    const file = path.join(this.root, id + '.blob');
+    const exists = !!fs.lstatSync(file, { throwIfNoEntry: false });
+    if (exists) {
+      privateBytes(file);
+      fs.unlinkSync(file);
+    }
+    // Also sync a retry after a process died between unlink and its directory sync.
+    syncDirectory(this.root);
+    return exists;
   }
   /** Caller obtains the complete current DB reference set while holding this same lease. */
   reconcile(referenced: Set<string>, before: number, lease: ArtifactLease): number {

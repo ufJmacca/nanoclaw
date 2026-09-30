@@ -9,6 +9,7 @@ import {
   type ArtifactLease,
   type KnowledgeArtifacts,
 } from './artifacts.js';
+import { purgeKnowledge, type PurgeHooks } from './purge.js';
 export type KnowledgeContext = Context & { provider: string; generation: string };
 export type ImportSource = {
   sourceKey: string;
@@ -60,7 +61,7 @@ export class KnowledgeStore {
   constructor(
     readonly database: BoundedDatabase,
     readonly artifacts: KnowledgeArtifacts,
-    readonly hooks: { afterPublication?(): Promise<void>; beforeDisclosure?(): Promise<void> } = {},
+    readonly hooks: { afterPublication?(): Promise<void>; beforeDisclosure?(): Promise<void> } & PurgeHooks = {},
     options: { retentionMs?: number } = {},
   ) {
     this.retentionMs = options.retentionMs ?? 30 * 24 * 60 * 60 * 1000;
@@ -88,6 +89,17 @@ export class KnowledgeStore {
       if (error instanceof KnowledgeArtifactsBusy) return { status: 'unavailable' };
       throw error;
     }
+  }
+  async purgeDue(scopeId: string): Promise<Result> {
+    return this.exclusive((lease) =>
+      purgeKnowledge({
+        scopeId,
+        lease,
+        artifacts: this.artifacts,
+        hooks: this.hooks,
+        transaction: (operation, mutation) => this.transaction(operation, mutation),
+      }),
+    );
   }
   /** Trusted host cleanup only. Preserve quarantined captures until their separate retention purge. */
   async reconcileArtifacts(graceMs = 24 * 60 * 60 * 1000): Promise<Result> {
@@ -127,12 +139,29 @@ export class KnowledgeStore {
       (input.projectId !== undefined && !idPattern.test(input.projectId))
     )
       return { status: 'denied' };
-    const access = await this.transaction(async (client) => ({
-      status: (await authorised(client, context)) ? 'ok' : 'denied',
-    }));
+    const access = await this.transaction(async (client) => {
+      if (!(await authorised(client, context))) return { status: 'denied' };
+      const revoked = await client.query(
+        `SELECT s.id FROM cos.sources s WHERE s.scope_id=$1 AND s.source_key=$2 AND
+        (s.status='revoked' OR EXISTS(SELECT 1 FROM cos.revocation_tombstones t WHERE t.scope_id=s.scope_id AND t.source_id=s.id))`,
+        [context.scopeId, input.sourceKey],
+      );
+      return { status: revoked.rowCount ? 'denied' : 'ok' };
+    });
     if (access.status !== 'ok') return access;
     return this.exclusive(async (lease) => {
-      const captured = this.artifacts.capture(context.scopeId, input.filename, lease);
+      const inspected = this.artifacts.inspect(context.scopeId, input.filename, lease);
+      const eligible = await this.transaction(async (client) => {
+        await client.query('SELECT pg_advisory_xact_lock(73101004)');
+        if (!(await authorised(client, context))) return { status: 'denied' };
+        const deleted = await client.query(
+          "SELECT id FROM cos.artifacts WHERE id=$1 AND (scope_id<>$2 OR lifecycle='deleted')",
+          [inspected.id, context.scopeId],
+        );
+        return { status: deleted.rowCount ? 'conflict' : 'ok' };
+      });
+      if (eligible.status !== 'ok') return eligible;
+      const captured = this.artifacts.capture(context.scopeId, input.filename, lease, inspected.digest);
       await this.hooks.afterPublication?.();
       const hash = digest({ method: 'cos_source_import', input, content: captured.digest });
       const result = await this.transaction(async (client) => {

@@ -154,6 +154,8 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
       if (enabled()) await outbox?.drain(binding);
       // An approved source change may enqueue invalidation in this same pump.
       if (enabled()) await invalidations?.drain(binding);
+      // Retention is an already-approved deletion obligation, independent of model pause.
+      if (enabled()) await d.store?.knowledge?.purgeDue(binding.scopeId);
     },
     dispose: () => {
       disposed = true;

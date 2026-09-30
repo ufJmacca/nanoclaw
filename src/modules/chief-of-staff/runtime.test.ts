@@ -230,3 +230,47 @@ it('revokes model authorization when emergency pause arrives during the database
   expect(store.context).toHaveBeenCalledOnce();
   expect(authorization).toBeNull();
 });
+it('S02 processes due retention work while paused without admitting ordinary outbox or model work', async () => {
+  const db = initTestDb();
+  const binding: CosBinding = {
+    scopeId: 'scope',
+    agentGroupId: 'group',
+    messagingGroupId: 'mg',
+    sessionId: 'session',
+    provider: 'codex',
+    instanceId: 'fixture',
+    channelId: 'private',
+    ownerId: 'owner',
+    botId: 'bot',
+  };
+  const session = {
+    id: 'session',
+    agent_group_id: 'group',
+    messaging_group_id: 'mg',
+    thread_id: null,
+    status: 'active',
+    agent_provider: 'codex',
+  } as Session;
+  installCosBoundary(binding, db);
+  const knowledge = {
+    pendingInvalidations: vi.fn().mockResolvedValue({ status: 'ok', items: [] }),
+    purgeDue: vi.fn().mockResolvedValue({ status: 'ok', processed: 0 }),
+  };
+  const pendingOutbox = vi.fn(),
+    wake = vi.fn();
+  runtime = createCosRuntime({
+    db,
+    enabled: true,
+    store: { knowledge, pendingOutbox } as unknown as PriorityStore,
+    facts: vi.fn(),
+    session: () => session,
+    destination: () => undefined,
+    stop: vi.fn(),
+    wake,
+  });
+  await runtime.pump(binding);
+  expect(knowledge.purgeDue).toHaveBeenCalledWith('scope');
+  expect(pendingOutbox).not.toHaveBeenCalled();
+  expect(wake).not.toHaveBeenCalled();
+  expect(db.prepare('SELECT paused FROM cos_identity_boundaries').get()).toEqual({ paused: 1 });
+});

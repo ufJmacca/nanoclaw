@@ -646,3 +646,189 @@ test('S02-PG01: cleanup waits for an uncertain remote metadata commit before tak
     await cleaning;
   }
 });
+async function approveDeletion(knowledge: KnowledgeStore, sourceId: string, expectedVersion = 1) {
+  const priorities = new PriorityStore(knowledge.database, knowledge);
+  const proposal = await priorities.propose(context, randomUUID(), {
+    kind: 'source_delete',
+    source_id: sourceId,
+    expected_version: expectedVersion,
+    reason: 'Delete selected synthetic source',
+  });
+  assert.equal(proposal.status, 'ok');
+  assert.equal(
+    (
+      await priorities.decide(
+        { ...context, ingressId: randomUUID() },
+        String(proposal.proposal_id),
+        String(proposal.confirmation_token),
+        'approve',
+      )
+    ).status,
+    'ok',
+  );
+  assert.equal((await priorities.apply(scope, String(proposal.proposal_id))).status, 'ok');
+  return String(proposal.proposal_id);
+}
+test('S02-T06: due deletion purges raw capture, full-text chunks and linked derivatives but retains the tombstone', async () => {
+  const a = await imported(note('purge-source', 'PurgeSourceCanary private text.'));
+  const read = await store.search({ ...context, generation: randomUUID() }, { query: 'PurgeSourceCanary' }),
+    evidence = (read.items as Evidence[])[0];
+  const derived = await artifacts.exclusive(async (lease) =>
+    artifacts.capture(scope, note('purge-answer', 'PurgeSourceCanary synthetic derived answer.').filename, lease),
+  );
+  await pool.query(
+    "INSERT INTO cos.artifacts(id,scope_id,kind,digest,byte_length,lifecycle,provenance) VALUES($1,$2,'answer',$3,$4,'published','{}')",
+    [derived.id, scope, derived.digest, derived.byteLength],
+  );
+  await pool.query('INSERT INTO cos.derivation_links(scope_id,artifact_id,evidence_id) VALUES($1,$2,$3)', [
+    scope,
+    derived.id,
+    evidence.evidence_id,
+  ]);
+  const sourceArtifact = (await pool.query('SELECT artifact_id FROM cos.source_revisions WHERE id=$1', [a.revision_id]))
+    .rows[0].artifact_id;
+  const purge = new KnowledgeStore(store.database, artifacts, {}, { retentionMs: 0 });
+  const proposal = await approveDeletion(purge, String(a.source_id));
+  assert.equal(fs.existsSync(path.join(artifacts.root, sourceArtifact + '.blob')), true);
+  assert.deepEqual(await purge.purgeDue(other), { status: 'ok', processed: 0 });
+  assert.equal(fs.existsSync(path.join(artifacts.root, sourceArtifact + '.blob')), true);
+  assert.equal((await purge.purgeDue(scope)).status, 'ok');
+  for (const id of [sourceArtifact, derived.id]) {
+    assert.equal(fs.existsSync(path.join(artifacts.root, id + '.blob')), false);
+    assert.equal(
+      (await pool.query('SELECT lifecycle FROM cos.artifacts WHERE id=$1', [id])).rows[0].lifecycle,
+      'deleted',
+    );
+  }
+  assert.equal(
+    (await pool.query('SELECT count(*)::int AS n FROM cos.chunks WHERE revision_id=$1', [a.revision_id])).rows[0].n,
+    0,
+  );
+  const tombstone = (
+    await pool.query('SELECT kind,provenance FROM cos.revocation_tombstones WHERE scope_id=$1 AND source_id=$2', [
+      scope,
+      a.source_id,
+    ])
+  ).rows[0];
+  assert.equal(tombstone.kind, 'delete');
+  assert.equal(tombstone.provenance.content_purge.state, 'completed');
+  assert.ok(
+    (await pool.query('SELECT delivered_at FROM cos.outbox WHERE id=$1', ['knowledge-purge-' + proposal])).rows[0]
+      .delivered_at,
+  );
+  assert.equal((await purge.purgeDue(scope)).status, 'ok');
+  assert.equal(
+    (await store.get({ ...context, generation: randomUUID() }, String(a.source_id), String(a.revision_id), 0)).status,
+    'denied',
+  );
+  assert.equal(
+    (await store.importSource(context, randomUUID(), note('purge-source', 'PurgeSourceCanary private text.'))).status,
+    'denied',
+  );
+  assert.equal(fs.existsSync(path.join(artifacts.root, sourceArtifact + '.blob')), false);
+  assert.equal(
+    (await store.importSource(context, randomUUID(), note('purge-reintroduced', 'PurgeSourceCanary private text.')))
+      .status,
+    'conflict',
+  );
+  assert.equal(fs.existsSync(path.join(artifacts.root, sourceArtifact + '.blob')), false);
+});
+test('S02-T06: retention deadlines and other admitted references prevent premature byte deletion', async () => {
+  const text = 'SharedPurgeCanary shared content.';
+  const a = await imported(note('purge-shared-a', text)),
+    b = await imported(note('purge-shared-b', text));
+  const artifactId = (await pool.query('SELECT artifact_id FROM cos.source_revisions WHERE id=$1', [a.revision_id]))
+    .rows[0].artifact_id;
+  const purge = new KnowledgeStore(store.database, artifacts, {}, { retentionMs: 0 });
+  await approveDeletion(purge, String(a.source_id));
+  assert.equal((await purge.purgeDue(scope)).status, 'ok');
+  assert.equal(fs.existsSync(path.join(artifacts.root, artifactId + '.blob')), true);
+  assert.equal(
+    (await store.get({ ...context, generation: randomUUID() }, String(b.source_id), String(b.revision_id), 0)).status,
+    'ok',
+  );
+  await approveDeletion(store, String(b.source_id));
+  assert.equal((await purge.purgeDue(scope)).status, 'ok');
+  assert.equal(fs.existsSync(path.join(artifacts.root, artifactId + '.blob')), true);
+  await pool.query(
+    "UPDATE cos.revocation_tombstones SET purge_after=clock_timestamp()-interval '1 second' WHERE scope_id=$1 AND source_id=$2",
+    [scope, b.source_id],
+  );
+  assert.equal((await purge.purgeDue(scope)).status, 'ok');
+  assert.equal(fs.existsSync(path.join(artifacts.root, artifactId + '.blob')), false);
+});
+test('S02-T08: interrupted purge resumes from committed metadata and missing bytes without reopening access', async () => {
+  const a = await imported(note('purge-retry', 'PurgeRetryCanary private text.'));
+  let fail = true;
+  const purge = new KnowledgeStore(
+    store.database,
+    artifacts,
+    {
+      afterPurgeUnlink: async () => {
+        if (fail) throw new Error('fixture interrupted after unlink');
+      },
+    },
+    { retentionMs: 0 },
+  );
+  const proposal = await approveDeletion(purge, String(a.source_id));
+  await assert.rejects(purge.purgeDue(scope), /fixture interrupted after unlink/);
+  assert.equal(
+    (await pool.query('SELECT delivered_at FROM cos.outbox WHERE id=$1', ['knowledge-purge-' + proposal])).rows[0]
+      .delivered_at,
+    null,
+  );
+  assert.equal(
+    (await store.get({ ...context, generation: randomUUID() }, String(a.source_id), String(a.revision_id), 0)).status,
+    'denied',
+  );
+  fail = false;
+  assert.equal((await purge.purgeDue(scope)).status, 'ok');
+  assert.ok(
+    (await pool.query('SELECT delivered_at FROM cos.outbox WHERE id=$1', ['knowledge-purge-' + proposal])).rows[0]
+      .delivered_at,
+  );
+});
+test('S02-PG02: a database outage blocks purge before byte removal and reconciles a lost final acknowledgement', async () => {
+  const a = await imported(note('purge-outage', 'PurgeOutageCanary private text.'));
+  const artifactId = (await pool.query('SELECT artifact_id FROM cos.source_revisions WHERE id=$1', [a.revision_id]))
+    .rows[0].artifact_id;
+  const relay = await connectionFault(await fixtureDatabaseConfig()),
+    database = new BoundedDatabase(new pg.Pool(relay.config), 350);
+  let fail = true;
+  const purge = new KnowledgeStore(
+    database,
+    artifacts,
+    {
+      afterPurgeUnlink: async () => {
+        if (fail) relay.partition();
+      },
+    },
+    { retentionMs: 0 },
+  );
+  const proposal = await approveDeletion(purge, String(a.source_id));
+  try {
+    relay.partition();
+    assert.ok(['unavailable', 'pending'].includes((await purge.purgeDue(scope)).status));
+    assert.equal(fs.existsSync(path.join(artifacts.root, artifactId + '.blob')), true);
+    relay.restore();
+    await new Promise((resolve) => setTimeout(resolve, 1050));
+    assert.ok(['unavailable', 'pending'].includes((await purge.purgeDue(scope)).status));
+    assert.equal(fs.existsSync(path.join(artifacts.root, artifactId + '.blob')), false);
+    assert.equal(
+      (await pool.query('SELECT delivered_at FROM cos.outbox WHERE id=$1', ['knowledge-purge-' + proposal])).rows[0]
+        .delivered_at,
+      null,
+    );
+    fail = false;
+    relay.restore();
+    await new Promise((resolve) => setTimeout(resolve, 1050));
+    assert.equal((await purge.purgeDue(scope)).status, 'ok');
+    assert.ok(
+      (await pool.query('SELECT delivered_at FROM cos.outbox WHERE id=$1', ['knowledge-purge-' + proposal])).rows[0]
+        .delivered_at,
+    );
+  } finally {
+    await database.pool.end();
+    await relay.close();
+  }
+});

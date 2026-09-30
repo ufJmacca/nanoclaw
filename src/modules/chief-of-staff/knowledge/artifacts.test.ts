@@ -148,4 +148,25 @@ describe('S02 host-owned artifact publication', () => {
     fs.mkdirSync(path.join(base, '.git'));
     expect(() => new KnowledgeArtifacts(root, staging)).toThrow();
   });
+  it('removes only an owned explicit artifact under its lease and tolerates an already-unlinked retry', async () => {
+    await artifacts.exclusive(async (lease) => {
+      const captured = artifacts.capture('scope-a', 'note.md', lease);
+      expect(() => artifacts.remove(captured.id, {} as typeof lease)).toThrow('knowledge_artifacts_lease_required');
+      expect(() => artifacts.remove('../unrelated', lease)).toThrow('invalid_artifact');
+      expect(artifacts.remove(captured.id, lease)).toBe(true);
+      expect(artifacts.remove(captured.id, lease)).toBe(false);
+      fs.symlinkSync(path.join(staging, 'note.md'), path.join(root, captured.id + '.blob'));
+      expect(() => artifacts.remove(captured.id, lease)).toThrow();
+      expect(fs.existsSync(path.join(staging, 'note.md'))).toBe(true);
+    });
+  });
+  it('inspection publishes nothing and a changed staging file cannot pass its earlier digest check', async () => {
+    await artifacts.exclusive(async (lease) => {
+      const staged = artifacts.inspect('scope-a', 'note.md', lease);
+      expect(fs.readdirSync(root).filter((name) => name.endsWith('.blob'))).toHaveLength(0);
+      fs.writeFileSync(path.join(staging, 'note.md'), 'Changed after policy verification.');
+      expect(() => artifacts.capture('scope-a', 'note.md', lease, staged.digest)).toThrow('staged_source_changed');
+      expect(fs.readdirSync(root).filter((name) => name.endsWith('.blob'))).toHaveLength(0);
+    });
+  });
 });
