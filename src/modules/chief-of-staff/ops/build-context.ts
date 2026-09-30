@@ -30,6 +30,7 @@ function allowed(name: string): boolean {
       'container/agent-runner/package.json',
       'container/agent-runner/bun.lock',
       'container/agent-runner/tsconfig.json',
+      'container/agent-runner/fixtures/cos-subscription-capability.ts',
     ].includes(name)
   );
 }

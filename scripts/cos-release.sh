@@ -159,6 +159,7 @@ isolation_checks() {
       "$host_image" --test --test-concurrency=1 \
       /release/dist/contracts/chief-of-staff/native-smoke.integration.js \
       /release/dist/contracts/chief-of-staff/subscription-native.integration.js || return
+    bash scripts/cos-subscription-image-check.sh "$host_image" "$worker" "$directory/native-${worker:7:12}" || return
   done
 }
 check host_image host_checks

@@ -24,6 +24,8 @@ function fixture() {
     'tsconfig.json': '{}',
     'src/index.ts': 'console.log("fixture")',
     'container/agent-runner/src/index.ts': 'fixture runner',
+    'container/agent-runner/fixtures/cos-subscription-capability.ts': 'offline native protocol fixture',
+    'container/agent-runner/fixtures/unadmitted.ts': 'UNADMITTED_FIXTURE_CANARY',
     'container/skills/fixture/SKILL.md': 'fixture skill',
     'container/CLAUDE.md': 'fixture instructions',
     '.env': 'PRIVATE_ENV_CANARY',
@@ -48,6 +50,10 @@ describe('S01-REL03 pinned source-only build context', () => {
     expect(fs.statSync(path.join(out, 'container/agent-runner/src')).mode & 0o777).toBe(0o755);
     expect(fs.statSync(path.join(out, 'container/agent-runner/src/index.ts')).mode & 0o777).toBe(0o644);
     expect(fs.readFileSync(path.join(out, 'src/index.ts'), 'utf8')).toBe('console.log("fixture")');
+    expect(
+      fs.readFileSync(path.join(out, 'container/agent-runner/fixtures/cos-subscription-capability.ts'), 'utf8'),
+    ).toBe('offline native protocol fixture');
+    expect(fs.existsSync(path.join(out, 'container/agent-runner/fixtures/unadmitted.ts'))).toBe(false);
     expect(result.sourceCommit).toBe(f.commit);
     expect(result.sourceTree).toBe(f.git('rev-parse', f.commit + '^{tree}'));
     for (const denied of ['.env', 'data', 'container/agent-runner/node_modules', 'src/private.key'])
