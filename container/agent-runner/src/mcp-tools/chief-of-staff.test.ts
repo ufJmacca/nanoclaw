@@ -71,6 +71,17 @@ test('S01-T01 disabled profile cannot enqueue CoS requests', async () => {
   expect(getOutboundDb().query('SELECT count(*) AS n FROM messages_out').get()).toEqual({ n: 0 });
 });
 
+test('a cancelled native tool cannot enqueue RPC or return a late host result', async () => {
+  const { inbound } = initTestSessionDb();
+  inbound.exec(
+    'CREATE TABLE cos_rpc_responses(request_id TEXT,payload_hash TEXT,delivery_id TEXT,response TEXT,updated_at TEXT)',
+  );
+  const controller = new AbortController();
+  controller.abort();
+  expect((await executeCosRequest(request, 200, controller.signal)).status).toBe('unavailable');
+  expect(getOutboundDb().query('SELECT count(*) AS n FROM messages_out').get()).toEqual({ n: 0 });
+});
+
 test('S01-T09 old host schema is unavailable without modifying the host-owned database', async () => {
   const { inbound } = initTestSessionDb();
   expect((await executeCosRequest(request, 20)).status).toBe('unavailable');

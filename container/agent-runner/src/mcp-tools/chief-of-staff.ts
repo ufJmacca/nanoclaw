@@ -6,13 +6,17 @@ import { randomUUID } from 'node:crypto';
 import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
 
-export async function executeCosRequest(request: CosRequest, waitMs = COS_WAIT_MS): Promise<CosResponse> {
+export async function executeCosRequest(
+  request: CosRequest,
+  waitMs = COS_WAIT_MS,
+  signal?: AbortSignal,
+): Promise<CosResponse> {
   const response = (status: CosResponse['status']): CosResponse => ({
     protocol: COS_PROTOCOL,
     request_id: request.request_id,
     status,
   });
-  if (process.env.NANOCLAW_COS_PROTOCOL !== COS_PROTOCOL) return response('unavailable');
+  if (signal?.aborted || process.env.NANOCLAW_COS_PROTOCOL !== COS_PROTOCOL) return response('unavailable');
   if (!validRequest(request)) return response('denied');
   const hash = digest(request);
   const deliveryId = randomUUID();
@@ -44,6 +48,7 @@ export async function executeCosRequest(request: CosRequest, waitMs = COS_WAIT_M
   });
   const end = Date.now() + Math.max(1, Math.min(waitMs, COS_WAIT_MS));
   do {
+    if (signal?.aborted) return response('unavailable');
     try {
       const value = read();
       if (value) return value;
@@ -52,7 +57,7 @@ export async function executeCosRequest(request: CosRequest, waitMs = COS_WAIT_M
     }
     await new Promise((resolve) => setTimeout(resolve, Math.min(100, Math.max(1, end - Date.now()))));
   } while (Date.now() < end);
-  return response('pending');
+  return response(signal?.aborted ? 'unavailable' : 'pending');
 }
 
 export const cosTools: McpToolDefinition[] = (
