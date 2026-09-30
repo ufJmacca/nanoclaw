@@ -1,6 +1,6 @@
 # S01 subscription runtime: capability evidence
 
-2026-09-30. The native subscription runtime is implemented and deployed as an unreviewed S01 candidate. Live subscription inference and Mattermost acceptance remain unverified. The [current S01 receipt](../chief-of-staff/evidence/S01.md) records exact final artifacts, deployment, protected-data checks and compatible contract-22 rollback; the sections below retain the development proofs and their original limitations.
+2026-09-30. The native subscription runtime is implemented and deployed as an unreviewed S01 candidate. Authorized live subscription inference and Mattermost acceptance passed using `gpt-6-astra`, ten bounded attempts and synthetic records; CoS is paused after the test. The [current S01 receipt](../chief-of-staff/evidence/S01.md) records exact tested source, deployment, protected-data checks, compatible contract-22 rollback and the later authorization-polling review correction. The sections below retain the development proofs and their original limitations.
 
 ## Native conversation and tool execution
 
