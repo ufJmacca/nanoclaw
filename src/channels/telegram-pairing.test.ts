@@ -75,11 +75,21 @@ describe('createPairing', () => {
   });
 
   it('does not collide with active codes', async () => {
-    const codes = new Set<string>();
-    for (let i = 0; i < 20; i++) {
-      const r = await createPairing('main');
-      expect(codes.has(r.code)).toBe(false);
-      codes.add(r.code);
+    const random = vi
+      .spyOn(Math, 'random')
+      .mockReturnValueOnce(0.1234)
+      .mockReturnValueOnce(0.1234)
+      .mockReturnValueOnce(0.2345);
+    try {
+      const first = await createPairing({ kind: 'new-agent', folder: 'first' });
+      const second = await createPairing({ kind: 'new-agent', folder: 'second' });
+      expect(first.code).toBe('1234');
+      expect(second.code).toBe('2345');
+      expect(getStatus(first.code)).toBe('pending');
+      expect(getStatus(second.code)).toBe('pending');
+      expect(random).toHaveBeenCalledTimes(3);
+    } finally {
+      random.mockRestore();
     }
   });
 });
