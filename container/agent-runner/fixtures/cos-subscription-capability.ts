@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
+import { randomUUID } from 'node:crypto';
 import { CosCodexProvider } from '../src/providers/codex-cos.js';
 import { initTestSessionDb, closeSessionDb } from '../src/db/connection.js';
 import { setContinuation, getContinuation } from '../src/db/session-state.js';
@@ -69,6 +70,11 @@ const systemTrust = process.env.NANOCLAW_COS_FIXTURE_SYSTEM_TRUST === '1';
 const productionQuery = process.env.NANOCLAW_COS_FIXTURE_PRODUCTION_QUERY === '1';
 const runnerEntry = process.env.NANOCLAW_COS_FIXTURE_RUNNER_ENTRY === '1';
 const compaction = process.env.NANOCLAW_COS_FIXTURE_COMPACTION === '1';
+const cancellation = process.env.NANOCLAW_COS_FIXTURE_CANCELLATION;
+if (cancellation && (!['shutdown', 'membership', 'rpc'].includes(cancellation) || !runnerEntry || compaction))
+  throw new Error('invalid_cancellation_fixture');
+let releaseLateResponse: (() => void) | undefined;
+let cancellationChecked = false;
 const compactionRequests: any[] = [];
 const compactedSummary = 'fixture-opaque-compacted-history-v1';
 if (compaction && !runnerEntry) throw new Error('compaction_requires_runner_entry');
@@ -191,6 +197,7 @@ function respond(body: any, send: (text: string) => void) {
     ];
     if (compaction && requests.length === 6) calls[5] = calls[0];
     if (compaction && requests.length === 7) calls[6] = calls[1];
+    if (cancellation === 'rpc' && requests.length === 7) calls[6] = calls[0];
     if (calls[requests.length - 1])
       item = {
         id: 'call_' + requests.length,
@@ -207,7 +214,7 @@ function respond(body: any, send: (text: string) => void) {
   // production CoS policy or supplying a model-controlled configuration override.
   const inputTokens = compaction && !compacting && body.generate !== false && requests.length === 5 ? 10_000_000 : 10;
   const responseId = compacting ? 'compact_' + compactionRequests.length : 'resp_' + requests.length;
-  for (const event of [
+  const events = [
     {
       type: 'response.created',
       response: { id: responseId, object: 'response', status: 'in_progress', output: [] },
@@ -224,8 +231,13 @@ function respond(body: any, send: (text: string) => void) {
         usage: { input_tokens: inputTokens, output_tokens: 3, total_tokens: inputTokens + 3 },
       },
     },
-  ])
-    send(JSON.stringify(event));
+  ];
+  const publish = () => {
+    for (const event of events) send(JSON.stringify(event));
+  };
+  if (cancellation && cancellation !== 'rpc' && body.generate !== false && requests.length === 7)
+    releaseLateResponse = publish;
+  else publish();
 }
 const upstream = Bun.serve({
   hostname: '127.0.0.1',
@@ -296,6 +308,7 @@ let gateway: ReturnType<typeof spawn> | undefined;
 let relay: Awaited<ReturnType<typeof startSubscriptionRelay>> | undefined;
 let credentialBroker: http.Server | undefined;
 let rpcPoll: ReturnType<typeof setInterval> | undefined;
+let rpcFailure: unknown;
 let stopRunner: (() => Promise<void>) | undefined;
 const watchdog = setTimeout(() => {
   console.error('probe_timeout');
@@ -320,13 +333,14 @@ async function switchGateway(role: 'auth' | 'query') {
       '-e',
       `
     import net from 'node:net';
+    import fs from 'node:fs';
     const {startSubscriptionEgress} = await import(${JSON.stringify(proxied)});
     let turns;
     if (${productionQuery && role === 'query'}) {
       const {startSubscriptionTurns} = await import('file:///fixture/subscription-turns.ts');
       const attempts = new Set();
-      turns = await startSubscriptionTurns({socket:'/run/cos/turn.sock',authorize:async()=>true,reserve:id=>{
-        if(attempts.has(id)||attempts.size>=${compaction ? 3 : 2})return false;
+      turns = await startSubscriptionTurns({socket:'/run/cos/turn.sock',authorize:async()=>!fs.existsSync('/tmp/fixture-revoked'),reserve:id=>{
+        if(attempts.has(id)||attempts.size>=${compaction || cancellation ? 3 : 2})return false;
         attempts.add(id);console.log(JSON.stringify({turnReserved:true}));return true;
       }});
     }
@@ -459,28 +473,40 @@ try {
     fs.chmodSync('/home/node/.codex', 0o700);
     process.env.NANOCLAW_COS_PROTOCOL = 'cos-rpc/v1';
     const { inbound, outbound } = initTestSessionDb();
+    // This fixture has separate host/runner processes. Use the same bounded
+    // SQLite lock wait as production rather than the single-process test default.
+    inbound.exec('PRAGMA busy_timeout = 5000');
+    outbound.exec('PRAGMA busy_timeout = 5000');
     inbound.exec(
       'CREATE TABLE cos_rpc_responses(request_id TEXT,payload_hash TEXT,delivery_id TEXT,response TEXT,updated_at TEXT)',
     );
     const deliveries = new Set<string>();
     rpcPoll = setInterval(() => {
-      for (const row of outbound.query("SELECT content FROM messages_out WHERE kind='system'").all() as {
-        content: string;
-      }[]) {
-        const { request, delivery_id } = JSON.parse(row.content);
-        if (deliveries.has(delivery_id)) continue;
-        deliveries.add(delivery_id);
-        dispatched.push(request.method);
-        assert.equal(request.method, 'cos_context_get');
-        const response = {
-          protocol: 'cos-rpc/v1',
-          request_id: request.request_id,
-          status: 'ok',
-          result: { records: ['Approved fixture priority'] },
-        };
-        inbound
-          .prepare('INSERT INTO cos_rpc_responses VALUES(?,?,?,?,?)')
-          .run(request.request_id, digest(request), delivery_id, JSON.stringify(response), 'fixture');
+      try {
+        for (const row of outbound.query("SELECT content FROM messages_out WHERE kind='system'").all() as {
+          content: string;
+        }[]) {
+          const { request, delivery_id } = JSON.parse(row.content);
+          if (deliveries.has(delivery_id)) continue;
+          deliveries.add(delivery_id);
+          dispatched.push(request.method);
+          assert.equal(request.method, 'cos_context_get');
+          const response = {
+            protocol: 'cos-rpc/v1',
+            request_id: request.request_id,
+            status: 'ok',
+            result: { records: ['Approved fixture priority'] },
+          };
+          const complete = () =>
+            inbound
+              .prepare('INSERT INTO cos_rpc_responses VALUES(?,?,?,?,?)')
+              .run(request.request_id, digest(request), delivery_id, JSON.stringify(response), 'fixture');
+          if (cancellation === 'rpc' && deliveries.size === 2) releaseLateResponse = complete;
+          else complete();
+        }
+      } catch (error) {
+        rpcFailure = error;
+        clearInterval(rpcPoll);
       }
     }, 10);
     credentialBroker = http.createServer((request, response) => {
@@ -523,7 +549,7 @@ try {
         .run();
     }
     let inputNumber = 0;
-    const run = async (prompt: string) => {
+    const run = async (prompt: string, cancel = false) => {
       if (runnerEntry) {
         inputNumber++;
         const previous = (
@@ -555,6 +581,86 @@ try {
         };
         const until = Date.now() + 20000;
         while (Date.now() < until) {
+          if (rpcFailure) throw rpcFailure;
+          if (cancel && releaseLateResponse) {
+            const nativePids = fs.readdirSync('/proc').filter((pid) => {
+              if (!/^\d+$/.test(pid)) return false;
+              try {
+                return fs
+                  .readFileSync('/proc/' + pid + '/cmdline', 'utf8')
+                  .split('\0')
+                  .includes('app-server');
+              } catch {
+                return false;
+              }
+            });
+            assert.ok(nativePids.length > 0, 'native process must be running at cancellation');
+            fs.writeFileSync('/tmp/fixture-revoked', 'fixture authority withdrawn');
+            if (cancellation === 'membership') {
+              const { guardConversationAccess } = await import('/fixture/conversation-access.ts');
+              let revoked = false;
+              const guard = guardConversationAccess({
+                active: () => true,
+                facts: async () => ({
+                  id: 'private',
+                  type: 'P',
+                  delete_at: 0,
+                  members: ['owner', 'bot', 'other'],
+                  activeSubscription: true,
+                }),
+                revoke: () => {
+                  revoked = true;
+                  child.kill('SIGTERM');
+                },
+              });
+              await assert.rejects(
+                guard({
+                  scopeId: 'fixture',
+                  ownerId: 'owner',
+                  botId: 'bot',
+                  channelId: 'private',
+                  instanceId: 'fixture',
+                  agentGroupId: 'fixture',
+                  messagingGroupId: 'fixture',
+                  sessionId: 'fixture',
+                  provider: 'codex',
+                }),
+              );
+              assert.equal(revoked, true);
+            } else child.kill('SIGTERM');
+            releaseLateResponse();
+            releaseLateResponse = undefined;
+            assert.equal(await child.exited, 0, await stderr);
+            await stdout;
+            stopRunner = undefined;
+            for (const pid of nativePids) {
+              const stat = fs.existsSync('/proc/' + pid + '/stat')
+                ? fs.readFileSync('/proc/' + pid + '/stat', 'utf8')
+                : '';
+              assert.ok(!stat || stat.split(') ')[1]?.startsWith('Z '), 'native process survived cancellation');
+            }
+            await new Promise((resolve) => setTimeout(resolve, 250));
+            assert.equal(
+              (outbound.query("SELECT count(*) AS n FROM messages_out WHERE kind='chat'").get() as { n: number }).n,
+              previous,
+              'late reply after cancellation',
+            );
+            assert.equal(requests.length, 7, 'cancelled turn must not retry');
+            const denied = await new Promise<number>((resolve, reject) => {
+              const request = http.request(
+                { socketPath: '/run/cos/turn.sock', path: '/begin', method: 'POST' },
+                (response) => {
+                  response.resume();
+                  response.once('end', () => resolve(response.statusCode!));
+                },
+              );
+              request.once('error', reject);
+              request.end(JSON.stringify({ attemptId: randomUUID() }));
+            });
+            assert.equal(denied, 403);
+            cancellationChecked = true;
+            return;
+          }
           const replies = outbound.query("SELECT content FROM messages_out WHERE kind='chat' ORDER BY seq").all() as {
             content: string;
           }[];
@@ -600,7 +706,12 @@ try {
       await run('Continue the same synthetic conversation after another runner restart.');
       assert.equal(getContinuation(continuationKey), original);
     }
-    assert.equal(reservedAttempts, compaction ? 3 : 2);
+    if (cancellation) {
+      await run('This synthetic turn must be cancelled before its answer arrives.', true);
+      assert.equal(getContinuation(continuationKey), original);
+      assert.equal(cancellationChecked, true);
+    }
+    assert.equal(reservedAttempts, compaction || cancellation ? 3 : 2);
   } else {
     await connect();
     const created = await sendCodexRequest(server, 'thread/start', params);
@@ -615,7 +726,7 @@ try {
     if (resumed.error) throw Error(JSON.stringify(resumed.error));
     await turn(threadId, 'Which synthetic colour did I mention?');
   }
-  assert.equal(requests.length, compaction ? 9 : 6);
+  assert.equal(requests.length, compaction ? 9 : cancellation ? 7 : 6);
   if (compaction) {
     assert.equal(compactionRequests.length, 1);
     assert.ok(
@@ -631,7 +742,10 @@ try {
         ),
     );
   } else assert.ok(JSON.stringify(requests.at(-1).input).includes('amber'));
-  assert.deepEqual(dispatched, compaction ? ['cos_context_get', 'cos_context_get'] : ['cos_context_get']);
+  assert.deepEqual(
+    dispatched,
+    compaction || cancellation === 'rpc' ? ['cos_context_get', 'cos_context_get'] : ['cos_context_get'],
+  );
   assert.equal(fs.existsSync('/tmp/escaped'), false);
   const allModelRequests = JSON.stringify([...requests, ...compactionRequests]);
   assert.equal(allModelRequests.includes(token), false);
@@ -684,6 +798,8 @@ try {
       ? ['clock__curr_time', 'cos_change_propose', 'cos_context_get', 'cos_request_status']
       : ['clock__curr_time', 'cos_context_get'],
   );
+  clearInterval(rpcPoll);
+  if (rpcFailure) throw rpcFailure;
   console.log(
     JSON.stringify({
       probe: 'passed',
@@ -699,6 +815,9 @@ try {
       productionQueryProvider: productionQuery,
       reservedAttempts,
       runnerEntry,
+      ...(cancellation
+        ? { cancellation, nativeProcessStopped: cancellationChecked, lateReplyAbsent: true, newAttemptDenied: true }
+        : {}),
       ...(compaction
         ? {
             nativeCompactions: compactionRequests.length,

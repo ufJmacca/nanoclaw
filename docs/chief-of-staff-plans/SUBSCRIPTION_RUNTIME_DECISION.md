@@ -71,6 +71,20 @@ Add `-e NANOCLAW_COS_FIXTURE_COMPACTION=1` to the runner-entry command above to 
 
 This follows the [pinned upstream compaction tests](https://github.com/openai/codex/blob/rust-v0.158.0/codex-rs/app-server/tests/suite/v2/compaction.rs). It proves protocol and history retention across compaction and restart with the development source overlay. The opaque summary is synthetic: this does not prove live summarization quality, semantic recall, final-image behavior or Pi acceptance.
 
+## Native cancellation fixture
+
+Use the runner-entry command above with `-e NANOCLAW_COS_FIXTURE_CANCELLATION=shutdown`, `membership` or `rpc`, without the compaction flag. Add these read-only fixture mounts:
+
+```sh
+--mount "type=bind,src=$PWD/src/modules/chief-of-staff/bridge/conversation-access.ts,dst=/fixture/conversation-access.ts,readonly" \
+--mount "type=bind,src=$PWD/src/modules/chief-of-staff/bridge/identity.ts,dst=/fixture/identity.ts,readonly" \
+--mount "type=bind,src=$PWD/src/modules/chief-of-staff/bridge/mattermost-facts.ts,dst=/fixture/mattermost-facts.ts,readonly"
+```
+
+Each scenario first completes two ordinary fixture turns, then interrupts the actual native runner during a third. Shutdown sends the runner its normal termination signal while a model response is withheld. Membership uses the real conversation-access guard with an additional synthetic channel member and a runner-stop callback. RPC withholds an admitted context-tool response. The pending response is released after signalling cancellation. Assertions check native app-server exit, no late reply, no automatic model retry, retained continuation, three charged fixture attempts and refusal of another turn by the real host turn controller. All responses and credentials are synthetic; no network access to external services is enabled.
+
+The fixture uses production's bounded SQLite busy timeout for its separate host/runner processes. A compaction regression exposed the previous zero-wait test connection; the repaired fixture also propagates background RPC failures before reporting success. These development checks do not exercise Docker's host stop command, the complete deployed Mattermost pause route, durable context invalidation or final-image isolation. Those remain part of release/Pi acceptance.
+
 ## Operator context inspection and recovery
 
 The packaged host admin entry now supports these commands from the bound installation directory, using the selected trusted Pi service environment:
