@@ -85,6 +85,22 @@ Each scenario first completes two ordinary fixture turns, then interrupts the ac
 
 The fixture uses production's bounded SQLite busy timeout for its separate host/runner processes. A compaction regression exposed the previous zero-wait test connection; the repaired fixture also propagates background RPC failures before reporting success. These development checks do not exercise Docker's host stop command, the complete deployed Mattermost pause route, durable context invalidation or final-image isolation. Those remain part of release/Pi acceptance.
 
+## Shared owner and native 401 fixture
+
+Use the runner-entry command with `-e NANOCLAW_COS_FIXTURE_SHARED_OWNER=1`, without cancellation or compaction flags, and these extra read-only mounts:
+
+```sh
+--mount "type=bind,src=$PWD/container/agent-runner/fixtures/subscription-owner.ts,dst=/app/fixtures/subscription-owner.ts,readonly" \
+--mount "type=bind,src=$PWD/src/providers/codex-subscription-auth.ts,dst=/fixture/codex-subscription-auth.ts,readonly" \
+--mount "type=bind,src=$PWD/src/providers/codex-subscription-broker.ts,dst=/fixture/codex-subscription-broker.ts,readonly"
+```
+
+After two successful turns, the synthetic backend rejects the old access credential with HTTP 401. The real CoS runner asks the real session broker/store to renew; a second session credential client concurrently requests renewal of that same generation. One native account-check writer rotates the staged credential. Both clients receive the same new access-only cache, the owner retains the refresh credential, the second client's history canary survives, and the publication journal closes. CoS reports that the interrupted turn was not replayed; a new explicit turn resumes the same conversation and succeeds. The passing receipt records seven generating requests, four reserved attempts and two OAuth refreshes total: the fixture's initial authentication proof plus the single shared-owner renewal. Native transport makes multiple rejected HTTP attempts before reporting its terminal error; these are not successful generating requests.
+
+The first combined run exposed a production gap: native 0.158.0 reports its blocked access-only OAuth refresh as `codexErrorInfo=other` with an exact transport error, losing the original 401 category. The shared turn handler now recognizes that pinned error and the exact native expired/reused/revoked/unknown refresh messages from [the pinned authentication source](https://github.com/openai/codex/blob/rust-v0.158.0/codex-rs/login/src/auth/manager.rs). It asks the coordinated owner to renew once, without replaying the turn. General model-network errors, account-switch errors, quota errors and merely similar text do not rotate credentials. Five added cases failed before the repair; all 13 turn-renewal tests and all 165 runner tests now pass. Future Codex upgrades must repeat this native error-shape proof. The internal-only external-token login mode is not used.
+
+This development fixture runs the real store/brokers under Bun and maps staged `CODEX_HOME` for the native check instead of invoking the production Docker helper. It verifies two concurrent credential clients, not two complete concurrently generating ordinary/CoS providers. Existing Node component tests remain relevant; full production helper mounts, ordinary-provider concurrency, interruption and final-image/Pi gates remain required. No real login, provider request or Mattermost message is made.
+
 ## Operator context inspection and recovery
 
 The packaged host admin entry now supports these commands from the bound installation directory, using the selected trusted Pi service environment:

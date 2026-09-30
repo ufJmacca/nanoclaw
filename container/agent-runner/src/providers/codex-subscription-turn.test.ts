@@ -93,3 +93,32 @@ test('quota failures do not trigger credential rotation', async () => {
   expect(result.renewed).toBe(0);
   expect(result.writes).toHaveLength(1);
 });
+test.each([
+  'error sending request for url (https://auth.openai.com/oauth/token)',
+  'Your access token could not be refreshed. Please log out and sign in again.',
+  'Your access token could not be refreshed because your refresh token has expired. Please log out and sign in again.',
+  'Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.',
+  'Your access token could not be refreshed because your refresh token was revoked. Please log out and sign in again.',
+])('renews pinned native access-only refresh failure without replay: %s', async (message) => {
+  const result = await drive([
+    { method: 'turn/completed', params: { turn: { status: 'failed', error: { message, codexErrorInfo: 'other' } } } },
+  ]);
+  expect(result.renewed).toBe(1);
+  expect(result.writes).toHaveLength(1);
+  expect(JSON.stringify(result.events)).not.toContain(message);
+});
+test.each([
+  ['other', 'error sending request for url (https://chatgpt.com/backend-api/codex/responses)'],
+  [
+    'other',
+    'Your access token could not be refreshed because you have since logged out or signed in to another account. Please sign in again.',
+  ],
+  ['usageLimitExceeded', 'Your access token could not be refreshed. Please log out and sign in again.'],
+  ['other', 'prefix: error sending request for url (https://auth.openai.com/oauth/token)'],
+])('does not renew unrelated, quota or account-switch failures: %s %s', async (info, message) => {
+  const result = await drive([
+    { method: 'turn/completed', params: { turn: { status: 'failed', error: { message, codexErrorInfo: info } } } },
+  ]);
+  expect(result.renewed).toBe(0);
+  expect(result.writes).toHaveLength(1);
+});

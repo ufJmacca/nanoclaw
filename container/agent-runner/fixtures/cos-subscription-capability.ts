@@ -52,6 +52,12 @@ const rotatedToken = jwt({
   jti: 'rotated',
   'https://api.openai.com/auth': { chatgpt_account_id: 'fixture-account', chatgpt_plan_type: 'plus' },
 });
+const finalToken = jwt({
+  exp: 4102444800,
+  email: 'fixture@example.invalid',
+  jti: 'final',
+  'https://api.openai.com/auth': { chatgpt_account_id: 'fixture-account', chatgpt_plan_type: 'plus' },
+});
 let refreshCalls = 0;
 fs.writeFileSync(
   '/home/node/.codex/auth.json',
@@ -71,6 +77,12 @@ const productionQuery = process.env.NANOCLAW_COS_FIXTURE_PRODUCTION_QUERY === '1
 const runnerEntry = process.env.NANOCLAW_COS_FIXTURE_RUNNER_ENTRY === '1';
 const compaction = process.env.NANOCLAW_COS_FIXTURE_COMPACTION === '1';
 const cancellation = process.env.NANOCLAW_COS_FIXTURE_CANCELLATION;
+const sharedOwner = process.env.NANOCLAW_COS_FIXTURE_SHARED_OWNER === '1';
+if (sharedOwner && (!runnerEntry || cancellation || compaction)) throw new Error('invalid_shared_owner_fixture');
+let owner: Awaited<ReturnType<typeof import('./subscription-owner.js').startFixtureOwner>> | undefined;
+let ownerReceipt: { nativeOwnerChecks: number; concurrentClients: number; sourceRefreshRetained: boolean } | undefined;
+let rejectOldQuery = false;
+let rejectedQueries = 0;
 if (cancellation && (!['shutdown', 'membership', 'rpc'].includes(cancellation) || !runnerEntry || compaction))
   throw new Error('invalid_cancellation_fixture');
 let releaseLateResponse: (() => void) | undefined;
@@ -249,9 +261,22 @@ const upstream = Bun.serve({
       JSON.stringify({
         path: url.pathname,
         method: req.method,
-        authFixture: [token, rotatedToken].some((value) => req.headers.get('authorization') === `Bearer ${value}`),
+        authFixture: [token, rotatedToken, finalToken].some(
+          (value) => req.headers.get('authorization') === `Bearer ${value}`,
+        ),
       }),
     );
+    if (
+      rejectOldQuery &&
+      url.pathname.endsWith('/responses') &&
+      req.headers.get('authorization') === `Bearer ${rotatedToken}`
+    ) {
+      rejectedQueries++;
+      return Response.json(
+        { error: { message: 'Synthetic expired access', type: 'invalid_request_error', code: 'invalid_api_key' } },
+        { status: 401 },
+      );
+    }
     if (server.upgrade(req)) return;
     if (url.pathname === '/fixture/oauth/token' || url.pathname === '/oauth/token') {
       const raw = await req.text();
@@ -259,12 +284,13 @@ const upstream = Bun.serve({
         ? JSON.parse(raw)
         : Object.fromEntries(new URLSearchParams(raw));
       assert.equal(body.grant_type, 'refresh_token');
-      assert.equal(body.refresh_token, 'fixture-refresh');
+      assert.equal(body.refresh_token, refreshCalls === 0 ? 'fixture-refresh' : 'fixture-refresh-rotated');
+      assert.ok(refreshCalls === 0 || (sharedOwner && refreshCalls === 1));
       refreshCalls++;
       return Response.json({
-        access_token: rotatedToken,
-        id_token: rotatedToken,
-        refresh_token: 'fixture-refresh-rotated',
+        access_token: refreshCalls === 1 ? rotatedToken : finalToken,
+        id_token: refreshCalls === 1 ? rotatedToken : finalToken,
+        refresh_token: refreshCalls === 1 ? 'fixture-refresh-rotated' : 'fixture-refresh-final',
         token_type: 'Bearer',
         expires_in: 3600,
       });
@@ -340,7 +366,7 @@ async function switchGateway(role: 'auth' | 'query') {
       const {startSubscriptionTurns} = await import('file:///fixture/subscription-turns.ts');
       const attempts = new Set();
       turns = await startSubscriptionTurns({socket:'/run/cos/turn.sock',authorize:async()=>!fs.existsSync('/tmp/fixture-revoked'),reserve:id=>{
-        if(attempts.has(id)||attempts.size>=${compaction || cancellation ? 3 : 2})return false;
+        if(attempts.has(id)||attempts.size>=${sharedOwner ? 4 : compaction || cancellation ? 3 : 2})return false;
         attempts.add(id);console.log(JSON.stringify({turnReserved:true}));return true;
       }});
     }
@@ -465,6 +491,7 @@ try {
   assert.equal(refreshed.tokens.refresh_token, 'fixture-refresh-rotated');
   assert.equal(refreshed.tokens.access_token, rotatedToken);
   await switchGateway('query');
+  if (sharedOwner) owner = await (await import('./subscription-owner.js')).startFixtureOwner(JSON.stringify(refreshed));
   // The native refresh owner retains the rotating credential. Query runtimes
   // consume an access-only native cache and never receive a refresh credential.
   refreshed.tokens.refresh_token = '';
@@ -509,12 +536,14 @@ try {
         clearInterval(rpcPoll);
       }
     }, 10);
-    credentialBroker = http.createServer((request, response) => {
-      assert.equal(request.url, '/cached');
-      response.setHeader('content-type', 'application/json');
-      response.end(JSON.stringify({ version: 1, authJson: JSON.stringify(refreshed), generation: 'a'.repeat(64) }));
-    });
-    await new Promise<void>((resolve) => credentialBroker!.listen('/run/nanoclaw/codex-credentials.sock', resolve));
+    if (!sharedOwner) {
+      credentialBroker = http.createServer((request, response) => {
+        assert.equal(request.url, '/cached');
+        response.setHeader('content-type', 'application/json');
+        response.end(JSON.stringify({ version: 1, authJson: JSON.stringify(refreshed), generation: 'a'.repeat(64) }));
+      });
+      await new Promise<void>((resolve) => credentialBroker!.listen('/run/nanoclaw/codex-credentials.sock', resolve));
+    }
     const contextGeneration = '11111111-1111-4111-8111-111111111111';
     const continuationKey = runnerEntry ? 'cos-codex-subscription:' + contextGeneration : 'cos-codex';
     if (runnerEntry) {
@@ -549,7 +578,7 @@ try {
         .run();
     }
     let inputNumber = 0;
-    const run = async (prompt: string, cancel = false) => {
+    const run = async (prompt: string, cancel = false, renewed = false) => {
       if (runnerEntry) {
         inputNumber++;
         const previous = (
@@ -665,7 +694,12 @@ try {
             content: string;
           }[];
           if (replies.length > previous) {
-            assert.ok(JSON.parse(replies.at(-1)!.content).text.includes('Fixture answer'));
+            assert.ok(
+              JSON.parse(replies.at(-1)!.content).text.includes(
+                renewed ? 'credentials were renewed' : 'Fixture answer',
+              ),
+              JSON.parse(replies.at(-1)!.content).text,
+            );
             await stopRunner();
             stopRunner = undefined;
             assert.equal(getContinuation('codex'), 'ordinary-context-canary');
@@ -711,7 +745,18 @@ try {
       assert.equal(getContinuation(continuationKey), original);
       assert.equal(cancellationChecked, true);
     }
-    assert.equal(reservedAttempts, compaction || cancellation ? 3 : 2);
+    if (sharedOwner) {
+      rejectOldQuery = true;
+      await run('This interrupted synthetic turn must never be replayed.', false, true);
+      assert.equal(requests.length, 6, 'renewal must not replay the interrupted turn');
+      assert.equal(getContinuation(continuationKey), original);
+      ownerReceipt = await owner!.verify();
+      assert.equal(ownerReceipt.sourceRefreshRetained, true);
+      assert.ok(rejectedQueries > 0);
+      await run('A new explicit turn after renewal.');
+      assert.equal(getContinuation(continuationKey), original);
+    }
+    assert.equal(reservedAttempts, sharedOwner ? 4 : compaction || cancellation ? 3 : 2);
   } else {
     await connect();
     const created = await sendCodexRequest(server, 'thread/start', params);
@@ -726,7 +771,7 @@ try {
     if (resumed.error) throw Error(JSON.stringify(resumed.error));
     await turn(threadId, 'Which synthetic colour did I mention?');
   }
-  assert.equal(requests.length, compaction ? 9 : cancellation ? 7 : 6);
+  assert.equal(requests.length, compaction ? 9 : cancellation || sharedOwner ? 7 : 6);
   if (compaction) {
     assert.equal(compactionRequests.length, 1);
     assert.ok(
@@ -750,8 +795,9 @@ try {
   const allModelRequests = JSON.stringify([...requests, ...compactionRequests]);
   assert.equal(allModelRequests.includes(token), false);
   assert.equal(allModelRequests.includes(rotatedToken), false);
+  assert.equal(allModelRequests.includes(finalToken), false);
   assert.equal(allModelRequests.includes('fixture-refresh'), false);
-  assert.equal(refreshCalls, 1);
+  assert.equal(refreshCalls, sharedOwner ? 2 : 1);
   if (proxied) {
     assert.ok(destinations.some(({ role, host }) => role === 'auth' && host === 'auth.openai.com'));
     assert.ok(destinations.some(({ role, host }) => role === 'query' && host === 'chatgpt.com'));
@@ -815,6 +861,9 @@ try {
       productionQueryProvider: productionQuery,
       reservedAttempts,
       runnerEntry,
+      ...(sharedOwner
+        ? { sharedOwner: ownerReceipt, native401Observed: rejectedQueries, interruptedTurnNotReplayed: true }
+        : {}),
       ...(cancellation
         ? { cancellation, nativeProcessStopped: cancellationChecked, lateReplyAbsent: true, newAttemptDenied: true }
         : {}),
@@ -835,6 +884,7 @@ try {
     credentialBroker.closeAllConnections();
     await new Promise<void>((resolve) => credentialBroker!.close(() => resolve()));
   }
+  await owner?.close();
   if (server) killCodexAppServer(server);
   await relay?.close();
   if (gateway) {

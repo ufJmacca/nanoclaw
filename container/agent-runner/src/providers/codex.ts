@@ -385,7 +385,7 @@ export async function* runOneTurn(
         if (turn?.status === 'failed' || turn?.status === 'interrupted') {
           turnState.error = new Error(turn.error?.message ?? 'Turn did not complete');
           if (turn.error?.codexErrorInfo !== undefined)
-            turnState.unauthorized = nativeUnauthorized(turn.error.codexErrorInfo);
+            turnState.unauthorized = nativeUnauthorized(turn.error.codexErrorInfo, turn.error.message);
         }
         turnDone = true;
         break;
@@ -393,7 +393,7 @@ export async function* runOneTurn(
       case 'turn/failed': {
         const e = params.error as { message?: string; codexErrorInfo?: unknown } | undefined;
         turnState.error = new Error(e?.message || 'Turn failed');
-        turnState.unauthorized = nativeUnauthorized(e?.codexErrorInfo);
+        turnState.unauthorized = nativeUnauthorized(e?.codexErrorInfo, e?.message);
         turnDone = true;
         break;
       }
@@ -401,7 +401,7 @@ export async function* runOneTurn(
         if (params.willRetry === true || (params.threadId && params.threadId !== threadId)) break;
         const error = params.error as { message?: string; codexErrorInfo?: unknown } | undefined;
         turnState.error = new Error(error?.message ?? 'Turn failed');
-        turnState.unauthorized = nativeUnauthorized(error?.codexErrorInfo);
+        turnState.unauthorized = nativeUnauthorized(error?.codexErrorInfo, error?.message);
         break;
       }
       case 'thread/status/changed': {
@@ -520,8 +520,20 @@ export async function* runOneTurn(
   }
 }
 
-function nativeUnauthorized(info: unknown): boolean {
+// Pinned 0.158.0 turns a managed-cache 401 into these terminal refresh errors.
+// Access-only workers cannot refresh themselves. Only the coordinated owner's
+// native helper may rotate; the failed turn is never automatically replayed.
+// Match exact native errors, not endpoint substrings or arbitrary provider text.
+const NATIVE_REFRESH_FAILURES = new Set([
+  'error sending request for url (https://auth.openai.com/oauth/token)',
+  'Your access token could not be refreshed. Please log out and sign in again.',
+  'Your access token could not be refreshed because your refresh token has expired. Please log out and sign in again.',
+  'Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.',
+  'Your access token could not be refreshed because your refresh token was revoked. Please log out and sign in again.',
+]);
+function nativeUnauthorized(info: unknown, message?: string): boolean {
   if (info === 'unauthorized') return true;
+  if (info === 'other' && typeof message === 'string' && NATIVE_REFRESH_FAILURES.has(message)) return true;
   if (!info || typeof info !== 'object') return false;
   return [
     'httpConnectionFailed',
