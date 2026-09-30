@@ -65,3 +65,16 @@ The consumer checks source exposure records against private host-owned generatio
 A completed purge removes the proved retired provider directory (including its replaceable per-generation access cache) and CoS RPC response-cache rows tagged by the host with that exact scope/session/generation. The current generation, master credential store, native messages/approval receipts, unrelated contexts and backups remain intact. Missing ownership is an error, never permission to infer ownership from a directory name. The generation ownership records must accompany any future restore of native history; losing them does not relax deletion checks.
 
 This is logical deletion of the managed source artifacts, retired provider history and tagged response cache. It does not retract delivered messages or provider inputs, delete owner staging originals, rewrite retained native message/tool-request archives, expire protected backups, or prove physical erasure from filesystem snapshots or SQLite/PostgreSQL pages and journals. Those boundaries remain explicit in the deletion evidence and recovery/retention policy.
+
+### S02 development verification
+
+Inside the repository devcontainer, supply only the selected admitted test profile and explicit fixture host-root/image configuration, then run:
+
+```sh
+pnpm cos:test --slice S02 --db-profile test
+pnpm cos:demo --slice S02 --fixture --db-profile test
+```
+
+The test command includes affected S01 contracts, S02 database contracts and the routed twelve-question knowledge conversation. The demo command runs that conversation independently and emits its delivered replies and bounded quality judgements. See [the recorded development demonstration](evidence/S02_DEMO.md). `COS_FIXTURE_HOST_ROOT` identifies the Mac checkout for Docker bind mounts; `COS_FIXTURE_IMAGE` identifies the explicitly selected local runner. Development may use the existing `COS_FIXTURE_RUNNER_VOLUME` with a source mount. Final release checks must omit that override and use the exact tested immutable image identity. Neither the whole private environment nor database credentials enter the runner.
+
+Runtime-disposable selection retains the existing live cross-host guard; there is no automatic fallback from the separate test database. S02 release/manifest registration and exact-image/Pi gates remain pending even when these development commands pass.

@@ -1,10 +1,11 @@
 import { spawnSync } from 'node:child_process';
 import { safeHostEnvironment } from '../../host-environment.js';
-import { parseFixtureArguments } from './arguments.js';
+import { parseFixtureArguments, fixtureFiles } from './arguments.js';
 import { assertRuntimeFixtureGuard, selectedFixtureEnvironment } from './fixture-database.js';
 
 try {
-  const { demo, profile } = parseFixtureArguments(process.argv.slice(2));
+  const args = parseFixtureArguments(process.argv.slice(2)),
+    { profile } = args;
   const env = { ...process.env, COS_FIXTURE_DATABASE_PROFILE: profile };
   if (profile === 'runtime-disposable') await assertRuntimeFixtureGuard(env);
   const selected = selectedFixtureEnvironment(env, true);
@@ -14,7 +15,7 @@ try {
   if (!fixtures.COS_FIXTURE_HOST_ROOT || !fixtures.COS_FIXTURE_IMAGE)
     throw new Error('explicit_container_fixture_configuration_required');
   const extension = import.meta.url.endsWith('.ts') ? 'ts' : 'js';
-  const files = demo ? ['flow.integration'] : ['priorities.integration', 'flow.integration'];
+  const files = fixtureFiles(args);
   const result = spawnSync(
     process.execPath,
     [

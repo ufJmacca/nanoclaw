@@ -95,9 +95,14 @@ test(
       await client.start();
       const listed = await client.request('tools/list', {});
       assert.deepEqual(listed.tools.map((tool: { name: string }) => tool.name).sort(), [
+        'cos_answer_get',
+        'cos_answer_prepare',
         'cos_change_propose',
         'cos_context_get',
+        'cos_knowledge_search',
         'cos_request_status',
+        'cos_source_change_propose',
+        'cos_source_get',
       ]);
       const ids: string[] = [];
       for (const [kind, title] of [
