@@ -36,6 +36,7 @@ import { initTestDb, closeDb } from '../../db/connection.js';
 import { INBOUND_SCHEMA } from '../../db/schema.js';
 import type { Session } from '../../types.js';
 import Database from 'better-sqlite3';
+import type { BriefSnapshot } from '../../modules/chief-of-staff/automation/brief-snapshot.js';
 import type { BriefRefreshPlan } from '../../modules/chief-of-staff/automation/brief-refresh.js';
 import type { WorkChange } from '../../modules/chief-of-staff/contracts/protocol.js';
 const scope = 'brief-' + randomUUID(),
@@ -846,6 +847,17 @@ test('S04 refresh plans preserve their original budget, selected calendars and s
     );
     const finished = await runs.finishRefresh(context, run.id, Number(claim.generation));
     assert.equal((finished.refresh as BriefRefreshPlan).state, 'complete');
+    const captured = await collector.collect(
+      {
+        ...context,
+        generation: randomUUID(),
+        ingressId: randomUUID(),
+        origin: { kind: 'schedule', runId: run.id, generation: Number(claim.generation) },
+      },
+      'UTC',
+    );
+    assert.equal(captured.status, 'ok');
+    assert.equal((captured.snapshot as BriefSnapshot).coverage.refresh, 'complete');
     assert.equal(
       ((await runs.beginRefresh(context, run.id, Number(claim.generation), 'codex')).refresh as BriefRefreshPlan).state,
       'complete',
@@ -869,6 +881,61 @@ test('S04 refresh plans preserve their original budget, selected calendars and s
       [scope, binding],
     );
     await admin.query('DELETE FROM cos.calendar_snapshots WHERE scope_id=$1 AND binding_id=$2', [scope, binding]);
+    await admin.query('DELETE FROM cos.calendar_states WHERE scope_id=$1 AND binding_id=$2', [scope, binding]);
+    await admin.query('DELETE FROM cos.calendar_bindings WHERE scope_id=$1 AND id=$2', [scope, binding]);
+  }
+});
+
+test('S04 scheduled briefs require a terminal refresh result and retain its coverage warning', async () => {
+  const calendar = new CalendarStore(store.database),
+    binding = randomUUID();
+  assert.equal(
+    (
+      await calendar.bind(context, {
+        id: binding,
+        provider: 'fixture',
+        calendarIds: ['coverage'],
+        scopes: [GOOGLE_EVENT_READ_SCOPE],
+        timeZone: 'UTC',
+        processingProviders: ['codex'],
+      })
+    ).status,
+    'ok',
+  );
+  try {
+    const day = (
+      await pool.query('SELECT last_local_date::text AS day FROM cos.brief_schedules WHERE scope_id=$1', [scope])
+    ).rows[0].day;
+    const clock = new Date(day + 'T09:00:00Z');
+    const runs = new BriefRunStore(store.database, { clock: () => clock });
+    for (const outcome of ['failed', 'timed_out'] as const) {
+      clock.setUTCDate(clock.getUTCDate() + 1);
+      const run = (await runs.reserveDue(context)).run as { id: string };
+      const claimed = await runs.claim(context, run.id, 'fixture-coverage-host');
+      assert.equal(claimed.status, 'ok');
+      const scheduled = {
+        ...context,
+        generation: randomUUID(),
+        ingressId: randomUUID(),
+        origin: { kind: 'schedule' as const, runId: run.id, generation: Number(claimed.generation) },
+      };
+      const artifacts = new BriefArtifacts(collector);
+      assert.equal((await artifacts.prepare(scheduled, randomUUID(), 'UTC')).status, 'denied');
+      assert.equal((await runs.beginRefresh(context, run.id, scheduled.origin.generation, 'codex')).status, 'ok');
+      assert.equal((await artifacts.prepare(scheduled, randomUUID(), 'UTC')).status, 'denied');
+      assert.equal((await runs.finishRefresh(context, run.id, scheduled.origin.generation, outcome)).status, 'ok');
+      const prepared = await artifacts.prepare(scheduled, randomUUID(), 'UTC');
+      assert.equal(prepared.status, 'ok');
+      assert.equal((prepared.snapshot as BriefSnapshot).coverage.refresh, outcome);
+      assert.ok(String(prepared.text).includes('Refresh: ' + outcome.replaceAll('_', ' ') + '.'));
+      assert.equal((await collector.collect({ ...scheduled, provider: 'claude' }, 'UTC')).status, 'denied');
+      await runs.cancel(context, run.id, scheduled.origin.generation);
+      assert.equal((await artifacts.get(scheduled, String(prepared.artifact_id), true)).status, 'denied');
+      const history = await artifacts.readHistory({ ...scheduled, origin: undefined }, String(prepared.artifact_id));
+      assert.equal(history.status, 'ok');
+      assert.equal((history.snapshot as BriefSnapshot).coverage.refresh, outcome);
+    }
+  } finally {
     await admin.query('DELETE FROM cos.calendar_states WHERE scope_id=$1 AND binding_id=$2', [scope, binding]);
     await admin.query('DELETE FROM cos.calendar_bindings WHERE scope_id=$1 AND id=$2', [scope, binding]);
   }

@@ -1,3 +1,4 @@
+import { briefRefreshCoverage } from './brief-refresh-coverage.js';
 import { Temporal } from '@js-temporal/polyfill';
 import type { PoolClient } from 'pg';
 import { BoundedDatabase, DatabaseUnavailable } from '../store/client.js';
@@ -62,6 +63,15 @@ export class BriefCollector {
     const d = this.options,
       k = d.knowledge.answers.dependencies;
     if (!(await k.current(client, context))) return false;
+    if (!historical && context.origin) {
+      const refresh = await briefRefreshCoverage(client, context, snapshot.time_zone, true);
+      if (
+        !refresh ||
+        snapshot.coverage.refresh !== refresh.refresh ||
+        (refresh.truncated && !snapshot.coverage.truncated)
+      )
+        return false;
+    }
     const calendar = await k.calendarContext(client, context, true);
     if (calendar.status !== 'ok' || digest(calendar.notice) !== calendarDigest) return false;
     for (const item of [...snapshot.commitments, ...snapshot.decisions]) {
@@ -124,6 +134,8 @@ export class BriefCollector {
     const before = await this.transaction(async (client) => {
       const k = d.knowledge.answers.dependencies;
       if (!(await k.current(client, context))) return { status: 'denied' };
+      const refresh = await briefRefreshCoverage(client, context, timeZone);
+      if (!refresh) return { status: 'denied' };
       const calendar = await k.calendarContext(client, context, true);
       if (calendar.status !== 'ok') return { status: 'denied' };
       const records = (
@@ -171,8 +183,8 @@ export class BriefCollector {
               ? 'available'
               : 'not_connected',
         calendar: 'unavailable',
-        refresh: 'not_requested',
-        truncated: records.length > 100 || candidates.length > 100 || sources.length > 100,
+        refresh: refresh.refresh,
+        truncated: refresh.truncated || records.length > 100 || candidates.length > 100 || sources.length > 100,
         withheld,
       };
       return { status: 'ok', records: records.slice(0, 100), work, coverage, calendar_digest: digest(calendar.notice) };

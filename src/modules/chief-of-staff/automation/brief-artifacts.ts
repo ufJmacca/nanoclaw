@@ -1,3 +1,4 @@
+import { briefRefreshCoverage } from './brief-refresh-coverage.js';
 import type { PoolClient } from 'pg';
 import type { KnowledgeContext } from '../knowledge/store.js';
 import { digest, type Result } from '../domain/contracts.js';
@@ -33,27 +34,9 @@ export class BriefArtifacts {
     return this.collector.options.knowledge;
   }
   private async originAllowed(client: PoolClient, context: KnowledgeContext, timeZone: string): Promise<boolean> {
-    if (!context.origin) return true;
-    return (
-      (
-        await client.query(
-          `SELECT 1 FROM cos.brief_runs r JOIN cos.brief_schedules s ON s.scope_id=r.scope_id AND s.id=r.schedule_id AND s.version=r.schedule_version
-      WHERE r.scope_id=$1 AND r.id=$2 AND r.generation=$3 AND r.owner_id=$4 AND r.session_id=$5 AND r.agent_group_id=$6
-      AND r.state='dispatched' AND r.deadline_at>clock_timestamp() AND r.lease_until>clock_timestamp()
-      AND s.policy->>'state'='active' AND s.policy->>'time_zone'=$7`,
-          [
-            context.scopeId,
-            context.origin.runId,
-            context.origin.generation,
-            context.ownerId,
-            context.sessionId,
-            context.agentGroupId,
-            timeZone,
-          ],
-        )
-      ).rowCount === 1
-    );
+    return (await briefRefreshCoverage(client, context, timeZone)) !== null;
   }
+
   private async receipt(context: KnowledgeContext, request: string, hash: string, timeZone: string): Promise<Result> {
     const d = this.knowledge.answers.dependencies;
     return d.transaction(async (client) => {
