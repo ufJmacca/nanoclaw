@@ -14,6 +14,7 @@ import {
 import type { CalendarSnapshot } from './snapshot.js';
 import { hasCalendarReadScope, type CalendarAccess } from './reader.js';
 import { calendarEventOverlaps } from './window.js';
+import type { CalendarEvidence, CalendarCapture } from './evidence.js';
 
 export type CalendarBindingInput = {
   id: string;
@@ -160,6 +161,7 @@ export class CalendarStore {
   constructor(
     readonly database: BoundedDatabase,
     readonly hooks: { beforePublishCommit?(): Promise<void>; afterPublishCommit?(): Promise<void> } = {},
+    readonly evidence?: CalendarEvidence,
   ) {}
   private async transaction(
     context: Context,
@@ -170,6 +172,7 @@ export class CalendarStore {
     try {
       return await this.database.run(async (client) => {
         await client.query('BEGIN');
+        if (publishing && this.evidence) await client.query('SELECT pg_advisory_xact_lock(73101004)');
         if (!(await authorised(client, context, mutation))) {
           await client.query('COMMIT');
           return { status: 'denied' };
@@ -309,6 +312,31 @@ export class CalendarStore {
     if (!uuid.test(bindingId) || !uuid.test(id) || !snapshotValid(input)) return { status: 'denied' };
     const snapshot = structuredClone(input),
       hash = digest(snapshot);
+    const commit = (captured: CalendarCapture[]) =>
+      this.publishCaptured(context, bindingId, id, snapshot, hash, captured);
+    if (!this.evidence) return commit([]);
+    const admitted = await this.transaction(context, false, async (client) => {
+      const binding = await this.binding(client, context, bindingId);
+      return {
+        status:
+          binding?.auth === 'ready' &&
+          binding.selected_calendar_ids.includes(snapshot.calendarId) &&
+          snapshot.accessGeneration === bindingId + ':' + binding.version
+            ? 'ok'
+            : 'denied',
+      };
+    });
+    if (admitted.status !== 'ok') return admitted;
+    return this.evidence.capture(context, bindingId, snapshot, commit);
+  }
+  private publishCaptured(
+    context: Context,
+    bindingId: string,
+    id: string,
+    snapshot: CalendarSnapshot,
+    hash: string,
+    captured: CalendarCapture[],
+  ): Promise<Result> {
     return this.transaction(
       context,
       true,
@@ -425,6 +453,7 @@ export class CalendarStore {
           'UPDATE cos.calendar_states SET current_snapshot=$4,last_success_at=clock_timestamp() WHERE scope_id=$1 AND binding_id=$2 AND calendar_id=$3',
           [context.scopeId, bindingId, snapshot.calendarId, id],
         );
+        await this.evidence?.publish(client, context, bindingId, id, snapshot, b.processing_providers, captured);
         return result;
       },
       true,
@@ -465,6 +494,7 @@ export class CalendarStore {
         "UPDATE cos.calendar_observations SET lifecycle='quarantined',updated_at=clock_timestamp() WHERE scope_id=$1 AND binding_id=$2 AND lifecycle IN ('current','cancelled')",
         [context.scopeId, bindingId],
       );
+      await this.evidence?.revoke(client, context, bindingId, b.version + 1);
       return { status: 'ok' };
     });
   }

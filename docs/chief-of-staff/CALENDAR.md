@@ -1,6 +1,6 @@
 # Calendar awareness implementation
 
-S03 is in progress. The calendar readers, snapshot collector and PostgreSQL snapshot store exist; account linking, evidence integration and conversational coverage are not connected yet. No real calendar account has been linked or queried.
+S03 is in progress. The calendar readers, snapshot collector, PostgreSQL snapshot store and guarded S02 evidence integration exist. Runtime wiring, operator account linking and conversational coverage remain pending. No real calendar account has been linked or queried.
 
 ## Read contract
 
@@ -22,7 +22,11 @@ These are local capture limits, not a claim that Google's pages form a transacti
 
 Schema 3 records operator bindings, credential references, selected calendars, processing permissions, refresh attempts, completed snapshots and event revisions. Network collection runs outside database transactions. A single transaction publishes a complete capture, records its observed access role and retires missing observations within its coverage window. Events outside that window are retained. An incomplete or failed attempt keeps the previous completed view and reports incomplete coverage. No successful snapshot means unknown coverage, even when the returned event list is empty.
 
-Stable snapshot identities reconcile retries and lost acknowledgements. Concurrent duplicate publication creates one revision per changed event; an older refresh cannot overwrite a newer attempt. Revoked, expired or disconnected bindings hide cached observations immediately at this store boundary. Reconnection requires a newly authorised binding. Integration with S02 source/answer invalidation remains pending, so this store is not yet exposed to the coordinator.
+Stable snapshot identities reconcile retries and lost acknowledgements. Concurrent duplicate publication creates one revision per changed event; an older refresh cannot overwrite a newer attempt. Revoked, expired or disconnected bindings hide cached observations immediately at this store boundary. Reconnection requires a newly authorised binding. This store is not yet exposed to the coordinator.
+
+When constructed with the evidence publisher, a complete snapshot admits immutable source revisions, exact-line citations and observation links in the same transaction. Corrections, cancellations and successful omissions invalidate exposed contexts and derived answers. Source revisions remain historical records; owner revocation tombstones cannot be undone by a later refresh. File imports cannot overwrite connector-owned sources. Private evidence bytes are captured under the existing artifact lease before metadata publication, so interrupted transactions leave only unadmitted bytes eligible for ordinary orphan cleanup.
+
+Knowledge retrieval checks both the current database binding/observation and a host-supplied local access guard. Missing guards deny calendar evidence. The guard applies before search ranking and pagination, on direct reads, exposed contexts, historical answers and final answer publication, including uncited context dependencies. Durable local denial therefore closes cached disclosure even when the database has not yet recorded access loss. Runtime configuration must supply the protected denial journal before enabling calendar retrieval.
 
 The external test database has schema 3. The Pi remains on the accepted S02 schema 2 release. S03 release registration stays closed until its full acceptance flow exists.
 

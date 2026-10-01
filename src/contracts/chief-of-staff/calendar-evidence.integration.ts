@@ -1,0 +1,428 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { before, after, test } from 'node:test';
+import pg from 'pg';
+import { fixtureDatabaseConfig, connectFixtureDatabase, fixtureRuntimeUser } from './fixture-database.js';
+import { migrate } from '../../modules/chief-of-staff/store/migrations.js';
+import { BoundedDatabase } from '../../modules/chief-of-staff/store/client.js';
+import { KnowledgeArtifacts } from '../../modules/chief-of-staff/knowledge/artifacts.js';
+import { KnowledgeStore, type KnowledgeContext, type Evidence } from '../../modules/chief-of-staff/knowledge/store.js';
+import { CalendarStore } from '../../modules/chief-of-staff/calendar/store.js';
+import { CalendarEvidence } from '../../modules/chief-of-staff/calendar/evidence.js';
+import { CalendarAccessFences } from '../../modules/chief-of-staff/calendar/access-fences.js';
+import { fixtureCalendarReader } from '../../modules/chief-of-staff/calendar/fixture-reader.js';
+import { collectCalendarSnapshot } from '../../modules/chief-of-staff/calendar/snapshot.js';
+import { GOOGLE_EVENT_READ_SCOPE } from '../../modules/chief-of-staff/calendar/reader.js';
+import { PriorityStore } from '../../modules/chief-of-staff/store/priorities.js';
+import { connectionFault } from './connection-fault.js';
+import { setTimeout as delay } from 'node:timers/promises';
+const scope = 'calendar-evidence-' + randomUUID();
+const context: KnowledgeContext = {
+  scopeId: scope,
+  ownerId: 'fixture-owner',
+  agentGroupId: scope,
+  sessionId: scope,
+  ingressId: randomUUID(),
+  provider: 'codex',
+  generation: randomUUID(),
+};
+const fresh = () => ({ ...context, generation: randomUUID() });
+const window = { timeMin: '2026-10-01T00:00:00Z', timeMax: '2026-10-10T00:00:00Z', timeZone: 'Australia/Sydney' };
+let admin: pg.Client,
+  pool: pg.Pool,
+  database: BoundedDatabase,
+  calendar: CalendarStore,
+  knowledge: KnowledgeStore,
+  artifacts: KnowledgeArtifacts,
+  fences: CalendarAccessFences,
+  base: string;
+const calendarAccess = (scopeId: string, bindingId: string) => {
+  fences.assertOpen(scopeId, bindingId);
+  return true;
+};
+before(async () => {
+  admin = await connectFixtureDatabase(process.env, 'migration');
+  assert.equal((await admin.query('SELECT pg_try_advisory_lock(73101002) AS locked')).rows[0].locked, true);
+  await migrate(admin, fixtureRuntimeUser());
+  pool = new pg.Pool(await fixtureDatabaseConfig());
+  database = BoundedDatabase.fromConfig(await fixtureDatabaseConfig());
+  base = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-calendar-evidence-'));
+  for (const name of ['artifacts', 'staging', 'fences']) fs.mkdirSync(path.join(base, name), { mode: 0o700 });
+  artifacts = new KnowledgeArtifacts(path.join(base, 'artifacts'), path.join(base, 'staging'));
+  fences = CalendarAccessFences.initialize(path.join(base, 'fences'));
+  knowledge = new KnowledgeStore(database, artifacts, {}, { calendarAccess });
+  calendar = new CalendarStore(database, {}, new CalendarEvidence(artifacts));
+  await pool.query(
+    "INSERT INTO cos.scopes(id,owner_id,instance_id,channel_id,agent_group_id,status) VALUES($1,'fixture-owner','fixture-instance',$1,$1,'active')",
+    [scope],
+  );
+});
+after(async () => {
+  if (pool) {
+    await pool.query('UPDATE cos.calendar_states SET current_snapshot=NULL,last_attempt=NULL WHERE scope_id=$1', [
+      scope,
+    ]);
+    await pool.query('UPDATE cos.sources SET current_revision_id=NULL WHERE scope_id=$1', [scope]);
+    for (const table of [
+      'calendar_event_revisions',
+      'calendar_observations',
+      'calendar_snapshots',
+      'calendar_states',
+      'calendar_bindings',
+      'derivation_links',
+      'evidence_refs',
+      'chunks',
+      'revocation_tombstones',
+      'source_revisions',
+      'sources',
+      'artifacts',
+      'outbox',
+      'operations',
+      'events',
+      'proposals',
+    ])
+      await pool.query(`DELETE FROM cos.${table} WHERE scope_id=$1`, [scope]);
+    await pool.query('DELETE FROM cos.scopes WHERE id=$1', [scope]);
+    await pool.end();
+  }
+  await database?.pool.end();
+  await admin?.end();
+  if (base) fs.rmSync(base, { recursive: true, force: true });
+});
+const event = (summary: string) => ({
+  id: 'meeting',
+  etag: 'v1',
+  summary,
+  start: { date: '2026-10-04' },
+  end: { date: '2026-10-05' },
+});
+async function setup(summary: string) {
+  const id = randomUUID();
+  assert.equal(
+    (
+      await calendar.bind(context, {
+        id,
+        provider: 'fixture',
+        calendarIds: ['selected'],
+        scopes: [GOOGLE_EVENT_READ_SCOPE],
+        timeZone: window.timeZone,
+        processingProviders: ['codex'],
+      })
+    ).status,
+    'ok',
+  );
+  return {
+    id,
+    fixture: fixtureCalendarReader({
+      access: { generation: id + ':1', calendarIds: ['selected'], scopes: [GOOGLE_EVENT_READ_SCOPE], auth: 'ready' },
+      calendars: { selected: [event(summary)] },
+    }),
+  };
+}
+async function publish(s: Awaited<ReturnType<typeof setup>>) {
+  const id = randomUUID();
+  await calendar.start(context, s.id, 'selected', id, window);
+  const snapshot = await collectCalendarSnapshot(s.fixture.reader, 'selected', window);
+  const result = await calendar.publish(context, s.id, id, snapshot);
+  assert.equal(result.status, 'ok');
+  return { id, snapshot, result };
+}
+async function find(text: string, ctx = fresh()) {
+  const result = await knowledge.search(ctx, { query: text });
+  assert.equal(result.status, 'ok');
+  const row = (result.items as Evidence[])[0];
+  assert.ok(row, 'calendar evidence missing');
+  return { row, ctx };
+}
+test('S03-T02/T03: snapshot events become S02 evidence with immutable exact-line citations and no duplicate revisions', async () => {
+  const s = await setup('CalendarCitationCanary');
+  const first = await publish(s);
+  const { row } = await find('CalendarCitationCanary');
+  assert.ok(row.text.includes('CalendarCitationCanary'));
+  assert.equal(row.locator_format, 'normalized-utf8-lines/v1');
+  await publish(s);
+  assert.equal(
+    (
+      await pool.query('SELECT count(*)::int AS n FROM cos.source_revisions WHERE scope_id=$1 AND source_id=$2', [
+        scope,
+        row.source_id,
+      ])
+    ).rows[0].n,
+    1,
+  );
+  assert.deepEqual(await calendar.publish(context, s.id, first.id, first.snapshot), first.result);
+  assert.equal(
+    (
+      await pool.query('SELECT source_id FROM cos.calendar_observations WHERE scope_id=$1 AND binding_id=$2', [
+        scope,
+        s.id,
+      ])
+    ).rows[0].source_id,
+    row.source_id,
+  );
+});
+test('S03-T05: corrections fence exposed contexts, quarantine derived answers and provide only the new revision', async () => {
+  const s = await setup('CalendarCorrectionCanary old meeting');
+  await publish(s);
+  const { row, ctx } = await find('CalendarCorrectionCanary');
+  const answer = await knowledge.answers.prepare(ctx, randomUUID(), {
+    kind: 'answer',
+    coverage: 'limited',
+    claims: [
+      {
+        kind: 'inference',
+        text: 'Prepare for the meeting.',
+        citations: [{ kind: 'source', evidence_id: row.evidence_id }],
+      },
+    ],
+  });
+  assert.equal(answer.status, 'ok');
+  s.fixture.replace('selected', [event('CalendarCorrectionCanary corrected meeting')]);
+  await publish(s);
+  assert.equal((await knowledge.contextReady(ctx)).status, 'denied');
+  const current = await find('CalendarCorrectionCanary');
+  assert.notEqual(current.row.revision_id, row.revision_id);
+  assert.ok(current.row.text.includes('corrected'));
+  assert.equal(
+    (
+      await pool.query(
+        "SELECT count(*)::int AS n FROM cos.artifacts WHERE scope_id=$1 AND kind='answer' AND lifecycle='quarantined'",
+        [scope],
+      )
+    ).rows[0].n,
+    1,
+  );
+  assert.ok(
+    (await pool.query("SELECT id FROM cos.outbox WHERE scope_id=$1 AND kind='knowledge_invalidate'", [scope]))
+      .rowCount! > 0,
+  );
+});
+test('S03-T01/T05: cancellation and successful omission hide event evidence while retaining source history', async () => {
+  for (const cancelled of [false, true]) {
+    const term = cancelled ? 'CalendarCancelledCanary' : 'CalendarMissingCanary',
+      s = await setup(term);
+    await publish(s);
+    const { ctx, row } = await find(term);
+    s.fixture.replace('selected', cancelled ? [{ id: 'meeting', status: 'cancelled' }] : []);
+    await publish(s);
+    assert.equal((await knowledge.contextReady(ctx)).status, 'denied');
+    assert.deepEqual((await knowledge.search(fresh(), { query: term })).items, []);
+    assert.equal(
+      (
+        await pool.query('SELECT count(*)::int AS n FROM cos.source_revisions WHERE scope_id=$1 AND source_id=$2', [
+          scope,
+          row.source_id,
+        ])
+      ).rows[0].n,
+      1,
+    );
+  }
+});
+test('S03-T05: binding revocation retains access tombstones and hides cached event evidence', async () => {
+  const s = await setup('CalendarRevocationCanary');
+  await publish(s);
+  const { row, ctx } = await find('CalendarRevocationCanary');
+  await calendar.setAuth(context, s.id, 'revoked');
+  assert.equal((await knowledge.contextReady(ctx)).status, 'denied');
+  assert.deepEqual((await knowledge.search(fresh(), { query: 'CalendarRevocationCanary' })).items, []);
+  assert.equal(
+    (
+      await pool.query('SELECT kind FROM cos.revocation_tombstones WHERE scope_id=$1 AND source_id=$2', [
+        scope,
+        row.source_id,
+      ])
+    ).rows[0].kind,
+    'revoke',
+  );
+});
+async function answerFor(ctx: KnowledgeContext, row: Evidence) {
+  const result = await knowledge.answers.prepare(ctx, randomUUID(), {
+    kind: 'answer',
+    coverage: 'limited',
+    claims: [
+      {
+        kind: 'inference',
+        text: 'Prepare for the meeting.',
+        citations: [{ kind: 'source', evidence_id: row.evidence_id }],
+      },
+    ],
+  });
+  assert.equal(result.status, 'ok');
+  return String(result.artifact_id);
+}
+test('S03-T05: durable local denial alone fences search, direct reads, contexts, historical answers and publication', async () => {
+  const s = await setup('CalendarLocalFenceCanary');
+  await publish(s);
+  const { row, ctx } = await find('CalendarLocalFenceCanary');
+  const id = await answerFor(ctx, row);
+  const read = await knowledge.answers.get(ctx, id);
+  assert.equal(read.status, 'ok');
+  fences.deny(scope, s.id, 'revoked');
+  // Simulates remote invalidation failing: database state is still ready/current.
+  assert.equal(
+    (await pool.query('SELECT auth FROM cos.calendar_bindings WHERE scope_id=$1 AND id=$2', [scope, s.id])).rows[0]
+      .auth,
+    'ready',
+  );
+  assert.deepEqual((await knowledge.search(fresh(), { query: 'CalendarLocalFenceCanary' })).items, []);
+  assert.equal((await knowledge.get(fresh(), row.source_id, row.revision_id, row.ordinal)).status, 'denied');
+  assert.equal((await knowledge.contextReady(ctx)).status, 'denied');
+  assert.equal((await knowledge.answers.get(fresh(), id)).status, 'denied');
+  assert.equal((await knowledge.answers.authorizePublication(ctx, String(read.text))).status, 'denied');
+});
+test('S03-T05: unconfigured guard denies calendar evidence and revocation during disclosure closes late output', async () => {
+  const s = await setup('CalendarLateFenceCanary');
+  await publish(s);
+  const { row, ctx } = await find('CalendarLateFenceCanary');
+  const id = await answerFor(ctx, row);
+  const unconfigured = new KnowledgeStore(database, artifacts);
+  assert.deepEqual((await unconfigured.search(fresh(), { query: 'CalendarLateFenceCanary' })).items, []);
+  assert.equal((await unconfigured.answers.get(fresh(), id)).status, 'denied');
+  const late = new KnowledgeStore(
+    database,
+    artifacts,
+    {
+      beforeDisclosure: async () => {
+        fences.deny(scope, s.id, 'disconnected');
+      },
+    },
+    { calendarAccess },
+  );
+  assert.equal((await late.search(fresh(), { query: 'CalendarLateFenceCanary' })).status, 'denied');
+  const second = await setup('CalendarLateAnswerCanary');
+  await publish(second);
+  const evidence = await find('CalendarLateAnswerCanary');
+  const secondId = await answerFor(evidence.ctx, evidence.row);
+  const lateAnswer = new KnowledgeStore(
+    database,
+    artifacts,
+    {
+      beforeAnswerDisclosure: async () => {
+        fences.deny(scope, second.id, 'expired');
+      },
+    },
+    { calendarAccess },
+  );
+  assert.equal((await lateAnswer.answers.get(fresh(), secondId)).status, 'denied');
+});
+test('S03-T04: a staging-file import cannot overwrite connector-owned source identity', async () => {
+  const s = await setup('CalendarImportFenceCanary');
+  await publish(s);
+  const { row } = await find('CalendarImportFenceCanary');
+  const key = (
+    await pool.query('SELECT source_key FROM cos.sources WHERE scope_id=$1 AND id=$2', [scope, row.source_id])
+  ).rows[0].source_key;
+  fs.writeFileSync(path.join(base, 'staging', 'overwrite.txt'), 'Injected source replacement', { mode: 0o600 });
+  const result = await knowledge.importSource(context, randomUUID(), {
+    sourceKey: key,
+    filename: 'overwrite.txt',
+    title: 'Replacement',
+    processingProviders: ['codex'],
+    expectedVersion: row.source_version,
+  });
+  assert.equal(result.status, 'denied');
+  assert.equal((await find('CalendarImportFenceCanary')).row.revision_id, row.revision_id);
+});
+test('S03-T05: historical answers retain uncited calendar context dependencies', async () => {
+  const hidden = await setup('CalendarImplicitDependencyCanary');
+  await publish(hidden);
+  const cited = await setup('CalendarExplicitDependencyCanary');
+  await publish(cited);
+  const ctx = fresh();
+  await find('CalendarImplicitDependencyCanary', ctx);
+  const { row } = await find('CalendarExplicitDependencyCanary', ctx);
+  const id = await answerFor(ctx, row);
+  assert.equal((await knowledge.answers.get(fresh(), id)).status, 'ok');
+  fences.deny(scope, hidden.id, 'revoked');
+  assert.equal((await knowledge.answers.get(fresh(), id)).status, 'denied');
+  assert.equal((await find('CalendarExplicitDependencyCanary')).row.source_id, row.source_id);
+});
+test('S03-PG01/PG02: lost database connection rolls back snapshot, evidence correction and answer invalidation together', async () => {
+  const s = await setup('CalendarAtomicEvidenceCanary original');
+  const first = await publish(s);
+  const { row, ctx } = await find('CalendarAtomicEvidenceCanary');
+  const answer = await answerFor(ctx, row);
+  s.fixture.replace('selected', [event('CalendarAtomicEvidenceCanary corrected')]);
+  const attempt = randomUUID();
+  await calendar.start(context, s.id, 'selected', attempt, window);
+  const snapshot = await collectCalendarSnapshot(s.fixture.reader, 'selected', window);
+  const relay = await connectionFault(await fixtureDatabaseConfig());
+  const brokenDatabase = new BoundedDatabase(new pg.Pool(relay.config), 350);
+  let inject = true;
+  const fault = new CalendarStore(
+    brokenDatabase,
+    {
+      beforePublishCommit: async () => {
+        if (inject) relay.partition();
+      },
+    },
+    new CalendarEvidence(artifacts),
+  );
+  try {
+    assert.equal((await fault.publish(context, s.id, attempt, snapshot)).status, 'pending');
+    const read = await calendar.read(context, s.id, 'selected');
+    assert.equal(read.snapshot_id, first.id);
+    assert.equal(read.coverage, 'incomplete');
+    assert.equal((await find('CalendarAtomicEvidenceCanary')).row.revision_id, row.revision_id);
+    assert.equal((await knowledge.answers.get(ctx, answer)).status, 'ok');
+    relay.restore();
+    inject = false;
+    await delay(1100);
+    const recovered = await fault.publish(context, s.id, attempt, snapshot);
+    assert.equal(recovered.status, 'ok');
+    assert.deepEqual(await fault.publish(context, s.id, attempt, snapshot), recovered);
+    assert.equal((await knowledge.answers.get(fresh(), answer)).status, 'denied');
+    assert.equal(
+      (
+        await pool.query('SELECT count(*)::int AS n FROM cos.source_revisions WHERE scope_id=$1 AND source_id=$2', [
+          scope,
+          row.source_id,
+        ])
+      ).rows[0].n,
+      2,
+    );
+  } finally {
+    await brokenDatabase.pool.end();
+    await relay.close();
+  }
+});
+test('S03-T05: refresh never resurrects an owner-revoked calendar source', async () => {
+  const s = await setup('CalendarOwnerRevokedCanary');
+  await publish(s);
+  const { row } = await find('CalendarOwnerRevokedCanary');
+  const priorities = new PriorityStore(database, knowledge);
+  const proposed = await priorities.propose(context, randomUUID(), {
+    kind: 'source_revoke',
+    source_id: row.source_id,
+    expected_version: row.source_version,
+    reason: 'Fixture owner withdrew source',
+  });
+  assert.equal(proposed.status, 'ok');
+  assert.equal(
+    (
+      await priorities.decide(
+        { ...context, ingressId: randomUUID() },
+        String(proposed.proposal_id),
+        String(proposed.confirmation_token),
+        'approve',
+      )
+    ).status,
+    'ok',
+  );
+  assert.equal((await priorities.apply(scope, String(proposed.proposal_id))).status, 'ok');
+  s.fixture.replace('selected', [event('CalendarOwnerRevokedCanary new event text')]);
+  await publish(s);
+  assert.deepEqual((await knowledge.search(fresh(), { query: 'CalendarOwnerRevokedCanary' })).items, []);
+  assert.equal(
+    (
+      await pool.query('SELECT count(*)::int AS n FROM cos.source_revisions WHERE scope_id=$1 AND source_id=$2', [
+        scope,
+        row.source_id,
+      ])
+    ).rows[0].n,
+    1,
+  );
+});

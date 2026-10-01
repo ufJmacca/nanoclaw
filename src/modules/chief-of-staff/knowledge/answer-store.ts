@@ -58,6 +58,7 @@ export class KnowledgeAnswers {
       transaction: Transaction;
       exclusive(operation: (lease: ArtifactLease) => Promise<Result>): Promise<Result>;
       current(client: PoolClient, context: KnowledgeContext): Promise<boolean>;
+      sourcesReadable(client: PoolClient, context: KnowledgeContext, ids: string[]): Promise<boolean>;
       retrievalEnabled(): boolean;
       hooks: AnswerHooks;
     },
@@ -99,7 +100,13 @@ export class KnowledgeAnswers {
       if (!row) return null;
       rows.push(row as ResolvedCitation);
     }
-    return rows;
+    return (await this.dependencies.sourcesReadable(
+      client,
+      context,
+      rows.flatMap((row) => (row.kind === 'source' ? [row.source_id] : [])),
+    ))
+      ? rows
+      : null;
   }
   private verifyBytes(rows: ResolvedCitation[]): void {
     for (const row of rows)
@@ -254,6 +261,22 @@ export class KnowledgeAnswers {
       [context.scopeId, id, context.sessionId, context.provider, this.dependencies.retrievalEnabled()],
     );
     if (invalid.rowCount) return null;
+    // An answer also depends on previously exposed context that was not explicitly cited.
+    const dependencies = (
+      await client.query(
+        `SELECT DISTINCT e.source_id FROM cos.derivation_links d JOIN cos.evidence_refs e ON e.scope_id=d.scope_id AND e.id=d.evidence_id
+      WHERE d.scope_id=$1 AND d.artifact_id=$2`,
+        [context.scopeId, id],
+      )
+    ).rows as Array<{ source_id: string }>;
+    if (
+      !(await this.dependencies.sourcesReadable(
+        client,
+        context,
+        dependencies.map((row) => row.source_id),
+      ))
+    )
+      return null;
     const resolved = await this.resolve(client, context, metadata.provenance.citations, true);
     return resolved ? { metadata, resolved } : null;
   }

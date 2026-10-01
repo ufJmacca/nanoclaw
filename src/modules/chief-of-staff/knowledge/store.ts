@@ -11,6 +11,8 @@ import {
 } from './artifacts.js';
 import { purgeKnowledge, type PurgeHooks } from './purge.js';
 import { KnowledgeAnswers, type AnswerHooks } from './answer-store.js';
+import { calendarSourceAccess } from '../calendar/source-access.js';
+import { hasCalendarReadScope } from '../calendar/reader.js';
 export type KnowledgeContext = Context & { provider: string; generation: string };
 export type ImportSource = {
   sourceKey: string;
@@ -74,20 +76,27 @@ export class KnowledgeStore {
   readonly retentionMs: number;
   readonly answers: KnowledgeAnswers;
   readonly retrievalEnabled: () => boolean;
+  private readonly calendarAccess: (scopeId: string, bindingId: string) => boolean;
   constructor(
     readonly database: BoundedDatabase,
     readonly artifacts: KnowledgeArtifacts,
     readonly hooks: { afterPublication?(): Promise<void>; beforeDisclosure?(): Promise<void> } & PurgeHooks &
       AnswerHooks = {},
-    options: { retentionMs?: number; retrievalEnabled?(): boolean } = {},
+    options: {
+      retentionMs?: number;
+      retrievalEnabled?(): boolean;
+      calendarAccess?(scopeId: string, bindingId: string): boolean;
+    } = {},
   ) {
     this.retrievalEnabled = options.retrievalEnabled ?? (() => true);
+    this.calendarAccess = options.calendarAccess ?? (() => false);
     this.answers = new KnowledgeAnswers({
       artifacts,
       hooks,
       transaction: (operation, mutation) => this.transaction(operation, mutation),
       exclusive: (operation) => this.exclusive(operation),
       current: (client, context) => this.current(client, context),
+      sourcesReadable: (client, context, ids) => this.sourcesReadable(client, context, ids),
       retrievalEnabled: this.retrievalEnabled,
     });
     this.retentionMs = options.retentionMs ?? 30 * 24 * 60 * 60 * 1000;
@@ -239,6 +248,8 @@ export class KnowledgeStore {
             )
           ).rows[0];
           if (
+            previous?.provenance?.origin === 'calendar_observation' ||
+            Object.hasOwn(previous?.access_policy ?? {}, 'calendar_binding_id') ||
             previous?.status === 'revoked' ||
             (previous &&
               (
@@ -363,6 +374,37 @@ export class KnowledgeStore {
       return result.status === 'pending' ? { ...result, request_id: requestId } : result;
     });
   }
+  private async openCalendarBindings(client: PoolClient, context: KnowledgeContext): Promise<string[]> {
+    const rows = (
+      await client.query(
+        "SELECT id::text,permission_scopes FROM cos.calendar_bindings WHERE scope_id=$1 AND auth='ready' AND $2=ANY(processing_providers)",
+        [context.scopeId, context.provider],
+      )
+    ).rows as Array<{ id: string; permission_scopes: string[] }>;
+    return rows
+      .filter(({ id, permission_scopes }) => {
+        try {
+          return hasCalendarReadScope(permission_scopes) && this.calendarAccess(context.scopeId, id) === true;
+          // eslint-disable-next-line no-catch-all/no-catch-all -- Missing/corrupt journals and recorded access loss deny disclosure without revealing private paths.
+        } catch {
+          return false;
+        }
+      })
+      .map(({ id }) => id);
+  }
+  private async sourcesReadable(client: PoolClient, context: KnowledgeContext, ids: string[]): Promise<boolean> {
+    const unique = [...new Set(ids)];
+    if (!unique.length) return true;
+    const allowed = await this.openCalendarBindings(client, context);
+    return (
+      (
+        await client.query(
+          `SELECT s.id FROM cos.sources s WHERE s.scope_id=$1 AND s.id=ANY($2::text[]) AND ${calendarSourceAccess('$3')}`,
+          [context.scopeId, unique, allowed],
+        )
+      ).rowCount === unique.length
+    );
+  }
   private async current(client: PoolClient, context: KnowledgeContext): Promise<boolean> {
     if (!providers.includes(context.provider) || !uuid.test(context.generation) || !(await authorised(client, context)))
       return false;
@@ -370,8 +412,16 @@ export class KnowledgeStore {
       `SELECT 1 FROM cos.evidence_refs e JOIN cos.sources s ON s.scope_id=e.scope_id AND s.id=e.source_id
       WHERE e.scope_id=$1 AND e.session_id=$2 AND e.context_generation=$3 AND
       (NOT $5::boolean OR s.version<>e.source_version OR s.current_revision_id<>e.revision_id OR s.status NOT IN ('current','stale')
-        OR NOT $4=ANY(s.processing_providers) OR e.processing_provider<>$4 OR EXISTS(SELECT 1 FROM cos.revocation_tombstones t WHERE t.scope_id=s.scope_id AND t.source_id=s.id)) LIMIT 1`,
-      [context.scopeId, context.sessionId, context.generation, context.provider, this.retrievalEnabled()],
+        OR NOT $4=ANY(s.processing_providers) OR e.processing_provider<>$4 OR NOT ${calendarSourceAccess('$6')}
+        OR EXISTS(SELECT 1 FROM cos.revocation_tombstones t WHERE t.scope_id=s.scope_id AND t.source_id=s.id)) LIMIT 1`,
+      [
+        context.scopeId,
+        context.sessionId,
+        context.generation,
+        context.provider,
+        this.retrievalEnabled(),
+        await this.openCalendarBindings(client, context),
+      ],
     );
     return !invalid.rowCount;
   }
@@ -428,6 +478,7 @@ export class KnowledgeStore {
         await client.query(
           `${candidateSelect},ts_rank(c.search,plainto_tsquery('simple',$3)) AS score ${candidateJoin}
         AND c.search @@ plainto_tsquery('simple',$3) AND ($4::text IS NULL OR s.id=$4) AND ($5::text IS NULL OR s.project_id=$5)
+        AND ${calendarSourceAccess('$8')}
         ORDER BY score DESC,s.id,c.ordinal LIMIT $6 OFFSET $7`,
           [
             context.scopeId,
@@ -437,6 +488,7 @@ export class KnowledgeStore {
             input.projectId ?? null,
             input.limit ?? 5,
             input.offset ?? 0,
+            await this.openCalendarBindings(client, context),
           ],
         )
       ).rows;
@@ -458,13 +510,17 @@ export class KnowledgeStore {
     const selected = await this.transaction(async (client) => {
       if (!(await this.current(client, context))) return { status: 'denied' };
       const items = (
-        await client.query(`${candidateSelect},0 AS score ${candidateJoin} AND s.id=$3 AND r.id=$4 AND c.ordinal=$5`, [
-          context.scopeId,
-          context.provider,
-          sourceId,
-          revisionId,
-          ordinal,
-        ])
+        await client.query(
+          `${candidateSelect},0 AS score ${candidateJoin} AND s.id=$3 AND r.id=$4 AND c.ordinal=$5 AND ${calendarSourceAccess('$6')}`,
+          [
+            context.scopeId,
+            context.provider,
+            sourceId,
+            revisionId,
+            ordinal,
+            await this.openCalendarBindings(client, context),
+          ],
+        )
       ).rows;
       return { status: items.length ? 'ok' : 'denied', items };
     });
@@ -492,6 +548,14 @@ export class KnowledgeStore {
     const result = await this.transaction(async (client) => {
       if (!this.retrievalEnabled()) return { status: 'unavailable' };
       if (!(await this.current(client, context))) return { status: 'denied' };
+      if (
+        !(await this.sourcesReadable(
+          client,
+          context,
+          candidates.map((row) => row.source_id),
+        ))
+      )
+        return { status: 'denied' };
       const items: Evidence[] = [];
       for (const row of candidates) {
         const allowed = await client.query(
