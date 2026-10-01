@@ -28,7 +28,7 @@ type State = {
 const fail = (code: string): never => {
   throw new CalendarReadError(code);
 };
-function rootGuard(root: string): void {
+function rootGuard(root: string): fs.Stats {
   const stat = fs.lstatSync(root);
   if (
     !path.isAbsolute(root) ||
@@ -43,6 +43,7 @@ function rootGuard(root: string): void {
     if (fs.lstatSync(path.join(current, '.git'), { throwIfNoEntry: false })) throw new Error('repository_root');
     if (path.dirname(current) === current) break;
   }
+  return stat;
 }
 function readJson(file: string, durable = false): unknown {
   const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
@@ -84,6 +85,7 @@ export class CalendarCredentialOwner {
   readonly #client: GoogleOAuthClient;
   readonly #fences: CalendarAccessFences;
   readonly #transport: OAuthTransport;
+  readonly #rootIdentity: { dev: number; ino: number };
   readonly #pending = new Map<string, Promise<string>>();
   constructor(
     readonly root: string,
@@ -95,6 +97,7 @@ export class CalendarCredentialOwner {
     this.#fences = fences;
     this.#transport = { ...transport };
     try {
+      this.#rootIdentity = rootGuard(this.root);
       this.guard();
     } catch (error) {
       privateFailure(error);
@@ -113,7 +116,9 @@ export class CalendarCredentialOwner {
     }
   }
   private guard(): void {
-    rootGuard(this.root);
+    const current = rootGuard(this.root);
+    if (current.dev !== this.#rootIdentity.dev || current.ino !== this.#rootIdentity.ino)
+      throw new Error('credential_root_changed');
     const value = readJson(path.join(this.root, marker));
     if (!object(value) || value.contract !== contract || Object.keys(value).length !== 1)
       throw new Error('unowned_root');
@@ -127,7 +132,7 @@ export class CalendarCredentialOwner {
     scope: string,
     binding: string,
     reference: string,
-    operation: (identity: string) => Promise<T>,
+    operation: (identity: string, root: string) => Promise<T>,
   ): Promise<T> {
     try {
       const identity = this.identity(scope, binding, reference);
@@ -136,19 +141,28 @@ export class CalendarCredentialOwner {
       return await withDeploymentLock(path.join(this.root, reference + '.lock'), async () => {
         this.guard();
         this.#fences.assertOpen(scope, binding);
-        return operation(identity);
+        const fd = fs.openSync(this.root, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+        try {
+          const pinned = fs.fstatSync(fd);
+          if (pinned.dev !== this.#rootIdentity.dev || pinned.ino !== this.#rootIdentity.ino)
+            throw new Error('credential_root_changed');
+          // Keep every token read/write on this verified filesystem, including across an awaited refresh.
+          const result = await operation(identity, '/proc/self/fd/' + fd);
+          this.guard();
+          this.#fences.assertOpen(scope, binding);
+          return result;
+        } finally {
+          fs.closeSync(fd);
+        }
       });
     } catch (error) {
       return privateFailure(error);
     }
   }
-  private state(reference: string, identity: string, durable = false): State {
-    const value = readJson(path.join(this.root, reference + '.json'), durable);
+  private state(root: string, reference: string, identity: string, durable = false): State {
+    const value = readJson(path.join(root, reference + '.json'), durable);
     if (durable) {
-      const directory = fs.openSync(
-        this.root,
-        fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW,
-      );
+      const directory = fs.openSync(root, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY);
       try {
         fs.fsyncSync(directory);
       } finally {
@@ -185,14 +199,14 @@ export class CalendarCredentialOwner {
   async install(scope: string, binding: string, reference: string, tokens: GoogleCalendarTokens): Promise<void> {
     if (!validGoogleCalendarTokens(tokens)) return fail('calendar_credentials_invalid');
     const captured = structuredClone(tokens);
-    return this.locked(scope, binding, reference, async (identity) => {
-      const file = path.join(this.root, reference + '.json');
+    return this.locked(scope, binding, reference, async (identity, root) => {
+      const file = path.join(root, reference + '.json');
       if (fs.lstatSync(file, { throwIfNoEntry: false })) {
-        const old = this.state(reference, identity);
+        const old = this.state(root, reference, identity);
         this.admitted(scope, binding, old);
         if (digest(old.tokens) !== digest(captured)) return fail('calendar_credentials_conflict');
         // Re-publish identical data to finish an interrupted directory sync before acknowledging install.
-        writeAtomic(this.root, reference + '.json', old);
+        writeAtomic(root, reference + '.json', old);
         return;
       }
       const state: State = {
@@ -204,31 +218,31 @@ export class CalendarCredentialOwner {
         tokens: captured,
       };
       this.admitted(scope, binding, state);
-      writeAtomic(this.root, reference + '.json', state);
+      writeAtomic(root, reference + '.json', state);
     });
   }
   async token(scope: string, binding: string, reference: string): Promise<string> {
     const key = this.identity(scope, binding, reference);
     const existing = this.#pending.get(key);
     if (existing) return existing;
-    const work = this.locked(scope, binding, reference, async (identity) => {
-      const state = this.state(reference, identity, true);
+    const work = this.locked(scope, binding, reference, async (identity, root) => {
+      const state = this.state(root, reference, identity, true);
       this.admitted(scope, binding, state);
       if (state.tokens.expiresAt > (this.#transport.now ?? Date.now)() + 60000) return state.tokens.accessToken;
-      writeAtomic(this.root, reference + '.json', { ...state, phase: 'refreshing' });
+      writeAtomic(root, reference + '.json', { ...state, phase: 'refreshing' });
       let rotated: GoogleCalendarTokens;
       try {
         rotated = await refreshGoogleCalendarToken(this.#client, state.tokens, this.#transport);
       } catch (error) {
         const revoked = error instanceof CalendarReadError && error.code === 'calendar_oauth_revoked';
         this.#fences.deny(scope, binding, revoked ? 'revoked' : 'expired');
-        writeAtomic(this.root, reference + '.json', { ...state, phase: revoked ? 'revoked' : 'uncertain' });
+        writeAtomic(root, reference + '.json', { ...state, phase: revoked ? 'revoked' : 'uncertain' });
         if (revoked) return fail('calendar_auth_revoked');
         if (error instanceof CalendarReadError) throw error;
         return fail('calendar_oauth_exchange_uncertain');
       }
       // On publication failure, the durable 'refreshing' record prevents reuse after reconstruction.
-      writeAtomic(this.root, reference + '.json', {
+      writeAtomic(root, reference + '.json', {
         ...state,
         phase: 'ready',
         generation: state.generation + 1,
@@ -252,8 +266,8 @@ export class CalendarCredentialOwner {
     const key = this.identity(scope, binding, reference),
       pending = this.#pending.get(key);
     if (pending) await pending;
-    return this.locked(scope, binding, reference, async (identity) => {
-      const state = this.state(reference, identity, true);
+    return this.locked(scope, binding, reference, async (identity, root) => {
+      const state = this.state(root, reference, identity, true);
       this.admitted(scope, binding, state);
       return { auth: 'ready', scopes: [...state.tokens.scopes], generation: state.generation };
     });

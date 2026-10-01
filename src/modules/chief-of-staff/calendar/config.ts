@@ -7,6 +7,7 @@ import { readPrivate } from '../ops/target-state.js';
 import { DatabaseConfigurationError } from '../store/config.js';
 import { verifyCalendarStorage, type CalendarStorageRoots } from './storage-policy.js';
 import type { StorageInspection } from './storage-protection.js';
+import { digest } from '../domain/contracts.js';
 export function calendarSettings(env: NodeJS.ProcessEnv): { enabled: boolean } {
   const enabled = env.COS_CALENDAR_ENABLED ?? 'false';
   if (!['true', 'false'].includes(enabled)) throw new DatabaseConfigurationError('COS_CALENDAR_ENABLED');
@@ -44,13 +45,16 @@ export function openCalendarCredentials(
     }
     const root = path.join(targetRoot, 'calendar');
     privateDirectory(root);
-    verifyCalendarStorage(roots, inspect);
+    const protection = verifyCalendarStorage(roots, inspect);
     const clientFile = path.join(root, 'oauth-client.json'),
       stat = fs.lstatSync(clientFile);
     if (!stat.isFile() || stat.nlink !== 1) throw new Error('unsafe_calendar_client');
     const client = readPrivate<GoogleOAuthClient>(clientFile, 16384);
     const fences = new CalendarAccessFences(path.join(root, 'access-denials'));
-    return { fences, credentials: new CalendarCredentialOwner(path.join(root, 'credentials'), client, fences) };
+    const credentials = new CalendarCredentialOwner(path.join(root, 'credentials'), client, fences);
+    if (digest(verifyCalendarStorage(roots, inspect)) !== digest(protection))
+      throw new Error('calendar_storage_changed');
+    return { fences, credentials };
   } catch {
     // eslint-disable-next-line preserve-caught-error -- Host paths and credential parse failures must not expose sensitive configuration, including through a nested cause.
     throw new Error('calendar_configuration_unavailable');

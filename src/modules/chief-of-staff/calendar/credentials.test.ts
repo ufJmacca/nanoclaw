@@ -47,6 +47,31 @@ function setup() {
   return { base, root, fences, fetch, transport, owner, binding, reference };
 }
 describe('S03 host calendar credential owner', () => {
+  it('refuses a replaced credential root even when ownership and token files were copied intact', async () => {
+    const s = setup();
+    await s.owner.install('scope', s.binding, s.reference, tokens());
+    fs.renameSync(s.root, s.root + '-old');
+    fs.cpSync(s.root + '-old', s.root, { recursive: true });
+    await expect(s.owner.token('scope', s.binding, s.reference)).rejects.toThrow('calendar_credentials_unavailable');
+    await expect(s.owner.inspect('scope', s.binding, s.reference)).rejects.toThrow('calendar_credentials_unavailable');
+    expect(s.fetch).not.toHaveBeenCalled();
+  });
+  it('pins rotation writes to the original directory and withholds tokens after its mount point is replaced', async () => {
+    const s = setup();
+    await s.owner.install('scope', s.binding, s.reference, tokens(true));
+    s.fetch.mockImplementation(async () => {
+      fs.renameSync(s.root, s.root + '-old');
+      fs.cpSync(s.root + '-old', s.root, { recursive: true });
+      return response();
+    });
+    await expect(s.owner.token('scope', s.binding, s.reference)).rejects.toThrow('calendar_credentials_unavailable');
+    const fallback = fs.readFileSync(path.join(s.root, s.reference + '.json'), 'utf8');
+    expect(fallback).not.toContain('ROTATED_');
+    expect(JSON.parse(fallback).phase).toBe('refreshing');
+    const protectedState = JSON.parse(fs.readFileSync(path.join(s.root + '-old', s.reference + '.json'), 'utf8'));
+    expect(protectedState.tokens.refreshToken).toBe('ROTATED_REFRESH_TOKEN');
+    expect(s.fetch).toHaveBeenCalledOnce();
+  });
   it('persists selected credential fields privately and returns metadata without token material', async () => {
     const s = setup();
     await s.owner.install('scope', s.binding, s.reference, tokens());
