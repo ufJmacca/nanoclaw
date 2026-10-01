@@ -25,6 +25,19 @@ function privateDirectory(root: string): void {
   )
     throw new Error('unsafe_calendar_root');
 }
+/** Disconnect/status do not need working OAuth tokens, and never open them. */
+export function openCalendarFences(roots: CalendarStorageRoots, inspect?: StorageInspection): CalendarAccessFences {
+  try {
+    const protection = verifyCalendarStorage(roots, inspect);
+    const fences = new CalendarAccessFences(path.join(roots.targetRoot, 'calendar', 'access-denials'));
+    if (digest(verifyCalendarStorage(roots, inspect)) !== digest(protection))
+      throw new Error('calendar_storage_changed');
+    return fences;
+  } catch {
+    // eslint-disable-next-line preserve-caught-error -- Host paths and private configuration must not enter diagnostics.
+    throw new Error('calendar_configuration_unavailable');
+  }
+}
 /** Runtime opens existing protected host state only. Operator setup owns initialization and storage-protection verification. */
 export function openCalendarCredentials(
   roots: CalendarStorageRoots,

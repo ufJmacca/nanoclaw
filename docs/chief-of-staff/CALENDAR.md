@@ -2,6 +2,8 @@
 
 S03 is in progress. The calendar readers, snapshot collector, PostgreSQL snapshot store, guarded S02 evidence integration, host connector, bounded model read tool and offline preparation conversation exist. Operator account linking and final release acceptance remain pending. No real calendar account has been linked or queried.
 
+Owner status, refresh and disconnect commands now have development-container tests. See the [operator runbook](CALENDAR_OPERATIONS.md) for their prerequisites and retry behavior. Protected setup and account linking remain in development.
+
 ## Read contract
 
 The host reader exposes access status, event listing and event lookup. It builds fixed Google Calendar HTTPS GET requests and refuses redirects. An owner's selected calendar IDs constrain every request even if the supplied token has broader scopes. Tokens are supplied through a host-only callback and never appear in returned events or operational errors.
@@ -60,7 +62,7 @@ Read-only inspection of the bound Pi did not find encrypted storage under its cu
 
 Deployment backups now include the calendar credential tree, OAuth client settings and monotonic access-denial/check journals when configured. Secret bytes go only to the verified encrypted backup directory; deployment receipts contain hashes and counts. Copying uses pinned directory descriptors so a replaced mount cannot redirect writes into its plaintext underlay. Traversal is bounded, private modes are required, and links, hardlinks, special files or changing captures are rejected. Complete snapshots are immutable by operation ID; a retry verifies their bytes and renews directory durability before acknowledging them. Migration revalidates the snapshot receipt. There is no automatic credential or denial-journal restore: rollback preserves current state, and old backups must not reopen revoked access or reuse rotated tokens. With no calendar state or policy, deployment records an explicit absence receipt and needs no calendar storage configuration.
 
-Credential-file operations still require a final review of mount replacement while the host is running; the present runtime protection check runs when credentials are opened. Complete that check and operator activation controls before real credentials are admitted.
+Credential-file operations pin the verified directory across reads, installation and rotation, then recheck its identity before returning. Replacement during an awaited rotation cannot redirect tokens to the replacement path. Runtime opening also rechecks its storage proof after constructing the owner. Operator activation controls and final acceptance remain required before real credentials are admitted.
 
 ## Bounded model reads
 

@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, expect, it } from 'vitest';
-import { calendarSettings, openCalendarCredentials as openConfiguredCalendar } from './config.js';
+import { calendarSettings, openCalendarCredentials as openConfiguredCalendar, openCalendarFences } from './config.js';
 import { CalendarAccessFences } from './access-fences.js';
 import { CalendarCredentialOwner } from './credentials.js';
 import { configureCalendarStorage } from './storage-policy.js';
@@ -87,6 +87,19 @@ it('opens only explicitly initialized host directories and preserves durable den
   expect(first.credentials.root).toBe(path.join(calendar, 'credentials'));
   first.fences.deny('scope', binding, 'revoked');
   expect(() => openCalendarCredentials(root, []).fences.assertOpen('scope', binding)).toThrow('calendar_auth_revoked');
+});
+it('keeps the denial journal accessible without opening a missing or corrupt OAuth client', () => {
+  const root = setup(),
+    calendar = configure(root);
+  fs.writeFileSync(path.join(calendar, 'oauth-client.json'), '{PRIVATE_CORRUPT_CLIENT');
+  const fences = openCalendarFences(fixtureRoots(root), inspect);
+  const binding = '11111111-1111-4111-8111-111111111111';
+  fences.deny('scope', binding, 'disconnected');
+  fs.unlinkSync(path.join(calendar, 'oauth-client.json'));
+  expect(() => openCalendarFences(fixtureRoots(root), inspect).assertOpen('scope', binding)).toThrow(
+    'calendar_auth_disconnected',
+  );
+  expect(() => openCalendarCredentials(root, [])).toThrow('calendar_configuration_unavailable');
 });
 it('does not create or adopt missing and uninitialized runtime directories', () => {
   const root = setup();

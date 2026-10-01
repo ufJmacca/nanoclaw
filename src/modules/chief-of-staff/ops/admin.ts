@@ -1,5 +1,6 @@
 import path from 'node:path';
 import { isKnowledgeCommand, parseKnowledgeArguments } from './knowledge-admin.js';
+import { isCalendarCommand, parseCalendarArguments } from './calendar-admin.js';
 import { pathToFileURL } from 'node:url';
 import { DatabaseConfigurationError, parseDatabaseConfig, externalDatabaseConfig } from '../store/config.js';
 import { connectChecked, DatabasePreflightError } from '../store/preflight.js';
@@ -15,6 +16,7 @@ import { contextAdminCommand, type ContextAdminArguments } from './context-admin
 type AdminArguments = { command: 'status' } | { command: 'bind'; binding: BindingRequest } | ContextAdminArguments;
 export function parseAdminArguments(args: string[]): AdminArguments {
   if (isKnowledgeCommand({ command: args[0] })) return parseKnowledgeArguments(args);
+  if (isCalendarCommand({ command: args[0] })) return parseCalendarArguments(args);
   if (args.length === 1 && args[0] === 'status') return { command: 'status' };
   if (['context-status', 'context-prepare', 'context-recover', 'model-activate', 'context-resume'].includes(args[0])) {
     const values: Record<string, string> = {};
@@ -116,6 +118,12 @@ export function safeAdminError(error: unknown): string {
       [
         'invalid_admin_arguments',
         'invalid_source_manifest',
+        'invalid_calendar_manifest',
+        'calendar_disabled',
+        'calendar_operation_conflict',
+        'unsafe_calendar_admin_state',
+        'calendar_configuration_unavailable',
+        'calendar_backup_unavailable',
         'unsafe_conversation_ownership',
         'unsafe_conversation_purge',
         'conversation_purge_conflict',

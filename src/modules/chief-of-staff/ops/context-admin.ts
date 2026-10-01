@@ -1,4 +1,4 @@
-/** Owner-run local controls. No model calls, credential refresh or message sends. */
+/** Owner-run controls. Calendar sync may refresh its own tokens; no model calls or message sends. */
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -31,9 +31,11 @@ import { recoverConversation } from './conversation-recovery.js';
 import { issueActivation, resumeContext, rebindRecoveredActivation } from './model-activation.js';
 
 import { isKnowledgeCommand, runKnowledgeAdmin, type KnowledgeAdminArguments } from './knowledge-admin.js';
+import { isCalendarCommand, runCalendarAdmin, type CalendarAdminArguments } from './calendar-admin.js';
 
 export type ContextAdminArguments =
   | KnowledgeAdminArguments
+  | CalendarAdminArguments
   | { command: 'context-status'; scopeId: string }
   | { command: 'context-prepare'; scopeId: string }
   | { command: 'model-activate'; scopeId: string; policyFile: string }
@@ -238,6 +240,20 @@ export async function contextAdminCommand(
           args,
           db,
           inbound,
+          env,
+          roots: {
+            targetRoot: root,
+            installationRoot: target.binding.installationRoot,
+            dataRoot: target.binding.dataRoot,
+          },
+          binding,
+          check,
+          assertAuthority,
+        });
+      }
+      if (isCalendarCommand(args)) {
+        return runCalendarAdmin({
+          args,
           env,
           roots: {
             targetRoot: root,
