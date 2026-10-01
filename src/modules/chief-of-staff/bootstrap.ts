@@ -23,6 +23,7 @@ export function startCosHostModule(assertHostAuthority: () => void): { service: 
   const keys = [
     'COS_ENABLED',
     'COS_KNOWLEDGE_ENABLED',
+    'COS_CALENDAR_ENABLED',
     'COS_KNOWLEDGE_RETENTION_DAYS',
     'COS_TARGET_STATE_DIR',
     'CODEX_MODEL',

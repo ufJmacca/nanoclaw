@@ -25,6 +25,7 @@ export type CalendarBindingInput = {
   timeZone: string;
   processingProviders: string[];
 };
+export type CalendarConnection = CalendarBindingInput & { version: number; auth: CalendarAccess['auth'] };
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const validCalendarId = (value: unknown): value is string =>
   typeof value === 'string' &&
@@ -193,6 +194,26 @@ export class CalendarStore {
     return (
       await client.query('SELECT * FROM cos.calendar_bindings WHERE scope_id=$1 AND id=$2', [context.scopeId, id])
     ).rows[0];
+  }
+  /** Trusted connector host only. Credential references are never part of model RPC responses. */
+  async connection(context: Context, id: string): Promise<Result> {
+    if (!uuid.test(id)) return { status: 'denied' };
+    return this.transaction(context, false, async (client) => {
+      const b = await this.binding(client, context, id);
+      if (!b) return { status: 'denied' };
+      const binding: CalendarConnection = {
+        id: b.id,
+        provider: b.provider as CalendarConnection['provider'],
+        calendarIds: b.selected_calendar_ids,
+        scopes: b.permission_scopes,
+        ...(b.credential_ref ? { credentialRef: b.credential_ref } : {}),
+        timeZone: b.time_zone,
+        processingProviders: b.processing_providers,
+        version: b.version,
+        auth: b.auth,
+      };
+      return { status: 'ok', binding };
+    });
   }
   /** Trusted operator only. Account linking and model processing permissions are never accepted from RPC. */
   async bind(context: Context, input: CalendarBindingInput): Promise<Result> {

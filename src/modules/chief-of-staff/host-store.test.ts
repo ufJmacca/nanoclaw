@@ -9,6 +9,7 @@ const f = vi.hoisted(() => ({
   open: vi.fn(),
   pool: { end: vi.fn() },
   configure: vi.fn(),
+  calendarOpen: vi.fn(),
 }));
 vi.mock('./store/preflight.js', async (original) => ({
   ...(await original<typeof import('./store/preflight.js')>()),
@@ -28,6 +29,10 @@ vi.mock('./knowledge/config.js', async (original) => ({
 vi.mock('./store/client.js', async (original) => ({
   ...(await original<typeof import('./store/client.js')>()),
   BoundedDatabase: { fromConfig: vi.fn(() => ({ pool: f.pool })) },
+}));
+vi.mock('./calendar/config.js', async (original) => ({
+  ...(await original<typeof import('./calendar/config.js')>()),
+  openCalendarCredentials: f.calendarOpen,
 }));
 import { connectCosHostStore } from './host-store.js';
 afterEach(() => vi.resetAllMocks());
@@ -52,6 +57,7 @@ it('connects the current schema with knowledge guards present even when retrieva
   expect(store.knowledge!.retentionMs).toBe(30 * 86400000);
   expect(f.open).toHaveBeenCalledWith('/state', ['/install', '/install/data']);
   expect(f.check.end).toHaveBeenCalledOnce();
+  expect(f.calendarOpen).not.toHaveBeenCalled();
 });
 it.each([1, 2, 4])('rejects incompatible schema %s before creating artifacts or a runtime pool', async (version) => {
   fixture();
@@ -66,6 +72,18 @@ it.each([1, 2, 4])('rejects incompatible schema %s before creating artifacts or 
   expect(f.open).not.toHaveBeenCalled();
   expect(f.configure).not.toHaveBeenCalled();
   expect(f.check.end).toHaveBeenCalledOnce();
+});
+it('opens the protected calendar owner only after target/schema verification and shares the bounded pool', async () => {
+  fixture();
+  f.calendarOpen.mockReturnValue({ fences: { assertOpen: vi.fn(), deny: vi.fn() }, credentials: {} });
+  const store = await connectCosHostStore(
+    { COS_CALENDAR_ENABLED: 'true' },
+    { targetRoot: '/state', installationRoot: '/install', dataRoot: '/install/data' },
+    () => true,
+  );
+  expect(f.calendarOpen).toHaveBeenCalledWith('/state', ['/install', '/install/data']);
+  expect(store.calendar).toBeDefined();
+  expect(f.calendarOpen.mock.invocationCallOrder[0]).toBeGreaterThan(f.schema.mock.invocationCallOrder[0]!);
 });
 it('checks database identity before touching knowledge roots', async () => {
   fixture();

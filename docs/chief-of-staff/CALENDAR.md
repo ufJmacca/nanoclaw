@@ -1,6 +1,6 @@
 # Calendar awareness implementation
 
-S03 is in progress. The calendar readers, snapshot collector, PostgreSQL snapshot store and guarded S02 evidence integration exist. Runtime wiring, operator account linking and conversational coverage remain pending. No real calendar account has been linked or queried.
+S03 is in progress. The calendar readers, snapshot collector, PostgreSQL snapshot store, guarded S02 evidence integration and host connector wiring exist. Operator account linking and conversational coverage remain pending. No real calendar account has been linked or queried.
 
 ## Read contract
 
@@ -40,4 +40,12 @@ The loopback listener now checks the actual bound host/port, callback path, meth
 
 The host credential owner stores validated token fields in private files outside Git. References are bound to one scope, connector and OAuth client. A kernel lock excludes concurrent owners; one owner coalesces concurrent requests. Refresh is journalled before dispatch, and rotation is saved and synced before the access token is released. An interrupted or uncertain refresh stops reuse and records a durable access denial. Private permissions do not establish disk encryption: the operator workflow must configure and verify storage encryption and protected backups.
 
-The Pi administration path and runtime integration remain pending. The operator runbook must cover account consent, selected-calendar admission, host storage/backup protection and revocation before live linking is enabled. These components do not enable an account-link command by themselves.
+The Pi administration path and coordinator tools remain pending. The operator runbook must cover account consent, selected-calendar admission, host storage/backup protection and revocation before live linking is enabled. These components do not enable an account-link command by themselves.
+
+## Host integration in development
+
+The host store now constructs the calendar connector on its existing bounded PostgreSQL pool when `COS_CALENDAR_ENABLED=true`; the default is false. It first verifies the bound target and schema, then opens existing private `calendar/credentials`, `calendar/access-denials` and `calendar/oauth-client.json` under the target-state directory. Runtime startup never initializes these directories or repairs their ownership. Missing, permissive, linked or repository-contained roots fail closed. Client configuration stays in a host-only private file, outside worker mounts and the environment forwarded to workers.
+
+The connector rereads scoped binding metadata before requests and after asynchronous credential acquisition and provider responses. Google requests use the fixed read-only reader; the fixture reader requires explicit test injection. Repeating a completed snapshot does not refresh credentials. Operator disconnect writes local denial before database revocation and remains available when refresh admission is disabled. A failed denial write also closes the running connector's in-memory gate, which is shared with cached knowledge disclosure. Recovery across restart after failed denial persistence remains a required activation check; the memory latch alone does not establish that guarantee.
+
+These development components do not establish storage encryption, backup coverage or live readiness. Operator setup/storage verification, backup integration, restart-safe handling of failed denial persistence, bounded model tools, conversational coverage and final release acceptance remain required before calendar activation on the Pi.

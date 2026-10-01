@@ -1,6 +1,7 @@
 import type { Context, ProposalChange, Result } from '../domain/contracts.js';
 import { digest, validProposalChange, validSourceChange } from '../domain/contracts.js';
 import type { KnowledgeStore } from '../knowledge/store.js';
+import type { CalendarConnector } from '../calendar/connector.js';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { PoolClient } from 'pg';
 import { BoundedDatabase, DatabaseUnavailable } from './client.js';
@@ -35,6 +36,7 @@ export class PriorityStore {
   constructor(
     readonly database: BoundedDatabase,
     readonly knowledge?: KnowledgeStore,
+    readonly calendar?: CalendarConnector,
   ) {}
   /** Trusted setup only; deliberately absent from the agent RPC method table. */
   async bindScope(binding: CosBinding): Promise<Result> {

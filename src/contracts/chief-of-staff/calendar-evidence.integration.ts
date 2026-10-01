@@ -19,6 +19,7 @@ import { GOOGLE_EVENT_READ_SCOPE } from '../../modules/chief-of-staff/calendar/r
 import { PriorityStore } from '../../modules/chief-of-staff/store/priorities.js';
 import { connectionFault } from './connection-fault.js';
 import { setTimeout as delay } from 'node:timers/promises';
+import { CalendarConnector } from '../../modules/chief-of-staff/calendar/connector.js';
 const scope = 'calendar-evidence-' + randomUUID();
 const context: KnowledgeContext = {
   scopeId: scope,
@@ -425,4 +426,23 @@ test('S03-T05: refresh never resurrects an owner-revoked calendar source', async
     ).rows[0].n,
     1,
   );
+});
+test('S03-T04/T05: the connector reads scoped binding metadata and refreshes/disconnects through the real host stores', async () => {
+  const s = await setup('CalendarConnectedHostCanary');
+  const configured = await calendar.connection(context, s.id);
+  assert.equal(configured.status, 'ok');
+  assert.equal(JSON.stringify(configured).includes('credentialRef'), false);
+  assert.equal((await calendar.connection({ ...context, ownerId: 'foreign' }, s.id)).status, 'denied');
+  const connector = new CalendarConnector({
+    store: calendar,
+    fences,
+    admitted: () => true,
+    fixtureReader: () => s.fixture.reader,
+  });
+  assert.equal((await connector.refresh(context, s.id, 'selected', randomUUID(), window)).result.status, 'ok');
+  const { ctx } = await find('CalendarConnectedHostCanary');
+  assert.equal((await connector.disconnect(context, s.id)).status, 'ok');
+  assert.equal((await knowledge.contextReady(ctx)).status, 'denied');
+  assert.equal((await calendar.connection(context, s.id)).status, 'ok');
+  assert.throws(() => connector.assertOpen(scope, s.id), /calendar_auth_disconnected/);
 });
