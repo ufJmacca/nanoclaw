@@ -32,9 +32,7 @@ export async function connectCosHostStore(
     await check.end();
   }
   const artifacts = openKnowledgeArtifacts(roots.targetRoot, [roots.installationRoot, roots.dataRoot]);
-  const calendarOwner = calendarConfig.enabled
-    ? openCalendarCredentials(roots.targetRoot, [roots.installationRoot, roots.dataRoot])
-    : undefined;
+  const calendarOwner = calendarConfig.enabled ? openCalendarCredentials(roots) : undefined;
   const database = BoundedDatabase.fromConfig(await externalDatabaseConfig(env, 'runtime'), admitted);
   const calendarStore = calendarOwner ? new CalendarStore(database, {}, new CalendarEvidence(artifacts)) : undefined;
   const calendar = calendarOwner

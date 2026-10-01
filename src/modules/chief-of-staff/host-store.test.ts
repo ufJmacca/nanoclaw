@@ -81,7 +81,11 @@ it('opens the protected calendar owner only after target/schema verification and
     { targetRoot: '/state', installationRoot: '/install', dataRoot: '/install/data' },
     () => true,
   );
-  expect(f.calendarOpen).toHaveBeenCalledWith('/state', ['/install', '/install/data']);
+  expect(f.calendarOpen).toHaveBeenCalledWith({
+    targetRoot: '/state',
+    installationRoot: '/install',
+    dataRoot: '/install/data',
+  });
   expect(store.calendar).toBeDefined();
   expect(f.calendarOpen.mock.invocationCallOrder[0]).toBeGreaterThan(f.schema.mock.invocationCallOrder[0]!);
 });

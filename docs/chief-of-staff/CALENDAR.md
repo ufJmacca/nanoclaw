@@ -52,6 +52,12 @@ Before a provider check, the host takes a kernel lock and durably records that t
 
 These development components do not establish storage encryption, backup coverage or live readiness. Operator setup/storage verification, backup integration and final release acceptance remain required before calendar activation on the Pi.
 
+Runtime calendar credential opening now requires an existing `calendar-storage.json` policy and an owned backup directory. The storage verifier uses fixed, read-only Linux `findmnt` and `lsblk` commands with a minimal environment, bounded output and deadlines. It matches the mounted filesystem to encrypted device ancestry, checks all reported members sharing the filesystem UUID, and rejects plaintext or ambiguous layouts. Supported filesystems are ext4, XFS and Btrfs on dm-crypt. Private file modes alone cannot satisfy this check. The policy pins filesystem UUIDs and mount locations while allowing kernel device-number changes across reboot.
+
+The explicit storage-configuration helper verifies both credential and backup directories, refuses runtime/repository overlap, and initializes backup ownership only in an empty directory. Retries preserve the same policy; they cannot replace its filesystem or backup destination, or recreate missing ownership after configuration. Runtime verification never initializes these records. Host paths are kept out of verification errors and returned encryption proofs. No disk creation, encryption, mounting or OS configuration is performed by these helpers.
+
+Read-only inspection of the bound Pi did not find encrypted storage under its current CoS state directory. No calendar credential storage has been activated there. Operator command wiring and actual protected snapshots remain pending; passing synthetic storage tests does not establish protection on the Pi.
+
 ## Bounded model reads
 
 `cos_context_get` includes up to ten selected-calendar coverage entries with binding IDs, calendar IDs, configured zones, snapshot windows and last-attempt/last-success timestamps. Follow `calendar.next_offset` using the request's `calendar_offset` field. An unconfigured connector reports `not_configured`; a processing profile with no selected calendars reports `not_connected`. Neither means an empty day.

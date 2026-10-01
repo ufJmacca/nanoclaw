@@ -5,6 +5,8 @@ import { CalendarCredentialOwner } from './credentials.js';
 import type { GoogleOAuthClient } from './oauth.js';
 import { readPrivate } from '../ops/target-state.js';
 import { DatabaseConfigurationError } from '../store/config.js';
+import { verifyCalendarStorage, type CalendarStorageRoots } from './storage-policy.js';
+import type { StorageInspection } from './storage-protection.js';
 export function calendarSettings(env: NodeJS.ProcessEnv): { enabled: boolean } {
   const enabled = env.COS_CALENDAR_ENABLED ?? 'false';
   if (!['true', 'false'].includes(enabled)) throw new DatabaseConfigurationError('COS_CALENDAR_ENABLED');
@@ -24,13 +26,14 @@ function privateDirectory(root: string): void {
 }
 /** Runtime opens existing protected host state only. Operator setup owns initialization and storage-protection verification. */
 export function openCalendarCredentials(
-  targetRoot: string,
-  excludedRoots: string[],
+  roots: CalendarStorageRoots,
+  inspect?: StorageInspection,
 ): { fences: CalendarAccessFences; credentials: CalendarCredentialOwner } {
   try {
+    const { targetRoot, installationRoot, dataRoot } = roots;
     privateDirectory(targetRoot);
     if (
-      excludedRoots.some(
+      [installationRoot, dataRoot].some(
         (root) => root === targetRoot || targetRoot.startsWith(root + '/') || root.startsWith(targetRoot + '/'),
       )
     )
@@ -41,6 +44,7 @@ export function openCalendarCredentials(
     }
     const root = path.join(targetRoot, 'calendar');
     privateDirectory(root);
+    verifyCalendarStorage(roots, inspect);
     const clientFile = path.join(root, 'oauth-client.json'),
       stat = fs.lstatSync(clientFile);
     if (!stat.isFile() || stat.nlink !== 1) throw new Error('unsafe_calendar_client');
