@@ -4,15 +4,17 @@ import { getDb, hasTable } from './db/connection.js';
 import type { Session } from './types.js';
 import type { InboundEvent } from './channels/adapter.js';
 import type { Binding } from './modules/chief-of-staff/bridge/identity.js';
+import { hasCosMissionBoundary } from './cos-mission-boundary.js';
 
 export type CosBinding = Binding & { sessionId: string };
 export function hasCosStateBoundary(agentGroupId: string, sessionId: string): boolean {
   const db = getDb();
   return (
-    hasTable(db, 'cos_identity_boundaries') &&
-    !!db
-      .prepare('SELECT 1 FROM cos_identity_boundaries WHERE agent_group_id=? OR session_id=?')
-      .get(agentGroupId, sessionId)
+    hasCosMissionBoundary(agentGroupId, sessionId, db) ||
+    (hasTable(db, 'cos_identity_boundaries') &&
+      !!db
+        .prepare('SELECT 1 FROM cos_identity_boundaries WHERE agent_group_id=? OR session_id=?')
+        .get(agentGroupId, sessionId))
   );
 }
 export function ensureCosBoundarySchema(db: Database.Database): void {
@@ -54,6 +56,9 @@ export type CosBoundary =
       ingressAt: string | null;
     };
 export function cosBoundary(session: Session, db: Database.Database = getDb()): CosBoundary {
+  // A child has no channel binding. Coordinator hooks cannot authorize it.
+  if (hasCosMissionBoundary(session.agent_group_id, session.id, db))
+    return { restricted: true, binding: null, paused: true, ingressId: null, ingressAt: null };
   if (!hasTable(db, 'cos_identity_boundaries')) return { restricted: false };
   const rows = db
     .prepare(`SELECT * FROM cos_identity_boundaries WHERE session_id=? OR agent_group_id=? OR messaging_group_id=?`)
@@ -182,6 +187,7 @@ export async function interceptCosIngress(event: InboundEvent): Promise<boolean>
   }
 }
 export function installCosBoundary(binding: CosBinding, db: Database.Database): void {
+  if (hasCosMissionBoundary(binding.agentGroupId, binding.sessionId, db)) throw new Error('mission_identity_conflict');
   ensureCosBoundarySchema(db);
   db.prepare(
     `INSERT INTO cos_identity_boundaries(scope_id,agent_group_id,messaging_group_id,session_id,platform_id,binding)
