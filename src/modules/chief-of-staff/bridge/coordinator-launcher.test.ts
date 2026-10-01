@@ -101,13 +101,11 @@ describe('S01 coordinator admission', () => {
       expect(launch.args.join(' ')).not.toContain('fixture-access');
       expect(launcher.context(binding)).toEqual(context);
 
-      const turnSocket = path.join(
-        target,
-        fs
-          .readdirSync(target, { withFileTypes: true })
-          .find((entry) => entry.isDirectory() && entry.name.startsWith('model-'))!.name,
-        'turn.sock',
-      );
+      const turnSocket = launch.args
+        .find((arg) => arg.includes('dst=/run/cos/turn.sock'))!
+        .split(',')
+        .find((part) => part.startsWith('src='))!
+        .slice(4);
       const begin = () =>
         new Promise<number | undefined>((resolve, reject) => {
           const request = http.request({ socketPath: turnSocket, path: '/begin', method: 'POST' }, (response) => {

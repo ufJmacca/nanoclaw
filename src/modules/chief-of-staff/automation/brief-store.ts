@@ -13,6 +13,7 @@ const safeRun = (run: Record<string, unknown>) => ({
   ...run,
   deadline_at: instant(run.deadline_at),
   intended_at: instant(run.intended_at),
+  created_at: instant(run.created_at),
 });
 const id = (value: string) => /^[a-zA-Z0-9_-]{1,100}$/.test(value);
 export type BriefArtifactReference = {
@@ -153,6 +154,7 @@ export class BriefRunStore {
             JSON.stringify({
               schedule_revision: schedule.version,
               schedule_proposal: schedule.provenance.proposal_id,
+              time_zone: schedule.policy.time_zone,
               intended_local_date: plan.due.intendedLocalDate,
             }),
           ],

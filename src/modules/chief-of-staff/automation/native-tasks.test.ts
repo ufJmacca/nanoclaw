@@ -32,6 +32,38 @@ function fixture() {
   db.exec(INBOUND_SCHEMA);
   return { db, tasks: new NativeBriefTasks(db) };
 }
+it('S04 makes an admitted occurrence runnable using its stable reservation time', async () => {
+  const { db, tasks } = fixture();
+  const occurrence = {
+    ...run,
+    intended_at: '2099-01-01T09:00:00.000Z',
+    created_at: '2026-01-01T09:00:01.000Z',
+    provenance: { time_zone: 'Australia/Sydney' },
+  };
+  const id = tasks.stage(binding, occurrence);
+  expect(id).toBeTruthy();
+  expect(countDueMessages(db)).toBe(0);
+  expect(
+    await tasks.activate(
+      binding,
+      occurrence,
+      async () => true,
+      () => true,
+    ),
+  ).toBe(true);
+  expect(countDueMessages(db)).toBe(1);
+  expect(new NativeBriefTasks(db).stage(binding, occurrence)).toBe(id);
+  expect(db.prepare('SELECT process_after FROM messages_in WHERE id=?').get(id)).toEqual({
+    process_after: occurrence.created_at,
+  });
+  expect(tasks.stage(binding, { ...occurrence, created_at: 'invalid' })).toBeNull();
+  const content = JSON.parse(
+    (db.prepare('SELECT content FROM messages_in WHERE id=?').get(id) as { content: string }).content,
+  );
+  expect(content.cosBrief.timeZone).toBe('Australia/Sydney');
+  expect(content.prompt).toContain('Australia/Sydney');
+  expect(tasks.stage(binding, { ...occurrence, provenance: { time_zone: 'UTC' } })).toBeNull();
+});
 it('S04 stages one native task paused and preserves its identity and retry state across restart', async () => {
   const { db, tasks } = fixture();
   const staged = tasks.stage(binding, run);

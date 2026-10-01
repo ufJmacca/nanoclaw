@@ -12,17 +12,13 @@
  * PR #8, the install skill re-fills the marker on install.
  */
 import type Database from 'better-sqlite3';
-import { CronExpressionParser } from 'cron-parser';
+import { nextRecurrenceAt } from './next-occurrence.js';
+export { nextRecurrenceAt } from './next-occurrence.js';
 
 import { TIMEZONE } from '../../config.js';
 import { log } from '../../log.js';
 import type { Session } from '../../types.js';
 import { clearRecurrence, getCompletedRecurring, insertRecurrence } from './db.js';
-
-/** Shared native parser. Callers supply an explicit clock and timezone for reproducible wakes. */
-export function nextRecurrenceAt(expression: string, timeZone: string, after: Date): string {
-  return CronExpressionParser.parse(expression, { tz: timeZone, currentDate: after }).next().toISOString()!;
-}
 
 export async function handleRecurrence(inDb: Database.Database, session: Session): Promise<void> {
   const recurring = getCompletedRecurring(inDb);

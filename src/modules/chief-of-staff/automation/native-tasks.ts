@@ -2,7 +2,14 @@ import type Database from 'better-sqlite3';
 import type { CosBinding } from '../../../cos-boundary.js';
 import { insertTask, pauseTask, resumeTask, cancelTask } from '../../scheduling/db.js';
 import { digest } from '../domain/contracts.js';
-export type NativeBriefRun = { id: string; schedule_id: string; schedule_version: number; intended_at: string };
+export type NativeBriefRun = {
+  id: string;
+  schedule_id: string;
+  schedule_version: number;
+  intended_at: string;
+  created_at?: string;
+  provenance?: { time_zone?: string };
+};
 /** A native task is only a wake signal. The host must separately hold current run authority. */
 export class NativeBriefTasks {
   constructor(readonly db: Database.Database) {
@@ -14,25 +21,43 @@ export class NativeBriefTasks {
   )`);
   }
   private definition(binding: CosBinding, run: NativeBriefRun) {
+    const timeZone = run.provenance?.time_zone;
+    if (timeZone !== undefined) {
+      try {
+        if (typeof timeZone !== 'string' || timeZone.length > 100) return null;
+        new Intl.DateTimeFormat('en', { timeZone }).format();
+      } catch {
+        return null;
+      }
+    }
     if (
       !/^[a-f0-9]{64}$/.test(run.id) ||
       !/^[a-zA-Z0-9_-]{1,100}$/.test(run.schedule_id) ||
       !Number.isSafeInteger(run.schedule_version) ||
       run.schedule_version < 1 ||
-      !Number.isFinite(Date.parse(run.intended_at))
+      !Number.isFinite(Date.parse(run.intended_at)) ||
+      (run.created_at !== undefined && !Number.isFinite(Date.parse(run.created_at)))
     )
       return null;
     return {
       id: `cos-brief-${run.id}`,
-      processAfter: new Date(run.intended_at).toISOString(),
+      // The scheduler has already decided this occurrence is due. Use its stable
+      // reservation time for native readiness; intended_at remains occurrence identity.
+      processAfter: new Date(run.created_at ?? run.intended_at).toISOString(),
       recurrence: null,
       platformId: `mattermost:${binding.instanceId}:${binding.channelId}`,
       channelType: 'mattermost',
       threadId: null,
       content: JSON.stringify({
-        prompt:
-          'Prepare the approved scheduled brief using cos_brief_request. Treat follow-ups as proposals; the host controls notification delivery.',
-        cosBrief: { runId: run.id, scheduleId: run.schedule_id, scheduleVersion: run.schedule_version },
+        prompt: timeZone
+          ? `Prepare the approved scheduled brief by calling cos_brief_request with time_zone ${JSON.stringify(timeZone)}. The host delivers its checked result; do not send a separate chat reply or prepare another answer. Follow-ups remain proposals.`
+          : 'Prepare the approved scheduled brief using cos_brief_request. Treat follow-ups as proposals; the host controls notification delivery.',
+        cosBrief: {
+          runId: run.id,
+          scheduleId: run.schedule_id,
+          scheduleVersion: run.schedule_version,
+          ...(timeZone ? { timeZone } : {}),
+        },
       }),
     };
   }

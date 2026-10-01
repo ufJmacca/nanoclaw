@@ -1,5 +1,5 @@
 import { Temporal } from '@js-temporal/polyfill';
-import { nextRecurrenceAt } from '../../scheduling/recurrence.js';
+import { nextRecurrenceAt } from '../../scheduling/next-occurrence.js';
 import { digest } from '../contracts/protocol.js';
 import { validBriefSchedulePolicy, type BriefSchedulePolicy } from '../contracts/schedule-protocol.js';
 export { validBriefSchedulePolicy, type BriefSchedulePolicy } from '../contracts/schedule-protocol.js';
