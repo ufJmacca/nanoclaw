@@ -28,6 +28,7 @@ type Dependencies = {
   runs: Pick<BriefRunStore, 'beginRefresh' | 'recordRefreshTarget' | 'finishRefresh'>;
   connector?: Pick<CalendarConnector, 'refresh'>;
   current(): boolean;
+  beforeRefresh?(plan: BriefRefreshPlan, signal: AbortSignal): Promise<Result>;
 };
 
 /** One aggregate budget, including database work, for the persisted selected targets. */
@@ -45,8 +46,11 @@ export class BriefRefresh {
     const controller = new AbortController(),
       started = performance.now();
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const interrupted = (): Result | undefined =>
-      !d.current() ? { status: 'denied' } : controller.signal.aborted ? { status: 'pending' } : undefined;
+    let deadline = seconds > 0 ? started + seconds * 1000 : Infinity;
+    const interrupted = (): Result | undefined => {
+      if (performance.now() >= deadline) controller.abort();
+      return !d.current() ? { status: 'denied' } : controller.signal.aborted ? { status: 'pending' } : undefined;
+    };
     // A zero-second refresh only records not_requested; the database retains its own bound.
     if (seconds > 0) timer = setTimeout(() => controller.abort(), seconds * 1000);
     const watch = setInterval(() => {
@@ -59,7 +63,8 @@ export class BriefRefresh {
       if (begun.status !== 'ok') return begun;
       const plan = begun.refresh as BriefRefreshPlan;
       if (plan.state !== 'running') return begun;
-      const remaining = Math.min(seconds * 1000, Number(begun.remaining_ms)) - (performance.now() - started);
+      deadline = started + Math.min(seconds * 1000, Number(begun.remaining_ms));
+      const remaining = deadline - performance.now();
       if (!Number.isFinite(remaining) || remaining <= 0) return { status: 'pending' };
       clearTimeout(timer);
       timer = setTimeout(() => controller.abort(), remaining);
@@ -68,6 +73,12 @@ export class BriefRefresh {
         return interrupted() ?? result;
       };
       if (!d.connector) return await finish('failed');
+      if (d.beforeRefresh) {
+        const prepared = await d.beforeRefresh(plan, controller.signal);
+        const stopped = interrupted();
+        if (stopped) return stopped;
+        if (prepared.status !== 'ok') return prepared;
+      }
       for (const target of plan.targets) {
         if (target.state !== 'pending') continue;
         const before = interrupted();

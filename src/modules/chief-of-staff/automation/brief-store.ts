@@ -210,14 +210,21 @@ export class BriefRunStore {
     });
   }
   /** Fresh host admission, independent of any local projection or cached consent. */
-  async authorize(context: Context, runId: string, generation: number): Promise<Result> {
+  async authorize(context: Context, runId: string, generation: number, signal?: AbortSignal): Promise<Result> {
     if (!id(runId) || !Number.isSafeInteger(generation) || generation < 1) return { status: 'denied' };
-    return this.transaction(context, async (client) => {
-      const run = await this.currentRun(client, context, runId);
-      return run && ['dispatched', 'prepared'].includes(run.state) && run.lease_current && run.generation === generation
-        ? { status: 'ok' }
-        : { status: 'denied' };
-    });
+    return this.transaction(
+      context,
+      async (client) => {
+        const run = await this.currentRun(client, context, runId);
+        return run &&
+          ['dispatched', 'prepared'].includes(run.state) &&
+          run.lease_current &&
+          run.generation === generation
+          ? { status: 'ok' }
+          : { status: 'denied' };
+      },
+      signal,
+    );
   }
   /** Owner preemption also reconciles obsolete revisions and ambiguous sends. */
   async cancel(context: Context, runId: string, generation: number): Promise<Result> {

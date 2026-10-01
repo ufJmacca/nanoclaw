@@ -314,7 +314,7 @@ it('S02 processes due retention work while paused without admitting ordinary out
   expect(db.prepare('SELECT paused FROM cos_identity_boundaries').get()).toEqual({ paused: 1 });
 });
 
-it.each(['existing', 'due'])(
+it.each(['existing', 'due', 'refresh'])(
   'S04 wires %s scheduled work, checked delivery and retirement into the host pump',
   async (mode) => {
     const db = initTestDb();
@@ -359,7 +359,7 @@ it.each(['existing', 'due'])(
       schedule_id: 'schedule',
       schedule_version: 1,
       intended_at: new Date().toISOString(),
-      limits: { refresh_seconds: 0 },
+      limits: { refresh_seconds: mode === 'refresh' ? 20 : 0 },
       deadline_at: lease.deadlineAt,
     };
     const reference = {
@@ -368,7 +368,46 @@ it.each(['existing', 'due'])(
       context_generation: generation,
       provider: 'codex',
     };
+    const refreshPlan = {
+      version: 1 as const,
+      provider: 'codex',
+      generation: 1,
+      started_at: new Date().toISOString(),
+      deadline_at: lease.deadlineAt,
+      state: 'running',
+      truncated: false,
+      unavailable: 0,
+      targets: [
+        {
+          binding_id: 'calendar',
+          binding_version: 1,
+          calendar_id: 'selected',
+          snapshot_id: randomUUID(),
+          window: { timeMin: new Date().toISOString(), timeMax: lease.deadlineAt, timeZone: 'UTC' },
+          state: 'pending',
+        },
+      ],
+    };
+    const calendar = { refresh: vi.fn().mockResolvedValue({ result: { status: 'ok' } }) };
+    const renewBriefContext = vi.fn((_binding, request) => {
+      expect(request.expectedGeneration).toBe(generation);
+      expect(calendar.refresh).not.toHaveBeenCalled();
+      const next = randomUUID();
+      db.prepare('UPDATE cos_conversation_states SET generation=?').run(next);
+      reference.context_generation = next;
+      return { generation: next };
+    });
     const briefs = {
+      beginRefresh: vi.fn().mockImplementation(async () => ({
+        status: 'ok',
+        refresh: { ...refreshPlan, state: mode === 'refresh' ? refreshPlan.state : 'not_requested' },
+        remaining_ms: 20000,
+      })),
+      recordRefreshTarget: vi.fn().mockResolvedValue({ status: 'ok' }),
+      finishRefresh: vi.fn().mockImplementation(async () => {
+        refreshPlan.state = 'complete';
+        return { status: 'ok', refresh: refreshPlan };
+      }),
       reserveDue: vi.fn(async () => ({ status: 'ok', run: { ...run } })),
       claim: vi.fn(async (_c, _id, host) => {
         run.state = 'dispatched';
@@ -408,6 +447,7 @@ it.each(['existing', 'due'])(
         enabled: true,
         store: {
           briefs,
+          calendar,
           knowledge,
           briefArtifacts,
           pendingOutbox: vi.fn().mockResolvedValue({ status: 'ok', items: [] }),
@@ -425,12 +465,14 @@ it.each(['existing', 'due'])(
         wake,
         running: () => false,
         withBriefTasks: (_session, operation) => operation(tasks),
-        launcher: { ready: () => true, prepare: vi.fn() },
+        launcher: { ready: () => true, prepare: vi.fn(), renewBriefContext },
       });
       await runtime.pump(binding);
-      if (mode === 'due') {
+      if (mode !== 'existing') {
         expect(briefs.reserveDue).toHaveBeenCalledOnce();
         expect(wake).toHaveBeenCalledOnce();
+        expect(renewBriefContext).toHaveBeenCalledTimes(mode === 'refresh' ? 1 : 0);
+        expect(calendar.refresh).toHaveBeenCalledTimes(mode === 'refresh' ? 1 : 0);
         expect(deliver).not.toHaveBeenCalled();
         expect(tasks.state(binding, run)).toBe('pending');
         run.state = 'prepared';

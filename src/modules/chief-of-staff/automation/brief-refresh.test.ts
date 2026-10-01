@@ -185,3 +185,45 @@ it('S04 owner preemption during final bookkeeping never admits generation', asyn
   });
   expect((await f.refresh.execute(f.context, 'run', 1, 'codex', 20)).status).toBe('denied');
 });
+it('S04 context preparation shares the refresh deadline and cannot start a connector after expiry', async () => {
+  vi.useFakeTimers();
+  const f = fixture();
+  f.runs.beginRefresh.mockResolvedValue({ status: 'ok', refresh: f.plan, remaining_ms: 100 });
+  const beforeRefresh = vi.fn(
+    async (_plan, signal: AbortSignal) =>
+      new Promise<{ status: 'pending' }>((resolve) => {
+        signal.addEventListener('abort', () => resolve({ status: 'pending' }), { once: true });
+      }),
+  );
+  const work = new BriefRefresh({ runs: f.runs, connector: f.connector, current: f.current, beforeRefresh }).execute(
+    f.context,
+    'run',
+    1,
+    'codex',
+    20,
+  );
+  await vi.advanceTimersByTimeAsync(101);
+  expect((await work).status).toBe('pending');
+  expect(beforeRefresh).toHaveBeenCalledOnce();
+  expect(f.connector.refresh).not.toHaveBeenCalled();
+});
+it('S04 elapsed synchronous context work cannot start a late connector before the timer callback runs', async () => {
+  const f = fixture();
+  let elapsed = 0;
+  const clock = vi.spyOn(performance, 'now').mockImplementation(() => elapsed);
+  try {
+    const refresh = new BriefRefresh({
+      runs: f.runs,
+      connector: f.connector,
+      current: f.current,
+      beforeRefresh: async () => {
+        elapsed = 20001;
+        return { status: 'ok' };
+      },
+    });
+    expect((await refresh.execute(f.context, 'run', 1, 'codex', 20)).status).toBe('pending');
+    expect(f.connector.refresh).not.toHaveBeenCalled();
+  } finally {
+    clock.mockRestore();
+  }
+});

@@ -1,3 +1,11 @@
+import { createConversationState } from '../../modules/chief-of-staff/bridge/conversation-state.js';
+import {
+  ensureModelBudget,
+  reserveSubscriptionAttempt,
+  type SubscriptionActivation,
+} from '../../modules/chief-of-staff/bridge/model-policy.js';
+import { issueActivation } from '../../modules/chief-of-staff/ops/model-activation.js';
+import { renewBriefContext } from '../../modules/chief-of-staff/bridge/brief-context-renewal.js';
 import { connectionFault } from './connection-fault.js';
 import { setTimeout as delay } from 'node:timers/promises';
 import { WorkStore } from '../../modules/chief-of-staff/store/work.js';
@@ -771,6 +779,8 @@ test('S04 refresh plans preserve their original budget, selected calendars and s
     run = reserved.run as { id: string; deadline_at: string };
   const claim = await runs.claim(context, run.id, 'fixture-refresh-host');
   assert.equal(claim.status, 'ok');
+  const nativeDb = new Database(':memory:'),
+    nativeRoot = fs.mkdtempSync(path.join(base, 'renewal-'));
   try {
     const aborted = AbortSignal.abort();
     assert.equal(
@@ -824,6 +834,47 @@ test('S04 refresh plans preserve their original budget, selected calendars and s
       },
       calendars: { selected: [] },
     });
+    const nativeBinding: CosBinding = {
+      scopeId: scope,
+      ownerId: context.ownerId,
+      agentGroupId: context.agentGroupId,
+      sessionId: context.sessionId,
+      messagingGroupId: 'fixture-mg',
+      instanceId: 'fixture',
+      channelId: 'private',
+      botId: 'bot',
+      provider: 'codex',
+    };
+    installCosBoundary(nativeBinding, nativeDb);
+    ensureModelBudget(nativeDb);
+    const accountFingerprint = 'a'.repeat(64),
+      conversations = createConversationState(nativeRoot, nativeDb),
+      old = conversations.prepare(nativeBinding, accountFingerprint);
+    const policy: SubscriptionActivation = {
+      version: 2,
+      runtime: 'codex-subscription/v1',
+      activationId: randomUUID().replaceAll('-', ''),
+      consentRef: 'fixture only',
+      scopeId: scope,
+      provider: 'codex',
+      model: 'fixture-model',
+      maxAttempts: 3,
+      expiresAt: new Date(Date.now() + 60000).toISOString(),
+      accountFingerprint,
+      contextGeneration: old.generation,
+    };
+    issueActivation(
+      { root: nativeRoot, db: nativeDb, binding: nativeBinding, accountFingerprint, assertAuthority() {} },
+      policy,
+    );
+    assert.equal(reserveSubscriptionAttempt(nativeDb, policy, 'fixture-owner', randomUUID()), true);
+    nativeDb.exec("UPDATE cos_identity_boundaries SET paused=0,ingress_id='fixture-owner'");
+    const oldContext = { ...context, generation: old.generation, ingressId: 'fixture-owner' };
+    assert.equal((await collector.collect(oldContext, 'UTC')).status, 'ok');
+    const renewed = renewBriefContext(
+      { root: nativeRoot, db: nativeDb, binding: nativeBinding, accountFingerprint, assertIdle() {} },
+      { runId: run.id, runGeneration: Number(claim.generation), expectedGeneration: old.generation },
+    );
     assert.equal((await calendar.start(context, binding, 'selected', target.snapshot_id, target.window)).status, 'ok');
     assert.equal(
       (
@@ -850,7 +901,7 @@ test('S04 refresh plans preserve their original budget, selected calendars and s
     const captured = await collector.collect(
       {
         ...context,
-        generation: randomUUID(),
+        generation: renewed.generation,
         ingressId: randomUUID(),
         origin: { kind: 'schedule', runId: run.id, generation: Number(claim.generation) },
       },
@@ -858,6 +909,12 @@ test('S04 refresh plans preserve their original budget, selected calendars and s
     );
     assert.equal(captured.status, 'ok');
     assert.equal((captured.snapshot as BriefSnapshot).coverage.refresh, 'complete');
+    assert.equal((await knowledge.contextReady(oldContext)).status, 'denied');
+    assert.equal((await knowledge.contextReady({ ...oldContext, generation: renewed.generation })).status, 'ok');
+    assert.deepEqual(nativeDb.prepare('SELECT used,policy_digest FROM cos_model_budgets').get(), {
+      used: 1,
+      policy_digest: digest(policy),
+    });
     assert.equal(
       ((await runs.beginRefresh(context, run.id, Number(claim.generation), 'codex')).refresh as BriefRefreshPlan).state,
       'complete',
@@ -876,6 +933,8 @@ test('S04 refresh plans preserve their original budget, selected calendars and s
     assert.equal(expired.remaining_ms, 0);
     await runs.cancel(context, next.id, Number(nextClaim.generation));
   } finally {
+    nativeDb.close();
+    fs.rmSync(nativeRoot, { recursive: true, force: true });
     await admin.query(
       'UPDATE cos.calendar_states SET current_snapshot=NULL,last_attempt=NULL WHERE scope_id=$1 AND binding_id=$2',
       [scope, binding],

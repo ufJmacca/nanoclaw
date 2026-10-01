@@ -19,6 +19,7 @@ import { NativeBriefTasks } from './automation/native-tasks.js';
 import { BriefDelivery } from './automation/brief-delivery.js';
 import { BriefReconciliation } from './automation/brief-reconciliation.js';
 import { BriefDispatch } from './automation/brief-dispatch.js';
+import { BriefRefresh } from './automation/brief-refresh.js';
 
 export type RuntimeDependencies = {
   db: Database.Database;
@@ -163,13 +164,40 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
           }
         },
         prepare: async (binding, context, run) => {
-          // Refresh-enabled schedules remain closed until the bounded connector path is installed.
-          if (run.limits.refresh_seconds !== 0 || !d.store?.knowledge) return { status: 'denied' };
+          if (!d.store?.knowledge) return { status: 'denied' };
           const session = d.session(binding.sessionId),
             boundary = session && cosBoundary(session, d.db);
           if (!session || !boundary?.restricted || !boundary.ingressId) return { status: 'denied' };
-          const retained = resolveKnowledgeContext(session, { ...context, ingressId: boundary.ingressId }, d.db);
-          return retained ? await d.store.knowledge.contextReady(retained) : { status: 'denied' };
+          const ownerContext = { ...context, ingressId: boundary.ingressId };
+          const current = () =>
+            enabled() && digest(cosBoundary(session, d.db)) === digest(boundary) && !(d.running?.(session.id) ?? true);
+          const retained = resolveKnowledgeContext(session, ownerContext, d.db);
+          if (!retained || !current()) return { status: 'denied' };
+          const readable = await d.store.knowledge.contextReady(retained);
+          if (!current()) return { status: 'denied' };
+          if (readable.status !== 'ok') return readable;
+          const refreshed = await new BriefRefresh({
+            runs: d.store.briefs,
+            connector: d.store.calendar,
+            current,
+            beforeRefresh: async (_plan, signal) => {
+              // Replace before any snapshot changes: the new generation has no old calendar exposure.
+              const authority = await d.store!.briefs.authorize(context, run.id, run.generation, signal);
+              if (authority.status !== 'ok') return authority;
+              if (!(await briefAdmission(binding)) || !current() || signal.aborted || !d.launcher?.renewBriefContext)
+                return { status: signal.aborted ? 'pending' : 'denied' };
+              d.launcher.renewBriefContext(
+                binding,
+                { runId: run.id, runGeneration: run.generation, expectedGeneration: retained.generation },
+                () => current() && !signal.aborted,
+              );
+              return { status: 'ok' };
+            },
+          }).execute(context, run.id, run.generation, binding.provider, run.limits.refresh_seconds);
+          if (!current()) return { status: 'denied' };
+          if (refreshed.status !== 'ok') return refreshed;
+          const fresh = resolveKnowledgeContext(session, ownerContext, d.db);
+          return fresh ? await d.store.knowledge.contextReady(fresh) : { status: 'denied' };
         },
         wake: d.wake,
       })
