@@ -1,7 +1,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { digest } from '../domain/contracts.js';
 import { CalendarReadError } from './reader.js';
+import { withDeploymentLock } from '../ops/deployment-lock.js';
 
 const markerName = '.cos-calendar-fences';
 const marker = 'cos-calendar-access-fences/v1\n';
@@ -87,6 +89,8 @@ function syncDirectory(root: string): void {
 /** Host-only, append-only access denial journal. A new account link must use a new binding identity.
  * Keep outside repositories, releases and worker mounts; include it in protected host backups. */
 export class CalendarAccessFences {
+  readonly #active = new Map<string, string>();
+  readonly #denied = new Map<string, Denial['auth']>();
   constructor(readonly root: string) {
     protect(() => this.guard());
   }
@@ -126,12 +130,14 @@ export class CalendarAccessFences {
   deny(scope: string, binding: string, auth: Denial['auth']): void {
     protect(() => {
       if (!['expired', 'revoked', 'disconnected'].includes(auth)) throw new Error('invalid_denial');
-      if (this.denial(scope, binding)) {
+      const name = this.identity(scope, binding),
+        existing = this.denial(scope, binding);
+      if (!this.#denied.has(name)) this.#denied.set(name, existing?.auth ?? auth);
+      if (existing) {
         read(path.join(this.root, this.identity(scope, binding)), true);
         syncDirectory(this.root);
         return;
       }
-      const name = this.identity(scope, binding);
       const value: Denial = {
         version: 1,
         scopeDigest: digest(scope),
@@ -151,8 +157,49 @@ export class CalendarAccessFences {
   }
   assertOpen(scope: string, binding: string): void {
     protect(() => {
+      const name = this.identity(scope, binding),
+        auth = this.#denied.get(name);
       const value = this.denial(scope, binding);
       if (value) throw new CalendarReadError('calendar_auth_' + value.auth);
+      if (auth) throw new CalendarReadError('calendar_auth_' + auth);
+      const pending = path.join(this.root, name + '.pending');
+      if (
+        fs.lstatSync(pending, { throwIfNoEntry: false }) &&
+        (!this.#active.has(name) || read(pending) !== this.#active.get(name))
+      )
+        throw new CalendarReadError('calendar_access_check_uncertain');
     });
+  }
+  /** Persist before checking provider access. Unowned/interrupted checks never reopen a binding.
+   * The active owner may keep using the last admitted snapshot until it observes access loss. */
+  async runCheck<T>(scope: string, binding: string, operation: () => Promise<T>): Promise<T> {
+    try {
+      this.guard();
+      const name = this.identity(scope, binding),
+        pending = path.join(this.root, name + '.pending');
+      return await withDeploymentLock(path.join(this.root, name + '.check.lock'), async () => {
+        this.assertOpen(scope, binding);
+        const record =
+          JSON.stringify({ version: 1, scopeDigest: digest(scope), bindingId: binding, id: randomUUID() }) + '\n';
+        create(this.root, name + '.pending', record);
+        this.#active.set(name, record);
+        try {
+          const result = await operation();
+          if (!this.#denied.has(name) && !this.denial(scope, binding)) {
+            if (read(pending) !== record) throw new Error('changed_pending_check');
+            fs.unlinkSync(pending);
+            syncDirectory(this.root);
+          }
+          return result;
+        } finally {
+          this.#active.delete(name);
+        }
+      });
+    } catch (error) {
+      if (error instanceof CalendarReadError) throw error;
+      if (error instanceof Error && error.message === 'target_deployment_locked')
+        throw new CalendarReadError('calendar_access_check_busy');
+      throw new CalendarReadError('calendar_access_fence_unavailable');
+    }
   }
 }

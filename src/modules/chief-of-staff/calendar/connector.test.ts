@@ -44,6 +44,7 @@ function setup(provider: 'google' | 'fixture' = 'google') {
   };
   let open = true;
   const fences = {
+    runCheck: async <T>(_scope: string, _binding: string, operation: () => Promise<T>) => operation(),
     assertOpen: vi.fn(() => {
       if (!open) throw new CalendarReadError('calendar_auth_revoked');
     }),

@@ -13,7 +13,7 @@ import { digest } from '../domain/contracts.js';
 export type CalendarConnectorOptions = {
   store: Pick<CalendarStore, 'connection' | 'start' | 'publish' | 'fail' | 'setAuth'>;
   credentials?: Pick<CalendarCredentialOwner, 'inspect' | 'token'>;
-  fences: Pick<CalendarAccessFences, 'assertOpen' | 'deny'>;
+  fences: Pick<CalendarAccessFences, 'assertOpen' | 'deny' | 'runCheck'>;
   admitted(): boolean;
   fixtureReader?(binding: CalendarConnection): CalendarReader;
   fetch?: (url: string, init: RequestInit) => Promise<Response>;
@@ -124,19 +124,21 @@ export class CalendarConnector {
       } catch {
         return { result: { status: 'denied' } };
       }
-      return await refreshCalendar({
-        store: this.options.store,
-        context: captured,
-        bindingId,
-        calendarId,
-        snapshotId,
-        window: selected,
-        reader: this.reader(captured, binding, calendarId),
-        accessLoss: async (auth) => {
-          if (auth === 'ready') throw new CalendarReadError('calendar_invalid_denial');
-          this.deny(captured.scopeId, bindingId, auth);
-        },
-      });
+      return await this.options.fences.runCheck(captured.scopeId, bindingId, () =>
+        refreshCalendar({
+          store: this.options.store,
+          context: captured,
+          bindingId,
+          calendarId,
+          snapshotId,
+          window: selected,
+          reader: this.reader(captured, binding, calendarId),
+          accessLoss: async (auth) => {
+            if (auth === 'ready') throw new CalendarReadError('calendar_invalid_denial');
+            this.deny(captured.scopeId, bindingId, auth);
+          },
+        }),
+      );
     } catch (error) {
       const denied =
         error instanceof CalendarReadError &&

@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { before, after, test } from 'node:test';
+import { before, after, test, mock } from 'node:test';
 import pg from 'pg';
 import { fixtureDatabaseConfig, connectFixtureDatabase, fixtureRuntimeUser } from './fixture-database.js';
 import { migrate } from '../../modules/chief-of-staff/store/migrations.js';
@@ -15,7 +15,7 @@ import { CalendarEvidence } from '../../modules/chief-of-staff/calendar/evidence
 import { CalendarAccessFences } from '../../modules/chief-of-staff/calendar/access-fences.js';
 import { fixtureCalendarReader } from '../../modules/chief-of-staff/calendar/fixture-reader.js';
 import { collectCalendarSnapshot } from '../../modules/chief-of-staff/calendar/snapshot.js';
-import { GOOGLE_EVENT_READ_SCOPE } from '../../modules/chief-of-staff/calendar/reader.js';
+import { GOOGLE_EVENT_READ_SCOPE, CalendarReadError } from '../../modules/chief-of-staff/calendar/reader.js';
 import { PriorityStore } from '../../modules/chief-of-staff/store/priorities.js';
 import { connectionFault } from './connection-fault.js';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -445,4 +445,53 @@ test('S03-T04/T05: the connector reads scoped binding metadata and refreshes/dis
   assert.equal((await knowledge.contextReady(ctx)).status, 'denied');
   assert.equal((await calendar.connection(context, s.id)).status, 'ok');
   assert.throws(() => connector.assertOpen(scope, s.id), /calendar_auth_disconnected/);
+});
+test('S03-T05/PG02: denial-write failure cannot reopen cached calendar evidence after host reconstruction', async () => {
+  const s = await setup('CalendarReconstructedDenialCanary');
+  await publish(s);
+  const { ctx, row } = await find('CalendarReconstructedDenialCanary');
+  const id = await answerFor(ctx, row),
+    open = fs.openSync;
+  const connector = new CalendarConnector({
+    store: calendar,
+    fences,
+    admitted: () => true,
+    fixtureReader: () => ({
+      ...s.fixture.reader,
+      list: async () => {
+        mock.method(fs, 'openSync', (file: fs.PathLike, flags: fs.OpenMode, ...args: [fs.Mode?]) => {
+          if (String(file).endsWith('.json') && flags === 'wx') throw new Error('PRIVATE_IO_CANARY');
+          return open(file, flags, ...args);
+        });
+        throw new CalendarReadError('calendar_auth_revoked');
+      },
+    }),
+  });
+  try {
+    const result = await connector.refresh(context, s.id, 'selected', randomUUID(), window);
+    assert.equal(result.result.status, 'unavailable');
+    assert.equal(result.result.code, 'calendar_access_fence_failed');
+  } finally {
+    mock.restoreAll();
+  }
+  assert.equal(
+    (await pool.query('SELECT auth FROM cos.calendar_bindings WHERE scope_id=$1 AND id=$2', [scope, s.id])).rows[0]
+      .auth,
+    'ready',
+  );
+  const rebuilt = new CalendarAccessFences(path.join(base, 'fences'));
+  const restarted = new KnowledgeStore(
+    database,
+    artifacts,
+    {},
+    {
+      calendarAccess: (scopeId, bindingId) => {
+        rebuilt.assertOpen(scopeId, bindingId);
+        return true;
+      },
+    },
+  );
+  assert.deepEqual((await restarted.search(fresh(), { query: 'CalendarReconstructedDenialCanary' })).items, []);
+  assert.equal((await restarted.contextReady(ctx)).status, 'denied');
+  assert.equal((await restarted.answers.get(fresh(), id)).status, 'denied');
 });

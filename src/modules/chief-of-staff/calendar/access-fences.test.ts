@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { spawn } from 'node:child_process';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CalendarAccessFences } from './access-fences.js';
 const dirs: string[] = [];
@@ -17,6 +18,111 @@ const directory = () => {
 };
 
 describe('S03 durable host calendar access fence', () => {
+  it('keeps an actually killed provider-check process closed on reconstruction', async () => {
+    const root = directory(),
+      id = randomUUID();
+    CalendarAccessFences.initialize(root);
+    const module = new URL('./access-fences.ts', import.meta.url).href;
+    const child = spawn(
+      process.execPath,
+      [
+        '--import',
+        'tsx',
+        '--input-type=module',
+        '-e',
+        `const {CalendarAccessFences}=await import(${JSON.stringify(module)});await new CalendarAccessFences(process.argv[1]).runCheck('scope',process.argv[2],async()=>{process.stdout.write('ready');await new Promise(()=>{setInterval(()=>{},1000);});});`,
+        root,
+        id,
+      ],
+      { env: { PATH: process.env.PATH }, stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000 },
+    );
+    const exited = new Promise<void>((resolve) => child.once('exit', () => resolve()));
+    try {
+      await new Promise<void>((resolve, reject) => {
+        child.once('error', reject);
+        child.once('exit', () => reject(new Error('fixture_ended_before_ready')));
+        child.stdout.once('data', (data) =>
+          String(data) === 'ready' ? resolve() : reject(new Error('unexpected_fixture_output')),
+        );
+      });
+      child.kill('SIGKILL');
+      await exited;
+      const restarted = new CalendarAccessFences(root);
+      expect(() => restarted.assertOpen('scope', id)).toThrow('calendar_access_check_uncertain');
+      await expect(restarted.runCheck('scope', id, async () => {})).rejects.toThrow('calendar_access_check_uncertain');
+    } finally {
+      child.kill('SIGKILL');
+      await exited;
+    }
+  });
+  it('persists uncertainty before a provider check and removes it only after a settled result', async () => {
+    const root = directory(),
+      id = randomUUID(),
+      fence = CalendarAccessFences.initialize(root);
+    expect(
+      await fence.runCheck('scope', id, async () => {
+        fence.assertOpen('scope', id);
+        expect(() => new CalendarAccessFences(root).assertOpen('scope', id)).toThrow('calendar_access_check_uncertain');
+        return 'checked';
+      }),
+    ).toBe('checked');
+    expect(() => new CalendarAccessFences(root).assertOpen('scope', id)).not.toThrow();
+  });
+  it('keeps cached access closed after reconstruction when denial cannot create its file', async () => {
+    const root = directory(),
+      id = randomUUID(),
+      fence = CalendarAccessFences.initialize(root);
+    await fence.runCheck('scope', id, async () => {
+      const open = fs.openSync;
+      vi.spyOn(fs, 'openSync').mockImplementation((file, flags, ...args) => {
+        if (String(file).endsWith('.json') && flags === 'wx') throw new Error('PRIVATE_PATH_CANARY');
+        return open(file, flags, ...args);
+      });
+      expect(() => fence.deny('scope', id, 'revoked')).toThrow('calendar_access_fence_unavailable');
+      expect(() => fence.assertOpen('scope', id)).toThrow('calendar_auth_revoked');
+      vi.restoreAllMocks();
+    });
+    const rebuilt = new CalendarAccessFences(root);
+    expect(() => rebuilt.assertOpen('scope', id)).toThrow('calendar_access_check_uncertain');
+    await expect(rebuilt.runCheck('scope', id, async () => {})).rejects.toThrow('calendar_access_check_uncertain');
+  });
+  it('never dispatches a check before its write-ahead record is durable', async () => {
+    const root = directory(),
+      id = randomUUID(),
+      fence = CalendarAccessFences.initialize(root),
+      check = vi.fn(async () => {});
+    vi.spyOn(fs, 'fsyncSync').mockImplementationOnce(() => {
+      throw new Error('fixture_sync_failure');
+    });
+    await expect(fence.runCheck('scope', id, check)).rejects.toThrow('calendar_access_fence_unavailable');
+    expect(check).not.toHaveBeenCalled();
+    expect(() => new CalendarAccessFences(root).assertOpen('scope', id)).toThrow('calendar_access_check_uncertain');
+  });
+  it('retains interrupted checks and excludes concurrent owners without stealing their locks', async () => {
+    const root = directory(),
+      id = randomUUID(),
+      fence = CalendarAccessFences.initialize(root);
+    let release!: () => void, entered!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const running = fence.runCheck('scope', id, async () => {
+      entered();
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      throw new Error('PRIVATE_PROVIDER_CANARY');
+    });
+    await ready;
+    const second = new CalendarAccessFences(root),
+      check = vi.fn(async () => {});
+    await expect(second.runCheck('scope', id, check)).rejects.toThrow('calendar_access_check_busy');
+    expect(check).not.toHaveBeenCalled();
+    release();
+    await expect(running).rejects.toThrow('calendar_access_fence_unavailable');
+    expect(() => new CalendarAccessFences(root).assertOpen('scope', id)).toThrow('calendar_access_check_uncertain');
+    expect(() => fence.assertOpen('scope', id)).toThrow('calendar_access_check_uncertain');
+  });
   it('retries interrupted durability before acknowledging an existing denial', () => {
     const root = directory(),
       id = randomUUID(),
