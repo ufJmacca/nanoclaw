@@ -63,7 +63,7 @@ it('connects the current schema with knowledge guards present even when retrieva
   expect(f.check.end).toHaveBeenCalledOnce();
   expect(f.calendarOpen).not.toHaveBeenCalled();
 });
-it.each([1, 2, 3, 4, SCHEMA_VERSION + 1])(
+it.each([...Array.from({ length: SCHEMA_VERSION - 1 }, (_, i) => i + 1), SCHEMA_VERSION + 1])(
   'rejects incompatible schema %s before creating artifacts or a runtime pool',
   async (version) => {
     fixture();

@@ -7,6 +7,9 @@ import { migrate } from '../../modules/chief-of-staff/store/migrations.js';
 import { BoundedDatabase } from '../../modules/chief-of-staff/store/client.js';
 import { PriorityStore } from '../../modules/chief-of-staff/store/priorities.js';
 import type { ScheduleChange } from '../../modules/chief-of-staff/contracts/schedule-protocol.js';
+import { BriefRunStore } from '../../modules/chief-of-staff/automation/brief-store.js';
+import { connectionFault } from './connection-fault.js';
+import { setTimeout as delay } from 'node:timers/promises';
 const scope = 'brief-schedule-' + randomUUID(),
   context = {
     scopeId: scope,
@@ -45,6 +48,9 @@ before(async () => {
 after(async () => {
   if (admin) {
     for (const table of [
+      'brief_call_reservations',
+      'brief_notifications',
+      'brief_runs',
       'brief_schedule_revisions',
       'brief_schedules',
       'outbox',
@@ -161,5 +167,165 @@ test('S04-T10 a schedule proposal creates no authority until the exact owner app
       })
     ).status,
     'conflict',
+  );
+});
+
+test('S04-T01/T02/T08 repeated wakes and restarted hosts reconcile one run and notification without resetting budgets', async () => {
+  const existing = (await pool.query('SELECT id,version FROM cos.brief_schedules WHERE scope_id=$1', [scope])).rows[0];
+  assert.equal(
+    (
+      await approve({
+        ...change,
+        record_id: existing.id,
+        expected_version: existing.version,
+        policy: { ...change.policy, time_zone: 'UTC', quiet_hours: null, weekdays: [1, 2, 3, 4, 5, 6, 7] },
+      })
+    ).status,
+    'ok',
+  );
+  const now = new Date(Date.now() + 86400000);
+  now.setUTCHours(9, 0, 0, 0);
+  const briefs = new BriefRunStore(store.database, { clock: () => now });
+  const attempts = await Promise.all(Array.from({ length: 4 }, () => briefs.reserveDue(context)));
+  assert.ok(attempts.every((result) => result.status === 'ok'));
+  const run = attempts[0].run as any;
+  assert.ok(run.id);
+  assert.ok(attempts.every((result) => (result.run as any).id === run.id));
+  assert.equal(
+    (await pool.query('SELECT count(*)::int AS n FROM cos.brief_runs WHERE scope_id=$1', [scope])).rows[0].n,
+    1,
+  );
+  assert.equal(
+    (await pool.query('SELECT count(*)::int AS n FROM cos.brief_notifications WHERE scope_id=$1', [scope])).rows[0].n,
+    1,
+  );
+  const claim = await briefs.claim(context, run.id, 'host-a');
+  assert.equal(claim.status, 'ok');
+  assert.equal((await briefs.claim(context, run.id, 'host-b')).status, 'denied');
+  const generation = Number(claim.generation),
+    call = randomUUID();
+  assert.equal((await briefs.reserveCall(context, run.id, generation, 'model', call)).status, 'ok');
+  assert.equal((await briefs.reserveCall(context, run.id, generation, 'model', call)).status, 'denied');
+  const restarted = new BriefRunStore(store.database, { clock: () => now });
+  const recovered = await restarted.reserveDue(context);
+  assert.equal(recovered.status, 'ok');
+  assert.equal((recovered.run as any).id, run.id);
+  assert.equal((recovered.run as any).deadline_at, run.deadline_at);
+  assert.equal((await restarted.reserveCall(context, run.id, generation, 'model', randomUUID())).status, 'ok');
+  assert.equal((await restarted.reserveCall(context, run.id, generation, 'model', randomUUID())).status, 'denied');
+  for (let i = 0; i < change.limits.max_tool_calls; i++)
+    assert.equal((await briefs.reserveCall(context, run.id, generation, 'tool', randomUUID())).status, 'ok');
+  assert.equal((await briefs.reserveCall(context, run.id, generation, 'tool', randomUUID())).status, 'denied');
+  assert.equal(
+    (await briefs.reserveCall({ ...context, ownerId: 'intruder' }, run.id, generation, 'tool', randomUUID())).status,
+    'denied',
+  );
+  assert.equal((await briefs.reserveCall(context, run.id, generation + 1, 'tool', randomUUID())).status, 'denied');
+  await pool.query(
+    "UPDATE cos.brief_notifications SET state='delivering',attempt_id=$2,started_at=clock_timestamp() WHERE scope_id=$1 AND run_id=$3",
+    [scope, randomUUID(), run.id],
+  );
+  const current = (await pool.query('SELECT id,version FROM cos.brief_schedules WHERE scope_id=$1', [scope])).rows[0];
+  assert.equal(
+    (
+      await approve({
+        ...change,
+        record_id: current.id,
+        expected_version: current.version,
+        policy: { ...change.policy, state: 'paused' },
+      })
+    ).status,
+    'ok',
+  );
+  assert.equal((await briefs.claim(context, run.id, 'host-a')).status, 'denied');
+  assert.equal((await briefs.reserveDue(context)).run, null);
+  assert.equal(
+    (await pool.query('SELECT state FROM cos.brief_notifications WHERE scope_id=$1 AND run_id=$2', [scope, run.id]))
+      .rows[0].state,
+    'uncertain',
+  );
+  assert.equal(
+    (await pool.query('SELECT state FROM cos.brief_runs WHERE scope_id=$1 AND id=$2', [scope, run.id])).rows[0].state,
+    'uncertain',
+  );
+});
+test('S04 run-store outage, lost reservation acknowledgement and expiry never reset the occurrence budget', async () => {
+  const current = (await pool.query('SELECT id,version FROM cos.brief_schedules WHERE scope_id=$1', [scope])).rows[0];
+  assert.equal(
+    (
+      await approve({
+        ...change,
+        record_id: current.id,
+        expected_version: current.version,
+        policy: { ...change.policy, time_zone: 'UTC', quiet_hours: null, weekdays: [1, 2, 3, 4, 5, 6, 7] },
+      })
+    ).status,
+    'ok',
+  );
+  const now = new Date(Date.now() + 2 * 86400000);
+  now.setUTCHours(9, 0, 0, 0);
+  const before = (await pool.query('SELECT count(*)::int AS n FROM cos.brief_runs WHERE scope_id=$1', [scope])).rows[0]
+    .n;
+  const relay = await connectionFault(await fixtureDatabaseConfig()),
+    database = new BoundedDatabase(new pg.Pool(relay.config), 350);
+  try {
+    await database.run((client) => client.query('SELECT 1'));
+    relay.partition();
+    const fault = new BriefRunStore(database, { clock: () => now });
+    assert.ok(['pending', 'unavailable'].includes((await fault.reserveDue(context)).status));
+    assert.equal(
+      (await pool.query('SELECT count(*)::int AS n FROM cos.brief_runs WHERE scope_id=$1', [scope])).rows[0].n,
+      before,
+    );
+    relay.restore();
+    await delay(1100);
+    assert.equal((await fault.reserveDue(context)).status, 'ok');
+  } finally {
+    await database.pool.end();
+    await relay.close();
+  }
+  const briefs = new BriefRunStore(store.database, { clock: () => now }),
+    run = (await briefs.reserveDue(context)).run as any;
+  const claimed = await briefs.claim(context, run.id, 'host-recovered');
+  assert.equal(claimed.status, 'ok');
+  const faultyPool = new pg.Pool(await fixtureDatabaseConfig()),
+    client = await faultyPool.connect(),
+    original = client.query.bind(client);
+  let dropped = false;
+  client.query = (async (...args: unknown[]) => {
+    const result = await (original as (...a: unknown[]) => Promise<unknown>)(...args);
+    if (args[0] === 'COMMIT' && !dropped) {
+      dropped = true;
+      throw new Error('fixture_lost_brief_call_ack');
+    }
+    return result;
+  }) as typeof client.query;
+  client.release();
+  const callId = randomUUID(),
+    generation = Number(claimed.generation);
+  try {
+    const lost = new BriefRunStore(new BoundedDatabase(faultyPool));
+    assert.equal((await lost.reserveCall(context, run.id, generation, 'model', callId)).status, 'pending');
+    assert.equal((await briefs.reserveCall(context, run.id, generation, 'model', callId)).status, 'denied');
+    assert.equal((await briefs.reserveCall(context, run.id, generation, 'model', randomUUID())).status, 'ok');
+    assert.equal((await briefs.reserveCall(context, run.id, generation, 'model', randomUUID())).status, 'denied');
+  } finally {
+    await faultyPool.end();
+  }
+  await pool.query(
+    "UPDATE cos.brief_runs SET deadline_at=clock_timestamp()-interval '1 second' WHERE scope_id=$1 AND id=$2",
+    [scope, run.id],
+  );
+  assert.equal((await briefs.claim(context, run.id, 'host-recovered')).status, 'denied');
+  assert.equal((await briefs.reserveCall(context, run.id, generation, 'tool', randomUUID())).status, 'denied');
+  assert.equal((await briefs.reserveDue(context)).run, null);
+  assert.equal(
+    (await pool.query('SELECT state FROM cos.brief_notifications WHERE scope_id=$1 AND run_id=$2', [scope, run.id]))
+      .rows[0].state,
+    'failed',
+  );
+  assert.equal(
+    (await pool.query('SELECT count(*)::int AS n FROM cos.brief_runs WHERE scope_id=$1', [scope])).rows[0].n,
+    before + 1,
   );
 });

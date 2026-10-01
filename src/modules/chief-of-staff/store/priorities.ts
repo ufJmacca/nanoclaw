@@ -5,6 +5,7 @@ import { validWorkChange, validWorkRead, type WorkRead } from '../contracts/prot
 import { WorkStore } from './work.js';
 import { validScheduleChange } from '../contracts/schedule-protocol.js';
 import { BriefScheduleStore } from '../automation/schedule-store.js';
+import { BriefRunStore } from '../automation/brief-store.js';
 import type { CalendarConnector } from '../calendar/connector.js';
 import type { CalendarView } from '../calendar/view.js';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
@@ -40,6 +41,7 @@ async function event(
 export class PriorityStore {
   readonly work: WorkStore;
   readonly schedules = new BriefScheduleStore();
+  readonly briefs: BriefRunStore;
   constructor(
     readonly database: BoundedDatabase,
     readonly knowledge?: KnowledgeStore,
@@ -47,6 +49,7 @@ export class PriorityStore {
     readonly calendarView?: CalendarView,
   ) {
     this.work = new WorkStore(knowledge);
+    this.briefs = new BriefRunStore(database);
   }
   private async workReceiptCurrent(client: PoolClient, context: Context, result: Result): Promise<boolean> {
     if (!validWorkChange(result.change)) return true;
