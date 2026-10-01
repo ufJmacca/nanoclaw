@@ -55,6 +55,7 @@ it('cannot stop, migrate, activate or roll back without the current Pi-owned mai
 it.each([
   ['S02', 2, 'S01'],
   ['S03', 3, 'S02'],
+  ['S04', 6, 'S03'],
 ] as const)(
   'activates %s only on schema %s and refuses predecessor rollback after migration',
   async (slice, version, priorSlice) => {

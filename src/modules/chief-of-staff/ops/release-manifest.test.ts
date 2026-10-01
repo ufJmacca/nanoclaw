@@ -1,10 +1,31 @@
 import { describe, it, expect } from 'vitest';
 import { REQUIRED_RELEASE_CHECKS, validateReleaseManifest, type ReleaseManifest } from './release-manifest.js';
-import { INITIAL_CHECKSUM } from '../store/migrations.js';
+import { INITIAL_CHECKSUM, MIGRATIONS } from '../store/migrations.js';
 const sha = 'a'.repeat(40),
   tree = 'b'.repeat(40),
   image = 'sha256:' + 'c'.repeat(64),
   agent = 'sha256:' + 'd'.repeat(64);
+it('S04 requires six exact pinned migrations and rejects earlier schema or later slice claims', () => {
+  const current = {
+    ...manifest(),
+    slice: 'S04',
+    postgres: { minimum: 6, maximum: 6 },
+    sqlite: { minimum: 22, maximum: 22 },
+    migrations: MIGRATIONS.map(({ version, checksum }) => ({ version, checksum })),
+  };
+  expect(validateReleaseManifest(current)).toEqual(current);
+  for (const patch of [
+    { postgres: { minimum: 3, maximum: 6 } },
+    { postgres: { minimum: 6, maximum: 7 } },
+    { migrations: current.migrations.slice(0, 5) },
+    { slice: 'S03' },
+    { slice: 'S05' },
+    ...current.migrations.map((_, index) => ({
+      migrations: current.migrations.map((m, i) => (i === index ? { ...m, checksum: '0'.repeat(64) } : m)),
+    })),
+  ])
+    expect(() => validateReleaseManifest({ ...current, ...patch })).toThrow('release_not_transferable');
+});
 function manifest(): ReleaseManifest {
   return {
     contract: 'cos-release/v1',

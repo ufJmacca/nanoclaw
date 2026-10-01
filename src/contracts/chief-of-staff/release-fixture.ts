@@ -2,11 +2,14 @@ import { REQUIRED_RELEASE_CHECKS, type ReleaseManifest } from '../../modules/chi
 import { INITIAL_CHECKSUM } from '../../modules/chief-of-staff/store/migrations.js';
 import { KNOWLEDGE_CHECKSUM } from '../../modules/chief-of-staff/store/knowledge-schema.js';
 import { CALENDAR_CHECKSUM } from '../../modules/chief-of-staff/store/calendar-schema.js';
+import { WORK_CHECKSUM } from '../../modules/chief-of-staff/store/work-schema.js';
+import { SCHEDULE_CHECKSUM } from '../../modules/chief-of-staff/store/schedule-schema.js';
+import { BRIEF_CHECKSUM } from '../../modules/chief-of-staff/store/brief-schema.js';
 /** Synthetic identities for release-contract tests; never a transferable artifact receipt. */
-export function fixtureRelease(slice: 'S01' | 'S02' | 'S03' = 'S01'): ReleaseManifest {
+export function fixtureRelease(slice: 'S01' | 'S02' | 'S03' | 'S04' = 'S01'): ReleaseManifest {
   const commit = 'a'.repeat(40),
     imageIds = ['sha256:' + 'c'.repeat(64), 'sha256:' + 'd'.repeat(64)],
-    schemaVersion = slice === 'S01' ? 1 : slice === 'S02' ? 2 : 3;
+    schemaVersion = slice === 'S01' ? 1 : slice === 'S02' ? 2 : slice === 'S03' ? 3 : 6;
   return {
     contract: 'cos-release/v1',
     releaseId: 'release-fixture',
@@ -21,7 +24,9 @@ export function fixtureRelease(slice: 'S01' | 'S02' | 'S03' = 'S01'): ReleaseMan
           ? 'refs/heads/cos/s01-first-use-and-priorities'
           : slice === 'S02'
             ? 'refs/heads/cos/s02-grounded-knowledge'
-            : 'refs/heads/cos/s03-calendar-awareness',
+            : slice === 'S03'
+              ? 'refs/heads/cos/s03-calendar-awareness'
+              : 'refs/heads/cos/s04-daily-brief-and-commitments',
       syncContract: 'cos-source-sync/github-pinned-v1',
     },
     buildInputDigest: 'e'.repeat(64),
@@ -33,7 +38,14 @@ export function fixtureRelease(slice: 'S01' | 'S02' | 'S03' = 'S01'): ReleaseMan
     migrations: [
       { version: 1, checksum: INITIAL_CHECKSUM },
       ...(schemaVersion >= 2 ? [{ version: 2, checksum: KNOWLEDGE_CHECKSUM }] : []),
-      ...(schemaVersion === 3 ? [{ version: 3, checksum: CALENDAR_CHECKSUM }] : []),
+      ...(schemaVersion >= 3 ? [{ version: 3, checksum: CALENDAR_CHECKSUM }] : []),
+      ...(schemaVersion === 6
+        ? [
+            { version: 4, checksum: WORK_CHECKSUM },
+            { version: 5, checksum: SCHEDULE_CHECKSUM },
+            { version: 6, checksum: BRIEF_CHECKSUM },
+          ]
+        : []),
     ],
     previousReleaseIds: [],
     images: [

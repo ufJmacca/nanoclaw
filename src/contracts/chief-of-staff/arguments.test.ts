@@ -14,7 +14,7 @@ describe('CoS fixture command selection', () => {
   it.each(
     [
       [],
-      ['--slice', 'S04', '--db-profile', 'test'],
+      ['--slice', 'S05', '--db-profile', 'test'],
       ['--slice', 'S01', '--db-profile', 'runtime'],
       ['--demo', '--slice', 'S01', '--db-profile', 'test'],
       ['--slice', 'S01', '--db-profile', 'test', '--db-profile', 'test'],
@@ -22,6 +22,17 @@ describe('CoS fixture command selection', () => {
   )('rejects unsupported, duplicate or incomplete arguments', ({ args }) =>
     expect(() => parseFixtureArguments(args)).toThrow(),
   );
+});
+it('registers the authenticated S04 recurring flow and all affected predecessor contracts', () => {
+  const args = parseFixtureArguments(['--demo', '--fixture', '--slice', 'S04', '--db-profile', 'test']);
+  expect(fixtureFiles(args)).toEqual(['brief-flow.integration']);
+  expect(fixtureFiles({ ...args, demo: false })).toEqual([
+    ...fixtureFiles({ slice: 'S03', demo: false }),
+    'work.integration',
+    'schedules.integration',
+    'brief.integration',
+    'brief-flow.integration',
+  ]);
 });
 
 it('registers S02 demonstration and all affected contracts without permitting later slices', () => {
