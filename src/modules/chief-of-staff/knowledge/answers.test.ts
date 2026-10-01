@@ -23,6 +23,11 @@ const source: ResolvedCitation = {
   text: 'Supplier approval is pending.',
   artifact_id: 'private-host-only',
 };
+it('accepts only a request for host-verified calendar coverage, never model-supplied freshness', () => {
+  expect(validAnswerDraft({ ...draft, calendar: 'coverage' })).toBe(true);
+  for (const calendar of ['complete', { last_success_at: '2026-10-01T00:00:00Z' }, true, null])
+    expect(validAnswerDraft({ ...draft, calendar })).toBe(false);
+});
 it('accepts bounded source and approved-record claims, including explicitly insufficient coverage', () => {
   expect(validAnswerDraft(draft)).toBe(true);
   expect(

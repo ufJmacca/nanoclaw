@@ -9,12 +9,14 @@ describe('S01-PG07 explicit checksummed migrations', () => {
       if (sql.includes('pg_try_advisory_lock')) return { rows: [{ locked: true }] };
       return { rows: [] };
     });
-    expect(await migrate({ query } as unknown as pg.Client, 'fixture_runtime')).toBe(2);
+    expect(await migrate({ query } as unknown as pg.Client, 'fixture_runtime')).toBe(3);
     const calls = query.mock.calls.map(([sql]) => sql);
     expect(calls.some((sql) => sql.includes('pg_try_advisory_lock'))).toBe(true);
     expect(calls).toContain('BEGIN');
     expect(calls).toContain('COMMIT');
     expect(calls.some((sql) => sql.includes('CREATE TABLE cos.sources'))).toBe(true);
+    expect(calls.some((sql) => sql.includes('CREATE TABLE cos.calendar_bindings'))).toBe(true);
+    expect(calls.some((sql) => sql.includes('GRANT SELECT,INSERT,UPDATE,DELETE ON cos.calendar_bindings'))).toBe(true);
     expect(calls.some((sql) => sql.includes('pg_advisory_unlock'))).toBe(true);
   });
 

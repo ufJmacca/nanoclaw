@@ -146,3 +146,31 @@ it('S02 requires the exact knowledge migration and schema 2 while historical S01
     expect(() => validateReleaseManifest({ ...current, ...patch })).toThrow('release_not_transferable');
   expect(() => validateReleaseManifest({ ...current, slice: 'S01' })).toThrow();
 });
+it('S03 requires all three pinned migrations and schema 3 without changing historical receipts', async () => {
+  const { KNOWLEDGE_CHECKSUM } = await import('../store/knowledge-schema.js');
+  const { CALENDAR_CHECKSUM } = await import('../store/calendar-schema.js');
+  const current = {
+    ...manifest(),
+    slice: 'S03',
+    postgres: { minimum: 3, maximum: 3 },
+    sqlite: { minimum: 22, maximum: 22 },
+    migrations: [
+      { version: 1, checksum: INITIAL_CHECKSUM },
+      { version: 2, checksum: KNOWLEDGE_CHECKSUM },
+      { version: 3, checksum: CALENDAR_CHECKSUM },
+    ],
+  };
+  expect(validateReleaseManifest(current)).toEqual(current);
+  for (const patch of [
+    { postgres: { minimum: 2, maximum: 3 } },
+    { postgres: { minimum: 3, maximum: 4 } },
+    { migrations: current.migrations.slice(0, 2) },
+    { migrations: [...current.migrations].reverse() },
+    { migrations: [current.migrations[0], current.migrations[1], { version: 3, checksum: '0'.repeat(64) }] },
+    { migrations: [current.migrations[0], { version: 2, checksum: '0'.repeat(64) }, current.migrations[2]] },
+    { slice: 'S02' },
+    { slice: 'S04' },
+  ])
+    expect(() => validateReleaseManifest({ ...current, ...patch })).toThrow('release_not_transferable');
+  expect(validateReleaseManifest(manifest()).slice).toBe('S01');
+});

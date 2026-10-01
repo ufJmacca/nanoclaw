@@ -68,7 +68,7 @@ const priorityTools: McpToolDefinition[] = (
     name: method,
     description:
       method === 'cos_context_get'
-        ? 'Read approved priorities with record provenance. Rankings are advice.'
+        ? 'Read approved priorities and selected-calendar coverage, time zones and freshness. Rankings are advice. Follow calendar next_offset using calendar_offset to read further inventory pages.'
         : method === 'cos_change_propose'
           ? 'Propose an exact internal change for owner approval. This never approves or applies it.'
           : 'Reconcile a pending request using its original request ID.',
@@ -102,7 +102,10 @@ const priorityTools: McpToolDefinition[] = (
           }
         : method === 'cos_request_status'
           ? { request_id: { type: 'string' } }
-          : { view: { type: 'string', enum: ['today'] } }) as Record<string, object>,
+          : {
+              view: { type: 'string', enum: ['today'] },
+              calendar_offset: { type: 'integer', minimum: 0, maximum: 10000 },
+            }) as Record<string, object>,
       required: method === 'cos_change_propose' ? ['change'] : method === 'cos_request_status' ? ['request_id'] : [],
       additionalProperties: false,
     },
@@ -111,7 +114,7 @@ const priorityTools: McpToolDefinition[] = (
     const id = method === 'cos_change_propose' && typeof args.request_id === 'string' ? args.request_id : randomUUID();
     const params =
       method === 'cos_context_get'
-        ? { view: args.view ?? 'today' }
+        ? { ...args, view: args.view ?? 'today' }
         : method === 'cos_change_propose'
           ? { change: args.change }
           : { request_id: args.request_id };
@@ -214,5 +217,34 @@ const answerTools: McpToolDefinition[] = (['cos_answer_prepare', 'cos_answer_get
     return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
   },
 }));
-export const cosTools: McpToolDefinition[] = [...priorityTools, ...knowledgeTools, ...answerTools];
+const calendarTool: McpToolDefinition = {
+  tool: {
+    name: 'cos_calendar_read',
+    description:
+      'Read up to five observed events from a selected calendar, with checked citations and snapshot freshness. Get binding/calendar IDs and time zones from cos_context_get. Use explicit instant bounds; preserve all-day dates and exclusive end dates. Follow next_offset for more events. Incomplete or unavailable coverage is not an empty day. This tool cannot link accounts, refresh a provider or write calendar events.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        binding_id: { type: 'string', format: 'uuid' },
+        calendar_id: { type: 'string', minLength: 1, maxLength: 1024 },
+        time_min: { type: 'string', format: 'date-time' },
+        time_max: { type: 'string', format: 'date-time' },
+        limit: { type: 'integer', minimum: 1, maximum: 5 },
+        offset: { type: 'integer', minimum: 0, maximum: 5000 },
+      },
+      required: ['binding_id', 'calendar_id', 'time_min', 'time_max'],
+    },
+  },
+  async handler(args) {
+    const result = await executeCosRequest({
+      protocol: COS_PROTOCOL,
+      request_id: randomUUID(),
+      method: 'cos_calendar_read',
+      params: args,
+    });
+    return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
+  },
+};
+export const cosTools: McpToolDefinition[] = [...priorityTools, ...knowledgeTools, ...answerTools, calendarTool];
 if (process.env.NANOCLAW_COS_PROTOCOL === COS_PROTOCOL) registerTools(cosTools);

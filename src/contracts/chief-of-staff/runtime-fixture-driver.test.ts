@@ -31,7 +31,8 @@ it('binds new runs to their slice without changing historical request identities
   expect(validateRuntimeFixtureRequest(current)).toEqual(current);
   expect(digest(validateRuntimeFixtureRequest(current))).not.toBe(historical);
   expect(validateRuntimeFixtureRequest({ ...request, slice: 'S01' }).slice).toBe('S01');
-  for (const slice of ['S03', '', null, undefined])
+  expect(validateRuntimeFixtureRequest({ ...request, slice: 'S03' }).slice).toBe('S03');
+  for (const slice of ['S04', '', null, undefined])
     expect(() => validateRuntimeFixtureRequest({ ...request, slice })).toThrow('invalid_runtime_fixture_request');
 });
 

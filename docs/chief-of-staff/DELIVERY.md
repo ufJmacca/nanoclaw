@@ -3,7 +3,7 @@
 Run the host wrappers from the Mac checkout. They use the running repository devcontainer for project tools and the host's Docker, GitHub and SSH tools. They never install project dependencies on the Mac or build application code on the Pi.
 
 ```sh
-bash scripts/cos-release.sh --slice S02 --target pi --db-profile test --local-only
+bash scripts/cos-release.sh --slice S03 --target pi --db-profile test --local-only
 bash scripts/cos-deploy.sh status --target pi
 bash scripts/cos-deploy.sh --target pi --release-manifest /absolute/checkout/.cos-plan-state/releases/release-…/release.json
 bash scripts/cos-deploy.sh rollback --target pi --release-id release-…
@@ -35,11 +35,17 @@ Prefer `--db-profile test`. Explicit `--db-profile runtime-disposable` requires 
 
 Private test logs and receipts remain under `.cos-plan-state`; only sanitised acceptance evidence belongs in Git. Runtime fixture retries must retain the same owner, source, image, slice and request identity. A completed Pi receipt can reconcile a lost final reply only when the matching Mac receipt proves fixtures passed. Historical requests without a slice retain their original S01 meaning and receipt identity. See the acceptance receipts for actual deployment status.
 
-## S02 knowledge configuration — candidate deployed
+## S03 calendar delivery
 
-The S02 host source requires PostgreSQL schema 2 and checks its recorded checksums at startup. Startup never migrates the database. The release command now selects S02 and records both exact migration checksums, PostgreSQL schema 2 and SQLite schema 22. It requires the private ledger to show S01's human merge and healthy delivery of that same merged source. Historical S01 manifests remain readable; this source cannot create a new S01 release.
+New release construction selects S03, PostgreSQL schema 3 and SQLite contract 22. It requires S02's reviewed merge and verified delivery of that exact merged source. The manifest carries the three pinned migration checksums; historical S01/S02 manifests remain readable. See [S03 evidence](evidence/S03.md) for the tested candidate, actual deployment and recovery observations, and [calendar operations](CALENDAR_OPERATIONS.md) for optional account setup.
 
-The candidate `release-159fab8393b7-20260930152801` passed final-image checks and is deployed healthy, with both worker profiles' Pi-native checks passed. See [S02 evidence](evidence/S02.md) for exact identities and review status. Human merge and a release built from the actual merged source are still required. Once schema 2 is installed, the old S01 manifest is incompatible and cannot be rolled back into service. Listing S01 as an upgrade predecessor does not make it a valid rollback target. Preserve a failed deployment's receipt and maintenance lease; do not reset the database or clear the lease to force a retry.
+Calendar access remains disabled until separately configured. Calendar credentials and denial journals, when present, require verified encrypted storage and protected backups. Deployment does not link an account or activate a model. After schema 3 is installed, S02 is not a compatible rollback; preserve closed admission on an unresolved failure and use tested compatible code.
+
+## S02 knowledge configuration
+
+The historical S02 host required PostgreSQL schema 2 and checked its recorded checksums at startup. The current S03 host requires schema 3. Startup never migrates the database. The knowledge controls below remain available in S03.
+
+S02 was human-merged and its exact merged source was tested and delivered before S03 began; see [S02 evidence](evidence/S02.md). Once schema 2 was installed, the old S01 manifest became incompatible. Listing a release as an upgrade predecessor does not make it a valid rollback target. Preserve a failed deployment's receipt and maintenance lease; do not reset the database or clear the lease to force a retry.
 
 The trusted host runtime environment accepts `COS_KNOWLEDGE_ENABLED=true` to enable selected-source ingestion and retrieval. Its default is `false`. `COS_KNOWLEDGE_RETENTION_DAYS` is an integer from 0 through 365, defaulting to 30; approved deletion records its deadline when applied. Keep both settings in the host's scoped runtime environment, and restart the host to apply changes through the normal deployment/operational checks. No agent receives these settings or database credentials.
 

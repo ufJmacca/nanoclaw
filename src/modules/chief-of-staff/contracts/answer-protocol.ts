@@ -8,6 +8,7 @@ export type AnswerDraft = {
   claims: Array<{ kind: 'quote' | 'inference'; text: string; citations: AnswerCitation[] }>;
   questions?: string[];
   notice?: 'approval_required';
+  calendar?: 'coverage';
 };
 /** Provider guidance; validAnswerDraft additionally enforces byte, Unicode and cross-field limits. */
 export const answerDraftSchema = {
@@ -15,6 +16,12 @@ export const answerDraftSchema = {
   additionalProperties: false,
   required: ['kind', 'coverage', 'claims'],
   properties: {
+    calendar: {
+      type: 'string',
+      enum: ['coverage'],
+      description:
+        'Append current host-verified calendar coverage and freshness. The host rechecks this notice before publication. This does not refresh the provider or prove an empty day.',
+    },
     kind: { type: 'string', enum: ['answer', 'summary'] },
     coverage: { type: 'string', enum: ['limited', 'conflicting', 'insufficient', 'not_applicable'] },
     questions: {
@@ -103,7 +110,7 @@ export function validAnswerCitation(citation: unknown): citation is AnswerCitati
 export function validAnswerDraft(value: unknown): value is AnswerDraft {
   if (
     !object(value) ||
-    !keys(value, ['kind', 'coverage', 'claims', 'questions', 'notice']) ||
+    !keys(value, ['kind', 'coverage', 'claims', 'questions', 'notice', 'calendar']) ||
     !['answer', 'summary'].includes(String(value.kind)) ||
     !['limited', 'conflicting', 'insufficient', 'not_applicable'].includes(String(value.coverage)) ||
     !Array.isArray(value.claims) ||
@@ -111,6 +118,7 @@ export function validAnswerDraft(value: unknown): value is AnswerDraft {
   )
     return false;
   if (value.notice !== undefined && value.notice !== 'approval_required') return false;
+  if (value.calendar !== undefined && value.calendar !== 'coverage') return false;
   if (
     value.questions !== undefined &&
     (!Array.isArray(value.questions) ||

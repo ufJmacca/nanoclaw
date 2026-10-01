@@ -10,6 +10,16 @@ vi.mock('../../../config.js', async () => ({
   GROUPS_DIR: '/tmp/nanoclaw-context-admin/groups',
 }));
 vi.mock('../host-store.js', () => ({ connectCosHostStore: vi.fn() }));
+vi.mock('./calendar-admin.js', async () => ({
+  ...(await vi.importActual('./calendar-admin.js')),
+  runCalendarAdmin: vi.fn(),
+}));
+import { runCalendarAdmin } from './calendar-admin.js';
+vi.mock('./calendar-account-admin.js', async () => ({
+  ...(await vi.importActual('./calendar-account-admin.js')),
+  runCalendarAccountAdmin: vi.fn(),
+}));
+import { runCalendarAccountAdmin } from './calendar-account-admin.js';
 import { connectCosHostStore } from '../host-store.js';
 import type { PriorityStore } from '../store/priorities.js';
 import { initDb, closeDb } from '../../../db/connection.js';
@@ -339,6 +349,54 @@ it('owner source commands derive scope and identity from the paused binding with
   await contextAdminCommand({ command: 'source-reconcile', scopeId: 'fixture' }, env, dependencies);
   expect(knowledge.reconcileArtifacts).toHaveBeenCalledWith();
   expect(fs.existsSync(state + '/conversations')).toBe(false);
+  expect(fs.existsSync(state + '/model-activation.json')).toBe(false);
+});
+it('calendar commands use native owner and maintenance authority without a model login or allowance', async () => {
+  fs.rmSync(state + '/codex-auth', { recursive: true });
+  const args = { command: 'calendar-status' as const, scopeId: 'fixture', offset: 0 };
+  const run = vi.mocked(runCalendarAdmin);
+  run.mockClear();
+  run.mockImplementation(async (options) => {
+    expect(options.binding).toMatchObject({ scopeId: 'fixture', ownerId: 'owner', provider: 'codex' });
+    expect(options.roots).toEqual({ targetRoot: state, installationRoot: root, dataRoot: root + '/data' });
+    await options.check();
+    return { status: 'ok', paused: true, live_model: 'not_invoked' };
+  });
+  expect(await contextAdminCommand(args, env, dependencies)).toMatchObject({ status: 'ok', paused: true });
+  const { assertAuthority } = run.mock.calls[0][0];
+  expect(() => assertAuthority()).toThrow();
+  expect(fs.existsSync(state + '/conversations')).toBe(false);
+  expect(fs.existsSync(state + '/model-activation.json')).toBe(false);
+  run.mockClear();
+  quiescent.mockResolvedValueOnce(false);
+  await expect(contextAdminCommand(args, env, dependencies)).rejects.toThrow('target_not_quiescent');
+  facts.mockResolvedValueOnce({
+    id: 'private',
+    type: 'P',
+    delete_at: 0,
+    members: ['owner', 'bot', 'outsider'],
+    activeSubscription: true,
+  });
+  await expect(contextAdminCommand(args, env, dependencies)).rejects.toThrow('private_owner_membership_required');
+  expect(run).not.toHaveBeenCalled();
+});
+it('account linking uses the same paused native authority and cannot run after its lease is released', async () => {
+  fs.rmSync(state + '/codex-auth', { recursive: true });
+  const run = vi.mocked(runCalendarAccountAdmin);
+  run.mockImplementation(async (options) => {
+    await options.check();
+    expect(options.binding).toMatchObject({ scopeId: 'fixture', ownerId: 'owner', provider: 'codex' });
+    return { status: 'ok', paused: true, live_model: 'not_invoked' };
+  });
+  const args = {
+    command: 'calendar-link' as const,
+    scopeId: 'fixture',
+    bindingId: randomUUID(),
+    requestId: randomUUID(),
+    manifestFile: state + '/selection.json',
+  };
+  expect(await contextAdminCommand(args, env, dependencies)).toMatchObject({ status: 'ok', paused: true });
+  expect(() => run.mock.calls.at(-1)![0].assertAuthority()).toThrow();
   expect(fs.existsSync(state + '/model-activation.json')).toBe(false);
 });
 it('source setup requires quiescence and private owner membership, and closes the pool on import failure', async () => {

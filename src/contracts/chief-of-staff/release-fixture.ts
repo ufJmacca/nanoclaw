@@ -1,10 +1,12 @@
 import { REQUIRED_RELEASE_CHECKS, type ReleaseManifest } from '../../modules/chief-of-staff/ops/release-manifest.js';
 import { INITIAL_CHECKSUM } from '../../modules/chief-of-staff/store/migrations.js';
 import { KNOWLEDGE_CHECKSUM } from '../../modules/chief-of-staff/store/knowledge-schema.js';
+import { CALENDAR_CHECKSUM } from '../../modules/chief-of-staff/store/calendar-schema.js';
 /** Synthetic identities for release-contract tests; never a transferable artifact receipt. */
-export function fixtureRelease(slice: 'S01' | 'S02' = 'S01'): ReleaseManifest {
+export function fixtureRelease(slice: 'S01' | 'S02' | 'S03' = 'S01'): ReleaseManifest {
   const commit = 'a'.repeat(40),
-    imageIds = ['sha256:' + 'c'.repeat(64), 'sha256:' + 'd'.repeat(64)];
+    imageIds = ['sha256:' + 'c'.repeat(64), 'sha256:' + 'd'.repeat(64)],
+    schemaVersion = slice === 'S01' ? 1 : slice === 'S02' ? 2 : 3;
   return {
     contract: 'cos-release/v1',
     releaseId: 'release-fixture',
@@ -15,18 +17,23 @@ export function fixtureRelease(slice: 'S01' | 'S02' = 'S01'): ReleaseManifest {
       commit,
       tree: 'b'.repeat(40),
       fetchRef:
-        slice === 'S01' ? 'refs/heads/cos/s01-first-use-and-priorities' : 'refs/heads/cos/s02-grounded-knowledge',
+        slice === 'S01'
+          ? 'refs/heads/cos/s01-first-use-and-priorities'
+          : slice === 'S02'
+            ? 'refs/heads/cos/s02-grounded-knowledge'
+            : 'refs/heads/cos/s03-calendar-awareness',
       syncContract: 'cos-source-sync/github-pinned-v1',
     },
     buildInputDigest: 'e'.repeat(64),
     hostPayloadDigest: 'f'.repeat(64),
     workerAssetsDigest: '1'.repeat(64),
     rpc: 'cos-rpc/v1',
-    postgres: { minimum: slice === 'S01' ? 1 : 2, maximum: slice === 'S01' ? 1 : 2 },
+    postgres: { minimum: schemaVersion, maximum: schemaVersion },
     sqlite: { minimum: 22, maximum: 22 },
     migrations: [
       { version: 1, checksum: INITIAL_CHECKSUM },
-      ...(slice === 'S02' ? [{ version: 2, checksum: KNOWLEDGE_CHECKSUM }] : []),
+      ...(schemaVersion >= 2 ? [{ version: 2, checksum: KNOWLEDGE_CHECKSUM }] : []),
+      ...(schemaVersion === 3 ? [{ version: 3, checksum: CALENDAR_CHECKSUM }] : []),
     ],
     previousReleaseIds: [],
     images: [

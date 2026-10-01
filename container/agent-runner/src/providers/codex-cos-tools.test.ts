@@ -27,6 +27,7 @@ test('native CoS exposes only its fixed approved tools and dispatches validated 
     'cos_source_change_propose',
     'cos_answer_prepare',
     'cos_answer_get',
+    'cos_calendar_read',
   ]);
   expect((await dispatch.handle(call())).success).toBe(true);
   expect(calls).toHaveLength(1);
@@ -65,6 +66,37 @@ test('S02 dispatches answer preparation with a stable request ID and rejects for
     ).toBe(false);
   expect(calls).toHaveLength(2);
   dispatch.close();
+});
+test('S03 dispatches bounded calendar reads and paged coverage without accepting account or write authority', async () => {
+  const { dispatch, calls } = fixture();
+  const args = {
+    binding_id: '11111111-1111-4111-8111-111111111111',
+    calendar_id: 'selected',
+    time_min: '2026-10-01T00:00:00Z',
+    time_max: '2026-10-02T00:00:00Z',
+    limit: 2,
+  };
+  expect(
+    (await dispatch.handle(call({ callId: 'calendar', tool: 'cos_calendar_read', arguments: args }))).success,
+  ).toBe(true);
+  expect(calls[0]).toMatchObject({ method: 'cos_calendar_read', params: args });
+  expect((await dispatch.handle(call({ callId: 'coverage', arguments: { calendar_offset: 10 } }))).success).toBe(true);
+  expect(calls[1]).toMatchObject({ method: 'cos_context_get', params: { view: 'today', calendar_offset: 10 } });
+  for (const [i, extra] of [
+    { provider: 'claude' },
+    { scope_id: 'foreign' },
+    { method: 'DELETE' },
+    { url: 'https://evil.test' },
+    { limit: 6 },
+  ].entries())
+    expect(
+      (
+        await dispatch.handle(
+          call({ callId: 'denied-' + i, tool: 'cos_calendar_read', arguments: { ...args, ...extra } }),
+        )
+      ).success,
+    ).toBe(false);
+  expect(calls).toHaveLength(2);
 });
 test('S02 dispatches bounded knowledge queries without accepting model authority or direct source mutations', async () => {
   const f = fixture();

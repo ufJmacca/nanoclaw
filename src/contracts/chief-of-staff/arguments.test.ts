@@ -14,7 +14,7 @@ describe('CoS fixture command selection', () => {
   it.each(
     [
       [],
-      ['--slice', 'S03', '--db-profile', 'test'],
+      ['--slice', 'S04', '--db-profile', 'test'],
       ['--slice', 'S01', '--db-profile', 'runtime'],
       ['--demo', '--slice', 'S01', '--db-profile', 'test'],
       ['--slice', 'S01', '--db-profile', 'test', '--db-profile', 'test'],
@@ -33,5 +33,18 @@ it('registers S02 demonstration and all affected contracts without permitting la
     'flow.integration',
     'knowledge.integration',
     'knowledge-flow.integration',
+  ]);
+});
+it('registers the offline S03 preparation flow and all affected predecessor/database contracts', () => {
+  const args = parseFixtureArguments(['--demo', '--fixture', '--slice', 'S03', '--db-profile', 'test']);
+  expect(fixtureFiles(args)).toEqual(['calendar-flow.integration']);
+  expect(fixtureFiles({ ...args, demo: false })).toEqual([
+    'priorities.integration',
+    'flow.integration',
+    'knowledge.integration',
+    'knowledge-flow.integration',
+    'calendar.integration',
+    'calendar-evidence.integration',
+    'calendar-flow.integration',
   ]);
 });

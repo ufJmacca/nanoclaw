@@ -119,43 +119,46 @@ it('selects runtime credentials separately without inheriting a test marker or a
   expect(selected.MATTERMOST_BOT_TOKEN).toBeUndefined();
 });
 
-it('S02 release checkpoints preserve reviewed predecessor evidence and reject an unfinished predecessor', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-s02-release-ledger-'));
-  const source = 'a'.repeat(40);
-  const prior = {
-    id: 'S01',
-    implementation_status: 'merged',
-    review_status: 'human_merged',
-    merged_sha: source,
-    deployed_source_sha: source,
-    merged_source_delivery_status: 'passed',
-    pi_smoke_status: 'passed',
-  };
-  const ledger = {
-    active_slice: 'S02',
-    slices: [prior, { id: 'S02', implementation_status: 'in_progress' }],
-    unknown: 'preserve',
-  };
-  const file = path.join(root, 'execution.json');
-  const save = (value: unknown) => fs.writeFileSync(file, JSON.stringify(value), { mode: 0o600 });
-  try {
-    save(ledger);
-    expect(readLocalExecution(root, true)).toEqual(ledger);
-    checkpointLocalExecution(root, { release_status: 'local_checks_pending' });
-    const updated = JSON.parse(fs.readFileSync(file, 'utf8'));
-    expect(updated.slices[0]).toEqual(prior);
-    expect(updated.slices[1].release_status).toBe('local_checks_pending');
-    expect(updated.unknown).toBe('preserve');
-    for (const patch of [
-      { review_status: 'awaiting_review' },
-      { deployed_source_sha: 'b'.repeat(40) },
-      { pi_smoke_status: 'not_run' },
-      { implementation_status: 'in_progress' },
-    ]) {
-      save({ ...ledger, slices: [{ ...prior, ...patch }, ledger.slices[1]] });
-      expect(() => readLocalExecution(root, true)).toThrow('predecessor_acceptance_required');
+it.each(['S02', 'S03'])(
+  '%s release checkpoints preserve reviewed predecessor evidence and reject an unfinished predecessor',
+  (slice) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-s02-release-ledger-'));
+    const source = 'a'.repeat(40);
+    const prior = {
+      id: slice === 'S02' ? 'S01' : 'S02',
+      implementation_status: 'merged',
+      review_status: 'human_merged',
+      merged_sha: source,
+      deployed_source_sha: source,
+      merged_source_delivery_status: 'passed',
+      pi_smoke_status: 'passed',
+    };
+    const ledger = {
+      active_slice: slice,
+      slices: [prior, { id: slice, implementation_status: 'in_progress' }],
+      unknown: 'preserve',
+    };
+    const file = path.join(root, 'execution.json');
+    const save = (value: unknown) => fs.writeFileSync(file, JSON.stringify(value), { mode: 0o600 });
+    try {
+      save(ledger);
+      expect(readLocalExecution(root, true)).toEqual(ledger);
+      checkpointLocalExecution(root, { release_status: 'local_checks_pending' });
+      const updated = JSON.parse(fs.readFileSync(file, 'utf8'));
+      expect(updated.slices[0]).toEqual(prior);
+      expect(updated.slices[1].release_status).toBe('local_checks_pending');
+      expect(updated.unknown).toBe('preserve');
+      for (const patch of [
+        { review_status: 'awaiting_review' },
+        { deployed_source_sha: 'b'.repeat(40) },
+        { pi_smoke_status: 'not_run' },
+        { implementation_status: 'in_progress' },
+      ]) {
+        save({ ...ledger, slices: [{ ...prior, ...patch }, ledger.slices[1]] });
+        expect(() => readLocalExecution(root, true)).toThrow('predecessor_acceptance_required');
+      }
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
     }
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true });
-  }
-});
+  },
+);
