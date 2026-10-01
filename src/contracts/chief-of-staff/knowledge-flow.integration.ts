@@ -111,6 +111,7 @@ test(
         assert.deepEqual(listed.tools.map((t: { name: string }) => t.name).sort(), [
           'cos_answer_get',
           'cos_answer_prepare',
+          'cos_calendar_read',
           'cos_change_propose',
           'cos_context_get',
           'cos_knowledge_search',

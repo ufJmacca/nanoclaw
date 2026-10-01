@@ -1,6 +1,6 @@
 # Calendar awareness implementation
 
-S03 is in progress. The calendar readers, snapshot collector, PostgreSQL snapshot store, guarded S02 evidence integration and host connector wiring exist. Operator account linking and conversational coverage remain pending. No real calendar account has been linked or queried.
+S03 is in progress. The calendar readers, snapshot collector, PostgreSQL snapshot store, guarded S02 evidence integration, host connector and bounded model read tool exist. Operator account linking and the complete preparation conversation remain pending. No real calendar account has been linked or queried.
 
 ## Read contract
 
@@ -40,7 +40,7 @@ The loopback listener now checks the actual bound host/port, callback path, meth
 
 The host credential owner stores validated token fields in private files outside Git. References are bound to one scope, connector and OAuth client. A kernel lock excludes concurrent owners; one owner coalesces concurrent requests. Refresh is journalled before dispatch, and rotation is saved and synced before the access token is released. An interrupted or uncertain refresh stops reuse and records a durable access denial. Private permissions do not establish disk encryption: the operator workflow must configure and verify storage encryption and protected backups.
 
-The Pi administration path and coordinator tools remain pending. The operator runbook must cover account consent, selected-calendar admission, host storage/backup protection and revocation before live linking is enabled. These components do not enable an account-link command by themselves.
+The Pi administration path remains pending. The operator runbook must cover account consent, selected-calendar admission, host storage/backup protection and revocation before live linking is enabled. These components do not enable an account-link command by themselves.
 
 ## Host integration in development
 
@@ -50,4 +50,12 @@ The connector rereads scoped binding metadata before requests and after asynchro
 
 Before a provider check, the host takes a kernel lock and durably records that the check is in progress. Only the owning fence instance permits reads while that check runs. A settled check with no observed access loss removes the record; access loss or an interrupted check retains it. Failed denial writes also close the running process immediately. A reconstructed host refuses an interrupted check even if no denial file was successfully created. Such uncertainty requires a new authorised binding; startup never clears the record or replays the uncertain request. An actual killed-process test and a database-backed cached-answer test verify this behavior.
 
-These development components do not establish storage encryption, backup coverage or live readiness. Operator setup/storage verification, backup integration, bounded model tools, conversational coverage and final release acceptance remain required before calendar activation on the Pi.
+These development components do not establish storage encryption, backup coverage or live readiness. Operator setup/storage verification, backup integration, the complete preparation conversation and final release acceptance remain required before calendar activation on the Pi.
+
+## Bounded model reads
+
+`cos_context_get` includes up to ten selected-calendar coverage entries with binding IDs, calendar IDs, configured zones, snapshot windows and last-attempt/last-success timestamps. Follow `calendar.next_offset` using the request's `calendar_offset` field. An unconfigured connector reports `not_configured`; a processing profile with no selected calendars reports `not_connected`. Neither means an empty day.
+
+`cos_calendar_read` accepts those binding/calendar IDs, explicit `time_min` and `time_max` instants, a limit of one to five events and an offset. It cannot choose another scope/provider, call an arbitrary endpoint, link an account, refresh the provider or write calendar events. Results preserve all-day dates and exclusive ends, order by the event's start in the configured zone, and carry exact S02 evidence references. A bounded preview is published as the first source chunk; complete provider details remain available through ordinary guarded source retrieval. Preview serialization is stable across PostgreSQL JSONB key ordering, and the returned preview must exactly occur in its cited chunk.
+
+Unknown, disconnected, out-of-window or withheld event evidence produces a coverage warning. A snapshot change during a read returns a conflict rather than a stale empty result. Local and database permissions are checked again before disclosure. The tool response includes freshness metadata, but the final answer path still needs the preparation-conversation acceptance check, including how freshness and coverage facts are rendered under the existing checked-answer contract.

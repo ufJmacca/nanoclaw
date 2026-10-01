@@ -20,6 +20,7 @@ import { PriorityStore } from '../../modules/chief-of-staff/store/priorities.js'
 import { connectionFault } from './connection-fault.js';
 import { setTimeout as delay } from 'node:timers/promises';
 import { CalendarConnector } from '../../modules/chief-of-staff/calendar/connector.js';
+import { CalendarView } from '../../modules/chief-of-staff/calendar/view.js';
 const scope = 'calendar-evidence-' + randomUUID();
 const context: KnowledgeContext = {
   scopeId: scope,
@@ -417,6 +418,10 @@ test('S03-T05: refresh never resurrects an owner-revoked calendar source', async
   s.fixture.replace('selected', [event('CalendarOwnerRevokedCanary new event text')]);
   await publish(s);
   assert.deepEqual((await knowledge.search(fresh(), { query: 'CalendarOwnerRevokedCanary' })).items, []);
+  const observed = await calendarView().read(fresh(), readInput(s.id));
+  assert.equal(observed.coverage, 'incomplete');
+  assert.equal(observed.warning, 'calendar_evidence_unavailable');
+  assert.deepEqual(observed.items, []);
   assert.equal(
     (
       await pool.query('SELECT count(*)::int AS n FROM cos.source_revisions WHERE scope_id=$1 AND source_id=$2', [
@@ -494,4 +499,146 @@ test('S03-T05/PG02: denial-write failure cannot reopen cached calendar evidence 
   assert.deepEqual((await restarted.search(fresh(), { query: 'CalendarReconstructedDenialCanary' })).items, []);
   assert.equal((await restarted.contextReady(ctx)).status, 'denied');
   assert.equal((await restarted.answers.get(fresh(), id)).status, 'denied');
+});
+const calendarView = () =>
+  new CalendarView({
+    store: calendar,
+    knowledge,
+    assertOpen: (scopeId, bindingId) => fences.assertOpen(scopeId, bindingId),
+    enabled: () => true,
+  });
+const readInput = (id: string) => ({
+  binding_id: id,
+  calendar_id: 'selected',
+  time_min: window.timeMin,
+  time_max: window.timeMax,
+});
+test('S03-T02/T08: bounded calendar view returns ordered events with checked citations and excludes long descriptions', async () => {
+  const s = await setup('CalendarViewCanary');
+  s.fixture.replace(
+    'selected',
+    Array.from({ length: 7 }, (_, i) => ({
+      ...event('CalendarViewCanary ' + i),
+      id: 'event-' + i,
+      description: 'PRIVATE_LONG_DESCRIPTION_CANARY ' + 'x'.repeat(15000),
+      start: { date: '2026-10-0' + (i + 2) },
+      end: { date: '2026-10-0' + (i + 3) },
+    })).reverse(),
+  );
+  await publish(s);
+  const ctx = fresh(),
+    result = await calendarView().read(ctx, { ...readInput(s.id), limit: 2, offset: 2 });
+  assert.equal(result.status, 'ok');
+  assert.equal(result.coverage, 'complete');
+  assert.equal(result.next_offset, 4);
+  const items = result.items as Array<{ summary: string; start: unknown; end: unknown; evidence: Evidence }>;
+  assert.deepEqual(
+    items.map((item) => item.summary),
+    ['CalendarViewCanary 2', 'CalendarViewCanary 3'],
+  );
+  assert.deepEqual(items[0].start, { kind: 'date', date: '2026-10-04' });
+  assert.ok(items[0].evidence.text.includes('2026-10-04'));
+  assert.ok(items[0].evidence.text.includes('CalendarViewCanary 2'));
+  assert.ok(items[0].evidence.evidence_id);
+  assert.equal(JSON.stringify(result).includes('PRIVATE_LONG_DESCRIPTION_CANARY'), false);
+  assert.ok(Buffer.byteLength(JSON.stringify(result)) < 16000);
+  const answer = await answerFor(ctx, items[0].evidence);
+  assert.equal((await knowledge.answers.get(ctx, answer)).status, 'ok');
+});
+test('S03-T04/T10: calendar view preserves incomplete and unavailable coverage instead of claiming an empty day', async () => {
+  const s = await setup('CalendarViewCoverageCanary'),
+    view = calendarView();
+  const initial = await view.read(fresh(), readInput(s.id));
+  assert.equal(initial.status, 'ok');
+  assert.equal(initial.coverage, 'incomplete');
+  assert.equal(initial.warning, 'calendar_not_synced');
+  await publish(s);
+  const outside = await view.read(fresh(), {
+    ...readInput(s.id),
+    time_min: '2026-11-01T00:00:00Z',
+    time_max: '2026-11-02T00:00:00Z',
+  });
+  assert.equal(outside.status, 'ok');
+  assert.equal(outside.coverage, 'incomplete');
+  assert.equal(outside.warning, 'calendar_window_not_covered');
+  assert.deepEqual(outside.items, []);
+  fences.deny(scope, s.id, 'disconnected');
+  const lost = await view.read(fresh(), readInput(s.id));
+  assert.equal(lost.status, 'ok');
+  assert.equal(lost.coverage, 'unavailable');
+  assert.deepEqual(lost.items, []);
+  assert.equal((await view.read({ ...fresh(), ownerId: 'foreign' }, readInput(s.id))).status, 'denied');
+  assert.equal((await view.read({ ...fresh(), provider: 'claude' }, readInput(s.id))).status, 'denied');
+});
+test('S03-T04: calendar view rejects unbounded or forged requests before selection', async () => {
+  const s = await setup('CalendarViewLimitCanary'),
+    view = calendarView();
+  await publish(s);
+  for (const extra of [
+    { limit: 6 },
+    { offset: -1 },
+    { time_min: 'bad' },
+    { time_max: window.timeMin },
+    { scope_id: 'foreign' },
+    { timeZone: 'forged' },
+    { method: 'DELETE' },
+  ])
+    assert.equal((await view.read(fresh(), { ...readInput(s.id), ...extra })).status, 'denied');
+});
+test('S03-T10: coverage inventory is bounded and exposes no credentials, events or foreign-provider calendars', async () => {
+  const s = await setup('CalendarCoveragePrivateContentCanary');
+  await publish(s);
+  const result = await calendarView().coverage(fresh());
+  assert.equal(result.status, 'ok');
+  assert.ok((result.items as unknown[]).length <= 10);
+  assert.equal(JSON.stringify(result).includes('CalendarCoveragePrivateContentCanary'), false);
+  assert.equal(JSON.stringify(result).includes('credential'), false);
+  assert.equal((await calendarView().coverage({ ...fresh(), ownerId: 'foreign' })).status, 'denied');
+  const foreign = await calendarView().coverage({ ...fresh(), provider: 'claude' });
+  assert.equal(foreign.coverage, 'not_connected');
+  assert.deepEqual(foreign.items, []);
+  const ids: string[] = [];
+  let offset = 0;
+  for (let pages = 0; pages < 10; pages++) {
+    const page = await calendarView().coverage(fresh(), offset);
+    assert.equal(page.status, 'ok');
+    ids.push(...(page.items as Array<{ binding_id: string }>).map((item) => item.binding_id));
+    if (page.next_offset === null) break;
+    offset = Number(page.next_offset);
+  }
+  assert.equal(new Set(ids).size, ids.length);
+  assert.equal(
+    ids.length,
+    (
+      await pool.query(
+        "SELECT count(*)::int AS n FROM cos.calendar_bindings WHERE scope_id=$1 AND 'codex'=ANY(processing_providers)",
+        [scope],
+      )
+    ).rows[0].n,
+  );
+});
+test('S03-T01/T05: a changed snapshot cannot publish a stale empty calendar view', async () => {
+  const s = await setup('CalendarViewRaceCanary');
+  s.fixture.replace('selected', []);
+  await publish(s);
+  let calls = 0;
+  const view = new CalendarView({
+    store: {
+      coverage: (...args) => calendar.coverage(...args),
+      evidenceSnapshot: async (...args) => {
+        const captured = await calendar.evidenceSnapshot(...args);
+        if (++calls === 1) {
+          s.fixture.replace('selected', [event('CalendarViewRaceCanary')]);
+          await publish(s);
+        }
+        return captured;
+      },
+    },
+    knowledge,
+    assertOpen: (scopeId, binding) => fences.assertOpen(scopeId, binding),
+    enabled: () => true,
+  });
+  const result = await view.read(fresh(), readInput(s.id));
+  assert.equal(result.status, 'conflict');
+  assert.equal(result.items, undefined);
 });

@@ -159,6 +159,27 @@ function snapshotValid(value: CalendarSnapshot): boolean {
 }
 
 export class CalendarStore {
+  /** Bounded metadata inventory for the current model-processing profile. No tokens or source text. */
+  async coverage(context: Context & { provider: string }, offset = 0): Promise<Result> {
+    if (!Number.isInteger(offset) || offset < 0 || offset > 10000) return { status: 'denied' };
+    return this.transaction(context, false, async (client) => {
+      const rows = (
+        await client.query(
+          `SELECT b.id AS binding_id,c.calendar_id,b.time_zone,b.auth,b.permission_scopes,
+        s.current_snapshot AS snapshot_id,s.last_attempt,s.last_success_at,s.last_attempt_at,g.coverage_window,a.status AS attempt_status
+        FROM cos.calendar_bindings b CROSS JOIN LATERAL unnest(b.selected_calendar_ids) AS c(calendar_id)
+        LEFT JOIN cos.calendar_states s ON s.scope_id=b.scope_id AND s.binding_id=b.id AND s.calendar_id=c.calendar_id
+        LEFT JOIN cos.calendar_snapshots g ON g.scope_id=s.scope_id AND g.binding_id=s.binding_id AND g.id=s.current_snapshot
+        LEFT JOIN cos.calendar_snapshots a ON a.scope_id=s.scope_id AND a.binding_id=s.binding_id AND a.id=s.last_attempt
+        WHERE b.scope_id=$1 AND $2=ANY(b.processing_providers) ORDER BY b.id,c.calendar_id LIMIT 11 OFFSET $3`,
+          [context.scopeId, context.provider, offset],
+        )
+      ).rows;
+      const more = rows.length > 10;
+      if (more) rows.pop();
+      return { status: 'ok', items: rows, next_offset: more ? offset + 10 : null };
+    });
+  }
   constructor(
     readonly database: BoundedDatabase,
     readonly hooks: { beforePublishCommit?(): Promise<void>; afterPublishCommit?(): Promise<void> } = {},
@@ -520,13 +541,43 @@ export class CalendarStore {
     });
   }
   async read(context: Context & { provider: string }, bindingId: string, calendarId: string): Promise<Result> {
+    return this.readSnapshot(context, bindingId, calendarId, false);
+  }
+  /** Private host selection input, never returned directly to a model. */
+  async evidenceSnapshot(
+    context: Context & { provider: string },
+    bindingId: string,
+    calendarId: string,
+  ): Promise<Result> {
+    return this.readSnapshot(context, bindingId, calendarId, true);
+  }
+  private async readSnapshot(
+    context: Context & { provider: string },
+    bindingId: string,
+    calendarId: string,
+    evidenceMode: boolean,
+  ): Promise<Result> {
     if (!uuid.test(bindingId) || !validCalendarId(calendarId)) return { status: 'denied' };
     return this.transaction(context, false, async (client) => {
       const b = await this.binding(client, context, bindingId);
       if (!b || !b.selected_calendar_ids.includes(calendarId) || !b.processing_providers.includes(context.provider))
         return { status: 'denied' };
       if (b.auth !== 'ready')
-        return { status: 'ok', coverage: 'unavailable', warning: 'calendar_auth_' + b.auth, items: [] };
+        return {
+          status: 'ok',
+          coverage: 'unavailable',
+          warning: 'calendar_auth_' + b.auth,
+          time_zone: b.time_zone,
+          items: [],
+        };
+      if (!hasCalendarReadScope(b.permission_scopes))
+        return {
+          status: 'ok',
+          coverage: 'unavailable',
+          warning: 'calendar_scope_denied',
+          time_zone: b.time_zone,
+          items: [],
+        };
       const state = (
         await client.query(
           `SELECT s.*,g.coverage_window,a.status AS attempt_status FROM cos.calendar_states s
@@ -541,8 +592,22 @@ export class CalendarStore {
       const rows = state?.current_snapshot
         ? (
             await client.query(
-              "SELECT event,version FROM cos.calendar_observations WHERE scope_id=$1 AND binding_id=$2 AND calendar_id=$3 AND last_snapshot=$4 AND lifecycle='current' ORDER BY provider_event_id LIMIT 5000",
-              [context.scopeId, bindingId, calendarId, state.current_snapshot],
+              evidenceMode
+                ? `SELECT o.event,o.version,o.source_id,s.current_revision_id AS revision_id,
+                (s.status IN ('current','stale') AND $5=ANY(s.processing_providers) AND a.lifecycle='published'
+                 AND NOT EXISTS(SELECT 1 FROM cos.revocation_tombstones t WHERE t.scope_id=s.scope_id AND t.source_id=s.id)) AS readable
+                FROM cos.calendar_observations o LEFT JOIN cos.sources s ON s.scope_id=o.scope_id AND s.id=o.source_id
+                LEFT JOIN cos.source_revisions r ON r.scope_id=s.scope_id AND r.id=s.current_revision_id
+                LEFT JOIN cos.artifacts a ON a.scope_id=r.scope_id AND a.id=r.artifact_id
+                WHERE o.scope_id=$1 AND o.binding_id=$2 AND o.calendar_id=$3 AND o.last_snapshot=$4 AND o.lifecycle='current' ORDER BY o.provider_event_id LIMIT 5000`
+                : "SELECT event,version FROM cos.calendar_observations WHERE scope_id=$1 AND binding_id=$2 AND calendar_id=$3 AND last_snapshot=$4 AND lifecycle='current' ORDER BY provider_event_id LIMIT 5000",
+              [
+                context.scopeId,
+                bindingId,
+                calendarId,
+                state.current_snapshot,
+                ...(evidenceMode ? [context.provider] : []),
+              ],
             )
           ).rows
         : [];
@@ -557,10 +622,11 @@ export class CalendarStore {
               ? 'calendar_refresh_incomplete'
               : 'calendar_not_synced',
         snapshot_id: state?.current_snapshot ?? null,
+        time_zone: b.time_zone,
         window: state?.coverage_window ?? null,
         last_attempt_at: state?.last_attempt_at ?? null,
         last_success_at: state?.last_success_at ?? null,
-        items: rows.map((row) => ({ event: row.event, version: row.version })),
+        items: evidenceMode ? rows : rows.map((row) => ({ event: row.event, version: row.version })),
       };
     });
   }

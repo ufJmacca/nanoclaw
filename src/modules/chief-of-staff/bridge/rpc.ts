@@ -7,6 +7,7 @@ import { COS_PROTOCOL, validRequest, validResponse, type CosResponse } from '../
 import type { Change, SourceChange, Result } from '../domain/contracts.js';
 import type { PriorityStore } from '../store/priorities.js';
 import type { KnowledgeStore, KnowledgeContext } from '../knowledge/store.js';
+import type { CalendarReadInput } from '../contracts/protocol.js';
 
 export function ensureRpcSchema(db: Database.Database): void {
   db.exec(`CREATE TABLE IF NOT EXISTS cos_rpc_responses (
@@ -48,12 +49,28 @@ export function createRpcHandler(dependencies: {
       if (!context) result = { status: 'denied' };
       else if (dependencies.knowledge && !knowledgeContext) result = { status: 'denied' };
       else if (access && access.status !== 'ok') result = { status: access.status };
-      else if (request.method === 'cos_context_get') result = await dependencies.store.context(context);
-      else if (request.method === 'cos_change_propose')
+      else if (request.method === 'cos_context_get') {
+        result = await dependencies.store.context(context);
+        if (result.status === 'ok')
+          result = {
+            ...result,
+            calendar:
+              dependencies.store.calendarView && knowledgeContext
+                ? await dependencies.store.calendarView.coverage(
+                    knowledgeContext,
+                    Number(request.params.calendar_offset ?? 0),
+                  )
+                : { status: 'unavailable', coverage: 'not_configured', items: [] },
+          };
+      } else if (request.method === 'cos_change_propose')
         result = await dependencies.store.propose(context, request.request_id, request.params.change as Change);
       else if (request.method === 'cos_request_status')
         result = await dependencies.store.status(context, String(request.params.request_id));
       else if (!dependencies.knowledge || !knowledgeContext) result = { status: 'unavailable' };
+      else if (request.method === 'cos_calendar_read')
+        result = dependencies.store.calendarView
+          ? await dependencies.store.calendarView.read(knowledgeContext, request.params as CalendarReadInput)
+          : { status: 'unavailable' };
       else if (request.method === 'cos_knowledge_search')
         result = await dependencies.knowledge.search(knowledgeContext, {
           query: String(request.params.query),

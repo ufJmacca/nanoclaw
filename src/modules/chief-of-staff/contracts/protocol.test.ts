@@ -8,6 +8,30 @@ const request = {
   params: { view: 'today' },
 };
 describe('S01-T09 canonical bounded RPC contract', () => {
+  it('S03 admits bounded calendar reads and rejects model-supplied authority or write options', () => {
+    const calendar = {
+      ...request,
+      method: 'cos_calendar_read',
+      params: {
+        binding_id: request.request_id,
+        calendar_id: 'selected@example.test',
+        time_min: '2026-10-01T00:00:00Z',
+        time_max: '2026-10-02T00:00:00Z',
+      },
+    };
+    expect(validRequest(calendar)).toBe(true);
+    for (const extra of [
+      { limit: 6 },
+      { offset: 5001 },
+      { scope_id: 'foreign' },
+      { provider: 'claude' },
+      { method: 'POST' },
+      { url: 'https://evil.test' },
+      { timeZone: 'UTC' },
+      { time_min: 'tomorrow' },
+    ])
+      expect(validRequest({ ...calendar, params: { ...calendar.params, ...extra } })).toBe(false);
+  });
   it('S02 packages the same answer contract into the runner', () => {
     expect(fs.readFileSync('container/agent-runner/src/mcp-tools/generated/answer-protocol.ts', 'utf8')).toBe(
       fs.readFileSync('src/modules/chief-of-staff/contracts/answer-protocol.ts', 'utf8'),

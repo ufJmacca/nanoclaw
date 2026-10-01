@@ -27,7 +27,8 @@ export type CosMethod =
   | 'cos_source_get'
   | 'cos_source_change_propose'
   | 'cos_answer_prepare'
-  | 'cos_answer_get';
+  | 'cos_answer_get'
+  | 'cos_calendar_read';
 export type CosRequest = {
   protocol: typeof COS_PROTOCOL;
   request_id: string;
@@ -39,6 +40,37 @@ const object = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === 'object' && !Array.isArray(value);
 const keys = (value: Record<string, unknown>, allowed: string[]): boolean =>
   Object.keys(value).every((key) => allowed.includes(key));
+export type CalendarReadInput = {
+  binding_id: string;
+  calendar_id: string;
+  time_min: string;
+  time_max: string;
+  limit?: number;
+  offset?: number;
+};
+export function validCalendarReadInput(value: unknown): value is CalendarReadInput {
+  const instant = (v: unknown) =>
+    typeof v === 'string' &&
+    v.length <= 80 &&
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/.test(v);
+  return (
+    object(value) &&
+    keys(value, ['binding_id', 'calendar_id', 'time_min', 'time_max', 'limit', 'offset']) &&
+    typeof value.binding_id === 'string' &&
+    uuid.test(value.binding_id) &&
+    typeof value.calendar_id === 'string' &&
+    value.calendar_id.length > 0 &&
+    value.calendar_id.length <= 1024 &&
+    !/[\s\u007f-\u009f]/u.test(value.calendar_id) &&
+    !['.', '..'].includes(value.calendar_id) &&
+    instant(value.time_min) &&
+    instant(value.time_max) &&
+    (value.limit === undefined ||
+      (Number.isInteger(value.limit) && Number(value.limit) >= 1 && Number(value.limit) <= 5)) &&
+    (value.offset === undefined ||
+      (Number.isInteger(value.offset) && Number(value.offset) >= 0 && Number(value.offset) <= 5000))
+  );
+}
 
 export function validRequest(value: unknown): value is CosRequest {
   if (!object(value) || !keys(value, ['protocol', 'request_id', 'method', 'params'])) return false;
@@ -56,7 +88,16 @@ export function validRequest(value: unknown): value is CosRequest {
     !object(value.params)
   )
     return false;
-  if (value.method === 'cos_context_get') return keys(value.params, ['view']) && value.params.view === 'today';
+  if (value.method === 'cos_context_get')
+    return (
+      keys(value.params, ['view', 'calendar_offset']) &&
+      value.params.view === 'today' &&
+      (value.params.calendar_offset === undefined ||
+        (Number.isInteger(value.params.calendar_offset) &&
+          Number(value.params.calendar_offset) >= 0 &&
+          Number(value.params.calendar_offset) <= 10000))
+    );
+  if (value.method === 'cos_calendar_read') return validCalendarReadInput(value.params);
   if (value.method === 'cos_request_status')
     return (
       keys(value.params, ['request_id']) &&

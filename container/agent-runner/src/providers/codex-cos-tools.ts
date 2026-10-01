@@ -30,7 +30,7 @@ function requestFor(tool: unknown, args: unknown): CosRequest | null {
   const prepare = tool === 'cos_answer_prepare';
   const allowed =
     tool === 'cos_context_get'
-      ? ['view']
+      ? ['view', 'calendar_offset']
       : proposal
         ? ['request_id', 'change']
         : tool === 'cos_request_status'
@@ -43,7 +43,9 @@ function requestFor(tool: unknown, args: unknown): CosRequest | null {
                 ? ['request_id', 'draft']
                 : tool === 'cos_answer_get'
                   ? ['artifact_id']
-                  : null;
+                  : tool === 'cos_calendar_read'
+                    ? ['binding_id', 'calendar_id', 'time_min', 'time_max', 'limit', 'offset']
+                    : null;
   if (!allowed || Object.keys(values).some((key) => !allowed.includes(key))) return null;
   const request = {
     protocol: COS_PROTOCOL,
@@ -51,7 +53,7 @@ function requestFor(tool: unknown, args: unknown): CosRequest | null {
     method: tool,
     params:
       tool === 'cos_context_get'
-        ? { view: values.view ?? 'today' }
+        ? { ...values, view: values.view ?? 'today' }
         : proposal
           ? { change: values.change }
           : tool === 'cos_request_status'

@@ -11,6 +11,7 @@ import { calendarSettings, openCalendarCredentials } from './calendar/config.js'
 import { CalendarStore } from './calendar/store.js';
 import { CalendarEvidence } from './calendar/evidence.js';
 import { CalendarConnector } from './calendar/connector.js';
+import { CalendarView } from './calendar/view.js';
 
 /** Runtime credentials only. Startup validates the schema; it never migrates or opens source access implicitly. */
 export async function connectCosHostStore(
@@ -35,25 +36,35 @@ export async function connectCosHostStore(
     ? openCalendarCredentials(roots.targetRoot, [roots.installationRoot, roots.dataRoot])
     : undefined;
   const database = BoundedDatabase.fromConfig(await externalDatabaseConfig(env, 'runtime'), admitted);
+  const calendarStore = calendarOwner ? new CalendarStore(database, {}, new CalendarEvidence(artifacts)) : undefined;
   const calendar = calendarOwner
     ? new CalendarConnector({
-        store: new CalendarStore(database, {}, new CalendarEvidence(artifacts)),
+        store: calendarStore!,
         ...calendarOwner,
         admitted,
       })
     : undefined;
   // Keep the store and its denial/retention obligations active when ingestion/retrieval are switched off.
+  const knowledge = new KnowledgeStore(database, artifacts, retention, {
+    retentionMs: settings.retentionMs,
+    retrievalEnabled: () => settings.enabled,
+    calendarAccess: (scopeId, bindingId) => {
+      if (!calendar || !admitted()) return false;
+      calendar.assertOpen(scopeId, bindingId);
+      return true;
+    },
+  });
   return new PriorityStore(
     database,
-    new KnowledgeStore(database, artifacts, retention, {
-      retentionMs: settings.retentionMs,
-      retrievalEnabled: () => settings.enabled,
-      calendarAccess: (scopeId, bindingId) => {
-        if (!calendar || !admitted()) return false;
-        calendar.assertOpen(scopeId, bindingId);
-        return true;
-      },
-    }),
+    knowledge,
     calendar,
+    calendar && calendarStore
+      ? new CalendarView({
+          store: calendarStore,
+          knowledge,
+          enabled: admitted,
+          assertOpen: (scope, binding) => calendar.assertOpen(scope, binding),
+        })
+      : undefined,
   );
 }

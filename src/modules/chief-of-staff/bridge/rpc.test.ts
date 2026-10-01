@@ -98,6 +98,58 @@ describe('S01 host-owned SQLite RPC response bridge', () => {
   });
 });
 describe('S02 knowledge RPC host authority', () => {
+  it('S03 uses host context for calendar reads and includes bounded calendar coverage with priorities', async () => {
+    const { db, store } = fixture(),
+      context = {
+        scopeId: 'fixture',
+        ownerId: 'owner',
+        sessionId: 'session',
+        agentGroupId: 'group',
+        ingressId: 'verified',
+      };
+    const retained = { ...context, provider: 'codex', generation: '33333333-3333-4333-8333-333333333333' };
+    const knowledge = { contextReady: vi.fn().mockResolvedValue({ status: 'ok' }) };
+    const calendarView = {
+      read: vi.fn().mockResolvedValue({ status: 'ok', items: [{ summary: 'CalendarRPCFixtureCanary' }] }),
+      coverage: vi.fn().mockResolvedValue({ status: 'ok', items: [], coverage: 'not_connected' }),
+    };
+    const handler = createRpcHandler({
+      resolveContext: async () => context,
+      store: { ...store, calendarView } as unknown as PriorityStore,
+      knowledge: knowledge as unknown as KnowledgeStore,
+      resolveKnowledgeContext: async () => retained,
+    });
+    const params = {
+      binding_id: request.request_id,
+      calendar_id: 'selected',
+      time_min: '2026-10-01T00:00:00Z',
+      time_max: '2026-10-02T00:00:00Z',
+    };
+    const content = {
+      action: 'cos_rpc',
+      delivery_id: '22222222-2222-4222-8222-222222222222',
+      request: { ...request, method: 'cos_calendar_read', params },
+    };
+    await handler(content, {} as Session, db);
+    const response = () =>
+      JSON.parse(
+        (
+          db.prepare('SELECT response FROM cos_rpc_responses ORDER BY rowid DESC LIMIT 1').get() as {
+            response: string;
+          }
+        ).response,
+      );
+    expect(response()).toMatchObject({ status: 'ok', result: { items: [{ summary: 'CalendarRPCFixtureCanary' }] } });
+    expect(calendarView.read).toHaveBeenCalledWith(retained, params);
+    knowledge.contextReady.mockResolvedValueOnce({ status: 'ok' }).mockResolvedValue({ status: 'denied' });
+    await handler(content, {} as Session, db);
+    expect(response().status).toBe('denied');
+    expect(JSON.stringify(response())).not.toContain('CalendarRPCFixtureCanary');
+    knowledge.contextReady.mockResolvedValue({ status: 'ok' });
+    await handler({ ...content, request }, {} as Session, db);
+    expect(response()).toMatchObject({ status: 'ok', result: { calendar: { coverage: 'not_connected' } } });
+    expect(calendarView.coverage).toHaveBeenCalledWith(retained, 0);
+  });
   it.each(['cos_answer_prepare', 'cos_answer_get'])(
     'routes %s with host context and suppresses output when the generation changes',
     async (method) => {
