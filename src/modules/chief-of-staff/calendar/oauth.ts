@@ -17,7 +17,7 @@ const fail = (code: string): never => {
 };
 const secret = (value: unknown, max = 8192): value is string =>
   typeof value === 'string' && value.length <= max && /^[\x21-\x7e]+$/.test(value);
-function checkedClient(client: GoogleOAuthClient): GoogleOAuthClient {
+export function checkedClient(client: GoogleOAuthClient): GoogleOAuthClient {
   if (
     !object(client) ||
     Object.keys(client).some((k) => !['clientId', 'clientSecret'].includes(k)) ||
@@ -53,6 +53,19 @@ function validScopes(value: unknown): value is string[] {
     value.length <= 50 &&
     value.every((s) => secret(s, 200)) &&
     hasCalendarReadScope(value)
+  );
+}
+export function validGoogleCalendarTokens(value: unknown): value is GoogleCalendarTokens {
+  return (
+    object(value) &&
+    Object.keys(value).sort().join(',') === 'accessToken,expiresAt,refreshExpiresAt,refreshToken,scopes' &&
+    secret(value.accessToken) &&
+    secret(value.refreshToken) &&
+    typeof value.expiresAt === 'number' &&
+    Number.isFinite(value.expiresAt) &&
+    (value.refreshExpiresAt === null ||
+      (typeof value.refreshExpiresAt === 'number' && Number.isFinite(value.refreshExpiresAt))) &&
+    validScopes(value.scopes)
   );
 }
 async function tokenJson(response: Response): Promise<Record<string, unknown>> {
