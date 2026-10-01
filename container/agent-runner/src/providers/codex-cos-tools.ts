@@ -26,7 +26,8 @@ const denied = () => ({
 function requestFor(tool: unknown, args: unknown): CosRequest | null {
   if (!args || typeof args !== 'object' || Array.isArray(args)) return null;
   const values = args as Record<string, unknown>;
-  const proposal = tool === 'cos_change_propose' || tool === 'cos_source_change_propose';
+  const proposal =
+    tool === 'cos_change_propose' || tool === 'cos_source_change_propose' || tool === 'cos_work_change_propose';
   const prepare = tool === 'cos_answer_prepare';
   const allowed =
     tool === 'cos_context_get'
@@ -45,7 +46,9 @@ function requestFor(tool: unknown, args: unknown): CosRequest | null {
                   ? ['artifact_id']
                   : tool === 'cos_calendar_read'
                     ? ['binding_id', 'calendar_id', 'time_min', 'time_max', 'limit', 'offset']
-                    : null;
+                    : tool === 'cos_work_read'
+                      ? ['view', 'offset', 'record_id', 'version']
+                      : null;
   if (!allowed || Object.keys(values).some((key) => !allowed.includes(key))) return null;
   const request = {
     protocol: COS_PROTOCOL,

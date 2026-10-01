@@ -7,7 +7,7 @@ import { COS_PROTOCOL, validRequest, validResponse, type CosResponse } from '../
 import type { Change, SourceChange, Result } from '../domain/contracts.js';
 import type { PriorityStore } from '../store/priorities.js';
 import type { KnowledgeStore, KnowledgeContext } from '../knowledge/store.js';
-import type { CalendarReadInput } from '../contracts/protocol.js';
+import type { CalendarReadInput, WorkChange, WorkRead } from '../contracts/protocol.js';
 
 export function ensureRpcSchema(db: Database.Database): void {
   db.exec(`CREATE TABLE IF NOT EXISTS cos_rpc_responses (
@@ -50,7 +50,7 @@ export function createRpcHandler(dependencies: {
       else if (dependencies.knowledge && !knowledgeContext) result = { status: 'denied' };
       else if (access && access.status !== 'ok') result = { status: access.status };
       else if (request.method === 'cos_context_get') {
-        result = await dependencies.store.context(context);
+        result = await dependencies.store.context(context, knowledgeContext ?? undefined);
         if (result.status === 'ok')
           result = {
             ...result,
@@ -64,6 +64,15 @@ export function createRpcHandler(dependencies: {
           };
       } else if (request.method === 'cos_change_propose')
         result = await dependencies.store.propose(context, request.request_id, request.params.change as Change);
+      else if (request.method === 'cos_work_read')
+        result = await dependencies.store.readWork(context, request.params as WorkRead, knowledgeContext ?? undefined);
+      else if (request.method === 'cos_work_change_propose')
+        result = await dependencies.store.propose(
+          context,
+          request.request_id,
+          request.params.change as WorkChange,
+          knowledgeContext ?? undefined,
+        );
       else if (request.method === 'cos_request_status')
         result = await dependencies.store.status(context, String(request.params.request_id));
       else if (!dependencies.knowledge || !knowledgeContext) result = { status: 'unavailable' };

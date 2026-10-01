@@ -25,6 +25,7 @@ function fixture(allowed = true) {
   const store = {
     context: vi.fn().mockResolvedValue({ status: 'ok', records: [{ id: 'approved-record' }] }),
     propose: vi.fn(),
+    readWork: vi.fn(),
     status: vi.fn(),
   };
   const resolveContext = vi.fn().mockResolvedValue(allowed ? context : null);
@@ -98,6 +99,63 @@ describe('S01 host-owned SQLite RPC response bridge', () => {
   });
 });
 describe('S02 knowledge RPC host authority', () => {
+  it('S04 routes work proposals and historical reads with host-derived identity and withholds replies after revocation', async () => {
+    const { db, store } = fixture();
+    const context = {
+      scopeId: 'fixture',
+      ownerId: 'owner',
+      sessionId: 'session',
+      agentGroupId: 'group',
+      ingressId: 'verified',
+    };
+    const retained = { ...context, provider: 'codex', generation: '33333333-3333-4333-8333-333333333333' };
+    const knowledge = { contextReady: vi.fn().mockResolvedValue({ status: 'ok' }) };
+    const handler = createRpcHandler({
+      resolveContext: async () => context,
+      store: store as unknown as PriorityStore,
+      knowledge: knowledge as unknown as KnowledgeStore,
+      resolveKnowledgeContext: async () => retained,
+    });
+    const change = {
+      kind: 'commitment',
+      title: 'WorkRPCFixtureCanary',
+      description: '',
+      reason: 'Owner suggestion',
+      state: 'confirmed',
+      project_id: null,
+      due: null,
+      defer_until: null,
+      evidence: [],
+      expected_version: 0,
+    };
+    store.propose.mockResolvedValue({ status: 'ok', change, confirmation_token: 'HOST_ONLY_TOKEN' });
+    store.readWork.mockResolvedValue({ status: 'ok', item: { title: 'WorkRPCFixtureCanary', version: 2 } });
+    const call = async (method: string, params: unknown) => {
+      await handler(
+        {
+          action: 'cos_rpc',
+          delivery_id: '22222222-2222-4222-8222-222222222222',
+          request: { ...request, method, params },
+        },
+        {} as Session,
+        db,
+      );
+      return JSON.parse(
+        (db.prepare('SELECT response FROM cos_rpc_responses ORDER BY rowid DESC LIMIT 1').get() as { response: string })
+          .response,
+      );
+    };
+    expect(await call('cos_work_change_propose', { change })).toMatchObject({ status: 'ok' });
+    expect(store.propose).toHaveBeenCalledWith(context, request.request_id, change, retained);
+    expect(JSON.stringify(await call('cos_work_read', { record_id: 'work-1', version: 2 }))).toContain(
+      'WorkRPCFixtureCanary',
+    );
+    expect(store.readWork).toHaveBeenCalledWith(context, { record_id: 'work-1', version: 2 }, retained);
+    knowledge.contextReady.mockResolvedValueOnce({ status: 'ok' }).mockResolvedValue({ status: 'denied' });
+    const denied = await call('cos_work_read', { record_id: 'work-1' });
+    expect(denied.status).toBe('denied');
+    expect(JSON.stringify(denied)).not.toContain('WorkRPCFixtureCanary');
+  });
   it('S03 uses host context for calendar reads and includes bounded calendar coverage with priorities', async () => {
     const { db, store } = fixture(),
       context = {

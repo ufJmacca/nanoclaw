@@ -95,7 +95,8 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
             payload: { proposal_id: preview.proposalId, change: preview.change },
             text: preview.text,
             expiresAt: preview.expiresAt,
-            validateDestination: () => admitted(binding),
+            validateDestination: async () =>
+              (await admitted(binding)) && (await d.store!.previewCurrent(binding, preview.proposalId, preview.change)),
           });
         },
       })

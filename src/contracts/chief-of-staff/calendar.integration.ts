@@ -4,7 +4,7 @@ import { before, after, test } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import pg from 'pg';
 import { fixtureDatabaseConfig, connectFixtureDatabase, fixtureRuntimeUser } from './fixture-database.js';
-import { migrate } from '../../modules/chief-of-staff/store/migrations.js';
+import { migrate, SCHEMA_VERSION } from '../../modules/chief-of-staff/store/migrations.js';
 import { BoundedDatabase } from '../../modules/chief-of-staff/store/client.js';
 import { CalendarStore, type CalendarBindingInput } from '../../modules/chief-of-staff/calendar/store.js';
 import { fixtureCalendarReader } from '../../modules/chief-of-staff/calendar/fixture-reader.js';
@@ -40,7 +40,7 @@ let admin: pg.Client, pool: pg.Pool, store: CalendarStore;
 before(async () => {
   admin = await connectFixtureDatabase(process.env, 'migration');
   assert.equal((await admin.query('SELECT pg_try_advisory_lock(73101002) AS locked')).rows[0].locked, true);
-  assert.equal(await migrate(admin, fixtureRuntimeUser()), 3);
+  assert.equal(await migrate(admin, fixtureRuntimeUser()), SCHEMA_VERSION);
   pool = new pg.Pool(await fixtureDatabaseConfig());
   store = new CalendarStore(BoundedDatabase.fromConfig(await fixtureDatabaseConfig()));
   await pool.query(

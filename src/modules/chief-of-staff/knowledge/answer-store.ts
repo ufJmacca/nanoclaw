@@ -125,6 +125,44 @@ export class KnowledgeAnswers {
           throw new Error('invalid_answer_evidence');
       }
   }
+  /** Check work dependencies; historical reads register the new context before disclosing saved text. */
+  async validateWorkEvidence(
+    client: PoolClient,
+    context: KnowledgeContext,
+    refs: AnswerCitation[],
+    historical = false,
+  ): Promise<boolean> {
+    if (!(await this.dependencies.current(client, context))) return false;
+    const resolved = await this.resolve(client, context, refs, historical);
+    if (!resolved) return false;
+    if (historical) await this.registerExposure(client, context, resolved);
+    return true;
+  }
+  private async registerExposure(
+    client: PoolClient,
+    context: KnowledgeContext,
+    resolved: ResolvedCitation[],
+  ): Promise<void> {
+    for (const ref of resolved)
+      if (ref.kind === 'source')
+        await client.query(
+          `INSERT INTO cos.evidence_refs(id,scope_id,source_id,revision_id,revision_digest,source_version,start_line,end_line,session_id,context_generation,processing_provider)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT(scope_id,session_id,context_generation,revision_id,start_line,end_line,source_version) DO NOTHING`,
+          [
+            randomUUID(),
+            context.scopeId,
+            ref.source_id,
+            ref.revision_id,
+            ref.revision_digest,
+            ref.source_version,
+            ref.start_line,
+            ref.end_line,
+            context.sessionId,
+            context.generation,
+            context.provider,
+          ],
+        );
+  }
   async prepare(context: KnowledgeContext, requestId: string, draft: unknown): Promise<Result> {
     if (
       !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(requestId) ||
@@ -338,25 +376,7 @@ export class KnowledgeAnswers {
         if (dependency.status !== 'ok' || digest(dependency.notice) !== digest(calendar)) return { status: 'denied' };
       }
       // Historical redisplay is a new disclosure to this context, which must be fenced on later correction/revocation.
-      for (const ref of resolved)
-        if (ref.kind === 'source')
-          await client.query(
-            `INSERT INTO cos.evidence_refs(id,scope_id,source_id,revision_id,revision_digest,source_version,start_line,end_line,session_id,context_generation,processing_provider)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT(scope_id,session_id,context_generation,revision_id,start_line,end_line,source_version) DO NOTHING`,
-            [
-              randomUUID(),
-              context.scopeId,
-              ref.source_id,
-              ref.revision_id,
-              ref.revision_digest,
-              ref.source_version,
-              ref.start_line,
-              ref.end_line,
-              context.sessionId,
-              context.generation,
-              context.provider,
-            ],
-          );
+      await this.registerExposure(client, context, resolved);
       // Re-exposure includes implicit context dependencies, not only rendered footnotes.
       await client.query(
         `INSERT INTO cos.evidence_refs(id,scope_id,source_id,revision_id,revision_digest,source_version,start_line,end_line,session_id,context_generation,processing_provider)

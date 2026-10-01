@@ -28,6 +28,8 @@ test('native CoS exposes only its fixed approved tools and dispatches validated 
     'cos_answer_prepare',
     'cos_answer_get',
     'cos_calendar_read',
+    'cos_work_change_propose',
+    'cos_work_read',
   ]);
   expect((await dispatch.handle(call())).success).toBe(true);
   expect(calls).toHaveLength(1);
@@ -97,6 +99,47 @@ test('S03 dispatches bounded calendar reads and paged coverage without accepting
       ).success,
     ).toBe(false);
   expect(calls).toHaveLength(2);
+});
+test('S04 native work dispatch preserves proposal identity and rejects authority or ambiguous dispositions', async () => {
+  const { dispatch, calls } = fixture();
+  const requestId = '11111111-1111-4111-8111-111111111111';
+  const change = {
+    kind: 'commitment',
+    title: 'Pilot',
+    description: '',
+    reason: 'Owner follow-up',
+    state: 'confirmed',
+    project_id: null,
+    due: null,
+    defer_until: null,
+    evidence: [],
+    expected_version: 0,
+  };
+  expect(
+    (await dispatch.handle(call({ tool: 'cos_work_change_propose', arguments: { request_id: requestId, change } })))
+      .success,
+  ).toBe(true);
+  expect(calls[0]).toMatchObject({ request_id: requestId, method: 'cos_work_change_propose', params: { change } });
+  expect(
+    (
+      await dispatch.handle(
+        call({ callId: 'read', tool: 'cos_work_read', arguments: { record_id: 'work-1', version: 2 } }),
+      )
+    ).success,
+  ).toBe(true);
+  expect(calls[1]).toMatchObject({ method: 'cos_work_read', params: { record_id: 'work-1', version: 2 } });
+  for (const [i, args] of [
+    { change, owner_id: 'forged' },
+    { change, approved: true },
+    { change: { ...change, state: 'completed' } },
+    { change, request_id: 7 },
+  ].entries())
+    expect(
+      (await dispatch.handle(call({ callId: 'invalid-' + i, tool: 'cos_work_change_propose', arguments: args })))
+        .success,
+    ).toBe(false);
+  expect(calls).toHaveLength(2);
+  dispatch.close();
 });
 test('S02 dispatches bounded knowledge queries without accepting model authority or direct source mutations', async () => {
   const f = fixture();

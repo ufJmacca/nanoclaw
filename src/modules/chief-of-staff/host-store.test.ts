@@ -16,7 +16,7 @@ vi.mock('./store/preflight.js', async (original) => ({
   connectChecked: f.connect,
 }));
 vi.mock('./ops/target-identity.js', () => ({ localTarget: f.target, databaseFingerprint: f.fingerprint }));
-vi.mock('./store/migrations.js', () => ({ SCHEMA_VERSION: 3, migrationStatus: f.schema }));
+vi.mock('./store/migrations.js', () => ({ SCHEMA_VERSION: 4, migrationStatus: f.schema }));
 vi.mock('./store/config.js', async (original) => ({
   ...(await original<typeof import('./store/config.js')>()),
   parseDatabaseConfig: () => ({}),
@@ -41,7 +41,7 @@ function fixture() {
   f.check.end.mockResolvedValue(undefined);
   f.target.mockReturnValue({ binding: { databaseFingerprint: 'bound-database' } });
   f.fingerprint.mockResolvedValue('bound-database');
-  f.schema.mockResolvedValue(3);
+  f.schema.mockResolvedValue(4);
   f.open.mockReturnValue(f.artifacts);
   f.configure.mockResolvedValue({});
 }
@@ -59,7 +59,7 @@ it('connects the current schema with knowledge guards present even when retrieva
   expect(f.check.end).toHaveBeenCalledOnce();
   expect(f.calendarOpen).not.toHaveBeenCalled();
 });
-it.each([1, 2, 4])('rejects incompatible schema %s before creating artifacts or a runtime pool', async (version) => {
+it.each([1, 2, 3, 5])('rejects incompatible schema %s before creating artifacts or a runtime pool', async (version) => {
   fixture();
   f.schema.mockResolvedValue(version);
   await expect(
