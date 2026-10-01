@@ -909,6 +909,7 @@ try {
             'clock__curr_time',
             'cos_answer_get',
             'cos_answer_prepare',
+            'cos_brief_request',
             'cos_brief_schedule_propose',
             'cos_calendar_read',
             'cos_change_propose',
