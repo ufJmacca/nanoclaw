@@ -21,9 +21,11 @@ import { PriorityStore } from '../../modules/chief-of-staff/store/priorities.js'
 import { KnowledgeArtifacts } from '../../modules/chief-of-staff/knowledge/artifacts.js';
 import { KnowledgeStore } from '../../modules/chief-of-staff/knowledge/store.js';
 import { BriefRunStore } from '../../modules/chief-of-staff/automation/brief-store.js';
+import { digest } from '../../modules/chief-of-staff/domain/contracts.js';
 import type { ProposalChange } from '../../modules/chief-of-staff/domain/contracts.js';
 import { BriefArtifacts } from '../../modules/chief-of-staff/automation/brief-artifacts.js';
 import { BriefCollector } from '../../modules/chief-of-staff/automation/brief-collector.js';
+import { BriefDelivery } from '../../modules/chief-of-staff/automation/brief-delivery.js';
 import type { WorkChange } from '../../modules/chief-of-staff/contracts/protocol.js';
 const scope = 'brief-' + randomUUID(),
   context = {
@@ -246,8 +248,194 @@ test('S04 scheduled brief preparation requires the exact active lease and approv
   const created = await briefs.prepare(scheduled, randomUUID(), 'UTC');
   assert.equal(created.status, 'ok');
   assert.equal((created.snapshot as any).time_zone, 'UTC');
+  const reference = {
+    artifact_id: String(created.artifact_id),
+    output_digest: digest(String(created.text)),
+    context_generation: scheduled.generation,
+    provider: scheduled.provider,
+  };
+  assert.equal(
+    (await runs.prepare(context, run.id, Number(lease.generation), { ...reference, output_digest: '0'.repeat(64) }))
+      .status,
+    'denied',
+  );
+  assert.equal((await runs.prepare(context, run.id, Number(lease.generation), reference)).status, 'ok');
+  assert.equal((await runs.prepare(context, run.id, Number(lease.generation), reference)).status, 'ok');
+  const persisted = (
+    await pool.query('SELECT snapshot,state FROM cos.brief_runs WHERE scope_id=$1 AND id=$2', [scope, run.id])
+  ).rows[0];
+  assert.equal(persisted.state, 'prepared');
+  assert.deepEqual(persisted.snapshot, reference);
+  assert.ok(!JSON.stringify(persisted).includes('CoS brief'));
+  const attempts = await Promise.all(
+    Array.from({ length: 4 }, () => runs.beginDelivery(context, run.id, Number(lease.generation), randomUUID())),
+  );
+  const admitted = attempts.filter((x) => x.status === 'ok');
+  assert.equal(admitted.length, 1);
+  const delivery = admitted[0];
+  assert.equal(
+    (await runs.deliveryCurrent(context, run.id, Number(lease.generation), String(delivery.attempt_id))).status,
+    'ok',
+  );
   assert.equal((await runs.cancel(context, run.id, Number(lease.generation))).status, 'ok');
+  assert.equal(
+    (await runs.deliveryCurrent(context, run.id, Number(lease.generation), String(delivery.attempt_id))).status,
+    'denied',
+  );
+  assert.equal(
+    (await pool.query('SELECT state FROM cos.brief_notifications WHERE scope_id=$1 AND run_id=$2', [scope, run.id]))
+      .rows[0].state,
+    'uncertain',
+  );
+  // A late verified platform receipt records the actual effect even after owner cancellation.
+  const delivered = { state: 'delivered' as const, platform_receipt: 'fixture-post-id' };
+  assert.equal(
+    (await runs.finishDelivery(context, run.id, Number(lease.generation), String(delivery.attempt_id), delivered))
+      .status,
+    'ok',
+  );
+  assert.equal(
+    (await runs.finishDelivery(context, run.id, Number(lease.generation), String(delivery.attempt_id), delivered))
+      .status,
+    'ok',
+  );
+  assert.equal(
+    (
+      await runs.finishDelivery(context, run.id, Number(lease.generation), String(delivery.attempt_id), {
+        state: 'uncertain',
+      })
+    ).status,
+    'denied',
+  );
+  assert.equal((await runs.beginDelivery(context, run.id, Number(lease.generation), randomUUID())).status, 'denied');
+  assert.equal(
+    (
+      await pool.query('SELECT state,receipt FROM cos.brief_notifications WHERE scope_id=$1 AND run_id=$2', [
+        scope,
+        run.id,
+      ])
+    ).rows[0].receipt.platform_receipt,
+    'fixture-post-id',
+  );
   assert.equal((await briefs.prepare(scheduled, randomUUID(), 'UTC')).status, 'denied');
+});
+
+async function nextPreparedBrief() {
+  const day = (
+    await pool.query('SELECT last_local_date::text AS day FROM cos.brief_schedules WHERE scope_id=$1', [scope])
+  ).rows[0].day;
+  const clock = new Date(day + 'T09:00:00Z');
+  clock.setUTCDate(clock.getUTCDate() + 1);
+  const runs = new BriefRunStore(store.database, { clock: () => clock });
+  const reserved = await runs.reserveDue(context);
+  assert.equal(reserved.status, 'ok');
+  const run = reserved.run as any;
+  const lease = await runs.claim(context, run.id, 'fixture-host');
+  assert.equal(lease.status, 'ok');
+  const scheduled = {
+    ...context,
+    generation: randomUUID(),
+    origin: { kind: 'schedule' as const, runId: run.id, generation: Number(lease.generation) },
+    ingressId: `brief:${run.id}:${lease.generation}`,
+  };
+  const artifacts = new BriefArtifacts(collector);
+  const artifact = await artifacts.prepare(scheduled, randomUUID(), 'UTC');
+  assert.equal(artifact.status, 'ok');
+  assert.equal(
+    (
+      await runs.prepare(scheduled, run.id, scheduled.origin.generation, {
+        artifact_id: String(artifact.artifact_id),
+        output_digest: digest(artifact.text),
+        context_generation: scheduled.generation,
+        provider: scheduled.provider,
+      })
+    ).status,
+    'ok',
+  );
+  return { runs, run, scheduled, artifacts };
+}
+
+test('S04 lost delivery-start acknowledgement cannot authorize a send after restart', async () => {
+  const f = await nextPreparedBrief();
+  const faultyPool = new pg.Pool(await fixtureDatabaseConfig()),
+    client = await faultyPool.connect(),
+    original = client.query.bind(client);
+  let started = false,
+    dropped = false;
+  client.query = (async (...args: unknown[]) => {
+    const result = await (original as (...a: unknown[]) => Promise<unknown>)(...args);
+    if (typeof args[0] === 'string' && args[0].includes("SET state='delivering'")) started = true;
+    if (args[0] === 'COMMIT' && started && !dropped) {
+      dropped = true;
+      throw Error('fixture_lost_delivery_start_ack');
+    }
+    return result;
+  }) as typeof client.query;
+  client.release();
+  try {
+    const attempt = randomUUID();
+    assert.equal(
+      (
+        await new BriefRunStore(new BoundedDatabase(faultyPool)).beginDelivery(
+          f.scheduled,
+          f.run.id,
+          f.scheduled.origin.generation,
+          attempt,
+        )
+      ).status,
+      'pending',
+    );
+    const restarted = new BriefRunStore(store.database);
+    assert.equal(
+      (await restarted.beginDelivery(f.scheduled, f.run.id, f.scheduled.origin.generation, attempt)).status,
+      'denied',
+    );
+    assert.equal(
+      (await restarted.beginDelivery(f.scheduled, f.run.id, f.scheduled.origin.generation, randomUUID())).status,
+      'denied',
+    );
+    assert.equal(((await restarted.inspect(f.scheduled, f.run.id)).notification as any).state, 'delivering');
+    // Startup reconciliation consumes the orphaned delivery fence; it never retries the post.
+    assert.equal(
+      (
+        await restarted.finishDelivery(f.scheduled, f.run.id, f.scheduled.origin.generation, attempt, {
+          state: 'uncertain',
+        })
+      ).status,
+      'ok',
+    );
+    assert.equal(((await restarted.inspect(f.scheduled, f.run.id)).run as any).state, 'uncertain');
+  } finally {
+    await faultyPool.end();
+  }
+});
+
+test('S04 checked notifications record delivery or ambiguity once and deny changed private membership', async () => {
+  for (const mode of ['delivered', 'uncertain', 'revoked']) {
+    const f = await nextPreparedBrief();
+    let calls = 0;
+    const delivery = new BriefDelivery({
+      runs: f.runs,
+      artifacts: f.artifacts,
+      current: () => f.scheduled,
+      admitted: async () => mode !== 'revoked',
+      send: async (_context, text, id) => {
+        calls++;
+        assert.equal(id, 'brief-' + f.run.id);
+        assert.match(text, /CoS brief/);
+        if (mode === 'uncertain') throw Error('fixture accepted then connection lost');
+        return 'fixture-confirmed-post';
+      },
+    });
+    const sent = await delivery.deliver(f.scheduled);
+    assert.equal(sent.status, 'ok');
+    assert.equal(sent.state, mode === 'revoked' ? 'failed' : mode);
+    await delivery.deliver(f.scheduled);
+    assert.equal(calls, mode === 'revoked' ? 0 : 1);
+    const notification = (await new BriefRunStore(store.database).inspect(f.scheduled, f.run.id)).notification as any;
+    assert.equal(notification.state, sent.state);
+    assert.ok(!JSON.stringify(notification).includes('CoS brief'));
+  }
 });
 
 test('S04 brief persistence reconciles a lost commit acknowledgement and blocks on a real database partition', async () => {

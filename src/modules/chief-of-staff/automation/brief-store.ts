@@ -1,5 +1,7 @@
 import type { PoolClient } from 'pg';
 import { BoundedDatabase, DatabaseUnavailable } from '../store/client.js';
+import { isArtifactIdentity } from '../knowledge/artifacts.js';
+import { digest } from '../domain/contracts.js';
 import type { Context, Result } from '../domain/contracts.js';
 import { planBriefOccurrence } from './schedule-policy.js';
 const instant = (value: unknown) => (value instanceof Date ? value : new Date(String(value))).toISOString();
@@ -9,6 +11,31 @@ const safeRun = (run: Record<string, unknown>) => ({
   intended_at: instant(run.intended_at),
 });
 const id = (value: string) => /^[a-zA-Z0-9_-]{1,100}$/.test(value);
+export type BriefArtifactReference = {
+  artifact_id: string;
+  output_digest: string;
+  context_generation: string;
+  provider: string;
+};
+export type BriefDeliveryOutcome =
+  | { state: 'delivered'; platform_receipt: string }
+  | { state: 'uncertain' }
+  | { state: 'failed'; reason: 'admission_denied' | 'provider_rejected' };
+const validReference = (value: unknown): value is BriefArtifactReference => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const v = value as BriefArtifactReference;
+  return (
+    Object.keys(v).length === 4 &&
+    Object.keys(v).every((k) => ['artifact_id', 'output_digest', 'context_generation', 'provider'].includes(k)) &&
+    typeof v.artifact_id === 'string' &&
+    isArtifactIdentity(v.artifact_id) &&
+    typeof v.output_digest === 'string' &&
+    /^[a-f0-9]{64}$/.test(v.output_digest) &&
+    typeof v.context_generation === 'string' &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v.context_generation) &&
+    ['codex', 'claude'].includes(v.provider)
+  );
+};
 export class BriefRunStore {
   constructor(
     readonly database: BoundedDatabase,
@@ -197,6 +224,197 @@ export class BriefRunStore {
         await client.query('SELECT state FROM cos.brief_runs WHERE scope_id=$1 AND id=$2', [context.scopeId, runId])
       ).rows[0];
       return { status: 'ok', state: current.state };
+    });
+  }
+  private async artifactCurrent(
+    client: PoolClient,
+    context: Context,
+    runId: string,
+    generation: number,
+    reference: unknown,
+  ): Promise<boolean> {
+    if (!validReference(reference)) return false;
+    const row = (
+      await client.query(
+        "SELECT provenance FROM cos.artifacts WHERE scope_id=$1 AND id=$2 AND kind='summary' AND lifecycle='published'",
+        [context.scopeId, reference.artifact_id],
+      )
+    ).rows[0];
+    const p = row?.provenance;
+    return (
+      !!p &&
+      p.format === 'cos-brief/v1' &&
+      p.owner_id === context.ownerId &&
+      p.session_id === context.sessionId &&
+      p.processing_provider === reference.provider &&
+      p.context_generation === reference.context_generation &&
+      p.output_digest === reference.output_digest &&
+      p.origin_run?.id === runId &&
+      p.origin_run?.generation === generation
+    );
+  }
+  /** Store only the protected artifact reference, never another copy of source-derived text. */
+  async prepare(
+    context: Context,
+    runId: string,
+    generation: number,
+    reference: BriefArtifactReference,
+  ): Promise<Result> {
+    if (!id(runId) || !Number.isSafeInteger(generation) || generation < 1 || !validReference(reference))
+      return { status: 'denied' };
+    const captured = structuredClone(reference);
+    return this.transaction(context, async (client) => {
+      const run = await this.currentRun(client, context, runId);
+      if (
+        !run ||
+        !['dispatched', 'prepared'].includes(run.state) ||
+        !run.lease_current ||
+        run.generation !== generation ||
+        !(await this.artifactCurrent(client, context, runId, generation, captured))
+      )
+        return { status: 'denied' };
+      if (run.state === 'prepared')
+        return digest(run.snapshot) === digest(captured) ? { status: 'ok', run_id: runId } : { status: 'conflict' };
+      const notification = (
+        await client.query('SELECT state FROM cos.brief_notifications WHERE scope_id=$1 AND run_id=$2 FOR UPDATE', [
+          context.scopeId,
+          runId,
+        ])
+      ).rows[0];
+      if (notification?.state !== 'queued') return { status: 'denied' };
+      await client.query(
+        "UPDATE cos.brief_runs SET state='prepared',snapshot=$3,version=version+1,updated_at=clock_timestamp() WHERE scope_id=$1 AND id=$2",
+        [context.scopeId, runId, JSON.stringify(captured)],
+      );
+      await client.query(
+        'UPDATE cos.brief_notifications SET payload=$3,version=version+1,updated_at=clock_timestamp() WHERE scope_id=$1 AND run_id=$2',
+        [context.scopeId, runId, JSON.stringify(captured)],
+      );
+      return { status: 'ok', run_id: runId };
+    });
+  }
+  /** Only a newly committed transition permits one transport invocation; replays never permit another. */
+  async beginDelivery(context: Context, runId: string, generation: number, attemptId: string): Promise<Result> {
+    if (!id(runId) || !id(attemptId) || !Number.isSafeInteger(generation) || generation < 1)
+      return { status: 'denied' };
+    return this.transaction(context, async (client) => {
+      const run = await this.currentRun(client, context, runId);
+      if (
+        !run ||
+        run.state !== 'prepared' ||
+        !run.lease_current ||
+        run.generation !== generation ||
+        !(await this.artifactCurrent(client, context, runId, generation, run.snapshot))
+      )
+        return { status: 'denied' };
+      const notification = (
+        await client.query(
+          'SELECT id,state,payload FROM cos.brief_notifications WHERE scope_id=$1 AND run_id=$2 FOR UPDATE',
+          [context.scopeId, runId],
+        )
+      ).rows[0];
+      if (notification?.state !== 'queued' || digest(notification.payload) !== digest(run.snapshot))
+        return { status: 'denied' };
+      await client.query(
+        "UPDATE cos.brief_notifications SET state='delivering',attempt_id=$3,started_at=clock_timestamp(),version=version+1,updated_at=clock_timestamp() WHERE scope_id=$1 AND run_id=$2",
+        [context.scopeId, runId, attemptId],
+      );
+      return { status: 'ok', notification_id: notification.id, attempt_id: attemptId, reference: run.snapshot };
+    });
+  }
+  async deliveryCurrent(context: Context, runId: string, generation: number, attemptId: string): Promise<Result> {
+    if (!id(runId) || !id(attemptId) || !Number.isSafeInteger(generation) || generation < 1)
+      return { status: 'denied' };
+    return this.transaction(context, async (client) => {
+      const run = await this.currentRun(client, context, runId);
+      if (
+        !run ||
+        run.state !== 'prepared' ||
+        !run.lease_current ||
+        run.generation !== generation ||
+        !(await this.artifactCurrent(client, context, runId, generation, run.snapshot))
+      )
+        return { status: 'denied' };
+      const row = (
+        await client.query(
+          "SELECT payload FROM cos.brief_notifications WHERE scope_id=$1 AND run_id=$2 AND state='delivering' AND attempt_id=$3",
+          [context.scopeId, runId, attemptId],
+        )
+      ).rows[0];
+      return row && digest(row.payload) === digest(run.snapshot) ? { status: 'ok' } : { status: 'denied' };
+    });
+  }
+  /** A late verified receipt records an already-performed effect even if its lease has since ended. */
+  async finishDelivery(
+    context: Context,
+    runId: string,
+    generation: number,
+    attemptId: string,
+    outcome: BriefDeliveryOutcome,
+  ): Promise<Result> {
+    if (
+      !id(runId) ||
+      !id(attemptId) ||
+      !Number.isSafeInteger(generation) ||
+      generation < 1 ||
+      !outcome ||
+      !['delivered', 'uncertain', 'failed'].includes(outcome.state) ||
+      (outcome.state === 'delivered' && !/^[a-zA-Z0-9_-]{1,128}$/.test(outcome.platform_receipt)) ||
+      (outcome.state === 'failed' && !['admission_denied', 'provider_rejected'].includes(outcome.reason))
+    )
+      return { status: 'denied' };
+    const receipt = structuredClone(outcome);
+    return this.transaction(context, async (client) => {
+      await this.schedule(client, context);
+      const run = (
+        await client.query(
+          'SELECT id FROM cos.brief_runs WHERE scope_id=$1 AND id=$2 AND generation=$3 AND owner_id=$4 AND session_id=$5 AND agent_group_id=$6 FOR UPDATE',
+          [context.scopeId, runId, generation, context.ownerId, context.sessionId, context.agentGroupId],
+        )
+      ).rows[0];
+      if (!run) return { status: 'denied' };
+      const notification = (
+        await client.query(
+          'SELECT state,attempt_id,receipt FROM cos.brief_notifications WHERE scope_id=$1 AND run_id=$2 FOR UPDATE',
+          [context.scopeId, runId],
+        )
+      ).rows[0];
+      if (!notification || notification.attempt_id !== attemptId) return { status: 'denied' };
+      if (notification.state === outcome.state && digest(notification.receipt) === digest(receipt))
+        return { status: 'ok', state: outcome.state };
+      if (
+        notification.state !== 'delivering' &&
+        !(notification.state === 'uncertain' && ['uncertain', 'delivered'].includes(outcome.state))
+      )
+        return { status: 'denied' };
+      await client.query(
+        'UPDATE cos.brief_notifications SET state=$3,receipt=$4,version=version+1,updated_at=clock_timestamp() WHERE scope_id=$1 AND run_id=$2',
+        [context.scopeId, runId, outcome.state, JSON.stringify(receipt)],
+      );
+      await client.query(
+        'UPDATE cos.brief_runs SET state=$3,version=version+1,updated_at=clock_timestamp() WHERE scope_id=$1 AND id=$2',
+        [context.scopeId, runId, outcome.state],
+      );
+      return { status: 'ok', state: outcome.state };
+    });
+  }
+  async inspect(context: Context, runId: string): Promise<Result> {
+    if (!id(runId)) return { status: 'denied' };
+    return this.transaction(context, async (client) => {
+      const run = (
+        await client.query(
+          'SELECT * FROM cos.brief_runs WHERE scope_id=$1 AND id=$2 AND owner_id=$3 AND session_id=$4 AND agent_group_id=$5',
+          [context.scopeId, runId, context.ownerId, context.sessionId, context.agentGroupId],
+        )
+      ).rows[0];
+      if (!run) return { status: 'denied' };
+      const notification = (
+        await client.query(
+          'SELECT id,state,payload,receipt,attempt_id FROM cos.brief_notifications WHERE scope_id=$1 AND run_id=$2',
+          [context.scopeId, runId],
+        )
+      ).rows[0];
+      return { status: 'ok', run: safeRun(run), notification };
     });
   }
   async reserveCall(

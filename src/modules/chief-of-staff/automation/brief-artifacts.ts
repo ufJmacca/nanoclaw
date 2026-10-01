@@ -126,6 +126,7 @@ export class BriefArtifacts {
           }
           const provenance = {
             format: 'cos-brief/v1',
+            origin_run: context.origin ? { id: context.origin.runId, generation: context.origin.generation } : null,
             owner_id: context.ownerId,
             session_id: context.sessionId,
             processing_provider: context.provider,

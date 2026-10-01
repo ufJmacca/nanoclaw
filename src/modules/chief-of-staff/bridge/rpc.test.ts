@@ -371,6 +371,55 @@ it('S04 gates every scheduled tool dispatch on durable budget authority, includi
   expect(f.store.context).toHaveBeenCalledOnce();
 });
 
+it.each(['ok', 'pending', 'denied'])(
+  'S04 scheduled brief RPC attaches its checked artifact only after %s persistence',
+  async (status) => {
+    const f = fixture();
+    const context = {
+      scopeId: 'fixture',
+      ownerId: 'owner',
+      sessionId: 'session',
+      agentGroupId: 'group',
+      ingressId: 'verified',
+      origin: { kind: 'schedule' as const, runId: 'run', generation: 2 },
+    };
+    const retained = { ...context, provider: 'codex', generation: '33333333-3333-4333-8333-333333333333' };
+    const artifact = 'a'.repeat(64) + '-' + 'b'.repeat(64);
+    const briefs = { prepare: vi.fn().mockResolvedValue({ status }) };
+    const briefArtifacts = {
+      prepare: vi.fn().mockResolvedValue({ status: 'ok', artifact_id: artifact, text: 'Checked brief' }),
+    };
+    f.resolveContext.mockResolvedValue(context);
+    const handler = createRpcHandler({
+      resolveContext: f.resolveContext,
+      store: { ...f.store, briefs, briefArtifacts } as unknown as PriorityStore,
+      reserveTool: async () => ({ status: 'ok' }),
+      knowledge: { contextReady: vi.fn().mockResolvedValue({ status: 'ok' }) } as unknown as KnowledgeStore,
+      resolveKnowledgeContext: async () => retained,
+    });
+    await handler(
+      {
+        action: 'cos_rpc',
+        delivery_id: '22222222-2222-4222-8222-222222222222',
+        request: { ...request, method: 'cos_brief_request', params: { time_zone: 'UTC' } },
+      },
+      {} as Session,
+      f.db,
+    );
+    expect(briefs.prepare).toHaveBeenCalledExactlyOnceWith(context, 'run', 2, {
+      artifact_id: artifact,
+      output_digest: digest('Checked brief'),
+      context_generation: retained.generation,
+      provider: 'codex',
+    });
+    const response = JSON.parse(
+      (f.db.prepare('SELECT response FROM cos_rpc_responses').get() as { response: string }).response,
+    );
+    expect(response.status).toBe(status);
+    if (status !== 'ok') expect(JSON.stringify(response)).not.toContain('Checked brief');
+  },
+);
+
 it('S04 brief RPC uses host context and suppresses a prepared response after authority changes', async () => {
   const f = fixture();
   const context = {
