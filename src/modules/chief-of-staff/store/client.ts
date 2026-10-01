@@ -21,7 +21,8 @@ export class BoundedDatabase {
     });
   }
 
-  async run<T>(operation: (client: PoolClient) => Promise<T>, mutation = false): Promise<T> {
+  async run<T>(operation: (client: PoolClient) => Promise<T>, mutation = false, signal?: AbortSignal): Promise<T> {
+    if (signal?.aborted) throw new DatabaseUnavailable();
     if (this.admission && !this.admission()) throw new DatabaseUnavailable();
     if (Date.now() < this.cooldownUntil) throw new DatabaseUnavailable();
     if (this.admitted >= this.capacity) throw new DatabaseUnavailable('busy');
@@ -45,12 +46,16 @@ export class BoundedDatabase {
       }
     };
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let abort: (() => void) | undefined;
     const deadline = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => {
+      abort = () => {
+        if (expired) return;
         expired = true;
         release(true);
         reject(new DatabaseUnavailable(mutation && started ? 'pending' : 'unavailable'));
-      }, this.deadlineMs);
+      };
+      timer = setTimeout(abort, this.deadlineMs);
+      signal?.addEventListener('abort', abort, { once: true });
     });
     const work = (async () => {
       try {
@@ -89,6 +94,7 @@ export class BoundedDatabase {
       throw new DatabaseUnavailable(mutation && started ? 'pending' : 'unavailable');
     } finally {
       clearTimeout(timer);
+      if (abort) signal?.removeEventListener('abort', abort);
       // A late acquisition retains its admission slot until settled, so
       // repeated timeouts cannot create an unbounded driver wait queue.
       if (acquisitionSettled) finishAdmission();

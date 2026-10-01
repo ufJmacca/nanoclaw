@@ -8,7 +8,7 @@ import { readEnvFile } from '../../env.js';
 import { getDb } from '../../db/connection.js';
 import { getSession } from '../../db/sessions.js';
 import { getMessagingGroup } from '../../db/messaging-groups.js';
-import { killContainer, wakeContainer } from '../../container-runner.js';
+import { killContainer, wakeContainer, hasContainerExecution } from '../../container-runner.js';
 import { NodeMattermostTransport } from '../../channels/mattermost-client.js';
 import { validateMattermostSessionForExecution } from '../../channels/mattermost-subscription.js';
 import { createMattermostFacts } from './bridge/mattermost-facts.js';
@@ -113,7 +113,7 @@ export function startCosHostModule(assertHostAuthority: () => void): { service: 
       return false;
     }
   };
-  const launcher = createCoordinatorLauncher({ targetRoot, db: getDb() });
+  const launcher = createCoordinatorLauncher({ targetRoot, db: getDb(), running: hasContainerExecution });
   const facts = guardConversationAccess({
     active: activeBinding,
     facts: transportFacts,
@@ -134,6 +134,7 @@ export function startCosHostModule(assertHostAuthority: () => void): { service: 
     session: getSession,
     destination: getMessagingGroup,
     stop: (id) => killContainer(id, 'CoS emergency pause'),
+    running: hasContainerExecution,
     wake: async (session) => {
       await wakeContainer(session);
     },

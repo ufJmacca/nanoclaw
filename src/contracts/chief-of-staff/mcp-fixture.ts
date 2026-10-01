@@ -133,6 +133,24 @@ export class McpFixture {
     const result = await this.request('tools/call', { name, arguments: args });
     return JSON.parse(result.content[0].text);
   }
+  /** Scripted worker completion uses the same read-only input and outbound acknowledgements as native polling. */
+  async completePending(): Promise<string[]> {
+    const source =
+      "import {getPendingMessages,markProcessing,markCompleted} from '/app/src/db/messages-in.ts'; const ids=getPendingMessages().map(row=>row.id); markProcessing(ids); markCompleted(ids); console.log(JSON.stringify(ids));";
+    const child = spawn('docker', ['exec', this.name, 'bun', '-e', source], {
+      env: safeHostEnvironment('docker'),
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    let output = '';
+    child.stdout.on('data', (chunk) => {
+      output += chunk.toString();
+    });
+    await new Promise<void>((resolve, reject) => {
+      child.once('error', reject);
+      child.once('exit', (code) => (code === 0 ? resolve() : reject(new Error('Fixture acknowledgement failed'))));
+    });
+    return JSON.parse(output);
+  }
   /** Fixture provider reply, written by the same isolated container as ordinary runner output. */
   async reply(text: string, platformId: string): Promise<void> {
     const source =

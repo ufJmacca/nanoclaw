@@ -47,6 +47,66 @@ function setup() {
   return { base, root, fences, fetch, transport, owner, binding, reference };
 }
 describe('S03 host calendar credential owner', () => {
+  it('S04 pre-cancellation preserves the installed credential and avoids token rotation', async () => {
+    const s = setup();
+    await s.owner.install('scope', s.binding, s.reference, tokens());
+    await expect(s.owner.token('scope', s.binding, s.reference, AbortSignal.abort())).rejects.toThrow(
+      'calendar_refresh_timed_out',
+    );
+    expect(s.fetch).not.toHaveBeenCalled();
+    await expect(s.owner.token('scope', s.binding, s.reference)).resolves.toBe('FIXTURE_ACCESS_TOKEN');
+  });
+  it('S04 aborting token rotation preserves the durable uncertain fence and never retries it', async () => {
+    const s = setup(),
+      abort = new AbortController();
+    await s.owner.install('scope', s.binding, s.reference, tokens(true));
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    s.fetch.mockImplementation(
+      async (_url, init) =>
+        new Promise((_resolve, reject) => {
+          entered();
+          init.signal!.addEventListener('abort', () => reject(Error('fixture connection aborted')), { once: true });
+        }),
+    );
+    const work = s.owner.token('scope', s.binding, s.reference, abort.signal);
+    const denied = expect(work).rejects.toThrow('calendar_oauth_exchange_uncertain');
+    await started;
+    abort.abort();
+    await denied;
+    expect(JSON.parse(fs.readFileSync(path.join(s.root, s.reference + '.json'), 'utf8')).phase).toBe('uncertain');
+    expect(() => s.fences.assertOpen('scope', s.binding)).toThrow('calendar_auth_expired');
+    await expect(s.owner.token('scope', s.binding, s.reference)).rejects.toThrow('calendar_auth_expired');
+    expect(s.fetch).toHaveBeenCalledOnce();
+  });
+  it("S04 an expired joiner cannot cancel or duplicate another caller's bounded credential rotation", async () => {
+    const s = setup(),
+      abort = new AbortController();
+    await s.owner.install('scope', s.binding, s.reference, tokens(true));
+    let release!: (response: Response) => void, entered!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    s.fetch.mockImplementation(
+      async () =>
+        new Promise((resolve) => {
+          release = resolve;
+          entered();
+        }),
+    );
+    const first = s.owner.token('scope', s.binding, s.reference);
+    await started;
+    const second = s.owner.token('scope', s.binding, s.reference, abort.signal);
+    const denied = expect(second).rejects.toThrow('calendar_refresh_timed_out');
+    abort.abort();
+    await denied;
+    release(response());
+    await expect(first).resolves.toBe('ROTATED_ACCESS_TOKEN');
+    expect(s.fetch).toHaveBeenCalledOnce();
+    expect(() => s.fences.assertOpen('scope', s.binding)).not.toThrow();
+  });
   it('refuses a replaced credential root even when ownership and token files were copied intact', async () => {
     const s = setup();
     await s.owner.install('scope', s.binding, s.reference, tokens());

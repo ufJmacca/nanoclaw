@@ -12,6 +12,8 @@
  * PR #8, the install skill re-fills the marker on install.
  */
 import type Database from 'better-sqlite3';
+import { nextRecurrenceAt } from './next-occurrence.js';
+export { nextRecurrenceAt } from './next-occurrence.js';
 
 import { TIMEZONE } from '../../config.js';
 import { log } from '../../log.js';
@@ -23,13 +25,11 @@ export async function handleRecurrence(inDb: Database.Database, session: Session
 
   for (const msg of recurring) {
     try {
-      const { CronExpressionParser } = await import('cron-parser');
       // Interpret the cron expression in the user's timezone. v1 did this
       // (src/v1/task-scheduler.ts:20-49); without it, a task written "0 9 * * *"
       // by an agent running in a user's local TZ fires at 09:00 UTC instead of
       // 09:00 user-local.
-      const interval = CronExpressionParser.parse(msg.recurrence, { tz: TIMEZONE });
-      const nextRun = interval.next().toISOString();
+      const nextRun = nextRecurrenceAt(msg.recurrence, TIMEZONE, new Date());
       const prefix = msg.kind === 'task' ? 'task' : 'msg';
       const newId = `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 

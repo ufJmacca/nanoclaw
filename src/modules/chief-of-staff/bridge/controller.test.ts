@@ -1,5 +1,6 @@
 import Database from 'better-sqlite3';
 import { describe, it, expect, vi, afterEach } from 'vitest';
+import { installScheduledOrigin, scheduledContext } from '../automation/scheduled-origin.js';
 import { CosController } from './controller.js';
 import { installCosBoundary, type CosBinding } from '../../../cos-boundary.js';
 import type { InboundEvent } from '../../../channels/adapter.js';
@@ -36,6 +37,7 @@ function fixture() {
   const facts = vi
     .fn()
     .mockResolvedValue({ id: 'private', type: 'P', delete_at: 0, members: ['bot', 'owner'], activeSubscription: true });
+  const verifyScheduled = vi.fn().mockResolvedValue(true);
   const decide = vi.fn().mockResolvedValue({ status: 'ok' }),
     acknowledge = vi.fn(),
     stop = vi.fn(),
@@ -51,7 +53,9 @@ function fixture() {
     enabled,
     project,
     wake,
+    verifyScheduled,
     controller: new CosController({
+      verifyScheduled,
       db,
       facts,
       decide,
@@ -167,5 +171,58 @@ describe('S01 ingress projection crash recovery', () => {
     await f.controller.ingress(binding, event('first', 'first'));
     expect(await f.controller.context(session)).toMatchObject({ ingressId: 'second' });
     expect(f.project).toHaveBeenCalledTimes(2);
+  });
+});
+
+const lease = {
+  runId: 'a'.repeat(64),
+  generation: 1,
+  hostId: 'host',
+  deadlineAt: new Date(now + 120000).toISOString(),
+};
+describe('S04 scheduled origin admission and owner preemption', () => {
+  it('uses the shared session with fresh remote run authority, without extending owner ingress', async () => {
+    const f = fixture();
+    expect(installScheduledOrigin(f.db, binding, session, lease, now)).toBe(true);
+    expect(await f.controller.context(session)).toMatchObject({
+      sessionId: 'session',
+      origin: { kind: 'schedule', runId: lease.runId, generation: 1 },
+    });
+    expect(f.verifyScheduled).toHaveBeenCalledOnce();
+    f.verifyScheduled.mockResolvedValue(false);
+    expect(await f.controller.context(session)).toBeNull();
+    f.verifyScheduled.mockRejectedValue(Error('database unavailable'));
+    expect(await f.controller.context(session)).toBeNull();
+    const noVerifier = new CosController({ ...f.controller.dependencies, verifyScheduled: undefined });
+    expect(await noVerifier.context(session)).toBeNull();
+  });
+  it('fences a scheduled container before projecting fresh owner input, retaining the fence until reconciliation', async () => {
+    const f = fixture();
+    await f.controller.ingress(binding, event('first', 'first'));
+    expect(installScheduledOrigin(f.db, binding, session, lease, now)).toBe(true);
+    await f.controller.ingress(binding, event('first', 'first'));
+    expect(f.stop).not.toHaveBeenCalled();
+    f.project.mockImplementation(() => expect(f.controller.localContext(session)).toBeNull());
+    await f.controller.ingress(binding, event('new', 'new'));
+    expect(f.stop).toHaveBeenCalledOnce();
+    expect(f.stop.mock.invocationCallOrder[0]).toBeLessThan(f.project.mock.invocationCallOrder[1]);
+    expect(scheduledContext(session, f.db, now)).toBeNull();
+    expect(await f.controller.context(session)).toBeNull();
+  });
+  it('rejects a scheduled verification that races with pause or fresh owner ingress', async () => {
+    const f = fixture();
+    installScheduledOrigin(f.db, binding, session, lease, now);
+    let finish!: (value: boolean) => void;
+    f.verifyScheduled.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const pending = f.controller.context(session);
+    await vi.waitFor(() => expect(f.verifyScheduled).toHaveBeenCalledOnce());
+    await f.controller.ingress(binding, event('new', 'new'));
+    finish(true);
+    expect(await pending).toBeNull();
   });
 });

@@ -11,6 +11,43 @@ function fixture(capacity = 2) {
 afterEach(() => vi.useRealTimers());
 
 describe('S01-PG04 bounded shared database client', () => {
+  it('S04 refuses an aborted refresh before acquiring database credentials', async () => {
+    const { db, pool } = fixture();
+    await expect(db.run(async () => 'unused', false, AbortSignal.abort())).rejects.toMatchObject({
+      code: 'unavailable',
+    });
+    expect(pool.connect).not.toHaveBeenCalled();
+  });
+  it('S04 cancellation destroys an active mutation and retains its uncertain outcome', async () => {
+    const { db, client } = fixture();
+    const abort = new AbortController();
+    const work = db.run(async () => new Promise(() => {}), true, abort.signal);
+    const assertion = expect(work).rejects.toMatchObject({ code: 'pending' });
+    await Promise.resolve();
+    abort.abort();
+    await assertion;
+    expect(client.release).toHaveBeenCalledExactlyOnceWith(true);
+  });
+  it('S04 cancellation during pool acquisition fences a late client without running the operation', async () => {
+    const { db, client, pool } = fixture(1),
+      abort = new AbortController();
+    let arrive!: (client: unknown) => void;
+    pool.connect.mockReturnValue(
+      new Promise((resolve) => {
+        arrive = resolve;
+      }),
+    );
+    const operation = vi.fn(async () => 'late');
+    const work = db.run(operation, false, abort.signal);
+    const assertion = expect(work).rejects.toMatchObject({ code: 'unavailable' });
+    abort.abort();
+    await assertion;
+    arrive(client);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(operation).not.toHaveBeenCalled();
+    expect(client.release).toHaveBeenCalledExactlyOnceWith(true);
+  });
   it('handles idle pool errors without crashing the host', () => {
     const { pool } = fixture();
     expect(() => pool.emit('error', new Error('secret endpoint detail'))).not.toThrow();

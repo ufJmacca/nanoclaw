@@ -139,6 +139,11 @@ export function isContainerRunning(sessionId: string): boolean {
   return activeContainers.has(sessionId);
 }
 
+/** Recovery must also fence a reserved or queued wake that can still start a container. */
+export function hasContainerExecution(sessionId: string): boolean {
+  return activeContainers.has(sessionId) || wakePromises.has(sessionId) || queuedWakes.has(sessionId);
+}
+
 /** Open container admission during host startup. */
 export function startContainerAdmissions(): void {
   containerAdmissionsOpen = true;

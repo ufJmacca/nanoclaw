@@ -1,6 +1,6 @@
 import pg from 'pg';
 import { describe, expect, it, vi } from 'vitest';
-import { migrate, migrationStatus } from './migrations.js';
+import { migrate, migrationStatus, SCHEMA_VERSION } from './migrations.js';
 
 describe('S01-PG07 explicit checksummed migrations', () => {
   it('serialises migrations under a bounded advisory lock and commits one version', async () => {
@@ -9,13 +9,23 @@ describe('S01-PG07 explicit checksummed migrations', () => {
       if (sql.includes('pg_try_advisory_lock')) return { rows: [{ locked: true }] };
       return { rows: [] };
     });
-    expect(await migrate({ query } as unknown as pg.Client, 'fixture_runtime')).toBe(3);
+    expect(await migrate({ query } as unknown as pg.Client, 'fixture_runtime')).toBe(SCHEMA_VERSION);
     const calls = query.mock.calls.map(([sql]) => sql);
     expect(calls.some((sql) => sql.includes('pg_try_advisory_lock'))).toBe(true);
     expect(calls).toContain('BEGIN');
     expect(calls).toContain('COMMIT');
     expect(calls.some((sql) => sql.includes('CREATE TABLE cos.sources'))).toBe(true);
     expect(calls.some((sql) => sql.includes('CREATE TABLE cos.calendar_bindings'))).toBe(true);
+    expect(calls.some((sql) => sql.includes('CREATE TABLE cos.work_items'))).toBe(true);
+    expect(calls.some((sql) => sql.includes('GRANT SELECT,INSERT ON cos.work_revisions'))).toBe(true);
+    expect(calls.some((sql) => sql.includes('CREATE TABLE cos.brief_schedules'))).toBe(true);
+    expect(calls.some((sql) => sql.includes('CREATE TABLE cos.brief_runs'))).toBe(true);
+    expect(calls.some((sql) => sql.includes('REVOKE UPDATE,DELETE,TRUNCATE ON cos.brief_call_reservations'))).toBe(
+      true,
+    );
+    expect(calls.some((sql) => sql.includes('REVOKE UPDATE,DELETE,TRUNCATE ON cos.brief_schedule_revisions'))).toBe(
+      true,
+    );
     expect(calls.some((sql) => sql.includes('GRANT SELECT,INSERT,UPDATE,DELETE ON cos.calendar_bindings'))).toBe(true);
     expect(calls.some((sql) => sql.includes('pg_advisory_unlock'))).toBe(true);
   });

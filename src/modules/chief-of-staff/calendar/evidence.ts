@@ -5,6 +5,8 @@ import type { KnowledgeArtifacts } from '../knowledge/artifacts.js';
 import { extractChunks, type TextChunk } from '../knowledge/text.js';
 import type { CalendarSnapshot } from './snapshot.js';
 import { calendarPreview } from './presentation.js';
+import { assertCalendarActive } from './cancellation.js';
+import { setImmediate as yieldToHost } from 'node:timers/promises';
 export type CalendarCapture = {
   eventId: string;
   sourceKey: string;
@@ -41,11 +43,14 @@ export class CalendarEvidence {
     binding: string,
     snapshot: CalendarSnapshot,
     operation: (captured: CalendarCapture[]) => Promise<Result>,
+    signal?: AbortSignal,
   ): Promise<Result> {
     try {
       return await this.artifacts.exclusive(async (lease) => {
         const captured: CalendarCapture[] = [];
         for (const event of snapshot.events) {
+          if (signal && captured.length % 50 === 0) await yieldToHost();
+          assertCalendarActive(signal);
           if (event.status === 'cancelled') continue;
           const sourceKey =
             'cos-calendar-' + digest({ binding, calendar: snapshot.calendarId, event: event.providerEventId });
@@ -64,6 +69,7 @@ export class CalendarEvidence {
             chunks: extractChunks(text),
           });
         }
+        assertCalendarActive(signal);
         return await operation(captured);
       });
     } catch {

@@ -9,6 +9,32 @@ const request: CosRequest = {
   params: { view: 'today' },
 };
 const previous = process.env.NANOCLAW_COS_PROTOCOL;
+test('S04 work reader exposes bounded views and exact revisions without write authority', async () => {
+  const tool = cosTools.find((definition) => definition.tool.name === 'cos_work_read');
+  expect(tool).toBeDefined();
+  expect(Object.keys(tool!.tool.inputSchema.properties!)).toEqual(['view', 'offset', 'record_id', 'version']);
+  initTestSessionDb();
+  expect(JSON.stringify(await tool!.handler({ view: 'all', owner_id: 'forged' }))).toContain('denied');
+  expect(getOutboundDb().query('SELECT count(*) AS n FROM messages_out').get()).toEqual({ n: 0 });
+});
+test('S04 work proposal exposes exact versioned changes and cannot accept caller authority', async () => {
+  const tool = cosTools.find((definition) => definition.tool.name === 'cos_work_change_propose');
+  expect(tool).toBeDefined();
+  const schema = tool!.tool.inputSchema;
+  expect(schema.required).toEqual(['change']);
+  expect(Object.keys(schema.properties!)).toEqual(['request_id', 'change']);
+  expect(schema.additionalProperties).toBe(false);
+  const change = schema.properties!.change as any;
+  expect(change.required).toContain('expected_version');
+  expect(change.required).toContain('evidence');
+  expect(change.properties.kind.enum).toEqual(['commitment', 'decision']);
+  expect(change.properties.evidence.maxItems).toBe(10);
+  expect(change.additionalProperties).toBe(false);
+  initTestSessionDb();
+  const result = await tool!.handler({ change: {}, owner_id: 'forged' });
+  expect(JSON.stringify(result)).toContain('denied');
+  expect(getOutboundDb().query('SELECT count(*) AS n FROM messages_out').get()).toEqual({ n: 0 });
+});
 test('S02 answer tool requires a cited draft and advertises no caller authority', () => {
   const schema = cosTools.find((definition) => definition.tool.name === 'cos_answer_prepare')!.tool.inputSchema;
   expect(schema.required).toEqual(['draft']);
@@ -114,4 +140,15 @@ test('S01-T04 a cached response cannot bypass a fresh host authorisation check',
     .prepare('INSERT INTO cos_rpc_responses VALUES(?,?,?,?,?)')
     .run(request.request_id, digest(request), 'old-delivery', JSON.stringify(stale), 'old');
   expect((await executeCosRequest(request, 20)).status).toBe('pending');
+});
+
+test('S04 brief tool advertises bounded requests and rejects caller authority before RPC dispatch', async () => {
+  initTestSessionDb();
+  const tool = cosTools.find((x) => x.tool.name === 'cos_brief_request');
+  expect(tool).toBeDefined();
+  expect(tool!.tool.inputSchema.additionalProperties).toBe(false);
+  expect(Object.keys(tool!.tool.inputSchema.properties!)).toEqual(['request_id', 'time_zone', 'artifact_id']);
+  const result = await tool!.handler({ time_zone: 'UTC', owner_id: 'forged' });
+  expect(JSON.stringify(result)).toContain('denied');
+  expect(getOutboundDb().query('SELECT count(*) AS n FROM messages_out').get()).toEqual({ n: 0 });
 });

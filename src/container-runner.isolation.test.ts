@@ -117,6 +117,7 @@ vi.mock('./session-manager.js', () => ({
 import {
   getActiveContainerCount,
   isContainerRunning,
+  hasContainerExecution,
   startContainerAdmissions,
   wakeContainer,
 } from './container-runner.js';
@@ -407,6 +408,9 @@ describe('container execution isolation', () => {
     const duplicateWake = wakeContainer({ ...firstSession });
     const secondWake = wakeContainer(secondSession);
 
+    expect(hasContainerExecution(firstSession.id)).toBe(true);
+    expect(hasContainerExecution(secondSession.id)).toBe(true);
+    expect(hasContainerExecution('unrelated')).toBe(false);
     expect(duplicateWake).toBe(firstWake);
     expect(secondWake).not.toBe(firstWake);
     await Promise.all([firstWake, duplicateWake, secondWake]);
@@ -1718,6 +1722,8 @@ describe('container execution isolation', () => {
     expect(isContainerRunning(activeSession.id)).toBe(false);
     expect(isContainerRunning(spawningSession.id)).toBe(false);
     expect(isContainerRunning(pendingSession.id)).toBe(false);
+    expect(hasContainerExecution(activeSession.id)).toBe(false);
+    expect(hasContainerExecution(spawningSession.id)).toBe(false);
     const stoppedNames = runnerMocks.stopContainer.mock.calls.map(([name]) => name as string);
     expect(stoppedNames).toHaveLength(2);
     expect(stoppedNames.some((name) => name.includes(activeGroup.folder))).toBe(true);

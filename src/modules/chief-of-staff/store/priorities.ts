@@ -1,6 +1,13 @@
 import type { Context, ProposalChange, Result } from '../domain/contracts.js';
 import { digest, validProposalChange, validSourceChange } from '../domain/contracts.js';
-import type { KnowledgeStore } from '../knowledge/store.js';
+import type { KnowledgeContext, KnowledgeStore } from '../knowledge/store.js';
+import { validWorkChange, validWorkRead, type WorkRead } from '../contracts/protocol.js';
+import { WorkStore } from './work.js';
+import { validScheduleChange } from '../contracts/schedule-protocol.js';
+import { BriefScheduleStore } from '../automation/schedule-store.js';
+import { BriefCollector } from '../automation/brief-collector.js';
+import { BriefArtifacts } from '../automation/brief-artifacts.js';
+import { BriefRunStore } from '../automation/brief-store.js';
 import type { CalendarConnector } from '../calendar/connector.js';
 import type { CalendarView } from '../calendar/view.js';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
@@ -34,12 +41,61 @@ async function event(
 }
 
 export class PriorityStore {
+  readonly work: WorkStore;
+  readonly schedules = new BriefScheduleStore();
+  readonly briefs: BriefRunStore;
+  readonly briefArtifacts?: BriefArtifacts;
   constructor(
     readonly database: BoundedDatabase,
     readonly knowledge?: KnowledgeStore,
     readonly calendar?: CalendarConnector,
     readonly calendarView?: CalendarView,
-  ) {}
+  ) {
+    this.work = new WorkStore(knowledge);
+    this.briefs = new BriefRunStore(database);
+    if (knowledge)
+      this.briefArtifacts = new BriefArtifacts(
+        new BriefCollector({ database, work: this.work, knowledge, calendarView }),
+      );
+  }
+  private async workReceiptCurrent(client: PoolClient, context: Context, result: Result): Promise<boolean> {
+    if (!validWorkChange(result.change)) return true;
+    const proposal = (
+      await client.query(
+        'SELECT change,work_context FROM cos.proposals WHERE scope_id=$1 AND id=$2 AND owner_id=$3 AND session_id=$4',
+        [context.scopeId, result.proposal_id, context.ownerId, context.sessionId],
+      )
+    ).rows[0];
+    return (
+      !!proposal &&
+      digest(proposal.change) === digest(result.change) &&
+      (await this.work.validateChange(client, context, result.change, proposal.work_context ?? undefined))
+    );
+  }
+  /** Rechecked immediately before each platform preview send, including retries. */
+  async previewCurrent(binding: CosBinding, proposalId: string, change: ProposalChange): Promise<boolean> {
+    const result = await this.transaction(async (client) => {
+      const context = { ...binding, ingressId: '' };
+      if (!(await authorised(client, context))) return { status: 'denied' };
+      const proposal = (
+        await client.query(
+          "SELECT ingress_id,change FROM cos.proposals WHERE scope_id=$1 AND id=$2 AND owner_id=$3 AND session_id=$4 AND state='pending' AND expires_at>clock_timestamp()",
+          [binding.scopeId, proposalId, binding.ownerId, binding.sessionId],
+        )
+      ).rows[0];
+      if (!proposal || digest(proposal.change) !== digest(change)) return { status: 'denied' };
+      return {
+        status: (await this.workReceiptCurrent(
+          client,
+          { ...context, ingressId: proposal.ingress_id },
+          { status: 'ok', proposal_id: proposalId, change },
+        ))
+          ? 'ok'
+          : 'denied',
+      };
+    }, false);
+    return result.status === 'ok';
+  }
   /** Trusted setup only; deliberately absent from the agent RPC method table. */
   async bindScope(binding: CosBinding): Promise<Result> {
     return this.transaction(async (client) => {
@@ -63,7 +119,7 @@ export class PriorityStore {
     return this.transaction(async (client) => {
       const items = (
         await client.query(
-          `SELECT o.id,o.kind,o.payload,p.session_id,p.expires_at
+          `SELECT o.id,o.kind,o.payload,p.session_id,p.expires_at,p.ingress_id,s.owner_id,s.agent_group_id
         FROM cos.outbox o JOIN cos.scopes s ON s.id=o.scope_id
         JOIN cos.proposals p ON p.id=o.payload->>'proposal_id' AND p.scope_id=o.scope_id
         WHERE o.scope_id=$1 AND s.status='active' AND o.delivered_at IS NULL
@@ -73,7 +129,20 @@ export class PriorityStore {
           [scopeId],
         )
       ).rows;
-      return { status: 'ok', items };
+      const current = [];
+      for (const item of items) {
+        const { owner_id, agent_group_id, ingress_id, ...safe } = item;
+        const context = {
+          scopeId,
+          ownerId: owner_id,
+          agentGroupId: agent_group_id,
+          ingressId: ingress_id,
+          sessionId: item.session_id,
+        };
+        if (item.kind !== 'approval_preview' || (await this.workReceiptCurrent(client, context, item.payload)))
+          current.push(safe);
+      }
+      return { status: 'ok', items: current };
     }, false);
   }
   async acknowledgePreview(scopeId: string, id: string): Promise<Result> {
@@ -101,10 +170,21 @@ export class PriorityStore {
     }
   }
 
-  async propose(context: Context, requestId: string, change: ProposalChange): Promise<Result> {
+  async propose(
+    context: Context,
+    requestId: string,
+    change: ProposalChange,
+    retained?: KnowledgeContext,
+  ): Promise<Result> {
     if (!uuid.test(requestId) || !validProposalChange(change)) return { status: 'denied' };
-    const method = validSourceChange(change) ? 'cos_source_change_propose' : 'cos_change_propose';
-    const hash = digest({ method, change });
+    const method = validSourceChange(change)
+      ? 'cos_source_change_propose'
+      : validWorkChange(change)
+        ? 'cos_work_change_propose'
+        : validScheduleChange(change)
+          ? 'cos_brief_schedule_propose'
+          : 'cos_change_propose';
+    const hash = digest(validWorkChange(change) ? { method, change, retained: retained ?? null } : { method, change });
     const result = await this.transaction(async (client) => {
       if (!(await authorised(client, context))) return { status: 'denied' };
       const inserted = await client.query(
@@ -121,11 +201,14 @@ export class PriorityStore {
           )
         ).rows[0];
         if (existing?.scope_id !== context.scopeId || existing?.payload_hash !== hash) return { status: 'conflict' };
+        if (existing.result && !(await this.workReceiptCurrent(client, context, existing.result)))
+          return { status: 'denied' };
         return existing.result ?? { status: 'pending', request_id: requestId };
       }
       if (
-        validSourceChange(change) &&
-        (!this.knowledge || !(await this.knowledge.validateChange(client, context.scopeId, change)))
+        (validSourceChange(change) &&
+          (!this.knowledge || !(await this.knowledge.validateChange(client, context.scopeId, change)))) ||
+        (validWorkChange(change) && !(await this.work.validateChange(client, context, change, retained)))
       ) {
         const receipt: Result = { status: 'denied' };
         await client.query('UPDATE cos.operations SET result=$3 WHERE session_id=$1 AND request_id=$2', [
@@ -138,8 +221,8 @@ export class PriorityStore {
       const id = randomUUID();
       const token = randomBytes(24).toString('base64url');
       await client.query(
-        `INSERT INTO cos.proposals(id,scope_id,session_id,ingress_id,owner_id,change,payload_hash,challenge_hash,state,expires_at)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,'pending',clock_timestamp()+interval '15 minutes')`,
+        `INSERT INTO cos.proposals(id,scope_id,session_id,ingress_id,owner_id,change,payload_hash,challenge_hash,state,expires_at,work_context)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,'pending',clock_timestamp()+interval '15 minutes',$9)`,
         [
           id,
           context.scopeId,
@@ -149,6 +232,7 @@ export class PriorityStore {
           JSON.stringify(change),
           digest(change),
           digest(token),
+          validWorkChange(change) && retained ? JSON.stringify(retained) : null,
         ],
       );
       const receipt: Result = {
@@ -229,9 +313,10 @@ export class PriorityStore {
   /** Trusted outbox consumer only; approval acceptance never applies effects inline. */
   async apply(scopeId: string, proposalId: string): Promise<Result> {
     return this.transaction(async (client) => {
-      const scope = await client.query("SELECT id FROM cos.scopes WHERE id=$1 AND status='active' FOR UPDATE", [
-        scopeId,
-      ]);
+      const scope = await client.query(
+        "SELECT id,owner_id,agent_group_id FROM cos.scopes WHERE id=$1 AND status='active' FOR UPDATE",
+        [scopeId],
+      );
       if (!scope.rowCount) return { status: 'denied' };
       const proposal = (
         await client.query('SELECT * FROM cos.proposals WHERE id=$1 AND scope_id=$2 FOR UPDATE', [proposalId, scopeId])
@@ -241,6 +326,31 @@ export class PriorityStore {
       if (proposal.state === 'conflict') return { status: 'conflict' };
       const change = proposal.change as ProposalChange;
       if (!validProposalChange(change) || digest(change) !== proposal.payload_hash) return { status: 'denied' };
+      if (validWorkChange(change) || validScheduleChange(change)) {
+        const context: Context = {
+          scopeId,
+          ownerId: scope.rows[0].owner_id,
+          agentGroupId: scope.rows[0].agent_group_id,
+          sessionId: proposal.session_id,
+          ingressId: proposal.ingress_id,
+        };
+        if (proposal.owner_id !== context.ownerId) return { status: 'denied' };
+        const result = validScheduleChange(change)
+          ? await this.schedules.applyApproved(client, context, proposal, change)
+          : await this.work.applyApproved(client, context, proposal, change, proposal.work_context ?? undefined);
+        if (!['ok', 'conflict'].includes(result.status)) return result;
+        const changed = result.status === 'ok';
+        await client.query(
+          'UPDATE cos.proposals SET state=$2,applied_record_id=$3,updated_at=clock_timestamp() WHERE id=$1',
+          [proposalId, changed ? 'applied' : 'conflict', changed ? result.record_id : null],
+        );
+        await client.query('UPDATE cos.outbox SET delivered_at=clock_timestamp() WHERE id=$1', ['apply-' + proposalId]);
+        await event(client, scopeId, changed ? 'applied' : 'conflict', proposalId, {
+          owner_id: proposal.owner_id,
+          ingress_id: proposal.decision_ingress_id,
+        });
+        return result;
+      }
       if (validSourceChange(change)) {
         if (!this.knowledge) return { status: 'unavailable' };
         const result = await this.knowledge.applyApproved(client, scopeId, proposalId, change);
@@ -312,7 +422,7 @@ export class PriorityStore {
     });
   }
 
-  async context(context: Context): Promise<Result> {
+  async context(context: Context, retained?: KnowledgeContext): Promise<Result> {
     return this.transaction(async (client) => {
       if (!(await authorised(client, context))) return { status: 'denied' };
       const records = (
@@ -322,13 +432,28 @@ export class PriorityStore {
           [context.scopeId],
         )
       ).rows;
+      const work = await this.work.read(client, context, { view: 'open' }, retained);
       return {
         status: 'ok',
         records,
+        work: work.items,
+        work_withheld: work.withheld,
+        work_next_offset: work.next_offset,
+        work_truncated: work.truncated,
+        brief_schedules: await this.schedules.read(client, context),
         ranking: 'advice',
         coverage: records.length ? ['approved_records_only'] : ['no_approved_priorities'],
       };
     }, false);
+  }
+
+  async readWork(context: Context, input: WorkRead, retained?: KnowledgeContext): Promise<Result> {
+    if (!validWorkRead(input)) return { status: 'denied' };
+    return this.transaction(
+      async (client) =>
+        (await authorised(client, context)) ? this.work.read(client, context, input, retained) : { status: 'denied' },
+      false,
+    );
   }
 
   async status(context: Context, requestId: string): Promise<Result> {
@@ -342,6 +467,7 @@ export class PriorityStore {
           context.scopeId,
         ])
       ).rows[0];
+      if (row?.result && !(await this.workReceiptCurrent(client, context, row.result))) return { status: 'denied' };
       return row?.result ?? { status: 'unavailable' };
     }, false);
   }

@@ -1,6 +1,9 @@
 import { KNOWLEDGE_CHECKSUM } from '../store/knowledge-schema.js';
 import { INITIAL_CHECKSUM } from '../store/schema-definition.js';
 import { CALENDAR_CHECKSUM } from '../store/calendar-schema.js';
+import { WORK_CHECKSUM } from '../store/work-schema.js';
+import { SCHEDULE_CHECKSUM } from '../store/schedule-schema.js';
+import { BRIEF_CHECKSUM } from '../store/brief-schema.js';
 export const REQUIRED_RELEASE_CHECKS = [
   'root',
   'runner',
@@ -13,7 +16,7 @@ export const REQUIRED_RELEASE_CHECKS = [
 export type ReleaseManifest = {
   contract: 'cos-release/v1';
   releaseId: string;
-  slice: 'S01' | 'S02' | 'S03';
+  slice: 'S01' | 'S02' | 'S03' | 'S04';
   platform: 'linux/arm64';
   source: {
     repository: 'ufJmacca/nanoclaw';
@@ -45,7 +48,7 @@ export function validateReleaseManifest(value: unknown): ReleaseManifest {
   if (
     !object(value) ||
     value.contract !== 'cos-release/v1' ||
-    (value.slice !== 'S01' && value.slice !== 'S02' && value.slice !== 'S03') ||
+    !['S01', 'S02', 'S03', 'S04'].includes(String(value.slice)) ||
     value.platform !== 'linux/arm64' ||
     value.rpc !== 'cos-rpc/v1' ||
     !matches(value.releaseId, /^release-[a-zA-Z0-9_-]{1,120}$/) ||
@@ -66,7 +69,7 @@ export function validateReleaseManifest(value: unknown): ReleaseManifest {
   )
     return reject();
   const postgres = value.postgres,
-    schemaVersion = value.slice === 'S01' ? 1 : value.slice === 'S02' ? 2 : 3;
+    schemaVersion = value.slice === 'S01' ? 1 : value.slice === 'S02' ? 2 : value.slice === 'S03' ? 3 : 6;
   if (
     !object(postgres) ||
     !Number.isSafeInteger(postgres.minimum) ||
@@ -86,10 +89,15 @@ export function validateReleaseManifest(value: unknown): ReleaseManifest {
       (!object(value.migrations[1]) ||
         value.migrations[1].version !== 2 ||
         value.migrations[1].checksum !== KNOWLEDGE_CHECKSUM)) ||
-    (schemaVersion === 3 &&
+    (schemaVersion >= 3 &&
       (!object(value.migrations[2]) ||
         value.migrations[2].version !== 3 ||
         value.migrations[2].checksum !== CALENDAR_CHECKSUM)) ||
+    (schemaVersion === 6 &&
+      [WORK_CHECKSUM, SCHEDULE_CHECKSUM, BRIEF_CHECKSUM].some((checksum, i) => {
+        const migration = (value.migrations as unknown[])[i + 3];
+        return !object(migration) || migration.version !== i + 4 || migration.checksum !== checksum;
+      })) ||
     !Array.isArray(value.previousReleaseIds) ||
     value.previousReleaseIds.length > 20 ||
     new Set(value.previousReleaseIds).size !== value.previousReleaseIds.length ||

@@ -25,6 +25,7 @@ function fixture(allowed = true) {
   const store = {
     context: vi.fn().mockResolvedValue({ status: 'ok', records: [{ id: 'approved-record' }] }),
     propose: vi.fn(),
+    readWork: vi.fn(),
     status: vi.fn(),
   };
   const resolveContext = vi.fn().mockResolvedValue(allowed ? context : null);
@@ -98,6 +99,80 @@ describe('S01 host-owned SQLite RPC response bridge', () => {
   });
 });
 describe('S02 knowledge RPC host authority', () => {
+  it('S04 routes work proposals and historical reads with host-derived identity and withholds replies after revocation', async () => {
+    const { db, store } = fixture();
+    const context = {
+      scopeId: 'fixture',
+      ownerId: 'owner',
+      sessionId: 'session',
+      agentGroupId: 'group',
+      ingressId: 'verified',
+    };
+    const retained = { ...context, provider: 'codex', generation: '33333333-3333-4333-8333-333333333333' };
+    const knowledge = { contextReady: vi.fn().mockResolvedValue({ status: 'ok' }) };
+    const handler = createRpcHandler({
+      resolveContext: async () => context,
+      store: store as unknown as PriorityStore,
+      knowledge: knowledge as unknown as KnowledgeStore,
+      resolveKnowledgeContext: async () => retained,
+    });
+    const change = {
+      kind: 'commitment',
+      title: 'WorkRPCFixtureCanary',
+      description: '',
+      reason: 'Owner suggestion',
+      state: 'confirmed',
+      project_id: null,
+      due: null,
+      defer_until: null,
+      evidence: [],
+      expected_version: 0,
+    };
+    store.propose.mockResolvedValue({ status: 'ok', change, confirmation_token: 'HOST_ONLY_TOKEN' });
+    store.readWork.mockResolvedValue({ status: 'ok', item: { title: 'WorkRPCFixtureCanary', version: 2 } });
+    const call = async (method: string, params: unknown) => {
+      await handler(
+        {
+          action: 'cos_rpc',
+          delivery_id: '22222222-2222-4222-8222-222222222222',
+          request: { ...request, method, params },
+        },
+        {} as Session,
+        db,
+      );
+      return JSON.parse(
+        (db.prepare('SELECT response FROM cos_rpc_responses ORDER BY rowid DESC LIMIT 1').get() as { response: string })
+          .response,
+      );
+    };
+    expect(await call('cos_work_change_propose', { change })).toMatchObject({ status: 'ok' });
+    expect(store.propose).toHaveBeenCalledWith(context, request.request_id, change, retained);
+    expect(JSON.stringify(await call('cos_work_read', { record_id: 'work-1', version: 2 }))).toContain(
+      'WorkRPCFixtureCanary',
+    );
+    expect(store.readWork).toHaveBeenCalledWith(context, { record_id: 'work-1', version: 2 }, retained);
+    const schedule = {
+      kind: 'brief_schedule',
+      title: 'Morning brief',
+      reason: 'Owner requested weekdays',
+      expected_version: 0,
+      policy: {
+        state: 'active',
+        time_zone: 'Australia/Sydney',
+        local_time: '09:00',
+        weekdays: [1, 2, 3, 4, 5],
+        quiet_hours: null,
+        snooze_until: null,
+      },
+      limits: { max_turns: 2, max_tool_calls: 12, deadline_seconds: 120, refresh_seconds: 20 },
+    };
+    expect(await call('cos_brief_schedule_propose', { change: schedule })).toMatchObject({ status: 'ok' });
+    expect(store.propose).toHaveBeenLastCalledWith(context, request.request_id, schedule);
+    knowledge.contextReady.mockResolvedValueOnce({ status: 'ok' }).mockResolvedValue({ status: 'denied' });
+    const denied = await call('cos_work_read', { record_id: 'work-1' });
+    expect(denied.status).toBe('denied');
+    expect(JSON.stringify(denied)).not.toContain('WorkRPCFixtureCanary');
+  });
   it('S03 uses host context for calendar reads and includes bounded calendar coverage with priorities', async () => {
     const { db, store } = fixture(),
       context = {
@@ -251,4 +326,145 @@ describe('S02 knowledge RPC host authority', () => {
     expect(JSON.parse(denied).status).toBe('denied');
     expect(denied).not.toContain('private canary');
   });
+});
+
+it('S04 gates every scheduled tool dispatch on durable budget authority, including ambiguous reservations', async () => {
+  const f = fixture(),
+    delivery_id = '22222222-2222-4222-8222-222222222222';
+  const context = {
+    scopeId: 'fixture',
+    ownerId: 'owner',
+    sessionId: 'session',
+    agentGroupId: 'group',
+    ingressId: 'scheduled',
+    origin: { kind: 'schedule' as const, runId: 'a'.repeat(64), generation: 1 },
+  };
+  f.resolveContext.mockResolvedValue(context);
+  const reserveTool = vi.fn().mockResolvedValue({ status: 'pending' });
+  const handler = createRpcHandler({
+    resolveContext: f.resolveContext,
+    store: f.store as unknown as PriorityStore,
+    reserveTool,
+  });
+  const call = async () => {
+    await handler({ action: 'cos_rpc', request, delivery_id }, {} as Session, f.db);
+    return JSON.parse((f.db.prepare('SELECT response FROM cos_rpc_responses').get() as { response: string }).response);
+  };
+  expect((await call()).status).toBe('pending');
+  expect(f.store.context).not.toHaveBeenCalled();
+  expect(reserveTool).toHaveBeenCalledWith(context, expect.stringMatching(/^rpc-[a-f0-9]{64}$/));
+  reserveTool.mockResolvedValue({ status: 'ok' });
+  expect((await call()).status).toBe('ok');
+  expect(f.store.context).toHaveBeenCalledOnce();
+  reserveTool.mockResolvedValue({ status: 'denied' });
+  expect((await call()).status).toBe('denied');
+  expect(f.store.context).toHaveBeenCalledOnce();
+  reserveTool.mockImplementation(async () => {
+    f.resolveContext.mockResolvedValue(null);
+    return { status: 'ok' };
+  });
+  expect((await call()).status).toBe('denied');
+  expect(f.store.context).toHaveBeenCalledOnce();
+  f.resolveContext.mockResolvedValue(context);
+  const noHook = createRpcHandler({ resolveContext: f.resolveContext, store: f.store as unknown as PriorityStore });
+  await noHook({ action: 'cos_rpc', request, delivery_id }, {} as Session, f.db);
+  expect(f.store.context).toHaveBeenCalledOnce();
+});
+
+it.each(['ok', 'pending', 'denied'])(
+  'S04 scheduled brief RPC attaches its checked artifact only after %s persistence',
+  async (status) => {
+    const f = fixture();
+    const context = {
+      scopeId: 'fixture',
+      ownerId: 'owner',
+      sessionId: 'session',
+      agentGroupId: 'group',
+      ingressId: 'verified',
+      origin: { kind: 'schedule' as const, runId: 'run', generation: 2 },
+    };
+    const retained = { ...context, provider: 'codex', generation: '33333333-3333-4333-8333-333333333333' };
+    const artifact = 'a'.repeat(64) + '-' + 'b'.repeat(64);
+    const briefs = { prepare: vi.fn().mockResolvedValue({ status }) };
+    const briefArtifacts = {
+      prepare: vi.fn().mockResolvedValue({ status: 'ok', artifact_id: artifact, text: 'Checked brief' }),
+    };
+    f.resolveContext.mockResolvedValue(context);
+    const handler = createRpcHandler({
+      resolveContext: f.resolveContext,
+      store: { ...f.store, briefs, briefArtifacts } as unknown as PriorityStore,
+      reserveTool: async () => ({ status: 'ok' }),
+      knowledge: { contextReady: vi.fn().mockResolvedValue({ status: 'ok' }) } as unknown as KnowledgeStore,
+      resolveKnowledgeContext: async () => retained,
+    });
+    await handler(
+      {
+        action: 'cos_rpc',
+        delivery_id: '22222222-2222-4222-8222-222222222222',
+        request: { ...request, method: 'cos_brief_request', params: { time_zone: 'UTC' } },
+      },
+      {} as Session,
+      f.db,
+    );
+    expect(briefs.prepare).toHaveBeenCalledExactlyOnceWith(context, 'run', 2, {
+      artifact_id: artifact,
+      output_digest: digest('Checked brief'),
+      context_generation: retained.generation,
+      provider: 'codex',
+    });
+    const response = JSON.parse(
+      (f.db.prepare('SELECT response FROM cos_rpc_responses').get() as { response: string }).response,
+    );
+    expect(response.status).toBe(status);
+    if (status !== 'ok') expect(JSON.stringify(response)).not.toContain('Checked brief');
+  },
+);
+
+it('S04 brief RPC uses host context and suppresses a prepared response after authority changes', async () => {
+  const f = fixture();
+  const context = {
+      scopeId: 'fixture',
+      ownerId: 'owner',
+      sessionId: 'session',
+      agentGroupId: 'group',
+      ingressId: 'verified',
+    },
+    retained = { ...context, provider: 'codex', generation: '33333333-3333-4333-8333-333333333333' };
+  const artifact = 'a'.repeat(64) + '-' + 'b'.repeat(64),
+    briefArtifacts = {
+      prepare: vi.fn().mockResolvedValue({ status: 'ok', artifact_id: artifact, text: 'Checked brief canary' }),
+      readHistory: vi.fn().mockResolvedValue({ status: 'ok', artifact_id: artifact, text: 'Saved brief canary' }),
+    };
+  const handler = createRpcHandler({
+    resolveContext: f.resolveContext,
+    store: { ...f.store, briefArtifacts } as unknown as PriorityStore,
+    knowledge: { contextReady: vi.fn().mockResolvedValue({ status: 'ok' }) } as unknown as KnowledgeStore,
+    resolveKnowledgeContext: async () => retained,
+  });
+  const call = async (params: Record<string, unknown>) => {
+    await handler(
+      {
+        action: 'cos_rpc',
+        delivery_id: '22222222-2222-4222-8222-222222222222',
+        request: { ...request, method: 'cos_brief_request', params },
+      },
+      {} as Session,
+      f.db,
+    );
+    return JSON.parse(
+      (f.db.prepare('SELECT response FROM cos_rpc_responses ORDER BY rowid DESC LIMIT 1').get() as { response: string })
+        .response,
+    );
+  };
+  expect((await call({ time_zone: 'Australia/Sydney' })).status).toBe('ok');
+  expect(briefArtifacts.prepare).toHaveBeenCalledWith(retained, request.request_id, 'Australia/Sydney');
+  expect((await call({ artifact_id: artifact })).status).toBe('ok');
+  expect(briefArtifacts.readHistory).toHaveBeenCalledWith(retained, artifact);
+  briefArtifacts.prepare.mockImplementation(async () => {
+    f.resolveContext.mockResolvedValue(null);
+    return { status: 'ok', text: 'Must not disclose' };
+  });
+  const denied = await call({ time_zone: 'UTC' });
+  expect(denied.status).toBe('denied');
+  expect(JSON.stringify(denied)).not.toContain('Must not disclose');
 });

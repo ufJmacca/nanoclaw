@@ -26,10 +26,16 @@ const denied = () => ({
 function requestFor(tool: unknown, args: unknown): CosRequest | null {
   if (!args || typeof args !== 'object' || Array.isArray(args)) return null;
   const values = args as Record<string, unknown>;
-  const proposal = tool === 'cos_change_propose' || tool === 'cos_source_change_propose';
-  const prepare = tool === 'cos_answer_prepare';
-  const allowed =
-    tool === 'cos_context_get'
+  const proposal =
+    tool === 'cos_change_propose' ||
+    tool === 'cos_source_change_propose' ||
+    tool === 'cos_work_change_propose' ||
+    tool === 'cos_brief_schedule_propose';
+  const prepare = tool === 'cos_answer_prepare',
+    brief = tool === 'cos_brief_request';
+  const allowed = brief
+    ? ['request_id', 'time_zone', 'artifact_id']
+    : tool === 'cos_context_get'
       ? ['view', 'calendar_offset']
       : proposal
         ? ['request_id', 'change']
@@ -45,14 +51,17 @@ function requestFor(tool: unknown, args: unknown): CosRequest | null {
                   ? ['artifact_id']
                   : tool === 'cos_calendar_read'
                     ? ['binding_id', 'calendar_id', 'time_min', 'time_max', 'limit', 'offset']
-                    : null;
+                    : tool === 'cos_work_read'
+                      ? ['view', 'offset', 'record_id', 'version']
+                      : null;
   if (!allowed || Object.keys(values).some((key) => !allowed.includes(key))) return null;
   const request = {
     protocol: COS_PROTOCOL,
-    request_id: (proposal || prepare) && values.request_id !== undefined ? values.request_id : randomUUID(),
+    request_id: (proposal || prepare || brief) && values.request_id !== undefined ? values.request_id : randomUUID(),
     method: tool,
-    params:
-      tool === 'cos_context_get'
+    params: brief
+      ? Object.fromEntries(Object.entries(values).filter(([key]) => key !== 'request_id'))
+      : tool === 'cos_context_get'
         ? { ...values, view: values.view ?? 'today' }
         : proposal
           ? { change: values.change }

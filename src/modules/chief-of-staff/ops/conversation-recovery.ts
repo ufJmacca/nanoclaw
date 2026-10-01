@@ -1,3 +1,4 @@
+import { supersedeBriefContextRenewals } from '../bridge/brief-context-renewal.js';
 /** Explicit host recovery only. Caller holds the target lock, quiescent maintenance
  * and exact host execution lease, with current private-channel membership verified.
  * Old history and authority are never imported into the fresh generation.
@@ -188,6 +189,7 @@ export async function recoverConversation(options: {
           .prepare('UPDATE cos_identity_boundaries SET ingress_id=NULL,ingress_at=NULL WHERE scope_id=? AND paused=1')
           .run(o.binding.scopeId);
         o.db.prepare('UPDATE cos_ingress_receipts SET projected=1 WHERE scope_id=?').run(o.binding.scopeId);
+        supersedeBriefContextRenewals(o.db, o.binding.scopeId, o.expectedGeneration);
       })
       .immediate();
     // Inbound owns both processing eligibility and delivery outcomes. Outbound data is

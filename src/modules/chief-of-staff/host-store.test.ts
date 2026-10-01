@@ -16,7 +16,10 @@ vi.mock('./store/preflight.js', async (original) => ({
   connectChecked: f.connect,
 }));
 vi.mock('./ops/target-identity.js', () => ({ localTarget: f.target, databaseFingerprint: f.fingerprint }));
-vi.mock('./store/migrations.js', () => ({ SCHEMA_VERSION: 3, migrationStatus: f.schema }));
+vi.mock('./store/migrations.js', async (original) => ({
+  ...(await original<typeof import('./store/migrations.js')>()),
+  migrationStatus: f.schema,
+}));
 vi.mock('./store/config.js', async (original) => ({
   ...(await original<typeof import('./store/config.js')>()),
   parseDatabaseConfig: () => ({}),
@@ -35,13 +38,14 @@ vi.mock('./calendar/config.js', async (original) => ({
   openCalendarCredentials: f.calendarOpen,
 }));
 import { connectCosHostStore } from './host-store.js';
+import { SCHEMA_VERSION } from './store/migrations.js';
 afterEach(() => vi.resetAllMocks());
 function fixture() {
   f.connect.mockResolvedValue(f.check);
   f.check.end.mockResolvedValue(undefined);
   f.target.mockReturnValue({ binding: { databaseFingerprint: 'bound-database' } });
   f.fingerprint.mockResolvedValue('bound-database');
-  f.schema.mockResolvedValue(3);
+  f.schema.mockResolvedValue(SCHEMA_VERSION);
   f.open.mockReturnValue(f.artifacts);
   f.configure.mockResolvedValue({});
 }
@@ -59,20 +63,23 @@ it('connects the current schema with knowledge guards present even when retrieva
   expect(f.check.end).toHaveBeenCalledOnce();
   expect(f.calendarOpen).not.toHaveBeenCalled();
 });
-it.each([1, 2, 4])('rejects incompatible schema %s before creating artifacts or a runtime pool', async (version) => {
-  fixture();
-  f.schema.mockResolvedValue(version);
-  await expect(
-    connectCosHostStore(
-      {},
-      { targetRoot: '/state', installationRoot: '/install', dataRoot: '/install/data' },
-      () => true,
-    ),
-  ).rejects.toThrow('schema_incompatible');
-  expect(f.open).not.toHaveBeenCalled();
-  expect(f.configure).not.toHaveBeenCalled();
-  expect(f.check.end).toHaveBeenCalledOnce();
-});
+it.each([...Array.from({ length: SCHEMA_VERSION - 1 }, (_, i) => i + 1), SCHEMA_VERSION + 1])(
+  'rejects incompatible schema %s before creating artifacts or a runtime pool',
+  async (version) => {
+    fixture();
+    f.schema.mockResolvedValue(version);
+    await expect(
+      connectCosHostStore(
+        {},
+        { targetRoot: '/state', installationRoot: '/install', dataRoot: '/install/data' },
+        () => true,
+      ),
+    ).rejects.toThrow('schema_incompatible');
+    expect(f.open).not.toHaveBeenCalled();
+    expect(f.configure).not.toHaveBeenCalled();
+    expect(f.check.end).toHaveBeenCalledOnce();
+  },
+);
 it('opens the protected calendar owner only after target/schema verification and shares the bounded pool', async () => {
   fixture();
   f.calendarOpen.mockReturnValue({ fences: { assertOpen: vi.fn(), deny: vi.fn() }, credentials: {} });

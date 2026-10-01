@@ -1,8 +1,8 @@
-import { writeSessionMessage } from '../../session-manager.js';
+import { writeSessionMessage, openInboundDb } from '../../session-manager.js';
 import type Database from 'better-sqlite3';
 import type { Session, MessagingGroup } from '../../types.js';
 import { cosBoundary, setCosBoundaryHooks, type CosBinding } from '../../cos-boundary.js';
-import { registerDeliveryAction } from '../../delivery.js';
+import { registerDeliveryAction, getDeliveryAdapter } from '../../delivery.js';
 import { deletePendingApproval } from '../../db/sessions.js';
 import { requestCorrelatedApproval } from '../approvals/correlated.js';
 import { CosController } from './bridge/controller.js';
@@ -15,6 +15,11 @@ import { createTurnAuthorization } from './bridge/turn-authorization.js';
 import { resolveKnowledgeContext } from './knowledge/context.js';
 import { digest, type Context } from './domain/contracts.js';
 import { KnowledgeInvalidation } from './knowledge/invalidation.js';
+import { NativeBriefTasks } from './automation/native-tasks.js';
+import { BriefDelivery } from './automation/brief-delivery.js';
+import { BriefReconciliation } from './automation/brief-reconciliation.js';
+import { BriefDispatch } from './automation/brief-dispatch.js';
+import { BriefRefresh } from './automation/brief-refresh.js';
 
 export type RuntimeDependencies = {
   db: Database.Database;
@@ -27,6 +32,8 @@ export type RuntimeDependencies = {
   stop(sessionId: string): void;
   wake(session: Session): Promise<void>;
   launcher?: CoordinatorLauncher;
+  running?(sessionId: string): boolean;
+  withBriefTasks?<T>(session: Session, operation: (tasks: NativeBriefTasks) => T): T;
 };
 export function createCosRuntime(dependencies: RuntimeDependencies) {
   const d = dependencies;
@@ -36,8 +43,16 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
     if (!d.store?.knowledge) return true;
     const retained = resolveKnowledgeContext(session, context, d.db);
     if (!retained || (await d.store.knowledge.contextReady(retained)).status !== 'ok') return false;
-    if (text !== undefined && (await d.store.knowledge.answers.authorizePublication(retained, text)).status !== 'ok')
-      return false;
+    if (text !== undefined) {
+      const answer = await d.store.knowledge.answers.authorizePublication(retained, text);
+      if (
+        answer.status !== 'ok' &&
+        (answer.status !== 'denied' ||
+          !d.store.briefArtifacts ||
+          (await d.store.briefArtifacts.authorizePublication(retained, text)).status !== 'ok')
+      )
+        return false;
+    }
     const current = resolveKnowledgeContext(session, context, d.db);
     return !!current && digest(current) === digest(retained);
   };
@@ -46,6 +61,10 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
     enabled,
     facts: d.facts,
     session: d.session,
+    verifyScheduled: async (context) =>
+      !!context.origin &&
+      !!d.store &&
+      (await d.store.briefs.authorize(context, context.origin.runId, context.origin.generation)).status === 'ok',
     decide: (...args) => (d.store ? d.store.decide(...args) : Promise.resolve({ status: 'unavailable' })),
     acknowledge: (proposal) => deletePendingApproval('cos-' + proposal),
     stop: d.stop,
@@ -69,11 +88,120 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
     const session = d.session(binding.sessionId);
     if (!session) return false;
     const boundary = cosBoundary(session, d.db);
-    if (!boundary.restricted || !boundary.binding || boundary.paused) return false;
+    if (!boundary.restricted || !boundary.binding || boundary.paused || digest(boundary.binding) !== digest(binding))
+      return false;
     if (!validPrivateChannel(binding, await d.facts(binding))) return false;
     const current = cosBoundary(session, d.db);
-    return current.restricted && !!current.binding && !current.paused;
+    return current.restricted && !!current.binding && !current.paused && digest(current.binding) === digest(binding);
   };
+  const withTasks = <T>(binding: CosBinding, operation: (tasks: NativeBriefTasks) => T): T => {
+    const session = d.session(binding.sessionId);
+    if (!session || session.agent_group_id !== binding.agentGroupId) throw Error('cos_brief_session_unavailable');
+    if (d.withBriefTasks) return d.withBriefTasks(session, operation);
+    const inbound = openInboundDb(session.agent_group_id, session.id);
+    try {
+      return operation(new NativeBriefTasks(inbound));
+    } finally {
+      inbound.close();
+    }
+  };
+  const localBriefContext = (binding: CosBinding) => {
+    const session = d.session(binding.sessionId),
+      context = session && controller.localContext(session);
+    return session && context?.origin ? resolveKnowledgeContext(session, context, d.db) : null;
+  };
+  const briefAdmission = async (binding: CosBinding) =>
+    (d.launcher?.ready(binding) ?? false) && (await admitted(binding));
+  const briefReconciliation = d.store?.briefArtifacts
+    ? new BriefReconciliation({
+        db: d.db,
+        runs: d.store.briefs,
+        local: localBriefContext,
+        admitted: briefAdmission,
+        running: (id) => d.running?.(id) ?? true,
+        stop: d.stop,
+        retire: (binding, run) => withTasks(binding, (tasks) => tasks.retire(binding, run)),
+        taskState: (binding, run) => withTasks(binding, (tasks) => tasks.state(binding, run)),
+        deliver: async (context) => {
+          const session = d.session(context.sessionId),
+            adapter = getDeliveryAdapter();
+          const boundary = session && cosBoundary(session, d.db);
+          const binding = boundary?.restricted ? boundary.binding : null;
+          if (!binding || !adapter || adapter.isAvailable?.('mattermost') === false) return { status: 'unavailable' };
+          return new BriefDelivery({
+            runs: d.store!.briefs,
+            artifacts: d.store!.briefArtifacts!,
+            current: () => localBriefContext(binding),
+            admitted: () => briefAdmission(binding),
+            send: (_context, text, notificationId) =>
+              adapter.deliver(
+                'mattermost',
+                `mattermost:${binding.instanceId}:${binding.channelId}`,
+                null,
+                'chat',
+                JSON.stringify({ text }),
+                undefined,
+                notificationId,
+              ),
+          }).deliver(context);
+        },
+      })
+    : null;
+  const briefDispatch = d.store?.briefArtifacts
+    ? new BriefDispatch({
+        db: d.db,
+        runs: d.store.briefs,
+        session: d.session,
+        admitted: briefAdmission,
+        running: (id) => d.running?.(id) ?? true,
+        withTasks: async (session, operation) => {
+          if (d.withBriefTasks) return await d.withBriefTasks(session, operation);
+          const inbound = openInboundDb(session.agent_group_id, session.id);
+          try {
+            return await operation(new NativeBriefTasks(inbound));
+          } finally {
+            inbound.close();
+          }
+        },
+        prepare: async (binding, context, run) => {
+          if (!d.store?.knowledge) return { status: 'denied' };
+          const session = d.session(binding.sessionId),
+            boundary = session && cosBoundary(session, d.db);
+          if (!session || !boundary?.restricted || !boundary.ingressId) return { status: 'denied' };
+          const ownerContext = { ...context, ingressId: boundary.ingressId };
+          const current = () =>
+            enabled() && digest(cosBoundary(session, d.db)) === digest(boundary) && !(d.running?.(session.id) ?? true);
+          const retained = resolveKnowledgeContext(session, ownerContext, d.db);
+          if (!retained || !current()) return { status: 'denied' };
+          const readable = await d.store.knowledge.contextReady(retained);
+          if (!current()) return { status: 'denied' };
+          if (readable.status !== 'ok') return readable;
+          const refreshed = await new BriefRefresh({
+            runs: d.store.briefs,
+            connector: d.store.calendar,
+            current,
+            beforeRefresh: async (_plan, signal) => {
+              // Replace before any snapshot changes: the new generation has no old calendar exposure.
+              const authority = await d.store!.briefs.authorize(context, run.id, run.generation, signal);
+              if (authority.status !== 'ok') return authority;
+              if (!(await briefAdmission(binding)) || !current() || signal.aborted || !d.launcher?.renewBriefContext)
+                return { status: signal.aborted ? 'pending' : 'denied' };
+              d.launcher.renewBriefContext(
+                binding,
+                { runId: run.id, runGeneration: run.generation, expectedGeneration: retained.generation },
+                () => current() && !signal.aborted,
+              );
+              return { status: 'ok' };
+            },
+          }).execute(context, run.id, run.generation, binding.provider, run.limits.refresh_seconds);
+          if (!current()) return { status: 'denied' };
+          if (refreshed.status !== 'ok') return refreshed;
+          const fresh = resolveKnowledgeContext(session, ownerContext, d.db);
+          return fresh ? await d.store.knowledge.contextReady(fresh) : { status: 'denied' };
+        },
+        wake: d.wake,
+      })
+    : null;
   const outbox = d.store
     ? new CosOutbox({
         store: d.store,
@@ -95,7 +223,8 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
             payload: { proposal_id: preview.proposalId, change: preview.change },
             text: preview.text,
             expiresAt: preview.expiresAt,
-            validateDestination: () => admitted(binding),
+            validateDestination: async () =>
+              (await admitted(binding)) && (await d.store!.previewCurrent(binding, preview.proposalId, preview.change)),
           });
         },
       })
@@ -112,6 +241,18 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
         session,
         createTurnAuthorization({
           local: () => controller.localContext(session),
+          reserve: async (context, attemptId) =>
+            !!context.origin &&
+            !!d.store &&
+            (
+              await d.store.briefs.reserveCall(
+                context,
+                context.origin.runId,
+                context.origin.generation,
+                'model',
+                attemptId,
+              )
+            ).status === 'ok',
           verify: async () => {
             const context = await controller.context(session);
             return context &&
@@ -135,7 +276,8 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
       return (
         !!context &&
         (purpose === 'rpc' ||
-          (typeof text === 'string' &&
+          (!context.origin &&
+            typeof text === 'string' &&
             (await d.store.context(context)).status === 'ok' &&
             (await knowledgeAllowed(session, context, text))))
       );
@@ -146,6 +288,10 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
       'cos_rpc',
       createRpcHandler({
         resolveContext: (session) => controller.context(session),
+        reserveTool: (context, callId) =>
+          context.origin && d.store
+            ? d.store.briefs.reserveCall(context, context.origin.runId, context.origin.generation, 'tool', callId)
+            : Promise.resolve({ status: 'denied' }),
         store: d.store!,
         knowledge: d.store!.knowledge,
         resolveKnowledgeContext: async (session, context) => resolveKnowledgeContext(session, context, d.db),
@@ -155,6 +301,11 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
     controller,
     pump: async (binding: CosBinding) => {
       if (enabled()) await invalidations?.drain(binding);
+      if (enabled()) {
+        const recovered = await briefReconciliation?.drain(binding);
+        if (recovered?.status === 'ok' && ['absent', 'dispatched'].includes(String(recovered.state)))
+          await briefDispatch?.drain(binding);
+      }
       if (enabled()) await outbox?.drain(binding);
       // An approved source change may enqueue invalidation in this same pump.
       if (enabled()) await invalidations?.drain(binding);

@@ -6,12 +6,18 @@ import { DatabasePreflightError } from './preflight.js';
 import { INITIAL_SCHEMA, INITIAL_CHECKSUM } from './schema-definition.js';
 import { KNOWLEDGE_SCHEMA, KNOWLEDGE_CHECKSUM } from './knowledge-schema.js';
 import { CALENDAR_SCHEMA, CALENDAR_CHECKSUM } from './calendar-schema.js';
+import { WORK_SCHEMA, WORK_CHECKSUM } from './work-schema.js';
+import { SCHEDULE_SCHEMA, SCHEDULE_CHECKSUM } from './schedule-schema.js';
+import { BRIEF_SCHEMA, BRIEF_CHECKSUM } from './brief-schema.js';
 export { INITIAL_SCHEMA, INITIAL_CHECKSUM } from './schema-definition.js';
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 6;
 export const MIGRATIONS = [
   { version: 1, checksum: INITIAL_CHECKSUM, sql: INITIAL_SCHEMA },
   { version: 2, checksum: KNOWLEDGE_CHECKSUM, sql: KNOWLEDGE_SCHEMA },
   { version: 3, checksum: CALENDAR_CHECKSUM, sql: CALENDAR_SCHEMA },
+  { version: 4, checksum: WORK_CHECKSUM, sql: WORK_SCHEMA },
+  { version: 5, checksum: SCHEDULE_CHECKSUM, sql: SCHEDULE_SCHEMA },
+  { version: 6, checksum: BRIEF_CHECKSUM, sql: BRIEF_SCHEMA },
 ] as const;
 const LOCK_ID = 73101001;
 const identifier = (value: string) => '"' + value.replaceAll('"', '""') + '"';
@@ -57,6 +63,17 @@ export async function migrate(client: pg.Client, runtimeRole: string): Promise<n
     await client.query(
       `GRANT SELECT,INSERT,UPDATE,DELETE ON cos.calendar_bindings,cos.calendar_states,cos.calendar_snapshots,cos.calendar_observations,cos.calendar_event_revisions TO ${identifier(runtimeRole)}`,
     );
+    await client.query(`GRANT SELECT,INSERT,UPDATE,DELETE ON cos.work_items TO ${identifier(runtimeRole)}`);
+    await client.query(`GRANT SELECT,INSERT ON cos.work_revisions TO ${identifier(runtimeRole)}`);
+    await client.query(`REVOKE UPDATE,DELETE,TRUNCATE ON cos.work_revisions FROM ${identifier(runtimeRole)}`);
+    await client.query(`GRANT SELECT,INSERT,UPDATE,DELETE ON cos.brief_schedules TO ${identifier(runtimeRole)}`);
+    await client.query(`GRANT SELECT,INSERT ON cos.brief_schedule_revisions TO ${identifier(runtimeRole)}`);
+    await client.query(`REVOKE UPDATE,DELETE,TRUNCATE ON cos.brief_schedule_revisions FROM ${identifier(runtimeRole)}`);
+    await client.query(
+      `GRANT SELECT,INSERT,UPDATE,DELETE ON cos.brief_runs,cos.brief_notifications TO ${identifier(runtimeRole)}`,
+    );
+    await client.query(`GRANT SELECT,INSERT ON cos.brief_call_reservations TO ${identifier(runtimeRole)}`);
+    await client.query(`REVOKE UPDATE,DELETE,TRUNCATE ON cos.brief_call_reservations FROM ${identifier(runtimeRole)}`);
     await client.query('COMMIT');
     return SCHEMA_VERSION;
   } catch (error) {

@@ -1,6 +1,81 @@
 /** Canonical CoS wire contract; copied verbatim into the runner and checked for drift. */
 import { createHash } from 'node:crypto';
-import { validAnswerDraft } from './answer-protocol.js';
+import { validScheduleChange, type ScheduleChange } from './schedule-protocol.js';
+import { answerDraftSchema, validAnswerDraft, validAnswerCitation, type AnswerCitation } from './answer-protocol.js';
+/** Provider guidance; the wire validator additionally checks real dates and state transitions. */
+export const workChangeSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: [
+    'kind',
+    'title',
+    'description',
+    'reason',
+    'state',
+    'project_id',
+    'due',
+    'defer_until',
+    'evidence',
+    'expected_version',
+  ],
+  properties: {
+    kind: { type: 'string', enum: ['commitment', 'decision'] },
+    title: { type: 'string', minLength: 1, maxLength: 200 },
+    description: { type: 'string', maxLength: 8000 },
+    reason: { type: 'string', minLength: 1, maxLength: 2000 },
+    state: {
+      type: 'string',
+      enum: ['confirmed', 'completed', 'needed', 'decided', 'deferred', 'dismissed'],
+      description:
+        'New commitments use confirmed and new decisions use needed. Every change still requires owner approval.',
+    },
+    project_id: { anyOf: [{ type: 'null' }, { type: 'string', pattern: '^[a-zA-Z0-9_-]{1,100}$' }] },
+    due: {
+      anyOf: [
+        { type: 'null' },
+        {
+          type: 'object',
+          additionalProperties: false,
+          required: ['kind', 'date', 'time_zone'],
+          properties: {
+            kind: { type: 'string', enum: ['date'] },
+            date: { type: 'string', format: 'date' },
+            time_zone: { type: 'string', description: 'IANA timezone, for example Australia/Sydney.' },
+          },
+        },
+        {
+          type: 'object',
+          additionalProperties: false,
+          required: ['kind', 'at', 'time_zone'],
+          properties: {
+            kind: { type: 'string', enum: ['instant'] },
+            at: { type: 'string', pattern: '^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$' },
+            time_zone: { type: 'string' },
+          },
+        },
+      ],
+    },
+    defer_until: {
+      anyOf: [{ type: 'null' }, { type: 'string', pattern: '^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$' }],
+      description: 'Future UTC instant only for deferred state; null otherwise.',
+    },
+    evidence: {
+      type: 'array',
+      maxItems: 10,
+      items: answerDraftSchema.properties.claims.items.properties.citations.items,
+    },
+    record_id: {
+      type: 'string',
+      pattern: '^[a-zA-Z0-9_-]{1,100}$',
+      description: 'Exact existing work ID for an update; omit when creating.',
+    },
+    expected_version: {
+      type: 'integer',
+      minimum: 0,
+      description: 'Zero when creating; exact current positive version when updating.',
+    },
+  },
+};
 export const COS_PROTOCOL = 'cos-rpc/v1';
 export const COS_MAX_BYTES = 65536;
 export const COS_WAIT_MS = 15000;
@@ -22,6 +97,10 @@ export const digest = (value: unknown): string => createHash('sha256').update(ca
 export type CosMethod =
   | 'cos_context_get'
   | 'cos_change_propose'
+  | 'cos_work_change_propose'
+  | 'cos_work_read'
+  | 'cos_brief_schedule_propose'
+  | 'cos_brief_request'
   | 'cos_request_status'
   | 'cos_knowledge_search'
   | 'cos_source_get'
@@ -88,6 +167,28 @@ export function validRequest(value: unknown): value is CosRequest {
     !object(value.params)
   )
     return false;
+  if (value.method === 'cos_brief_request') {
+    if ('artifact_id' in value.params)
+      return (
+        keys(value.params, ['artifact_id']) &&
+        typeof value.params.artifact_id === 'string' &&
+        /^[a-f0-9]{64}-[a-f0-9]{64}$/.test(value.params.artifact_id)
+      );
+    if (
+      !keys(value.params, ['time_zone']) ||
+      typeof value.params.time_zone !== 'string' ||
+      value.params.time_zone.length > 100 ||
+      /^[+-]/.test(value.params.time_zone)
+    )
+      return false;
+    try {
+      new Intl.DateTimeFormat('en', { timeZone: value.params.time_zone });
+      return true;
+    } catch (error) {
+      if (error instanceof RangeError) return false;
+      throw error;
+    }
+  }
   if (value.method === 'cos_context_get')
     return (
       keys(value.params, ['view', 'calendar_offset']) &&
@@ -105,6 +206,11 @@ export function validRequest(value: unknown): value is CosRequest {
       uuid.test(value.params.request_id)
     );
   if (value.method === 'cos_change_propose') return keys(value.params, ['change']) && validChange(value.params.change);
+  if (value.method === 'cos_work_change_propose')
+    return keys(value.params, ['change']) && validWorkChange(value.params.change);
+  if (value.method === 'cos_work_read') return validWorkRead(value.params);
+  if (value.method === 'cos_brief_schedule_propose')
+    return keys(value.params, ['change']) && validScheduleChange(value.params.change);
   if (value.method === 'cos_source_change_propose')
     return keys(value.params, ['change']) && validSourceChange(value.params.change);
   if (value.method === 'cos_answer_prepare')
@@ -163,9 +269,123 @@ export function validSourceChange(value: unknown): value is SourceChange {
     value.reason.length <= 2000
   );
 }
-export type ProposalChange = Change | SourceChange;
+export type WorkDue =
+  | { kind: 'date'; date: string; time_zone: string }
+  | { kind: 'instant'; at: string; time_zone: string };
+export type WorkChange = {
+  kind: 'commitment' | 'decision';
+  title: string;
+  description: string;
+  reason: string;
+  state: 'confirmed' | 'completed' | 'needed' | 'decided' | 'deferred' | 'dismissed';
+  project_id: string | null;
+  due: WorkDue | null;
+  defer_until: string | null;
+  evidence: AnswerCitation[];
+  record_id?: string;
+  expected_version: number;
+};
+const workId = (v: unknown): v is string => typeof v === 'string' && /^[a-zA-Z0-9_-]{1,100}$/.test(v);
+export type WorkRead = { view: 'open' | 'all'; offset?: number } | { record_id: string; version?: number };
+export function validWorkRead(v: unknown): v is WorkRead {
+  return (
+    object(v) &&
+    ('record_id' in v
+      ? keys(v, ['record_id', 'version']) &&
+        workId(v.record_id) &&
+        (v.version === undefined || (Number.isSafeInteger(v.version) && Number(v.version) > 0))
+      : keys(v, ['view', 'offset']) &&
+        ['open', 'all'].includes(String(v.view)) &&
+        (v.offset === undefined || (Number.isInteger(v.offset) && Number(v.offset) >= 0 && Number(v.offset) <= 10000)))
+  );
+}
+const workText = (v: unknown, max: number): v is string =>
+  typeof v === 'string' &&
+  v.length <= max &&
+  Buffer.from(v).toString('utf8') === v &&
+  [...v].every((character) => {
+    const code = character.codePointAt(0)!;
+    return code === 9 || code === 10 || code === 13 || (code >= 32 && (code < 127 || code > 159));
+  });
+const calendarDate = (v: unknown): v is string => {
+  if (typeof v !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(v)) return false;
+  const at = Date.parse(v + 'T00:00:00Z');
+  return Number.isFinite(at) && new Date(at).toISOString().slice(0, 10) === v;
+};
+export function validWorkInstant(v: unknown): v is string {
+  return (
+    typeof v === 'string' &&
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(v) &&
+    Number.isFinite(Date.parse(v)) &&
+    new Date(v).toISOString() === v.slice(0, -1) + '.000Z'
+  );
+}
+function workZone(v: unknown): v is string {
+  if (typeof v !== 'string' || v.length > 100 || !/^[A-Za-z][A-Za-z0-9_+\-/]*$/.test(v)) return false;
+  try {
+    new Intl.DateTimeFormat('en', { timeZone: v }).format(0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+export function validWorkDue(v: unknown): v is WorkDue {
+  return (
+    object(v) &&
+    workZone(v.time_zone) &&
+    ((v.kind === 'date' && keys(v, ['kind', 'date', 'time_zone']) && calendarDate(v.date)) ||
+      (v.kind === 'instant' && keys(v, ['kind', 'at', 'time_zone']) && validWorkInstant(v.at)))
+  );
+}
+/** A valid proposal is still unapproved; only the host's durable owner decision may apply it. */
+export function validWorkChange(v: unknown): v is WorkChange {
+  if (
+    !object(v) ||
+    !keys(v, [
+      'kind',
+      'title',
+      'description',
+      'reason',
+      'state',
+      'project_id',
+      'due',
+      'defer_until',
+      'evidence',
+      'record_id',
+      'expected_version',
+    ])
+  )
+    return false;
+  if (!['commitment', 'decision'].includes(String(v.kind))) return false;
+  const states =
+    v.kind === 'commitment'
+      ? ['confirmed', 'completed', 'deferred', 'dismissed']
+      : ['needed', 'decided', 'deferred', 'dismissed'];
+  if (!states.includes(String(v.state)) || !Number.isSafeInteger(v.expected_version)) return false;
+  if (v.record_id === undefined) {
+    if (v.expected_version !== 0 || v.state !== (v.kind === 'commitment' ? 'confirmed' : 'needed')) return false;
+  } else if (!workId(v.record_id) || Number(v.expected_version) < 1) return false;
+  if (v.state === 'deferred' ? !validWorkInstant(v.defer_until) : v.defer_until !== null) return false;
+  return (
+    workText(v.title, 200) &&
+    v.title.trim().length > 0 &&
+    v.title.length <= 200 &&
+    workText(v.description, 8000) &&
+    v.description.length <= 8000 &&
+    workText(v.reason, 2000) &&
+    v.reason.trim().length > 0 &&
+    v.reason.length <= 2000 &&
+    (v.project_id === null || workId(v.project_id)) &&
+    (v.due === null || validWorkDue(v.due)) &&
+    Array.isArray(v.evidence) &&
+    v.evidence.length <= 10 &&
+    v.evidence.every(validAnswerCitation) &&
+    new Set(v.evidence.map(canonical)).size === v.evidence.length
+  );
+}
+export type ProposalChange = Change | SourceChange | WorkChange | ScheduleChange;
 export function validProposalChange(value: unknown): value is ProposalChange {
-  return validChange(value) || validSourceChange(value);
+  return validChange(value) || validSourceChange(value) || validWorkChange(value) || validScheduleChange(value);
 }
 
 export type CosResponse = {

@@ -9,5 +9,12 @@ export {
   type SourceChange,
 } from '../contracts/protocol.js';
 
-export type Context = { scopeId: string; ownerId: string; sessionId: string; agentGroupId: string; ingressId: string };
+export type Context = {
+  scopeId: string;
+  ownerId: string;
+  sessionId: string;
+  agentGroupId: string;
+  ingressId: string;
+  origin?: { kind: 'schedule'; runId: string; generation: number };
+};
 export type Result = { status: 'ok' | 'pending' | 'denied' | 'conflict' | 'unavailable'; [key: string]: unknown };

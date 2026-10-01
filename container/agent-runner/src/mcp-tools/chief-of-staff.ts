@@ -1,11 +1,19 @@
 import type { CosRequest, CosResponse } from './generated/cos-protocol.js';
-import { COS_PROTOCOL, COS_WAIT_MS, digest, validRequest, validResponse } from './generated/cos-protocol.js';
+import {
+  COS_PROTOCOL,
+  COS_WAIT_MS,
+  digest,
+  validRequest,
+  validResponse,
+  workChangeSchema,
+} from './generated/cos-protocol.js';
 import { openInboundDb } from '../db/connection.js';
 import { writeMessageOut } from '../db/messages-out.js';
 import { randomUUID } from 'node:crypto';
 import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
 import { answerDraftSchema } from './generated/answer-protocol.js';
+import { scheduleChangeSchema } from './generated/schedule-protocol.js';
 
 export async function executeCosRequest(
   request: CosRequest,
@@ -246,5 +254,104 @@ const calendarTool: McpToolDefinition = {
     return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
   },
 };
-export const cosTools: McpToolDefinition[] = [...priorityTools, ...knowledgeTools, ...answerTools, calendarTool];
+const workTools: McpToolDefinition[] = (
+  ['cos_work_change_propose', 'cos_brief_schedule_propose'] as const
+).map<McpToolDefinition>((method) => ({
+  tool: {
+    name: method,
+    description:
+      method === 'cos_work_change_propose'
+        ? 'Propose a commitment or decision, or an exact versioned edit, completion, deferral or dismissal. Suggestions remain proposals until the owner confirms the exact change. An urgency label never grants approval. Supply checked evidence references and preserve date versus instant semantics.'
+        : 'Propose the private daily or weekday brief schedule, or an exact versioned pause, resume, snooze or policy edit. Read the existing brief_schedules entry in cos_context_get before editing. Only owner confirmation grants this bounded schedule. Approval cannot activate a disabled connector, model allowance or foreign destination. Quiet hours and once-per-local-date delivery apply.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['change'],
+      properties: {
+        request_id: { type: 'string', format: 'uuid' },
+        change: method === 'cos_work_change_propose' ? workChangeSchema : scheduleChangeSchema,
+      },
+    },
+  },
+  async handler(args) {
+    const requestId = typeof args.request_id === 'string' ? args.request_id : randomUUID();
+    const result =
+      Object.keys(args).some((key) => !['request_id', 'change'].includes(key)) ||
+      (args.request_id !== undefined && typeof args.request_id !== 'string')
+        ? { protocol: COS_PROTOCOL, request_id: requestId, status: 'denied' }
+        : await executeCosRequest({
+            protocol: COS_PROTOCOL,
+            request_id: requestId,
+            method,
+            params: { change: args.change },
+          });
+    return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
+  },
+}));
+const workReadTool: McpToolDefinition = {
+  tool: {
+    name: 'cos_work_read',
+    description:
+      'Read owner-confirmed commitments and decisions. Use view open for currently actionable work or all for resolved/deferred work. Pages contain at most five summaries; follow next_offset. For full details or immutable history use record_id and optional version, without view/offset. Read the current version before proposing a disposition. Revoked evidence is withheld even from historical views.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        view: { type: 'string', enum: ['open', 'all'] },
+        offset: { type: 'integer', minimum: 0, maximum: 10000 },
+        record_id: { type: 'string', pattern: '^[a-zA-Z0-9_-]{1,100}$' },
+        version: { type: 'integer', minimum: 1 },
+      },
+      anyOf: [{ required: ['view'] }, { required: ['record_id'] }],
+    },
+  },
+  async handler(args) {
+    const value = await executeCosRequest({
+      protocol: COS_PROTOCOL,
+      request_id: randomUUID(),
+      method: 'cos_work_read',
+      params: args,
+    });
+    return { content: [{ type: 'text' as const, text: JSON.stringify(value) }] };
+  },
+};
+const briefTool: McpToolDefinition = {
+  tool: {
+    name: 'cos_brief_request',
+    description:
+      'Prepare a bounded, checked daily brief with time_zone, or read an immutable historical brief with artifact_id. Preserve request_id on retries. Calendar coverage, exact evidence versions and up to three attention items are included. Return the host text exactly when publishing; follow-ups remain owner-approved proposals. Scheduled requests must use the approved schedule timezone.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        request_id: { type: 'string', format: 'uuid' },
+        time_zone: { type: 'string', maxLength: 100, description: 'IANA timezone; omit when reading artifact_id.' },
+        artifact_id: { type: 'string', pattern: '^[a-f0-9]{64}-[a-f0-9]{64}$' },
+      },
+      oneOf: [{ required: ['time_zone'] }, { required: ['artifact_id'] }],
+    },
+  },
+  async handler(args) {
+    const requestId = typeof args.request_id === 'string' ? args.request_id : randomUUID();
+    const result =
+      args.request_id !== undefined && typeof args.request_id !== 'string'
+        ? { protocol: COS_PROTOCOL, request_id: requestId, status: 'denied' }
+        : await executeCosRequest({
+            protocol: COS_PROTOCOL,
+            request_id: requestId,
+            method: 'cos_brief_request',
+            params: Object.fromEntries(Object.entries(args).filter(([key]) => key !== 'request_id')),
+          });
+    return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
+  },
+};
+export const cosTools: McpToolDefinition[] = [
+  ...priorityTools,
+  ...knowledgeTools,
+  ...answerTools,
+  calendarTool,
+  ...workTools,
+  workReadTool,
+  briefTool,
+];
 if (process.env.NANOCLAW_COS_PROTOCOL === COS_PROTOCOL) registerTools(cosTools);
