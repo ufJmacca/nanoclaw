@@ -1,3 +1,4 @@
+import { interruptScheduledOrigin, scheduledContext } from '../automation/scheduled-origin.js';
 import type Database from 'better-sqlite3';
 import type { Session } from '../../../types.js';
 import type { InboundEvent } from '../../../channels/adapter.js';
@@ -18,6 +19,7 @@ export type ControllerDependencies = {
   project(session: Session, event: InboundEvent): void;
   wake(session: Session): Promise<void>;
   now?(): number;
+  verifyScheduled?(context: Context): Promise<boolean>;
 };
 export class CosController {
   constructor(readonly dependencies: ControllerDependencies) {}
@@ -33,6 +35,7 @@ export class CosController {
     const control = parseControl(verified.text);
     if (control?.kind === 'pause') {
       d.db.prepare('UPDATE cos_identity_boundaries SET paused=1 WHERE scope_id=?').run(binding.scopeId);
+      interruptScheduledOrigin(d.db, binding);
       d.stop(binding.sessionId);
       return true;
     }
@@ -75,6 +78,9 @@ export class CosController {
       };
     })();
     if (pending.payload_digest !== payloadDigest || pending.projected !== 0) return true;
+    // A new owner message preempts automation. Keep its local fence until the
+    // trusted scheduler durably reconciles the old run, including uncertain sends.
+    if (interruptScheduledOrigin(d.db, binding)) d.stop(binding.sessionId);
     // The receipt stays pending if writing native SQLite fails. Exact retries finish the
     // projection even after a crash between the two databases; native insertion is idempotent.
     // No attachments, reply redirection or generic command routing cross this boundary.
@@ -106,10 +112,12 @@ export class CosController {
     const d = this.dependencies;
     if (!d.enabled()) return null;
     const boundary = cosBoundary(session, d.db);
-    if (!boundary.restricted || !boundary.binding || boundary.paused || !boundary.ingressId || !boundary.ingressAt)
-      return null;
-    const now = d.now?.() ?? Date.now(),
-      at = Date.parse(boundary.ingressAt);
+    if (!boundary.restricted || !boundary.binding || boundary.paused) return null;
+    const now = d.now?.() ?? Date.now();
+    const scheduled = scheduledContext(session, d.db, now);
+    if (scheduled !== undefined) return scheduled;
+    if (!boundary.ingressId || !boundary.ingressAt) return null;
+    const at = Date.parse(boundary.ingressAt);
     if (!Number.isFinite(at) || at < now - 300_000 || at > now + 30_000) return null;
     const binding = boundary.binding;
     return {
@@ -130,6 +138,13 @@ export class CosController {
       !validPrivateChannel(boundary.binding, await this.dependencies.facts(boundary.binding))
     )
       return null;
+    if (context.origin) {
+      try {
+        if (!(await this.dependencies.verifyScheduled?.(context))) return null;
+      } catch {
+        return null;
+      }
+    }
     // A pause, disabled module or newer ingress may arrive during the remote check.
     const current = this.localContext(session);
     return current && digest(current) === digest(context) ? current : null;

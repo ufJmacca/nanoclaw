@@ -111,3 +111,33 @@ it('fails closed on revocation or transport failure and does not retry every sec
   }
   expect(f.verify).toHaveBeenCalledTimes(2);
 });
+
+it('requires a fresh durable reservation for scheduled attempts and rechecks local fencing', async () => {
+  const f = fixture();
+  f.set({ ...f.local()!, origin: { kind: 'schedule', runId: 'a'.repeat(64), generation: 1 } });
+  const reserve = vi.fn().mockResolvedValue(true);
+  const authorize = createTurnAuthorization({ local: f.local, verify: f.verify, reserve });
+  expect(await authorize.reserve!('attempt-1')).toBe(true);
+  expect(reserve).toHaveBeenCalledWith(f.local(), 'attempt-1');
+  reserve.mockResolvedValue(false);
+  expect(await authorize.reserve!('attempt-2')).toBe(false);
+  reserve.mockRejectedValue(Error('lost acknowledgement'));
+  expect(await authorize.reserve!('attempt-3')).toBe(false);
+  expect(await f.authorize.reserve!('missing-hook')).toBe(false);
+  reserve.mockImplementation(async () => {
+    f.set(null);
+    return true;
+  });
+  expect(await authorize.reserve!('raced')).toBe(false);
+});
+it('does not spend a scheduled budget for ordinary owner turns or failed fresh admission', async () => {
+  const f = fixture(),
+    reserve = vi.fn().mockResolvedValue(true);
+  const authorize = createTurnAuthorization({ local: f.local, verify: f.verify, reserve });
+  expect(await authorize.reserve!('ordinary')).toBe(true);
+  expect(reserve).not.toHaveBeenCalled();
+  f.set({ ...f.local()!, origin: { kind: 'schedule', runId: 'a'.repeat(64), generation: 1 } });
+  f.verify.mockResolvedValue(null);
+  expect(await authorize.reserve!('denied')).toBe(false);
+  expect(reserve).not.toHaveBeenCalled();
+});

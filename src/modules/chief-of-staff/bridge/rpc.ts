@@ -23,6 +23,7 @@ export function ensureRpcSchema(db: Database.Database): void {
 export function createRpcHandler(dependencies: {
   resolveContext(session: Session, db: Database.Database): Promise<Context | null>;
   store: PriorityStore;
+  reserveTool?(context: Context, callId: string): Promise<Result>;
   knowledge?: KnowledgeStore;
   resolveKnowledgeContext?(session: Session, context: Context, db: Database.Database): Promise<KnowledgeContext | null>;
 }): DeliveryActionHandler {
@@ -47,9 +48,21 @@ export function createRpcHandler(dependencies: {
       retainedContext = knowledgeContext;
       const access =
         dependencies.knowledge && knowledgeContext ? await dependencies.knowledge.contextReady(knowledgeContext) : null;
+      let reservation =
+        context?.origin && (!dependencies.knowledge || knowledgeContext) && (!access || access.status === 'ok')
+          ? ((await dependencies.reserveTool?.(
+              context,
+              'rpc-' + digest({ request_id: request.request_id, delivery_id: content.delivery_id }),
+            )) ?? { status: 'denied' as const })
+          : null;
+      if (reservation?.status === 'ok') {
+        const current = await dependencies.resolveContext(session, db);
+        if (!current || digest(current) !== digest(context)) reservation = { status: 'denied' };
+      }
       if (!context) result = { status: 'denied' };
       else if (dependencies.knowledge && !knowledgeContext) result = { status: 'denied' };
       else if (access && access.status !== 'ok') result = { status: access.status };
+      else if (reservation && reservation.status !== 'ok') result = { status: reservation.status };
       else if (request.method === 'cos_context_get') {
         result = await dependencies.store.context(context, knowledgeContext ?? undefined);
         if (result.status === 'ok')

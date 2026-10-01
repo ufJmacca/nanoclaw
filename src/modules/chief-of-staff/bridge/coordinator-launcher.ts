@@ -58,7 +58,8 @@ export function createCoordinatorLauncher(options: { targetRoot: string; db: Dat
       const admitted = activation(binding),
         release = currentRelease(),
         owner = subscriptionCoordinator();
-      if (!admitted || !release || !owner || binding.sessionId !== session.id || !(await authorize()))
+      const admittedIngress = await authorize();
+      if (!admitted || !release || !owner || binding.sessionId !== session.id || !admittedIngress)
         throw new Error('restricted_launch_denied');
       const { policy, retained } = admitted;
       const image = await selectReleaseImage(release, 'codex', { apt: [], npm: [] });
@@ -71,7 +72,7 @@ export function createCoordinatorLauncher(options: { targetRoot: string; db: Dat
       let entryClosed = false;
       const allowed = async () => {
         if (entryClosed || closed || subscriptionCoordinator() !== owner) return false;
-        if (!(await authorize('poll'))) return false;
+        if ((await authorize('poll')) !== admittedIngress) return false;
         const fresh = activation(binding);
         return (
           !entryClosed &&
@@ -113,7 +114,13 @@ export function createCoordinatorLauncher(options: { targetRoot: string; db: Dat
           authorize: allowed,
           reserve: async (attemptId) => {
             const ingress = await authorize();
-            return !!ingress && (await allowed()) && reserveSubscriptionAttempt(options.db, policy, ingress, attemptId);
+            return (
+              ingress === admittedIngress &&
+              (await allowed()) &&
+              (!authorize.reserve || (await authorize.reserve(attemptId))) &&
+              (await authorize()) === admittedIngress &&
+              reserveSubscriptionAttempt(options.db, policy, ingress, attemptId)
+            );
           },
         });
         const turnControl = turns;

@@ -327,3 +327,46 @@ describe('S02 knowledge RPC host authority', () => {
     expect(denied).not.toContain('private canary');
   });
 });
+
+it('S04 gates every scheduled tool dispatch on durable budget authority, including ambiguous reservations', async () => {
+  const f = fixture(),
+    delivery_id = '22222222-2222-4222-8222-222222222222';
+  const context = {
+    scopeId: 'fixture',
+    ownerId: 'owner',
+    sessionId: 'session',
+    agentGroupId: 'group',
+    ingressId: 'scheduled',
+    origin: { kind: 'schedule' as const, runId: 'a'.repeat(64), generation: 1 },
+  };
+  f.resolveContext.mockResolvedValue(context);
+  const reserveTool = vi.fn().mockResolvedValue({ status: 'pending' });
+  const handler = createRpcHandler({
+    resolveContext: f.resolveContext,
+    store: f.store as unknown as PriorityStore,
+    reserveTool,
+  });
+  const call = async () => {
+    await handler({ action: 'cos_rpc', request, delivery_id }, {} as Session, f.db);
+    return JSON.parse((f.db.prepare('SELECT response FROM cos_rpc_responses').get() as { response: string }).response);
+  };
+  expect((await call()).status).toBe('pending');
+  expect(f.store.context).not.toHaveBeenCalled();
+  expect(reserveTool).toHaveBeenCalledWith(context, expect.stringMatching(/^rpc-[a-f0-9]{64}$/));
+  reserveTool.mockResolvedValue({ status: 'ok' });
+  expect((await call()).status).toBe('ok');
+  expect(f.store.context).toHaveBeenCalledOnce();
+  reserveTool.mockResolvedValue({ status: 'denied' });
+  expect((await call()).status).toBe('denied');
+  expect(f.store.context).toHaveBeenCalledOnce();
+  reserveTool.mockImplementation(async () => {
+    f.resolveContext.mockResolvedValue(null);
+    return { status: 'ok' };
+  });
+  expect((await call()).status).toBe('denied');
+  expect(f.store.context).toHaveBeenCalledOnce();
+  f.resolveContext.mockResolvedValue(context);
+  const noHook = createRpcHandler({ resolveContext: f.resolveContext, store: f.store as unknown as PriorityStore });
+  await noHook({ action: 'cos_rpc', request, delivery_id }, {} as Session, f.db);
+  expect(f.store.context).toHaveBeenCalledOnce();
+});

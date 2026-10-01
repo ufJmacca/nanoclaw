@@ -12,6 +12,8 @@ import type { PriorityStore } from './store/priorities.js';
 import { createCosRuntime } from './runtime.js';
 import { randomUUID } from 'node:crypto';
 import { ensureConversationSchema } from './bridge/conversation-state.js';
+import { installScheduledOrigin } from './automation/scheduled-origin.js';
+import type { TurnAuthorization } from './bridge/turn-authorization.js';
 import { digest } from './domain/contracts.js';
 
 let runtime: ReturnType<typeof createCosRuntime> | undefined;
@@ -293,4 +295,98 @@ it('S02 processes due retention work while paused without admitting ordinary out
   expect(pendingOutbox).not.toHaveBeenCalled();
   expect(wake).not.toHaveBeenCalled();
   expect(db.prepare('SELECT paused FROM cos_identity_boundaries').get()).toEqual({ paused: 1 });
+});
+
+it('S04 wires shared-context scheduled admission and model budgets while withholding ordinary chat publication', async () => {
+  const db = initTestDb();
+  const binding: CosBinding = {
+    scopeId: 'scope',
+    agentGroupId: 'group',
+    messagingGroupId: 'mg',
+    sessionId: 'session',
+    provider: 'codex',
+    instanceId: 'fixture',
+    channelId: 'private',
+    ownerId: 'owner',
+    botId: 'bot',
+  };
+  const session = {
+    id: 'session',
+    agent_group_id: 'group',
+    messaging_group_id: 'mg',
+    thread_id: null,
+    status: 'active',
+    agent_provider: 'codex',
+  } as Session;
+  installCosBoundary(binding, db);
+  db.exec('UPDATE cos_identity_boundaries SET paused=0');
+  ensureConversationSchema(db);
+  const generation = randomUUID();
+  db.prepare(
+    "INSERT INTO cos_conversation_states(scope_id,binding_digest,account_fingerprint,generation,status,updated_at) VALUES(?,?,?,?,'active',?)",
+  ).run(binding.scopeId, digest(binding), 'a'.repeat(64), generation, new Date().toISOString());
+  const lease = {
+    runId: 'b'.repeat(64),
+    generation: 1,
+    hostId: 'host',
+    deadlineAt: new Date(Date.now() + 120000).toISOString(),
+  };
+  expect(installScheduledOrigin(db, binding, session, lease)).toBe(true);
+  const briefs = {
+    authorize: vi.fn().mockResolvedValue({ status: 'ok' }),
+    reserveCall: vi.fn().mockResolvedValue({ status: 'ok' }),
+  };
+  const knowledge = {
+    contextReady: vi.fn().mockResolvedValue({ status: 'ok' }),
+    answers: { authorizePublication: vi.fn().mockResolvedValue({ status: 'ok' }) },
+  };
+  let authorize!: TurnAuthorization;
+  runtime = createCosRuntime({
+    db,
+    enabled: true,
+    store: { briefs, knowledge, context: vi.fn().mockResolvedValue({ status: 'ok' }) } as unknown as PriorityStore,
+    facts: async () => ({
+      id: 'private',
+      type: 'P',
+      delete_at: 0,
+      members: ['bot', 'owner'],
+      activeSubscription: true,
+    }),
+    session: () => session,
+    destination: () => undefined,
+    stop: vi.fn(),
+    wake: vi.fn(),
+    launcher: {
+      ready: () => true,
+      prepare: async (_binding, _session, check) => {
+        authorize = check;
+        return {} as CosLaunch;
+      },
+    },
+  });
+  await prepareCosLaunch(session);
+  expect(await authorize()).toBe(`brief:${lease.runId}:1`);
+  expect(knowledge.contextReady).toHaveBeenCalledWith(expect.objectContaining({ sessionId: 'session', generation }));
+  expect(await authorize.reserve!('attempt')).toBe(true);
+  expect(briefs.reserveCall).toHaveBeenCalledWith(
+    expect.objectContaining({ origin: { kind: 'schedule', runId: lease.runId, generation: 1 } }),
+    lease.runId,
+    1,
+    'model',
+    'attempt',
+  );
+  briefs.reserveCall.mockResolvedValue({ status: 'pending' });
+  expect(await authorize.reserve!('lost')).toBe(false);
+  expect(
+    await permitCosOutbound(session, {
+      kind: 'chat',
+      channel_type: 'mattermost',
+      platform_id: 'mattermost:fixture:private',
+      thread_id: null,
+      content: JSON.stringify({ text: 'Untracked scheduled brief' }),
+    }),
+  ).toBe(false);
+  expect(knowledge.answers.authorizePublication).not.toHaveBeenCalled();
+  briefs.authorize.mockResolvedValue({ status: 'denied' });
+  expect(await authorize()).toBeNull();
 });

@@ -74,14 +74,17 @@ describe('S01 coordinator admission', () => {
       };
       fs.writeFileSync(path.join(target, 'model-activation.json'), JSON.stringify(policy), { mode: 0o600 });
       expect(launcher.ready(binding)).toBe(true);
-      const authorize = vi.fn(async (_mode?: 'poll'): Promise<string | null> => 'ingress');
+      const reserve = vi.fn().mockResolvedValue(false);
+      const authorize = Object.assign(
+        vi.fn(async (_mode?: 'poll'): Promise<string | null> => 'ingress'),
+        { reserve },
+      );
       const launch = await launcher.prepare(binding, { id: 'session' } as Session, authorize);
       expect(launch.args).toContain(`type=bind,src=${context.directory},dst=/home/node/.codex`);
       expect(launch.args.some((arg) => arg.includes('dst=/run/cos/turn.sock'))).toBe(true);
       expect(launch.args.join(' ')).not.toContain('fixture-access');
       expect(launcher.context(binding)).toEqual(context);
-      // A still-valid polling snapshot must not admit a new turn after remote revocation.
-      authorize.mockImplementation(async (mode) => (mode === 'poll' ? 'ingress' : null));
+
       const turnSocket = path.join(
         target,
         fs
@@ -89,15 +92,25 @@ describe('S01 coordinator admission', () => {
           .find((entry) => entry.isDirectory() && entry.name.startsWith('model-'))!.name,
         'turn.sock',
       );
-      const status = await new Promise<number | undefined>((resolve, reject) => {
-        const request = http.request({ socketPath: turnSocket, path: '/begin', method: 'POST' }, (response) => {
-          response.resume();
-          response.once('end', () => resolve(response.statusCode));
+      const begin = () =>
+        new Promise<number | undefined>((resolve, reject) => {
+          const request = http.request({ socketPath: turnSocket, path: '/begin', method: 'POST' }, (response) => {
+            response.resume();
+            response.once('end', () => resolve(response.statusCode));
+          });
+          request.once('error', reject);
+          request.end(JSON.stringify({ attemptId: randomUUID() }));
         });
-        request.once('error', reject);
-        request.end(JSON.stringify({ attemptId: randomUUID() }));
-      });
-      expect(status).toBe(403);
+      expect(await begin()).toBe(403);
+      expect(reserve).toHaveBeenCalledOnce();
+      // Polling success cannot admit a new turn after a fresh check denies it.
+      authorize.mockImplementation(async (mode) => (mode === 'poll' ? 'ingress' : null));
+      expect(await begin()).toBe(403);
+      // A running container cannot transfer its allowance to a different origin.
+      authorize.mockResolvedValue('new-ingress');
+      reserve.mockResolvedValue(true);
+      expect(await begin()).toBe(403);
+      expect(reserve).toHaveBeenCalledOnce();
       launcher.invalidate(binding.scopeId);
       expect(launcher.ready(binding)).toBe(false);
     } finally {

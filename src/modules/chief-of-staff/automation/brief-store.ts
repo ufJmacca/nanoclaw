@@ -137,7 +137,7 @@ export class BriefRunStore {
     return (
       (
         await client.query(
-          `SELECT * FROM cos.brief_runs WHERE scope_id=$1 AND id=$2 AND schedule_id=$3 AND schedule_version=$4 AND owner_id=$5 AND session_id=$6 AND agent_group_id=$7 AND deadline_at>clock_timestamp() FOR UPDATE`,
+          `SELECT *,lease_until>clock_timestamp() AS lease_current FROM cos.brief_runs WHERE scope_id=$1 AND id=$2 AND schedule_id=$3 AND schedule_version=$4 AND owner_id=$5 AND session_id=$6 AND agent_group_id=$7 AND deadline_at>clock_timestamp() FOR UPDATE`,
           [
             context.scopeId,
             runId,
@@ -157,7 +157,7 @@ export class BriefRunStore {
       const run = await this.currentRun(client, context, runId);
       if (!run || !['queued', 'dispatched'].includes(run.state)) return { status: 'denied' };
       if (run.state === 'dispatched')
-        return run.lease_owner === hostId
+        return run.lease_owner === hostId && run.lease_current
           ? { status: 'ok', generation: run.generation, deadline_at: safeRun(run).deadline_at }
           : { status: 'denied' };
       const updated = (
@@ -167,6 +167,36 @@ export class BriefRunStore {
         )
       ).rows[0];
       return { status: 'ok', generation: updated.generation, deadline_at: updated.deadline_at.toISOString() };
+    });
+  }
+  /** Fresh host admission, independent of any local projection or cached consent. */
+  async authorize(context: Context, runId: string, generation: number): Promise<Result> {
+    if (!id(runId) || !Number.isSafeInteger(generation) || generation < 1) return { status: 'denied' };
+    return this.transaction(context, async (client) => {
+      const run = await this.currentRun(client, context, runId);
+      return run && ['dispatched', 'prepared'].includes(run.state) && run.lease_current && run.generation === generation
+        ? { status: 'ok' }
+        : { status: 'denied' };
+    });
+  }
+  /** Owner preemption also reconciles obsolete revisions and ambiguous sends. */
+  async cancel(context: Context, runId: string, generation: number): Promise<Result> {
+    if (!id(runId) || !Number.isSafeInteger(generation) || generation < 1) return { status: 'denied' };
+    return this.transaction(context, async (client) => {
+      await this.schedule(client, context); // Same lock order as reservation, even when paused.
+      const run = (
+        await client.query(
+          'SELECT state FROM cos.brief_runs WHERE scope_id=$1 AND id=$2 AND generation=$3 AND owner_id=$4 AND session_id=$5 AND agent_group_id=$6 FOR UPDATE',
+          [context.scopeId, runId, generation, context.ownerId, context.sessionId, context.agentGroupId],
+        )
+      ).rows[0];
+      if (!run) return { status: 'denied' };
+      if (['queued', 'dispatched', 'prepared'].includes(run.state))
+        await this.settle(client, context.scopeId, runId, 'cancelled');
+      const current = (
+        await client.query('SELECT state FROM cos.brief_runs WHERE scope_id=$1 AND id=$2', [context.scopeId, runId])
+      ).rows[0];
+      return { status: 'ok', state: current.state };
     });
   }
   async reserveCall(
@@ -189,6 +219,7 @@ export class BriefRunStore {
       if (
         !run ||
         run.state !== 'dispatched' ||
+        !run.lease_current ||
         run.generation !== generation ||
         (kind === 'model' ? run.model_calls >= run.limits.max_turns : run.tool_calls >= run.limits.max_tool_calls)
       )

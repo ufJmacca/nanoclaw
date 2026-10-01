@@ -46,6 +46,10 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
     enabled,
     facts: d.facts,
     session: d.session,
+    verifyScheduled: async (context) =>
+      !!context.origin &&
+      !!d.store &&
+      (await d.store.briefs.authorize(context, context.origin.runId, context.origin.generation)).status === 'ok',
     decide: (...args) => (d.store ? d.store.decide(...args) : Promise.resolve({ status: 'unavailable' })),
     acknowledge: (proposal) => deletePendingApproval('cos-' + proposal),
     stop: d.stop,
@@ -113,6 +117,18 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
         session,
         createTurnAuthorization({
           local: () => controller.localContext(session),
+          reserve: async (context, attemptId) =>
+            !!context.origin &&
+            !!d.store &&
+            (
+              await d.store.briefs.reserveCall(
+                context,
+                context.origin.runId,
+                context.origin.generation,
+                'model',
+                attemptId,
+              )
+            ).status === 'ok',
           verify: async () => {
             const context = await controller.context(session);
             return context &&
@@ -136,7 +152,8 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
       return (
         !!context &&
         (purpose === 'rpc' ||
-          (typeof text === 'string' &&
+          (!context.origin &&
+            typeof text === 'string' &&
             (await d.store.context(context)).status === 'ok' &&
             (await knowledgeAllowed(session, context, text))))
       );
@@ -147,6 +164,10 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
       'cos_rpc',
       createRpcHandler({
         resolveContext: (session) => controller.context(session),
+        reserveTool: (context, callId) =>
+          context.origin && d.store
+            ? d.store.briefs.reserveCall(context, context.origin.runId, context.origin.generation, 'tool', callId)
+            : Promise.resolve({ status: 'denied' }),
         store: d.store!,
         knowledge: d.store!.knowledge,
         resolveKnowledgeContext: async (session, context) => resolveKnowledgeContext(session, context, d.db),

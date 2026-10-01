@@ -202,6 +202,12 @@ test('S04-T01/T02/T08 repeated wakes and restarted hosts reconcile one run and n
   const claim = await briefs.claim(context, run.id, 'host-a');
   assert.equal(claim.status, 'ok');
   assert.equal((await briefs.claim(context, run.id, 'host-b')).status, 'denied');
+  assert.equal((await briefs.authorize(context, run.id, Number(claim.generation))).status, 'ok');
+  assert.equal((await briefs.authorize(context, run.id, Number(claim.generation) + 1)).status, 'denied');
+  assert.equal(
+    (await briefs.authorize({ ...context, sessionId: 'foreign' }, run.id, Number(claim.generation))).status,
+    'denied',
+  );
   const generation = Number(claim.generation),
     call = randomUUID();
   assert.equal((await briefs.reserveCall(context, run.id, generation, 'model', call)).status, 'ok');
@@ -238,6 +244,10 @@ test('S04-T01/T02/T08 repeated wakes and restarted hosts reconcile one run and n
     'ok',
   );
   assert.equal((await briefs.claim(context, run.id, 'host-a')).status, 'denied');
+  assert.equal((await briefs.authorize(context, run.id, generation)).status, 'denied');
+  assert.equal((await briefs.cancel(context, run.id, generation + 1)).status, 'denied');
+  assert.deepEqual(await briefs.cancel(context, run.id, generation), { status: 'ok', state: 'uncertain' });
+  assert.deepEqual(await briefs.cancel(context, run.id, generation), { status: 'ok', state: 'uncertain' });
   assert.equal((await briefs.reserveDue(context)).run, null);
   assert.equal(
     (await pool.query('SELECT state FROM cos.brief_notifications WHERE scope_id=$1 AND run_id=$2', [scope, run.id]))
@@ -312,6 +322,13 @@ test('S04 run-store outage, lost reservation acknowledgement and expiry never re
   } finally {
     await faultyPool.end();
   }
+  await pool.query(
+    "UPDATE cos.brief_runs SET lease_until=clock_timestamp()-interval '1 second' WHERE scope_id=$1 AND id=$2",
+    [scope, run.id],
+  );
+  assert.equal((await briefs.authorize(context, run.id, generation)).status, 'denied');
+  assert.equal((await briefs.claim(context, run.id, 'host-recovered')).status, 'denied');
+  assert.equal((await briefs.reserveCall(context, run.id, generation, 'tool', randomUUID())).status, 'denied');
   await pool.query(
     "UPDATE cos.brief_runs SET deadline_at=clock_timestamp()-interval '1 second' WHERE scope_id=$1 AND id=$2",
     [scope, run.id],
