@@ -4,6 +4,10 @@ import { isArtifactIdentity } from '../knowledge/artifacts.js';
 import { digest } from '../domain/contracts.js';
 import type { Context, Result } from '../domain/contracts.js';
 import { planBriefOccurrence } from './schedule-policy.js';
+import { randomUUID } from 'node:crypto';
+import { snapshotWindow } from '../calendar/normalization.js';
+import { hasCalendarReadScope } from '../calendar/reader.js';
+import type { BriefRefreshPlan, BriefRefreshTarget } from './brief-refresh.js';
 const instant = (value: unknown) => (value instanceof Date ? value : new Date(String(value))).toISOString();
 const safeRun = (run: Record<string, unknown>) => ({
   ...run,
@@ -41,18 +45,27 @@ export class BriefRunStore {
     readonly database: BoundedDatabase,
     readonly options: { clock?: () => Date } = {},
   ) {}
-  private async transaction(context: Context, operation: (client: PoolClient) => Promise<Result>): Promise<Result> {
+  private async transaction(
+    context: Context,
+    operation: (client: PoolClient) => Promise<Result>,
+    signal?: AbortSignal,
+  ): Promise<Result> {
     try {
-      return await this.database.run(async (client) => {
-        await client.query('BEGIN');
-        const allowed = await client.query(
-          "SELECT 1 FROM cos.scopes WHERE id=$1 AND owner_id=$2 AND agent_group_id=$3 AND status='active' FOR SHARE",
-          [context.scopeId, context.ownerId, context.agentGroupId],
-        );
-        const result = allowed.rowCount ? await operation(client) : { status: 'denied' as const };
-        await client.query('COMMIT');
-        return result;
-      }, true);
+      return await this.database.run(
+        async (client) => {
+          await client.query('BEGIN');
+          const allowed = await client.query(
+            "SELECT 1 FROM cos.scopes WHERE id=$1 AND owner_id=$2 AND agent_group_id=$3 AND status='active' FOR SHARE",
+            [context.scopeId, context.ownerId, context.agentGroupId],
+          );
+          const result = allowed.rowCount ? await operation(client) : { status: 'denied' as const };
+          if (signal?.aborted) throw new DatabaseUnavailable('pending');
+          await client.query('COMMIT');
+          return result;
+        },
+        true,
+        signal,
+      );
     } catch (error) {
       if (error instanceof DatabaseUnavailable) return { status: error.code === 'pending' ? 'pending' : 'unavailable' };
       throw error;
@@ -416,6 +429,169 @@ export class BriefRunStore {
       ).rows[0];
       return { status: 'ok', run: safeRun(run), notification };
     });
+  }
+  private async refreshRun(client: PoolClient, context: Context, runId: string, generation: number) {
+    const run = await this.currentRun(client, context, runId);
+    return run?.state === 'dispatched' && run.lease_current && run.generation === generation ? run : null;
+  }
+  private async saveRefresh(client: PoolClient, context: Context, runId: string, refresh: BriefRefreshPlan) {
+    await client.query(
+      "UPDATE cos.brief_runs SET provenance=jsonb_set(provenance,'{refresh}',$3::jsonb),version=version+1,updated_at=clock_timestamp() WHERE scope_id=$1 AND id=$2",
+      [context.scopeId, runId, JSON.stringify(refresh)],
+    );
+  }
+  /** This persisted deadline is never recreated by a native retry or host restart. */
+  async beginRefresh(
+    context: Context,
+    runId: string,
+    generation: number,
+    provider: string,
+    signal?: AbortSignal,
+  ): Promise<Result> {
+    if (!id(runId) || !Number.isSafeInteger(generation) || generation < 1 || !['codex', 'claude'].includes(provider))
+      return { status: 'denied' };
+    return this.transaction(
+      context,
+      async (client) => {
+        const run = await this.refreshRun(client, context, runId, generation);
+        if (!run) return { status: 'denied' };
+        const now = (await client.query('SELECT clock_timestamp() AS at')).rows[0].at as Date;
+        let refresh = run.provenance.refresh as BriefRefreshPlan | undefined;
+        if (refresh && (refresh.provider !== provider || refresh.generation !== generation))
+          return { status: 'denied' };
+        if (!refresh) {
+          const seconds = run.limits.refresh_seconds;
+          if (!Number.isInteger(seconds) || seconds < 0 || seconds > 30) return { status: 'denied' };
+          const rows =
+            seconds === 0
+              ? []
+              : (
+                  await client.query(
+                    `SELECT b.id,b.version,b.time_zone,b.auth,b.permission_scopes,c.calendar_id FROM cos.calendar_bindings b CROSS JOIN LATERAL unnest(b.selected_calendar_ids) AS c(calendar_id) WHERE b.scope_id=$1 AND $2=ANY(b.processing_providers) ORDER BY b.id,c.calendar_id LIMIT 11`,
+                    [context.scopeId, provider],
+                  )
+                ).rows;
+          const targets: BriefRefreshTarget[] = rows
+            .slice(0, 10)
+            .filter((row) => row.auth === 'ready' && hasCalendarReadScope(row.permission_scopes))
+            .map((row) => ({
+              binding_id: row.id,
+              binding_version: row.version,
+              calendar_id: row.calendar_id,
+              snapshot_id: randomUUID(),
+              window: snapshotWindow(now.toISOString(), row.time_zone),
+              state: 'pending',
+            }));
+          refresh = {
+            version: 1,
+            provider,
+            generation,
+            started_at: now.toISOString(),
+            deadline_at: new Date(Math.min(run.deadline_at.getTime(), now.getTime() + seconds * 1000)).toISOString(),
+            state: seconds === 0 || rows.length === 0 ? 'not_requested' : targets.length ? 'running' : 'failed',
+            truncated: rows.length > 10,
+            unavailable: Math.min(rows.length, 10) - targets.length,
+            targets,
+          };
+          await this.saveRefresh(client, context, runId, refresh);
+        }
+        const remaining = Math.max(0, Date.parse(refresh.deadline_at) - now.getTime());
+        if (refresh.state === 'running' && remaining === 0) {
+          refresh.state = 'timed_out';
+          await this.saveRefresh(client, context, runId, refresh);
+        }
+        return { status: 'ok', refresh, remaining_ms: remaining };
+      },
+      signal,
+    );
+  }
+  async recordRefreshTarget(
+    context: Context,
+    runId: string,
+    generation: number,
+    snapshotId: string,
+    outcome: 'complete' | 'failed' | 'uncertain',
+    signal?: AbortSignal,
+  ): Promise<Result> {
+    if (
+      !id(runId) ||
+      !id(snapshotId) ||
+      !Number.isSafeInteger(generation) ||
+      generation < 1 ||
+      !['complete', 'failed', 'uncertain'].includes(outcome)
+    )
+      return { status: 'denied' };
+    return this.transaction(
+      context,
+      async (client) => {
+        const run = await this.refreshRun(client, context, runId, generation),
+          refresh = run?.provenance.refresh as BriefRefreshPlan | undefined;
+        const target = refresh?.targets.find((t) => t.snapshot_id === snapshotId);
+        if (!refresh || refresh.state !== 'running' || !target) return { status: 'denied' };
+        const snapshot = (
+          await client.query(
+            'SELECT status,coverage_window,completed_at FROM cos.calendar_snapshots WHERE scope_id=$1 AND binding_id=$2 AND calendar_id=$3 AND id=$4 AND binding_version=$5',
+            [context.scopeId, target.binding_id, target.calendar_id, snapshotId, target.binding_version],
+          )
+        ).rows[0];
+        const complete = snapshot?.status === 'complete' && digest(snapshot.coverage_window) === digest(target.window);
+        if (outcome === 'complete' && !complete) return { status: 'denied' };
+        if (target.state !== 'complete') {
+          target.state = complete ? 'complete' : outcome;
+          if (complete) target.completed_at = instant(snapshot.completed_at);
+        }
+        await this.saveRefresh(client, context, runId, refresh);
+        return { status: 'ok', refresh };
+      },
+      signal,
+    );
+  }
+  async finishRefresh(
+    context: Context,
+    runId: string,
+    generation: number,
+    forced?: 'failed' | 'timed_out',
+    signal?: AbortSignal,
+  ): Promise<Result> {
+    if (
+      !id(runId) ||
+      !Number.isSafeInteger(generation) ||
+      generation < 1 ||
+      (forced !== undefined && !['failed', 'timed_out'].includes(forced))
+    )
+      return { status: 'denied' };
+    return this.transaction(
+      context,
+      async (client) => {
+        const run = await this.refreshRun(client, context, runId, generation),
+          refresh = run?.provenance.refresh as BriefRefreshPlan | undefined;
+        if (!refresh) return { status: 'denied' };
+        if (refresh.state !== 'running') return { status: 'ok', refresh };
+        const now = (await client.query('SELECT clock_timestamp() AS at')).rows[0].at as Date;
+        if (
+          refresh.targets.some((t) => t.state === 'pending') &&
+          !forced &&
+          Date.parse(refresh.deadline_at) > now.getTime()
+        )
+          return { status: 'denied' };
+        refresh.state =
+          refresh.targets.every(
+            (t) =>
+              t.state === 'complete' &&
+              !!t.completed_at &&
+              Date.parse(t.completed_at) <= Date.parse(refresh.deadline_at),
+          ) &&
+          !refresh.truncated &&
+          !refresh.unavailable
+            ? 'complete'
+            : forced === 'timed_out' || Date.parse(refresh.deadline_at) <= now.getTime()
+              ? 'timed_out'
+              : 'failed';
+        await this.saveRefresh(client, context, runId, refresh);
+        return { status: 'ok', refresh };
+      },
+      signal,
+    );
   }
   async reserveCall(
     context: Context,

@@ -8,6 +8,7 @@ import { installScheduledOrigin, readScheduledLease, scheduledContext } from './
 
 export type DispatchBriefRun = NativeBriefRun & {
   state: string;
+  generation: number;
   limits: { refresh_seconds: number };
   deadline_at: string;
 };
@@ -19,7 +20,7 @@ type Dependencies = {
   running(sessionId: string): boolean;
   withTasks<T>(session: Session, operation: (tasks: NativeBriefTasks) => Promise<T>): Promise<T>;
   /** Complete bounded refresh/admission before installing a scheduled model origin. */
-  prepare(binding: CosBinding, context: Context, run: DispatchBriefRun): Promise<boolean>;
+  prepare(binding: CosBinding, context: Context, run: DispatchBriefRun): Promise<Result>;
   wake(session: Session): Promise<void>;
 };
 
@@ -85,7 +86,16 @@ export class BriefDispatch {
           return settled.status === 'ok' ? { status: 'denied' } : settled;
         };
         if (!unchanged() || !idle(run.id)) return await cancel();
-        if (!existing && !(await d.prepare(binding, context, run))) return await cancel();
+        if (!existing) {
+          const prepared = await d.prepare(binding, context, {
+            ...run,
+            generation: lease.generation,
+            deadline_at: lease.deadlineAt,
+          });
+          if (!unchanged() || !idle(run.id)) return await cancel();
+          if (['pending', 'unavailable'].includes(prepared.status)) return prepared;
+          if (prepared.status !== 'ok') return await cancel();
+        }
         if (!(await d.admitted(binding)) || !unchanged() || !idle(run.id)) return await cancel();
         if (!tasks.stage(binding, run) || !installScheduledOrigin(d.db, binding, session, lease)) return await cancel();
         const current = () => {

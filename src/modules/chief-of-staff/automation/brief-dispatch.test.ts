@@ -69,7 +69,7 @@ function fixture() {
     admitted = vi.fn(async () => true),
     running = vi.fn(() => false),
     wake = vi.fn(async () => {});
-  const prepare = vi.fn(async () => true);
+  const prepare = vi.fn(async (): Promise<Result> => ({ status: 'ok' }));
   const dependencies = {
     db,
     runs,
@@ -134,7 +134,7 @@ it.each(['claim', 'prepare', 'authorize'])('S04 owner ingress during %s prevents
   if (phase === 'prepare')
     f.prepare.mockImplementation(async () => {
       change();
-      return true;
+      return { status: 'ok' };
     });
   if (phase === 'authorize')
     f.runs.authorize.mockImplementation(async () => {
@@ -156,15 +156,46 @@ it('S04 unknown claim acknowledgement creates no runnable native task or new loc
 });
 it('S04 preparation failure and terminal native tasks cannot be bypassed by wake retries', async () => {
   const f = fixture();
-  f.prepare.mockResolvedValue(false);
+  f.prepare.mockResolvedValue({ status: 'denied' });
   await f.dispatch.drain(f.binding);
   expect(f.wake).not.toHaveBeenCalled();
   expect(f.runs.cancel).toHaveBeenCalled();
-  f.prepare.mockResolvedValue(true);
+  f.prepare.mockResolvedValue({ status: 'ok' });
   f.run.state = 'queued';
   f.tasks.stage(f.binding, f.run);
   f.tasks.cancel(f.binding, f.run);
   await f.dispatch.drain(f.binding);
   expect(f.wake).not.toHaveBeenCalled();
   expect(f.tasks.state(f.binding, f.run)).toBe('completed');
+});
+
+it.each(['pending', 'unavailable'] as const)(
+  'S04 %s refresh preparation preserves the claimed run for recovery without local authority',
+  async (status) => {
+    const f = fixture();
+    f.prepare.mockResolvedValueOnce({ status });
+    expect((await f.dispatch.drain(f.binding)).status).toBe(status);
+    expect(f.runs.cancel).not.toHaveBeenCalled();
+    expect(f.wake).not.toHaveBeenCalled();
+    expect(f.tasks.state(f.binding, f.run)).toBeNull();
+    expect(readScheduledLease(f.db, f.binding)).toBeNull();
+    const deadline = f.run.deadline_at;
+    expect((await new BriefDispatch(f.dependencies).drain(f.binding)).status).toBe('ok');
+    expect(f.prepare).toHaveBeenLastCalledWith(
+      f.binding,
+      expect.anything(),
+      expect.objectContaining({ id: f.run.id, generation: 1, deadline_at: deadline }),
+    );
+    expect(f.wake).toHaveBeenCalledOnce();
+  },
+);
+it('S04 owner preemption takes precedence over a pending preparation result', async () => {
+  const f = fixture();
+  f.prepare.mockImplementation(async () => {
+    f.db.exec("UPDATE cos_identity_boundaries SET ingress_id='new-owner'");
+    return { status: 'pending' };
+  });
+  expect((await f.dispatch.drain(f.binding)).status).toBe('denied');
+  expect(f.runs.cancel).toHaveBeenCalledOnce();
+  expect(f.wake).not.toHaveBeenCalled();
 });

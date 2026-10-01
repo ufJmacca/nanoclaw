@@ -164,12 +164,12 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
         },
         prepare: async (binding, context, run) => {
           // Refresh-enabled schedules remain closed until the bounded connector path is installed.
-          if (run.limits.refresh_seconds !== 0 || !d.store?.knowledge) return false;
+          if (run.limits.refresh_seconds !== 0 || !d.store?.knowledge) return { status: 'denied' };
           const session = d.session(binding.sessionId),
             boundary = session && cosBoundary(session, d.db);
-          if (!session || !boundary?.restricted || !boundary.ingressId) return false;
+          if (!session || !boundary?.restricted || !boundary.ingressId) return { status: 'denied' };
           const retained = resolveKnowledgeContext(session, { ...context, ingressId: boundary.ingressId }, d.db);
-          return !!retained && (await d.store.knowledge.contextReady(retained)).status === 'ok';
+          return retained ? await d.store.knowledge.contextReady(retained) : { status: 'denied' };
         },
         wake: d.wake,
       })

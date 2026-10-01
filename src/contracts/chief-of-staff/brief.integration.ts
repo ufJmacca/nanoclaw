@@ -22,7 +22,7 @@ import { KnowledgeArtifacts } from '../../modules/chief-of-staff/knowledge/artif
 import { KnowledgeStore } from '../../modules/chief-of-staff/knowledge/store.js';
 import { BriefRunStore } from '../../modules/chief-of-staff/automation/brief-store.js';
 import { digest } from '../../modules/chief-of-staff/domain/contracts.js';
-import type { ProposalChange } from '../../modules/chief-of-staff/domain/contracts.js';
+import type { ProposalChange, Result } from '../../modules/chief-of-staff/domain/contracts.js';
 import { BriefArtifacts } from '../../modules/chief-of-staff/automation/brief-artifacts.js';
 import { BriefCollector } from '../../modules/chief-of-staff/automation/brief-collector.js';
 import { BriefDelivery } from '../../modules/chief-of-staff/automation/brief-delivery.js';
@@ -36,6 +36,7 @@ import { initTestDb, closeDb } from '../../db/connection.js';
 import { INBOUND_SCHEMA } from '../../db/schema.js';
 import type { Session } from '../../types.js';
 import Database from 'better-sqlite3';
+import type { BriefRefreshPlan } from '../../modules/chief-of-staff/automation/brief-refresh.js';
 import type { WorkChange } from '../../modules/chief-of-staff/contracts/protocol.js';
 const scope = 'brief-' + randomUUID(),
   context = {
@@ -575,7 +576,7 @@ test('S04 recurring fixture: approved schedule, native restart, checked briefs a
     admitted: async () => true,
     running: () => false,
     withTasks: async <T>(_session: Session, op: (tasks: NativeBriefTasks) => Promise<T>) => op(tasks),
-    prepare: async () => true,
+    prepare: async (): Promise<Result> => ({ status: 'ok' }),
     wake: async () => {
       wakes++;
     },
@@ -730,6 +731,146 @@ test('S04 recurring fixture: approved schedule, native restart, checked briefs a
   } finally {
     inbound.close();
     closeDb();
+  }
+});
+
+test('S04 refresh plans preserve their original budget, selected calendars and snapshot identities', async () => {
+  const calendar = new CalendarStore(store.database),
+    binding = randomUUID();
+  assert.equal(
+    (
+      await calendar.bind(context, {
+        id: binding,
+        provider: 'fixture',
+        calendarIds: ['selected'],
+        scopes: [GOOGLE_EVENT_READ_SCOPE],
+        timeZone: 'UTC',
+        processingProviders: ['codex'],
+      })
+    ).status,
+    'ok',
+  );
+  const schedule = (await pool.query('SELECT * FROM cos.brief_schedules WHERE scope_id=$1', [scope])).rows[0];
+  await approve({
+    kind: 'brief_schedule',
+    title: 'Fixture refresh budget',
+    record_id: schedule.id,
+    expected_version: schedule.version,
+    reason: 'Fixture bounded refresh',
+    policy: schedule.policy,
+    limits: { ...schedule.limits, refresh_seconds: 20 },
+  });
+  const day = (
+    await pool.query('SELECT last_local_date::text AS day FROM cos.brief_schedules WHERE scope_id=$1', [scope])
+  ).rows[0].day;
+  const clock = new Date(day + 'T09:00:00Z');
+  clock.setUTCDate(clock.getUTCDate() + 1);
+  const runs = new BriefRunStore(store.database, { clock: () => clock }),
+    reserved = await runs.reserveDue(context),
+    run = reserved.run as { id: string; deadline_at: string };
+  const claim = await runs.claim(context, run.id, 'fixture-refresh-host');
+  assert.equal(claim.status, 'ok');
+  try {
+    const aborted = AbortSignal.abort();
+    assert.equal(
+      (await runs.beginRefresh(context, run.id, Number(claim.generation), 'codex', aborted)).status,
+      'unavailable',
+    );
+    assert.equal(
+      (
+        await pool.query("SELECT provenance->'refresh' AS refresh FROM cos.brief_runs WHERE scope_id=$1 AND id=$2", [
+          scope,
+          run.id,
+        ])
+      ).rows[0].refresh,
+      null,
+    );
+    const first = await runs.beginRefresh(context, run.id, Number(claim.generation), 'codex');
+    assert.equal(first.status, 'ok');
+    const plan = first.refresh as BriefRefreshPlan;
+    assert.equal(plan.state, 'running');
+    assert.equal(plan.targets.length, 1);
+    assert.ok(Date.parse(plan.deadline_at) <= Date.parse(run.deadline_at));
+    assert.ok(Number(first.remaining_ms) > 0 && Number(first.remaining_ms) <= 20000);
+    const restarted = await new BriefRunStore(store.database).beginRefresh(
+      context,
+      run.id,
+      Number(claim.generation),
+      'codex',
+    );
+    assert.deepEqual(restarted.refresh, plan);
+    assert.ok(Number(restarted.remaining_ms) <= Number(first.remaining_ms));
+    assert.equal(
+      (await runs.beginRefresh({ ...context, ownerId: 'foreign' }, run.id, Number(claim.generation), 'codex')).status,
+      'denied',
+    );
+    assert.equal(
+      (await runs.recordRefreshTarget(context, run.id, Number(claim.generation), randomUUID(), 'complete')).status,
+      'denied',
+    );
+    const target = plan.targets[0];
+    assert.equal(
+      (await runs.recordRefreshTarget(context, run.id, Number(claim.generation), target.snapshot_id, 'complete'))
+        .status,
+      'denied',
+    );
+    const fixture = fixtureCalendarReader({
+      access: {
+        generation: binding + ':1',
+        calendarIds: ['selected'],
+        scopes: [GOOGLE_EVENT_READ_SCOPE],
+        auth: 'ready',
+      },
+      calendars: { selected: [] },
+    });
+    assert.equal((await calendar.start(context, binding, 'selected', target.snapshot_id, target.window)).status, 'ok');
+    assert.equal(
+      (
+        await calendar.publish(
+          context,
+          binding,
+          target.snapshot_id,
+          await collectCalendarSnapshot(fixture.reader, 'selected', target.window),
+        )
+      ).status,
+      'ok',
+    );
+    assert.equal(
+      (await runs.recordRefreshTarget(context, run.id, Number(claim.generation), target.snapshot_id, 'uncertain'))
+        .status,
+      'ok',
+    );
+    assert.equal(
+      (await runs.finishRefresh(context, run.id, Number(claim.generation), undefined, aborted)).status,
+      'unavailable',
+    );
+    const finished = await runs.finishRefresh(context, run.id, Number(claim.generation));
+    assert.equal((finished.refresh as BriefRefreshPlan).state, 'complete');
+    assert.equal(
+      ((await runs.beginRefresh(context, run.id, Number(claim.generation), 'codex')).refresh as BriefRefreshPlan).state,
+      'complete',
+    );
+    await runs.cancel(context, run.id, Number(claim.generation));
+    clock.setUTCDate(clock.getUTCDate() + 1);
+    const next = (await runs.reserveDue(context)).run as { id: string };
+    const nextClaim = await runs.claim(context, next.id, 'fixture-refresh-host');
+    assert.equal((await runs.beginRefresh(context, next.id, Number(nextClaim.generation), 'codex')).status, 'ok');
+    await admin.query(
+      "UPDATE cos.brief_runs SET provenance=jsonb_set(provenance,'{refresh,deadline_at}',to_jsonb((clock_timestamp()-interval '1 second')::text)) WHERE scope_id=$1 AND id=$2",
+      [scope, next.id],
+    );
+    const expired = await runs.beginRefresh(context, next.id, Number(nextClaim.generation), 'codex');
+    assert.equal((expired.refresh as BriefRefreshPlan).state, 'timed_out');
+    assert.equal(expired.remaining_ms, 0);
+    await runs.cancel(context, next.id, Number(nextClaim.generation));
+  } finally {
+    await admin.query(
+      'UPDATE cos.calendar_states SET current_snapshot=NULL,last_attempt=NULL WHERE scope_id=$1 AND binding_id=$2',
+      [scope, binding],
+    );
+    await admin.query('DELETE FROM cos.calendar_snapshots WHERE scope_id=$1 AND binding_id=$2', [scope, binding]);
+    await admin.query('DELETE FROM cos.calendar_states WHERE scope_id=$1 AND binding_id=$2', [scope, binding]);
+    await admin.query('DELETE FROM cos.calendar_bindings WHERE scope_id=$1 AND id=$2', [scope, binding]);
   }
 });
 
