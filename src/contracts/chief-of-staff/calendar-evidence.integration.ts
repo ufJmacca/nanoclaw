@@ -101,8 +101,7 @@ const event = (summary: string) => ({
   start: { date: '2026-10-04' },
   end: { date: '2026-10-05' },
 });
-async function setup(summary: string) {
-  const id = randomUUID();
+async function setup(summary: string, id = randomUUID()) {
   assert.equal(
     (
       await calendar.bind(context, {
@@ -714,6 +713,10 @@ test('S03-T01/T05: a changed snapshot cannot publish a stale empty calendar view
   assert.equal(result.items, undefined);
 });
 test('S03-T05/T10: uncited calendar metadata fences future replies, including changes outside the displayed notice page', async () => {
+  // The maximal v4 UUID sorts after the earlier random v4 bindings. Keep the changed binding
+  // explicitly active; an arbitrary prior fixture may already be disconnected and reject start.
+  const outside = await setup('OutsideNoticePage', 'ffffffff-ffff-4fff-bfff-ffffffffffff');
+  await publish(outside);
   const ctx = fresh();
   assert.equal((await calendarView().coverage(ctx)).status, 'ok');
   const draft = {
@@ -726,12 +729,12 @@ test('S03-T05/T10: uncited calendar metadata fences future replies, including ch
   assert.equal(prepared.status, 'ok');
   assert.match(String(prepared.text), /Calendar coverage/);
   assert.match(String(prepared.text), /first 10/);
-  const rows = await pool.query(
-    'SELECT id FROM cos.calendar_bindings WHERE scope_id=$1 ORDER BY id OFFSET 10 LIMIT 1',
-    [scope],
+  const firstPage = await calendarView().coverage(fresh());
+  assert.equal(
+    (firstPage.items as Array<{ binding_id: string }>).some((row) => row.binding_id === outside.id),
+    false,
   );
-  assert.equal(rows.rowCount, 1);
-  await calendar.start(context, rows.rows[0].id, 'selected', randomUUID(), window);
+  assert.equal((await calendar.start(context, outside.id, 'selected', randomUUID(), window)).status, 'ok');
   assert.equal((await knowledge.contextReady(ctx)).status, 'denied');
   assert.equal((await knowledge.answers.prepare(ctx, randomUUID(), draft)).status, 'denied');
   assert.equal((await knowledge.answers.get(fresh(), String(prepared.artifact_id))).status, 'denied');

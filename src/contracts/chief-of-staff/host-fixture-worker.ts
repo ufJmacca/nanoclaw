@@ -8,10 +8,19 @@ import { fixtureDatabaseConfig, connectFixtureDatabase } from './fixture-databas
 import { BoundedDatabase } from '../../modules/chief-of-staff/store/client.js';
 import { PriorityStore } from '../../modules/chief-of-staff/store/priorities.js';
 import { connectionFault } from './connection-fault.js';
+import { CalendarStore } from '../../modules/chief-of-staff/calendar/store.js';
+import { CalendarAccessFences } from '../../modules/chief-of-staff/calendar/access-fences.js';
+import { CalendarView } from '../../modules/chief-of-staff/calendar/view.js';
 
 if (process.env.COS_FIXTURE_HOST_PROCESS !== 'S01' || !process.send) throw new Error('fixture_only');
 let handle: ((command: string, value: any) => Promise<unknown>) | undefined;
-async function start(input: { root: string; binding: CosBinding; ordinarySessionId: string; knowledgeRoot?: string }) {
+async function start(input: {
+  root: string;
+  binding: CosBinding;
+  ordinarySessionId: string;
+  knowledgeRoot?: string;
+  calendar?: boolean;
+}) {
   if (!path.isAbsolute(input.root) || !input.root.includes('/.cos-plan-state/fixtures/flow-'))
     throw new Error('fixture_root_required');
   process.chdir(input.root);
@@ -38,13 +47,36 @@ async function start(input: { root: string; binding: CosBinding; ordinarySession
   )
     throw new Error('fixture_knowledge_root_required');
   const database = new BoundedDatabase(new pg.Pool(relay.config), 600);
+  if (input.calendar && !input.knowledgeRoot) throw new Error('fixture_calendar_requires_knowledge_root');
+  const calendar = input.calendar ? new CalendarStore(database) : undefined;
+  const fences = input.calendar
+    ? new CalendarAccessFences(path.join(input.knowledgeRoot!, 'calendar-fences'))
+    : undefined;
   const knowledge = input.knowledgeRoot
     ? new KnowledgeStore(
         database,
         new KnowledgeArtifacts(path.join(input.knowledgeRoot, 'artifacts'), path.join(input.knowledgeRoot, 'staging')),
+        {},
+        {
+          calendarEnabled: () => !!calendar,
+          calendarAccess: (scope, binding) => {
+            if (!fences) return false;
+            fences.assertOpen(scope, binding);
+            return true;
+          },
+        },
       )
     : undefined;
-  const store = new PriorityStore(database, knowledge);
+  const view =
+    calendar && knowledge && fences
+      ? new CalendarView({
+          store: calendar,
+          knowledge,
+          enabled: () => true,
+          assertOpen: (scope, binding) => fences.assertOpen(scope, binding),
+        })
+      : undefined;
+  const store = new PriorityStore(database, knowledge, undefined, view);
   let crashAfterDecision = false;
   const decide = store.decide.bind(store);
   store.decide = async (...args: Parameters<PriorityStore['decide']>) => {

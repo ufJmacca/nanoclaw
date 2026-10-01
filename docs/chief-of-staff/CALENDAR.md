@@ -1,6 +1,6 @@
 # Calendar awareness implementation
 
-S03 is in progress. The calendar readers, snapshot collector, PostgreSQL snapshot store, guarded S02 evidence integration, host connector and bounded model read tool exist. Operator account linking and the complete preparation conversation remain pending. No real calendar account has been linked or queried.
+S03 is in progress. The calendar readers, snapshot collector, PostgreSQL snapshot store, guarded S02 evidence integration, host connector, bounded model read tool and offline preparation conversation exist. Operator account linking and final release acceptance remain pending. No real calendar account has been linked or queried.
 
 ## Read contract
 
@@ -50,7 +50,7 @@ The connector rereads scoped binding metadata before requests and after asynchro
 
 Before a provider check, the host takes a kernel lock and durably records that the check is in progress. Only the owning fence instance permits reads while that check runs. A settled check with no observed access loss removes the record; access loss or an interrupted check retains it. Failed denial writes also close the running process immediately. A reconstructed host refuses an interrupted check even if no denial file was successfully created. Such uncertainty requires a new authorised binding; startup never clears the record or replays the uncertain request. An actual killed-process test and a database-backed cached-answer test verify this behavior.
 
-These development components do not establish storage encryption, backup coverage or live readiness. Operator setup/storage verification, backup integration, the complete preparation conversation and final release acceptance remain required before calendar activation on the Pi.
+These development components do not establish storage encryption, backup coverage or live readiness. Operator setup/storage verification, backup integration and final release acceptance remain required before calendar activation on the Pi.
 
 ## Bounded model reads
 
@@ -65,3 +65,5 @@ For calendar preparation answers, `cos_answer_prepare` accepts `calendar: "cover
 Calendar views record a write-once, hash-only dependency for the native conversation generation before disclosing metadata. Subsequent answers inherit the checked notice even when they cite no event or omit the calendar option. Preparation, replay, historical reads and final publication recheck the dependency. Refreshes, local access loss, configuration changes or withdrawn evidence invalidate an exposed generation; a fresh generation is required. Dependencies include up to 100 selected-calendar entries across admitted bindings, including entries outside the ten-entry notice. Larger inventories fail closed rather than recording a partial dependency. This limit counts retained bindings, including disconnected ones.
 
 These checks pass database-backed tests for empty calendars, late revocation, unchanged replay, owner/provider isolation and changes outside the displayed notice page. The complete packaged preparation conversation and release acceptance remain pending.
+
+The registered offline demonstration, `pnpm cos:demo --slice S03 --fixture --db-profile test`, now exercises the preparation conversation through actual host routing, PostgreSQL, an isolated runner's MCP tools and private-channel fixture delivery. It includes an all-day event, timed meeting, moved recurring occurrence and cancellation on a Sydney daylight-saving transition day. It verifies checked citations and freshness, excludes unselected calendars, creates no inferred goals or commitments, retains answers across restart and reports unavailable coverage after disconnect and explicit fixture context recovery. Ordinary NanoClaw routing remains usable. `pnpm cos:test --slice S03 --db-profile test` includes the S01/S02 predecessor contracts and S03 calendar persistence/evidence/conversation tests. Both require the existing explicitly selected fixture image, host root and database environment. Development-source runs do not replace tests of the final immutable release images.
