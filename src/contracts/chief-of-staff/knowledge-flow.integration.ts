@@ -111,6 +111,8 @@ test(
         assert.deepEqual(listed.tools.map((t: { name: string }) => t.name).sort(), [
           'cos_answer_get',
           'cos_answer_prepare',
+          'cos_brief_request',
+          'cos_brief_schedule_propose',
           'cos_calendar_read',
           'cos_change_propose',
           'cos_context_get',
@@ -118,6 +120,8 @@ test(
           'cos_request_status',
           'cos_source_change_propose',
           'cos_source_get',
+          'cos_work_change_propose',
+          'cos_work_read',
         ]);
       };
       const ingress = async (text: string) => {

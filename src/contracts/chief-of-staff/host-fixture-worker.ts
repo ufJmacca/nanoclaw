@@ -1,5 +1,6 @@
 import path from 'node:path';
 import os from 'node:os';
+import fs from 'node:fs';
 import { KnowledgeStore } from '../../modules/chief-of-staff/knowledge/store.js';
 import { KnowledgeArtifacts } from '../../modules/chief-of-staff/knowledge/artifacts.js';
 import pg from 'pg';
@@ -11,6 +12,15 @@ import { connectionFault } from './connection-fault.js';
 import { CalendarStore } from '../../modules/chief-of-staff/calendar/store.js';
 import { CalendarAccessFences } from '../../modules/chief-of-staff/calendar/access-fences.js';
 import { CalendarView } from '../../modules/chief-of-staff/calendar/view.js';
+import { CalendarEvidence } from '../../modules/chief-of-staff/calendar/evidence.js';
+import { CalendarConnector } from '../../modules/chief-of-staff/calendar/connector.js';
+import { fixtureCalendarReader } from '../../modules/chief-of-staff/calendar/fixture-reader.js';
+import { renewBriefContext } from '../../modules/chief-of-staff/bridge/brief-context-renewal.js';
+import {
+  reserveSubscriptionAttempt,
+  subscriptionActivation,
+} from '../../modules/chief-of-staff/bridge/model-policy.js';
+import { readPrivate } from '../../modules/chief-of-staff/ops/target-state.js';
 
 if (process.env.COS_FIXTURE_HOST_PROCESS !== 'S01' || !process.send) throw new Error('fixture_only');
 let handle: ((command: string, value: any) => Promise<unknown>) | undefined;
@@ -20,6 +30,7 @@ async function start(input: {
   ordinarySessionId: string;
   knowledgeRoot?: string;
   calendar?: boolean;
+  brief?: { clock: string; events: unknown[] };
 }) {
   if (!path.isAbsolute(input.root) || !input.root.includes('/.cos-plan-state/fixtures/flow-'))
     throw new Error('fixture_root_required');
@@ -29,7 +40,7 @@ async function start(input: {
   const { getSession, getPendingApproval } = await import('../../db/sessions.js');
   const { getMessagingGroup } = await import('../../db/messaging-groups.js');
   const { sessionDir } = await import('../../session-manager.js');
-  const { openInboundDb } = await import('../../db/session-db.js');
+  const { openInboundDb, openOutboundDb, syncProcessingAcks } = await import('../../db/session-db.js');
   const { stopContainerAdmissions } = await import('../../container-runner.js');
   const { createCosRuntime } = await import('../../modules/chief-of-staff/runtime.js');
   const { setDeliveryAdapter, startDeliveryIntake, deliverSessionMessages, stopAndDrainDeliveryPolls } =
@@ -48,7 +59,23 @@ async function start(input: {
     throw new Error('fixture_knowledge_root_required');
   const database = new BoundedDatabase(new pg.Pool(relay.config), 600);
   if (input.calendar && !input.knowledgeRoot) throw new Error('fixture_calendar_requires_knowledge_root');
-  const calendar = input.calendar ? new CalendarStore(database) : undefined;
+  if (input.brief && (!input.calendar || !Number.isFinite(Date.parse(input.brief.clock))))
+    throw new Error('fixture_brief_requires_calendar_clock');
+  let fixtureClock = input.brief?.clock;
+  const calendar = input.calendar
+    ? new CalendarStore(
+        database,
+        {},
+        input.brief
+          ? new CalendarEvidence(
+              new KnowledgeArtifacts(
+                path.join(input.knowledgeRoot!, 'artifacts'),
+                path.join(input.knowledgeRoot!, 'staging'),
+              ),
+            )
+          : undefined,
+      )
+    : undefined;
   const fences = input.calendar
     ? new CalendarAccessFences(path.join(input.knowledgeRoot!, 'calendar-fences'))
     : undefined;
@@ -76,7 +103,29 @@ async function start(input: {
           assertOpen: (scope, binding) => fences.assertOpen(scope, binding),
         })
       : undefined;
-  const store = new PriorityStore(database, knowledge, undefined, view);
+  const connector =
+    input.brief && calendar && fences
+      ? new CalendarConnector({
+          store: calendar,
+          fences,
+          admitted: () => true,
+          fixtureReader: (binding) =>
+            fixtureCalendarReader({
+              access: {
+                generation: binding.id + ':' + binding.version,
+                calendarIds: binding.calendarIds,
+                scopes: binding.scopes,
+                auth: binding.auth,
+              },
+              calendars: { selected: input.brief!.events },
+            }).reader,
+        })
+      : undefined;
+  const store = new PriorityStore(database, knowledge, connector, view);
+  if (input.brief) {
+    store.briefs.options.clock = () => new Date(fixtureClock!);
+    store.briefArtifacts!.collector.options.clock = () => new Date(fixtureClock!);
+  }
   let crashAfterDecision = false;
   const decide = store.decide.bind(store);
   store.decide = async (...args: Parameters<PriorityStore['decide']>) => {
@@ -109,6 +158,30 @@ async function start(input: {
     destination: getMessagingGroup,
     stop: () => {},
     wake: async () => {},
+    ...(input.brief
+      ? {
+          running: () => false,
+          launcher: {
+            ready: () => true, // Synthetic provider only. prepare cannot launch a real model.
+            prepare: async () => {
+              throw new Error('fixture_native_provider_forbidden');
+            },
+            renewBriefContext: (currentBinding, request, current) =>
+              renewBriefContext(
+                {
+                  root: input.knowledgeRoot!,
+                  db,
+                  binding: currentBinding,
+                  accountFingerprint: 'a'.repeat(64),
+                  assertIdle() {
+                    if (!current()) throw new Error('fixture_context_changed');
+                  },
+                },
+                request,
+              ),
+          } satisfies import('../../modules/chief-of-staff/bridge/coordinator-launcher.js').CoordinatorLauncher,
+        }
+      : {}),
   });
   setDeliveryAdapter({
     deliver: async (type, platform, _thread, _kind, content, _files, id) => {
@@ -168,6 +241,63 @@ async function start(input: {
     if (command === 'pump') {
       await runtime.pump(binding);
       return true;
+    }
+    if (input.brief && command === 'clock') {
+      if (typeof value !== 'string' || !Number.isFinite(Date.parse(value))) throw new Error('fixture_clock_invalid');
+      fixtureClock = value;
+      return true;
+    }
+    if (input.brief && command === 'sync-acks') {
+      const directory = sessionDir(session.agent_group_id, session.id),
+        inbound = openInboundDb(path.join(directory, 'inbound.db')),
+        outbound = openOutboundDb(path.join(directory, 'outbound.db'));
+      try {
+        syncProcessingAcks(inbound, outbound);
+      } finally {
+        inbound.close();
+        outbound.close();
+      }
+      return true;
+    }
+    if (input.brief && command === 'brief-diagnostics') {
+      const directory = sessionDir(session.agent_group_id, session.id);
+      if (!fs.existsSync(path.join(directory, 'outbound.db')))
+        return {
+          isolated: directory.startsWith(input.root + '/'),
+          outboundExists: false,
+          inboundExists: fs.existsSync(path.join(directory, 'inbound.db')),
+        };
+      const inbound = openInboundDb(path.join(directory, 'inbound.db')),
+        outbound = openOutboundDb(path.join(directory, 'outbound.db'));
+      try {
+        return {
+          isolated: directory.startsWith(input.root + '/'),
+          context: !!(await runtime.controller.context(session)),
+          outbound: outbound.prepare('SELECT kind,count(*) AS n FROM messages_out GROUP BY kind').all(),
+          inbound: inbound.prepare('SELECT kind,status,count(*) AS n FROM messages_in GROUP BY kind,status').all(),
+        };
+      } finally {
+        inbound.close();
+        outbound.close();
+      }
+    }
+    if (input.brief && command === 'reserve-fixture-turn') {
+      const context = await runtime.controller.context(session);
+      if (!context?.origin || typeof value !== 'string') return false;
+      const reserved = await store.briefs.reserveCall(
+        context,
+        context.origin.runId,
+        context.origin.generation,
+        'model',
+        value,
+      );
+      if (reserved.status !== 'ok') return false;
+      const policy = subscriptionActivation(
+        readPrivate(path.join(input.knowledgeRoot!, 'model-activation.json')),
+        binding.scopeId,
+        'a'.repeat(64),
+      );
+      return !!policy && reserveSubscriptionAttempt(db, policy, context.ingressId, value);
     }
     if (command === 'approval') return getPendingApproval(value) ?? null;
     if (command === 'partition') {
