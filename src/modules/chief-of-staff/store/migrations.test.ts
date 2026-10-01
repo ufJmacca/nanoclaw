@@ -18,6 +18,10 @@ describe('S01-PG07 explicit checksummed migrations', () => {
     expect(calls.some((sql) => sql.includes('CREATE TABLE cos.calendar_bindings'))).toBe(true);
     expect(calls.some((sql) => sql.includes('CREATE TABLE cos.work_items'))).toBe(true);
     expect(calls.some((sql) => sql.includes('GRANT SELECT,INSERT ON cos.work_revisions'))).toBe(true);
+    expect(calls.some((sql) => sql.includes('CREATE TABLE cos.brief_schedules'))).toBe(true);
+    expect(calls.some((sql) => sql.includes('REVOKE UPDATE,DELETE,TRUNCATE ON cos.brief_schedule_revisions'))).toBe(
+      true,
+    );
     expect(calls.some((sql) => sql.includes('GRANT SELECT,INSERT,UPDATE,DELETE ON cos.calendar_bindings'))).toBe(true);
     expect(calls.some((sql) => sql.includes('pg_advisory_unlock'))).toBe(true);
   });

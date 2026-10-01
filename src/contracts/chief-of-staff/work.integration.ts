@@ -137,9 +137,10 @@ test('S04-T03 confirmed, completed, deferred and dismissed revisions retain exac
     record_id: id,
     expected_version: 1,
     state: 'deferred',
-    defer_until: '2026-10-06T00:00:00Z',
+    defer_until: new Date(Date.now() + 86400000).toISOString().replace(/\.\d{3}Z$/, 'Z'),
   });
   assert.equal(deferred.status, 'ok');
+  assert.ok(!((await store.readWork(context, { view: 'open' })).items as any[]).some((r) => r.id === id));
   assert.equal(
     (await approve({ ...change, record_id: id, expected_version: 1, state: 'completed' })).status,
     'conflict',

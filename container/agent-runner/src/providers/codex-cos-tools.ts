@@ -27,7 +27,10 @@ function requestFor(tool: unknown, args: unknown): CosRequest | null {
   if (!args || typeof args !== 'object' || Array.isArray(args)) return null;
   const values = args as Record<string, unknown>;
   const proposal =
-    tool === 'cos_change_propose' || tool === 'cos_source_change_propose' || tool === 'cos_work_change_propose';
+    tool === 'cos_change_propose' ||
+    tool === 'cos_source_change_propose' ||
+    tool === 'cos_work_change_propose' ||
+    tool === 'cos_brief_schedule_propose';
   const prepare = tool === 'cos_answer_prepare';
   const allowed =
     tool === 'cos_context_get'

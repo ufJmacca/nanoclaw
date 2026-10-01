@@ -13,6 +13,7 @@ import { randomUUID } from 'node:crypto';
 import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
 import { answerDraftSchema } from './generated/answer-protocol.js';
+import { scheduleChangeSchema } from './generated/schedule-protocol.js';
 
 export async function executeCosRequest(
   request: CosRequest,
@@ -253,16 +254,23 @@ const calendarTool: McpToolDefinition = {
     return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
   },
 };
-const workTool: McpToolDefinition = {
+const workTools: McpToolDefinition[] = (
+  ['cos_work_change_propose', 'cos_brief_schedule_propose'] as const
+).map<McpToolDefinition>((method) => ({
   tool: {
-    name: 'cos_work_change_propose',
+    name: method,
     description:
-      'Propose a commitment or decision, or an exact versioned edit, completion, deferral or dismissal. Suggestions remain proposals until the owner confirms the exact change. An urgency label never grants approval. Supply checked evidence references and preserve date versus instant semantics.',
+      method === 'cos_work_change_propose'
+        ? 'Propose a commitment or decision, or an exact versioned edit, completion, deferral or dismissal. Suggestions remain proposals until the owner confirms the exact change. An urgency label never grants approval. Supply checked evidence references and preserve date versus instant semantics.'
+        : 'Propose the private daily or weekday brief schedule, or an exact versioned pause, resume, snooze or policy edit. Read the existing brief_schedules entry in cos_context_get before editing. Only owner confirmation grants this bounded schedule. Approval cannot activate a disabled connector, model allowance or foreign destination. Quiet hours and once-per-local-date delivery apply.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
       required: ['change'],
-      properties: { request_id: { type: 'string', format: 'uuid' }, change: workChangeSchema },
+      properties: {
+        request_id: { type: 'string', format: 'uuid' },
+        change: method === 'cos_work_change_propose' ? workChangeSchema : scheduleChangeSchema,
+      },
     },
   },
   async handler(args) {
@@ -274,12 +282,12 @@ const workTool: McpToolDefinition = {
         : await executeCosRequest({
             protocol: COS_PROTOCOL,
             request_id: requestId,
-            method: 'cos_work_change_propose',
+            method,
             params: { change: args.change },
           });
     return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
   },
-};
+}));
 const workReadTool: McpToolDefinition = {
   tool: {
     name: 'cos_work_read',
@@ -312,7 +320,7 @@ export const cosTools: McpToolDefinition[] = [
   ...knowledgeTools,
   ...answerTools,
   calendarTool,
-  workTool,
+  ...workTools,
   workReadTool,
 ];
 if (process.env.NANOCLAW_COS_PROTOCOL === COS_PROTOCOL) registerTools(cosTools);

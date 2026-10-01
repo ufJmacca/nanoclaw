@@ -3,6 +3,8 @@ import { digest, validProposalChange, validSourceChange } from '../domain/contra
 import type { KnowledgeContext, KnowledgeStore } from '../knowledge/store.js';
 import { validWorkChange, validWorkRead, type WorkRead } from '../contracts/protocol.js';
 import { WorkStore } from './work.js';
+import { validScheduleChange } from '../contracts/schedule-protocol.js';
+import { BriefScheduleStore } from '../automation/schedule-store.js';
 import type { CalendarConnector } from '../calendar/connector.js';
 import type { CalendarView } from '../calendar/view.js';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
@@ -37,6 +39,7 @@ async function event(
 
 export class PriorityStore {
   readonly work: WorkStore;
+  readonly schedules = new BriefScheduleStore();
   constructor(
     readonly database: BoundedDatabase,
     readonly knowledge?: KnowledgeStore,
@@ -168,7 +171,9 @@ export class PriorityStore {
       ? 'cos_source_change_propose'
       : validWorkChange(change)
         ? 'cos_work_change_propose'
-        : 'cos_change_propose';
+        : validScheduleChange(change)
+          ? 'cos_brief_schedule_propose'
+          : 'cos_change_propose';
     const hash = digest(validWorkChange(change) ? { method, change, retained: retained ?? null } : { method, change });
     const result = await this.transaction(async (client) => {
       if (!(await authorised(client, context))) return { status: 'denied' };
@@ -311,7 +316,7 @@ export class PriorityStore {
       if (proposal.state === 'conflict') return { status: 'conflict' };
       const change = proposal.change as ProposalChange;
       if (!validProposalChange(change) || digest(change) !== proposal.payload_hash) return { status: 'denied' };
-      if (validWorkChange(change)) {
+      if (validWorkChange(change) || validScheduleChange(change)) {
         const context: Context = {
           scopeId,
           ownerId: scope.rows[0].owner_id,
@@ -320,13 +325,9 @@ export class PriorityStore {
           ingressId: proposal.ingress_id,
         };
         if (proposal.owner_id !== context.ownerId) return { status: 'denied' };
-        const result = await this.work.applyApproved(
-          client,
-          context,
-          proposal,
-          change,
-          proposal.work_context ?? undefined,
-        );
+        const result = validScheduleChange(change)
+          ? await this.schedules.applyApproved(client, context, proposal, change)
+          : await this.work.applyApproved(client, context, proposal, change, proposal.work_context ?? undefined);
         if (!['ok', 'conflict'].includes(result.status)) return result;
         const changed = result.status === 'ok';
         await client.query(
@@ -429,6 +430,7 @@ export class PriorityStore {
         work_withheld: work.withheld,
         work_next_offset: work.next_offset,
         work_truncated: work.truncated,
+        brief_schedules: await this.schedules.read(client, context),
         ranking: 'advice',
         coverage: records.length ? ['approved_records_only'] : ['no_approved_priorities'],
       };

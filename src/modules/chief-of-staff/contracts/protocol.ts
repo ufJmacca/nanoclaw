@@ -1,5 +1,6 @@
 /** Canonical CoS wire contract; copied verbatim into the runner and checked for drift. */
 import { createHash } from 'node:crypto';
+import { validScheduleChange, type ScheduleChange } from './schedule-protocol.js';
 import { answerDraftSchema, validAnswerDraft, validAnswerCitation, type AnswerCitation } from './answer-protocol.js';
 /** Provider guidance; the wire validator additionally checks real dates and state transitions. */
 export const workChangeSchema = {
@@ -98,6 +99,7 @@ export type CosMethod =
   | 'cos_change_propose'
   | 'cos_work_change_propose'
   | 'cos_work_read'
+  | 'cos_brief_schedule_propose'
   | 'cos_request_status'
   | 'cos_knowledge_search'
   | 'cos_source_get'
@@ -184,6 +186,8 @@ export function validRequest(value: unknown): value is CosRequest {
   if (value.method === 'cos_work_change_propose')
     return keys(value.params, ['change']) && validWorkChange(value.params.change);
   if (value.method === 'cos_work_read') return validWorkRead(value.params);
+  if (value.method === 'cos_brief_schedule_propose')
+    return keys(value.params, ['change']) && validScheduleChange(value.params.change);
   if (value.method === 'cos_source_change_propose')
     return keys(value.params, ['change']) && validSourceChange(value.params.change);
   if (value.method === 'cos_answer_prepare')
@@ -356,9 +360,9 @@ export function validWorkChange(v: unknown): v is WorkChange {
     new Set(v.evidence.map(canonical)).size === v.evidence.length
   );
 }
-export type ProposalChange = Change | SourceChange | WorkChange;
+export type ProposalChange = Change | SourceChange | WorkChange | ScheduleChange;
 export function validProposalChange(value: unknown): value is ProposalChange {
-  return validChange(value) || validSourceChange(value) || validWorkChange(value);
+  return validChange(value) || validSourceChange(value) || validWorkChange(value) || validScheduleChange(value);
 }
 
 export type CosResponse = {

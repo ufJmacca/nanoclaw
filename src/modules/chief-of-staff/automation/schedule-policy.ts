@@ -1,14 +1,8 @@
 import { Temporal } from '@js-temporal/polyfill';
 import { nextRecurrenceAt } from '../../scheduling/recurrence.js';
 import { digest } from '../contracts/protocol.js';
-export type BriefSchedulePolicy = {
-  state: 'active' | 'paused';
-  time_zone: string;
-  local_time: string;
-  weekdays: number[];
-  quiet_hours: { start: string; end: string } | null;
-  snooze_until: string | null;
-};
+import { validBriefSchedulePolicy, type BriefSchedulePolicy } from '../contracts/schedule-protocol.js';
+export { validBriefSchedulePolicy, type BriefSchedulePolicy } from '../contracts/schedule-protocol.js';
 export type ScheduleIdentity = {
   scopeId: string;
   scheduleId: string;
@@ -18,8 +12,6 @@ export type ScheduleIdentity = {
 };
 export type BriefOccurrence = { key: string; intendedAt: string; localDate: string; intendedLocalDate: string };
 export type SchedulePlan = { due: BriefOccurrence | null; nextWakeAt: string | null };
-const object = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
-const localTime = (v: unknown): v is string => typeof v === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(v);
 const instant = (v: unknown): v is string => {
   if (typeof v !== 'string' || v.length > 40) return false;
   try {
@@ -30,42 +22,6 @@ const instant = (v: unknown): v is string => {
     throw error;
   }
 };
-export function validBriefSchedulePolicy(value: unknown): value is BriefSchedulePolicy {
-  if (
-    !object(value) ||
-    Object.keys(value).some(
-      (key) => !['state', 'time_zone', 'local_time', 'weekdays', 'quiet_hours', 'snooze_until'].includes(key),
-    ) ||
-    !['active', 'paused'].includes(String(value.state)) ||
-    typeof value.time_zone !== 'string' ||
-    value.time_zone.length > 100 ||
-    /^[+-]/.test(value.time_zone) ||
-    !localTime(value.local_time) ||
-    !Array.isArray(value.weekdays) ||
-    value.weekdays.length < 1 ||
-    value.weekdays.length > 7 ||
-    new Set(value.weekdays).size !== value.weekdays.length ||
-    !value.weekdays.every((day) => Number.isInteger(day) && day >= 1 && day <= 7) ||
-    (value.snooze_until !== null && !instant(value.snooze_until))
-  )
-    return false;
-  if (
-    value.quiet_hours !== null &&
-    (!object(value.quiet_hours) ||
-      Object.keys(value.quiet_hours).some((key) => !['start', 'end'].includes(key)) ||
-      !localTime(value.quiet_hours.start) ||
-      !localTime(value.quiet_hours.end) ||
-      value.quiet_hours.start === value.quiet_hours.end)
-  )
-    return false;
-  try {
-    Temporal.Instant.from('2026-01-01T00:00:00Z').toZonedDateTimeISO(value.time_zone);
-    return true;
-  } catch (error) {
-    if (error instanceof RangeError) return false;
-    throw error;
-  }
-}
 /** Daily/weekday expressions only: no worker-supplied cron, script or destination. */
 export function briefRecurrence(policy: BriefSchedulePolicy): string {
   if (!validBriefSchedulePolicy(policy)) throw new Error('invalid_brief_schedule');

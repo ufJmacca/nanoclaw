@@ -151,6 +151,23 @@ describe('S02 knowledge RPC host authority', () => {
       'WorkRPCFixtureCanary',
     );
     expect(store.readWork).toHaveBeenCalledWith(context, { record_id: 'work-1', version: 2 }, retained);
+    const schedule = {
+      kind: 'brief_schedule',
+      title: 'Morning brief',
+      reason: 'Owner requested weekdays',
+      expected_version: 0,
+      policy: {
+        state: 'active',
+        time_zone: 'Australia/Sydney',
+        local_time: '09:00',
+        weekdays: [1, 2, 3, 4, 5],
+        quiet_hours: null,
+        snooze_until: null,
+      },
+      limits: { max_turns: 2, max_tool_calls: 12, deadline_seconds: 120, refresh_seconds: 20 },
+    };
+    expect(await call('cos_brief_schedule_propose', { change: schedule })).toMatchObject({ status: 'ok' });
+    expect(store.propose).toHaveBeenLastCalledWith(context, request.request_id, schedule);
     knowledge.contextReady.mockResolvedValueOnce({ status: 'ok' }).mockResolvedValue({ status: 'denied' });
     const denied = await call('cos_work_read', { record_id: 'work-1' });
     expect(denied.status).toBe('denied');
