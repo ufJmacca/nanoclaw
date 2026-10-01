@@ -1,3 +1,4 @@
+import { policyAllowsBriefContext } from '../bridge/brief-context-renewal.js';
 /** Owner-run controls. Calendar sync may refresh its own tokens; no model calls or message sends. */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -133,7 +134,7 @@ function localStatus(db: Database.Database, root: string, binding: CosBinding) {
       : null;
   let remainingAttempts: number | null = null;
   let activation = present ? 'invalid_or_expired' : 'not_configured';
-  if (policy && row && context === 'active' && policy.contextGeneration === row.generation) {
+  if (policy && row && context === 'active' && policyAllowsBriefContext(db, binding, policy, row.generation)) {
     const budget = db
       .prepare('SELECT policy_digest,used FROM cos_model_budgets WHERE activation_id=?')
       .get(policy.activationId) as { policy_digest: string; used: number } | undefined;

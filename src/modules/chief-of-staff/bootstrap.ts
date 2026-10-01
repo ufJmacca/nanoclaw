@@ -113,7 +113,7 @@ export function startCosHostModule(assertHostAuthority: () => void): { service: 
       return false;
     }
   };
-  const launcher = createCoordinatorLauncher({ targetRoot, db: getDb() });
+  const launcher = createCoordinatorLauncher({ targetRoot, db: getDb(), running: hasContainerExecution });
   const facts = guardConversationAccess({
     active: activeBinding,
     facts: transportFacts,

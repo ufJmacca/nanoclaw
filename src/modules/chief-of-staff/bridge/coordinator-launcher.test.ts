@@ -6,7 +6,8 @@ import http from 'node:http';
 import { randomUUID } from 'node:crypto';
 import Database from 'better-sqlite3';
 import type { Session } from '../../../types.js';
-import type { CosBinding } from '../../../cos-boundary.js';
+import { installCosBoundary, type CosBinding } from '../../../cos-boundary.js';
+import { issueActivation } from '../ops/model-activation.js';
 import { ensureModelBudget } from './model-policy.js';
 const state = vi.hoisted(() => ({ session: '' }));
 vi.mock('../../../release-runtime.js', () => ({
@@ -32,7 +33,17 @@ describe('S01 coordinator admission', () => {
     fs.writeFileSync(path.join(state.session, 'inbound.db'), 'fixture');
     const db = new Database(':memory:');
     ensureModelBudget(db);
-    const binding = { scopeId: 'native', provider: 'codex', agentGroupId: 'group', sessionId: 'session' } as CosBinding;
+    const binding: CosBinding = {
+      scopeId: 'native',
+      provider: 'codex',
+      agentGroupId: 'group',
+      sessionId: 'session',
+      messagingGroupId: 'mg',
+      ownerId: 'owner',
+      botId: 'bot',
+      instanceId: 'fixture',
+      channelId: 'private',
+    };
     const credentials = createSubscriptionCoordinator({
       root: credentialRoot,
       assertAuthority() {},
@@ -56,7 +67,7 @@ describe('S01 coordinator admission', () => {
       },
     });
     const uninstall = installSubscriptionCoordinator(credentials);
-    const launcher = createCoordinatorLauncher({ targetRoot: target, db });
+    const launcher = createCoordinatorLauncher({ targetRoot: target, db, running: () => false });
     try {
       const context = launcher.context(binding);
       const policy = {
@@ -72,7 +83,12 @@ describe('S01 coordinator admission', () => {
         contextGeneration: context.generation,
         expiresAt: '2030-01-01T00:00:00Z',
       };
-      fs.writeFileSync(path.join(target, 'model-activation.json'), JSON.stringify(policy), { mode: 0o600 });
+      installCosBoundary(binding, db);
+      issueActivation(
+        { root: target, db, binding, accountFingerprint: context.accountFingerprint, assertAuthority() {} },
+        policy,
+      );
+      db.exec("UPDATE cos_identity_boundaries SET paused=0,ingress_id='ingress'");
       expect(launcher.ready(binding)).toBe(true);
       const reserve = vi.fn().mockResolvedValue(false);
       const authorize = Object.assign(
@@ -111,6 +127,15 @@ describe('S01 coordinator admission', () => {
       reserve.mockResolvedValue(true);
       expect(await begin()).toBe(403);
       expect(reserve).toHaveBeenCalledOnce();
+      const renewed = launcher.renewBriefContext(
+        binding,
+        { runId: 'd'.repeat(64), runGeneration: 1, expectedGeneration: context.generation },
+        () => true,
+      );
+      expect(renewed.generation).not.toBe(context.generation);
+      expect(launcher.context(binding).generation).toBe(renewed.generation);
+      expect(launcher.ready(binding)).toBe(true);
+      expect(JSON.parse(fs.readFileSync(path.join(target, 'model-activation.json'), 'utf8'))).toEqual(policy);
       launcher.invalidate(binding.scopeId);
       expect(launcher.ready(binding)).toBe(false);
     } finally {

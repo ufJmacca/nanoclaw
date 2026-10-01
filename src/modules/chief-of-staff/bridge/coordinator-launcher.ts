@@ -1,3 +1,9 @@
+import {
+  renewBriefContext,
+  resumeBriefContextRenewal,
+  policyAllowsBriefContext,
+  type BriefContextRenewalRequest,
+} from './brief-context-renewal.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
@@ -18,20 +24,39 @@ import type { TurnAuthorization } from './turn-authorization.js';
 
 export type CoordinatorLauncher = {
   ready(binding: CosBinding): boolean;
+  renewBriefContext?(
+    binding: CosBinding,
+    request: BriefContextRenewalRequest,
+    current: () => boolean,
+  ): { generation: string };
   prepare(binding: CosBinding, session: Session, authorize: TurnAuthorization): Promise<CosLaunch>;
 };
 /** Native subscription only. Deployment never creates a model activation. */
-export function createCoordinatorLauncher(options: { targetRoot: string; db: Database.Database }) {
+export function createCoordinatorLauncher(options: {
+  targetRoot: string;
+  db: Database.Database;
+  running?(sessionId: string): boolean;
+}) {
   let closed = false;
   let conversations: ReturnType<typeof createConversationState> | undefined;
   const contexts = () => (conversations ??= createConversationState(options.targetRoot, options.db));
   const entries = new Map<string, { close(): Promise<void> }>();
+  const assertIdle = (binding: CosBinding) => {
+    if (closed || (options.running?.(binding.sessionId) ?? true)) throw new Error('brief_context_execution_active');
+  };
   const context = (binding: CosBinding) => {
     const owner = subscriptionCoordinator();
     if (closed || !owner || !releaseMode() || binding.provider !== 'codex') throw new Error('restricted_launch_denied');
     const account = JSON.parse(owner.cached().authJson)?.tokens?.account_id;
     if (typeof account !== 'string' || !account || account.length > 65536) throw new Error('restricted_launch_denied');
     const accountFingerprint = createHash('sha256').update(account).digest('hex');
+    resumeBriefContextRenewal({
+      root: options.targetRoot,
+      db: options.db,
+      binding,
+      accountFingerprint,
+      assertIdle: () => assertIdle(binding),
+    });
     return { ...contexts().prepare(binding, accountFingerprint), accountFingerprint };
   };
   const activation = (binding: CosBinding) => {
@@ -42,7 +67,9 @@ export function createCoordinatorLauncher(options: { targetRoot: string; db: Dat
         binding.scopeId,
         retained.accountFingerprint,
       );
-      return policy?.contextGeneration === retained.generation ? { policy, retained } : null;
+      return policy && policyAllowsBriefContext(options.db, binding, policy, retained.generation)
+        ? { policy, retained }
+        : null;
       // eslint-disable-next-line no-catch-all/no-catch-all -- Missing consent, private state or credentials all make the native launcher unavailable.
     } catch {
       return null;
@@ -50,6 +77,23 @@ export function createCoordinatorLauncher(options: { targetRoot: string; db: Dat
   };
   return {
     context,
+    renewBriefContext(binding: CosBinding, request: BriefContextRenewalRequest, current: () => boolean) {
+      const admitted = activation(binding);
+      if (!admitted || !current()) throw new Error('brief_context_renewal_denied');
+      return renewBriefContext(
+        {
+          root: options.targetRoot,
+          db: options.db,
+          binding,
+          accountFingerprint: admitted.retained.accountFingerprint,
+          assertIdle() {
+            assertIdle(binding);
+            if (!current()) throw new Error('brief_context_renewal_denied');
+          },
+        },
+        request,
+      );
+    },
     invalidate(scopeId: string) {
       contexts().invalidate(scopeId, 'access_changed');
     },

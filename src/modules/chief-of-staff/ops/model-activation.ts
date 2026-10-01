@@ -1,4 +1,5 @@
 /** Trusted operator controls; these never invoke a model, send a message or wake a runner. */
+import { policyAllowsBriefContext } from '../bridge/brief-context-renewal.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import type Database from 'better-sqlite3';
@@ -57,15 +58,21 @@ function boundary(o: Options, requirePaused: boolean) {
     throw new Error('activation_requires_paused_binding');
   return row;
 }
+function currentGeneration(o: Options): string {
+  const row = o.db
+    .prepare("SELECT generation FROM cos_conversation_states WHERE scope_id=? AND status='active'")
+    .get(o.binding.scopeId) as { generation: string } | undefined;
+  if (!row || !createConversationState(o.root, o.db).current(o.binding, o.accountFingerprint, row.generation))
+    throw new Error('activation_context_mismatch');
+  return row.generation;
+}
 function policyFor(o: Options, value: unknown) {
   const policy = subscriptionActivation(value, o.binding.scopeId, o.accountFingerprint);
-  if (
-    !policy ||
-    !createConversationState(o.root, o.db).current(o.binding, o.accountFingerprint, policy.contextGeneration)
-  )
+  if (!policy || !policyAllowsBriefContext(o.db, o.binding, policy, currentGeneration(o)))
     throw new Error('activation_context_mismatch');
   return policy;
 }
+
 function active(root: string): unknown | null {
   const file = path.join(root, 'model-activation.json');
   return fs.lstatSync(file, { throwIfNoEntry: false }) ? readPrivate(file) : null;
@@ -136,7 +143,7 @@ export function issueActivation(o: Options, value: unknown) {
   return {
     status: 'activation_configured_paused',
     activationId: policy.activationId,
-    generation: policy.contextGeneration,
+    generation: currentGeneration(o),
     remainingAttempts: remaining(o, policy),
     expiresAt: policy.expiresAt,
     live_model: 'not_verified',
@@ -183,7 +190,7 @@ export function rebindRecoveredActivation(o: Options, request: { expectedGenerat
     const current = active(o.root);
     if (current === null) return { status: 'not_transferred', reason: 'missing' };
     const policy = subscriptionActivation(current, o.binding.scopeId, o.accountFingerprint, 0);
-    if (!policy || policy.contextGeneration !== request.expectedGeneration)
+    if (!policy || !policyAllowsBriefContext(o.db, o.binding, policy, request.expectedGeneration))
       return { status: 'not_transferred', reason: 'context_or_policy_mismatch' };
     if (Date.parse(policy.expiresAt) <= Date.now()) return { status: 'not_transferred', reason: 'expired' };
     const issuanceFile = path.join(directory(o.root, 'model-activations'), policy.activationId + '.json');
@@ -219,7 +226,7 @@ export function rebindRecoveredActivation(o: Options, request: { expectedGenerat
     record.issuance.phase !== 'installed' ||
     record.issuance.bindingDigest !== digest(o.binding) ||
     !subscriptionActivation(prior, o.binding.scopeId, o.accountFingerprint, 0) ||
-    prior.contextGeneration !== request.expectedGeneration ||
+    !policyAllowsBriefContext(o.db, o.binding, prior, request.expectedGeneration) ||
     digest(next) !== digest({ ...prior, contextGeneration: recovery.generation })
   )
     throw new Error('activation_conflict');
@@ -318,7 +325,7 @@ export function resumeContext(
     return {
       status: 'resume_replayed',
       activationId,
-      generation: policy.contextGeneration,
+      generation: currentGeneration(o),
       paused,
       live_model: 'not_verified',
     };
@@ -363,7 +370,7 @@ export function resumeContext(
   return {
     status: 'resumed',
     activationId,
-    generation: policy.contextGeneration,
+    generation: currentGeneration(o),
     paused: false,
     live_model: 'not_verified',
   };
