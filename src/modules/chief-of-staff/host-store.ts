@@ -48,6 +48,7 @@ export async function connectCosHostStore(
   const knowledge = new KnowledgeStore(database, artifacts, retention, {
     retentionMs: settings.retentionMs,
     retrievalEnabled: () => settings.enabled,
+    calendarEnabled: () => !!calendar && admitted(),
     calendarAccess: (scopeId, bindingId) => {
       if (!calendar || !admitted()) return false;
       calendar.assertOpen(scopeId, bindingId);

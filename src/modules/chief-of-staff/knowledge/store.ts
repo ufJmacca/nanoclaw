@@ -13,6 +13,7 @@ import { purgeKnowledge, type PurgeHooks } from './purge.js';
 import { KnowledgeAnswers, type AnswerHooks } from './answer-store.js';
 import { calendarSourceAccess } from '../calendar/source-access.js';
 import { hasCalendarReadScope } from '../calendar/reader.js';
+import { calendarAnswerNotice, checkCalendarContext, type CalendarAnswerNotice } from '../calendar/answer-notice.js';
 export type KnowledgeContext = Context & { provider: string; generation: string };
 export type ImportSource = {
   sourceKey: string;
@@ -77,6 +78,7 @@ export class KnowledgeStore {
   readonly answers: KnowledgeAnswers;
   readonly retrievalEnabled: () => boolean;
   private readonly calendarAccess: (scopeId: string, bindingId: string) => boolean;
+  private readonly calendarNotice: (client: PoolClient, context: KnowledgeContext) => Promise<CalendarAnswerNotice>;
   constructor(
     readonly database: BoundedDatabase,
     readonly artifacts: KnowledgeArtifacts,
@@ -86,10 +88,16 @@ export class KnowledgeStore {
       retentionMs?: number;
       retrievalEnabled?(): boolean;
       calendarAccess?(scopeId: string, bindingId: string): boolean;
+      calendarEnabled?(): boolean;
     } = {},
   ) {
     this.retrievalEnabled = options.retrievalEnabled ?? (() => true);
     this.calendarAccess = options.calendarAccess ?? (() => false);
+    this.calendarNotice = (client, context) =>
+      calendarAnswerNotice(client, context, {
+        enabled: () => this.retrievalEnabled() && (options.calendarEnabled?.() ?? false),
+        access: this.calendarAccess,
+      });
     this.answers = new KnowledgeAnswers({
       artifacts,
       hooks,
@@ -98,6 +106,9 @@ export class KnowledgeStore {
       current: (client, context) => this.current(client, context),
       sourcesReadable: (client, context, ids) => this.sourcesReadable(client, context, ids),
       retrievalEnabled: this.retrievalEnabled,
+      calendarNotice: this.calendarNotice,
+      calendarContext: (client, context, register) =>
+        checkCalendarContext(client, context, () => this.calendarNotice(client, context), register),
     });
     this.retentionMs = options.retentionMs ?? 30 * 24 * 60 * 60 * 1000;
     if (!Number.isSafeInteger(this.retentionMs) || this.retentionMs < 0 || this.retentionMs > 365 * 24 * 60 * 60 * 1000)
@@ -423,10 +434,19 @@ export class KnowledgeStore {
         await this.openCalendarBindings(client, context),
       ],
     );
-    return !invalid.rowCount;
+    if (invalid.rowCount) return false;
+    return (await checkCalendarContext(client, context, () => this.calendarNotice(client, context))).status === 'ok';
   }
   async contextReady(context: KnowledgeContext): Promise<Result> {
     return this.transaction(async (client) => ({ status: (await this.current(client, context)) ? 'ok' : 'denied' }));
+  }
+  /** Record metadata exposure before returning a calendar view, including empty and unavailable views. */
+  async recordCalendarContext(context: KnowledgeContext): Promise<Result> {
+    return this.transaction(async (client) => {
+      if (!(await this.current(client, context))) return { status: 'denied' };
+      const result = await checkCalendarContext(client, context, () => this.calendarNotice(client, context), true);
+      return { status: result.status };
+    }, true);
   }
   /** Trusted host reconciliation, including paused scopes. No agent RPC exposes these methods. */
   async pendingInvalidations(scopeId: string): Promise<Result> {

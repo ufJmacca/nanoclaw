@@ -26,7 +26,7 @@ export class CalendarView {
       ctx = Object.freeze({ ...context });
     if (!d.enabled() || !d.knowledge.retrievalEnabled())
       return { status: 'unavailable', coverage: 'unavailable', items: [] };
-    const ready = await d.knowledge.contextReady(ctx);
+    const ready = await d.knowledge.recordCalendarContext(ctx);
     if (ready.status !== 'ok') return { status: ready.status };
     const result = await d.store.coverage(ctx, offset);
     if (result.status !== 'ok') return { status: result.status };
@@ -84,7 +84,7 @@ export class CalendarView {
       ctx = Object.freeze({ ...context }),
       d = this.options;
     if (!d.enabled() || !d.knowledge.retrievalEnabled()) return { status: 'unavailable' };
-    const ready = await d.knowledge.contextReady(ctx);
+    const ready = await d.knowledge.recordCalendarContext(ctx);
     if (ready.status !== 'ok') return { status: ready.status };
     const snapshot = await d.store.evidenceSnapshot(ctx, request.binding_id, request.calendar_id);
     if (snapshot.status !== 'ok') return { status: snapshot.status };

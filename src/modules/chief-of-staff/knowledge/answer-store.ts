@@ -3,6 +3,7 @@ import type { PoolClient } from 'pg';
 import { digest, type Result } from '../domain/contracts.js';
 import type { KnowledgeContext } from './store.js';
 import { isArtifactIdentity, type ArtifactLease, type KnowledgeArtifacts } from './artifacts.js';
+import type { CalendarAnswerNotice, CalendarContextCheck } from '../calendar/answer-notice.js';
 import {
   citationKey,
   renderAnswer,
@@ -27,6 +28,7 @@ type Metadata = {
     ingress_id: string;
     draft_hash: string;
     citations: AnswerCitation[];
+    calendar_notice_digest?: string;
   };
 };
 const references = (draft: AnswerDraft) => [
@@ -60,6 +62,8 @@ export class KnowledgeAnswers {
       current(client: PoolClient, context: KnowledgeContext): Promise<boolean>;
       sourcesReadable(client: PoolClient, context: KnowledgeContext, ids: string[]): Promise<boolean>;
       retrievalEnabled(): boolean;
+      calendarNotice(client: PoolClient, context: KnowledgeContext): Promise<CalendarAnswerNotice>;
+      calendarContext(client: PoolClient, context: KnowledgeContext, register?: boolean): Promise<CalendarContextCheck>;
       hooks: AnswerHooks;
     },
   ) {}
@@ -144,19 +148,24 @@ export class KnowledgeAnswers {
             ? (old.result ?? { status: 'pending', request_id: requestId })
             : { status: 'conflict' };
         const resolved = await this.resolve(client, context, refs);
-        return resolved ? { status: 'ok', resolved } : { status: 'denied' };
-      });
+        if (!resolved) return { status: 'denied' };
+        const dependency = await d.calendarContext(client, context, Boolean(draft.calendar));
+        return dependency.status === 'ok'
+          ? { status: 'ok', resolved, calendar: dependency.notice }
+          : { status: 'denied' };
+      }, Boolean(draft.calendar));
       if (before.status !== 'ok' || before.artifact_id) return before;
-      const resolved = before.resolved as ResolvedCitation[];
+      const resolved = before.resolved as ResolvedCitation[],
+        calendar = before.calendar as CalendarAnswerNotice | null;
       let text: string;
       try {
         this.verifyBytes(resolved);
-        text = renderAnswer(draft, resolved);
+        text = renderAnswer(draft, resolved) + (calendar ? '\n\n' + calendar.text : '');
         // eslint-disable-next-line no-catch-all/no-catch-all -- Invalid citations or inaccessible private files deny preparation without disclosing paths or bytes.
       } catch {
         return { status: 'denied' };
       }
-      const body = JSON.stringify({ format: 'cos-answer/v1', draft, text });
+      const body = JSON.stringify({ format: 'cos-answer/v1', draft, text, ...(calendar ? { calendar } : {}) });
       const namespace = digest({
         scope: context.scopeId,
         session: context.sessionId,
@@ -171,6 +180,8 @@ export class KnowledgeAnswers {
         if (!(await d.current(client, context))) return { status: 'denied' };
         const current = await this.resolve(client, context, refs);
         if (!current || digest(current) !== digest(resolved)) return { status: 'denied' };
+        if (calendar && digest(await d.calendarNotice(client, context)) !== digest(calendar))
+          return { status: 'denied' };
         const inserted = await client.query(
           `INSERT INTO cos.operations(session_id,request_id,scope_id,method,payload_hash)
           VALUES($1,$2,$3,'cos_answer_prepare',$4) ON CONFLICT DO NOTHING RETURNING request_id`,
@@ -196,6 +207,7 @@ export class KnowledgeAnswers {
           draft_hash: digest(draft),
           citations: refs,
           output_digest: digest(text),
+          ...(calendar ? { calendar_notice_digest: digest(calendar) } : {}),
         };
         await client.query(
           `INSERT INTO cos.artifacts(id,scope_id,kind,digest,byte_length,lifecycle,provenance) VALUES($1,$2,$3,$4,$5,'published',$6)`,
@@ -233,7 +245,7 @@ export class KnowledgeAnswers {
     client: PoolClient,
     context: KnowledgeContext,
     id: string,
-  ): Promise<{ metadata: Metadata; resolved: ResolvedCitation[] } | null> {
+  ): Promise<{ metadata: Metadata; resolved: ResolvedCitation[]; calendar: CalendarAnswerNotice | null } | null> {
     if (!(await this.dependencies.current(client, context))) return null;
     const metadata = (
       await client.query(
@@ -278,7 +290,12 @@ export class KnowledgeAnswers {
     )
       return null;
     const resolved = await this.resolve(client, context, metadata.provenance.citations, true);
-    return resolved ? { metadata, resolved } : null;
+    if (!resolved) return null;
+    const calendar = metadata.provenance.calendar_notice_digest
+      ? await this.dependencies.calendarNotice(client, context)
+      : null;
+    if (calendar && digest(calendar) !== metadata.provenance.calendar_notice_digest) return null;
+    return { metadata, resolved, calendar };
   }
   async get(context: KnowledgeContext, id: string): Promise<Result> {
     if (!isArtifactIdentity(id)) return { status: 'denied' };
@@ -289,21 +306,24 @@ export class KnowledgeAnswers {
     });
     if (before.status !== 'ok') return before;
     const metadata = before.metadata as Metadata,
-      resolved = before.resolved as ResolvedCitation[];
+      resolved = before.resolved as ResolvedCitation[],
+      calendar = before.calendar as CalendarAnswerNotice | null;
     let text: string;
     try {
       this.verifyBytes(resolved);
       const body = JSON.parse(d.artifacts.read(id, metadata.digest));
       if (
         !body ||
-        Object.keys(body).some((key) => !['format', 'draft', 'text'].includes(key)) ||
+        Object.keys(body).some((key) => !['format', 'draft', 'text', 'calendar'].includes(key)) ||
         body.format !== 'cos-answer/v1' ||
         !validAnswerDraft(body.draft) ||
         digest(body.draft) !== metadata.provenance.draft_hash ||
-        digest(references(body.draft)) !== digest(metadata.provenance.citations)
+        digest(references(body.draft)) !== digest(metadata.provenance.citations) ||
+        (Boolean(body.draft.calendar) && !calendar) ||
+        digest(body.calendar ?? null) !== digest(calendar)
       )
         return { status: 'denied' };
-      text = renderAnswer(body.draft, resolved);
+      text = renderAnswer(body.draft, resolved) + (calendar ? '\n\n' + calendar.text : '');
       if (text !== body.text) return { status: 'denied' };
       await d.hooks.beforeAnswerDisclosure?.();
       // eslint-disable-next-line no-catch-all/no-catch-all -- Unreadable or corrupt private artifacts cannot be redisplayed or leak diagnostic paths.
@@ -312,7 +332,11 @@ export class KnowledgeAnswers {
     }
     const final = await d.transaction(async (client) => {
       const fresh = await this.snapshot(client, context, id);
-      if (!fresh || digest(fresh) !== digest({ metadata, resolved })) return { status: 'denied' };
+      if (!fresh || digest(fresh) !== digest({ metadata, resolved, calendar })) return { status: 'denied' };
+      if (calendar) {
+        const dependency = await d.calendarContext(client, context, true);
+        if (dependency.status !== 'ok' || digest(dependency.notice) !== digest(calendar)) return { status: 'denied' };
+      }
       // Historical redisplay is a new disclosure to this context, which must be fenced on later correction/revocation.
       for (const ref of resolved)
         if (ref.kind === 'source')

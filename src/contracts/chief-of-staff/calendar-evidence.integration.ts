@@ -55,7 +55,7 @@ before(async () => {
   for (const name of ['artifacts', 'staging', 'fences']) fs.mkdirSync(path.join(base, name), { mode: 0o700 });
   artifacts = new KnowledgeArtifacts(path.join(base, 'artifacts'), path.join(base, 'staging'));
   fences = CalendarAccessFences.initialize(path.join(base, 'fences'));
-  knowledge = new KnowledgeStore(database, artifacts, {}, { calendarAccess });
+  knowledge = new KnowledgeStore(database, artifacts, {}, { calendarAccess, calendarEnabled: () => true });
   calendar = new CalendarStore(database, {}, new CalendarEvidence(artifacts));
   await pool.query(
     "INSERT INTO cos.scopes(id,owner_id,instance_id,channel_id,agent_group_id,status) VALUES($1,'fixture-owner','fixture-instance',$1,$1,'active')",
@@ -139,6 +139,36 @@ async function find(text: string, ctx = fresh()) {
   assert.ok(row, 'calendar evidence missing');
   return { row, ctx };
 }
+test('S03-T10: checked calendar notices survive replay but expire on refresh and access changes, even without event citations', async () => {
+  const s = await setup('CoverageNoticeCanary');
+  await publish(s);
+  const ctx = fresh(),
+    request = randomUUID();
+  const draft = { kind: 'answer', coverage: 'insufficient', claims: [], calendar: 'coverage' };
+  const first = await knowledge.answers.prepare(ctx, request, draft);
+  assert.equal(first.status, 'ok');
+  assert.match(String(first.text), /Calendar coverage/);
+  assert.match(String(first.text), /Last successful refresh:/);
+  assert.match(String(first.text), /Australia\/Sydney/);
+  assert.doesNotMatch(String(first.text), /CoverageNoticeCanary|credential|nothing scheduled/);
+  assert.equal((await knowledge.answers.prepare(ctx, request, draft)).text, first.text);
+  assert.equal((await knowledge.answers.authorizePublication(ctx, String(first.text))).status, 'ok');
+  const pending = randomUUID();
+  await calendar.start(context, s.id, 'selected', pending, window);
+  assert.equal((await knowledge.answers.get(ctx, String(first.artifact_id))).status, 'denied');
+  assert.equal((await knowledge.answers.authorizePublication(ctx, String(first.text))).status, 'denied');
+  assert.equal((await knowledge.contextReady(ctx)).status, 'denied');
+  const incompleteContext = fresh();
+  const incomplete = await knowledge.answers.prepare(incompleteContext, randomUUID(), draft);
+  assert.equal(incomplete.status, 'ok');
+  assert.match(String(incomplete.text), /refresh is incomplete/);
+  fences.deny(scope, s.id, 'revoked');
+  assert.equal((await knowledge.answers.get(incompleteContext, String(incomplete.artifact_id))).status, 'denied');
+  const disconnected = await knowledge.answers.prepare(fresh(), randomUUID(), draft);
+  assert.equal(disconnected.status, 'ok');
+  assert.match(String(disconnected.text), /access is unavailable/);
+  assert.doesNotMatch(String(disconnected.text), /nothing scheduled/);
+});
 test('S03-T02/T03: snapshot events become S02 evidence with immutable exact-line citations and no duplicate revisions', async () => {
   const s = await setup('CalendarCitationCanary');
   const first = await publish(s);
@@ -165,6 +195,47 @@ test('S03-T02/T03: snapshot events become S02 evidence with immutable exact-line
     ).rows[0].source_id,
     row.source_id,
   );
+});
+test('S03-T05/T10: empty-calendar notices are rechecked after local access loss during final disclosure', async () => {
+  const s = await setup('EmptyNoticeRace');
+  s.fixture.replace('selected', []);
+  await publish(s);
+  const guarded = new KnowledgeStore(
+    database,
+    artifacts,
+    {
+      beforeAnswerDisclosure: async () => fences.deny(scope, s.id, 'revoked'),
+    },
+    { calendarAccess, calendarEnabled: () => true },
+  );
+  const result = await guarded.answers.prepare(fresh(), randomUUID(), {
+    kind: 'answer',
+    coverage: 'insufficient',
+    claims: [],
+    calendar: 'coverage',
+  });
+  assert.equal(result.status, 'denied');
+  assert.equal(result.text, undefined);
+});
+test('S03-T04/T10: notices enforce owner/provider identity and retrieval disablement', async () => {
+  const draft = { kind: 'answer', coverage: 'insufficient', claims: [], calendar: 'coverage' };
+  assert.equal(
+    (await knowledge.answers.prepare({ ...fresh(), ownerId: 'foreign' }, randomUUID(), draft)).status,
+    'denied',
+  );
+  const ctx = { ...fresh(), provider: 'claude' };
+  const empty = await knowledge.answers.prepare(ctx, randomUUID(), draft);
+  assert.equal(empty.status, 'ok');
+  assert.match(String(empty.text), /no calendar is connected/);
+  assert.doesNotMatch(String(empty.text), /selected|Australia\/Sydney/);
+  let enabled = false;
+  const disabled = new KnowledgeStore(database, artifacts, {}, { calendarAccess, calendarEnabled: () => enabled });
+  const disabledContext = { ...ctx, generation: randomUUID() };
+  const result = await disabled.answers.prepare(disabledContext, randomUUID(), draft);
+  assert.equal(result.status, 'ok');
+  assert.match(String(result.text), /retrieval is disabled/);
+  enabled = true;
+  assert.equal((await disabled.answers.get(disabledContext, String(result.artifact_id))).status, 'denied');
 });
 test('S03-T05: corrections fence exposed contexts, quarantine derived answers and provide only the new revision', async () => {
   const s = await setup('CalendarCorrectionCanary old meeting');
@@ -639,6 +710,29 @@ test('S03-T01/T05: a changed snapshot cannot publish a stale empty calendar view
     enabled: () => true,
   });
   const result = await view.read(fresh(), readInput(s.id));
-  assert.equal(result.status, 'conflict');
+  assert.ok(['conflict', 'denied'].includes(result.status));
   assert.equal(result.items, undefined);
+});
+test('S03-T05/T10: uncited calendar metadata fences future replies, including changes outside the displayed notice page', async () => {
+  const ctx = fresh();
+  assert.equal((await calendarView().coverage(ctx)).status, 'ok');
+  const draft = {
+    kind: 'answer',
+    coverage: 'not_applicable',
+    claims: [],
+    questions: ['Which meeting should we prepare for?'],
+  };
+  const prepared = await knowledge.answers.prepare(ctx, randomUUID(), draft);
+  assert.equal(prepared.status, 'ok');
+  assert.match(String(prepared.text), /Calendar coverage/);
+  assert.match(String(prepared.text), /first 10/);
+  const rows = await pool.query(
+    'SELECT id FROM cos.calendar_bindings WHERE scope_id=$1 ORDER BY id OFFSET 10 LIMIT 1',
+    [scope],
+  );
+  assert.equal(rows.rowCount, 1);
+  await calendar.start(context, rows.rows[0].id, 'selected', randomUUID(), window);
+  assert.equal((await knowledge.contextReady(ctx)).status, 'denied');
+  assert.equal((await knowledge.answers.prepare(ctx, randomUUID(), draft)).status, 'denied');
+  assert.equal((await knowledge.answers.get(fresh(), String(prepared.artifact_id))).status, 'denied');
 });
