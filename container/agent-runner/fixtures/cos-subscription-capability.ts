@@ -935,7 +935,7 @@ try {
         .sort();
     assert.deepEqual(declared(requests[5]), ['clock__curr_time', ...s01Tools]);
     const expected = ['clock__curr_time', ...cosDynamicTools.map((tool) => tool.name)].sort();
-    assert.equal(expected.length, 13);
+    assert.equal(expected.length, 14);
     assert.deepEqual(declared(requests[6]), expected);
     assert.deepEqual(declared(requests.at(-1)), expected);
   }
