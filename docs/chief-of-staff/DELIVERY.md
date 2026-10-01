@@ -3,7 +3,7 @@
 Run the host wrappers from the Mac checkout. They use the running repository devcontainer for project tools and the host's Docker, GitHub and SSH tools. They never install project dependencies on the Mac or build application code on the Pi.
 
 ```sh
-bash scripts/cos-release.sh --slice S03 --target pi --db-profile test --local-only
+bash scripts/cos-release.sh --slice S04 --target pi --db-profile test --local-only
 bash scripts/cos-deploy.sh status --target pi
 bash scripts/cos-deploy.sh --target pi --release-manifest /absolute/checkout/.cos-plan-state/releases/release-…/release.json
 bash scripts/cos-deploy.sh rollback --target pi --release-id release-…
@@ -35,15 +35,21 @@ Prefer `--db-profile test`. Explicit `--db-profile runtime-disposable` requires 
 
 Private test logs and receipts remain under `.cos-plan-state`; only sanitised acceptance evidence belongs in Git. Runtime fixture retries must retain the same owner, source, image, slice and request identity. A completed Pi receipt can reconcile a lost final reply only when the matching Mac receipt proves fixtures passed. Historical requests without a slice retain their original S01 meaning and receipt identity. See the acceptance receipts for actual deployment status.
 
+## S04 brief and commitment delivery
+
+New release construction selects S04, PostgreSQL schema 6 and SQLite contract 22. It requires S03's reviewed merge and verified delivery of that exact merged source. The manifest pins all six migration checksums; historical S01–S03 release identities remain readable under their own schema contracts. See [S04 evidence](evidence/S04.md) and [briefs and commitments](BRIEFS_AND_COMMITMENTS.md) for implementation, testing and live prerequisites.
+
+Migrations 4–6 add confirmed work and immutable revisions, approved schedules, stable briefing runs, notification intents and budget reservations. The schema-3 S03 release is incompatible after these migrations. Refuse incompatible rollback, preserve maintenance and pause on unresolved failure, and use tested schema-compatible recovery code. Deployment does not approve a schedule, resume CoS, connect an account or extend model consent.
+
 ## S03 calendar delivery
 
-New release construction selects S03, PostgreSQL schema 3 and SQLite contract 22. It requires S02's reviewed merge and verified delivery of that exact merged source. The manifest carries the three pinned migration checksums; historical S01/S02 manifests remain readable. See [S03 evidence](evidence/S03.md) for the tested candidate, actual deployment and recovery observations, and [calendar operations](CALENDAR_OPERATIONS.md) for optional account setup.
+S03 release construction selected PostgreSQL schema 3 and SQLite contract 22 after S02's reviewed merge and verified delivery of that exact merged source. Its manifest carries the three pinned migration checksums. See [S03 evidence](evidence/S03.md) for the reviewed merged deployment and recovery observations, and [calendar operations](CALENDAR_OPERATIONS.md) for optional account setup.
 
 Calendar access remains disabled until separately configured. Calendar credentials and denial journals, when present, require verified encrypted storage and protected backups. Deployment does not link an account or activate a model. After schema 3 is installed, S02 is not a compatible rollback; preserve closed admission on an unresolved failure and use tested compatible code.
 
 ## S02 knowledge configuration
 
-The historical S02 host required PostgreSQL schema 2 and checked its recorded checksums at startup. The current S03 host requires schema 3. Startup never migrates the database. The knowledge controls below remain available in S03.
+The historical S02 host required PostgreSQL schema 2 and checked its recorded checksums at startup. The current S04 host requires schema 6. Startup never migrates the database. The knowledge controls below remain available in S04.
 
 S02 was human-merged and its exact merged source was tested and delivered before S03 began; see [S02 evidence](evidence/S02.md). Once schema 2 was installed, the old S01 manifest became incompatible. Listing a release as an upgrade predecessor does not make it a valid rollback target. Preserve a failed deployment's receipt and maintenance lease; do not reset the database or clear the lease to force a retry.
 
@@ -103,4 +109,4 @@ pnpm cos:demo --slice S02 --fixture --db-profile test
 
 The test command includes affected S01 contracts, S02 database contracts and the routed twelve-question knowledge conversation. The demo command runs that conversation independently and emits its delivered replies and bounded quality judgements. See [the recorded development demonstration](evidence/S02_DEMO.md). `COS_FIXTURE_HOST_ROOT` identifies the Mac checkout for Docker bind mounts; `COS_FIXTURE_IMAGE` identifies the explicitly selected local runner. Development may use the existing `COS_FIXTURE_RUNNER_VOLUME` with a source mount. Final release checks must omit that override and use the exact tested immutable image identity. Neither the whole private environment nor database credentials enter the runner.
 
-Runtime-disposable selection retains the existing live cross-host guard; there is no automatic fallback from the separate test database. Source and packaged fixture requests now record their selected slice; packaged S02 tests run the complete S02 selector for each worker profile. Exact-image/Pi gates remain pending even when development commands pass.
+Runtime-disposable selection retains the existing live cross-host guard; there is no automatic fallback from the separate test database. Source and packaged fixture requests record their selected slice. The current S04 selector runs affected predecessor contracts plus work, schedule, brief and authenticated recurring-flow scenarios for each final worker profile. Passing development commands alone does not satisfy exact-image or Pi gates.
