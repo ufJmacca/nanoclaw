@@ -11,6 +11,7 @@ import {
   scheduledContext,
   interruptScheduledOrigin,
   clearScheduledOrigin,
+  readScheduledLease,
 } from './scheduled-origin.js';
 const binding: CosBinding = {
   scopeId: 'scope',
@@ -43,6 +44,15 @@ function fixture() {
   );
   return db;
 }
+it('S04 can recover an interrupted or expired local lease without treating it as execution authority', () => {
+  const db = fixture();
+  expect(readScheduledLease(db, binding)).toBeNull();
+  expect(installScheduledOrigin(db, binding, session, lease, now)).toBe(true);
+  interruptScheduledOrigin(db, binding);
+  expect(scheduledContext(session, db, now + 150000)).toBeNull();
+  expect(readScheduledLease(db, binding)).toEqual(lease);
+  expect(readScheduledLease(db, { ...binding, ownerId: 'foreign' })).toBeNull();
+});
 it('S04 scheduled work uses an explicit lease origin without forging or extending owner ingress', () => {
   const db = fixture(),
     before = db.prepare('SELECT ingress_id,ingress_at FROM cos_identity_boundaries').get();

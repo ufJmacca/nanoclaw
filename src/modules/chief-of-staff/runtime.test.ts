@@ -15,6 +15,11 @@ import { ensureConversationSchema } from './bridge/conversation-state.js';
 import { installScheduledOrigin } from './automation/scheduled-origin.js';
 import type { TurnAuthorization } from './bridge/turn-authorization.js';
 import { digest } from './domain/contracts.js';
+import { setDeliveryAdapter } from '../../delivery.js';
+import { NativeBriefTasks } from './automation/native-tasks.js';
+import Database from 'better-sqlite3';
+import { INBOUND_SCHEMA } from '../../db/schema.js';
+import { readScheduledLease } from './automation/scheduled-origin.js';
 
 let runtime: ReturnType<typeof createCosRuntime> | undefined;
 afterEach(() => {
@@ -307,6 +312,127 @@ it('S02 processes due retention work while paused without admitting ordinary out
   expect(pendingOutbox).not.toHaveBeenCalled();
   expect(wake).not.toHaveBeenCalled();
   expect(db.prepare('SELECT paused FROM cos_identity_boundaries').get()).toEqual({ paused: 1 });
+});
+
+it('S04 wires checked notification delivery and terminal native retirement into the host pump', async () => {
+  const db = initTestDb();
+  const binding: CosBinding = {
+    scopeId: 'scope',
+    agentGroupId: 'group',
+    messagingGroupId: 'mg',
+    sessionId: 'session',
+    provider: 'codex',
+    instanceId: 'fixture',
+    channelId: 'private',
+    ownerId: 'owner',
+    botId: 'bot',
+  };
+  const session = {
+    id: 'session',
+    agent_group_id: 'group',
+    messaging_group_id: 'mg',
+    thread_id: null,
+    status: 'active',
+    agent_provider: 'codex',
+  } as Session;
+  installCosBoundary(binding, db);
+  db.exec('UPDATE cos_identity_boundaries SET paused=0');
+  ensureConversationSchema(db);
+  const generation = randomUUID();
+  db.prepare(
+    "INSERT INTO cos_conversation_states(scope_id,binding_digest,account_fingerprint,generation,status,updated_at) VALUES(?,?,?,?,'active',?)",
+  ).run(binding.scopeId, digest(binding), 'a'.repeat(64), generation, new Date().toISOString());
+  const lease = {
+    runId: 'b'.repeat(64),
+    generation: 1,
+    hostId: 'host',
+    deadlineAt: new Date(Date.now() + 120000).toISOString(),
+  };
+  expect(installScheduledOrigin(db, binding, session, lease)).toBe(true);
+  const run = {
+    id: lease.runId,
+    generation: 1,
+    lease_owner: 'host',
+    state: 'prepared',
+    schedule_id: 'schedule',
+    schedule_version: 1,
+    intended_at: new Date().toISOString(),
+  };
+  const reference = {
+    artifact_id: 'a'.repeat(64) + '-' + 'b'.repeat(64),
+    output_digest: digest('Checked scheduled brief'),
+    context_generation: generation,
+    provider: 'codex',
+  };
+  const briefs = {
+    inspect: vi.fn(async () => ({ status: 'ok', run: { ...run }, notification: { state: 'queued' } })),
+    authorize: vi.fn().mockResolvedValue({ status: 'ok' }),
+    beginDelivery: vi.fn().mockResolvedValue({ status: 'ok', notification_id: 'brief-' + run.id, reference }),
+    deliveryCurrent: vi.fn().mockResolvedValue({ status: 'ok' }),
+    finishDelivery: vi.fn(async (_c, _r, _g, _a, outcome) => {
+      run.state = outcome.state;
+      return { status: 'ok', state: outcome.state };
+    }),
+  };
+  const knowledge = {
+    pendingInvalidations: vi.fn().mockResolvedValue({ status: 'ok', items: [] }),
+    purgeDue: vi.fn().mockResolvedValue({ status: 'ok' }),
+  };
+  const briefArtifacts = {
+    get: vi
+      .fn()
+      .mockResolvedValue({ status: 'ok', artifact_id: reference.artifact_id, text: 'Checked scheduled brief' }),
+  };
+  const inbound = new Database(':memory:');
+  inbound.exec(INBOUND_SCHEMA);
+  const tasks = new NativeBriefTasks(inbound);
+  tasks.stage(binding, run);
+  const deliver = vi.fn().mockResolvedValue('verified-post');
+  setDeliveryAdapter({ deliver });
+  const stop = vi.fn();
+  try {
+    runtime = createCosRuntime({
+      db,
+      enabled: true,
+      store: {
+        briefs,
+        knowledge,
+        briefArtifacts,
+        pendingOutbox: vi.fn().mockResolvedValue({ status: 'ok', items: [] }),
+      } as unknown as PriorityStore,
+      facts: async () => ({
+        id: 'private',
+        type: 'P',
+        delete_at: 0,
+        members: ['bot', 'owner'],
+        activeSubscription: true,
+      }),
+      session: () => session,
+      destination: () => undefined,
+      stop,
+      wake: vi.fn(),
+      running: () => false,
+      withBriefTasks: (_session, operation) => operation(tasks),
+      launcher: { ready: () => true, prepare: vi.fn() },
+    });
+    await runtime.pump(binding);
+    expect(deliver).toHaveBeenCalledExactlyOnceWith(
+      'mattermost',
+      'mattermost:fixture:private',
+      null,
+      'chat',
+      JSON.stringify({ text: 'Checked scheduled brief' }),
+      undefined,
+      'brief-' + run.id,
+    );
+    await runtime.pump(binding);
+    expect(deliver).toHaveBeenCalledOnce();
+    expect(tasks.state(binding, run)).toBe('completed');
+    expect(stop).toHaveBeenCalledWith('session');
+    expect(readScheduledLease(db, binding)).toBeNull();
+  } finally {
+    inbound.close();
+  }
 });
 
 it('S04 wires shared-context scheduled admission and model budgets while withholding ordinary chat publication', async () => {

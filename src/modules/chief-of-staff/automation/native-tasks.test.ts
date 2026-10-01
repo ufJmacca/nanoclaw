@@ -77,6 +77,16 @@ it('S04 stages one native task paused and preserves its identity and retry state
   ).toBe(false);
   expect(countDueMessages(db)).toBe(0);
 });
+it('S04 retirement tolerates a pre-staging crash and preserves foreign task collisions', () => {
+  const { db, tasks } = fixture();
+  expect(tasks.retire(binding, run)).toBe(true);
+  expect(tasks.stage(binding, run)).toBeTruthy();
+  expect(tasks.retire(binding, run)).toBe(true);
+  expect(tasks.state(binding, run)).toBe('completed'); // Native cancellation uses completed; CoS retains its distinct outcome.
+  db.prepare("UPDATE messages_in SET content='foreign' WHERE id=?").run(`cos-brief-${run.id}`);
+  expect(tasks.retire(binding, run)).toBe(false);
+  expect(db.prepare('SELECT content FROM messages_in').get()).toEqual({ content: 'foreign' });
+});
 it('S04 rejects changed payloads, foreign bindings and unrelated native task collisions', async () => {
   const { db, tasks } = fixture();
   insertTask(db, {

@@ -140,6 +140,20 @@ export class NativeBriefTasks {
       return true;
     })();
   }
+  /** An origin may have been committed just before a crash prevented native staging. */
+  retire(binding: CosBinding, run: NativeBriefRun): boolean {
+    const task = this.definition(binding, run);
+    if (!task) return false;
+    return this.db.transaction(() => {
+      if (this.owned(binding, run)) return this.cancel(binding, run);
+      return (
+        !this.db.prepare('SELECT 1 FROM messages_in WHERE id=? OR series_id=?').get(task.id, task.id) &&
+        !this.db
+          .prepare('SELECT 1 FROM cos_brief_native_tasks WHERE task_id=? OR (scope_id=? AND run_id=?)')
+          .get(task.id, binding.scopeId, run.id)
+      );
+    })();
+  }
   pause(binding: CosBinding, run: NativeBriefRun): boolean {
     return this.db.transaction(() => {
       const row = this.owned(binding, run);

@@ -21,6 +21,16 @@ function ensureSchema(db: Database.Database) {
   interrupted INTEGER NOT NULL DEFAULT 0 CHECK(interrupted IN (0,1))
 );`);
 }
+/** Recovery identity only. An interrupted or expired row grants no model or publication authority. */
+export function readScheduledLease(db: Database.Database, binding: CosBinding): ScheduledLease | null {
+  if (!hasTable(db, 'cos_scheduled_origins')) return null;
+  const row = db.prepare('SELECT * FROM cos_scheduled_origins WHERE scope_id=?').get(binding.scopeId) as
+    | Row
+    | undefined;
+  return row && row.binding_digest === digest(binding)
+    ? { runId: row.run_id, generation: row.generation, hostId: row.lease_owner, deadlineAt: row.deadline_at }
+    : null;
+}
 /** Only the trusted scheduler installs a successfully claimed PostgreSQL lease. This row is never offline authority. */
 export function installScheduledOrigin(
   db: Database.Database,
