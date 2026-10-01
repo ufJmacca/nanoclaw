@@ -1,6 +1,6 @@
 # Calendar operator controls
 
-S03 is in development. These commands have development-container tests; no S03 release or live calendar link is accepted yet. Google Calendar reads are optional and disabled by default. The Pi continues to run accepted S02 with CoS paused.
+S03 is deployed as a tested candidate; see the [acceptance receipt](evidence/S03.md) for verification and human review status. Google Calendar reads are optional and disabled by default. The Pi has no linked calendar and CoS remains paused.
 
 Calendar administration uses the existing native CoS binding. The target must have its maintenance lease, a stopped service and workers, a paused CoS binding, and current private owner/bot membership. The command takes the target and host locks and derives scope ownership from NanoClaw. It leaves CoS paused and does not invoke a model or send a message.
 
@@ -84,4 +84,6 @@ To check provider revocation in a separately approved live test, remove this des
 
 The fixture suite verifies fixed Google GET event requests and the separate fixed OAuth token POST. S03 has no event-write endpoint. For a live test, verify selected events and snapshot/freshness metadata using these commands without recording Authorization headers, token bodies, raw event content or the private browser URL in shared logs. Linking or deployment alone is not evidence of a successful live read.
 
-Calendar reads cannot edit Google events. Preparation advice remains a proposal. Model activation and context recovery retain their separate existing controls; none of these commands resumes CoS or replenishes its allowance.
+For coordinator answers, the trusted host also needs `COS_KNOWLEDGE_ENABLED=true`: calendar citations use the guarded knowledge store. After successful account setup and a selected refresh, apply the configuration through the normal service controls. The retained older coordinator context needs guarded context recovery to acquire the current tool catalogue. Changed snapshots or revoked access can also invalidate an exposed context. Recovery stays within the same NanoClaw AgentGroup; visual Mattermost reply threads do not create independent coordinator contexts.
+
+Calendar reads cannot edit Google events. Preparation advice remains a proposal. Model activation and context recovery retain their separate existing controls; none of these commands resumes CoS or replenishes its allowance. The earlier live-test allowance has expired, so a new live conversation test needs a separately authorized bounded allowance.
