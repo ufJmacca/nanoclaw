@@ -26,6 +26,16 @@ import type { ProposalChange } from '../../modules/chief-of-staff/domain/contrac
 import { BriefArtifacts } from '../../modules/chief-of-staff/automation/brief-artifacts.js';
 import { BriefCollector } from '../../modules/chief-of-staff/automation/brief-collector.js';
 import { BriefDelivery } from '../../modules/chief-of-staff/automation/brief-delivery.js';
+import { BriefDispatch } from '../../modules/chief-of-staff/automation/brief-dispatch.js';
+import { BriefReconciliation } from '../../modules/chief-of-staff/automation/brief-reconciliation.js';
+import { NativeBriefTasks } from '../../modules/chief-of-staff/automation/native-tasks.js';
+import { scheduledContext, readScheduledLease } from '../../modules/chief-of-staff/automation/scheduled-origin.js';
+import { createRpcHandler } from '../../modules/chief-of-staff/bridge/rpc.js';
+import { installCosBoundary, type CosBinding } from '../../cos-boundary.js';
+import { initTestDb, closeDb } from '../../db/connection.js';
+import { INBOUND_SCHEMA } from '../../db/schema.js';
+import type { Session } from '../../types.js';
+import Database from 'better-sqlite3';
 import type { WorkChange } from '../../modules/chief-of-staff/contracts/protocol.js';
 const scope = 'brief-' + randomUUID(),
   context = {
@@ -507,6 +517,219 @@ test('S04 brief persistence reconciles a lost commit acknowledgement and blocks 
   } finally {
     await database.pool.end();
     await relay.close();
+  }
+});
+
+test('S04 recurring fixture: approved schedule, native restart, checked briefs and confirmed commitment resolution', async () => {
+  const db = initTestDb(),
+    inbound = new Database(':memory:');
+  inbound.exec(INBOUND_SCHEMA);
+  const binding: CosBinding = {
+    scopeId: scope,
+    ownerId: context.ownerId,
+    sessionId: scope,
+    agentGroupId: scope,
+    messagingGroupId: 'fixture-mg',
+    instanceId: 'fixture',
+    channelId: scope,
+    botId: 'fixture-bot',
+    provider: 'codex',
+  };
+  const session = {
+    id: scope,
+    agent_group_id: scope,
+    messaging_group_id: 'fixture-mg',
+    thread_id: null,
+    status: 'active',
+    agent_provider: 'codex',
+  } as Session;
+  installCosBoundary(binding, db);
+  db.prepare('UPDATE cos_identity_boundaries SET paused=0,ingress_id=?').run(context.ingressId);
+  const schedule = (await pool.query('SELECT * FROM cos.brief_schedules WHERE scope_id=$1', [scope])).rows[0];
+  await approve({
+    kind: 'brief_schedule',
+    record_id: schedule.id,
+    title: 'Fixture recurring brief',
+    expected_version: schedule.version,
+    reason: 'Fixture recurring demonstration',
+    policy: schedule.policy,
+    limits: schedule.limits,
+  });
+  const date = (
+    await pool.query('SELECT last_local_date::text AS day FROM cos.brief_schedules WHERE scope_id=$1', [scope])
+  ).rows[0].day;
+  const clock = new Date(date + 'T09:00:00Z');
+  clock.setUTCDate(clock.getUTCDate() + 1);
+  const runs = new BriefRunStore(store.database, { clock: () => clock });
+  const artifacts = new BriefArtifacts(new BriefCollector({ ...collector.options, clock: () => clock }));
+  const tasks = new NativeBriefTasks(inbound);
+  const local = () => {
+    const c = scheduledContext(session, db);
+    return c ? { ...c, provider: 'codex', generation: context.generation } : null;
+  };
+  let wakes = 0;
+  const dispatchOptions = {
+    db,
+    runs,
+    session: () => session,
+    admitted: async () => true,
+    running: () => false,
+    withTasks: async <T>(_session: Session, op: (tasks: NativeBriefTasks) => Promise<T>) => op(tasks),
+    prepare: async () => true,
+    wake: async () => {
+      wakes++;
+    },
+  };
+  const sent: Array<{ text: string; id: string }> = [];
+  const delivery = new BriefDelivery({
+    runs,
+    artifacts,
+    current: local,
+    admitted: async () => true,
+    send: async (_context, text, id) => {
+      sent.push({ text, id });
+      return 'fixture-post-' + sent.length;
+    },
+  });
+  const recoveryOptions = {
+    db,
+    runs,
+    local,
+    admitted: async () => true,
+    running: () => false,
+    stop: () => {},
+    retire: (b: CosBinding, r: Parameters<NativeBriefTasks['retire']>[1]) => tasks.retire(b, r),
+    taskState: (b: CosBinding, r: Parameters<NativeBriefTasks['state']>[1]) => tasks.state(b, r),
+    deliver: (c: Parameters<BriefDelivery['deliver']>[0]) => delivery.deliver(c),
+  };
+  const rpcStore = new PriorityStore(store.database, knowledge);
+  // Keep fixture clock and artifact publication identical to the sender's collector.
+  rpcStore.briefArtifacts!.collector.options.clock = () => clock;
+  const handler = createRpcHandler({
+    store: rpcStore,
+    knowledge,
+    resolveContext: async () => scheduledContext(session, db) ?? null,
+    resolveKnowledgeContext: async () => local(),
+    reserveTool: (c, id) => runs.reserveCall(c, c.origin!.runId, c.origin!.generation, 'tool', id),
+  });
+  let commitment = '';
+  try {
+    const relay = await connectionFault(await fixtureDatabaseConfig());
+    const partitioned = new BoundedDatabase(new pg.Pool(relay.config), 350);
+    try {
+      await partitioned.run((c) => c.query('SELECT 1'));
+      relay.partition();
+      const denied = await new BriefDispatch({
+        ...dispatchOptions,
+        runs: new BriefRunStore(partitioned, { clock: () => clock }),
+      }).drain(binding);
+      assert.ok(['pending', 'unavailable'].includes(denied.status));
+      assert.equal(readScheduledLease(db, binding), null);
+      assert.equal(wakes, 0);
+      assert.deepEqual(inbound.prepare('SELECT id FROM messages_in').all(), []);
+    } finally {
+      relay.restore();
+      await partitioned.pool.end();
+      await relay.close();
+    }
+    const lostPool = new pg.Pool(await fixtureDatabaseConfig()),
+      lostClient = await lostPool.connect(),
+      original = lostClient.query.bind(lostClient);
+    let claimed = false,
+      dropped = false;
+    lostClient.query = (async (...args: unknown[]) => {
+      const result = await (original as (...a: unknown[]) => Promise<unknown>)(...args);
+      if (typeof args[0] === 'string' && args[0].includes("SET state='dispatched'")) claimed = true;
+      if (args[0] === 'COMMIT' && claimed && !dropped) {
+        dropped = true;
+        throw Error('fixture_lost_dispatch_claim_ack');
+      }
+      return result;
+    }) as typeof lostClient.query;
+    lostClient.release();
+    try {
+      assert.equal(
+        (
+          await new BriefDispatch({
+            ...dispatchOptions,
+            runs: new BriefRunStore(new BoundedDatabase(lostPool), { clock: () => clock }),
+          }).drain(binding)
+        ).status,
+        'pending',
+      );
+      assert.equal(readScheduledLease(db, binding), null);
+      assert.equal(wakes, 0);
+      assert.deepEqual(inbound.prepare('SELECT id FROM messages_in').all(), []);
+    } finally {
+      await lostPool.end();
+    }
+    for (let morning = 0; morning < 3; morning++) {
+      assert.equal((await new BriefDispatch(dispatchOptions).drain(binding)).status, 'ok');
+      const lease = readScheduledLease(db, binding)!;
+      assert.ok(lease);
+      // Reconstruct host scheduling after dispatch, preserving the native retry and durable generation.
+      inbound.prepare('UPDATE messages_in SET tries=1 WHERE id=?').run('cos-brief-' + lease.runId);
+      assert.equal((await new BriefDispatch(dispatchOptions).drain(binding)).status, 'ok');
+      assert.deepEqual(readScheduledLease(db, binding), lease);
+      assert.equal(
+        (
+          inbound.prepare('SELECT tries FROM messages_in WHERE id=?').get('cos-brief-' + lease.runId) as {
+            tries: number;
+          }
+        ).tries,
+        1,
+      );
+      const native = local()!;
+      assert.equal((await runs.reserveCall(native, lease.runId, lease.generation, 'model', randomUUID())).status, 'ok');
+      const request = {
+        protocol: 'cos-rpc/v1',
+        request_id: randomUUID(),
+        method: 'cos_brief_request',
+        params: { time_zone: 'UTC' },
+      };
+      await handler({ action: 'cos_rpc', delivery_id: randomUUID(), request }, session, inbound);
+      const response = JSON.parse(
+        (
+          inbound.prepare('SELECT response FROM cos_rpc_responses WHERE request_id=?').get(request.request_id) as {
+            response: string;
+          }
+        ).response,
+      );
+      assert.equal(response.status, 'ok');
+      const before = (await runs.inspect(native, lease.runId)).run as {
+        model_calls: number;
+        tool_calls: number;
+        state: string;
+      };
+      assert.deepEqual(
+        { model: before.model_calls, tool: before.tool_calls, state: before.state },
+        { model: 1, tool: 1, state: 'prepared' },
+      );
+      const recovery = new BriefReconciliation(recoveryOptions);
+      assert.equal((await recovery.drain(binding)).status, 'ok');
+      assert.equal((await recovery.drain(binding)).status, 'ok');
+      assert.equal(readScheduledLease(db, binding), null);
+      assert.equal((await new BriefDispatch(dispatchOptions).drain(binding)).state, 'not_due');
+      assert.equal(sent.length, morning + 1);
+      if (morning === 1) assert.ok(sent[morning].text.includes('Recurring fixture commitment'));
+      else assert.ok(!sent[morning].text.includes('Recurring fixture commitment'));
+      assert.match(sent[morning].text, /Calendar: unavailable/);
+      if (morning === 0) commitment = await approve({ ...change, title: 'Recurring fixture commitment' });
+      if (morning === 1)
+        await approve({
+          ...change,
+          title: 'Recurring fixture commitment',
+          record_id: commitment,
+          expected_version: 1,
+          state: 'completed',
+        });
+      clock.setUTCDate(clock.getUTCDate() + 1);
+    }
+    assert.equal(new Set(sent.map((x) => x.id)).size, 3);
+    assert.equal(wakes, 6); // Repeated native wakes reuse three runs and their original reservations.
+  } finally {
+    inbound.close();
+    closeDb();
   }
 });
 

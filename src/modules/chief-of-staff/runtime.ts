@@ -18,6 +18,7 @@ import { KnowledgeInvalidation } from './knowledge/invalidation.js';
 import { NativeBriefTasks } from './automation/native-tasks.js';
 import { BriefDelivery } from './automation/brief-delivery.js';
 import { BriefReconciliation } from './automation/brief-reconciliation.js';
+import { BriefDispatch } from './automation/brief-dispatch.js';
 
 export type RuntimeDependencies = {
   db: Database.Database;
@@ -145,6 +146,34 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
         },
       })
     : null;
+  const briefDispatch = d.store?.briefArtifacts
+    ? new BriefDispatch({
+        db: d.db,
+        runs: d.store.briefs,
+        session: d.session,
+        admitted: briefAdmission,
+        running: (id) => d.running?.(id) ?? true,
+        withTasks: async (session, operation) => {
+          if (d.withBriefTasks) return await d.withBriefTasks(session, operation);
+          const inbound = openInboundDb(session.agent_group_id, session.id);
+          try {
+            return await operation(new NativeBriefTasks(inbound));
+          } finally {
+            inbound.close();
+          }
+        },
+        prepare: async (binding, context, run) => {
+          // Refresh-enabled schedules remain closed until the bounded connector path is installed.
+          if (run.limits.refresh_seconds !== 0 || !d.store?.knowledge) return false;
+          const session = d.session(binding.sessionId),
+            boundary = session && cosBoundary(session, d.db);
+          if (!session || !boundary?.restricted || !boundary.ingressId) return false;
+          const retained = resolveKnowledgeContext(session, { ...context, ingressId: boundary.ingressId }, d.db);
+          return !!retained && (await d.store.knowledge.contextReady(retained)).status === 'ok';
+        },
+        wake: d.wake,
+      })
+    : null;
   const outbox = d.store
     ? new CosOutbox({
         store: d.store,
@@ -244,7 +273,11 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
     controller,
     pump: async (binding: CosBinding) => {
       if (enabled()) await invalidations?.drain(binding);
-      if (enabled()) await briefReconciliation?.drain(binding);
+      if (enabled()) {
+        const recovered = await briefReconciliation?.drain(binding);
+        if (recovered?.status === 'ok' && ['absent', 'dispatched'].includes(String(recovered.state)))
+          await briefDispatch?.drain(binding);
+      }
       if (enabled()) await outbox?.drain(binding);
       // An approved source change may enqueue invalidation in this same pump.
       if (enabled()) await invalidations?.drain(binding);
