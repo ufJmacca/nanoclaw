@@ -11,13 +11,14 @@ it('S04 requires six exact pinned migrations and rejects earlier schema or later
     slice: 'S04',
     postgres: { minimum: 6, maximum: 6 },
     sqlite: { minimum: 22, maximum: 22 },
-    migrations: MIGRATIONS.map(({ version, checksum }) => ({ version, checksum })),
+    migrations: MIGRATIONS.slice(0, 6).map(({ version, checksum }) => ({ version, checksum })),
   };
   expect(validateReleaseManifest(current)).toEqual(current);
   for (const patch of [
     { postgres: { minimum: 3, maximum: 6 } },
     { postgres: { minimum: 6, maximum: 7 } },
     { migrations: current.migrations.slice(0, 5) },
+    { migrations: MIGRATIONS.map(({ version, checksum }) => ({ version, checksum })) },
     { slice: 'S03' },
     { slice: 'S05' },
     ...current.migrations.map((_, index) => ({
