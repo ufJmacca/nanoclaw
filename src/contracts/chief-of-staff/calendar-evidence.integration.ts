@@ -21,6 +21,11 @@ import { connectionFault } from './connection-fault.js';
 import { setTimeout as delay } from 'node:timers/promises';
 import { CalendarConnector } from '../../modules/chief-of-staff/calendar/connector.js';
 import { CalendarView } from '../../modules/chief-of-staff/calendar/view.js';
+import { runCalendarAccountAdmin } from '../../modules/chief-of-staff/ops/calendar-account-admin.js';
+import { runCalendarAdmin } from '../../modules/chief-of-staff/ops/calendar-admin.js';
+import { writeAtomic } from '../../modules/chief-of-staff/ops/target-state.js';
+import type { StorageInspection } from '../../modules/chief-of-staff/calendar/storage-protection.js';
+import type { CosBinding } from '../../cos-boundary.js';
 const scope = 'calendar-evidence-' + randomUUID();
 const context: KnowledgeContext = {
   scopeId: scope,
@@ -138,6 +143,154 @@ async function find(text: string, ctx = fresh()) {
   assert.ok(row, 'calendar evidence missing');
   return { row, ctx };
 }
+test('S03 operator flow: explicit loopback link, selected sync, stable retry and local/database disconnect', async () => {
+  const fixtureRoot = path.join(base, 'operator');
+  fs.mkdirSync(fixtureRoot, { mode: 0o700 });
+  const roots = {
+      targetRoot: fixtureRoot + '/state',
+      installationRoot: fixtureRoot + '/app',
+      dataRoot: fixtureRoot + '/data',
+    },
+    backupRoot = fixtureRoot + '/backup';
+  for (const root of [...Object.values(roots), backupRoot, roots.targetRoot + '/calendar'])
+    fs.mkdirSync(root, { mode: 0o700 });
+  writeAtomic(roots.targetRoot + '/calendar', 'oauth-client.json', {
+    clientId: 'fixture.apps.googleusercontent.com',
+    clientSecret: 'OPERATOR_CLIENT_CANARY',
+  });
+  const inspect: StorageInspection = (command, args) =>
+    JSON.stringify(
+      command.endsWith('/findmnt')
+        ? {
+            filesystems: [
+              {
+                target: args[args.indexOf('--target') + 1],
+                source: '/dev/mapper/fixture',
+                fstype: 'ext4',
+                'maj:min': '253:0',
+                uuid: 'operator-fixture-storage',
+              },
+            ],
+          }
+        : {
+            blockdevices: [
+              { name: '/dev/mapper/fixture', type: 'crypt', 'maj:min': '253:0', uuid: 'operator-fixture-storage' },
+            ],
+          },
+    );
+  const requests: string[] = [];
+  const transport = async (url: string, init: RequestInit) => {
+    requests.push(url);
+    if (url === 'https://oauth2.googleapis.com/token') {
+      assert.equal(init.method, 'POST');
+      return new Response(
+        JSON.stringify({
+          access_token: 'OPERATOR_ACCESS_CANARY',
+          refresh_token: 'OPERATOR_REFRESH_CANARY',
+          token_type: 'Bearer',
+          expires_in: 3600,
+          scope: GOOGLE_EVENT_READ_SCOPE,
+        }),
+      );
+    }
+    assert.equal(new URL(url).origin, 'https://www.googleapis.com');
+    assert.equal(new URL(url).pathname, '/calendar/v3/calendars/selected/events');
+    assert.equal(init.method, 'GET');
+    return new Response(JSON.stringify({ accessRole: 'reader', items: [event('OperatorCalendarFixtureCanary')] }));
+  };
+  const connect = async () => new PriorityStore(BoundedDatabase.fromConfig(await fixtureDatabaseConfig()));
+  const dependencies = {
+    inspect,
+    fetch: transport,
+    connect,
+    artifacts: () => artifacts,
+    display: async (url: string) => {
+      const auth = new URL(url),
+        callback = new URL(auth.searchParams.get('redirect_uri')!);
+      callback.searchParams.set('code', 'fixture-code');
+      callback.searchParams.set('state', auth.searchParams.get('state')!);
+      const response = await fetch(callback);
+      assert.equal(response.status, 200);
+      assert.doesNotMatch(await response.text(), /CANARY/);
+    },
+  };
+  const options = {
+    roots,
+    env: { COS_CALENDAR_ENABLED: 'true' },
+    binding: {
+      scopeId: scope,
+      ownerId: context.ownerId,
+      agentGroupId: scope,
+      sessionId: scope,
+      provider: 'codex',
+    } as CosBinding,
+    check: async () => {},
+    assertAuthority: () => {},
+  };
+  const configured = await runCalendarAccountAdmin(
+    { ...options, args: { command: 'calendar-setup', scopeId: scope, requestId: randomUUID(), backupRoot } },
+    dependencies,
+  );
+  assert.equal(configured.status, 'configured_paused');
+  const bindingId = randomUUID();
+  writeAtomic(roots.targetRoot, 'selection.json', {
+    calendarIds: ['selected'],
+    timeZone: window.timeZone,
+    processingProviders: ['codex'],
+  });
+  const link = {
+    command: 'calendar-link' as const,
+    scopeId: scope,
+    bindingId,
+    requestId: randomUUID(),
+    manifestFile: roots.targetRoot + '/selection.json',
+  };
+  assert.equal((await runCalendarAccountAdmin({ ...options, args: link }, dependencies)).status, 'ok');
+  assert.equal((await runCalendarAccountAdmin({ ...options, args: link }, dependencies)).status, 'ok');
+  assert.equal(requests.length, 1);
+  writeAtomic(roots.targetRoot, 'sync.json', { calendarId: 'selected', window });
+  const sync = {
+    command: 'calendar-sync' as const,
+    scopeId: scope,
+    bindingId,
+    requestId: randomUUID(),
+    manifestFile: roots.targetRoot + '/sync.json',
+  };
+  assert.equal((await runCalendarAdmin({ ...options, args: sync }, dependencies)).status, 'ok');
+  assert.equal((await runCalendarAdmin({ ...options, args: sync }, dependencies)).status, 'ok');
+  assert.equal(requests.length, 2);
+  const [snapshot] = (
+    await pool.query('SELECT status FROM cos.calendar_snapshots WHERE scope_id=$1 AND id=$2', [scope, sync.requestId])
+  ).rows;
+  assert.equal(snapshot.status, 'complete');
+  const rows = (
+    await pool.query('SELECT event FROM cos.calendar_event_revisions WHERE scope_id=$1 AND binding_id=$2', [
+      scope,
+      bindingId,
+    ])
+  ).rows;
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].event.summary, 'OperatorCalendarFixtureCanary');
+  const disconnected = await runCalendarAdmin(
+    {
+      ...options,
+      env: {},
+      args: { command: 'calendar-disconnect', scopeId: scope, bindingId, requestId: randomUUID() },
+    },
+    dependencies,
+  );
+  assert.equal(disconnected.status, 'ok');
+  assert.equal(disconnected.local_access, 'denied');
+  const recorded = await calendar.connection(context, bindingId);
+  assert.equal((recorded.binding as { auth: string }).auth, 'disconnected');
+  assert.throws(
+    () => new CalendarAccessFences(roots.targetRoot + '/calendar/access-denials').assertOpen(scope, bindingId),
+    /calendar_auth_disconnected/,
+  );
+  await assert.rejects(runCalendarAccountAdmin({ ...options, args: link }, dependencies), /calendar_auth_disconnected/);
+  assert.equal(requests.length, 2);
+  assert.doesNotMatch(JSON.stringify([configured, disconnected]), /CANARY|refreshToken|clientSecret/);
+});
 test('S03-T10: checked calendar notices survive replay but expire on refresh and access changes, even without event citations', async () => {
   const s = await setup('CoverageNoticeCanary');
   await publish(s);

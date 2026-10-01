@@ -1,14 +1,14 @@
 # Calendar awareness implementation
 
-S03 is in progress. The calendar readers, snapshot collector, PostgreSQL snapshot store, guarded S02 evidence integration, host connector, bounded model read tool and offline preparation conversation exist. Operator account linking and final release acceptance remain pending. No real calendar account has been linked or queried.
+S03 is in progress. The calendar readers, snapshot collector, PostgreSQL snapshot store, guarded S02 evidence integration, host connector, bounded model read tool, offline preparation conversation and owner controls exist. Final release acceptance and live calendar validation remain pending. No real calendar account has been linked or queried.
 
-Owner status, refresh and disconnect commands now have development-container tests. See the [operator runbook](CALENDAR_OPERATIONS.md) for their prerequisites and retry behavior. Protected setup and account linking remain in development.
+Owner setup, account linking, status, refresh and disconnect commands have development-container tests. See the [operator runbook](CALENDAR_OPERATIONS.md) for storage, consent and retry requirements. The complete operator fixture uses a real loopback callback and PostgreSQL with synthetic provider responses and storage inspection; it does not establish encryption or account access on the Pi.
 
 ## Read contract
 
 The host reader exposes access status, event listing and event lookup. It builds fixed Google Calendar HTTPS GET requests and refuses redirects. An owner's selected calendar IDs constrain every request even if the supplied token has broader scopes. Tokens are supplied through a host-only callback and never appear in returned events or operational errors.
 
-The intended authorization scope is `calendar.events.readonly`. Calendar selection uses explicit IDs, so the implementation does not need CalendarList or calendar-write permission. The OAuth operator flow remains to be implemented and tested. Google documents event-read scopes separately from calendar-management scopes. [Scope reference](https://developers.google.com/workspace/calendar/api/auth).
+The authorization scope is `calendar.events.readonly`. Calendar selection uses explicit IDs, so the implementation does not need CalendarList or calendar-write permission. Google documents event-read scopes separately from calendar-management scopes. [Scope reference](https://developers.google.com/workspace/calendar/api/auth).
 
 ## Snapshot and time policy
 
@@ -34,7 +34,7 @@ The external test database has schema 3. The Pi remains on the accepted S02 sche
 
 The host refresh coordinator checks the durable binding before fetching pages, reconciles an already committed request without refetching, and retains a prepared capture for an uncertain publication retry. Prepared captures are private recovery material, never model responses or logs. Detected access loss requires a host denial before the database update. The append-only denial journal survives reconstruction; unsafe, missing or corrupt journals fail closed. Runtime startup cannot initialize or reset it. Explicit setup and inclusion in protected host backups are still part of the pending operator integration. The journal contains binding references and denial reasons, never OAuth tokens. Actual coordinator/knowledge disclosure must consult this journal before S03 can be enabled.
 
-## Pending operator flow
+## Operator authorization flow
 
 The OAuth protocol module uses a desktop client, an exact IPv4 loopback callback, PKCE S256 and single-use state. Consent attempts expire after ten minutes and cannot be restored after process restart. Token exchange and refresh use only Google's HTTPS token endpoint, without redirects or automatic replay. Responses are bounded and validated; refresh rotation and time-based refresh expiry are retained. Provider error text, identity tokens and unknown response fields are excluded. These behaviors pass synthetic-response tests. Google supports desktop loopback callbacks and documents the PKCE exchange and refresh fields. [Installed-app authorization](https://developers.google.com/identity/protocols/oauth2/native-app).
 
@@ -42,7 +42,7 @@ The loopback listener now checks the actual bound host/port, callback path, meth
 
 The host credential owner stores validated token fields in private files outside Git. References are bound to one scope, connector and OAuth client. A kernel lock excludes concurrent owners; one owner coalesces concurrent requests. Refresh is journalled before dispatch, and rotation is saved and synced before the access token is released. An interrupted or uncertain refresh stops reuse and records a durable access denial. Private permissions do not establish disk encryption: the operator workflow must configure and verify storage encryption and protected backups.
 
-The Pi administration path remains pending. The operator runbook must cover account consent, selected-calendar admission, host storage/backup protection and revocation before live linking is enabled. These components do not enable an account-link command by themselves.
+The owner-run `calendar-setup` and `calendar-link` commands now wire these components through native maintenance, private membership and paused-binding checks. Linking uses a private selected-calendar manifest and a single durable attempt per binding. Database admission can retry without another OAuth exchange; uncertain authorization cannot. Tokens are saved and backed up before binding admission. Setup and linking do not activate a model, fetch events, resume CoS or change refresh enablement. Final Pi release checks and separately authorized live validation remain pending.
 
 ## Host integration in development
 

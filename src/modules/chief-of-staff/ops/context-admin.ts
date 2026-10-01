@@ -32,10 +32,16 @@ import { issueActivation, resumeContext, rebindRecoveredActivation } from './mod
 
 import { isKnowledgeCommand, runKnowledgeAdmin, type KnowledgeAdminArguments } from './knowledge-admin.js';
 import { isCalendarCommand, runCalendarAdmin, type CalendarAdminArguments } from './calendar-admin.js';
+import {
+  isCalendarAccountCommand,
+  runCalendarAccountAdmin,
+  type CalendarAccountArguments,
+} from './calendar-account-admin.js';
 
 export type ContextAdminArguments =
   | KnowledgeAdminArguments
   | CalendarAdminArguments
+  | CalendarAccountArguments
   | { command: 'context-status'; scopeId: string }
   | { command: 'context-prepare'; scopeId: string }
   | { command: 'model-activate'; scopeId: string; policyFile: string }
@@ -253,6 +259,20 @@ export async function contextAdminCommand(
       }
       if (isCalendarCommand(args)) {
         return runCalendarAdmin({
+          args,
+          env,
+          roots: {
+            targetRoot: root,
+            installationRoot: target.binding.installationRoot,
+            dataRoot: target.binding.dataRoot,
+          },
+          binding,
+          check,
+          assertAuthority,
+        });
+      }
+      if (isCalendarAccountCommand(args)) {
+        return runCalendarAccountAdmin({
           args,
           env,
           roots: {

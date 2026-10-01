@@ -15,6 +15,11 @@ vi.mock('./calendar-admin.js', async () => ({
   runCalendarAdmin: vi.fn(),
 }));
 import { runCalendarAdmin } from './calendar-admin.js';
+vi.mock('./calendar-account-admin.js', async () => ({
+  ...(await vi.importActual('./calendar-account-admin.js')),
+  runCalendarAccountAdmin: vi.fn(),
+}));
+import { runCalendarAccountAdmin } from './calendar-account-admin.js';
 import { connectCosHostStore } from '../host-store.js';
 import type { PriorityStore } from '../store/priorities.js';
 import { initDb, closeDb } from '../../../db/connection.js';
@@ -374,6 +379,25 @@ it('calendar commands use native owner and maintenance authority without a model
   });
   await expect(contextAdminCommand(args, env, dependencies)).rejects.toThrow('private_owner_membership_required');
   expect(run).not.toHaveBeenCalled();
+});
+it('account linking uses the same paused native authority and cannot run after its lease is released', async () => {
+  fs.rmSync(state + '/codex-auth', { recursive: true });
+  const run = vi.mocked(runCalendarAccountAdmin);
+  run.mockImplementation(async (options) => {
+    await options.check();
+    expect(options.binding).toMatchObject({ scopeId: 'fixture', ownerId: 'owner', provider: 'codex' });
+    return { status: 'ok', paused: true, live_model: 'not_invoked' };
+  });
+  const args = {
+    command: 'calendar-link' as const,
+    scopeId: 'fixture',
+    bindingId: randomUUID(),
+    requestId: randomUUID(),
+    manifestFile: state + '/selection.json',
+  };
+  expect(await contextAdminCommand(args, env, dependencies)).toMatchObject({ status: 'ok', paused: true });
+  expect(() => run.mock.calls.at(-1)![0].assertAuthority()).toThrow();
+  expect(fs.existsSync(state + '/model-activation.json')).toBe(false);
 });
 it('source setup requires quiescence and private owner membership, and closes the pool on import failure', async () => {
   const connect = vi.mocked(connectCosHostStore);

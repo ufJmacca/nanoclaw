@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { isKnowledgeCommand, parseKnowledgeArguments } from './knowledge-admin.js';
 import { isCalendarCommand, parseCalendarArguments } from './calendar-admin.js';
+import { isCalendarAccountCommand, parseCalendarAccountArguments } from './calendar-account-admin.js';
 import { pathToFileURL } from 'node:url';
 import { DatabaseConfigurationError, parseDatabaseConfig, externalDatabaseConfig } from '../store/config.js';
 import { connectChecked, DatabasePreflightError } from '../store/preflight.js';
@@ -17,6 +18,7 @@ type AdminArguments = { command: 'status' } | { command: 'bind'; binding: Bindin
 export function parseAdminArguments(args: string[]): AdminArguments {
   if (isKnowledgeCommand({ command: args[0] })) return parseKnowledgeArguments(args);
   if (isCalendarCommand({ command: args[0] })) return parseCalendarArguments(args);
+  if (isCalendarAccountCommand({ command: args[0] })) return parseCalendarAccountArguments(args);
   if (args.length === 1 && args[0] === 'status') return { command: 'status' };
   if (['context-status', 'context-prepare', 'context-recover', 'model-activate', 'context-resume'].includes(args[0])) {
     const values: Record<string, string> = {};
@@ -124,6 +126,28 @@ export function safeAdminError(error: unknown): string {
         'unsafe_calendar_admin_state',
         'calendar_configuration_unavailable',
         'calendar_backup_unavailable',
+        'calendar_storage_policy_unavailable',
+        'calendar_setup_conflict',
+        'calendar_setup_required',
+        'calendar_link_uncertain',
+        'calendar_interactive_terminal_required',
+        'calendar_auth_disconnected',
+        'calendar_auth_expired',
+        'calendar_auth_revoked',
+        'calendar_access_check_uncertain',
+        'calendar_access_fence_unavailable',
+        'calendar_credentials_unavailable',
+        'calendar_credentials_busy',
+        'calendar_credentials_conflict',
+        'calendar_oauth_configuration_invalid',
+        'calendar_oauth_client_invalid',
+        'calendar_oauth_denied',
+        'calendar_oauth_revoked',
+        'calendar_oauth_cancelled',
+        'calendar_oauth_flow_expired',
+        'calendar_oauth_listener_unavailable',
+        'calendar_oauth_exchange_uncertain',
+        'calendar_oauth_invalid_response',
         'unsafe_conversation_ownership',
         'unsafe_conversation_purge',
         'conversation_purge_conflict',

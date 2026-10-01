@@ -12,6 +12,8 @@ import { CalendarConnector } from '../calendar/connector.js';
 import { calendarSettings, openCalendarCredentials, openCalendarFences } from '../calendar/config.js';
 import { backupCalendarState } from '../calendar/backup.js';
 import type { CalendarStorageRoots } from '../calendar/storage-policy.js';
+import type { StorageInspection } from '../calendar/storage-protection.js';
+import type { OAuthTransport } from '../calendar/oauth.js';
 import {
   hasCalendarControl,
   object,
@@ -26,6 +28,11 @@ export type CalendarAdminArguments =
   | { command: 'calendar-sync'; scopeId: string; bindingId: string; requestId: string; manifestFile: string }
   | { command: 'calendar-disconnect'; scopeId: string; bindingId: string; requestId: string };
 type SyncInput = { calendarId: string; window?: CalendarWindow };
+export {
+  readJson as readCalendarAdminJson,
+  childDirectory as calendarAdminDirectory,
+  operation as calendarAdminOperation,
+};
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 export function isCalendarCommand(args: { command: string }): args is CalendarAdminArguments {
   return ['calendar-status', 'calendar-sync', 'calendar-disconnect'].includes(args.command);
@@ -166,14 +173,22 @@ function operation(
   return { root, window: record.window };
 }
 /** Caller holds target, maintenance and host leases and verifies a paused private native binding. */
-export async function runCalendarAdmin(options: {
-  args: CalendarAdminArguments;
-  env: NodeJS.ProcessEnv;
-  roots: CalendarStorageRoots;
-  binding: CosBinding;
-  check(): Promise<void>;
-  assertAuthority(): void;
-}): Promise<Record<string, unknown>> {
+export async function runCalendarAdmin(
+  options: {
+    args: CalendarAdminArguments;
+    env: NodeJS.ProcessEnv;
+    roots: CalendarStorageRoots;
+    binding: CosBinding;
+    check(): Promise<void>;
+    assertAuthority(): void;
+  },
+  dependencies: {
+    inspect?: StorageInspection;
+    fetch?: OAuthTransport['fetch'];
+    connect?: typeof connectCosHostStore;
+    artifacts?: typeof openKnowledgeArtifacts;
+  } = {},
+): Promise<Record<string, unknown>> {
   const { args, binding, roots } = options;
   if (args.scopeId !== binding.scopeId) throw new Error('context_binding_changed');
   await options.check();
@@ -188,7 +203,7 @@ export async function runCalendarAdmin(options: {
       throw new Error('invalid_calendar_manifest');
     }
   }
-  const fences = openCalendarFences(roots);
+  const fences = openCalendarFences(roots, dependencies.inspect);
   let journal: ReturnType<typeof operation> | undefined;
   const backup = async (phase: 'before' | 'after') => {
     if (!journal || args.command === 'calendar-status') throw new Error('unsafe_calendar_admin_state');
@@ -198,6 +213,7 @@ export async function runCalendarAdmin(options: {
       operationId: 'admin-' + args.requestId + '-' + phase,
       receiptRoot: childDirectory(journal.root, phase),
       check: options.check,
+      inspect: dependencies.inspect,
     });
   };
   // Native ownership is already checked. A deny-only local tombstone must survive even an unavailable database.
@@ -221,13 +237,22 @@ export async function runCalendarAdmin(options: {
   };
   try {
     // Admin disconnect/status remain possible with refresh disabled or unusable OAuth credentials.
-    const host = await connectCosHostStore({ ...options.env, COS_CALENDAR_ENABLED: 'false' }, roots, admitted);
+    const host = await (dependencies.connect ?? connectCosHostStore)(
+      { ...options.env, COS_CALENDAR_ENABLED: 'false' },
+      roots,
+      admitted,
+    );
     try {
       await options.check();
       const store = new CalendarStore(
         host.database,
         {},
-        new CalendarEvidence(openKnowledgeArtifacts(roots.targetRoot, [roots.installationRoot, roots.dataRoot])),
+        new CalendarEvidence(
+          (dependencies.artifacts ?? openKnowledgeArtifacts)(roots.targetRoot, [
+            roots.installationRoot,
+            roots.dataRoot,
+          ]),
+        ),
       );
       if (args.command === 'calendar-status') {
         const result = await store.coverage(context, args.offset);
@@ -268,9 +293,9 @@ export async function runCalendarAdmin(options: {
         () => input!.window ?? snapshotWindow(new Date(Date.now()).toISOString(), connection.timeZone),
       );
       await backup('before');
-      const owner = openCalendarCredentials(roots);
+      const owner = openCalendarCredentials(roots, dependencies.inspect);
       await options.check();
-      const connector = new CalendarConnector({ store, ...owner, admitted });
+      const connector = new CalendarConnector({ store, ...owner, admitted, fetch: dependencies.fetch });
       const refreshed = await connector.refresh(
         context,
         args.bindingId,
