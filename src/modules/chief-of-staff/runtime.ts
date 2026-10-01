@@ -36,8 +36,16 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
     if (!d.store?.knowledge) return true;
     const retained = resolveKnowledgeContext(session, context, d.db);
     if (!retained || (await d.store.knowledge.contextReady(retained)).status !== 'ok') return false;
-    if (text !== undefined && (await d.store.knowledge.answers.authorizePublication(retained, text)).status !== 'ok')
-      return false;
+    if (text !== undefined) {
+      const answer = await d.store.knowledge.answers.authorizePublication(retained, text);
+      if (
+        answer.status !== 'ok' &&
+        (answer.status !== 'denied' ||
+          !d.store.briefArtifacts ||
+          (await d.store.briefArtifacts.authorizePublication(retained, text)).status !== 'ok')
+      )
+        return false;
+    }
     const current = resolveKnowledgeContext(session, context, d.db);
     return !!current && digest(current) === digest(retained);
   };

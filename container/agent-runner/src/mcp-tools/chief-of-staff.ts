@@ -315,6 +315,36 @@ const workReadTool: McpToolDefinition = {
     return { content: [{ type: 'text' as const, text: JSON.stringify(value) }] };
   },
 };
+const briefTool: McpToolDefinition = {
+  tool: {
+    name: 'cos_brief_request',
+    description:
+      'Prepare a bounded, checked daily brief with time_zone, or read an immutable historical brief with artifact_id. Preserve request_id on retries. Calendar coverage, exact evidence versions and up to three attention items are included. Return the host text exactly when publishing; follow-ups remain owner-approved proposals. Scheduled requests must use the approved schedule timezone.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        request_id: { type: 'string', format: 'uuid' },
+        time_zone: { type: 'string', maxLength: 100, description: 'IANA timezone; omit when reading artifact_id.' },
+        artifact_id: { type: 'string', pattern: '^[a-f0-9]{64}-[a-f0-9]{64}$' },
+      },
+      oneOf: [{ required: ['time_zone'] }, { required: ['artifact_id'] }],
+    },
+  },
+  async handler(args) {
+    const requestId = typeof args.request_id === 'string' ? args.request_id : randomUUID();
+    const result =
+      args.request_id !== undefined && typeof args.request_id !== 'string'
+        ? { protocol: COS_PROTOCOL, request_id: requestId, status: 'denied' }
+        : await executeCosRequest({
+            protocol: COS_PROTOCOL,
+            request_id: requestId,
+            method: 'cos_brief_request',
+            params: Object.fromEntries(Object.entries(args).filter(([key]) => key !== 'request_id')),
+          });
+    return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
+  },
+};
 export const cosTools: McpToolDefinition[] = [
   ...priorityTools,
   ...knowledgeTools,
@@ -322,5 +352,6 @@ export const cosTools: McpToolDefinition[] = [
   calendarTool,
   ...workTools,
   workReadTool,
+  briefTool,
 ];
 if (process.env.NANOCLAW_COS_PROTOCOL === COS_PROTOCOL) registerTools(cosTools);

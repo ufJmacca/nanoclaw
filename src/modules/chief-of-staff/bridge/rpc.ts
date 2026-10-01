@@ -92,6 +92,16 @@ export function createRpcHandler(dependencies: {
       else if (request.method === 'cos_request_status')
         result = await dependencies.store.status(context, String(request.params.request_id));
       else if (!dependencies.knowledge || !knowledgeContext) result = { status: 'unavailable' };
+      else if (request.method === 'cos_brief_request')
+        result = dependencies.store.briefArtifacts
+          ? typeof request.params.artifact_id === 'string'
+            ? await dependencies.store.briefArtifacts.readHistory(knowledgeContext, request.params.artifact_id)
+            : await dependencies.store.briefArtifacts.prepare(
+                knowledgeContext,
+                request.request_id,
+                String(request.params.time_zone),
+              )
+          : { status: 'unavailable' };
       else if (request.method === 'cos_calendar_read')
         result = dependencies.store.calendarView
           ? await dependencies.store.calendarView.read(knowledgeContext, request.params as CalendarReadInput)

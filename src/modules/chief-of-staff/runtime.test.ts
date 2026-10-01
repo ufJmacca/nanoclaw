@@ -52,6 +52,7 @@ it('S02 checks current source authority before native admission and prepared pri
   db.prepare(
     "INSERT INTO cos_conversation_states(scope_id,binding_digest,account_fingerprint,generation,status,updated_at) VALUES(?,?,?,?,'active',?)",
   ).run(binding.scopeId, digest(binding), 'a'.repeat(64), randomUUID(), new Date().toISOString());
+  const briefArtifacts = { authorizePublication: vi.fn().mockResolvedValue({ status: 'denied' }) };
   const knowledge = {
     contextReady: vi.fn().mockResolvedValue({ status: 'ok' }),
     answers: { authorizePublication: vi.fn().mockResolvedValue({ status: 'ok' }) },
@@ -60,7 +61,11 @@ it('S02 checks current source authority before native admission and prepared pri
   runtime = createCosRuntime({
     db,
     enabled: true,
-    store: { context: vi.fn().mockResolvedValue({ status: 'ok' }), knowledge } as unknown as PriorityStore,
+    store: {
+      context: vi.fn().mockResolvedValue({ status: 'ok' }),
+      knowledge,
+      briefArtifacts,
+    } as unknown as PriorityStore,
     facts: async () => ({
       id: 'private',
       type: 'P',
@@ -98,6 +103,13 @@ it('S02 checks current source authority before native admission and prepared pri
   expect(
     await permitCosOutbound(session, { ...message, content: JSON.stringify({ text: 'Unprepared private canary' }) }),
   ).toBe(false);
+  briefArtifacts.authorizePublication.mockResolvedValue({ status: 'ok' });
+  expect(await permitCosOutbound(session, message)).toBe(true);
+  expect(briefArtifacts.authorizePublication).toHaveBeenCalledWith(
+    expect.objectContaining({ scopeId: 'scope', sessionId: 'session' }),
+    'Previously prepared source answer',
+  );
+  briefArtifacts.authorizePublication.mockResolvedValue({ status: 'denied' });
   knowledge.answers.authorizePublication.mockResolvedValue({ status: 'unavailable' });
   expect(await permitCosOutbound(session, message)).toBe(false);
   knowledge.answers.authorizePublication.mockResolvedValue({ status: 'ok' });

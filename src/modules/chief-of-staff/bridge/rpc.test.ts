@@ -370,3 +370,52 @@ it('S04 gates every scheduled tool dispatch on durable budget authority, includi
   await noHook({ action: 'cos_rpc', request, delivery_id }, {} as Session, f.db);
   expect(f.store.context).toHaveBeenCalledOnce();
 });
+
+it('S04 brief RPC uses host context and suppresses a prepared response after authority changes', async () => {
+  const f = fixture();
+  const context = {
+      scopeId: 'fixture',
+      ownerId: 'owner',
+      sessionId: 'session',
+      agentGroupId: 'group',
+      ingressId: 'verified',
+    },
+    retained = { ...context, provider: 'codex', generation: '33333333-3333-4333-8333-333333333333' };
+  const artifact = 'a'.repeat(64) + '-' + 'b'.repeat(64),
+    briefArtifacts = {
+      prepare: vi.fn().mockResolvedValue({ status: 'ok', artifact_id: artifact, text: 'Checked brief canary' }),
+      readHistory: vi.fn().mockResolvedValue({ status: 'ok', artifact_id: artifact, text: 'Saved brief canary' }),
+    };
+  const handler = createRpcHandler({
+    resolveContext: f.resolveContext,
+    store: { ...f.store, briefArtifacts } as unknown as PriorityStore,
+    knowledge: { contextReady: vi.fn().mockResolvedValue({ status: 'ok' }) } as unknown as KnowledgeStore,
+    resolveKnowledgeContext: async () => retained,
+  });
+  const call = async (params: Record<string, unknown>) => {
+    await handler(
+      {
+        action: 'cos_rpc',
+        delivery_id: '22222222-2222-4222-8222-222222222222',
+        request: { ...request, method: 'cos_brief_request', params },
+      },
+      {} as Session,
+      f.db,
+    );
+    return JSON.parse(
+      (f.db.prepare('SELECT response FROM cos_rpc_responses ORDER BY rowid DESC LIMIT 1').get() as { response: string })
+        .response,
+    );
+  };
+  expect((await call({ time_zone: 'Australia/Sydney' })).status).toBe('ok');
+  expect(briefArtifacts.prepare).toHaveBeenCalledWith(retained, request.request_id, 'Australia/Sydney');
+  expect((await call({ artifact_id: artifact })).status).toBe('ok');
+  expect(briefArtifacts.readHistory).toHaveBeenCalledWith(retained, artifact);
+  briefArtifacts.prepare.mockImplementation(async () => {
+    f.resolveContext.mockResolvedValue(null);
+    return { status: 'ok', text: 'Must not disclose' };
+  });
+  const denied = await call({ time_zone: 'UTC' });
+  expect(denied.status).toBe('denied');
+  expect(JSON.stringify(denied)).not.toContain('Must not disclose');
+});

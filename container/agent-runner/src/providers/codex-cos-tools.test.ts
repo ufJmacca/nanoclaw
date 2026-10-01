@@ -31,6 +31,7 @@ test('native CoS exposes only its fixed approved tools and dispatches validated 
     'cos_work_change_propose',
     'cos_brief_schedule_propose',
     'cos_work_read',
+    'cos_brief_request',
   ]);
   expect((await dispatch.handle(call())).success).toBe(true);
   expect(calls).toHaveLength(1);
@@ -294,5 +295,30 @@ test('concurrent calls and excessive per-turn requests are denied without host w
   }
   expect((await dispatch.handle(call({ callId: 'over-budget' }))).success).toBe(false);
   expect(calls).toBe(32);
+  dispatch.close();
+});
+
+test('S04 native brief requests keep stable request IDs and reject extra authority', async () => {
+  const { calls, dispatch } = fixture();
+  const requestId = '11111111-1111-4111-8111-111111111111';
+  expect(
+    (
+      await dispatch.handle(
+        call({ tool: 'cos_brief_request', arguments: { request_id: requestId, time_zone: 'Australia/Sydney' } }),
+      )
+    ).success,
+  ).toBe(true);
+  expect(calls[0]).toMatchObject({
+    method: 'cos_brief_request',
+    request_id: requestId,
+    params: { time_zone: 'Australia/Sydney' },
+  });
+  expect(
+    (
+      await dispatch.handle(
+        call({ tool: 'cos_brief_request', callId: 'forged', arguments: { time_zone: 'UTC', run_id: 'forged' } }),
+      )
+    ).success,
+  ).toBe(false);
   dispatch.close();
 });

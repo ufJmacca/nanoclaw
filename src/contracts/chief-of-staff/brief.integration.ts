@@ -1,0 +1,450 @@
+import { connectionFault } from './connection-fault.js';
+import { setTimeout as delay } from 'node:timers/promises';
+import { WorkStore } from '../../modules/chief-of-staff/store/work.js';
+import { CalendarStore } from '../../modules/chief-of-staff/calendar/store.js';
+import { CalendarEvidence } from '../../modules/chief-of-staff/calendar/evidence.js';
+import { CalendarView } from '../../modules/chief-of-staff/calendar/view.js';
+import { fixtureCalendarReader } from '../../modules/chief-of-staff/calendar/fixture-reader.js';
+import { collectCalendarSnapshot } from '../../modules/chief-of-staff/calendar/snapshot.js';
+import { GOOGLE_EVENT_READ_SCOPE } from '../../modules/chief-of-staff/calendar/reader.js';
+import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
+import { before, after, test } from 'node:test';
+import pg from 'pg';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { fixtureDatabaseConfig, connectFixtureDatabase, fixtureRuntimeUser } from './fixture-database.js';
+import { migrate } from '../../modules/chief-of-staff/store/migrations.js';
+import { BoundedDatabase } from '../../modules/chief-of-staff/store/client.js';
+import { PriorityStore } from '../../modules/chief-of-staff/store/priorities.js';
+import { KnowledgeArtifacts } from '../../modules/chief-of-staff/knowledge/artifacts.js';
+import { KnowledgeStore } from '../../modules/chief-of-staff/knowledge/store.js';
+import { BriefRunStore } from '../../modules/chief-of-staff/automation/brief-store.js';
+import type { ProposalChange } from '../../modules/chief-of-staff/domain/contracts.js';
+import { BriefArtifacts } from '../../modules/chief-of-staff/automation/brief-artifacts.js';
+import { BriefCollector } from '../../modules/chief-of-staff/automation/brief-collector.js';
+import type { WorkChange } from '../../modules/chief-of-staff/contracts/protocol.js';
+const scope = 'brief-' + randomUUID(),
+  context = {
+    scopeId: scope,
+    ownerId: 'owner',
+    agentGroupId: scope,
+    sessionId: scope,
+    ingressId: randomUUID(),
+    provider: 'codex',
+    generation: randomUUID(),
+  };
+let calendarAccess = true;
+let admin: pg.Client,
+  pool: pg.Pool,
+  store: PriorityStore,
+  knowledge: KnowledgeStore,
+  base: string,
+  collector: BriefCollector;
+before(async () => {
+  admin = await connectFixtureDatabase(process.env, 'migration');
+  assert.equal((await admin.query('SELECT pg_try_advisory_lock(73101002) AS locked')).rows[0].locked, true);
+  await migrate(admin, fixtureRuntimeUser());
+  pool = new pg.Pool(await fixtureDatabaseConfig());
+  base = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-brief-fixture-'));
+  for (const dir of ['artifacts', 'staging']) fs.mkdirSync(path.join(base, dir), { mode: 0o700 });
+  const database = BoundedDatabase.fromConfig(await fixtureDatabaseConfig());
+  knowledge = new KnowledgeStore(
+    database,
+    new KnowledgeArtifacts(path.join(base, 'artifacts'), path.join(base, 'staging')),
+    {},
+    { calendarEnabled: () => true, calendarAccess: () => calendarAccess },
+  );
+  store = new PriorityStore(database, knowledge);
+  await pool.query(
+    "INSERT INTO cos.scopes(id,owner_id,instance_id,channel_id,agent_group_id,status) VALUES($1,$2,'fixture',$1,$1,'active')",
+    [scope, context.ownerId],
+  );
+  collector = new BriefCollector({
+    database,
+    work: store.work,
+    knowledge,
+    clock: () => new Date('2026-10-04T01:00:00Z'),
+  });
+});
+after(async () => {
+  if (admin) {
+    await admin.query('UPDATE cos.calendar_states SET current_snapshot=NULL,last_attempt=NULL WHERE scope_id=$1', [
+      scope,
+    ]);
+    await admin.query('UPDATE cos.sources SET current_revision_id=NULL WHERE scope_id=$1', [scope]);
+    for (const table of [
+      'calendar_event_revisions',
+      'calendar_observations',
+      'calendar_snapshots',
+      'calendar_states',
+      'calendar_bindings',
+      'brief_notifications',
+      'brief_call_reservations',
+      'brief_runs',
+      'brief_schedule_revisions',
+      'brief_schedules',
+      'work_revisions',
+      'work_items',
+      'derivation_links',
+      'evidence_refs',
+      'chunks',
+      'revocation_tombstones',
+      'source_revisions',
+      'sources',
+      'artifacts',
+      'outbox',
+      'events',
+      'operations',
+      'proposals',
+      'records',
+    ])
+      await admin.query(`DELETE FROM cos.${table} WHERE scope_id=$1`, [scope]);
+    await admin.query('DELETE FROM cos.scopes WHERE id=$1', [scope]);
+  }
+  await pool?.end();
+  await store?.database.pool.end();
+  await admin?.end();
+  if (base) fs.rmSync(base, { recursive: true, force: true });
+});
+const change: WorkChange = {
+  kind: 'commitment',
+  title: 'Fixture agreed review',
+  description: 'Owner confirmed preparation',
+  reason: 'Fixture suggestion',
+  state: 'confirmed',
+  project_id: null,
+  due: { kind: 'date', date: '2026-10-04', time_zone: 'Australia/Sydney' },
+  defer_until: null,
+  evidence: [],
+  expected_version: 0,
+};
+async function approve(c: ProposalChange) {
+  const p = await store.propose(context, randomUUID(), c);
+  assert.equal(p.status, 'ok');
+  assert.equal(
+    (
+      await store.decide(
+        { ...context, ingressId: randomUUID() },
+        String(p.proposal_id),
+        String(p.confirmation_token),
+        'approve',
+      )
+    ).status,
+    'ok',
+  );
+  const applied = await store.apply(scope, String(p.proposal_id));
+  assert.equal(applied.status, 'ok');
+  return String(applied.record_id);
+}
+test('S04 brief empty state is useful, scoped, and does not infer a free day', async () => {
+  const result = await collector.collect(context, 'Australia/Sydney');
+  assert.equal(result.status, 'ok');
+  assert.match(String(result.text), /No confirmed commitments/);
+  assert.match(String(result.text), /Calendar: unavailable/);
+  assert.match(String(result.text), /does not establish that nothing is scheduled/);
+  assert.equal((await collector.collect({ ...context, ownerId: 'foreign' }, 'Australia/Sydney')).status, 'denied');
+  assert.equal((await collector.collect(context, 'invalid/timezone')).status, 'denied');
+});
+test('S04 brief uses only approved current work, keeps exact versions, and removes completed commitments', async () => {
+  const proposed = await store.propose(context, randomUUID(), { ...change, title: 'Unapproved canary' });
+  assert.equal(proposed.status, 'ok');
+  const id = await approve(change);
+  const before = await collector.collect(context, 'Australia/Sydney');
+  assert.equal(before.status, 'ok');
+  const snapshot = before.snapshot as any;
+  assert.equal(snapshot.commitments[0].id, id);
+  assert.equal(snapshot.commitments[0].version, 1);
+  assert.equal(snapshot.attention[0].reason, 'due_within_window');
+  assert.ok(!JSON.stringify(before).includes('Unapproved canary'));
+  await approve({ ...change, record_id: id, expected_version: 1, state: 'completed' });
+  const after = await collector.collect(context, 'Australia/Sydney');
+  assert.equal(after.status, 'ok');
+  assert.deepEqual((after.snapshot as any).commitments, []);
+  assert.equal(snapshot.commitments[0].version, 1); // New state cannot mutate the captured object.
+});
+
+test('S04 immutable brief artifacts replay their original versions while publication rechecks current work', async () => {
+  const id = await approve({ ...change, title: 'Persisted brief canary' });
+  const briefs = new BriefArtifacts(collector),
+    request = randomUUID();
+  const before = await briefs.prepare(context, request, 'Australia/Sydney');
+  assert.equal(before.status, 'ok');
+  assert.ok(before.artifact_id);
+  assert.equal(
+    (
+      await briefs.prepare(
+        { ...context, origin: { kind: 'schedule', runId: 'a'.repeat(64), generation: 1 } },
+        randomUUID(),
+        'Australia/Sydney',
+      )
+    ).status,
+    'denied',
+  );
+  const captured = JSON.stringify(before.snapshot);
+  assert.equal(
+    (await new BriefArtifacts(collector).prepare(context, request, 'Australia/Sydney')).artifact_id,
+    before.artifact_id,
+  );
+  assert.equal((await briefs.prepare(context, request, 'UTC')).status, 'conflict');
+  assert.equal((await briefs.get({ ...context, ownerId: 'foreign' }, String(before.artifact_id))).status, 'denied');
+  assert.equal((await briefs.authorizePublication(context, String(before.text))).status, 'ok');
+  await approve({ ...change, title: 'Changed work canary', record_id: id, expected_version: 1, state: 'completed' });
+  const history = await briefs.get({ ...context, generation: randomUUID() }, String(before.artifact_id));
+  assert.equal(history.status, 'ok');
+  assert.equal(JSON.stringify(history.snapshot), captured);
+  assert.equal((await briefs.authorizePublication(context, String(before.text))).status, 'denied');
+  assert.equal((await briefs.get(context, String(before.artifact_id), true)).status, 'denied');
+  const historical = await briefs.readHistory(context, String(before.artifact_id));
+  assert.equal(historical.status, 'ok');
+  assert.match(String(historical.text), /^Historical brief/);
+  assert.equal((await briefs.authorizePublication(context, String(historical.text))).status, 'ok');
+});
+
+test('S04 scheduled brief preparation requires the exact active lease and approved timezone', async () => {
+  await approve({
+    kind: 'brief_schedule',
+    title: 'Fixture morning',
+    reason: 'Fixture owner request',
+    expected_version: 0,
+    policy: {
+      state: 'active',
+      time_zone: 'UTC',
+      local_time: '09:00',
+      weekdays: [1, 2, 3, 4, 5, 6, 7],
+      quiet_hours: null,
+      snooze_until: null,
+    },
+    limits: { max_turns: 2, max_tool_calls: 12, deadline_seconds: 120, refresh_seconds: 0 },
+  });
+  const clock = new Date(Date.now() + 86400000);
+  clock.setUTCHours(9, 0, 0, 0);
+  const runs = new BriefRunStore(store.database, { clock: () => clock }),
+    reserved = await runs.reserveDue(context);
+  assert.equal(reserved.status, 'ok');
+  const run = reserved.run as any;
+  const lease = await runs.claim(context, run.id, 'fixture-host');
+  assert.equal(lease.status, 'ok');
+  const scheduled = {
+      ...context,
+      origin: { kind: 'schedule' as const, runId: run.id, generation: Number(lease.generation) },
+      ingressId: `brief:${run.id}:${lease.generation}`,
+    },
+    briefs = new BriefArtifacts(collector);
+  assert.equal((await briefs.prepare(scheduled, randomUUID(), 'Australia/Sydney')).status, 'denied');
+  assert.equal(
+    (
+      await briefs.prepare(
+        { ...scheduled, origin: { ...scheduled.origin, generation: scheduled.origin.generation + 1 } },
+        randomUUID(),
+        'UTC',
+      )
+    ).status,
+    'denied',
+  );
+  const created = await briefs.prepare(scheduled, randomUUID(), 'UTC');
+  assert.equal(created.status, 'ok');
+  assert.equal((created.snapshot as any).time_zone, 'UTC');
+  assert.equal((await runs.cancel(context, run.id, Number(lease.generation))).status, 'ok');
+  assert.equal((await briefs.prepare(scheduled, randomUUID(), 'UTC')).status, 'denied');
+});
+
+test('S04 brief persistence reconciles a lost commit acknowledgement and blocks on a real database partition', async () => {
+  const fixtureContext = { ...context, generation: randomUUID() },
+    request = randomUUID();
+  const faultyPool = new pg.Pool(await fixtureDatabaseConfig()),
+    client = await faultyPool.connect(),
+    original = client.query.bind(client);
+  let inserted = false,
+    dropped = false;
+  client.query = (async (...args: unknown[]) => {
+    const result = await (original as (...a: unknown[]) => Promise<unknown>)(...args);
+    if (typeof args[0] === 'string' && args[0].includes('INSERT INTO cos.artifacts')) inserted = true;
+    if (args[0] === 'COMMIT' && inserted && !dropped) {
+      dropped = true;
+      throw Error('fixture_lost_brief_commit_ack');
+    }
+    return result;
+  }) as typeof client.query;
+  client.release();
+  const make = (database: BoundedDatabase) => {
+    const k = new KnowledgeStore(
+      database,
+      knowledge.artifacts,
+      {},
+      { calendarEnabled: () => true, calendarAccess: () => calendarAccess },
+    );
+    return new BriefArtifacts(
+      new BriefCollector({ database, knowledge: k, work: new WorkStore(k), clock: collector.options.clock }),
+    );
+  };
+  try {
+    assert.equal(
+      (await make(new BoundedDatabase(faultyPool)).prepare(fixtureContext, request, 'UTC')).status,
+      'pending',
+    );
+    const recovered = await new BriefArtifacts(collector).prepare(fixtureContext, request, 'UTC');
+    assert.equal(recovered.status, 'ok');
+    assert.equal(
+      (await new BriefArtifacts(collector).prepare(fixtureContext, request, 'UTC')).artifact_id,
+      recovered.artifact_id,
+    );
+    assert.equal(
+      (
+        await pool.query('SELECT count(*)::int AS n FROM cos.operations WHERE session_id=$1 AND request_id=$2', [
+          scope,
+          request,
+        ])
+      ).rows[0].n,
+      1,
+    );
+  } finally {
+    await faultyPool.end();
+  }
+  const relay = await connectionFault(await fixtureDatabaseConfig()),
+    database = new BoundedDatabase(new pg.Pool(relay.config), 350);
+  try {
+    await database.run((c) => c.query('SELECT 1'));
+    relay.partition();
+    const files = fs.readdirSync(path.join(base, 'artifacts')).sort(),
+      briefs = make(database),
+      next = randomUUID(),
+      fresh = { ...context, generation: randomUUID() };
+    assert.ok(['pending', 'unavailable'].includes((await briefs.prepare(fresh, next, 'UTC')).status));
+    assert.deepEqual(fs.readdirSync(path.join(base, 'artifacts')).sort(), files);
+    relay.restore();
+    await delay(1100);
+    assert.equal((await briefs.prepare(fresh, next, 'UTC')).status, 'ok');
+  } finally {
+    await database.pool.end();
+    await relay.close();
+  }
+});
+
+test('S04-T07 collects cited calendar snapshots with visible staleness and denies revocation during disclosure', async () => {
+  const calendar = new CalendarStore(store.database, {}, new CalendarEvidence(knowledge.artifacts));
+  const binding = randomUUID(),
+    snapshotId = randomUUID(),
+    window = { timeMin: '2026-10-01T00:00:00Z', timeMax: '2026-10-10T00:00:00Z', timeZone: 'Australia/Sydney' };
+  assert.equal(
+    (
+      await calendar.bind(context, {
+        id: binding,
+        provider: 'fixture',
+        calendarIds: ['selected'],
+        scopes: [GOOGLE_EVENT_READ_SCOPE],
+        timeZone: window.timeZone,
+        processingProviders: ['codex'],
+      })
+    ).status,
+    'ok',
+  );
+  const fixture = fixtureCalendarReader({
+    access: { generation: binding + ':1', calendarIds: ['selected'], scopes: [GOOGLE_EVENT_READ_SCOPE], auth: 'ready' },
+    calendars: {
+      selected: [
+        {
+          id: 'meeting',
+          etag: 'v1',
+          summary: 'Brief calendar canary',
+          description: 'PRIVATE_LONG_DESCRIPTION',
+          start: { date: '2026-10-04' },
+          end: { date: '2026-10-05' },
+        },
+      ],
+    },
+  });
+  assert.equal((await calendar.start(context, binding, 'selected', snapshotId, window)).status, 'ok');
+  assert.equal(
+    (
+      await calendar.publish(
+        context,
+        binding,
+        snapshotId,
+        await collectCalendarSnapshot(fixture.reader, 'selected', window),
+      )
+    ).status,
+    'ok',
+  );
+  const view = new CalendarView({
+    store: calendar,
+    knowledge,
+    enabled: () => true,
+    assertOpen: () => {
+      if (!calendarAccess) throw Error('fixture revoked');
+    },
+  });
+  const briefs = new BriefCollector({ ...collector.options, calendarView: view });
+  const briefArtifacts = new BriefArtifacts(briefs);
+  const saved = await briefArtifacts.prepare(
+    { ...context, generation: randomUUID() },
+    randomUUID(),
+    'Australia/Sydney',
+  );
+  assert.equal(saved.status, 'ok');
+  const result = await briefs.collect({ ...context, generation: randomUUID() }, 'Australia/Sydney');
+  assert.equal(result.status, 'ok');
+  const snapshot = result.snapshot as any;
+  assert.equal(snapshot.events.length, 1);
+  assert.equal(snapshot.events[0].summary, 'Brief calendar canary');
+  assert.equal(snapshot.events[0].snapshot_id, snapshotId);
+  assert.equal(snapshot.coverage.calendar, 'stale');
+  assert.equal(snapshot.calendar_coverage[0].snapshot_id, snapshotId);
+  assert.ok(snapshot.calendar_coverage[0].last_success_at);
+  assert.match(String(result.text), /Last successful refresh/);
+  assert.ok(!JSON.stringify(result).includes('PRIVATE_LONG_DESCRIPTION'));
+  knowledge.hooks.beforeDisclosure = async () => {
+    calendarAccess = false;
+  };
+  assert.equal((await briefs.collect({ ...context, generation: randomUUID() }, 'Australia/Sydney')).status, 'denied');
+  knowledge.hooks.beforeDisclosure = undefined;
+  assert.equal(
+    (await briefArtifacts.get({ ...context, generation: randomUUID() }, String(saved.artifact_id))).status,
+    'denied',
+  );
+  const denied = await briefs.collect({ ...context, generation: randomUUID() }, 'Australia/Sydney');
+  assert.equal(denied.status, 'ok');
+  assert.deepEqual((denied.snapshot as any).events, []);
+  assert.equal((denied.snapshot as any).coverage.calendar, 'unavailable');
+  calendarAccess = true;
+  const source = (await pool.query('SELECT id,version FROM cos.sources WHERE scope_id=$1', [scope])).rows[0];
+  const proposal = await store.propose(context, randomUUID(), {
+    kind: 'source_delete',
+    source_id: source.id,
+    expected_version: source.version,
+    reason: 'Fixture retention test',
+  });
+  assert.equal(proposal.status, 'ok');
+  assert.equal(
+    (
+      await store.decide(
+        { ...context, ingressId: randomUUID() },
+        String(proposal.proposal_id),
+        String(proposal.confirmation_token),
+        'approve',
+      )
+    ).status,
+    'ok',
+  );
+  assert.equal((await store.apply(scope, String(proposal.proposal_id))).status, 'ok');
+  assert.equal(
+    (await briefArtifacts.get({ ...context, generation: randomUUID() }, String(saved.artifact_id))).status,
+    'denied',
+  );
+  await admin.query(
+    "UPDATE cos.revocation_tombstones SET purge_after=clock_timestamp()-interval '1 second' WHERE scope_id=$1",
+    [scope],
+  );
+  // This store fixture has no native provider history; its cleanup hook has no local files to remove.
+  knowledge.hooks.purgeContexts = async () => ({ status: 'ok' });
+  assert.equal((await knowledge.purgeDue(scope)).status, 'ok');
+  const metadata = (
+    await pool.query('SELECT digest,lifecycle FROM cos.artifacts WHERE scope_id=$1 AND id=$2', [
+      scope,
+      saved.artifact_id,
+    ])
+  ).rows[0];
+  assert.equal(metadata.lifecycle, 'deleted');
+  assert.throws(() => knowledge.artifacts.read(String(saved.artifact_id), metadata.digest));
+});

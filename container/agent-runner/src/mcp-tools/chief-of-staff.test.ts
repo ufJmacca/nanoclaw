@@ -141,3 +141,14 @@ test('S01-T04 a cached response cannot bypass a fresh host authorisation check',
     .run(request.request_id, digest(request), 'old-delivery', JSON.stringify(stale), 'old');
   expect((await executeCosRequest(request, 20)).status).toBe('pending');
 });
+
+test('S04 brief tool advertises bounded requests and rejects caller authority before RPC dispatch', async () => {
+  initTestSessionDb();
+  const tool = cosTools.find((x) => x.tool.name === 'cos_brief_request');
+  expect(tool).toBeDefined();
+  expect(tool!.tool.inputSchema.additionalProperties).toBe(false);
+  expect(Object.keys(tool!.tool.inputSchema.properties!)).toEqual(['request_id', 'time_zone', 'artifact_id']);
+  const result = await tool!.handler({ time_zone: 'UTC', owner_id: 'forged' });
+  expect(JSON.stringify(result)).toContain('denied');
+  expect(getOutboundDb().query('SELECT count(*) AS n FROM messages_out').get()).toEqual({ n: 0 });
+});

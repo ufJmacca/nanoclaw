@@ -100,6 +100,7 @@ export type CosMethod =
   | 'cos_work_change_propose'
   | 'cos_work_read'
   | 'cos_brief_schedule_propose'
+  | 'cos_brief_request'
   | 'cos_request_status'
   | 'cos_knowledge_search'
   | 'cos_source_get'
@@ -166,6 +167,28 @@ export function validRequest(value: unknown): value is CosRequest {
     !object(value.params)
   )
     return false;
+  if (value.method === 'cos_brief_request') {
+    if ('artifact_id' in value.params)
+      return (
+        keys(value.params, ['artifact_id']) &&
+        typeof value.params.artifact_id === 'string' &&
+        /^[a-f0-9]{64}-[a-f0-9]{64}$/.test(value.params.artifact_id)
+      );
+    if (
+      !keys(value.params, ['time_zone']) ||
+      typeof value.params.time_zone !== 'string' ||
+      value.params.time_zone.length > 100 ||
+      /^[+-]/.test(value.params.time_zone)
+    )
+      return false;
+    try {
+      new Intl.DateTimeFormat('en', { timeZone: value.params.time_zone });
+      return true;
+    } catch (error) {
+      if (error instanceof RangeError) return false;
+      throw error;
+    }
+  }
   if (value.method === 'cos_context_get')
     return (
       keys(value.params, ['view', 'calendar_offset']) &&
