@@ -10,6 +10,7 @@ import { readPrivate, readTarget, writeAtomic } from './target-state.js';
 import { maintenanceLeaseForOwner, assertMaintenanceLease } from './maintenance.js';
 import { backupNativeDatabase, installServiceOverride, restoreServiceOverride } from './native-installation.js';
 import { backupConversations, verifyConversationBackup } from './conversation-backup.js';
+import { backupCalendarState, verifyCalendarBackup } from '../calendar/backup.js';
 import { fenceLegacyCoordinators } from './legacy-rollback.js';
 import { artifactHash, verifyReleaseBundle, verifyLoadedImages } from './release-artifacts.js';
 import { payloadDigest } from './payload.js';
@@ -81,6 +82,12 @@ export function createTargetEffects(
     )
       throw new Error('target_not_quiescent');
     lease();
+  };
+  const calendarBackup = {
+    roots: { targetRoot: settings.stateRoot, installationRoot: settings.installationRoot, dataRoot: settings.dataRoot },
+    operationId: manifest.releaseId,
+    receiptRoot: receipt,
+    check: verifyQuiescent,
   };
   const observeProcess = async (expectedPayload?: string) => {
     const observed = await commands.observe();
@@ -326,6 +333,7 @@ export function createTargetEffects(
           }
       }
       const conversations = await backupConversations(path.join(settings.stateRoot, 'conversations'), receipt);
+      const calendar = await backupCalendarState(calendarBackup);
       await verifyQuiescent();
       writeAtomic(receipt, 'native-state.json', {
         version: 1,
@@ -334,6 +342,7 @@ export function createTargetEffects(
         groupsRoot: path.join(settings.installationRoot, 'groups'),
         sessions: backups,
         conversations,
+        calendar,
         configurationPreserved: true,
       });
     },
@@ -342,6 +351,7 @@ export function createTargetEffects(
       // Revalidate the preserved central backup before either store is changed.
       await backupNativeDatabase(central, receipt);
       await verifyConversationBackup(path.join(settings.stateRoot, 'conversations'), receipt);
+      await verifyCalendarBackup(calendarBackup);
       await verifyQuiescent();
       const env: NodeJS.ProcessEnv = {
         ...readTargetDatabaseEnvironment(settings, 'migration'),

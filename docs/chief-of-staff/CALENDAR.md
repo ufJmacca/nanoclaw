@@ -56,7 +56,11 @@ Runtime calendar credential opening now requires an existing `calendar-storage.j
 
 The explicit storage-configuration helper verifies both credential and backup directories, refuses runtime/repository overlap, and initializes backup ownership only in an empty directory. Retries preserve the same policy; they cannot replace its filesystem or backup destination, or recreate missing ownership after configuration. Runtime verification never initializes these records. Host paths are kept out of verification errors and returned encryption proofs. No disk creation, encryption, mounting or OS configuration is performed by these helpers.
 
-Read-only inspection of the bound Pi did not find encrypted storage under its current CoS state directory. No calendar credential storage has been activated there. Operator command wiring and actual protected snapshots remain pending; passing synthetic storage tests does not establish protection on the Pi.
+Read-only inspection of the bound Pi did not find encrypted storage under its current CoS state directory. No calendar credential storage has been activated there. Operator command wiring remains pending; passing synthetic storage and backup tests does not establish protection on the Pi.
+
+Deployment backups now include the calendar credential tree, OAuth client settings and monotonic access-denial/check journals when configured. Secret bytes go only to the verified encrypted backup directory; deployment receipts contain hashes and counts. Copying uses pinned directory descriptors so a replaced mount cannot redirect writes into its plaintext underlay. Traversal is bounded, private modes are required, and links, hardlinks, special files or changing captures are rejected. Complete snapshots are immutable by operation ID; a retry verifies their bytes and renews directory durability before acknowledging them. Migration revalidates the snapshot receipt. There is no automatic credential or denial-journal restore: rollback preserves current state, and old backups must not reopen revoked access or reuse rotated tokens. With no calendar state or policy, deployment records an explicit absence receipt and needs no calendar storage configuration.
+
+Credential-file operations still require a final review of mount replacement while the host is running; the present runtime protection check runs when credentials are opened. Complete that check and operator activation controls before real credentials are admitted.
 
 ## Bounded model reads
 

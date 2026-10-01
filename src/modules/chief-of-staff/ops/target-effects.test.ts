@@ -203,6 +203,13 @@ it('includes native history in the actual deployment backup and blocks migration
     const record = JSON.parse(fs.readFileSync(path.join(receipt, 'native-state.json'), 'utf8'));
     expect(record.conversations.present).toBe(true);
     expect(record.conversations.files).toBe(1);
+    expect(record.calendar.present).toBe(false);
+    const calendarReceipt = path.join(receipt, 'calendar-backup.json'),
+      calendarBytes = fs.readFileSync(calendarReceipt);
+    fs.writeFileSync(calendarReceipt, JSON.stringify({ forged: true }));
+    await expect(effects.migrate()).rejects.toThrow('calendar_backup_unavailable');
+    expect(calls.database).not.toHaveBeenCalled();
+    fs.writeFileSync(calendarReceipt, calendarBytes);
     const copied = path.join(receipt, 'conversation-backup/history', generation, 'history.jsonl');
     expect(fs.readFileSync(copied, 'utf8')).toBe('retained history');
     fs.appendFileSync(copied, 'corrupt');
