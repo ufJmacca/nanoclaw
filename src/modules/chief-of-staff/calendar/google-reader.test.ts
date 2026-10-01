@@ -43,6 +43,21 @@ const setup = (responses: Response[] = [json({ accessRole: 'reader', items: [raw
   };
 };
 describe('S03 Google read-only transport', () => {
+  it('S04 a cancelled retry backoff cannot dispatch another provider request', async () => {
+    const abort = new AbortController(),
+      fetch = vi.fn(async () => json({}, 503));
+    const reader = googleCalendarReader({
+      access: async () => grant(),
+      token: async () => 'fixture',
+      fetch,
+      signal: abort.signal,
+      sleep: async () => {
+        abort.abort();
+      },
+    });
+    await expect(reader.list('selected@example.test', window)).rejects.toThrow('calendar_refresh_timed_out');
+    expect(fetch).toHaveBeenCalledOnce();
+  });
   it('freezes the caller window before an asynchronous credential request', async () => {
     const s = setup([
       json({
@@ -79,7 +94,7 @@ describe('S03 Google read-only transport', () => {
       },
     });
     const s = setup([new Response(body, { status: 401 })]);
-    await expect(s.reader.list('selected@example.test', window)).rejects.toThrow(/^calendar_unavailable$/);
+    await expect(s.reader.list('selected@example.test', window)).rejects.toThrow(/^calendar_auth_revoked$/);
   });
   it('S03-T01/T06: fixes the endpoint, method and window and follows only an opaque page token', async () => {
     const s = setup([

@@ -14,6 +14,7 @@ import {
 import type { CalendarAccessFences } from './access-fences.js';
 import { CalendarReadError } from './reader.js';
 import { object } from './normalization.js';
+import { assertCalendarActive, awaitCalendarCredential } from './cancellation.js';
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const marker = '.cos-calendar-credentials';
 const contract = 'cos-calendar-credentials/v1';
@@ -221,18 +222,24 @@ export class CalendarCredentialOwner {
       writeAtomic(root, reference + '.json', state);
     });
   }
-  async token(scope: string, binding: string, reference: string): Promise<string> {
+  async token(scope: string, binding: string, reference: string, signal?: AbortSignal): Promise<string> {
+    assertCalendarActive(signal);
     const key = this.identity(scope, binding, reference);
     const existing = this.#pending.get(key);
-    if (existing) return existing;
+    if (existing) return signal ? awaitCalendarCredential(existing, signal) : existing;
     const work = this.locked(scope, binding, reference, async (identity, root) => {
+      assertCalendarActive(signal);
       const state = this.state(root, reference, identity, true);
       this.admitted(scope, binding, state);
       if (state.tokens.expiresAt > (this.#transport.now ?? Date.now)() + 60000) return state.tokens.accessToken;
       writeAtomic(root, reference + '.json', { ...state, phase: 'refreshing' });
       let rotated: GoogleCalendarTokens;
       try {
-        rotated = await refreshGoogleCalendarToken(this.#client, state.tokens, this.#transport);
+        rotated = await refreshGoogleCalendarToken(
+          this.#client,
+          state.tokens,
+          signal ? { ...this.#transport, signal } : this.#transport,
+        );
       } catch (error) {
         const revoked = error instanceof CalendarReadError && error.code === 'calendar_oauth_revoked';
         this.#fences.deny(scope, binding, revoked ? 'revoked' : 'expired');
@@ -253,7 +260,9 @@ export class CalendarCredentialOwner {
     });
     this.#pending.set(key, work);
     try {
-      return await work;
+      const token = await work;
+      assertCalendarActive(signal);
+      return token;
     } finally {
       if (this.#pending.get(key) === work) this.#pending.delete(key);
     }

@@ -3,6 +3,7 @@ import { CalendarReadError, type CalendarReader, type CalendarAccess } from './r
 import type { CalendarWindow } from './normalization.js';
 import type { CalendarStore } from './store.js';
 import { collectCalendarSnapshot, type CalendarSnapshot } from './snapshot.js';
+import { assertCalendarActive } from './cancellation.js';
 
 /** Private host recovery material; never a model RPC response or operational log. */
 export type PreparedCalendarRefresh = { bindingId: string; snapshotId: string; snapshot: CalendarSnapshot };
@@ -14,6 +15,7 @@ export type CalendarRefreshOptions = {
   calendarId: string;
   snapshotId: string;
   window: CalendarWindow;
+  signal?: AbortSignal;
   /** The host must durably deny this binding before returning, independently of PostgreSQL availability.
    * If persistence fails, its admission gate must remain closed. No default/no-op production implementation. */
   accessLoss(auth: CalendarAccess['auth']): Promise<void>;
@@ -43,7 +45,13 @@ export async function refreshCalendar(
   const { store, reader, bindingId, calendarId, snapshotId, accessLoss } = options;
   const context = Object.freeze({ ...options.context }),
     window = Object.freeze({ ...options.window });
-  const started = await store.start(context, bindingId, calendarId, snapshotId, window);
+  const signal = options.signal;
+  const timedOut = () => ({ result: { status: 'unavailable' as const, code: 'calendar_refresh_timed_out' } });
+  if (signal?.aborted) return timedOut();
+  const started = signal
+    ? await store.start(context, bindingId, calendarId, snapshotId, window, signal)
+    : await store.start(context, bindingId, calendarId, snapshotId, window);
+  if (signal?.aborted) return timedOut();
   if (started.status !== 'ok') return { result: started };
   if (started.snapshot_status === 'complete') {
     return {
@@ -55,7 +63,8 @@ export async function refreshCalendar(
   }
   let snapshot: CalendarSnapshot;
   try {
-    snapshot = await collectCalendarSnapshot(reader, calendarId, window);
+    snapshot = await collectCalendarSnapshot(reader, calendarId, window, signal);
+    assertCalendarActive(signal);
   } catch (error) {
     const code = error instanceof CalendarReadError ? error.code : 'calendar_refresh_failed';
     const auth = Object.hasOwn(lostAccess, code) ? lostAccess[code] : undefined;
@@ -65,24 +74,31 @@ export async function refreshCalendar(
       } catch {
         return { result: { status: 'unavailable', code: 'calendar_access_fence_failed', access_loss: auth } };
       }
-      const denied = await store.setAuth(context, bindingId, auth);
+      if (signal?.aborted)
+        return { result: { status: 'denied', access_loss: auth, code: 'calendar_refresh_timed_out' } };
+      const denied = signal
+        ? await store.setAuth(context, bindingId, auth, signal)
+        : await store.setAuth(context, bindingId, auth);
       if (denied.status !== 'ok') return { result: { status: denied.status, access_loss: auth } };
-      const failed = await store.fail(context, bindingId, snapshotId, 'calendar_refresh_failed');
+      const failed = signal
+        ? await store.fail(context, bindingId, snapshotId, 'calendar_refresh_failed', signal)
+        : await store.fail(context, bindingId, snapshotId, 'calendar_refresh_failed');
       return { result: { status: failed.status === 'ok' ? 'denied' : failed.status, access_loss: auth } };
     }
-    const failed = await store.fail(
-      context,
-      bindingId,
-      snapshotId,
-      safeFailures.has(code) ? code : 'calendar_refresh_failed',
-    );
+    if (signal?.aborted) return timedOut();
+    const failure = safeFailures.has(code) ? code : 'calendar_refresh_failed';
+    const failed = signal
+      ? await store.fail(context, bindingId, snapshotId, failure, signal)
+      : await store.fail(context, bindingId, snapshotId, failure);
     return {
       result: { status: failed.status === 'ok' ? 'unavailable' : failed.status, code: 'calendar_refresh_failed' },
     };
   }
   const prepared = { bindingId, snapshotId, snapshot };
   try {
-    const result = await store.publish(context, bindingId, snapshotId, snapshot);
+    const result = signal
+      ? await store.publish(context, bindingId, snapshotId, snapshot, signal)
+      : await store.publish(context, bindingId, snapshotId, snapshot);
     return ['pending', 'unavailable'].includes(result.status) ? { result, prepared } : { result };
   } catch {
     // An unexpected transport failure cannot prove that a remote commit did not happen.

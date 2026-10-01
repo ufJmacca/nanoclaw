@@ -2,6 +2,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { digest } from '../domain/contracts.js';
 import { calendarZone, normalizeEvent, object, hasCalendarControl, validateCalendarWindow } from './normalization.js';
 import { hasCalendarReadScope, CalendarReadError, type CalendarAccess, type CalendarReader } from './reader.js';
+import { assertCalendarActive, calendarRequestSignal } from './cancellation.js';
 
 type Options = {
   access: () => Promise<CalendarAccess>;
@@ -10,6 +11,7 @@ type Options = {
   sleep?: (milliseconds: number) => Promise<void>;
   now?: () => number;
   random?: () => number;
+  signal?: AbortSignal;
 };
 const fail = (code: string): never => {
   throw new CalendarReadError(code);
@@ -23,7 +25,8 @@ const calendarIdValid = (id: unknown): id is string =>
   id !== '.' &&
   id !== '..';
 
-async function boundedJson(response: Response): Promise<Record<string, unknown>> {
+async function boundedJson(response: Response, signal?: AbortSignal): Promise<Record<string, unknown>> {
+  assertCalendarActive(signal);
   const maximum = 1024 * 1024;
   if (Number(response.headers.get('content-length')) > maximum) {
     await response.body?.cancel();
@@ -36,6 +39,7 @@ async function boundedJson(response: Response): Promise<Record<string, unknown>>
   try {
     for (;;) {
       const next = await reader.read();
+      assertCalendarActive(signal);
       if (next.done) break;
       size += next.value.byteLength;
       if (size > maximum) {
@@ -63,7 +67,9 @@ export function googleCalendarReader(options: Options): CalendarReader {
     random = options.random ?? Math.random;
   const access = async (): Promise<CalendarAccess> => {
     try {
+      assertCalendarActive(options.signal);
       const a = await options.access();
+      assertCalendarActive(options.signal);
       if (
         !a ||
         typeof a.generation !== 'string' ||
@@ -96,34 +102,40 @@ export function googleCalendarReader(options: Options): CalendarReader {
     const allowed = await admit(calendarId),
       deadline = now() + 30000;
     for (let attempt = 0; attempt < 3; attempt++) {
+      assertCalendarActive(options.signal);
       if (attempt) await admit(calendarId, allowed);
       if (now() >= deadline) return fail('calendar_unavailable');
       let response: Response;
       try {
         const token = await options.token();
+        assertCalendarActive(options.signal);
         if (typeof token !== 'string' || !/^[\x21-\x7e]{1,8192}$/.test(token)) return fail('calendar_auth_expired');
         if (now() >= deadline) return fail('calendar_unavailable');
         response = await fetch(url.href, {
           method: 'GET',
           redirect: 'error',
           headers: { Authorization: 'Bearer ' + token, Accept: 'application/json' },
-          signal: AbortSignal.timeout(Math.max(1, Math.min(10000, deadline - now()))),
+          signal: calendarRequestSignal(options.signal, Math.max(1, Math.min(10000, deadline - now()))),
         });
       } catch (error) {
         if (error instanceof CalendarReadError) throw error;
+        assertCalendarActive(options.signal);
         return fail('calendar_unavailable');
       }
+      if ([401, 404, 410].includes(response.status)) {
+        // A definite denial takes precedence over timeout or response-cleanup failures.
+        await response.body?.cancel().catch(() => {});
+        return fail(
+          response.status === 401
+            ? 'calendar_auth_revoked'
+            : isEvent
+              ? 'calendar_event_missing'
+              : 'calendar_access_revoked',
+        );
+      }
       await admit(calendarId, allowed);
-      if (response.status === 401) {
-        await response.body?.cancel();
-        return fail('calendar_auth_revoked');
-      }
-      if (response.status === 404 || response.status === 410) {
-        await response.body?.cancel();
-        return fail(isEvent ? 'calendar_event_missing' : 'calendar_access_revoked');
-      }
       let body: Record<string, unknown> | undefined;
-      if (response.status === 403) body = await boundedJson(response);
+      if (response.status === 403) body = await boundedJson(response, options.signal);
       const providerError = body && object(body.error) ? body.error : null;
       const reasons =
         providerError && Array.isArray(providerError.errors)
@@ -142,7 +154,9 @@ export function googleCalendarReader(options: Options): CalendarReader {
         const backoff = 500 * 2 ** attempt + Math.floor(Math.max(0, Math.min(1, random())) * 250);
         const wait = Number.isFinite(hintMs) ? Math.max(backoff, hintMs) : backoff;
         if (wait > 5000 || now() + wait >= deadline) return fail(code);
-        await sleep(wait);
+        if (options.sleep) await sleep(wait);
+        else await delay(wait, undefined, { signal: options.signal });
+        assertCalendarActive(options.signal);
         continue;
       }
       if (response.status === 403) return fail('calendar_access_revoked');
@@ -150,7 +164,7 @@ export function googleCalendarReader(options: Options): CalendarReader {
         await response.body?.cancel();
         return fail('calendar_unavailable');
       }
-      const result = await boundedJson(response);
+      const result = await boundedJson(response, options.signal);
       await admit(calendarId, allowed);
       return result;
     }
@@ -220,6 +234,7 @@ export function googleCalendarReader(options: Options): CalendarReader {
       return await operation();
     } catch (error) {
       if (error instanceof CalendarReadError) throw error;
+      assertCalendarActive(options.signal);
       if (error instanceof Error && ['calendar_invalid_event', 'calendar_invalid_window'].includes(error.message))
         return fail(error.message);
       return fail('calendar_unavailable');

@@ -10,6 +10,7 @@ import { CalendarReadError, hasCalendarReadScope } from './reader.js';
 import { googleCalendarReader } from './google-reader.js';
 import { snapshotWindow, validateCalendarWindow } from './normalization.js';
 import { digest } from '../domain/contracts.js';
+import { assertCalendarActive } from './cancellation.js';
 export type CalendarConnectorOptions = {
   store: Pick<CalendarStore, 'connection' | 'start' | 'publish' | 'fail' | 'setAuth'>;
   credentials?: Pick<CalendarCredentialOwner, 'inspect' | 'token'>;
@@ -33,9 +34,18 @@ export class CalendarConnector {
     this.denied.set(digest({ scopeId, bindingId }), auth);
     this.options.fences.deny(scopeId, bindingId, auth);
   }
-  private async connection(context: Context, bindingId: string, refresh = true): Promise<CalendarConnection> {
+  private async connection(
+    context: Context,
+    bindingId: string,
+    refresh = true,
+    signal?: AbortSignal,
+  ): Promise<CalendarConnection> {
+    assertCalendarActive(signal);
     if (refresh && !this.options.admitted()) throw new CalendarReadError('calendar_disabled');
-    const result = await this.options.store.connection(context, bindingId);
+    const result = signal
+      ? await this.options.store.connection(context, bindingId, signal)
+      : await this.options.store.connection(context, bindingId);
+    assertCalendarActive(signal);
     if (result.status !== 'ok')
       throw new CalendarReadError(result.status === 'denied' ? 'calendar_binding_denied' : 'calendar_unavailable');
     if (refresh && !this.options.admitted()) throw new CalendarReadError('calendar_disabled');
@@ -52,10 +62,11 @@ export class CalendarConnector {
     context: Context & { provider: string },
     binding: CalendarConnection,
     calendar: string,
+    signal?: AbortSignal,
   ): CalendarReader {
     const d = this.options;
     const current = async () => {
-      const fresh = await this.connection(context, binding.id);
+      const fresh = await this.connection(context, binding.id, true, signal);
       this.admit(context, fresh, calendar);
       if (digest(fresh) !== digest(binding)) throw new CalendarReadError('calendar_access_changed');
       return fresh;
@@ -78,10 +89,13 @@ export class CalendarConnector {
       return googleCalendarReader({
         access,
         fetch: d.fetch,
+        signal,
         token: async () => {
           const fresh = await current();
           if (!d.credentials || !fresh.credentialRef) throw new CalendarReadError('calendar_credentials_unavailable');
-          const token = await d.credentials.token(context.scopeId, fresh.id, fresh.credentialRef);
+          const token = signal
+            ? await d.credentials.token(context.scopeId, fresh.id, fresh.credentialRef, signal)
+            : await d.credentials.token(context.scopeId, fresh.id, fresh.credentialRef);
           // Token refresh is asynchronous: recheck admission before a request can leave the host.
           await current();
           return token;
@@ -108,11 +122,12 @@ export class CalendarConnector {
     calendarId: string,
     snapshotId: string,
     window?: CalendarWindow,
+    signal?: AbortSignal,
   ): Promise<{ result: Result; prepared?: PreparedCalendarRefresh }> {
     const captured = Object.freeze({ ...context });
     try {
       const requested = window ? structuredClone(window) : undefined;
-      const binding = await this.connection(captured, bindingId);
+      const binding = await this.connection(captured, bindingId, true, signal);
       this.admit(captured, binding, calendarId);
       let selected: CalendarWindow;
       try {
@@ -132,7 +147,8 @@ export class CalendarConnector {
           calendarId,
           snapshotId,
           window: selected,
-          reader: this.reader(captured, binding, calendarId),
+          reader: this.reader(captured, binding, calendarId, signal),
+          signal,
           accessLoss: async (auth) => {
             if (auth === 'ready') throw new CalendarReadError('calendar_invalid_denial');
             this.deny(captured.scopeId, bindingId, auth);
@@ -140,6 +156,7 @@ export class CalendarConnector {
         }),
       );
     } catch (error) {
+      if (signal?.aborted) return { result: { status: 'unavailable', code: 'calendar_refresh_timed_out' } };
       const denied =
         error instanceof CalendarReadError &&
         [

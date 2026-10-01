@@ -73,6 +73,66 @@ function setup(provider: 'google' | 'fixture' = 'google') {
   return { connector, options, store, binding, credentials, fences, fetch, fixture, fixtureReader };
 }
 describe('S03 trusted calendar connector', () => {
+  it('S04 an expired refresh performs no binding, credential or network work', async () => {
+    const s = setup();
+    expect(
+      (await s.connector.refresh(context, 'binding', 'selected', 'snapshot', window, AbortSignal.abort())).result,
+    ).toMatchObject({ status: 'unavailable', code: 'calendar_refresh_timed_out' });
+    expect(s.store.connection).not.toHaveBeenCalled();
+    expect(s.store.start).not.toHaveBeenCalled();
+    expect(s.credentials.token).not.toHaveBeenCalled();
+    expect(s.fetch).not.toHaveBeenCalled();
+  });
+  it('S04 aborts an in-flight fetch and never publishes after its refresh budget expires', async () => {
+    const s = setup(),
+      abort = new AbortController();
+    let entered!: () => void;
+    const fetching = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    s.fetch.mockImplementation(
+      async (_url, init) =>
+        new Promise((_resolve, reject) => {
+          entered();
+          init.signal!.addEventListener('abort', () => reject(Error('fixture aborted')), { once: true });
+        }),
+    );
+    const work = s.connector.refresh(context, 'binding', 'selected', 'snapshot', window, abort.signal);
+    await fetching;
+    abort.abort();
+    expect((await work).result).toMatchObject({ status: 'unavailable', code: 'calendar_refresh_timed_out' });
+    expect(s.store.publish).not.toHaveBeenCalled();
+    expect(s.fences.deny).not.toHaveBeenCalled();
+  });
+  it('S04 cancellation after a fixture page prevents subsequent pages and snapshot publication', async () => {
+    const s = setup('fixture'),
+      abort = new AbortController(),
+      original = s.fixture.reader.list;
+    const list = vi.fn(async (...args: Parameters<typeof original>) => {
+      const page = await original(...args);
+      abort.abort();
+      return { ...page, nextPageToken: 'more' };
+    });
+    s.fixtureReader.mockReturnValue({ ...s.fixture.reader, list });
+    expect(
+      (await s.connector.refresh(context, 'binding', 'selected', 'snapshot', window, abort.signal)).result,
+    ).toMatchObject({ status: 'unavailable', code: 'calendar_refresh_timed_out' });
+    expect(list).toHaveBeenCalledOnce();
+    expect(s.store.publish).not.toHaveBeenCalled();
+  });
+  it('S04 an observed provider revocation is not hidden by simultaneous timeout', async () => {
+    const s = setup(),
+      abort = new AbortController();
+    s.fetch.mockImplementation(async () => {
+      abort.abort();
+      return new Response('', { status: 401 });
+    });
+    expect(
+      (await s.connector.refresh(context, 'binding', 'selected', 'snapshot', window, abort.signal)).result,
+    ).toMatchObject({ status: 'denied', access_loss: 'revoked' });
+    expect(s.fences.deny).toHaveBeenCalledWith('scope', 'binding', 'revoked');
+    expect(s.store.publish).not.toHaveBeenCalled();
+  });
   it('uses the host credential owner and pinned Google reader after scoped admission', async () => {
     const s = setup();
     expect((await s.connector.refresh(context, 'binding', 'selected', 'snapshot', window)).result.status).toBe('ok');

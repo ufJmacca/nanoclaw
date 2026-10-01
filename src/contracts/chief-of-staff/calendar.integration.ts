@@ -239,6 +239,44 @@ test('S03-PG01/PG02: actual connection loss during publication rolls back retire
     await relay.close();
   }
 });
+test('S04 refresh cancellation fences a real transaction before COMMIT and preserves uncertainty after COMMIT', async () => {
+  for (const phase of ['before', 'after']) {
+    const s = await setup(),
+      first = await publish(s);
+    s.fixture.replace('selected', [event('alpha', 'Cancelled refresh fixture')]);
+    const c = await capture(s),
+      abort = new AbortController();
+    const database = BoundedDatabase.fromConfig(await fixtureDatabaseConfig());
+    const fault = new CalendarStore(
+      database,
+      phase === 'before'
+        ? {
+            beforePublishCommit: async () => {
+              abort.abort();
+            },
+          }
+        : {
+            afterPublishCommit: async () => {
+              abort.abort();
+            },
+          },
+    );
+    try {
+      assert.equal((await fault.publish(context, s.id, c.attempt, c.snapshot, abort.signal)).status, 'pending');
+      const observed = await store.read(context, s.id, 'selected');
+      assert.equal(observed.snapshot_id, phase === 'before' ? first.attempt : c.attempt);
+      assert.equal((await store.publish(context, s.id, c.attempt, c.snapshot)).status, 'ok');
+      assert.equal((await store.read(context, s.id, 'selected')).snapshot_id, c.attempt);
+      const count = await pool.query(
+        'SELECT count(*)::int AS n FROM cos.calendar_snapshots WHERE scope_id=$1 AND binding_id=$2 AND id=$3',
+        [scope, s.id, c.attempt],
+      );
+      assert.equal(count.rows[0].n, 1);
+    } finally {
+      await database.pool.end();
+    }
+  }
+});
 test('S03-PG02: a lost acknowledgement reconciles a committed stable identity without duplicate revisions', async () => {
   const s = await setup();
   const c = await capture(s);

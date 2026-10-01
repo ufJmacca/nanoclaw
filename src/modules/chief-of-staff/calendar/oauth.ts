@@ -1,6 +1,7 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { CalendarReadError, GOOGLE_EVENT_READ_SCOPE, hasCalendarReadScope } from './reader.js';
 import { object } from './normalization.js';
+import { assertCalendarActive, calendarRequestSignal } from './cancellation.js';
 
 export type GoogleOAuthClient = { clientId: string; clientSecret?: string };
 /** Host credential material only. Never return through RPC, log, or mount in a worker. */
@@ -11,7 +12,11 @@ export type GoogleCalendarTokens = {
   refreshExpiresAt: number | null;
   scopes: string[];
 };
-export type OAuthTransport = { fetch?: (url: string, init: RequestInit) => Promise<Response>; now?: () => number };
+export type OAuthTransport = {
+  fetch?: (url: string, init: RequestInit) => Promise<Response>;
+  now?: () => number;
+  signal?: AbortSignal;
+};
 const fail = (code: string): never => {
   throw new CalendarReadError(code);
 };
@@ -105,6 +110,7 @@ async function exchange(
   transport: OAuthTransport,
   previous?: GoogleCalendarTokens,
 ): Promise<GoogleCalendarTokens> {
+  assertCalendarActive(transport.signal);
   const now = (transport.now ?? Date.now)();
   if (!Number.isFinite(now)) return fail('calendar_oauth_configuration_invalid');
   const params = new URLSearchParams({
@@ -122,7 +128,7 @@ async function exchange(
         'Cache-Control': 'no-store',
       },
       body: params.toString(),
-      signal: AbortSignal.timeout(10000),
+      signal: calendarRequestSignal(transport.signal, 10000),
     });
     const body = await tokenJson(response);
     if (response.status !== 200) {

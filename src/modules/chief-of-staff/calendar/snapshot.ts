@@ -1,6 +1,7 @@
 import { CalendarReadError, type CalendarReader } from './reader.js';
 import { validateCalendarWindow, type CalendarEvent, type CalendarWindow } from './normalization.js';
 import { digest } from '../domain/contracts.js';
+import { assertCalendarActive } from './cancellation.js';
 
 export type CalendarSnapshot = {
   calendarId: string;
@@ -16,12 +17,16 @@ export async function collectCalendarSnapshot(
   reader: CalendarReader,
   calendarId: string,
   requested: CalendarWindow,
+  signal?: AbortSignal,
 ): Promise<CalendarSnapshot> {
+  assertCalendarActive(signal);
   validateCalendarWindow(requested);
   const window = Object.freeze({ ...requested });
   const initial = await reader.access();
   const check = async () => {
+    assertCalendarActive(signal);
     const current = await reader.access();
+    assertCalendarActive(signal);
     if (current.auth !== 'ready') throw new CalendarReadError('calendar_auth_' + current.auth);
     if (!current.calendarIds.includes(calendarId)) throw new CalendarReadError('calendar_not_selected');
     if (digest(initial) !== digest(current)) throw new CalendarReadError('calendar_access_changed');
@@ -34,6 +39,7 @@ export async function collectCalendarSnapshot(
     accessRole = '',
     bytes = 0;
   for (let pages = 1; pages <= 20; pages++) {
+    assertCalendarActive(signal);
     if (pages > 1) await check();
     const page = await reader.list(calendarId, window, next);
     await check();

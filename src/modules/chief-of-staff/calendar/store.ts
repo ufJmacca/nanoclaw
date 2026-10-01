@@ -190,21 +190,27 @@ export class CalendarStore {
     mutation: boolean,
     operation: (client: PoolClient) => Promise<Result>,
     publishing = false,
+    signal?: AbortSignal,
   ): Promise<Result> {
     try {
-      return await this.database.run(async (client) => {
-        await client.query('BEGIN');
-        if (publishing && this.evidence) await client.query('SELECT pg_advisory_xact_lock(73101004)');
-        if (!(await authorised(client, context, mutation))) {
+      return await this.database.run(
+        async (client) => {
+          await client.query('BEGIN');
+          if (publishing && this.evidence) await client.query('SELECT pg_advisory_xact_lock(73101004)');
+          if (!(await authorised(client, context, mutation))) {
+            await client.query('COMMIT');
+            return { status: 'denied' };
+          }
+          const result = await operation(client);
+          if (publishing && result.status === 'ok') await this.hooks.beforePublishCommit?.();
+          if (signal?.aborted) throw new DatabaseUnavailable(mutation ? 'pending' : 'unavailable');
           await client.query('COMMIT');
-          return { status: 'denied' };
-        }
-        const result = await operation(client);
-        if (publishing && result.status === 'ok') await this.hooks.beforePublishCommit?.();
-        await client.query('COMMIT');
-        if (publishing && result.status === 'ok') await this.hooks.afterPublishCommit?.();
-        return result;
-      }, mutation);
+          if (publishing && result.status === 'ok') await this.hooks.afterPublishCommit?.();
+          return result;
+        },
+        mutation,
+        signal,
+      );
     } catch (error) {
       if (error instanceof DatabaseUnavailable)
         return { status: mutation && error.code === 'pending' ? 'pending' : 'unavailable' };
@@ -217,24 +223,30 @@ export class CalendarStore {
     ).rows[0];
   }
   /** Trusted connector host only. Credential references are never part of model RPC responses. */
-  async connection(context: Context, id: string): Promise<Result> {
+  async connection(context: Context, id: string, signal?: AbortSignal): Promise<Result> {
     if (!uuid.test(id)) return { status: 'denied' };
-    return this.transaction(context, false, async (client) => {
-      const b = await this.binding(client, context, id);
-      if (!b) return { status: 'denied' };
-      const binding: CalendarConnection = {
-        id: b.id,
-        provider: b.provider as CalendarConnection['provider'],
-        calendarIds: b.selected_calendar_ids,
-        scopes: b.permission_scopes,
-        ...(b.credential_ref ? { credentialRef: b.credential_ref } : {}),
-        timeZone: b.time_zone,
-        processingProviders: b.processing_providers,
-        version: b.version,
-        auth: b.auth,
-      };
-      return { status: 'ok', binding };
-    });
+    return this.transaction(
+      context,
+      false,
+      async (client) => {
+        const b = await this.binding(client, context, id);
+        if (!b) return { status: 'denied' };
+        const binding: CalendarConnection = {
+          id: b.id,
+          provider: b.provider as CalendarConnection['provider'],
+          calendarIds: b.selected_calendar_ids,
+          scopes: b.permission_scopes,
+          ...(b.credential_ref ? { credentialRef: b.credential_ref } : {}),
+          timeZone: b.time_zone,
+          processingProviders: b.processing_providers,
+          version: b.version,
+          auth: b.auth,
+        };
+        return { status: 'ok', binding };
+      },
+      false,
+      signal,
+    );
   }
   /** Trusted operator only. Account linking and model processing permissions are never accepted from RPC. */
   async bind(context: Context, input: CalendarBindingInput): Promise<Result> {
@@ -298,78 +310,98 @@ export class CalendarStore {
     calendarId: string,
     id: string,
     requested: CalendarWindow,
+    signal?: AbortSignal,
   ): Promise<Result> {
     if (!uuid.test(bindingId) || !uuid.test(id) || !validCalendarId(calendarId) || !windowValid(requested))
       return { status: 'denied' };
     const window = { ...requested };
-    return this.transaction(context, true, async (client) => {
-      const b = await this.binding(client, context, bindingId);
-      if (
-        !b ||
-        b.auth !== 'ready' ||
-        !b.selected_calendar_ids.includes(calendarId) ||
-        b.time_zone !== window.timeZone ||
-        !hasCalendarReadScope(b.permission_scopes)
-      )
-        return { status: 'denied' };
-      const old = (
-        await client.query('SELECT * FROM cos.calendar_snapshots WHERE scope_id=$1 AND binding_id=$2 AND id=$3', [
-          context.scopeId,
-          bindingId,
-          id,
-        ])
-      ).rows[0];
-      if (old) {
+    return this.transaction(
+      context,
+      true,
+      async (client) => {
+        const b = await this.binding(client, context, bindingId);
         if (
-          old.calendar_id !== calendarId ||
-          old.binding_version !== b.version ||
-          digest(old.coverage_window) !== digest(window)
+          !b ||
+          b.auth !== 'ready' ||
+          !b.selected_calendar_ids.includes(calendarId) ||
+          b.time_zone !== window.timeZone ||
+          !hasCalendarReadScope(b.permission_scopes)
         )
-          return { status: 'conflict' };
+          return { status: 'denied' };
+        const old = (
+          await client.query('SELECT * FROM cos.calendar_snapshots WHERE scope_id=$1 AND binding_id=$2 AND id=$3', [
+            context.scopeId,
+            bindingId,
+            id,
+          ])
+        ).rows[0];
+        if (old) {
+          if (
+            old.calendar_id !== calendarId ||
+            old.binding_version !== b.version ||
+            digest(old.coverage_window) !== digest(window)
+          )
+            return { status: 'conflict' };
+          return {
+            status: old.status === 'superseded' ? 'conflict' : 'ok',
+            snapshot_id: id,
+            access_generation: bindingId + ':' + b.version,
+            snapshot_status: old.status,
+            ...(old.status === 'complete' ? { result: old.result } : {}),
+          };
+        }
+        await client.query(
+          `INSERT INTO cos.calendar_snapshots(scope_id,binding_id,calendar_id,id,binding_version,coverage_window,status) VALUES($1,$2,$3,$4,$5,$6,'collecting')`,
+          [context.scopeId, bindingId, calendarId, id, b.version, JSON.stringify(window)],
+        );
+        await client.query(
+          'UPDATE cos.calendar_states SET last_attempt=$4,last_attempt_at=clock_timestamp() WHERE scope_id=$1 AND binding_id=$2 AND calendar_id=$3',
+          [context.scopeId, bindingId, calendarId, id],
+        );
         return {
-          status: old.status === 'superseded' ? 'conflict' : 'ok',
+          status: 'ok',
           snapshot_id: id,
           access_generation: bindingId + ':' + b.version,
-          snapshot_status: old.status,
-          ...(old.status === 'complete' ? { result: old.result } : {}),
+          snapshot_status: 'collecting',
         };
-      }
-      await client.query(
-        `INSERT INTO cos.calendar_snapshots(scope_id,binding_id,calendar_id,id,binding_version,coverage_window,status) VALUES($1,$2,$3,$4,$5,$6,'collecting')`,
-        [context.scopeId, bindingId, calendarId, id, b.version, JSON.stringify(window)],
-      );
-      await client.query(
-        'UPDATE cos.calendar_states SET last_attempt=$4,last_attempt_at=clock_timestamp() WHERE scope_id=$1 AND binding_id=$2 AND calendar_id=$3',
-        [context.scopeId, bindingId, calendarId, id],
-      );
-      return {
-        status: 'ok',
-        snapshot_id: id,
-        access_generation: bindingId + ':' + b.version,
-        snapshot_status: 'collecting',
-      };
-    });
+      },
+      false,
+      signal,
+    );
   }
-  async publish(context: Context, bindingId: string, id: string, input: CalendarSnapshot): Promise<Result> {
+  async publish(
+    context: Context,
+    bindingId: string,
+    id: string,
+    input: CalendarSnapshot,
+    signal?: AbortSignal,
+  ): Promise<Result> {
+    if (signal?.aborted) return { status: 'unavailable' };
     if (!uuid.test(bindingId) || !uuid.test(id) || !snapshotValid(input)) return { status: 'denied' };
     const snapshot = structuredClone(input),
       hash = digest(snapshot);
     const commit = (captured: CalendarCapture[]) =>
-      this.publishCaptured(context, bindingId, id, snapshot, hash, captured);
+      this.publishCaptured(context, bindingId, id, snapshot, hash, captured, signal);
     if (!this.evidence) return commit([]);
-    const admitted = await this.transaction(context, false, async (client) => {
-      const binding = await this.binding(client, context, bindingId);
-      return {
-        status:
-          binding?.auth === 'ready' &&
-          binding.selected_calendar_ids.includes(snapshot.calendarId) &&
-          snapshot.accessGeneration === bindingId + ':' + binding.version
-            ? 'ok'
-            : 'denied',
-      };
-    });
+    const admitted = await this.transaction(
+      context,
+      false,
+      async (client) => {
+        const binding = await this.binding(client, context, bindingId);
+        return {
+          status:
+            binding?.auth === 'ready' &&
+            binding.selected_calendar_ids.includes(snapshot.calendarId) &&
+            snapshot.accessGeneration === bindingId + ':' + binding.version
+              ? 'ok'
+              : 'denied',
+        };
+      },
+      false,
+      signal,
+    );
     if (admitted.status !== 'ok') return admitted;
-    return this.evidence.capture(context, bindingId, snapshot, commit);
+    return this.evidence.capture(context, bindingId, snapshot, commit, signal);
   }
   private publishCaptured(
     context: Context,
@@ -378,6 +410,7 @@ export class CalendarStore {
     snapshot: CalendarSnapshot,
     hash: string,
     captured: CalendarCapture[],
+    signal?: AbortSignal,
   ): Promise<Result> {
     return this.transaction(
       context,
@@ -499,9 +532,10 @@ export class CalendarStore {
         return result;
       },
       true,
+      signal,
     );
   }
-  async fail(context: Context, bindingId: string, id: string, code: string): Promise<Result> {
+  async fail(context: Context, bindingId: string, id: string, code: string, signal?: AbortSignal): Promise<Result> {
     if (!uuid.test(bindingId) || !uuid.test(id)) return { status: 'denied' };
     const safe = [
       'calendar_unavailable',
@@ -513,32 +547,49 @@ export class CalendarStore {
     ].includes(code)
       ? code
       : 'calendar_refresh_failed';
-    return this.transaction(context, true, async (client) => {
-      const result = await client.query(
-        "UPDATE cos.calendar_snapshots SET status='failed',failure_code=$4 WHERE scope_id=$1 AND binding_id=$2 AND id=$3 AND status IN ('collecting','failed')",
-        [context.scopeId, bindingId, id, safe],
-      );
-      return { status: result.rowCount ? 'ok' : 'conflict' };
-    });
+    return this.transaction(
+      context,
+      true,
+      async (client) => {
+        const result = await client.query(
+          "UPDATE cos.calendar_snapshots SET status='failed',failure_code=$4 WHERE scope_id=$1 AND binding_id=$2 AND id=$3 AND status IN ('collecting','failed')",
+          [context.scopeId, bindingId, id, safe],
+        );
+        return { status: result.rowCount ? 'ok' : 'conflict' };
+      },
+      false,
+      signal,
+    );
   }
-  async setAuth(context: Context, bindingId: string, auth: CalendarAccess['auth']): Promise<Result> {
+  async setAuth(
+    context: Context,
+    bindingId: string,
+    auth: CalendarAccess['auth'],
+    signal?: AbortSignal,
+  ): Promise<Result> {
     // Reconnection requires a newly authorised binding. This path can only reduce access.
     if (!uuid.test(bindingId) || !['expired', 'revoked', 'disconnected'].includes(auth)) return { status: 'denied' };
-    return this.transaction(context, true, async (client) => {
-      const b = await this.binding(client, context, bindingId);
-      if (!b) return { status: 'denied' };
-      if (b.auth === auth) return { status: 'ok' };
-      await client.query(
-        'UPDATE cos.calendar_bindings SET auth=$3,version=version+1,updated_at=clock_timestamp() WHERE scope_id=$1 AND id=$2',
-        [context.scopeId, bindingId, auth],
-      );
-      await client.query(
-        "UPDATE cos.calendar_observations SET lifecycle='quarantined',updated_at=clock_timestamp() WHERE scope_id=$1 AND binding_id=$2 AND lifecycle IN ('current','cancelled')",
-        [context.scopeId, bindingId],
-      );
-      await this.evidence?.revoke(client, context, bindingId, b.version + 1);
-      return { status: 'ok' };
-    });
+    return this.transaction(
+      context,
+      true,
+      async (client) => {
+        const b = await this.binding(client, context, bindingId);
+        if (!b) return { status: 'denied' };
+        if (b.auth === auth) return { status: 'ok' };
+        await client.query(
+          'UPDATE cos.calendar_bindings SET auth=$3,version=version+1,updated_at=clock_timestamp() WHERE scope_id=$1 AND id=$2',
+          [context.scopeId, bindingId, auth],
+        );
+        await client.query(
+          "UPDATE cos.calendar_observations SET lifecycle='quarantined',updated_at=clock_timestamp() WHERE scope_id=$1 AND binding_id=$2 AND lifecycle IN ('current','cancelled')",
+          [context.scopeId, bindingId],
+        );
+        await this.evidence?.revoke(client, context, bindingId, b.version + 1);
+        return { status: 'ok' };
+      },
+      false,
+      signal,
+    );
   }
   async read(context: Context & { provider: string }, bindingId: string, calendarId: string): Promise<Result> {
     return this.readSnapshot(context, bindingId, calendarId, false);
