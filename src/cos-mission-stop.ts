@@ -1,7 +1,7 @@
 /** Host-local stop journal. These records can only remove authority; PostgreSQL remains the mission ledger. */
 import type Database from 'better-sqlite3';
 import { hasTable } from './db/connection.js';
-import { validCosMissionIdentity, type CosMissionIdentity } from './cos-mission-boundary.js';
+import { cosMissionIdentities, validCosMissionIdentity, type CosMissionIdentity } from './cos-mission-boundary.js';
 const id = (v: string) => typeof v === 'string' && /^[a-zA-Z0-9_-]{1,100}$/.test(v);
 type AttemptReason = 'database_unavailable' | 'authority_lost' | 'deadline' | 'cancelled';
 type FamilyReason = 'owner_cancel' | 'origin_revoked';
@@ -94,21 +94,5 @@ export function isCosMissionStopped(identity: CosMissionIdentity, db: Database.D
 }
 /** Enumerate only exact, independently marked identities for native stop/reconciliation; never infer ordinary groups. */
 export function stoppedCosMissionIdentities(db: Database.Database): CosMissionIdentity[] {
-  if (!hasTable(db, 'cos_mission_boundaries')) return [];
-  const rows = db.prepare('SELECT * FROM cos_mission_boundaries ORDER BY attempt_id').all() as Array<{
-    attempt_id: string;
-    agent_group_id: string;
-    session_id: string;
-    identity: string;
-  }>;
-  return rows.flatMap((row) => {
-    const identity = parse(row.identity);
-    return validCosMissionIdentity(identity) &&
-      identity.attemptId === row.attempt_id &&
-      identity.agentGroupId === row.agent_group_id &&
-      identity.sessionId === row.session_id &&
-      isCosMissionStopped(identity, db)
-      ? [identity]
-      : [];
-  });
+  return cosMissionIdentities(db).filter((identity) => isCosMissionStopped(identity, db));
 }

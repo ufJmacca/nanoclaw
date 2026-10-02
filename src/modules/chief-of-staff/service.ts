@@ -5,6 +5,8 @@ import { DatabaseConfigurationError } from './store/config.js';
 import type { CosBinding } from '../../cos-boundary.js';
 import { interruptReviewOrigin } from './missions/review-origin.js';
 import { interruptScheduledOrigin } from './automation/scheduled-origin.js';
+import { cosMissionIdentities } from '../../cos-mission-boundary.js';
+import { stopCosMissionAttempt } from '../../cos-mission-stop.js';
 export type ServiceDependencies = Omit<RuntimeDependencies, 'store'> & { connect(): Promise<PriorityStore> };
 export class CosService {
   runtime: ReturnType<typeof createCosRuntime>;
@@ -18,6 +20,17 @@ export class CosService {
   }
   private fenceExecutions(): void {
     const d = this.dependencies;
+    // This also runs before the first successful PostgreSQL connection after a restart.
+    for (const identity of cosMissionIdentities(d.db)) {
+      try {
+        stopCosMissionAttempt(identity, 'authority_lost', d.db);
+        const session = d.session(identity.sessionId);
+        if (session && session.agent_group_id !== identity.agentGroupId) continue;
+        d.stop(identity.sessionId);
+      } catch {
+        // Retain each durable denial; one uncertain stop must not leave other specialists admitted.
+      }
+    }
     const bindings = d.db.prepare('SELECT binding FROM cos_identity_boundaries').all() as Array<{ binding: string }>;
     for (const item of bindings) {
       try {
@@ -81,8 +94,10 @@ export class CosService {
     }
   }
   async stop(): Promise<void> {
+    if (this.closed) return;
     this.stopped = true;
     this.runtime.dispose();
+    this.fenceExecutions();
     await this.inFlight;
     if (!this.closed) {
       this.closed = true;

@@ -48,6 +48,25 @@ export function hasCosMissionBoundary(groupId: string, sessionId: string, db: Da
 }
 type Boundary = { restricted: false } | { restricted: true; identity: CosMissionIdentity | null };
 type Row = { attempt_id: string; agent_group_id: string; session_id: string; identity: string };
+/** Exact permanent reservations only. Metadata for denial/recovery, never execution authority. */
+export function cosMissionIdentities(db: Database.Database): CosMissionIdentity[] {
+  if (!hasTable(db, 'cos_mission_boundaries')) return [];
+  const rows = db.prepare('SELECT * FROM cos_mission_boundaries ORDER BY attempt_id').all() as Row[];
+  return rows.flatMap((row) => {
+    try {
+      const identity: unknown = JSON.parse(row.identity);
+      return validCosMissionIdentity(identity) &&
+        identity.attemptId === row.attempt_id &&
+        identity.agentGroupId === row.agent_group_id &&
+        identity.sessionId === row.session_id
+        ? [identity]
+        : [];
+    } catch (error) {
+      if (!(error instanceof SyntaxError)) throw error;
+      return [];
+    }
+  });
+}
 export function missionBoundary(session: Session, db: Database.Database): Boundary {
   if (!hasTable(db, 'cos_mission_boundaries')) return { restricted: false };
   const rows = db

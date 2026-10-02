@@ -8,6 +8,8 @@ import { digest } from './domain/contracts.js';
 import { ensureConversationSchema } from './bridge/conversation-state.js';
 import { installReviewOrigin, reviewContext } from './missions/review-origin.js';
 import type { Session } from '../../types.js';
+import { installCosMissionBoundary, type CosMissionIdentity } from '../../cos-mission-boundary.js';
+import { isCosMissionStopped } from '../../cos-mission-stop.js';
 const services: CosService[] = [];
 afterEach(async () => {
   for (const service of services.splice(0)) await service.stop();
@@ -25,19 +27,20 @@ function fixture(enabled: boolean) {
   const connect = vi.fn().mockResolvedValue(store);
   const admission = vi.fn().mockReturnValue(true),
     stop = vi.fn();
+  const session = vi.fn((_id: string): Session | undefined => undefined);
   const service = new CosService({
     db,
     enabled,
     connect,
     facts: vi.fn(),
-    session: () => undefined,
+    session,
     destination: () => undefined,
     stop,
     admission,
     wake: vi.fn().mockResolvedValue(undefined),
   });
   services.push(service);
-  return { db, service, connect, end, query, admission, stop };
+  return { db, service, connect, end, query, admission, stop, session };
 }
 describe('S01-T01 host startup and dependency service', () => {
   it('disabled operation starts and ticks without connecting to PostgreSQL', async () => {
@@ -178,3 +181,59 @@ it.each(['database', 'maintenance'])(
     expect(f.db.prepare('SELECT count(*) AS n FROM cos_mission_review_origins').get()).toEqual({ n: 1 });
   },
 );
+it.each(['database', 'maintenance', 'initial-connection', 'shutdown'])(
+  'S05-PG02 %s durably fences exact specialists before stop without needing PostgreSQL',
+  async (failure) => {
+    const f = fixture(true);
+    const child = (name: string): CosMissionIdentity => ({
+      scopeId: 'scope',
+      missionId: 'mission-' + name,
+      attemptId: 'attempt-' + name,
+      generation: 1,
+      agentGroupId: 'child-' + name,
+      sessionId: 'session-' + name,
+      provider: 'codex',
+    });
+    const first = child('a'),
+      second = child('b'),
+      malformed = child('corrupt');
+    for (const identity of [first, second, malformed]) installCosMissionBoundary(identity, f.db);
+    f.db
+      .prepare('UPDATE cos_mission_boundaries SET identity=? WHERE attempt_id=?')
+      .run('{invalid', malformed.attemptId);
+    if (failure !== 'initial-connection') await f.service.tick();
+    f.stop.mockImplementation((id) => {
+      const identity = [first, second].find((i) => i.sessionId === id)!;
+      expect(identity).toBeDefined();
+      expect(isCosMissionStopped(identity, f.db)).toBe(true);
+      if (id === first.sessionId) throw Error('fixture stop uncertainty');
+    });
+    if (failure === 'database') f.query.mockRejectedValueOnce(Error('fixture partition'));
+    if (failure === 'maintenance') f.admission.mockReturnValue(false);
+    if (failure === 'initial-connection') f.connect.mockRejectedValueOnce(Error('fixture unavailable'));
+    if (failure === 'shutdown') await f.service.stop();
+    else await f.service.tick();
+    expect(f.stop.mock.calls.map(([id]) => id)).toEqual([first.sessionId, second.sessionId]);
+    expect(isCosMissionStopped(first, f.db)).toBe(true);
+    expect(isCosMissionStopped(second, f.db)).toBe(true);
+    expect(f.db.prepare('SELECT count(*) AS n FROM cos_mission_boundaries').get()).toEqual({ n: 3 });
+  },
+);
+it('S05-PG02 an inconsistent native session mapping is fenced without stopping a different workspace', async () => {
+  const f = fixture(true);
+  const identity: CosMissionIdentity = {
+    scopeId: 'scope',
+    missionId: 'mission',
+    attemptId: 'attempt',
+    generation: 1,
+    agentGroupId: 'owned-child',
+    sessionId: 'child-session',
+    provider: 'codex',
+  };
+  installCosMissionBoundary(identity, f.db);
+  f.session.mockReturnValue({ id: identity.sessionId, agent_group_id: 'unrelated-workspace' } as Session);
+  f.connect.mockRejectedValueOnce(Error('fixture unavailable'));
+  await f.service.tick();
+  expect(isCosMissionStopped(identity, f.db)).toBe(true);
+  expect(f.stop).not.toHaveBeenCalled();
+});
