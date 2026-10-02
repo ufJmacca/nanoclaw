@@ -20,7 +20,7 @@ export function createMissionCancellation(dependencies: {
       try {
         await dependencies.stop(identity);
       } catch {
-        // eslint-disable-next-line no-catch-all/no-catch-all -- The durable fence stays closed when physical stop requires reconciliation.
+        // The durable fence stays closed when physical stop requires reconciliation.
         pending = true;
       }
     }

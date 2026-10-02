@@ -27,14 +27,12 @@ function fixture(allowed = true) {
     propose: vi.fn(),
     readWork: vi.fn(),
     status: vi.fn(),
-    requestMission: vi
-      .fn()
-      .mockResolvedValue({
-        status: 'ok',
-        mission_id: 'mission',
-        proposal_id: 'proposal',
-        confirmation_token: 'PRIVATE_APPROVAL',
-      }),
+    requestMission: vi.fn().mockResolvedValue({
+      status: 'ok',
+      mission_id: 'mission',
+      proposal_id: 'proposal',
+      confirmation_token: 'PRIVATE_APPROVAL',
+    }),
     missionRuns: { inspect: vi.fn().mockResolvedValue({ status: 'ok', mission: { id: 'mission', state: 'running' } }) },
   };
   const resolveContext = vi.fn().mockResolvedValue(allowed ? context : null);
