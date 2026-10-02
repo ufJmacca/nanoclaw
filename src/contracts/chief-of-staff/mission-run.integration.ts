@@ -33,6 +33,7 @@ import { MissionReviews } from '../../modules/chief-of-staff/missions/review-sto
 import type { MissionReview } from '../../modules/chief-of-staff/contracts/mission-review.js';
 import { MissionNotifications } from '../../modules/chief-of-staff/missions/notifications.js';
 import { MissionNotificationDelivery } from '../../modules/chief-of-staff/missions/notification-delivery.js';
+import { MissionReviewRuns } from '../../modules/chief-of-staff/missions/review-runs.js';
 
 const scope = 'mission-run-' + randomUUID();
 const context = { scopeId: scope, ownerId: 'owner', agentGroupId: scope, sessionId: scope, ingressId: randomUUID() };
@@ -252,15 +253,28 @@ const blockedResult = (): MissionResult => ({
   criteria: [{ id: 'tradeoff', claim_ids: [] }],
   limitations: ['RESULT_CANARY: insufficient cost evidence.'],
 });
-async function submitted(outcome: 'answer' | 'partial' | 'blocked' = 'answer', stop = true, wallSeconds = 600) {
+async function submitted(
+  outcome: 'answer' | 'partial' | 'blocked' = 'answer',
+  stop = true,
+  wallSeconds = 600,
+  limits: Partial<MissionLimits> = {},
+  workerModelCalls = 0,
+) {
   authority.contextGeneration = randomUUID();
   const { identity, input } = await mission({
     max_turns: 2,
     max_tool_calls: 2,
     max_attempts: 2,
     wall_seconds: wallSeconds,
+    ...limits,
   });
   const lease = await dispatched(identity);
+  for (let n = 0; n < workerModelCalls; n++) {
+    assert.deepEqual(
+      await store.missionRuns.reserve(identity, randomUUID(), 'model', digest('fixture specialist turn')),
+      { status: 'ok', reserved: true },
+    );
+  }
   const result: MissionResult =
     outcome === 'blocked'
       ? blockedResult()
@@ -333,16 +347,129 @@ test('S05-T08 coordinator reads the exact artifact and records review with one a
   assert.equal(commands[0].delivered_at, null);
 });
 test('S05-T08 a saved result can be reviewed after the original execution deadline without reopening the worker', async () => {
-  const f = await submitted('answer', true, 30);
+  const f = await submitted('answer', true, 30, { max_tool_calls: 6 });
+  const automatic = new MissionReviewRuns(f.reviews);
+  const claim = await automatic.claim(f.k, f.identity.missionId, f.review.submission_id, 'review-host');
+  assert.equal(claim.status, 'ok');
   const order = (await rows('mission_work_orders')).find((r) => r.id === f.identity.missionId);
   await new Promise((resolve) =>
     setTimeout(resolve, Math.max(0, Date.parse(order.body.deadlineAt) - Date.now() + 150)),
   );
   assert.equal((await reserve(f.identity)).status, 'denied');
   assert.equal((await store.missionRuns.claimDispatch(context, f.identity.attemptId, 'host')).status, 'denied');
+  assert.equal(
+    (await automatic.authorize(f.k, f.identity.missionId, f.review.submission_id, claim.lease as any)).status,
+    'denied',
+  );
+  assert.equal(
+    (await automatic.claim(f.k, f.identity.missionId, f.review.submission_id, 'review-host')).status,
+    'denied',
+  );
   assert.equal((await f.reviews.read(f.k, f.identity.missionId, f.review.submission_id)).status, 'ok');
   assert.equal((await f.reviews.review(f.k, randomUUID(), f.review)).state, 'completed');
   assert.equal((await rows('mission_work_orders')).find((r) => r.id === f.identity.missionId).digest, order.digest);
+});
+test('S05-T05 automatic review claims a stable main-context task only after the specialist is stopped', async () => {
+  const f = await submitted('answer', false, 600, { max_tool_calls: 6 });
+  const runs = new MissionReviewRuns(f.reviews);
+  const claim = () => runs.claim(f.k, f.identity.missionId, f.review.submission_id, 'review-host');
+  assert.equal((await claim()).status, 'denied');
+  await store.missionRuns.confirmStopped(f.identity);
+  assert.equal(
+    (await runs.claim({ ...f.k, ownerId: 'foreign' }, f.identity.missionId, f.review.submission_id, 'review-host'))
+      .status,
+    'denied',
+  );
+  const first = await claim();
+  assert.equal(first.status, 'ok');
+  assert.deepEqual(await claim(), first);
+  assert.equal((first.identity as any).sessionId, context.sessionId);
+  assert.notEqual((first.identity as any).sessionId, f.identity.sessionId);
+  assert.equal((await runs.claim(f.k, f.identity.missionId, f.review.submission_id, 'other-host')).status, 'pending');
+  assert.equal(
+    (await runs.authorize(f.k, f.identity.missionId, f.review.submission_id, first.lease as any)).status,
+    'ok',
+  );
+  const renewed = await runs.renew(f.k, f.identity.missionId, f.review.submission_id, first.lease as any);
+  assert.equal(renewed.status, 'ok');
+  assert.ok(
+    Date.parse(String(renewed.deadline_at)) <=
+      Date.parse((await rows('mission_work_orders')).find((r) => r.id === f.identity.missionId).body.deadlineAt),
+  );
+  await admin.query(
+    "UPDATE cos.mission_attempts SET allocation=jsonb_set(allocation,'{coordinator_review,deadlineAt}',to_jsonb((clock_timestamp()-interval '1 second')::text)) WHERE scope_id=$1 AND id=$2",
+    [scope, f.identity.attemptId],
+  );
+  assert.equal(
+    (await runs.authorize(f.k, f.identity.missionId, f.review.submission_id, first.lease as any)).status,
+    'denied',
+  );
+  assert.equal(
+    (await runs.renew(f.k, f.identity.missionId, f.review.submission_id, first.lease as any)).status,
+    'denied',
+  );
+  const next = await runs.claim(f.k, f.identity.missionId, f.review.submission_id, 'other-host');
+  assert.equal(next.status, 'ok');
+  assert.equal(next.input_id, first.input_id);
+  assert.deepEqual(next.identity, first.identity);
+  assert.equal((next.lease as any).fence, (first.lease as any).fence + 1);
+  assert.equal(
+    (await runs.authorize(f.k, f.identity.missionId, f.review.submission_id, first.lease as any)).status,
+    'denied',
+  );
+});
+test('S05-T09 coordinator review spends the original root budgets and replay cannot authorize another invocation', async () => {
+  const f = await submitted('answer', true, 600, { max_turns: 3, max_tool_calls: 3 }, 1);
+  const runs = new MissionReviewRuns(f.reviews),
+    claimed = await runs.claim(f.k, f.identity.missionId, f.review.submission_id, 'review-host');
+  assert.equal(claimed.status, 'ok');
+  const callId = randomUUID(),
+    lease = claimed.lease as any;
+  const reserve = (kind: 'model' | 'tool', call = randomUUID()) =>
+    runs.reserve(f.k, f.identity.missionId, f.review.submission_id, lease, call, kind);
+  assert.deepEqual(await reserve('model', callId), { status: 'ok', reserved: true });
+  assert.deepEqual(await reserve('model', callId), { status: 'ok', reserved: false });
+  assert.equal((await reserve('tool', callId)).status, 'conflict');
+  const calls = await Promise.all(Array.from({ length: 4 }, () => reserve('model')));
+  assert.equal(calls.filter((r) => r.reserved === true).length, 1);
+  assert.deepEqual(await reserve('tool'), { status: 'ok', reserved: true });
+  assert.deepEqual(await reserve('tool'), { status: 'ok', reserved: true });
+  assert.equal((await reserve('tool')).status, 'denied');
+  assert.deepEqual(((await store.missionRuns.inspect(context, f.identity.missionId)).mission as any).usage, {
+    attempt: 1,
+    model: 3,
+    tool: 3,
+  });
+  assert.equal((await runs.claim(f.k, f.identity.missionId, f.review.submission_id, 'review-host')).status, 'denied');
+});
+test('S05-T07 revoked evidence, cancellation and completed review close automatic review authority', async () => {
+  for (const change of ['revoke', 'cancel', 'review']) {
+    const f = await submitted('answer', true, 600, { max_tool_calls: 6 });
+    const runs = new MissionReviewRuns(f.reviews),
+      claimed = await runs.claim(f.k, f.identity.missionId, f.review.submission_id, 'review-host');
+    assert.equal(claimed.status, 'ok');
+    if (change === 'revoke')
+      await admin.query("UPDATE cos.sources SET status='revoked' WHERE id=$1", [f.input.sources[0].source_id]);
+    if (change === 'cancel') await store.missionRuns.cancel(context, f.identity.missionId);
+    if (change === 'review') assert.equal((await f.reviews.review(f.k, randomUUID(), f.review)).status, 'ok');
+    assert.equal(
+      (await runs.authorize(f.k, f.identity.missionId, f.review.submission_id, claimed.lease as any)).status,
+      'denied',
+    );
+    assert.equal(
+      (
+        await runs.reserve(
+          f.k,
+          f.identity.missionId,
+          f.review.submission_id,
+          claimed.lease as any,
+          randomUUID(),
+          'model',
+        )
+      ).status,
+      'denied',
+    );
+  }
 });
 test('S05-T08 requires exact review version, criteria, digest and an independently confirmed worker stop', async () => {
   const f = await submitted('answer', false);

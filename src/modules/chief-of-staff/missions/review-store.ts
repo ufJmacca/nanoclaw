@@ -7,12 +7,25 @@ import type { KnowledgeContext, KnowledgeStore } from '../knowledge/store.js';
 import { checkMissionReview, validMissionReview } from '../contracts/mission-review.js';
 import type { MissionResult } from '../contracts/mission-result.js';
 import type { MissionProposalStore } from './proposal-store.js';
-import { checkResearchResult } from './result-checks.js';
+import { checkResearchResult, type ResearchResultChecks } from './result-checks.js';
 import { recordResearchExposure } from './exposure.js';
 import type { ResearchWorkOrder } from './work-order.js';
 const uuid = (v: unknown): v is string =>
   typeof v === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
 const id = (v: unknown): v is string => typeof v === 'string' && /^[a-zA-Z0-9_-]{1,100}$/.test(v);
+export type ReviewSnapshot = {
+  mission: { state: string; version: number; generation: number };
+  submission: {
+    id: string;
+    digest: string;
+    attempt_id: string;
+    generation: number;
+    allocation: Record<string, unknown>;
+  };
+  order: ResearchWorkOrder;
+  result: MissionResult;
+  checks: Extract<ResearchResultChecks, { status: 'review_required' }>;
+};
 
 /** Coordinator-only result access and advisory semantic review. Specialist submissions cannot call this store. */
 export class MissionReviews {
@@ -37,7 +50,24 @@ export class MissionReviews {
       throw error;
     }
   }
-  private async snapshot(client: PoolClient, context: KnowledgeContext, missionId: string, submissionId: string) {
+  /** Trusted host review orchestration shares the artifact lock and current mission row lock. */
+  async withCurrentSubmission(
+    context: KnowledgeContext,
+    missionId: string,
+    submissionId: string,
+    operation: (client: PoolClient, current: ReviewSnapshot) => Promise<Result>,
+  ): Promise<Result> {
+    return this.transaction(async (client) => {
+      const current = await this.snapshot(client, context, missionId, submissionId);
+      return current ? operation(client, current) : { status: 'denied' };
+    });
+  }
+  private async snapshot(
+    client: PoolClient,
+    context: KnowledgeContext,
+    missionId: string,
+    submissionId: string,
+  ): Promise<ReviewSnapshot | null> {
     if (
       context.origin ||
       context.provider !== 'codex' ||
