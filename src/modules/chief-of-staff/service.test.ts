@@ -46,6 +46,32 @@ function fixture(enabled: boolean, specialists?: (store: PriorityStore) => Speci
 function specialist() {
   return { pump: vi.fn(async (_binding: CosBinding) => {}), fenceLocal: vi.fn(), close: vi.fn(async () => {}) };
 }
+it('S06-T02/T07 advances specialists before waking the retained main review in the same healthy tick', async () => {
+  const worker = specialist(),
+    f = fixture(true, () => worker),
+    events: string[] = [];
+  await f.service.tick();
+  const binding: CosBinding = {
+    scopeId: 'scope',
+    agentGroupId: 'group',
+    messagingGroupId: 'mg',
+    sessionId: 'main',
+    provider: 'codex',
+    instanceId: 'fixture',
+    channelId: 'private',
+    ownerId: 'owner',
+    botId: 'bot',
+  };
+  installCosBoundary(binding, f.db);
+  worker.pump.mockImplementation(async () => {
+    events.push('specialists');
+  });
+  vi.spyOn(f.service.runtime, 'pump').mockImplementation(async () => {
+    events.push('main-review');
+  });
+  await f.service.tick();
+  expect(events).toEqual(['specialists', 'main-review']);
+});
 it('S05 starts one specialist lifecycle only after successful database health and drains it before releasing the pool', async () => {
   const worker = specialist(),
     create = vi.fn(() => worker),

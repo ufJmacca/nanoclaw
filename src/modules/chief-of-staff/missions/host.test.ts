@@ -23,6 +23,7 @@ import { RESEARCH_TEMPLATE, sealResearchWorkOrder } from './work-order.js';
 import { NativeMissionAllocation } from './native-allocation.js';
 import type { MissionRunStore } from './run-store.js';
 import { MissionHost } from './host.js';
+import type { TeamRunStore } from './team-run-store.js';
 const hosts: MissionHost[] = [];
 beforeEach(() => {
   fs.mkdirSync(fixture.root, { mode: 0o700 });
@@ -192,8 +193,8 @@ function setup() {
       return true;
     }),
   };
-  const create = () => {
-    const host = new MissionHost(options, { allocation, launcher, register });
+  const create = (teams?: TeamRunStore) => {
+    const host = new MissionHost({ ...options, teams }, { allocation, launcher, register });
     hosts.push(host);
     return host;
   };
@@ -213,6 +214,42 @@ function setup() {
     handler: () => handler,
   };
 }
+it('S06-T02/PG02 feeds team intents into the existing native dispatcher after result advancement and before single-worker discovery', async () => {
+  const f = setup(),
+    events: string[] = [],
+    teamId = 'team-' + 'a'.repeat(64);
+  const teams = {
+    pendingGraphs: vi.fn(async () => ({ status: 'ok', items: [teamId], next_after: null })),
+    advance: vi.fn(async () => {
+      events.push('advance');
+      return { status: 'ok', state: 'running' };
+    }),
+    claimReady: vi.fn(async () => {
+      events.push('team-intent');
+      return { status: 'ok', state: 'running' };
+    }),
+    requestRework: vi.fn(),
+  };
+  const pending = f.runs.pendingDispatch.getMockImplementation()!;
+  f.runs.pendingDispatch.mockImplementation(async () => {
+    events.push('native-discovery');
+    return pending();
+  });
+  const host = f.create(teams as unknown as TeamRunStore);
+  await host.pump(f.binding);
+  expect(events).toEqual(['advance', 'team-intent', 'native-discovery']);
+  expect(f.runs.claimDispatch).toHaveBeenCalledOnce();
+  expect(f.options.wake).toHaveBeenCalledOnce();
+  expect(f.register).toHaveBeenCalledOnce();
+  await host.pump(f.binding);
+  expect(f.options.wake).toHaveBeenCalledOnce();
+  expect(f.register).toHaveBeenCalledOnce();
+});
+it('S06-PG02 refuses a competing team pool before registering a worker dispatcher', () => {
+  const f = setup();
+  expect(() => f.create({ database: {} } as unknown as TeamRunStore)).toThrow('team_runtime_pool_mismatch');
+  expect(f.register).not.toHaveBeenCalled();
+});
 it('S05 host discovers, allocates and wakes the exact native child, then registers only its worker RPC', async () => {
   const f = setup(),
     host = f.create();

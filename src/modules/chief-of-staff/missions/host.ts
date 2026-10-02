@@ -14,11 +14,14 @@ import { MissionDispatch, type MissionLauncher } from './dispatch.js';
 import { NativeMissionAllocation } from './native-allocation.js';
 import { createMissionLauncher } from './launcher.js';
 import { createMissionRpcHandler } from './rpc.js';
+import type { TeamRunStore } from './team-run-store.js';
+import { TeamGraphPump } from './team-graph-pump.js';
 
 type Options = {
   root: string;
   db: Database.Database;
   runs: MissionRunStore;
+  teams?: TeamRunStore;
   authority: MissionAuthorityResolver;
   admitted(): boolean;
   assertHostAuthority(): void;
@@ -30,6 +33,7 @@ type Options = {
 /** One host-owned lifecycle per checked runtime pool. No ordinary A2A route or channel binding is created. */
 export class MissionHost implements SpecialistLifecycle {
   private readonly dispatcher: MissionDispatch;
+  private readonly graphs?: TeamGraphPump;
   private readonly launcher: MissionLauncher & { shutdown(): Promise<void> };
   private readonly settled = new Set<string>();
   private readonly cursors = new Map<string, string | null>();
@@ -46,6 +50,10 @@ export class MissionHost implements SpecialistLifecycle {
     } = {},
   ) {
     options.assertHostAuthority();
+    if (options.teams) {
+      if (options.teams.database !== options.runs.database) throw Error('team_runtime_pool_mismatch');
+      this.graphs = new TeamGraphPump({ teams: options.teams, local: (context) => this.local(context) });
+    }
     const allocation = adapters.allocation ?? new NativeMissionAllocation({ root: options.root });
     this.launcher =
       adapters.launcher ??
@@ -177,6 +185,8 @@ export class MissionHost implements SpecialistLifecycle {
         typeof retirement.next_after === 'string' ? retirement.next_after : null,
       );
       if (!(await this.admitted(context))) return;
+      await this.graphs?.drain(context);
+      if (this.closed || !this.local(context)) return;
       const pending = await this.options.runs.pendingDispatch(context, this.cursors.get(binding.scopeId) ?? null);
       if (this.closed) return;
       if (pending.status === 'denied') {

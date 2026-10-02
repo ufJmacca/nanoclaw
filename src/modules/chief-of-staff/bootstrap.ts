@@ -188,6 +188,7 @@ export function startCosHostModule(assertHostAuthority: () => void): { service: 
         root: targetRoot,
         db: getDb(),
         runs: store.missionRuns,
+        teams: store.teamRuns,
         authority: missionAuthority,
         admitted,
         assertHostAuthority,

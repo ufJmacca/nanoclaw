@@ -93,6 +93,28 @@ export class TeamRunStore {
     );
     return order ? { row, order } : null;
   }
+  /** Bounded host discovery is metadata only. Each transition separately validates current execution authority. */
+  async pendingGraphs(context: Context, after: string | null = null): Promise<Result> {
+    if (context.origin || (after !== null && !/^team-[a-f0-9]{64}$/.test(after))) return { status: 'denied' };
+    return this.transaction(
+      context,
+      async (client) => {
+        const rows = (
+          await client.query(
+            `SELECT r.id FROM cos.mission_team_roots r JOIN cos.mission_team_work_orders w ON w.scope_id=r.scope_id AND w.id=r.id
+        WHERE r.scope_id=$1 AND w.body->'origin'->>'ownerId'=$2 AND w.body->'origin'->>'agentGroupId'=$3
+        AND w.body->'origin'->>'sessionId'=$4 AND r.state IN ('queued','running','awaiting_review')
+        AND ($5::text IS NULL OR r.id>$5) ORDER BY r.id LIMIT 5`,
+            [context.scopeId, context.ownerId, context.agentGroupId, context.sessionId, after],
+          )
+        ).rows;
+        const items = rows.slice(0, 4).map((r) => r.id as string);
+        if (items.some((id) => !/^team-[a-f0-9]{64}$/.test(id))) return { status: 'denied' };
+        return { status: 'ok', items, next_after: rows.length > 4 ? items.at(-1)! : null };
+      },
+      false,
+    );
+  }
   /** Stable child creation is an intent, not a launch. Existing native MissionHost owns all resulting attempts. */
   async claimReady(context: Context, teamId: string): Promise<Result> {
     if (!id(teamId)) return { status: 'denied' };
@@ -909,6 +931,7 @@ export class TeamRunStore {
         );
         const row = rows.find((r) => r.step_id === change.stepId)!;
         row.state = change.state;
+        row.provenance = { ...row.provenance, ...change.provenance };
       }
       const failedRequired = rows.some((r) => r.state === 'failed' && r.definition.required);
       if (failedRequired && current.order.body.request.partial_policy === 'block') {
@@ -971,7 +994,15 @@ export class TeamRunStore {
           'UPDATE cos.mission_team_roots SET state=$3,version=version+1,updated_at=clock_timestamp() WHERE scope_id=$1 AND id=$2',
           [context.scopeId, teamId, state],
         );
-      return { status: 'ok', team_id: teamId, state };
+      return {
+        status: 'ok',
+        team_id: teamId,
+        state,
+        review_submission_id:
+          state === 'awaiting_review'
+            ? (rows.find((r) => r.definition.template_id === 'team-reviewer')?.provenance.submission_id ?? null)
+            : null,
+      };
     });
   }
   /** Denial-only owner control: available after pause, expired consent or source revocation. */

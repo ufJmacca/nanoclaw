@@ -34,6 +34,7 @@ import { installReviewedTeamTemplates } from '../../modules/chief-of-staff/missi
 import { TEAM_ADMISSION_POLICY } from '../../modules/chief-of-staff/missions/team-admission.js';
 import type { CosBinding } from '../../cos-boundary.js';
 import { createTeamCancellation } from '../../modules/chief-of-staff/missions/team-cancel.js';
+import { TeamGraphPump } from '../../modules/chief-of-staff/missions/team-graph-pump.js';
 
 const scope = 'team-admission-' + randomUUID();
 const context = { scopeId: scope, ownerId: 'owner', agentGroupId: scope, sessionId: scope, ingressId: randomUUID() };
@@ -514,6 +515,50 @@ test('S06-T01/T06/T07 owner RPC proposes one replayable graph, reads its metadat
     );
   } finally {
     native.close();
+  }
+});
+test('S06-T02/PG02 bounded owner graph discovery pages fairly without opening worker or model admission', async () => {
+  const teamIds: string[] = [];
+  for (let i = 0; i < 7; i++) {
+    const p = await store.requestTeam(context, randomUUID(), await input());
+    assert.equal((await approve(p)).status, 'ok');
+    teamIds.push(String(p.team_id));
+  }
+  let after: string | null = null;
+  const seen = new Set<string>();
+  try {
+    enabled = false;
+    for (let i = 0; i < 20; i++) {
+      const page = await store.teamRuns.pendingGraphs(context, after);
+      assert.equal(page.status, 'ok');
+      const items = page.items as string[];
+      assert.ok(items.length <= 4);
+      assert.deepEqual(items, [...items].sort());
+      for (const id of items) {
+        assert.equal(seen.has(id), false);
+        seen.add(id);
+      }
+      after = page.next_after as string | null;
+      if (after === null) break;
+      assert.equal(after, items.at(-1));
+    }
+    assert.equal(
+      teamIds.every((id) => seen.has(id)),
+      true,
+    );
+    assert.equal((await store.teamRuns.pendingGraphs({ ...context, ownerId: 'foreign' })).status, 'denied');
+    assert.deepEqual((await store.teamRuns.pendingGraphs({ ...context, sessionId: 'foreign' })).items, []);
+    assert.equal((await store.teamRuns.pendingGraphs(context, '../cursor')).status, 'denied');
+    assert.equal(
+      (await rows('mission_team_children')).some((r) => teamIds.includes(r.team_id)),
+      false,
+    );
+  } finally {
+    enabled = true;
+    for (const teamId of teamIds) {
+      assert.equal((await store.teamRuns.cancel(context, teamId)).status, 'ok');
+      assert.equal((await store.teamRuns.confirmCancellation(context, teamId)).status, 'ok');
+    }
   }
 });
 test('S06-T01 preview and apply revalidate template integrity and current source/provider consent', async () => {
@@ -1267,6 +1312,7 @@ async function finishTeamStep(
   revisionTarget?: string,
   extraModels = 0,
   expectModelExhausted = false,
+  advanceResult = true,
 ) {
   assert.equal((await f.teams.claimReady(context, f.teamId)).status, 'ok');
   const step = (await rows('mission_team_steps')).find((s) => s.team_id === f.teamId && s.step_id === stepId)!;
@@ -1343,9 +1389,87 @@ async function finishTeamStep(
   const submitted = await f.runs.submitResult(identity, lease, randomUUID(), 'submission', result);
   assert.equal(submitted.status, 'ok');
   assert.equal((await f.runs.confirmStopped(identity)).status, 'ok');
-  assert.equal((await f.teams.advance(context, f.teamId)).status, 'ok');
+  if (advanceResult) assert.equal((await f.teams.advance(context, f.teamId)).status, 'ok');
   return { identity, lease, order, submitted };
 }
+
+test('S06-T02/T03/T07 graph pump joins stopped results once and applies only original-budget reviewer rework', async () => {
+  for (const rework of [false, true]) {
+    const f = await stoppedAnalyses(
+      false,
+      rework
+        ? (r) => {
+            r.steps.find((s) => s.step_id === 'synthesis')!.max_rework_count = 1;
+            r.limits.max_attempts = 9;
+          }
+        : undefined,
+    );
+    const pump = new TeamGraphPump({
+      local: () => enabled,
+      teams: {
+        pendingGraphs: async () => ({ status: 'ok', items: [f.teamId], next_after: null }),
+        advance: (ctx, id) => f.teams.advance(ctx, id),
+        claimReady: (ctx, id) => f.teams.claimReady(ctx, id),
+        requestRework: (ctx, id, submission) => f.teams.requestRework(ctx, id, submission),
+      },
+    });
+    await pump.drain(context);
+    const first = (await rows('mission_team_children')).filter((r) => r.team_id === f.teamId);
+    assert.equal(first.length, 3);
+    assert.equal(first.filter((r) => r.step_id === 'synthesis').length, 1);
+    await pump.drain(context);
+    await pump.drain(context);
+    assert.deepEqual(
+      (await rows('mission_team_children')).filter((r) => r.team_id === f.teamId),
+      first,
+    );
+    await finishTeamStep(f, 'synthesis', undefined, 0, false, false);
+    await pump.drain(context);
+    await finishTeamStep(f, 'review', rework ? 'synthesis' : undefined, 0, false, false);
+    await pump.drain(context);
+    if (rework) {
+      assert.equal((await rows('mission_team_reworks')).filter((r) => r.team_id === f.teamId).length, 1);
+      assert.equal((await rows('mission_team_children')).filter((r) => r.team_id === f.teamId).length, 5);
+      const revised = (await rows('mission_team_steps')).find(
+        (r) => r.team_id === f.teamId && r.step_id === 'synthesis',
+      )!;
+      assert.equal(
+        (await rows('mission_team_children')).find((r) => r.mission_id === revised.child_mission_id)!.revision,
+        1,
+      );
+      await finishTeamStep(f, 'synthesis', undefined, 0, false, false);
+      await pump.drain(context);
+      await finishTeamStep(f, 'review', undefined, 0, false, false);
+      await pump.drain(context);
+    }
+    const snapshot = await f.teams.reviewSnapshot(context, f.teamId);
+    assert.equal(snapshot.status, 'ok');
+    assert.equal((snapshot.team as { state: string }).state, 'awaiting_review');
+    const budget = snapshot.root_budget as { limits: { attempt: number }; usage: { attempt: number; model: number } };
+    assert.equal(budget.limits.attempt, rework ? 9 : 8);
+    assert.equal(budget.usage.attempt, rework ? 6 : 4);
+    // stoppedAnalyses injects analyst submissions without physical model calls.
+    // Only the writer/reviewer fixture turns below consume model grants.
+    assert.equal(budget.usage.model, rework ? 4 : 2);
+    const children = (await rows('mission_team_children')).filter((r) => r.team_id === f.teamId);
+    await pump.drain(context);
+    assert.deepEqual(
+      (await rows('mission_team_children')).filter((r) => r.team_id === f.teamId),
+      children,
+    );
+    assert.equal(
+      (await rows('mission_team_budget_events')).filter((r) => r.team_id === f.teamId && r.kind === 'reserved').length,
+      4,
+    );
+    assert.equal(
+      (await rows('outbox')).filter((r) => r.kind === 'team_review_notification' && r.payload.team_id === f.teamId)
+        .length,
+      0,
+    );
+    assert.equal((await f.teams.cancel(context, f.teamId)).status, 'ok');
+    assert.equal((await f.teams.confirmCancellation(context, f.teamId)).status, 'ok');
+  }
+});
 
 test('S06-T03/T05/T07 bounded reviewer rework retains all immutable children, pinned earlier inputs and aggregate credits', async () => {
   const f = await stoppedAnalyses(false, (r) => {
