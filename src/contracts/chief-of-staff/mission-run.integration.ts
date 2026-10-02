@@ -14,6 +14,9 @@ import { installCosMissionBoundary } from '../../cos-mission-boundary.js';
 import { installCosMissionExecutionHooks } from '../../cos-mission-execution.js';
 import { permitCosOutbound } from '../../cos-boundary.js';
 import { createMissionRpcHandler } from '../../modules/chief-of-staff/missions/rpc.js';
+import { createRpcHandler } from '../../modules/chief-of-staff/bridge/rpc.js';
+import { createMissionCancellation } from '../../modules/chief-of-staff/missions/cancel.js';
+import { isCosMissionStopped } from '../../cos-mission-stop.js';
 import { connectFixtureDatabase, fixtureDatabaseConfig, fixtureRuntimeUser } from './fixture-database.js';
 import { migrate } from '../../modules/chief-of-staff/store/migrations.js';
 import { BoundedDatabase } from '../../modules/chief-of-staff/store/client.js';
@@ -174,6 +177,70 @@ const reserve = (
   kind: 'model' | 'tool' = 'model',
   payload = digest('fixture-call'),
 ) => store.missionRuns.reserve(i, id, kind, payload);
+test('S05-T05/T07 coordinator RPC proposes without launching, inspects the approved mission and durably cancels', async () => {
+  const native = initTestDb();
+  migrateNative(native);
+  const inbox = new Database(':memory:');
+  const main = { id: context.sessionId, agent_group_id: context.agentGroupId } as ReturnType<typeof getSession> &
+    object;
+  let stopped = 0;
+  const handler = createRpcHandler({
+    resolveContext: async () => context,
+    store,
+    cancelMission: createMissionCancellation({
+      db: native,
+      runs: store.missionRuns,
+      stop: () => {
+        stopped++;
+      },
+    }),
+  });
+  async function call(method: string, params: Record<string, unknown>, requestId = randomUUID()) {
+    const request = { protocol: 'cos-rpc/v1', request_id: requestId, method, params },
+      delivery_id = randomUUID();
+    await handler({ action: 'cos_rpc', request, delivery_id }, main, inbox);
+    return JSON.parse(
+      (
+        inbox
+          .prepare('SELECT response FROM cos_rpc_responses WHERE request_id=? AND payload_hash=? AND delivery_id=?')
+          .get(requestId, digest(request), delivery_id) as { response: string }
+      ).response,
+    );
+  }
+  try {
+    const input = await request(),
+      requestId = randomUUID();
+    const proposed = await call('cos_mission_request', { request: input }, requestId);
+    assert.equal(proposed.status, 'ok');
+    assert.equal(proposed.result.confirmation_token, undefined);
+    const missionId = proposed.result.mission_id;
+    assert.equal((await rows('mission_attempts')).filter((r) => r.mission_id === missionId).length, 0);
+    const hostPreview = await store.requestMission(context, requestId, input);
+    assert.equal((await approve(hostPreview)).status, 'ok');
+    assert.equal((await call('cos_mission_get', { mission_id: missionId })).result.mission.state, 'queued');
+    const a = (await rows('mission_attempts')).find((r) => r.mission_id === missionId);
+    const identity: CosMissionIdentity = {
+      scopeId: scope,
+      missionId,
+      attemptId: a.id,
+      generation: a.generation,
+      agentGroupId: a.agent_group_id,
+      sessionId: a.session_id,
+      provider: 'codex',
+    };
+    installCosMissionBoundary(identity, native);
+    const cancelled = await call('cos_mission_cancel', { mission_id: missionId });
+    assert.equal(cancelled.status, 'ok');
+    assert.equal(cancelled.result.state, 'cancelling');
+    assert.equal(isCosMissionStopped(identity, native), true);
+    assert.equal(stopped, 1);
+    assert.equal((await store.missionRuns.claimDispatch(context, identity.attemptId, 'host')).status, 'denied');
+    assert.equal((await call('cos_mission_get', { mission_id: missionId })).result.mission.state, 'cancelling');
+  } finally {
+    inbox.close();
+    closeDb();
+  }
+});
 const blockedResult = (): MissionResult => ({
   format: 'cos-research-result/v1',
   outcome: 'blocked',

@@ -20,6 +20,7 @@ import { BriefDelivery } from './automation/brief-delivery.js';
 import { BriefReconciliation } from './automation/brief-reconciliation.js';
 import { BriefDispatch } from './automation/brief-dispatch.js';
 import { BriefRefresh } from './automation/brief-refresh.js';
+import { createMissionCancellation } from './missions/cancel.js';
 
 export type RuntimeDependencies = {
   db: Database.Database;
@@ -293,6 +294,11 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
             ? d.store.briefs.reserveCall(context, context.origin.runId, context.origin.generation, 'tool', callId)
             : Promise.resolve({ status: 'denied' }),
         store: d.store!,
+        cancelMission: createMissionCancellation({
+          db: d.db,
+          runs: d.store!.missionRuns,
+          stop: (identity) => d.stop(identity.sessionId),
+        }),
         knowledge: d.store!.knowledge,
         resolveKnowledgeContext: async (session, context) => resolveKnowledgeContext(session, context, d.db),
       }),

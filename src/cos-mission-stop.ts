@@ -64,7 +64,7 @@ export function stopCosMissionAttempt(
     ).run(identity.attemptId, identity.agentGroupId, identity.sessionId, JSON.stringify(identity), reason);
   })();
 }
-/** Trusted owner/private-origin validation happens before this host-only function. No agent RPC exposes it. */
+/** Trusted owner/private-origin validation happens before this host-only function. RPC callers cannot select its scope. */
 export function stopCosMissionFamily(
   scopeId: string,
   missionId: string,
