@@ -383,9 +383,37 @@ export function validWorkChange(v: unknown): v is WorkChange {
     new Set(v.evidence.map(canonical)).size === v.evidence.length
   );
 }
-export type ProposalChange = Change | SourceChange | WorkChange | ScheduleChange;
+/** Host-created approval envelope. Admission verifies the entire body against immutable storage. */
+export type MissionChange = {
+  kind: 'research_mission';
+  mission_id: string;
+  work_order_digest: string;
+  work_order: Record<string, unknown>;
+};
+export function validMissionChange(value: unknown): value is MissionChange {
+  return (
+    object(value) &&
+    keys(value, ['kind', 'mission_id', 'work_order_digest', 'work_order']) &&
+    Object.keys(value).length === 4 &&
+    value.kind === 'research_mission' &&
+    typeof value.mission_id === 'string' &&
+    /^mission-[a-f0-9]{64}$/.test(value.mission_id) &&
+    typeof value.work_order_digest === 'string' &&
+    /^[a-f0-9]{64}$/.test(value.work_order_digest) &&
+    object(value.work_order) &&
+    Buffer.byteLength(JSON.stringify(value.work_order)) <= 24576 &&
+    digest(value.work_order) === value.work_order_digest
+  );
+}
+export type ProposalChange = Change | SourceChange | WorkChange | ScheduleChange | MissionChange;
 export function validProposalChange(value: unknown): value is ProposalChange {
-  return validChange(value) || validSourceChange(value) || validWorkChange(value) || validScheduleChange(value);
+  return (
+    validChange(value) ||
+    validSourceChange(value) ||
+    validWorkChange(value) ||
+    validScheduleChange(value) ||
+    validMissionChange(value)
+  );
 }
 
 export type CosResponse = {

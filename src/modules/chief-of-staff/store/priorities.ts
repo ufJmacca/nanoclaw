@@ -1,7 +1,9 @@
 import type { Context, ProposalChange, Result } from '../domain/contracts.js';
 import { digest, validProposalChange, validSourceChange } from '../domain/contracts.js';
 import type { KnowledgeContext, KnowledgeStore } from '../knowledge/store.js';
-import { validWorkChange, validWorkRead, type WorkRead } from '../contracts/protocol.js';
+import { validWorkChange, validWorkRead, validMissionChange, type WorkRead } from '../contracts/protocol.js';
+import { validMissionRequest, type MissionRequest } from '../contracts/mission-protocol.js';
+import { MissionProposalStore, type MissionAuthorityResolver } from '../missions/proposal-store.js';
 import { WorkStore } from './work.js';
 import { validScheduleChange } from '../contracts/schedule-protocol.js';
 import { BriefScheduleStore } from '../automation/schedule-store.js';
@@ -45,12 +47,15 @@ export class PriorityStore {
   readonly schedules = new BriefScheduleStore();
   readonly briefs: BriefRunStore;
   readonly briefArtifacts?: BriefArtifacts;
+  readonly missions: MissionProposalStore;
   constructor(
     readonly database: BoundedDatabase,
     readonly knowledge?: KnowledgeStore,
     readonly calendar?: CalendarConnector,
     readonly calendarView?: CalendarView,
+    missionAuthority?: MissionAuthorityResolver,
   ) {
+    this.missions = new MissionProposalStore(knowledge, missionAuthority);
     this.work = new WorkStore(knowledge);
     this.briefs = new BriefRunStore(database);
     if (knowledge)
@@ -59,6 +64,7 @@ export class PriorityStore {
       );
   }
   private async workReceiptCurrent(client: PoolClient, context: Context, result: Result): Promise<boolean> {
+    if (validMissionChange(result.change)) return this.missions.validateChange(client, context, result.change);
     if (!validWorkChange(result.change)) return true;
     const proposal = (
       await client.query(
@@ -176,15 +182,41 @@ export class PriorityStore {
     change: ProposalChange,
     retained?: KnowledgeContext,
   ): Promise<Result> {
-    if (!uuid.test(requestId) || !validProposalChange(change)) return { status: 'denied' };
-    const method = validSourceChange(change)
-      ? 'cos_source_change_propose'
-      : validWorkChange(change)
-        ? 'cos_work_change_propose'
-        : validScheduleChange(change)
-          ? 'cos_brief_schedule_propose'
-          : 'cos_change_propose';
-    const hash = digest(validWorkChange(change) ? { method, change, retained: retained ?? null } : { method, change });
+    // Only requestMission may create the host-owned work order and its approval envelope.
+    if (!uuid.test(requestId) || !validProposalChange(change) || validMissionChange(change))
+      return { status: 'denied' };
+    return this.proposal(context, requestId, change, retained);
+  }
+
+  async requestMission(context: Context, requestId: string, request: MissionRequest): Promise<Result> {
+    if (!uuid.test(requestId) || !validMissionRequest(request) || context.origin) return { status: 'denied' };
+    return this.proposal(context, requestId, undefined, undefined, request);
+  }
+
+  private async proposal(
+    context: Context,
+    requestId: string,
+    proposed?: ProposalChange,
+    retained?: KnowledgeContext,
+    mission?: MissionRequest,
+  ): Promise<Result> {
+    const change = proposed;
+    const method = mission
+      ? 'cos_mission_request'
+      : validSourceChange(change)
+        ? 'cos_source_change_propose'
+        : validWorkChange(change)
+          ? 'cos_work_change_propose'
+          : validScheduleChange(change)
+            ? 'cos_brief_schedule_propose'
+            : 'cos_change_propose';
+    const hash = digest(
+      mission
+        ? { method, request: mission }
+        : validWorkChange(change)
+          ? { method, change, retained: retained ?? null }
+          : { method, change },
+    );
     const result = await this.transaction(async (client) => {
       if (!(await authorised(client, context))) return { status: 'denied' };
       const inserted = await client.query(
@@ -205,7 +237,9 @@ export class PriorityStore {
           return { status: 'denied' };
         return existing.result ?? { status: 'pending', request_id: requestId };
       }
+      const change = mission ? await this.missions.prepare(client, context, requestId, mission) : proposed;
       if (
+        !change ||
         (validSourceChange(change) &&
           (!this.knowledge || !(await this.knowledge.validateChange(client, context.scopeId, change)))) ||
         (validWorkChange(change) && !(await this.work.validateChange(client, context, change, retained)))
@@ -235,12 +269,14 @@ export class PriorityStore {
           validWorkChange(change) && retained ? JSON.stringify(retained) : null,
         ],
       );
+      if (validMissionChange(change)) await this.missions.linkProposal(client, context, change, id);
       const receipt: Result = {
         status: 'ok',
         proposal_id: id,
         confirmation_token: token,
         change,
         request_id: requestId,
+        ...(validMissionChange(change) ? { mission_id: change.mission_id } : {}),
       };
       await client.query(`INSERT INTO cos.outbox(id,scope_id,kind,payload) VALUES($1,$2,'approval_preview',$3)`, [
         'preview-' + id,
@@ -326,7 +362,7 @@ export class PriorityStore {
       if (proposal.state === 'conflict') return { status: 'conflict' };
       const change = proposal.change as ProposalChange;
       if (!validProposalChange(change) || digest(change) !== proposal.payload_hash) return { status: 'denied' };
-      if (validWorkChange(change) || validScheduleChange(change)) {
+      if (validWorkChange(change) || validScheduleChange(change) || validMissionChange(change)) {
         const context: Context = {
           scopeId,
           ownerId: scope.rows[0].owner_id,
@@ -335,9 +371,11 @@ export class PriorityStore {
           ingressId: proposal.ingress_id,
         };
         if (proposal.owner_id !== context.ownerId) return { status: 'denied' };
-        const result = validScheduleChange(change)
-          ? await this.schedules.applyApproved(client, context, proposal, change)
-          : await this.work.applyApproved(client, context, proposal, change, proposal.work_context ?? undefined);
+        const result = validMissionChange(change)
+          ? await this.missions.applyApproved(client, context, proposal, change)
+          : validScheduleChange(change)
+            ? await this.schedules.applyApproved(client, context, proposal, change)
+            : await this.work.applyApproved(client, context, proposal, change, proposal.work_context ?? undefined);
         if (!['ok', 'conflict'].includes(result.status)) return result;
         const changed = result.status === 'ok';
         await client.query(
