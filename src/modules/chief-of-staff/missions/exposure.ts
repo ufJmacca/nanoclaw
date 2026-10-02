@@ -7,7 +7,7 @@ import type { ResearchWorkOrder } from './work-order.js';
 export async function recordMissionExposure(
   client: PoolClient,
   identity: CosMissionIdentity,
-  order: ResearchWorkOrder,
+  order: Pick<ResearchWorkOrder, 'context'>,
 ) {
   return recordResearchExposure(
     client,
@@ -19,7 +19,7 @@ export async function recordMissionExposure(
 export async function recordResearchExposure(
   client: PoolClient,
   context: { scopeId: string; sessionId: string; generation: string },
-  order: ResearchWorkOrder,
+  order: { context: Pick<ResearchWorkOrder['context'], 'sources'> },
 ) {
   const references = order.context.sources.flatMap((source) =>
     source.chunks.map((chunk) => ({

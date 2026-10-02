@@ -255,6 +255,7 @@ export class MissionDispatch {
         try {
           if (
             !this.local(entry) ||
+            (entry.phase === 'running' && (await this.dependencies.stopped(entry.input.identity))) ||
             !(await this.dependencies.admitted(entry.context)) ||
             (await this.dependencies.runs.renewDispatch(entry.input.identity, entry.lease)).status !== 'ok' ||
             !this.local(entry)

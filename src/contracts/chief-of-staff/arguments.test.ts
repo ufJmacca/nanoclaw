@@ -1,6 +1,15 @@
 import { describe, it, expect } from 'vitest';
 import { parseFixtureArguments, fixtureFiles } from './arguments.js';
 describe('CoS fixture command selection', () => {
+  it('registers S06 admission and its three native demonstrations with predecessor regressions', () => {
+    const args = parseFixtureArguments(['--demo', '--fixture', '--slice', 'S06', '--db-profile', 'test']);
+    expect(fixtureFiles(args)).toEqual(['team-flow.integration']);
+    expect(fixtureFiles({ ...args, demo: false })).toEqual([
+      ...fixtureFiles({ slice: 'S05', demo: false }),
+      'team-admission.integration',
+      'team-flow.integration',
+    ]);
+  });
   it('accepts explicit supported slice and profile selection', () =>
     expect(parseFixtureArguments(['--slice', 'S01', '--db-profile', 'test'])).toEqual({
       slice: 'S01',
@@ -14,7 +23,7 @@ describe('CoS fixture command selection', () => {
   it.each(
     [
       [],
-      ['--slice', 'S06', '--db-profile', 'test'],
+      ['--slice', 'S07', '--db-profile', 'test'],
       ['--slice', 'S01', '--db-profile', 'runtime'],
       ['--demo', '--slice', 'S01', '--db-profile', 'test'],
       ['--slice', 'S01', '--db-profile', 'test', '--db-profile', 'test'],

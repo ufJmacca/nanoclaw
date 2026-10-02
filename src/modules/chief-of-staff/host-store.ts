@@ -13,6 +13,7 @@ import { CalendarEvidence } from './calendar/evidence.js';
 import { CalendarConnector } from './calendar/connector.js';
 import { CalendarView } from './calendar/view.js';
 import type { MissionAuthorityResolver } from './missions/proposal-store.js';
+import type { TeamAuthorityResolver } from './missions/team-proposal-store.js';
 
 /** Runtime credentials only. Startup validates the schema; it never migrates or opens source access implicitly. */
 export async function connectCosHostStore(
@@ -21,6 +22,7 @@ export async function connectCosHostStore(
   admitted: () => boolean,
   retention: Pick<PurgeHooks, 'purgeContexts'> = {},
   missionAuthority?: MissionAuthorityResolver,
+  teamAuthority?: TeamAuthorityResolver,
 ): Promise<PriorityStore> {
   const settings = knowledgeSettings(env);
   const calendarConfig = calendarSettings(env);
@@ -68,5 +70,6 @@ export async function connectCosHostStore(
         })
       : undefined,
     missionAuthority ? (context) => (admitted() ? missionAuthority(context) : null) : undefined,
+    teamAuthority ? (context) => (admitted() ? teamAuthority(context) : null) : undefined,
   );
 }

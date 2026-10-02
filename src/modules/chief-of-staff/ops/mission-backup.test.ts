@@ -7,6 +7,16 @@ import { backupMissionState, verifyMissionBackup } from './mission-backup.js';
 const roots: string[] = [];
 const attempt = '11111111-1111-4111-8111-111111111111';
 const delegation = 'mission-delegation-' + 'a'.repeat(64) + '.json';
+it('S06 preserves the private team admission record without restoring activation authority', async () => {
+  const f = fixture(),
+    name = 'team-admission-' + 'b'.repeat(64) + '.json';
+  fs.writeFileSync(path.join(f.source, name), 'EXACT_TEAM_ADMISSION', { mode: 0o600 });
+  const result = await backupMissionState(f.source, f.receipt);
+  expect(result.files).toBe(6);
+  expect(fs.readFileSync(path.join(f.copied, name), 'utf8')).toBe('EXACT_TEAM_ADMISSION');
+  fs.writeFileSync(path.join(f.copied, name), 'CORRUPT');
+  await expect(verifyMissionBackup(f.source, f.receipt)).rejects.toThrow('mission_backup_conflict');
+});
 afterEach(() => {
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });

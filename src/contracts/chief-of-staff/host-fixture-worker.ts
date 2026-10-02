@@ -7,7 +7,7 @@ import pg from 'pg';
 import type { CosBinding } from '../../cos-boundary.js';
 import { fixtureDatabaseConfig, connectFixtureDatabase } from './fixture-database.js';
 import { BoundedDatabase } from '../../modules/chief-of-staff/store/client.js';
-import { PriorityStore } from '../../modules/chief-of-staff/store/priorities.js';
+import type { PriorityStore } from '../../modules/chief-of-staff/store/priorities.js';
 import { connectionFault } from './connection-fault.js';
 import { CalendarStore } from '../../modules/chief-of-staff/calendar/store.js';
 import { CalendarAccessFences } from '../../modules/chief-of-staff/calendar/access-fences.js';
@@ -39,11 +39,13 @@ async function start(input: {
     sourceRoot?: string;
     runnerVolume?: string;
     authority: MissionAuthority;
+    team?: { templateBundleDigest: string; teamPolicyDigest: string };
   };
 }) {
   if (!path.isAbsolute(input.root) || !input.root.includes('/.cos-plan-state/fixtures/flow-'))
     throw new Error('fixture_root_required');
   process.chdir(input.root);
+  const { PriorityStore } = await import('../../modules/chief-of-staff/store/priorities.js');
   const { initDb, closeDb } = await import('../../db/connection.js');
   const { runMigrations } = await import('../../db/migrations/index.js');
   const { getSession, getPendingApproval } = await import('../../db/sessions.js');
@@ -182,7 +184,14 @@ async function start(input: {
           ? input.mission!.authority
           : null
     : undefined;
-  const store = new PriorityStore(database, knowledge, connector, view, authority);
+  const teamAuthority =
+    input.mission?.team && authority
+      ? (context: Parameters<NonNullable<typeof authority>>[0]) => {
+          const single = authority(context);
+          return single ? { ...single, ...input.mission!.team! } : null;
+        }
+      : undefined;
+  const store = new PriorityStore(database, knowledge, connector, view, authority, teamAuthority);
   if (input.brief) {
     store.briefs.options.clock = () => new Date(fixtureClock!);
     store.briefArtifacts!.collector.options.clock = () => new Date(fixtureClock!);
@@ -225,6 +234,7 @@ async function start(input: {
           store,
           authority,
           binding,
+          teams: !!teamAuthority,
         })
       : undefined;
   const runtime = createCosRuntime({
@@ -234,6 +244,7 @@ async function start(input: {
     facts,
     session: getSession,
     destination: getMessagingGroup,
+    missionExecution: specialists?.execution,
     stop: (id) => {
       specialists?.stopSession(id);
     },
@@ -320,8 +331,8 @@ async function start(input: {
     }
     if (command === 'pump') {
       specialists?.check();
-      await runtime.pump(binding);
       await specialists?.host.pump(binding);
+      await runtime.pump(binding);
       return true;
     }
     if (input.brief && command === 'clock') {
@@ -348,6 +359,21 @@ async function start(input: {
       specialists!.holdNext();
       return true;
     }
+    if (input.mission?.team && command === 'mission-release-held') {
+      specialists!.releaseHeld();
+      return true;
+    }
+    if (input.mission?.team && command === 'mission-fail-step') {
+      if (value !== 'technical') throw Error('invalid_fixture_failure');
+      specialists!.failStep(value);
+      return true;
+    }
+    if (input.mission && command === 'main-context-generation')
+      return (
+        db.prepare('SELECT generation FROM cos_conversation_states WHERE scope_id=?').get(binding.scopeId) as {
+          generation: string;
+        }
+      )?.generation;
     if (input.mission && command === 'mission-states') return specialists!.states();
     if (input.mission && command === 'mission-stale-submit')
       return store.missionRuns.submitResult(value.identity, value.lease, value.requestId, value.callId, value.result);
@@ -360,7 +386,9 @@ async function start(input: {
       const retained = resolveKnowledgeContext(session, context, db),
         origin = context.origin;
       if (!retained) return false;
-      const result = await store.missionReviewRuns!.reserve(
+      const { CoordinatorReviewRuns } =
+        await import('../../modules/chief-of-staff/missions/coordinator-review-runs.js');
+      const result = await new CoordinatorReviewRuns(store.missionReviewRuns!, store.teamFinalReviews).reserve(
         retained,
         origin.runId,
         origin.submissionId,

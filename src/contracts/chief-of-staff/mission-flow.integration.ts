@@ -8,7 +8,6 @@ import { randomUUID } from 'node:crypto';
 import { connectFixtureDatabase, fixtureDatabaseConfig, fixtureRuntimeUser } from './fixture-database.js';
 import { migrate } from '../../modules/chief-of-staff/store/migrations.js';
 import { BoundedDatabase } from '../../modules/chief-of-staff/store/client.js';
-import { PriorityStore } from '../../modules/chief-of-staff/store/priorities.js';
 import { KnowledgeStore } from '../../modules/chief-of-staff/knowledge/store.js';
 import { KnowledgeArtifacts } from '../../modules/chief-of-staff/knowledge/artifacts.js';
 import { createConversationState } from '../../modules/chief-of-staff/bridge/conversation-state.js';
@@ -35,6 +34,7 @@ test(
       scope = 'demo-mission-' + randomUUID();
     for (const name of ['artifacts', 'staging']) fs.mkdirSync(path.join(knowledgeRoot, name), { mode: 0o700 });
     process.chdir(root);
+    const { PriorityStore } = await import('../../modules/chief-of-staff/store/priorities.js');
     const { initDb, closeDb } = await import('../../db/connection.js'),
       { runMigrations } = await import('../../db/migrations/index.js'),
       { subscribeMattermostChannelStrict } = await import('../../channels/mattermost-subscription.js'),

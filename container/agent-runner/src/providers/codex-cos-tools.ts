@@ -22,7 +22,8 @@ export const cosDynamicTools: DynamicToolFunctionSpec[] = cosTools.map(({ tool }
 }));
 
 function requestFor(tool: unknown, args: unknown): CosRequest | null {
-  if (typeof tool === 'string' && tool.startsWith('cos_mission_')) return missionCoordinatorRequest(tool, args);
+  if (typeof tool === 'string' && (tool.startsWith('cos_mission_') || tool.startsWith('cos_team_')))
+    return missionCoordinatorRequest(tool, args);
   if (!args || typeof args !== 'object' || Array.isArray(args)) return null;
   const values = args as Record<string, unknown>;
   const proposal =

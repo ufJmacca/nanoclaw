@@ -3,7 +3,7 @@
 S05 adds bounded research over admitted notes: propose a work order, approve it,
 follow or cancel the specialist, and receive a reviewed answer. The complete
 fixture demonstration, final ARM64 image checks and Pi acceptance pass. The
-candidate awaits human review and merge. Keep real mission execution disabled
+S05 merge and its exact merged-source release are accepted. Keep real mission execution disabled
 until the required confined live-provider smoke test has passed under a current
 model allowance.
 
@@ -102,6 +102,53 @@ scheduled-brief renewal may supply the current generation through its recorded
 consent lineage; an interrupted renewal closes mission admission until recovered.
 The specialist launcher rechecks these pins before launch and on every credential
 or model callback. Actual model invocations still require fresh budget reservations.
+
+## Specialist team configuration
+
+The S06 operator command is implemented and fixture-tested; S06 deployment and
+acceptance are still pending. Teams require the existing single-worker delegation
+and a separate reviewed team configuration. A simple request keeps the single-worker
+route. Team roles get fresh specialist contexts; the main CoS keeps its shared
+conversation.
+
+Use the same paused, private-owner, maintenance and database checks described above:
+
+```text
+cos:admin team-configure --scope <bound-scope> --request-id <uuid> --manifest <absolute-private-file>
+```
+
+The private manifest has exactly these fields:
+
+```json
+{
+  "expectedRevision": 0,
+  "enabled": false,
+  "templateBundleDigest": "<canonical digest of the installed TEAM_TEMPLATES>",
+  "policyDigest": "<canonical digest of the installed TEAM_ADMISSION_POLICY>",
+  "reviewRef": "<operator review reference>"
+}
+```
+
+The command verifies all four canonical analyst, writer and reviewer templates
+before inserting any missing entry. It cannot overwrite conflicting templates or
+reviewers. The policy caps graphs at six steps and two workers, keeps public
+retrieval disabled, and permits only approved rework within the original limits.
+Native capacity may impose a lower worker limit to preserve the coordinator.
+
+The coordinator now has `cos_team_request`, `cos_team_get` and `cos_team_cancel`.
+Requests create a proposal for exact owner approval. Status shows bounded step
+states and original budget history without copying source prose or worker history.
+Cancellation fences every retained child and stays pending until native absence
+is independently confirmed. Cancelling before approval launches nothing and
+creates no fictitious budget release. Scheduled and automatic review tasks cannot
+use owner team controls. Specialist tools remain context-read and result-submit.
+
+The returned revision belongs to team configuration alone. Exact request replay,
+file permissions and stale-revision rules match single-worker configuration.
+Permission is saved only after acknowledged template installation and renewed
+host checks. Configuration leaves CoS paused and does not authorise model usage,
+reset context, replenish budgets, send a message or launch a worker. Each team
+pins this revision; re-enabling teams cannot revive an older graph's permission.
 
 ## Source deletion and retained specialist data
 

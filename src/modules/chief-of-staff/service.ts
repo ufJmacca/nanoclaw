@@ -103,8 +103,8 @@ export class CosService {
         for (const row of rows) {
           if (this.stopped) return;
           const binding = JSON.parse(row.binding) as CosBinding;
-          await this.runtime.pump(binding);
-          if (!this.stopped) await this.specialists?.pump(binding);
+          await this.specialists?.pump(binding);
+          if (!this.stopped) await this.runtime.pump(binding);
         }
       } catch (error) {
         this.fenceSpecialists();

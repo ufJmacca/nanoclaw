@@ -64,12 +64,14 @@ it('S05 production bootstrap creates specialists from the checked service store 
   const options = f.service.mock.calls[0][0];
   expect(f.mission).not.toHaveBeenCalled();
   expect(options.specialists).toBeTypeOf('function');
-  const runs = { fixture: 'checked-pool' };
-  options.specialists({ missionRuns: runs });
+  const runs = { fixture: 'checked-pool' },
+    teams = { fixture: 'same-checked-pool' };
+  options.specialists({ missionRuns: runs, teamRuns: teams });
   expect(f.mission).toHaveBeenCalledWith(
     expect.objectContaining({
       root: '/fixture/target',
       runs,
+      teams,
       authority: f.authority,
       assertHostAuthority,
       admitted: options.admission,
@@ -80,5 +82,12 @@ it('S05 production bootstrap creates specialists from the checked service store 
     }),
   );
   await options.connect();
-  expect(f.connect).toHaveBeenCalledWith(expect.any(Object), expect.any(Object), options.admission, {}, f.authority);
+  expect(f.connect).toHaveBeenCalledWith(
+    expect.any(Object),
+    expect.any(Object),
+    options.admission,
+    {},
+    f.authority,
+    expect.any(Function),
+  );
 });

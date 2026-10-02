@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { validScheduleChange, type ScheduleChange } from './schedule-protocol.js';
 import { validMissionRequest } from './mission-protocol.js';
 import { validMissionReview } from './mission-review.js';
+import { validTeamRequest } from './team-protocol.js';
 import { answerDraftSchema, validAnswerDraft, validAnswerCitation, type AnswerCitation } from './answer-protocol.js';
 /** Provider guidance; the wire validator additionally checks real dates and state transitions. */
 export const workChangeSchema = {
@@ -106,6 +107,9 @@ export type CosMethod =
   | 'cos_mission_cancel'
   | 'cos_mission_result_get'
   | 'cos_mission_review'
+  | 'cos_team_request'
+  | 'cos_team_get'
+  | 'cos_team_cancel'
   | 'cos_brief_schedule_propose'
   | 'cos_brief_request'
   | 'cos_request_status'
@@ -218,6 +222,14 @@ export function validRequest(value: unknown): value is CosRequest {
   if (value.method === 'cos_work_read') return validWorkRead(value.params);
   if (value.method === 'cos_mission_request')
     return keys(value.params, ['request']) && validMissionRequest(value.params.request);
+  if (value.method === 'cos_team_request')
+    return keys(value.params, ['request']) && validTeamRequest(value.params.request);
+  if (value.method === 'cos_team_get' || value.method === 'cos_team_cancel')
+    return (
+      keys(value.params, ['team_id']) &&
+      typeof value.params.team_id === 'string' &&
+      /^team-[a-f0-9]{64}$/.test(value.params.team_id)
+    );
   if (value.method === 'cos_mission_review')
     return keys(value.params, ['review']) && validMissionReview(value.params.review);
   if (value.method === 'cos_mission_result_get')
@@ -430,14 +442,37 @@ export function validMissionChange(value: unknown): value is MissionChange {
     digest(value.work_order) === value.work_order_digest
   );
 }
-export type ProposalChange = Change | SourceChange | WorkChange | ScheduleChange | MissionChange;
+/** One owner approval covers this immutable graph, never a worker-created extension. */
+export type TeamChange = {
+  kind: 'specialist_team';
+  team_id: string;
+  work_order_digest: string;
+  work_order: Record<string, unknown>;
+};
+export function validTeamChange(value: unknown): value is TeamChange {
+  return (
+    object(value) &&
+    keys(value, ['kind', 'team_id', 'work_order_digest', 'work_order']) &&
+    Object.keys(value).length === 4 &&
+    value.kind === 'specialist_team' &&
+    typeof value.team_id === 'string' &&
+    /^team-[a-f0-9]{64}$/.test(value.team_id) &&
+    typeof value.work_order_digest === 'string' &&
+    /^[a-f0-9]{64}$/.test(value.work_order_digest) &&
+    object(value.work_order) &&
+    Buffer.byteLength(JSON.stringify(value.work_order)) <= 49152 &&
+    digest(value.work_order) === value.work_order_digest
+  );
+}
+export type ProposalChange = Change | SourceChange | WorkChange | ScheduleChange | MissionChange | TeamChange;
 export function validProposalChange(value: unknown): value is ProposalChange {
   return (
     validChange(value) ||
     validSourceChange(value) ||
     validWorkChange(value) ||
     validScheduleChange(value) ||
-    validMissionChange(value)
+    validMissionChange(value) ||
+    validTeamChange(value)
   );
 }
 

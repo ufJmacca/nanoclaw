@@ -32,6 +32,9 @@ import { RESEARCH_TEMPLATE } from './work-order.js';
 import { digest } from '../domain/contracts.js';
 import { writeAtomic } from '../ops/target-state.js';
 import { createMissionAuthorityResolver } from './authority.js';
+import { createTeamAuthorityResolver } from './team-authority.js';
+import { configureTeamAdmission, TEAM_ADMISSION_POLICY } from './team-admission.js';
+import { TEAM_TEMPLATES } from '../contracts/team-templates.js';
 beforeEach(() => {
   fs.mkdirSync(f.root, { mode: 0o700 });
   runMigrations(initTestDb());
@@ -103,6 +106,14 @@ function fixture() {
   const admitted = vi.fn(() => true),
     assertHostAuthority = vi.fn();
   const resolver = createMissionAuthorityResolver({ targetRoot: root, db, admitted, assertHostAuthority });
+  const teamResolver = createTeamAuthorityResolver({ targetRoot: root, db, missionAuthority: resolver });
+  const teamChange = {
+    expectedRevision: 0,
+    enabled: true,
+    templateBundleDigest: digest(TEAM_TEMPLATES),
+    policyDigest: digest(TEAM_ADMISSION_POLICY),
+    reviewRef: 'fixture-reviewed-team',
+  };
   return {
     db,
     root,
@@ -117,6 +128,8 @@ function fixture() {
     admitted,
     assertHostAuthority,
     resolver,
+    teamResolver,
+    teamChange,
   };
 }
 it('S05-T03 derives only current host-owned mission pins without preparing context or reserving model use', () => {
@@ -155,6 +168,7 @@ it.each([
   'unreleased',
 ])('S05-T03 denies %s without repairing state', (kind) => {
   const t = fixture();
+  configureTeamAdmission(t.root, t.binding, randomUUID(), t.teamChange);
   if (kind === 'paused') t.db.exec('UPDATE cos_identity_boundaries SET paused=1');
   if (kind === 'maintenance') t.admitted.mockReturnValue(false);
   if (kind === 'host-lease')
@@ -194,8 +208,53 @@ it.each([
   const before = t.db.serialize(),
     files = fs.readdirSync(t.root, { recursive: true });
   expect(t.resolver(t.context)).toBeNull();
+  expect(t.teamResolver(t.context)).toBeNull();
   expect(t.db.serialize()).toEqual(before);
   expect(fs.readdirSync(t.root, { recursive: true })).toEqual(files);
+});
+it('S06-T01/T05 single-worker delegation cannot implicitly enable team work or create another context', () => {
+  const t = fixture();
+  expect(t.resolver(t.context)).not.toBeNull();
+  expect(t.teamResolver(t.context)).toBeNull();
+  const record = configureTeamAdmission(t.root, t.binding, randomUUID(), t.teamChange);
+  const before = t.db.serialize(),
+    files = fs.readdirSync(t.root, { recursive: true });
+  expect(t.teamResolver(t.context)).toEqual({
+    ...t.resolver(t.context),
+    templateBundleDigest: digest(TEAM_TEMPLATES),
+    teamPolicyDigest: digest(record),
+  });
+  expect(t.teamResolver(t.context)?.contextGeneration).toBe(t.retained.generation);
+  expect(t.db.serialize()).toEqual(before);
+  expect(fs.readdirSync(t.root, { recursive: true })).toEqual(files);
+  expect(t.owner.prepare).not.toHaveBeenCalled();
+});
+it('S06-T03/T05 reviewed team revision fences old graph authority without resetting parent permissions', () => {
+  const t = fixture();
+  configureTeamAdmission(t.root, t.binding, randomUUID(), t.teamChange);
+  const original = t.teamResolver(t.context)!;
+  configureTeamAdmission(t.root, t.binding, randomUUID(), { ...t.teamChange, expectedRevision: 1, enabled: false });
+  expect(t.teamResolver(t.context)).toBeNull();
+  expect(t.resolver(t.context)).not.toBeNull();
+  configureTeamAdmission(t.root, t.binding, randomUUID(), { ...t.teamChange, expectedRevision: 2 });
+  const next = t.teamResolver(t.context)!;
+  expect(next.teamPolicyDigest).not.toBe(original.teamPolicyDigest);
+  expect(next.delegationDigest).toBe(original.delegationDigest);
+  expect(next.provider).toEqual(original.provider);
+  expect(next.contextGeneration).toBe(original.contextGeneration);
+});
+it('S06-T05 tampered team policy or owner record cannot renew the original authority', () => {
+  const t = fixture();
+  const record = configureTeamAdmission(t.root, t.binding, randomUUID(), t.teamChange);
+  for (const patch of [
+    { policyDigest: 'a'.repeat(64) },
+    { ownerId: 'foreign' },
+    { templateBundleDigest: 'b'.repeat(64) },
+  ]) {
+    writeAtomic(t.root, 'team-admission-' + digest(t.binding.scopeId) + '.json', { ...record, ...patch });
+    expect(t.teamResolver(t.context)).toBeNull();
+    expect(t.resolver(t.context)).not.toBeNull();
+  }
 });
 it('S05-T07 approved brief renewal changes the admitted generation while preserving the policy and allowance', () => {
   const t = fixture(),

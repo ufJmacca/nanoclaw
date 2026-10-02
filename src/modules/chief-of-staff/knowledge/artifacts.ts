@@ -3,6 +3,7 @@ import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { decodeSource, extractChunks, MAX_SOURCE_BYTES } from './text.js';
 import { withDeploymentLock } from '../ops/deployment-lock.js';
+import { OperationQueue, OperationBusy } from '../store/operation-queue.js';
 export const sourceDigest = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
 const identity = /^[a-f0-9]{64}-[a-f0-9]{64}$/;
 const marker = 'cos-knowledge-artifacts/v1\n';
@@ -68,6 +69,7 @@ function privateBytes(file: string, maximum = MAX_SOURCE_BYTES): Buffer {
 /** Only trusted host import/admin code can construct this store. Never mount either root in a worker. */
 export class KnowledgeArtifacts {
   private readonly leases = new WeakSet<ArtifactLease>();
+  private readonly operations = new OperationQueue(25, 12000);
   constructor(
     readonly root: string,
     readonly staging: string,
@@ -97,6 +99,14 @@ export class KnowledgeArtifacts {
   }
   /** One kernel lock covers publication, remote admission, and fresh-reference cleanup across processes. */
   async exclusive<T>(operation: (lease: ArtifactLease) => Promise<T>): Promise<T> {
+    try {
+      return await this.operations.run(() => this.locked(operation));
+    } catch (error) {
+      if (error instanceof OperationBusy) throw new KnowledgeArtifactsBusy();
+      throw error;
+    }
+  }
+  private async locked<T>(operation: (lease: ArtifactLease) => Promise<T>): Promise<T> {
     this.guard();
     try {
       return await withDeploymentLock(path.join(this.root, '.operation.lock'), async () => {

@@ -1,13 +1,23 @@
 import type { Context, ProposalChange, Result } from '../domain/contracts.js';
 import { digest, validProposalChange, validSourceChange } from '../domain/contracts.js';
 import type { KnowledgeContext, KnowledgeStore } from '../knowledge/store.js';
-import { validWorkChange, validWorkRead, validMissionChange, type WorkRead } from '../contracts/protocol.js';
+import {
+  validWorkChange,
+  validWorkRead,
+  validMissionChange,
+  validTeamChange,
+  type WorkRead,
+} from '../contracts/protocol.js';
+import { validTeamRequest, type TeamRequest } from '../contracts/team-protocol.js';
+import { TeamProposalStore, type TeamAuthorityResolver } from '../missions/team-proposal-store.js';
+import { TeamRunStore } from '../missions/team-run-store.js';
 import { validMissionRequest, type MissionRequest } from '../contracts/mission-protocol.js';
 import { MissionProposalStore, type MissionAuthorityResolver } from '../missions/proposal-store.js';
 import { MissionRunStore } from '../missions/run-store.js';
 import { MissionReviews } from '../missions/review-store.js';
 import { MissionNotifications } from '../missions/notifications.js';
 import { MissionReviewRuns } from '../missions/review-runs.js';
+import { TeamFinalReviews } from '../missions/team-final-review.js';
 import { WorkStore } from './work.js';
 import { validScheduleChange } from '../contracts/schedule-protocol.js';
 import { BriefScheduleStore } from '../automation/schedule-store.js';
@@ -52,23 +62,34 @@ export class PriorityStore {
   readonly briefs: BriefRunStore;
   readonly briefArtifacts?: BriefArtifacts;
   readonly missions: MissionProposalStore;
+  readonly teams: TeamProposalStore;
+  readonly teamRuns: TeamRunStore;
   readonly missionRuns: MissionRunStore;
   readonly missionReviews?: MissionReviews;
   readonly missionNotifications?: MissionNotifications;
   readonly missionReviewRuns?: MissionReviewRuns;
+  readonly teamFinalReviews?: TeamFinalReviews;
+  readonly teamNotifications?: MissionNotifications;
   constructor(
     readonly database: BoundedDatabase,
     readonly knowledge?: KnowledgeStore,
     readonly calendar?: CalendarConnector,
     readonly calendarView?: CalendarView,
     missionAuthority?: MissionAuthorityResolver,
+    teamAuthority?: TeamAuthorityResolver,
   ) {
-    this.missions = new MissionProposalStore(knowledge, missionAuthority);
+    this.teams = new TeamProposalStore(knowledge, teamAuthority);
+    this.teamRuns = new TeamRunStore(database, this.teams, knowledge);
+    this.missions = new MissionProposalStore(knowledge, missionAuthority, (...args) =>
+      this.teamRuns.captureChild(...args),
+    );
     this.missionRuns = new MissionRunStore(database, this.missions, knowledge?.artifacts);
     if (knowledge) {
       this.missionReviews = new MissionReviews(database, this.missions, knowledge);
       this.missionNotifications = new MissionNotifications(database, this.missionReviews);
       this.missionReviewRuns = new MissionReviewRuns(this.missionReviews);
+      this.teamFinalReviews = new TeamFinalReviews(this.teamRuns);
+      this.teamNotifications = new MissionNotifications(database, this.teamFinalReviews, 'team');
     }
     this.work = new WorkStore(knowledge);
     this.briefs = new BriefRunStore(database);
@@ -78,6 +99,7 @@ export class PriorityStore {
       );
   }
   private async workReceiptCurrent(client: PoolClient, context: Context, result: Result): Promise<boolean> {
+    if (validTeamChange(result.change)) return this.teams.validateChange(client, context, result.change);
     if (validMissionChange(result.change)) return this.missions.validateChange(client, context, result.change);
     if (!validWorkChange(result.change)) return true;
     const proposal = (
@@ -197,7 +219,7 @@ export class PriorityStore {
     retained?: KnowledgeContext,
   ): Promise<Result> {
     // Only requestMission may create the host-owned work order and its approval envelope.
-    if (!uuid.test(requestId) || !validProposalChange(change) || validMissionChange(change))
+    if (!uuid.test(requestId) || !validProposalChange(change) || validMissionChange(change) || validTeamChange(change))
       return { status: 'denied' };
     return this.proposal(context, requestId, change, retained);
   }
@@ -206,6 +228,10 @@ export class PriorityStore {
     if (!uuid.test(requestId) || !validMissionRequest(request) || context.origin) return { status: 'denied' };
     return this.proposal(context, requestId, undefined, undefined, request);
   }
+  async requestTeam(context: Context, requestId: string, request: TeamRequest): Promise<Result> {
+    if (!uuid.test(requestId) || !validTeamRequest(request) || context.origin) return { status: 'denied' };
+    return this.proposal(context, requestId, undefined, undefined, undefined, request);
+  }
 
   private async proposal(
     context: Context,
@@ -213,23 +239,28 @@ export class PriorityStore {
     proposed?: ProposalChange,
     retained?: KnowledgeContext,
     mission?: MissionRequest,
+    team?: TeamRequest,
   ): Promise<Result> {
     const change = proposed;
-    const method = mission
-      ? 'cos_mission_request'
-      : validSourceChange(change)
-        ? 'cos_source_change_propose'
-        : validWorkChange(change)
-          ? 'cos_work_change_propose'
-          : validScheduleChange(change)
-            ? 'cos_brief_schedule_propose'
-            : 'cos_change_propose';
+    const method = team
+      ? 'cos_team_request'
+      : mission
+        ? 'cos_mission_request'
+        : validSourceChange(change)
+          ? 'cos_source_change_propose'
+          : validWorkChange(change)
+            ? 'cos_work_change_propose'
+            : validScheduleChange(change)
+              ? 'cos_brief_schedule_propose'
+              : 'cos_change_propose';
     const hash = digest(
-      mission
-        ? { method, request: mission }
-        : validWorkChange(change)
-          ? { method, change, retained: retained ?? null }
-          : { method, change },
+      team
+        ? { method, request: team }
+        : mission
+          ? { method, request: mission }
+          : validWorkChange(change)
+            ? { method, change, retained: retained ?? null }
+            : { method, change },
     );
     const result = await this.transaction(async (client) => {
       if (!(await authorised(client, context))) return { status: 'denied' };
@@ -251,7 +282,11 @@ export class PriorityStore {
           return { status: 'denied' };
         return existing.result ?? { status: 'pending', request_id: requestId };
       }
-      const change = mission ? await this.missions.prepare(client, context, requestId, mission) : proposed;
+      const change = team
+        ? await this.teams.prepare(client, context, requestId, team)
+        : mission
+          ? await this.missions.prepare(client, context, requestId, mission)
+          : proposed;
       if (
         !change ||
         (validSourceChange(change) &&
@@ -284,6 +319,7 @@ export class PriorityStore {
         ],
       );
       if (validMissionChange(change)) await this.missions.linkProposal(client, context, change, id);
+      if (validTeamChange(change)) await this.teams.linkProposal(client, context, change, id);
       const receipt: Result = {
         status: 'ok',
         proposal_id: id,
@@ -291,6 +327,7 @@ export class PriorityStore {
         change,
         request_id: requestId,
         ...(validMissionChange(change) ? { mission_id: change.mission_id } : {}),
+        ...(validTeamChange(change) ? { team_id: change.team_id } : {}),
       };
       await client.query(`INSERT INTO cos.outbox(id,scope_id,kind,payload) VALUES($1,$2,'approval_preview',$3)`, [
         'preview-' + id,
@@ -324,6 +361,12 @@ export class PriorityStore {
         )
       ).rows[0];
       if (!proposal || proposal.owner_id !== context.ownerId || !equal(proposal.challenge_hash, digest(token)))
+        return { status: 'denied' };
+      if (
+        decision === 'approve' &&
+        validTeamChange(proposal.change) &&
+        !(await this.teams.validateChange(client, context, proposal.change))
+      )
         return { status: 'denied' };
       if (proposal.state !== 'pending') {
         if (proposal.decision_ingress_id !== context.ingressId) return { status: 'denied' };
@@ -376,7 +419,12 @@ export class PriorityStore {
       if (proposal.state === 'conflict') return { status: 'conflict' };
       const change = proposal.change as ProposalChange;
       if (!validProposalChange(change) || digest(change) !== proposal.payload_hash) return { status: 'denied' };
-      if (validWorkChange(change) || validScheduleChange(change) || validMissionChange(change)) {
+      if (
+        validWorkChange(change) ||
+        validScheduleChange(change) ||
+        validMissionChange(change) ||
+        validTeamChange(change)
+      ) {
         const context: Context = {
           scopeId,
           ownerId: scope.rows[0].owner_id,
@@ -385,11 +433,13 @@ export class PriorityStore {
           ingressId: proposal.ingress_id,
         };
         if (proposal.owner_id !== context.ownerId) return { status: 'denied' };
-        const result = validMissionChange(change)
-          ? await this.missions.applyApproved(client, context, proposal, change)
-          : validScheduleChange(change)
-            ? await this.schedules.applyApproved(client, context, proposal, change)
-            : await this.work.applyApproved(client, context, proposal, change, proposal.work_context ?? undefined);
+        const result = validTeamChange(change)
+          ? await this.teams.applyApproved(client, context, proposal, change)
+          : validMissionChange(change)
+            ? await this.missions.applyApproved(client, context, proposal, change)
+            : validScheduleChange(change)
+              ? await this.schedules.applyApproved(client, context, proposal, change)
+              : await this.work.applyApproved(client, context, proposal, change, proposal.work_context ?? undefined);
         if (!['ok', 'conflict'].includes(result.status)) return result;
         const changed = result.status === 'ok';
         await client.query(

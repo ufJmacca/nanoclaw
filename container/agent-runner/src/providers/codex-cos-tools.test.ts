@@ -1,11 +1,67 @@
 import { expect, test } from 'bun:test';
 import { createCosToolDispatch, cosDynamicTools } from './codex-cos-tools.js';
 import type { CosRequest } from '../mcp-tools/generated/cos-protocol.js';
+import { TEAM_DEFAULT_LIMITS } from '../mcp-tools/generated/team-protocol.js';
+import { MISSION_DEFAULT_LIMITS } from '../mcp-tools/generated/mission-protocol.js';
 
 const call = (extra: Record<string, unknown> = {}) => ({
   id: 1,
   method: 'item/tool/call',
   params: { threadId: 'thread', turnId: 'turn', callId: 'call', tool: 'cos_context_get', arguments: {}, ...extra },
+});
+test('S06 team tools propose exact bounded graphs and reject worker/model-supplied authority', async () => {
+  const f = fixture(),
+    request_id = '11111111-1111-4111-8111-111111111111';
+  const sources = [{ source_id: 'note', revision_id: 'revision' }],
+    acceptance_criteria = [{ id: 'cost', description: 'Compare costs.' }];
+  const step = (step_id: string, template_id: string, depends_on: string[] = []) => ({
+    step_id,
+    template_id,
+    template_version: 1,
+    depends_on,
+    input_artifact_refs: depends_on.map((step_id) => ({ step_id, result_schema: 'cos-research-result/v1' })),
+    sources,
+    required: true,
+    acceptance_criteria,
+    result_schema: template_id === 'team-reviewer' ? 'cos-team-review/v1' : 'cos-research-result/v1',
+    max_rework_count: 0,
+    limits: { ...MISSION_DEFAULT_LIMITS },
+  });
+  const request = {
+    question: 'Compare technical and operational costs.',
+    goal_id: null,
+    project_id: null,
+    sources,
+    acceptance_criteria,
+    limits: { ...TEAM_DEFAULT_LIMITS },
+    partial_policy: 'block',
+    steps: [
+      step('technical', 'team-technical-analyst'),
+      step('operations', 'team-operational-analyst'),
+      step('writer', 'team-writer', ['technical', 'operations']),
+      step('review', 'team-reviewer', ['writer']),
+    ],
+  };
+  expect(
+    (await f.dispatch.handle(call({ tool: 'cos_team_request', arguments: { request_id, request } }))).success,
+  ).toBe(true);
+  expect(f.calls[0]).toMatchObject({ method: 'cos_team_request', request_id, params: { request } });
+  const team_id = 'team-' + 'a'.repeat(64);
+  for (const tool of ['cos_team_get', 'cos_team_cancel']) {
+    expect((await f.dispatch.handle(call({ callId: tool, tool, arguments: { team_id } }))).success).toBe(true);
+    expect(f.calls.at(-1)).toMatchObject({ method: tool, params: { team_id } });
+  }
+  for (const [i, args] of [
+    { request },
+    { request_id, request, approved: true },
+    { request_id, request: { ...request, scope_id: 'foreign' } },
+    { request_id, request: { ...request, steps: [...request.steps, request.steps[0]] } },
+  ].entries())
+    expect(
+      (await f.dispatch.handle(call({ callId: 'bad-team-' + i, tool: 'cos_team_request', arguments: args }))).success,
+    ).toBe(false);
+  expect(f.calls).toHaveLength(3);
+  f.dispatch.close();
 });
 function fixture() {
   const calls: CosRequest[] = [];
@@ -37,6 +93,9 @@ test('native CoS exposes only its fixed approved tools and dispatches validated 
     'cos_mission_cancel',
     'cos_mission_result_get',
     'cos_mission_review',
+    'cos_team_request',
+    'cos_team_get',
+    'cos_team_cancel',
   ]);
   expect((await dispatch.handle(call())).success).toBe(true);
   expect(calls).toHaveLength(1);

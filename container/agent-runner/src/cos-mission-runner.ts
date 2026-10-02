@@ -17,7 +17,12 @@ try {
   const outcome = await runMissionTask({
     ...runtime,
     signal: cancellation.signal,
-    provider: new CosCodexProvider({ model: runtime.config.model, proxyUrl: relay.proxyUrl, profile: 'research' }),
+    provider: new CosCodexProvider({
+      model: runtime.config.model,
+      proxyUrl: relay.proxyUrl,
+      profile: 'research',
+      missionResultSchema: runtime.resultSchema,
+    }),
   });
   if (outcome === 'failed') process.exitCode = 1;
 } finally {

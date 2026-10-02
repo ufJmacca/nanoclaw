@@ -21,6 +21,8 @@ import { restrictedLaunch } from '../../modules/chief-of-staff/bridge/restricted
 import { startSubscriptionTurns } from '../../modules/chief-of-staff/bridge/subscription-turns.js';
 import { digest } from '../../modules/chief-of-staff/domain/contracts.js';
 import { safeHostEnvironment } from '../../host-environment.js';
+import { createMissionExecution } from '../../modules/chief-of-staff/missions/execution.js';
+import { validateTeamChildWorkOrder } from '../../modules/chief-of-staff/missions/team-work-order.js';
 
 const driver = `
 import net from 'node:net';import fs from 'node:fs';import assert from 'node:assert/strict';import {randomUUID} from 'node:crypto';
@@ -42,9 +44,19 @@ const provider={supportsNativeSlashCommands:false,query(){return {push(){},end()
  const read=await call('cos_mission_context_get',{});assert.equal(read.status,'ok','fixture context '+read.status);
  const source=read.result.context.sources[0],chunk=source.chunks[0];
  fs.writeFileSync('/workspace/agent/fixture-context.json',JSON.stringify(read),{mode:0o600});
- const result={format:'cos-research-result/v1',outcome:'answer',claims:[{id:'comparison',kind:'quote',text:chunk.text,citations:[{source_id:source.source_id,revision_id:source.revision_id,ordinal:chunk.ordinal,start_line:chunk.start_line,end_line:chunk.end_line}]}],criteria:read.result.work_order.request.acceptance_criteria.map(c=>({id:c.id,claim_ids:['comparison']})),limitations:[]};
+ if(failFixture){fs.writeFileSync('/workspace/agent/fixture-provider-failure.json',JSON.stringify({reason:'scripted_provider_failure'}),{mode:0o600});throw Error('scripted_provider_failure');}
+ const inputs=read.result.context.artifacts??[],role=read.result.template.id;
+ const citation={source_id:source.source_id,revision_id:source.revision_id,ordinal:chunk.ordinal,start_line:chunk.start_line,end_line:chunk.end_line};
+ const missing=inputs.filter(i=>i.state==='failed').map(i=>'Missing '+(i.required?'required':'optional')+' step '+i.step_id+'.');
+ let result;
+ if(role==='team-reviewer')result={format:'cos-team-review/v1',evidence_validity:inputs.filter(i=>i.state==='submitted').flatMap(i=>i.result.claims.map(c=>({step_id:i.step_id,claim_id:c.id,verdict:'supported',reason:'Fixture citation checked; preference is advisory.'}))),factual_gaps:missing,contradictions:inputs.some(i=>i.step_id==='technical'&&i.state==='submitted')?[{step_ids:['technical','operations'],description:'Analysts disagree: cost versus capacity.'}]:[],unmet_criteria:[],recommended_revisions:[],confidence:missing.length?'low':'medium'};
+ else {
+  const preference=role==='team-technical-analyst'?'Prefer Option A because it costs less.':role==='team-operational-analyst'?'Prefer Option B because it has more capacity.':role==='team-writer'?'Analysts disagree: retain the cost and capacity tradeoff. Choose a capacity-led pilot with cost uncertainty.':null;
+  const claims=[{id:'comparison',kind:'quote',text:chunk.text,citations:[citation]},...(preference?[{id:'preference',kind:'inference',text:preference,citations:[citation]}]:[])];
+  result={format:'cos-research-result/v1',outcome:missing.length?'partial':'answer',claims,criteria:read.result.work_order.request.acceptance_criteria.map(c=>({id:c.id,claim_ids:claims.map(c=>c.id)})),limitations:missing};
+ }
  fs.writeFileSync('/workspace/agent/fixture-draft.json',JSON.stringify(result),{mode:0o600});
- while(holdFixture&&!cancel.signal.aborted)await new Promise(resolve=>setTimeout(resolve,30));
+ while(holdFixture&&!fs.existsSync('/workspace/agent/fixture-release')&&!cancel.signal.aborted)await new Promise(resolve=>setTimeout(resolve,30));
  if(cancel.signal.aborted)throw Error('fixture_stopped');
  // The host may stop the worker after committing its result, before the RPC acknowledgement is read.
  // The outer test requires that exact durable submission and stop receipt before review.
@@ -66,6 +78,7 @@ export async function createMissionFixtureHost(o: {
   store: PriorityStore;
   authority: MissionAuthorityResolver;
   binding: CosBinding;
+  teams?: boolean;
 }) {
   if (
     o.runnerVolume &&
@@ -90,6 +103,8 @@ export async function createMissionFixtureHost(o: {
     resolved = await lookup(config.host!, { family: 4 });
   const databaseTarget = { host: resolved.address, port: config.port! };
   let holdNext = false;
+  let failureStep: string | undefined;
+  const expectedFailures = new Set<string>();
   const translated = (file: string) => {
     const relative = path.relative(o.repository, file);
     if (relative.startsWith('..') || path.isAbsolute(relative)) throw Error('fixture_path_outside_repository');
@@ -107,17 +122,37 @@ export async function createMissionFixtureHost(o: {
   fs.chmodSync(inertSocket, 0o600);
   let failure: unknown;
   const stopping = new Set<string>();
+  const diagnostics = new Map<string, { exit: number | null; stderr: string }>();
   const workspace = (i: CosMissionIdentity) => translated(sessionDir(i.agentGroupId, i.sessionId));
-  const stop = async (i: CosMissionIdentity) => {
-    stopping.add(i.sessionId);
-    probe.stop(workspace(i));
-    await runs.get(i.sessionId)?.done;
+  const localRunning = (id: string) => {
+    const child = runs.get(id)?.process;
+    return !!child && child.exitCode === null && child.signalCode === null;
   };
+  const native = createMissionExecution({
+    db: o.db,
+    assertHostAuthority() {},
+    session: getSession,
+    directory: (group, session) => translated(sessionDir(group, session)),
+    running: localRunning,
+    stop: (id) => {
+      stopping.add(id);
+    },
+    probe,
+  });
+  const execution = {
+    ...native,
+    async stop(i: CosMissionIdentity) {
+      await native.stop(i);
+      await runs.get(i.sessionId)?.done;
+    },
+  };
+  const stop = execution.stop;
   const host = new MissionHost(
     {
       root: target,
       db: o.db,
       runs: o.store.missionRuns,
+      teams: o.teams ? o.store.teamRuns : undefined,
       authority: o.authority,
       admitted: () => true,
       assertHostAuthority() {},
@@ -128,10 +163,20 @@ export async function createMissionFixtureHost(o: {
         members: [o.binding.ownerId, o.binding.botId],
         activeSubscription: true,
       }),
-      running: (i) => probe.present(workspace(i)),
+      running: execution.running,
+      unallocated: execution.unallocated,
       stop,
       wake: async (session) => {
-        const launch = await prepareCosLaunch(session);
+        let launch;
+        try {
+          launch = await prepareCosLaunch(session);
+        } catch (error) {
+          const reasons: string[] = [];
+          for (let current: unknown = error; current instanceof Error && reasons.length < 4; current = current.cause)
+            reasons.push(current.message);
+          failure = Error('fixture_launch_failed: ' + reasons.join(':'));
+          throw error;
+        }
         if (!launch) throw Error('fixture_restricted_launch_missing');
         const child = spawn('docker', launch.args, {
           env: safeHostEnvironment('docker'),
@@ -148,7 +193,14 @@ export async function createMissionFixtureHost(o: {
             resolve();
           });
           child.once('exit', (code) => {
-            if (code !== 0 && !stopping.has(session.id)) failure = new Error('fixture_worker_failed: ' + diagnostic);
+            diagnostics.set(session.id, { exit: code, stderr: diagnostic });
+            const scriptedFailure =
+              expectedFailures.has(session.id) &&
+              fs.existsSync(
+                path.join(sessionDir(session.agent_group_id, session.id), 'agent/fixture-provider-failure.json'),
+              );
+            if (code !== 0 && !stopping.has(session.id) && !scriptedFailure)
+              failure = new Error('fixture_worker_failed: ' + diagnostic);
             resolve();
           });
         });
@@ -169,6 +221,11 @@ export async function createMissionFixtureHost(o: {
               contextDigest: input.order.body.contextDigest,
               templateDigest: input.order.body.template.digest,
             };
+          const failFixture = validateTeamChildWorkOrder(input.order) && input.order.body.team.stepId === failureStep;
+          if (failFixture) {
+            expectedFailures.add(session.id);
+            failureStep = undefined;
+          }
           const config = path.join(paths.controlDirectory, 'fixture.json');
           fs.writeFileSync(
             config,
@@ -229,7 +286,14 @@ export async function createMissionFixtureHost(o: {
             '--',
             'bun',
             '-e',
-            'const databaseTarget=' + JSON.stringify(databaseTarget) + ';const holdFixture=' + holdNext + ';' + driver,
+            'const databaseTarget=' +
+              JSON.stringify(databaseTarget) +
+              ';const holdFixture=' +
+              holdNext +
+              ';const failFixture=' +
+              failFixture +
+              ';' +
+              driver,
           );
           if (o.runnerVolume) {
             // Source-stage fixture only. Final release runs use baked code and cannot receive these mounts.
@@ -259,9 +323,20 @@ export async function createMissionFixtureHost(o: {
   );
   return {
     host,
+    execution,
     stop,
     holdNext() {
       holdNext = true;
+    },
+    releaseHeld() {
+      holdNext = false;
+      for (const i of cosMissionIdentities(o.db)) {
+        const agent = path.join(sessionDir(i.agentGroupId, i.sessionId), 'agent');
+        if (fs.existsSync(agent)) fs.writeFileSync(path.join(agent, 'fixture-release'), '', { mode: 0o600 });
+      }
+    },
+    failStep(step: string) {
+      failureStep = step;
     },
     states() {
       return cosMissionIdentities(o.db).map((identity) => {
@@ -275,6 +350,9 @@ export async function createMissionFixtureHost(o: {
           running: probe.present(workspace(identity)),
           draft: read('fixture-draft.json'),
           isolation: read('fixture-isolation.json'),
+          submission: read('fixture-submission.json'),
+          released: fs.existsSync(path.join(directory, 'agent/fixture-release')),
+          diagnostic: diagnostics.get(identity.sessionId) ?? null,
         };
       });
     },

@@ -8,8 +8,17 @@ import type { MissionProposalStore } from './proposal-store.js';
 import { queueMissionAttempt } from './attempt.js';
 import { recordMissionExposure } from './exposure.js';
 import { KnowledgeArtifactsBusy, type KnowledgeArtifacts } from '../knowledge/artifacts.js';
-import { validMissionResult } from '../contracts/mission-result.js';
-import { checkResearchResult } from './result-checks.js';
+import { validMissionWorkerResult } from '../contracts/mission-worker-protocol.js';
+import { checkWorkerResult } from './result-checks.js';
+import { TEAM_TEMPLATES } from '../contracts/team-templates.js';
+import { teamStepUsage } from './team-budget.js';
+import {
+  defaultMissionWorkerCapacity,
+  missionWorkerCapacity,
+  lockMissionWorkerAdmission,
+  missionWorkerOccupancy,
+  type MissionWorkerCapacity,
+} from './worker-admission.js';
 
 export type MissionDispatchLease = { owner: string; fence: number };
 const validLease = (v: MissionDispatchLease) =>
@@ -65,12 +74,16 @@ const activeAttempts = ['queued', 'allocating', 'ready', 'running'];
  * Only future allocation code may change queued -> allocating -> ready -> running.
  * completed/partial/blocked/cancelled cannot retry; failed can retry within the original approval and limits. */
 export class MissionRunStore {
+  readonly workerCapacity: number;
   constructor(
     readonly database: BoundedDatabase,
     readonly proposals: MissionProposalStore,
     readonly artifacts?: KnowledgeArtifacts,
     readonly resultHooks: { afterPublication?(): Promise<void> } = {},
-  ) {}
+    capacity: MissionWorkerCapacity = defaultMissionWorkerCapacity(),
+  ) {
+    this.workerCapacity = missionWorkerCapacity(capacity);
+  }
 
   private async transaction(scopeId: string, operation: (client: PoolClient) => Promise<Result>): Promise<Result> {
     try {
@@ -87,6 +100,12 @@ export class MissionRunStore {
     }
   }
   private async mission(client: PoolClient, scopeId: string, missionId: string): Promise<MissionRow | undefined> {
+    // All team operations lock the parent first, including reservations/cancel/result processing.
+    await client.query(
+      `SELECT r.id FROM cos.mission_team_roots r JOIN cos.mission_team_children s ON s.scope_id=r.scope_id AND s.team_id=r.id
+      WHERE s.scope_id=$1 AND s.mission_id=$2 FOR UPDATE OF r`,
+      [scopeId, missionId],
+    );
     return (
       await client.query(
         `SELECT m.*,w.body,w.digest,p.state AS proposal_state,p.applied_record_id
@@ -123,7 +142,11 @@ export class MissionRunStore {
     );
   }
   private async capture(client: PoolClient, m: MissionRow): Promise<ResearchWorkOrder | null> {
-    if (m.proposal_state !== 'applied' || m.applied_record_id !== m.id) return null;
+    if (
+      m.body.format !== 'cos-team-child-work-order/v1' &&
+      (m.proposal_state !== 'applied' || m.applied_record_id !== m.id)
+    )
+      return null;
     const o = m.body.origin;
     const context: Context = {
       scopeId: o.scopeId,
@@ -143,6 +166,13 @@ export class MissionRunStore {
     return (await this.capture(client, m)) !== null;
   }
   private async usage(client: PoolClient, scopeId: string, missionId: string) {
+    const team = (
+      await client.query('SELECT team_id,step_id FROM cos.mission_team_children WHERE scope_id=$1 AND mission_id=$2', [
+        scopeId,
+        missionId,
+      ])
+    ).rows[0];
+    if (team) return teamStepUsage(client, scopeId, team.team_id, team.step_id);
     const rows = (
       await client.query(
         'SELECT kind,count(*)::int AS n FROM cos.mission_budget_reservations WHERE scope_id=$1 AND mission_id=$2 GROUP BY kind',
@@ -167,11 +197,16 @@ export class MissionRunStore {
         FROM cos.mission_attempts a
         JOIN cos.missions m ON m.scope_id=a.scope_id AND m.id=a.mission_id AND m.generation=a.generation
         JOIN cos.mission_work_orders w ON w.scope_id=m.scope_id AND w.id=m.id
-        JOIN cos.proposals p ON p.scope_id=m.scope_id AND p.id=m.proposal_id
+        LEFT JOIN cos.proposals p ON p.scope_id=m.scope_id AND p.id=m.proposal_id
+        LEFT JOIN cos.mission_team_steps ts ON ts.scope_id=m.scope_id AND ts.child_mission_id=m.id
+        LEFT JOIN cos.mission_team_roots tr ON tr.scope_id=ts.scope_id AND tr.id=ts.team_id
+        LEFT JOIN cos.proposals tp ON tp.scope_id=tr.scope_id AND tp.id=tr.proposal_id
         JOIN cos.scopes s ON s.id=m.scope_id
         WHERE a.scope_id=$1 AND s.owner_id=$2 AND s.agent_group_id=$3 AND s.status='active'
           AND m.state='queued' AND a.state IN ('queued','allocating','ready')
-          AND p.state='applied' AND p.applied_record_id=m.id
+          AND ((w.body->>'format'='cos-research-work-order/v1' AND p.state='applied' AND p.applied_record_id=m.id)
+            OR (w.body->>'format'='cos-team-child-work-order/v1' AND ts.state='running' AND tr.state IN ('queued','running')
+              AND tr.generation::text=w.body->'team'->>'generation' AND tr.id=w.body->'team'->>'teamId' AND tp.state='applied' AND tp.applied_record_id=tr.id))
           AND a.allocation->>'stop_confirmed' IS DISTINCT FROM 'true'
           AND w.body->'origin'->>'scopeId'=$1 AND w.body->'origin'->>'ownerId'=$2
           AND w.body->'origin'->>'agentGroupId'=$3 AND w.body->'origin'->>'sessionId'=$4
@@ -413,6 +448,7 @@ export class MissionRunStore {
       const m = await this.mission(client, context.scopeId, previous.mission_id);
       if (
         !m ||
+        m.body.format === 'cos-team-child-work-order/v1' ||
         !(await this.owner(client, context, m)) ||
         !['failed', 'queued', 'running'].includes(m.state) ||
         !(await this.current(client, m))
@@ -525,6 +561,55 @@ export class MissionRunStore {
       return { status: 'ok' };
     });
   }
+  /** Host-only cancellation reconciliation after a durable local family fence and independently absent native allocation.
+   * Every dispatch lease records a permanent allocation fence before native effects. Empty allocation therefore proves
+   * that this exact cancelled attempt never had permission to allocate. Unknown leased attempts still need native stops. */
+  async confirmUnallocatedCancellation(context: Context, identity: CosMissionIdentity): Promise<Result> {
+    if (context.origin || !validCosMissionIdentity(identity) || identity.scopeId !== context.scopeId)
+      return { status: 'denied' };
+    return this.transaction(context.scopeId, async (client) => {
+      const m = await this.mission(client, identity.scopeId, identity.missionId),
+        a = await this.attempt(client, identity);
+      if (
+        !m ||
+        !same(a, identity) ||
+        !(await this.owner(client, context, m)) ||
+        digest(m.body) !== m.digest ||
+        !['cancelling', 'cancelled'].includes(m.state) ||
+        m.generation <= identity.generation ||
+        a!.state !== 'cancelled' ||
+        a!.lease_owner !== null ||
+        a!.lease_until !== null
+      )
+        return { status: 'denied' };
+      const replay =
+        a!.provenance.never_allocated === true && digest(a!.allocation) === digest({ stop_confirmed: true });
+      if (!replay && Object.keys(a!.allocation).length !== 0) return { status: 'denied' };
+      const calls = (
+        await client.query(
+          'SELECT kind FROM cos.mission_budget_reservations WHERE scope_id=$1 AND mission_id=$2 AND attempt_id=$3 AND generation=$4',
+          [identity.scopeId, identity.missionId, identity.attemptId, identity.generation],
+        )
+      ).rows;
+      if (calls.length !== 1 || calls[0].kind !== 'attempt') return { status: 'denied' };
+      if (!replay)
+        await client.query(
+          `UPDATE cos.mission_attempts SET allocation='{"stop_confirmed":true}'::jsonb,
+        provenance=provenance||'{"never_allocated":true}'::jsonb,version=version+1,updated_at=clock_timestamp() WHERE scope_id=$1 AND id=$2`,
+          [identity.scopeId, identity.attemptId],
+        );
+      const pending = await client.query(
+        "SELECT 1 FROM cos.mission_attempts WHERE scope_id=$1 AND mission_id=$2 AND allocation->>'stop_confirmed' IS DISTINCT FROM 'true' LIMIT 1",
+        [identity.scopeId, identity.missionId],
+      );
+      if (!pending.rowCount && m.state === 'cancelling')
+        await client.query(
+          "UPDATE cos.missions SET state='cancelled',version=version+1,updated_at=clock_timestamp() WHERE scope_id=$1 AND id=$2",
+          [identity.scopeId, identity.missionId],
+        );
+      return { status: 'ok', never_allocated: true };
+    });
+  }
   /** Host recovery metadata remains readable after authority loss; it never grants execution or returns source bytes. */
   async retainedAttempt(context: Context, sessionId: string, attemptId: string): Promise<Result> {
     if (context.origin || !id(sessionId) || !id(attemptId)) return { status: 'denied' };
@@ -576,6 +661,7 @@ export class MissionRunStore {
   async claimDispatch(context: Context, attemptId: string, owner: string): Promise<Result> {
     if (!id(attemptId) || !id(owner) || context.origin) return { status: 'denied' };
     return this.transaction(context.scopeId, async (client) => {
+      if (!(await lockMissionWorkerAdmission(client))) return { status: 'pending' };
       const lookup = (
         await client.query('SELECT * FROM cos.mission_attempts WHERE scope_id=$1 AND id=$2', [
           context.scopeId,
@@ -592,11 +678,19 @@ export class MissionRunStore {
         m.state !== 'queued' ||
         m.generation !== a.generation ||
         !['queued', 'allocating', 'ready'].includes(a.state) ||
-        m.proposal_state !== 'applied' ||
-        m.applied_record_id !== m.id
+        (m.body.format !== 'cos-team-child-work-order/v1' &&
+          (m.proposal_state !== 'applied' || m.applied_record_id !== m.id))
       )
         return { status: 'denied' };
       if (a.lease_current && a.lease_owner !== owner) return { status: 'pending' };
+      const occupancy = await missionWorkerOccupancy(client, attemptId);
+      // S05 keeps its existing native queue policy when no team reserves capacity. With teams present,
+      // all workers share the same bound and a coordinator slot. Replays renew their existing slot.
+      if (
+        (m.body.format === 'cos-team-child-work-order/v1' || occupancy.teams > 0) &&
+        occupancy.active >= this.workerCapacity
+      )
+        return { status: 'pending' };
       const origin = m.body.origin;
       const order = await this.proposals.captureChange(
         client,
@@ -677,7 +771,7 @@ export class MissionRunStore {
       !validLease(lease) ||
       !id(callId) ||
       !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(requestId) ||
-      !validMissionResult(result)
+      !validMissionWorkerResult(result)
     )
       return { status: 'denied' };
     const artifacts = this.artifacts,
@@ -708,8 +802,8 @@ export class MissionRunStore {
           const previous = await existing(client);
           if (previous) return previous;
           if (current.mission.state !== 'running' || current.attempt.state !== 'running') return { status: 'denied' };
-          const checks = checkResearchResult(current.order, result);
-          if (checks.status !== 'review_required') return { status: 'denied' };
+          const checks = checkWorkerResult(current.order, result);
+          if (checks.status === 'invalid') return { status: 'denied' };
           const reserved = await this.reserveCall(
             client,
             current.mission,
@@ -736,9 +830,8 @@ export class MissionRunStore {
           const previous = await existing(client);
           if (previous) return previous;
           if (current.mission.state !== 'running' || current.attempt.state !== 'running') return { status: 'denied' };
-          const checks = checkResearchResult(current.order, result);
-          if (checks.status !== 'review_required' || digest(checks) !== digest(before.checks))
-            return { status: 'denied' };
+          const checks = checkWorkerResult(current.order, result);
+          if (checks.status === 'invalid' || digest(checks) !== digest(before.checks)) return { status: 'denied' };
           // Verify published bytes again before their durable metadata can be accepted.
           if (digest(JSON.parse(artifacts.read(captured.id, captured.digest))) !== resultDigest)
             return { status: 'denied' };
@@ -823,7 +916,10 @@ export class MissionRunStore {
         status: 'ok',
         work_order: current.order.body,
         context: current.order.context,
-        template: RESEARCH_TEMPLATE,
+        template:
+          current.order.body.format === 'cos-team-child-work-order/v1'
+            ? TEAM_TEMPLATES[current.order.body.template.id as keyof typeof TEAM_TEMPLATES]
+            : RESEARCH_TEMPLATE,
       };
     });
   }

@@ -10,6 +10,7 @@ import type { KnowledgeStore, KnowledgeContext } from '../knowledge/store.js';
 import type { CalendarReadInput, WorkChange, WorkRead } from '../contracts/protocol.js';
 import type { ScheduleChange } from '../contracts/schedule-protocol.js';
 import type { MissionRequest } from '../contracts/mission-protocol.js';
+import type { TeamRequest } from '../contracts/team-protocol.js';
 
 export function ensureRpcSchema(db: Database.Database): void {
   db.exec(`CREATE TABLE IF NOT EXISTS cos_rpc_responses (
@@ -26,6 +27,7 @@ export function createRpcHandler(dependencies: {
   store: PriorityStore;
   reserveTool?(context: Context, callId: string): Promise<Result>;
   cancelMission?(context: Context, missionId: string): Promise<Result>;
+  cancelTeam?(context: Context, teamId: string): Promise<Result>;
   knowledge?: KnowledgeStore;
   resolveKnowledgeContext?(session: Session, context: Context, db: Database.Database): Promise<KnowledgeContext | null>;
 }): DeliveryActionHandler {
@@ -70,9 +72,27 @@ export function createRpcHandler(dependencies: {
         !['cos_mission_result_get', 'cos_mission_review'].includes(request.method)
       )
         result = { status: 'denied' };
-      else if (request.method.startsWith('cos_mission_') && context.origin?.kind === 'schedule')
+      else if (
+        (request.method.startsWith('cos_mission_') || request.method.startsWith('cos_team_')) &&
+        context.origin?.kind === 'schedule'
+      )
         result = { status: 'denied' };
-      else if (request.method === 'cos_mission_request')
+      else if (request.method === 'cos_team_request')
+        result = await dependencies.store.requestTeam(
+          context,
+          request.request_id,
+          request.params.request as TeamRequest,
+        );
+      else if (request.method === 'cos_team_get')
+        result = await dependencies.store.teamRuns.inspect(context, String(request.params.team_id));
+      else if (request.method === 'cos_team_cancel') {
+        const stopped = await dependencies.cancelTeam?.(context, String(request.params.team_id));
+        if (!stopped) result = { status: 'denied' };
+        else {
+          const { identities: _identities, ...safe } = stopped;
+          result = safe;
+        }
+      } else if (request.method === 'cos_mission_request')
         result = await dependencies.store.requestMission(
           context,
           request.request_id,
@@ -80,25 +100,29 @@ export function createRpcHandler(dependencies: {
         );
       else if (request.method === 'cos_mission_get')
         result = await dependencies.store.missionRuns.inspect(context, String(request.params.mission_id));
-      else if (request.method === 'cos_mission_result_get')
+      else if (request.method === 'cos_mission_result_get') {
+        const reviews = String(request.params.mission_id).startsWith('team-')
+          ? dependencies.store.teamFinalReviews
+          : dependencies.store.missionReviews;
         result =
-          knowledgeContext && dependencies.store.missionReviews
-            ? await dependencies.store.missionReviews.read(
+          knowledgeContext && reviews
+            ? await reviews.read(
                 knowledgeContext,
                 String(request.params.mission_id),
                 String(request.params.submission_id),
               )
             : { status: 'denied' };
-      else if (request.method === 'cos_mission_review')
+      } else if (request.method === 'cos_mission_review') {
+        const missionId = (request.params.review as { mission_id?: unknown } | null)?.mission_id;
+        const reviews =
+          typeof missionId === 'string' && missionId.startsWith('team-')
+            ? dependencies.store.teamFinalReviews
+            : dependencies.store.missionReviews;
         result =
-          knowledgeContext && dependencies.store.missionReviews
-            ? await dependencies.store.missionReviews.review(
-                knowledgeContext,
-                request.request_id,
-                request.params.review,
-              )
+          knowledgeContext && reviews
+            ? await reviews.review(knowledgeContext, request.request_id, request.params.review)
             : { status: 'denied' };
-      else if (request.method === 'cos_mission_cancel')
+      } else if (request.method === 'cos_mission_cancel')
         result = (await dependencies.cancelMission?.(context, String(request.params.mission_id))) ?? {
           status: 'denied',
         };

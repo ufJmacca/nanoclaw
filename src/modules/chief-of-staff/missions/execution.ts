@@ -1,5 +1,11 @@
 import type Database from 'better-sqlite3';
-import { cosMissionIdentities, type CosMissionIdentity } from '../../../cos-mission-boundary.js';
+import {
+  cosMissionIdentities,
+  hasCosMissionBoundary,
+  validCosMissionIdentity,
+  type CosMissionIdentity,
+} from '../../../cos-mission-boundary.js';
+import { hasTable } from '../../../db/connection.js';
 import { digest } from '../domain/contracts.js';
 
 type Options = {
@@ -22,6 +28,36 @@ export function createMissionExecution(options: Options) {
     return options.directory(identity.agentGroupId, identity.sessionId);
   };
   return {
+    /** Local negative evidence only. The caller must also prove no dispatch lease was ever issued in PostgreSQL. */
+    unallocated(identity: CosMissionIdentity): boolean {
+      try {
+        options.assertHostAuthority();
+        if (
+          !validCosMissionIdentity(identity) ||
+          hasCosMissionBoundary(identity.agentGroupId, identity.sessionId, options.db) ||
+          options.session(identity.sessionId) ||
+          options.running(identity.sessionId)
+        )
+          return false;
+        if (
+          hasTable(options.db, 'agent_groups') &&
+          options.db.prepare('SELECT 1 FROM agent_groups WHERE id=?').get(identity.agentGroupId)
+        )
+          return false;
+        if (
+          hasTable(options.db, 'cos_mission_allocations') &&
+          options.db
+            .prepare(
+              "SELECT 1 FROM cos_mission_allocations WHERE attempt_id=? OR json_extract(identity,'$.sessionId')=? OR json_extract(identity,'$.agentGroupId')=?",
+            )
+            .get(identity.attemptId, identity.sessionId, identity.agentGroupId)
+        )
+          return false;
+        return true;
+      } catch {
+        return false;
+      }
+    },
     running(identity: CosMissionIdentity): boolean {
       try {
         const workspace = directory(identity);

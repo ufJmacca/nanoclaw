@@ -8,7 +8,6 @@ import { randomUUID } from 'node:crypto';
 import { connectFixtureDatabase, fixtureDatabaseConfig, fixtureRuntimeUser } from './fixture-database.js';
 import { migrate } from '../../modules/chief-of-staff/store/migrations.js';
 import { BoundedDatabase } from '../../modules/chief-of-staff/store/client.js';
-import { PriorityStore } from '../../modules/chief-of-staff/store/priorities.js';
 import { CalendarStore } from '../../modules/chief-of-staff/calendar/store.js';
 import { CalendarAccessFences } from '../../modules/chief-of-staff/calendar/access-fences.js';
 import { GOOGLE_EVENT_READ_SCOPE } from '../../modules/chief-of-staff/calendar/reader.js';
@@ -43,6 +42,7 @@ test(
     const morning = (day: number) => new Date(monday.getTime() + (day >= 2 ? day + 7 : day) * 86400000).toISOString();
     let clock = new Date(monday.getTime() - 3600000).toISOString();
     process.chdir(root);
+    const { PriorityStore } = await import('../../modules/chief-of-staff/store/priorities.js');
     const { initDb, closeDb } = await import('../../db/connection.js');
     const { runMigrations } = await import('../../db/migrations/index.js');
     const { subscribeMattermostChannelStrict } = await import('../../channels/mattermost-subscription.js');

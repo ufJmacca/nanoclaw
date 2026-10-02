@@ -3,8 +3,8 @@
 set -euo pipefail
 umask 077
 [[ "$(uname -s)" == Darwin ]] || { echo 'cos:release requires the Mac host' >&2; exit 1; }
-[[ ( $# == 6 || ( $# == 7 && "${7:-}" == --local-only ) ) && "$1" == --slice && "$2" == S05 && "$3" == --target && "$4" == pi && "$5" == --db-profile ]] || {
-  echo 'Usage: cos:release --slice S05 --target pi --db-profile test|runtime-disposable [--local-only]' >&2; exit 1;
+[[ ( $# == 6 || ( $# == 7 && "${7:-}" == --local-only ) ) && "$1" == --slice && "$2" == S06 && "$3" == --target && "$4" == pi && "$5" == --db-profile ]] || {
+  echo 'Usage: cos:release --slice S06 --target pi --db-profile test|runtime-disposable [--local-only]' >&2; exit 1;
 }
 slice=$2 profile=$6
 [[ "$profile" == test || "$profile" == runtime-disposable ]] || exit 1
@@ -170,9 +170,9 @@ isolation_checks() {
     bash scripts/cos-subscription-image-check.sh "$host_image" "$worker" "$directory/native-${worker:7:12}" || return
   done
 }
-check host_image host_checks
-check agent_image agent_checks
 check image_isolation isolation_checks
+check agent_image agent_checks
+check host_image host_checks
 # Export the existing tested identities, without rebuilding. Configuration IDs are hashed from this archive.
 docker save -o "$directory/images.tar" \
   "$(cli field "$id" host-tag)" "$(cli field "$id" agent-standard-tag)" "$(cli field "$id" agent-documents-tag)"

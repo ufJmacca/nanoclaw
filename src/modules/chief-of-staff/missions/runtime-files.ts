@@ -3,6 +3,8 @@ import path from 'node:path';
 import { digest } from '../domain/contracts.js';
 import { validMissionRuntimeBinding, type MissionRuntimeBinding } from '../contracts/mission-runtime.js';
 import { RESEARCH_TEMPLATE, sealResearchWorkOrder, type ResearchWorkOrder } from './work-order.js';
+import { validateTeamChildWorkOrder } from './team-work-order.js';
+import { TEAM_TEMPLATES } from '../contracts/team-templates.js';
 
 /** Recheck host-owned allocation bytes before mounting individual files, never the containing directory. */
 export function researchRuntimeFiles(directory: string, binding: MissionRuntimeBinding, model: string): string[] {
@@ -42,12 +44,22 @@ export function researchRuntimeFiles(directory: string, binding: MissionRuntimeB
     digest(body) !== binding.workOrderDigest ||
     digest(context) !== binding.contextDigest ||
     digest(template) !== binding.templateDigest ||
-    digest(template) !== digest(RESEARCH_TEMPLATE) ||
     body.missionId !== binding.missionId ||
     body.provider.model !== model ||
     body.contextDigest !== binding.contextDigest ||
     body.template.digest !== binding.templateDigest
   )
+    throw new Error('mission_artifacts_denied');
+  const order = { body, context, digest: binding.workOrderDigest };
+  if (body.format === 'cos-team-child-work-order/v1') {
+    if (
+      !validateTeamChildWorkOrder(order) ||
+      digest(template) !== digest(TEAM_TEMPLATES[order.body.team.step.template_id])
+    )
+      throw new Error('mission_artifacts_denied');
+    return ['work-order.json', 'context.json', 'template.json'].map((name) => path.join(directory, name));
+  }
+  if (body.format !== 'cos-research-work-order/v1' || digest(template) !== digest(RESEARCH_TEMPLATE))
     throw new Error('mission_artifacts_denied');
   const checked = sealResearchWorkOrder({
     missionId: body.missionId,

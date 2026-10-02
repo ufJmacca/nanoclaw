@@ -20,6 +20,12 @@ export class MissionProposalStore {
   constructor(
     readonly knowledge?: KnowledgeStore,
     readonly authority?: MissionAuthorityResolver,
+    readonly teamChildCapture?: (
+      client: PoolClient,
+      context: Context,
+      change: MissionChange,
+      execution: boolean,
+    ) => Promise<ResearchWorkOrder | null>,
   ) {}
 
   private async seal(
@@ -186,6 +192,8 @@ export class MissionProposalStore {
     )
       return null;
     const body = row.body as ResearchWorkOrder['body'];
+    if (body.format === 'cos-team-child-work-order/v1')
+      return this.teamChildCapture?.(client, context, change, execution) ?? null;
     if (
       body.origin.scopeId !== context.scopeId ||
       body.origin.ownerId !== context.ownerId ||

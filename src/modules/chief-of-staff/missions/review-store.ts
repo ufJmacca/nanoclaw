@@ -5,11 +5,12 @@ import { digest, type Result } from '../domain/contracts.js';
 import { KnowledgeArtifactsBusy } from '../knowledge/artifacts.js';
 import type { KnowledgeContext, KnowledgeStore } from '../knowledge/store.js';
 import { checkMissionReview, validMissionReview } from '../contracts/mission-review.js';
-import type { MissionResult } from '../contracts/mission-result.js';
+import { validMissionResult, type MissionResult } from '../contracts/mission-result.js';
 import type { MissionProposalStore } from './proposal-store.js';
-import { checkResearchResult, type ResearchResultChecks } from './result-checks.js';
+import { type ResearchResultChecks } from './result-checks.js';
 import { recordResearchExposure } from './exposure.js';
 import type { ResearchWorkOrder } from './work-order.js';
+import { readVerifiedSubmission } from './submission-reader.js';
 import { currentReviewLease } from './review-runs.js';
 const uuid = (v: unknown): v is string =>
   typeof v === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
@@ -113,44 +114,17 @@ export class MissionReviews {
       work_order: m.body as ResearchWorkOrder['body'],
     });
     if (!order) return null;
-    const submission = (
-      await client.query(
-        `SELECT s.*,a.digest AS artifact_digest,a.kind,a.lifecycle,a.provenance AS artifact_provenance,
-      t.state AS attempt_state,t.allocation,t.session_id AS worker_session
-      FROM cos.mission_result_submissions s JOIN cos.artifacts a ON a.scope_id=s.scope_id AND a.id=s.artifact_id
-      JOIN cos.mission_attempts t ON t.scope_id=s.scope_id AND t.mission_id=s.mission_id AND t.id=s.attempt_id AND t.generation=s.generation
-      WHERE s.scope_id=$1 AND s.mission_id=$2 AND s.id=$3 FOR SHARE OF a,t`,
-        [context.scopeId, missionId, submissionId],
-      )
-    ).rows[0];
-    if (
-      !submission ||
-      submission.generation !== m.generation ||
-      submission.attempt_state !== 'submitted' ||
-      submission.kind !== 'mission_result' ||
-      submission.lifecycle !== 'published' ||
-      submission.artifact_digest !== submission.body.artifact_digest ||
-      submission.artifact_provenance.submission_id !== submissionId ||
-      submission.artifact_provenance.mission_id !== missionId ||
-      submission.artifact_provenance.attempt_id !== submission.attempt_id ||
-      submission.artifact_provenance.generation !== submission.generation ||
-      submission.artifact_provenance.processing_provider !== 'codex' ||
-      submission.artifact_provenance.context_generation !== submission.attempt_id ||
-      submission.artifact_provenance.session_id !== submission.worker_session ||
-      submission.artifact_provenance.work_order_digest !== order.digest ||
-      submission.artifact_provenance.result_digest !== submission.digest
-    )
-      return null;
-    const result: MissionResult = JSON.parse(
-      this.knowledge.artifacts.read(submission.artifact_id, submission.artifact_digest),
+    const verified = await readVerifiedSubmission(
+      client,
+      this.knowledge.artifacts,
+      context.scopeId,
+      missionId,
+      submissionId,
+      m.generation,
+      order,
     );
-    const checks = checkResearchResult(order, result);
-    if (
-      checks.status !== 'review_required' ||
-      checks.resultDigest !== submission.digest ||
-      digest(checks) !== digest(submission.body.checks)
-    )
-      return null;
+    if (!verified || verified.checks.status !== 'review_required' || !validMissionResult(verified.result)) return null;
+    const { submission, result, checks } = verified;
     const snapshot = { mission: m, submission, order, result, checks };
     if (
       origin &&

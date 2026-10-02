@@ -46,6 +46,30 @@ describe('S02 host-owned artifact publication', () => {
     await expect(new KnowledgeArtifacts(root, staging).exclusive(async () => 42)).resolves.toBe(42);
     expect(fs.statSync(path.join(root, '.operation.lock')).ino).toBe(inode);
   });
+  it('S06 serializes concurrent operations through this host instance while retaining cross-process exclusion', async () => {
+    let release!: () => void;
+    const held = new Promise<void>((r) => {
+      release = r;
+    });
+    let entered = false;
+    const first = artifacts.exclusive(async () => {
+      entered = true;
+      await held;
+      return 'published';
+    });
+    while (!entered) await new Promise((r) => setTimeout(r, 1));
+    const secondWork = vi.fn(async () => 'reviewed');
+    const second = artifacts.exclusive(secondWork);
+    // Attach immediately so the red rejection is observed after releasing the original lease.
+    const result = second.then(
+      (value) => ({ value }),
+      (error) => ({ error }),
+    );
+    expect(secondWork).not.toHaveBeenCalled();
+    release();
+    await expect(first).resolves.toBe('published');
+    expect(await result).toEqual({ value: 'reviewed' });
+  });
   it('S02-T08: a killed publisher releases the kernel lock and leaves complete orphan bytes recoverable', async () => {
     const script = `import {KnowledgeArtifacts} from ${JSON.stringify(new URL('./artifacts.ts', import.meta.url).href)};
       const artifacts=new KnowledgeArtifacts(process.argv[1],process.argv[2]);

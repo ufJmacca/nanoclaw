@@ -16,7 +16,7 @@ afterEach(() => {
   runtime?.dispose();
   closeDb();
 });
-function fixture(automaticReview = false) {
+function fixture(automaticReview = false, teamReview = false, teamDelivery = false) {
   const db = initTestDb(),
     generation = randomUUID(),
     reviewId = randomUUID();
@@ -54,7 +54,7 @@ function fixture(automaticReview = false) {
     begin: vi.fn(async () => {
       if (started) return { status: 'denied' };
       started = true;
-      return { status: 'ok', notification_id: 'mission-review-' + reviewId };
+      return { status: 'ok', notification_id: (teamDelivery ? 'team-review-' : 'mission-review-') + reviewId };
     }),
     read: vi.fn(async () => ({ status: 'ok', text: 'Reviewed fixture result' })),
     finish: vi.fn(async (_c, _r, _a, receipt) => ({ status: 'ok', state: receipt.state })),
@@ -72,16 +72,21 @@ function fixture(automaticReview = false) {
     authorize: vi.fn(async () => ({ status: 'ok' })),
     reserve: vi.fn(async () => ({ status: 'ok', reserved: true })),
   };
+  const teamFinalReviews = {
+    authorize: vi.fn(async () => ({ status: 'ok' })),
+    reserve: vi.fn(async () => ({ status: 'ok', reserved: true })),
+  };
   let authorization: TurnAuthorization | undefined;
   runtime = createCosRuntime({
     db,
     enabled: true,
     store: {
-      missionNotifications,
+      ...(teamDelivery ? { teamNotifications: missionNotifications } : { missionNotifications }),
       pendingOutbox: vi.fn(async () => ({ status: 'ok', items: [] })),
       ...(automaticReview
         ? {
             missionReviewRuns,
+            ...(teamReview ? { teamFinalReviews } : {}),
             context: vi.fn(async () => ({ status: 'ok' })),
             knowledge: { contextReady: vi.fn(async () => ({ status: 'ok' })) },
           }
@@ -110,6 +115,7 @@ function fixture(automaticReview = false) {
     facts,
     session,
     missionReviewRuns,
+    teamFinalReviews,
     authorization: () => authorization,
   };
 }
@@ -187,4 +193,64 @@ it.each(['pause', 'membership', 'context'])('S05 host pump withholds result afte
     });
   await runtime.pump(f.binding);
   expect(f.deliver).not.toHaveBeenCalled();
+});
+
+it('S06-T03/T05 native main review uses team authority and escrow without falling back to single-worker grants', async () => {
+  const f = fixture(true, true),
+    teamId = 'team-' + 'a'.repeat(64),
+    submissionId = randomUUID();
+  const grant = {
+    identity: {
+      missionId: teamId,
+      submissionId,
+      attemptId: randomUUID(),
+      generation: 1,
+      sessionId: f.session.id,
+      contextGeneration: f.generation,
+    },
+    lease: { owner: 'host', fence: 1 },
+    deadlineAt: new Date(Date.now() + 25000).toISOString(),
+  };
+  expect(installReviewOrigin(f.db, f.binding, f.session, grant)).toBe(true);
+  await prepareCosLaunch(f.session);
+  const authorize = f.authorization()!;
+  expect(await authorize()).toContain('mission-review:' + teamId + ':1:1');
+  expect(await authorize.reserve!('team-model')).toBe(true);
+  expect(f.teamFinalReviews.reserve).toHaveBeenCalledWith(
+    expect.objectContaining({ sessionId: 'main', generation: f.generation }),
+    teamId,
+    submissionId,
+    grant.lease,
+    'team-model',
+    'model',
+  );
+  expect(f.missionReviewRuns.reserve).not.toHaveBeenCalled();
+  expect(f.missionReviewRuns.authorize).not.toHaveBeenCalled();
+  f.teamFinalReviews.reserve.mockResolvedValue({ status: 'ok', reserved: false });
+  expect(await authorize.reserve!('team-model')).toBe(false);
+  f.teamFinalReviews.authorize.mockResolvedValue({ status: 'denied' });
+  expect(await authorize()).toBeNull();
+  expect(f.db.prepare('SELECT generation FROM cos_conversation_states').get()).toEqual({ generation: f.generation });
+});
+
+it('S06-T07 host delivers one consolidated team result through the bound existing main conversation', async () => {
+  const f = fixture(false, false, true);
+  await runtime.pump(f.binding);
+  expect(f.deliver).toHaveBeenCalledExactlyOnceWith(
+    'mattermost',
+    'mattermost:fixture:private',
+    null,
+    'chat',
+    JSON.stringify({ text: 'Reviewed fixture result' }),
+    undefined,
+    'team-review-' + f.reviewId,
+  );
+  expect(f.missionNotifications.read).toHaveBeenCalledWith(
+    expect.objectContaining({ sessionId: 'main', generation: f.generation }),
+    f.reviewId,
+    expect.any(String),
+  );
+  await runtime.pump(f.binding);
+  expect(f.deliver).toHaveBeenCalledTimes(1);
+  expect(f.db.prepare('SELECT generation FROM cos_conversation_states').get()).toEqual({ generation: f.generation });
 });

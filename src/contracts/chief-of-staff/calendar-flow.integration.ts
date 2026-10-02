@@ -8,7 +8,6 @@ import { randomUUID } from 'node:crypto';
 import { connectFixtureDatabase, fixtureDatabaseConfig, fixtureRuntimeUser } from './fixture-database.js';
 import { migrate } from '../../modules/chief-of-staff/store/migrations.js';
 import { BoundedDatabase } from '../../modules/chief-of-staff/store/client.js';
-import { PriorityStore } from '../../modules/chief-of-staff/store/priorities.js';
 import { KnowledgeArtifacts } from '../../modules/chief-of-staff/knowledge/artifacts.js';
 import { CalendarStore } from '../../modules/chief-of-staff/calendar/store.js';
 import { CalendarEvidence } from '../../modules/chief-of-staff/calendar/evidence.js';
@@ -42,6 +41,7 @@ test(
     const fences = CalendarAccessFences.initialize(knowledgeRoot + '/calendar-fences');
     const scope = 'demo-calendar-' + randomUUID();
     process.chdir(root);
+    const { PriorityStore } = await import('../../modules/chief-of-staff/store/priorities.js');
     const { initDb, closeDb } = await import('../../db/connection.js');
     const { runMigrations } = await import('../../db/migrations/index.js');
     const { subscribeMattermostChannelStrict } = await import('../../channels/mattermost-subscription.js');

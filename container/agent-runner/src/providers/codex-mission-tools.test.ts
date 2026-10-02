@@ -1,5 +1,6 @@
 import { expect, test } from 'bun:test';
-import { createMissionToolDispatch, missionDynamicTools } from './codex-mission-tools.js';
+import { createMissionToolDispatch, missionDynamicTools, missionDynamicToolsForSchema } from './codex-mission-tools.js';
+import { teamReviewSchema } from '../mcp-tools/generated/team-review.js';
 import type { MissionWorkerRequest } from '../mcp-tools/generated/mission-worker-protocol.js';
 
 const call = (extra: Record<string, unknown> = {}) => ({
@@ -78,5 +79,27 @@ test('S05 specialist turn fences suppress late host content and repeated physica
   complete({ protocol: 'cos-mission-rpc/v1', request_id: id, status: 'ok', result: 'late-secret' });
   expect(JSON.stringify(await pending)).not.toContain('late-secret');
   expect((await dispatch.handle(call())).success).toBe(false);
+  dispatch.close();
+});
+test('S06 reviewer tools retain the fixed catalog and reject researcher-shaped submissions locally', async () => {
+  const tools = missionDynamicToolsForSchema('cos-team-review/v1');
+  expect(tools.map((t) => t.name)).toEqual(missionDynamicTools.map((t) => t.name));
+  expect((tools[1].inputSchema as { properties: { result: unknown } }).properties.result).toEqual(teamReviewSchema);
+  const dispatch = createMissionToolDispatch(undefined, 'cos-team-review/v1');
+  dispatch.beginTurn('child', 'turn');
+  const result = {
+    format: 'cos-research-result/v1',
+    outcome: 'blocked',
+    claims: [],
+    criteria: [{ id: 'criterion', claim_ids: [] }],
+    limitations: ['Missing evidence.'],
+  };
+  expect(
+    (
+      await dispatch.handle(
+        call({ tool: 'cos_result_submit', arguments: { request_id: '11111111-1111-4111-8111-111111111111', result } }),
+      )
+    ).success,
+  ).toBe(false);
   dispatch.close();
 });
