@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { initTestDb, closeDb } from '../../db/connection.js';
 import { ensureCosBoundarySchema, installCosBoundary, type CosBinding } from '../../cos-boundary.js';
-import { CosService } from './service.js';
+import { CosService, type SpecialistLifecycle } from './service.js';
 import type { PriorityStore } from './store/priorities.js';
 import { randomUUID } from 'node:crypto';
 import { digest } from './domain/contracts.js';
@@ -15,7 +15,7 @@ afterEach(async () => {
   for (const service of services.splice(0)) await service.stop();
   closeDb();
 });
-function fixture(enabled: boolean) {
+function fixture(enabled: boolean, specialists?: (store: PriorityStore) => SpecialistLifecycle) {
   const db = initTestDb();
   ensureCosBoundarySchema(db);
   const end = vi.fn().mockResolvedValue(undefined),
@@ -38,10 +38,94 @@ function fixture(enabled: boolean) {
     stop,
     admission,
     wake: vi.fn().mockResolvedValue(undefined),
+    specialists,
   });
   services.push(service);
   return { db, service, connect, end, query, admission, stop, session };
 }
+function specialist() {
+  return { pump: vi.fn(async (_binding: CosBinding) => {}), fenceLocal: vi.fn(), close: vi.fn(async () => {}) };
+}
+it('S05 starts one specialist lifecycle only after successful database health and drains it before releasing the pool', async () => {
+  const worker = specialist(),
+    create = vi.fn(() => worker),
+    f = fixture(true, create);
+  f.query.mockRejectedValueOnce(Error('fixture health failure'));
+  await f.service.tick();
+  expect(create).not.toHaveBeenCalled();
+  await f.service.tick();
+  await f.service.tick();
+  expect(create).toHaveBeenCalledOnce();
+  let release!: () => void;
+  worker.close.mockImplementationOnce(
+    () =>
+      new Promise<void>((resolve) => {
+        release = resolve;
+      }),
+  );
+  f.admission.mockReturnValue(false);
+  const draining = f.service.tick();
+  await vi.waitFor(() => expect(worker.close).toHaveBeenCalledOnce());
+  expect(worker.fenceLocal).toHaveBeenCalled();
+  expect(f.end).not.toHaveBeenCalled();
+  release();
+  await draining;
+  expect(f.end).toHaveBeenCalledOnce();
+  f.admission.mockReturnValue(true);
+  await f.service.tick();
+  expect(create).toHaveBeenCalledTimes(2);
+});
+it('S05 uncertain specialist cleanup cannot be discarded or replaced when database health returns', async () => {
+  const worker = specialist(),
+    create = vi.fn(() => worker),
+    f = fixture(true, create);
+  await f.service.tick();
+  worker.close.mockRejectedValue(Error('fixture cleanup uncertainty'));
+  f.query.mockRejectedValueOnce(Error('fixture health loss'));
+  await f.service.tick();
+  expect(worker.fenceLocal).toHaveBeenCalled();
+  await f.service.tick();
+  expect(create).toHaveBeenCalledOnce();
+  expect(f.service.status).toBe('unreachable');
+  expect(f.end).not.toHaveBeenCalled();
+  worker.close.mockResolvedValue();
+  await f.service.tick();
+  expect(create).toHaveBeenCalledTimes(2);
+});
+it('S05 shutdown closes specialist admission while a pump is in flight, then waits before pool release', async () => {
+  const worker = specialist(),
+    create = vi.fn(() => worker),
+    f = fixture(true, create);
+  const binding: CosBinding = {
+    scopeId: 'scope',
+    agentGroupId: 'group',
+    messagingGroupId: 'mg',
+    sessionId: 'main',
+    provider: 'codex',
+    instanceId: 'fixture',
+    channelId: 'private',
+    ownerId: 'owner',
+    botId: 'bot',
+  };
+  installCosBoundary(binding, f.db);
+  let release!: () => void;
+  worker.pump.mockImplementationOnce(
+    () =>
+      new Promise<void>((resolve) => {
+        release = resolve;
+      }),
+  );
+  const tick = f.service.tick();
+  await vi.waitFor(() => expect(worker.pump).toHaveBeenCalledWith(binding));
+  const stopping = f.service.stop();
+  expect(worker.fenceLocal).toHaveBeenCalled();
+  expect(f.end).not.toHaveBeenCalled();
+  release();
+  await tick;
+  await stopping;
+  expect(worker.close).toHaveBeenCalledOnce();
+  expect(f.end).toHaveBeenCalledOnce();
+});
 describe('S01-T01 host startup and dependency service', () => {
   it('disabled operation starts and ticks without connecting to PostgreSQL', async () => {
     const f = fixture(false);
