@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { digest } from '../domain/contracts.js';
 import { TEAM_TEMPLATES } from '../contracts/team-templates.js';
-import { TEAM_DEFAULT_LIMITS, type TeamRequest } from '../contracts/team-protocol.js';
+import { TEAM_DEFAULT_LIMITS, validTeamRequest, type TeamRequest } from '../contracts/team-protocol.js';
+import { COS_PROTOCOL, validRequest } from '../contracts/protocol.js';
 import { MISSION_DEFAULT_LIMITS } from '../contracts/mission-protocol.js';
 import type { TeamWorkOrderBody } from './team-proposal-store.js';
 import { sealTeamChildWorkOrder, validateTeamChildWorkOrder } from './team-work-order.js';
@@ -199,6 +200,30 @@ describe('S06-T05/T08 host-pinned review evidence', () => {
   });
 });
 describe('S06-T01/T03/T05 child work order isolation', () => {
+  it('rejects an otherwise admitted request whose duplicated child order exceeds native file bounds', () => {
+    const i = input();
+    i.approved.body.request.question = 'é'.repeat(4000);
+    const criteria = Array.from({ length: 4 }, (_, n) => ({ id: 'criterion' + n, description: 'é'.repeat(1000) }));
+    i.approved.body.request.acceptance_criteria = criteria;
+    for (const step of i.approved.body.request.steps) step.acceptance_criteria = structuredClone(criteria);
+    i.approved.digest = digest(i.approved.body);
+    expect(validTeamRequest(i.approved.body.request)).toBe(true);
+    expect(
+      validRequest({
+        protocol: COS_PROTOCOL,
+        request_id: '11111111-1111-4111-8111-111111111111',
+        method: 'cos_team_request',
+        params: { request: i.approved.body.request },
+      }),
+    ).toBe(true);
+    expect(() => sealTeamChildWorkOrder(i)).toThrow('team_child_order_denied');
+    const forged = structuredClone(sealTeamChildWorkOrder(input()));
+    forged.body.request.question = i.approved.body.request.question;
+    forged.body.request.acceptance_criteria = structuredClone(criteria);
+    forged.body.team.step.acceptance_criteria = structuredClone(criteria);
+    forged.digest = digest(forged.body);
+    expect(validateTeamChildWorkOrder(forged)).toBe(false);
+  });
   it('pins an independent reviewed analyst template and fresh specialist mission without main history', () => {
     const order = sealTeamChildWorkOrder(input());
     expect(order.body.template.digest).toBe(digest(TEAM_TEMPLATES['team-technical-analyst']));

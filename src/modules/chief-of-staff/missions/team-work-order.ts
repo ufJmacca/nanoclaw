@@ -6,6 +6,7 @@ import { validTeamRework, validTeamReworkForStep, type TeamRework } from '../con
 export type { TeamInputArtifact } from '../contracts/team-inputs.js';
 import type { TeamWorkOrderBody } from './team-proposal-store.js';
 import { RESEARCH_TEMPLATE, sealResearchWorkOrder, type MissionSourceSnapshot } from './work-order.js';
+import { MISSION_WORKER_PROTOCOL, validMissionWorkerResponse } from '../contracts/mission-worker-protocol.js';
 
 type TeamLineage = {
   teamId: string;
@@ -46,6 +47,23 @@ const stepRequest = (question: string, goal_id: string | null, project_id: strin
   acceptance_criteria: step.acceptance_criteria,
   limits: { ...step.limits, max_attempts: step.limits.max_attempts + step.max_rework_count },
 });
+function fitsNativePayload(body: unknown, context: unknown, template: unknown): boolean {
+  const requestId = '11111111-1111-4111-8111-111111111111';
+  return (
+    Buffer.byteLength(JSON.stringify(body)) <= 24576 &&
+    Buffer.byteLength(JSON.stringify(context)) <= 65536 &&
+    Buffer.byteLength(JSON.stringify(template)) <= 8192 &&
+    validMissionWorkerResponse(
+      {
+        protocol: MISSION_WORKER_PROTOCOL,
+        request_id: requestId,
+        status: 'ok',
+        result: { work_order: body, context, template },
+      },
+      requestId,
+    )
+  );
+}
 /** Pure materialisation only. The host must capture the exact currently approved parent before every dispatch/call. */
 export function sealTeamChildWorkOrder(input: unknown) {
   const denied = () => Error('team_child_order_denied');
@@ -160,6 +178,7 @@ export function sealTeamChildWorkOrder(input: unknown) {
       team: lineage,
     };
     const value = { body, context, digest: digest(body) };
+    if (!fitsNativePayload(body, context, template)) throw denied();
     return freeze(JSON.parse(JSON.stringify(value)) as typeof value);
   } catch {
     throw denied();
@@ -297,6 +316,7 @@ export function validateTeamChildWorkOrder(value: unknown): value is TeamChildWo
     };
     return (
       Buffer.byteLength(canonical(c), 'utf8') <= step.limits.context_bytes &&
+      fitsNativePayload(b, c, template) &&
       digest(expected) === value.digest &&
       digest(b) === value.digest
     );

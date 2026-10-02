@@ -11,6 +11,7 @@ import { settleTeamCredits } from './team-settlement.js';
 import { recordResearchExposure } from './exposure.js';
 import { DatabaseUnavailable } from '../store/client.js';
 import type { TeamWorkOrderBody } from './team-proposal-store.js';
+import { teamReviewPayload } from './team-review-payload.js';
 
 const id = (v: unknown): v is string => typeof v === 'string' && /^[a-zA-Z0-9_-]{1,100}$/.test(v);
 const uuid = (v: unknown): v is string =>
@@ -288,14 +289,8 @@ export class TeamFinalReviews {
             [context.scopeId, teamId, current.root.generation, current.resultDigest],
           )
         ).rows[0] ?? null;
-      return {
-        status: 'ok',
-        mission: { id: teamId, state: current.root.state, version: current.root.version },
-        submission: { id: submissionId, digest: current.resultDigest },
-        result: current.brief,
-        criteria: current.order.body.request.acceptance_criteria,
-        review,
-      };
+      const payload = teamReviewPayload(current, review);
+      return payload ? { status: 'ok', ...payload } : { status: 'denied' };
     });
   }
   /** Trusted host establishes independent main-session idle before installing the acknowledged lease in native SQLite. */

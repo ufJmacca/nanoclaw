@@ -5,6 +5,7 @@ import type { TeamBrief, TeamBriefOutput } from '../contracts/team-brief.js';
 import type { TeamProposalStore } from './team-proposal-store.js';
 import type { TeamChildWorkOrder } from './team-work-order.js';
 import { readVerifiedSubmission } from './submission-reader.js';
+import { teamReviewPayload } from './team-review-payload.js';
 
 export type CurrentTeamSnapshot = {
   row: { id: string; state: string; generation: number; version: number; provenance: Record<string, unknown> };
@@ -173,7 +174,7 @@ export async function buildTeamReviewSnapshot(
         ? ('claimed' as const)
         : ('missing' as const),
   }));
-  return {
+  const snapshot: TeamReviewSnapshot = {
     root: current.row,
     order: current.order,
     brief,
@@ -181,4 +182,5 @@ export async function buildTeamReviewSnapshot(
     anchor: anchor.submission,
     checks: { status: 'review_required', outcome: blocked ? 'blocked' : incomplete ? 'partial' : 'answer', criteria },
   };
+  return teamReviewPayload(snapshot) ? snapshot : null;
 }
