@@ -54,3 +54,11 @@ model budget, reset the main conversation or launch a mission. Model policy,
 current source access, exact owner approval and the verified execution profile
 remain separate requirements. Each work order pins its delegation configuration;
 disabling and re-enabling delegation cannot restore authority to an older mission.
+
+The host now derives mission authority from the exact native CoS binding, current
+delegation revision, retained main conversation and current Codex subscription
+policy. These checks do not prepare, recover or reset a conversation. A completed
+scheduled-brief renewal may supply the current generation through its recorded
+consent lineage; an interrupted renewal closes mission admission until recovered.
+The specialist launcher rechecks these pins before launch and on every credential
+or model callback. Actual model invocations still require fresh budget reservations.
