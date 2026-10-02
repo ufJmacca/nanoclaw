@@ -25,20 +25,18 @@ function fixture() {
 }
 test('S05 specialist native RPC uses its own action and requires a fresh matching host delivery', async () => {
   const inbound = fixture();
-  inbound
-    .prepare('INSERT INTO cos_rpc_responses VALUES(?,?,?,?,?)')
-    .run(
-      request.request_id,
-      digest(request),
-      'stale',
-      JSON.stringify({
-        protocol: request.protocol,
-        request_id: request.request_id,
-        status: 'ok',
-        result: 'stale-canary',
-      }),
-      'fixture',
-    );
+  inbound.prepare('INSERT INTO cos_rpc_responses VALUES(?,?,?,?,?)').run(
+    request.request_id,
+    digest(request),
+    'stale',
+    JSON.stringify({
+      protocol: request.protocol,
+      request_id: request.request_id,
+      status: 'ok',
+      result: 'stale-canary',
+    }),
+    'fixture',
+  );
   const response = {
     protocol: request.protocol,
     request_id: request.request_id,
@@ -74,19 +72,17 @@ test('S05 specialist cannot send under the coordinator profile or use forged aut
 });
 test('S05 stale context replies cannot survive an unavailable host', async () => {
   const inbound = fixture();
-  inbound
-    .prepare('INSERT INTO cos_rpc_responses VALUES(?,?,?,?,?)')
-    .run(
-      request.request_id,
-      digest(request),
-      'stale',
-      JSON.stringify({
-        protocol: request.protocol,
-        request_id: request.request_id,
-        status: 'ok',
-        result: 'old-context',
-      }),
-      'fixture',
-    );
+  inbound.prepare('INSERT INTO cos_rpc_responses VALUES(?,?,?,?,?)').run(
+    request.request_id,
+    digest(request),
+    'stale',
+    JSON.stringify({
+      protocol: request.protocol,
+      request_id: request.request_id,
+      status: 'ok',
+      result: 'old-context',
+    }),
+    'fixture',
+  );
   expect((await executeMissionRequest(request, 20)).status).toBe('pending');
 });
