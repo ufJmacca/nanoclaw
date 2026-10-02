@@ -154,6 +154,68 @@ export class MissionRunStore {
       tool: rows.find((r) => r.kind === 'tool')?.n ?? 0,
     };
   }
+  /** Bounded host discovery, not an execution grant. Claim rechecks source access and captures exact bytes.
+   * The cursor lets deferred or revoked early rows coexist with later eligible work without starvation. */
+  async pendingDispatch(context: Context, after: string | null = null): Promise<Result> {
+    const authority = this.proposals.authority?.(context);
+    if (!authority || context.origin || (after !== null && !id(after))) return { status: 'denied' };
+    return this.transaction(context.scopeId, async (client) => {
+      const rows = (
+        await client.query(
+          `SELECT a.*, w.body, w.digest
+        FROM cos.mission_attempts a
+        JOIN cos.missions m ON m.scope_id=a.scope_id AND m.id=a.mission_id AND m.generation=a.generation
+        JOIN cos.mission_work_orders w ON w.scope_id=m.scope_id AND w.id=m.id
+        JOIN cos.proposals p ON p.scope_id=m.scope_id AND p.id=m.proposal_id
+        JOIN cos.scopes s ON s.id=m.scope_id
+        WHERE a.scope_id=$1 AND s.owner_id=$2 AND s.agent_group_id=$3 AND s.status='active'
+          AND m.state='queued' AND a.state IN ('queued','allocating','ready')
+          AND p.state='applied' AND p.applied_record_id=m.id
+          AND a.allocation->>'stop_confirmed' IS DISTINCT FROM 'true'
+          AND w.body->'origin'->>'scopeId'=$1 AND w.body->'origin'->>'ownerId'=$2
+          AND w.body->'origin'->>'agentGroupId'=$3 AND w.body->'origin'->>'sessionId'=$4
+          AND w.body->'origin'->>'contextGeneration'=$5
+          AND w.body->'origin'->>'bindingDigest'=$6 AND w.body->'origin'->>'delegationDigest'=$7
+          AND w.body->'provider'=$8::jsonb AND (w.body->>'deadlineAt')::timestamptz>clock_timestamp()
+          AND ($9::text IS NULL OR a.id>$9)
+        ORDER BY a.id LIMIT 20`,
+          [
+            context.scopeId,
+            context.ownerId,
+            context.agentGroupId,
+            context.sessionId,
+            authority.contextGeneration,
+            authority.bindingDigest,
+            authority.delegationDigest,
+            JSON.stringify(authority.provider),
+            after,
+          ],
+        )
+      ).rows as Array<AttemptRow & { body: ResearchWorkOrder['body']; digest: string }>;
+      const items = rows.flatMap((row) => {
+        const identity = identityOf(row),
+          origin = row.body.origin;
+        return validCosMissionIdentity(identity) &&
+          digest(row.body) === row.digest &&
+          typeof origin.ingressId === 'string'
+          ? [
+              {
+                identity,
+                context: {
+                  scopeId: origin.scopeId,
+                  ownerId: origin.ownerId,
+                  agentGroupId: origin.agentGroupId,
+                  sessionId: origin.sessionId,
+                  ingressId: origin.ingressId,
+                },
+              },
+            ]
+          : [];
+      });
+      if (digest(this.proposals.authority?.(context) ?? null) !== digest(authority)) return { status: 'denied' };
+      return { status: 'ok', items, next_after: rows.length === 20 ? rows.at(-1)!.id : null };
+    });
+  }
   async inspect(context: Context, missionId: string): Promise<Result> {
     if (!id(missionId)) return { status: 'denied' };
     return this.transaction(context.scopeId, async (client) => {

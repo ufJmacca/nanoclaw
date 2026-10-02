@@ -192,6 +192,71 @@ const reserve = (
   kind: 'model' | 'tool' = 'model',
   payload = digest('fixture-call'),
 ) => store.missionRuns.reserve(i, id, kind, payload);
+test('S05-T05 queued dispatch discovery returns only approved current-owner metadata and preserves original ingress', async () => {
+  const previous = authority.contextGeneration;
+  authority.contextGeneration = randomUUID();
+  try {
+    const a = await mission(),
+      b = await mission();
+    const pending = await store.missionRuns.pendingDispatch({ ...context, ingressId: 'later-host-pump' });
+    assert.equal(pending.status, 'ok');
+    assert.equal((pending.items as any[]).length, 2);
+    assert.deepEqual(
+      (pending.items as any[]).map((x) => x.identity.attemptId).sort(),
+      [a.identity.attemptId, b.identity.attemptId].sort(),
+    );
+    for (const item of pending.items as any[]) assert.deepEqual(item.context, context);
+    assert.doesNotMatch(JSON.stringify(pending), /SOURCE_CANARY|Compare A|sources|question|policyDigest/);
+    const first = (pending.items as any[])[0];
+    assert.equal(
+      ((await store.missionRuns.pendingDispatch(context, first.identity.attemptId)).items as any[]).length,
+      1,
+    );
+    const claim = await store.missionRuns.claimDispatch(context, a.identity.attemptId, 'discovery-fixture');
+    assert.equal(claim.status, 'ok');
+    assert.equal(((await store.missionRuns.pendingDispatch(context)).items as any[]).length, 2);
+    await running(a.identity);
+    assert.deepEqual((await store.missionRuns.pendingDispatch(context)).items, [{ identity: b.identity, context }]);
+    for (const patch of [{ ownerId: 'foreign' }, { agentGroupId: 'foreign' }, { sessionId: 'foreign' }]) {
+      const result = await store.missionRuns.pendingDispatch({ ...context, ...patch });
+      assert.ok(result.status === 'denied' || (result.items as any[]).length === 0);
+    }
+    enabled = false;
+    assert.equal((await store.missionRuns.pendingDispatch(context)).status, 'denied');
+    enabled = true;
+    await store.missionRuns.cancel(context, b.identity.missionId);
+    assert.deepEqual((await store.missionRuns.pendingDispatch(context)).items, []);
+  } finally {
+    authority.contextGeneration = previous;
+    enabled = true;
+  }
+});
+test('S05-T05 queued discovery is bounded and its cursor reaches later work without replaying earlier attempts', async () => {
+  const previous = authority.contextGeneration;
+  authority.contextGeneration = randomUUID();
+  try {
+    const input = await request();
+    for (let i = 0; i < 21; i++) {
+      const proposal = await store.requestMission(context, randomUUID(), input);
+      assert.equal(proposal.status, 'ok');
+      assert.equal((await approve(proposal)).status, 'ok');
+    }
+    const first = await store.missionRuns.pendingDispatch(context);
+    assert.equal(first.status, 'ok');
+    assert.equal((first.items as any[]).length, 20);
+    assert.equal(first.next_after, (first.items as any[]).at(-1).identity.attemptId);
+    const second = await store.missionRuns.pendingDispatch(context, String(first.next_after));
+    assert.equal((second.items as any[]).length, 1);
+    assert.equal(second.next_after, null);
+    assert.equal(
+      new Set([...(first.items as any[]), ...(second.items as any[])].map((x) => x.identity.attemptId)).size,
+      21,
+    );
+    assert.equal((await store.missionRuns.pendingDispatch(context, '../foreign')).status, 'denied');
+  } finally {
+    authority.contextGeneration = previous;
+  }
+});
 test('S05-T05/T07 coordinator RPC proposes without launching, inspects the approved mission and durably cancels', async () => {
   const native = initTestDb();
   migrateNative(native);
