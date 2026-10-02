@@ -1,26 +1,11 @@
 import { canonical, digest } from '../domain/contracts.js';
 import { validTeamRequest, TEAM_STEP_KEYS, type TeamStep } from '../contracts/team-protocol.js';
 import { TEAM_TEMPLATES } from '../contracts/team-templates.js';
-import { validMissionResult, type MissionResult } from '../contracts/mission-result.js';
+import { validateTeamInputs } from '../contracts/team-inputs.js';
+export type { TeamInputArtifact } from '../contracts/team-inputs.js';
 import type { TeamWorkOrderBody } from './team-proposal-store.js';
 import { RESEARCH_TEMPLATE, sealResearchWorkOrder, type MissionSourceSnapshot } from './work-order.js';
 
-export type TeamInputArtifact =
-  | {
-      step_id: string;
-      state: 'submitted';
-      mission_id: string;
-      submission_id: string;
-      artifact_id: string;
-      result_digest: string;
-      result: MissionResult;
-    }
-  | {
-      step_id: string;
-      state: 'failed';
-      required: boolean;
-      reason: 'worker_failed' | 'budget_exhausted' | 'missing_coverage';
-    };
 type TeamLineage = {
   teamId: string;
   generation: number;
@@ -42,54 +27,12 @@ const exact = (v: Record<string, unknown>, keys: readonly string[]) =>
   Object.keys(v).length === keys.length && keys.every((k) => Object.hasOwn(v, k));
 const identifier = (v: unknown): v is string => typeof v === 'string' && /^[a-zA-Z0-9_-]{1,100}$/.test(v);
 const hash = (v: unknown): v is string => typeof v === 'string' && /^[a-f0-9]{64}$/.test(v);
-const uuid = (v: unknown): v is string =>
-  typeof v === 'string' && /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(v);
 function freeze<T>(v: T): T {
   if (v && typeof v === 'object') {
     for (const child of Object.values(v)) freeze(child);
     Object.freeze(v);
   }
   return v;
-}
-function artifactInputs(lineage: TeamLineage, values: unknown[]): TeamInputArtifact[] | null {
-  if (
-    !Array.isArray(values) ||
-    values.length !== lineage.step.depends_on.length ||
-    lineage.dependencyRequirements.length !== values.length
-  )
-    return null;
-  const seen = new Set<string>(),
-    artifacts: TeamInputArtifact[] = [];
-  for (const v of values) {
-    if (!object(v) || !identifier(v.step_id) || !lineage.step.depends_on.includes(v.step_id) || seen.has(v.step_id))
-      return null;
-    const requirement = lineage.dependencyRequirements.find((r) => r.step_id === v.step_id);
-    if (!requirement || requirement.result_schema !== 'cos-research-result/v1') return null;
-    if (v.state === 'submitted') {
-      if (
-        !exact(v, ['step_id', 'state', 'mission_id', 'submission_id', 'artifact_id', 'result_digest', 'result']) ||
-        typeof v.mission_id !== 'string' ||
-        !/^mission-[a-f0-9]{64}$/.test(v.mission_id) ||
-        !uuid(v.submission_id) ||
-        !identifier(v.artifact_id) ||
-        !hash(v.result_digest) ||
-        !validMissionResult(v.result) ||
-        digest(v.result) !== v.result_digest
-      )
-        return null;
-    } else if (v.state === 'failed') {
-      if (
-        !exact(v, ['step_id', 'state', 'required', 'reason']) ||
-        v.required !== requirement.required ||
-        !['worker_failed', 'budget_exhausted', 'missing_coverage'].includes(String(v.reason)) ||
-        (requirement.required && lineage.partialPolicy !== 'allow_labelled')
-      )
-        return null;
-    } else return null;
-    seen.add(v.step_id);
-    artifacts.push(v as TeamInputArtifact);
-  }
-  return artifacts.sort((a, b) => a.step_id.localeCompare(b.step_id));
 }
 const stepRequest = (question: string, goal_id: string | null, project_id: string | null, step: TeamStep) => ({
   question,
@@ -154,7 +97,7 @@ export function sealTeamChildWorkOrder(input: unknown) {
       })
       .sort((a, b) => a.step_id.localeCompare(b.step_id)),
   };
-  const artifacts = artifactInputs(lineage, i.artifacts);
+  const artifacts = validateTeamInputs(lineage, i.artifacts, digest);
   if (!artifacts) throw denied();
   try {
     const base = sealResearchWorkOrder({
@@ -268,7 +211,7 @@ export function validateTeamChildWorkOrder(value: unknown): value is TeamChildWo
     )
       return false;
     const template = TEAM_TEMPLATES[step.template_id],
-      artifacts = artifactInputs(lineage, c.artifacts);
+      artifacts = validateTeamInputs(lineage, c.artifacts, digest);
     if (
       !artifacts ||
       digest(artifacts) !== digest(c.artifacts) ||

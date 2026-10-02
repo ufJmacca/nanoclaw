@@ -109,6 +109,7 @@ export class MissionReviewRuns {
     const origin = row?.body?.origin;
     if (
       !row ||
+      row.body.format !== 'cos-research-work-order/v1' ||
       !origin ||
       digest(row.body) !== row.digest ||
       row.body.missionId !== missionId ||
@@ -133,6 +134,7 @@ export class MissionReviewRuns {
         JOIN cos.mission_attempts t ON t.scope_id=s.scope_id AND t.id=s.attempt_id AND t.generation=s.generation
         WHERE m.scope_id=$1 AND c.owner_id=$2 AND c.agent_group_id=$3 AND c.status='active'
           AND m.state='awaiting_review' AND t.state='submitted'
+          AND w.body->>'format'='cos-research-work-order/v1'
           AND t.allocation->'stop_confirmed'='true'::jsonb AND NOT t.allocation ? 'coordinator_review_retired'
           AND w.body->'origin'->>'sessionId'=$4 AND w.body->'origin'->>'contextGeneration'=$5
           AND (w.body->>'deadlineAt')::timestamptz > clock_timestamp()

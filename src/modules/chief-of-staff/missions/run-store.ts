@@ -8,8 +8,9 @@ import type { MissionProposalStore } from './proposal-store.js';
 import { queueMissionAttempt } from './attempt.js';
 import { recordMissionExposure } from './exposure.js';
 import { KnowledgeArtifactsBusy, type KnowledgeArtifacts } from '../knowledge/artifacts.js';
-import { validMissionResult } from '../contracts/mission-result.js';
-import { checkResearchResult } from './result-checks.js';
+import { validMissionWorkerResult } from '../contracts/mission-worker-protocol.js';
+import { checkWorkerResult } from './result-checks.js';
+import { TEAM_TEMPLATES } from '../contracts/team-templates.js';
 import {
   defaultMissionWorkerCapacity,
   missionWorkerCapacity,
@@ -712,7 +713,7 @@ export class MissionRunStore {
       !validLease(lease) ||
       !id(callId) ||
       !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(requestId) ||
-      !validMissionResult(result)
+      !validMissionWorkerResult(result)
     )
       return { status: 'denied' };
     const artifacts = this.artifacts,
@@ -743,8 +744,8 @@ export class MissionRunStore {
           const previous = await existing(client);
           if (previous) return previous;
           if (current.mission.state !== 'running' || current.attempt.state !== 'running') return { status: 'denied' };
-          const checks = checkResearchResult(current.order, result);
-          if (checks.status !== 'review_required') return { status: 'denied' };
+          const checks = checkWorkerResult(current.order, result);
+          if (checks.status === 'invalid') return { status: 'denied' };
           const reserved = await this.reserveCall(
             client,
             current.mission,
@@ -771,9 +772,8 @@ export class MissionRunStore {
           const previous = await existing(client);
           if (previous) return previous;
           if (current.mission.state !== 'running' || current.attempt.state !== 'running') return { status: 'denied' };
-          const checks = checkResearchResult(current.order, result);
-          if (checks.status !== 'review_required' || digest(checks) !== digest(before.checks))
-            return { status: 'denied' };
+          const checks = checkWorkerResult(current.order, result);
+          if (checks.status === 'invalid' || digest(checks) !== digest(before.checks)) return { status: 'denied' };
           // Verify published bytes again before their durable metadata can be accepted.
           if (digest(JSON.parse(artifacts.read(captured.id, captured.digest))) !== resultDigest)
             return { status: 'denied' };
@@ -858,7 +858,10 @@ export class MissionRunStore {
         status: 'ok',
         work_order: current.order.body,
         context: current.order.context,
-        template: RESEARCH_TEMPLATE,
+        template:
+          current.order.body.format === 'cos-team-child-work-order/v1'
+            ? TEAM_TEMPLATES[current.order.body.template.id as keyof typeof TEAM_TEMPLATES]
+            : RESEARCH_TEMPLATE,
       };
     });
   }

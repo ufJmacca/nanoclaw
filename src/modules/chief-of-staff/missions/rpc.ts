@@ -12,7 +12,7 @@ import {
   validMissionWorkerResponse,
   type MissionWorkerResponse,
 } from '../contracts/mission-worker-protocol.js';
-import type { MissionResult } from '../contracts/mission-result.js';
+import type { MissionWorkerResult } from '../contracts/mission-worker-protocol.js';
 import type { MissionWorkerGrant } from './dispatch.js';
 import type { MissionRunStore, MissionDispatchLease } from './run-store.js';
 
@@ -25,7 +25,7 @@ export function createMissionRpcHandler(dependencies: {
     lease: MissionDispatchLease,
     requestId: string,
     callId: string,
-    result: MissionResult,
+    result: MissionWorkerResult,
   ): Promise<Result>;
 }): DeliveryActionHandler {
   function native(session: Session): CosMissionIdentity | null {

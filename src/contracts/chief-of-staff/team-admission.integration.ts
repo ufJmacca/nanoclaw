@@ -19,6 +19,8 @@ import { TeamRunStore } from '../../modules/chief-of-staff/missions/team-run-sto
 import type { TeamChildWorkOrder } from '../../modules/chief-of-staff/missions/team-work-order.js';
 import { RESEARCH_TEMPLATE } from '../../modules/chief-of-staff/missions/work-order.js';
 import { MissionRunStore } from '../../modules/chief-of-staff/missions/run-store.js';
+import type { CosMissionIdentity } from '../../cos-mission-boundary.js';
+import type { MissionDispatchLease } from '../../modules/chief-of-staff/missions/run-store.js';
 
 const scope = 'team-admission-' + randomUUID();
 const context = { scopeId: scope, ownerId: 'owner', agentGroupId: scope, sessionId: scope, ingressId: randomUUID() };
@@ -484,4 +486,75 @@ test('S06-T02/PG02 already admitted single workers count against team admission;
   assert.equal((await dispatch.claimDispatch(context, second.id, 'fixture-host')).status, 'pending');
   assert.deepEqual((await teams.claimReady(context, String(p.team_id))).created, []);
   assert.equal((await dispatch.claimDispatch(context, first.id, 'fixture-host')).status, 'ok');
+});
+test('S06-T05/T07 analyst result shape and context are pinned; submitted children never trigger main-context review chatter', async () => {
+  await admin.query(
+    "UPDATE cos.mission_attempts SET allocation=allocation||'{\"stop_confirmed\":true}'::jsonb,state='failed',lease_owner=NULL,lease_until=NULL WHERE scope_id=$1",
+    [scope],
+  );
+  const r = await input(),
+    p = await store.requestTeam(context, randomUUID(), r);
+  await approve(p);
+  const teams = new TeamRunStore(store.database, store.teams, knowledge, { nativeCapacity: 3, maxWorkers: 2 });
+  await teams.claimReady(context, String(p.team_id));
+  const step = (await rows('mission_team_steps')).find((s) => s.team_id === p.team_id && s.step_id === 'technical')!;
+  const attempt = (await rows('mission_attempts')).find((a) => a.mission_id === step.child_mission_id)!;
+  const runs = new MissionRunStore(
+    store.database,
+    store.missions,
+    knowledge.artifacts,
+    {},
+    { nativeCapacity: 3, maxWorkers: 2 },
+  );
+  const claimed = await runs.claimDispatch(context, attempt.id, 'fixture-host');
+  assert.equal(claimed.status, 'ok');
+  const identity = claimed.identity as CosMissionIdentity,
+    lease = claimed.lease as MissionDispatchLease;
+  assert.equal((await runs.markDispatchReady(identity, lease, digest('fixture native receipt'))).status, 'ok');
+  assert.equal((await runs.beginExecution(identity, lease)).status, 'ok');
+  assert.deepEqual(
+    (await runs.readContext(identity, lease, 'fixture-context')).template,
+    TEAM_TEMPLATES['team-technical-analyst'],
+  );
+  assert.equal(
+    (
+      await runs.submitResult(identity, lease, randomUUID(), 'wrong-schema', {
+        format: 'cos-team-review/v1',
+        evidence_validity: [],
+        factual_gaps: [],
+        contradictions: [],
+        unmet_criteria: [],
+        recommended_revisions: [],
+        confidence: 'high',
+      })
+    ).status,
+    'denied',
+  );
+  const result = {
+    format: 'cos-research-result/v1',
+    outcome: 'answer',
+    claims: [
+      {
+        id: 'tradeoff',
+        kind: 'quote',
+        text: 'A costs less.',
+        citations: [{ ...r.sources[0], ordinal: 0, start_line: 1, end_line: 1 }],
+      },
+    ],
+    criteria: [{ id: 'tradeoff', claim_ids: ['tradeoff'] }],
+    limitations: ['Fixture notes only.'],
+  };
+  const requestId = randomUUID(),
+    submitted = await runs.submitResult(identity, lease, requestId, 'correct-schema', result);
+  assert.equal(submitted.status, 'ok');
+  assert.deepEqual(await runs.submitResult(identity, lease, requestId, 'correct-schema', result), submitted);
+  assert.equal((await runs.confirmStopped(identity)).status, 'ok');
+  const pending = await store.missionReviewRuns!.pending({
+    ...context,
+    provider: 'codex',
+    generation: authority.contextGeneration,
+  });
+  assert.equal(pending.status, 'ok');
+  assert.deepEqual(pending.items, []);
+  assert.equal((await rows('outbox')).filter((o) => o.kind === 'mission_result_notification').length, 0);
 });

@@ -1,5 +1,10 @@
 /** Canonical specialist-only wire contract; copied verbatim into the worker. */
 import { validMissionResult, type MissionResult } from './mission-result.js';
+import { validTeamReview, type TeamReview } from './team-review.js';
+export type MissionWorkerResult = MissionResult | TeamReview;
+/** The wire carries both bounded shapes; only the current host-pinned template can select one. */
+export const validMissionWorkerResult = (v: unknown): v is MissionWorkerResult =>
+  validMissionResult(v) || validTeamReview(v);
 export const MISSION_WORKER_PROTOCOL = 'cos-mission-rpc/v1' as const;
 export const MISSION_WORKER_REQUEST_BYTES = 24576;
 export const MISSION_WORKER_RESPONSE_BYTES = 98304;
@@ -8,7 +13,7 @@ export type MissionWorkerRequest = {
   request_id: string;
 } & (
   | { method: 'cos_mission_context_get'; params: Record<string, never> }
-  | { method: 'cos_result_submit'; params: { result: MissionResult } }
+  | { method: 'cos_result_submit'; params: { result: MissionWorkerResult } }
 );
 export type MissionWorkerResponse = {
   protocol: typeof MISSION_WORKER_PROTOCOL;
@@ -47,7 +52,7 @@ export function validMissionWorkerRequest(v: unknown): v is MissionWorkerRequest
     v.method === 'cos_result_submit' &&
     Object.keys(v.params).length === 1 &&
     Object.hasOwn(v.params, 'result') &&
-    validMissionResult(v.params.result)
+    validMissionWorkerResult(v.params.result)
   );
 }
 export function validMissionRpcEnvelope(v: unknown): v is MissionRpcEnvelope {

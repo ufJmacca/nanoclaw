@@ -5,6 +5,7 @@ import { TEAM_DEFAULT_LIMITS, type TeamRequest } from '../contracts/team-protoco
 import { MISSION_DEFAULT_LIMITS } from '../contracts/mission-protocol.js';
 import type { TeamWorkOrderBody } from './team-proposal-store.js';
 import { sealTeamChildWorkOrder, validateTeamChildWorkOrder } from './team-work-order.js';
+import { checkWorkerResult } from './result-checks.js';
 const source = {
   source_id: 'options',
   revision_id: 'v1',
@@ -102,6 +103,57 @@ function submitted(id: string) {
   a.result_digest = digest(a.result);
   return a;
 }
+describe('S06-T05/T08 host-pinned review evidence', () => {
+  const review = () => ({
+    format: 'cos-team-review/v1',
+    evidence_validity: [
+      {
+        step_id: 'synthesis',
+        claim_id: 'capacity',
+        verdict: 'uncertain',
+        reason: 'Only supplied notes support this inference.',
+      },
+    ],
+    factual_gaps: ['Measured capacity is unavailable.'],
+    contradictions: [],
+    unmet_criteria: [],
+    recommended_revisions: [],
+    confidence: 'low',
+  });
+  const order = () => {
+    const i = input('review');
+    i.artifacts = [submitted('synthesis')];
+    return sealTeamChildWorkOrder(i);
+  };
+  it('records advisory findings without a completion or approval grant', () => {
+    expect(checkWorkerResult(order(), review())).toMatchObject({
+      status: 'advisory_review',
+      resultDigest: digest(review()),
+    });
+  });
+  it('requires exact input claim coverage and scoped criterion/revision references', () => {
+    for (const patch of [
+      { evidence_validity: [] },
+      { evidence_validity: [{ ...review().evidence_validity[0], claim_id: 'invented' }] },
+      { unmet_criteria: ['invented'] },
+      { contradictions: [{ step_ids: ['synthesis', 'private-worker'], description: 'Invented disagreement.' }] },
+      {
+        recommended_revisions: [{ step_id: 'new-worker', criterion_ids: ['tradeoff'], instructions: 'Expand scope.' }],
+      },
+    ])
+      expect(checkWorkerResult(order(), { ...review(), ...patch }).status).toBe('invalid');
+  });
+  it('pins result shape to the exact reviewer template and rejects a rehashed invalid input citation', () => {
+    expect(checkWorkerResult(sealTeamChildWorkOrder(input()), review()).status).toBe('invalid');
+    expect(checkWorkerResult(order(), submitted('synthesis').result).status).toBe('invalid');
+    const i = input('review'),
+      a = submitted('synthesis');
+    a.result.claims[0].citations[0].source_id = 'foreign';
+    a.result_digest = digest(a.result);
+    i.artifacts = [a];
+    expect(checkWorkerResult(sealTeamChildWorkOrder(i), review()).status).toBe('invalid');
+  });
+});
 describe('S06-T01/T03/T05 child work order isolation', () => {
   it('pins an independent reviewed analyst template and fresh specialist mission without main history', () => {
     const order = sealTeamChildWorkOrder(input());

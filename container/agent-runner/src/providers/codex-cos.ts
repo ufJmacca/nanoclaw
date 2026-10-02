@@ -7,7 +7,11 @@ import { createSubscriptionTurnClient } from './codex-turn-client.js';
 import { stopSubscriptionAppServer, subscriptionProcessEnvironment } from './codex-subscription-check.js';
 import { subscriptionConfig, subscriptionThreadParams } from './codex-subscription-policy.js';
 import { cosDynamicTools, createCosToolDispatch } from './codex-cos-tools.js';
-import { missionDynamicTools, createMissionToolDispatch } from './codex-mission-tools.js';
+import {
+  missionDynamicToolsForSchema,
+  createMissionToolDispatch,
+  type MissionResultSchema,
+} from './codex-mission-tools.js';
 import {
   initializeCodexAppServer,
   spawnCodexAppServer,
@@ -63,12 +67,20 @@ export class CosCodexProvider implements AgentProvider {
   private readonly specialist: boolean;
   private readonly prefix: string;
   constructor(
-    private readonly options: { model: string; proxyUrl: string; profile?: 'coordinator' | 'research' },
+    private readonly options: {
+      model: string;
+      proxyUrl: string;
+      profile?: 'coordinator' | 'research';
+      missionResultSchema?: MissionResultSchema;
+    },
     private readonly dependencies = runtime,
   ) {
     if (options.profile !== undefined && options.profile !== 'coordinator' && options.profile !== 'research')
       throw new Error('cos_provider_profile_unavailable');
     this.specialist = options.profile === 'research';
+    if (options.missionResultSchema !== undefined && !this.specialist)
+      throw new Error('cos_provider_profile_unavailable');
+    if (this.specialist) missionDynamicToolsForSchema(options.missionResultSchema ?? 'cos-research-result/v1');
     this.prefix = this.specialist ? MISSION_PREFIX : PREFIX;
     this.config = subscriptionConfig(options.model);
     this.environment = subscriptionProcessEnvironment(options.proxyUrl);
@@ -84,7 +96,9 @@ export class CosCodexProvider implements AgentProvider {
     let ended = false,
       wake: (() => void) | undefined,
       server: AppServer | undefined;
-    const dispatch = this.specialist ? createMissionToolDispatch() : createCosToolDispatch();
+    const dispatch = this.specialist
+      ? createMissionToolDispatch(undefined, this.options.missionResultSchema ?? 'cos-research-result/v1')
+      : createCosToolDispatch();
     const cancelled = () => cancellation.signal.aborted;
     const self = this;
     async function* events(): AsyncGenerator<ProviderEvent> {
@@ -144,7 +158,13 @@ export class CosCodexProvider implements AgentProvider {
             const params = subscriptionThreadParams(self.options.model, input.systemContext?.instructions ?? '');
             const resumed = await sendCodexRequest(current, threadId ? 'thread/resume' : 'thread/start', {
               ...params,
-              ...(threadId ? { threadId } : { dynamicTools: self.specialist ? missionDynamicTools : cosDynamicTools }),
+              ...(threadId
+                ? { threadId }
+                : {
+                    dynamicTools: self.specialist
+                      ? missionDynamicToolsForSchema(self.options.missionResultSchema ?? 'cos-research-result/v1')
+                      : cosDynamicTools,
+                  }),
             });
             const returnedId = (resumed.result as { thread?: { id?: string } } | undefined)?.thread?.id;
             if (
