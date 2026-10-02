@@ -9,6 +9,7 @@ import type { TeamInputArtifact } from '../contracts/team-inputs.js';
 import type { TeamStep } from '../contracts/team-protocol.js';
 import { validMissionResult } from '../contracts/mission-result.js';
 import { readVerifiedSubmission } from './submission-reader.js';
+import { validCosMissionIdentity } from '../../../cos-mission-boundary.js';
 import { queueMissionAttempt } from './attempt.js';
 import {
   defaultMissionWorkerCapacity,
@@ -34,14 +35,18 @@ export class TeamRunStore {
   ) {
     this.workerCapacity = missionWorkerCapacity(capacity);
   }
-  private async transaction(context: Context, operation: (client: PoolClient) => Promise<Result>): Promise<Result> {
+  private async transaction(
+    context: Context,
+    operation: (client: PoolClient) => Promise<Result>,
+    admission = true,
+  ): Promise<Result> {
     if (context.origin) return { status: 'denied' };
     try {
       return await this.database.run(async (client) => {
         await client.query('BEGIN');
         const scope = await client.query(
-          "SELECT id FROM cos.scopes WHERE id=$1 AND owner_id=$2 AND agent_group_id=$3 AND status='active' FOR SHARE",
-          [context.scopeId, context.ownerId, context.agentGroupId],
+          "SELECT id FROM cos.scopes WHERE id=$1 AND owner_id=$2 AND agent_group_id=$3 AND (NOT $4::boolean OR status='active') FOR SHARE",
+          [context.scopeId, context.ownerId, context.agentGroupId, admission],
         );
         const result = scope.rowCount ? await operation(client) : { status: 'denied' as const };
         await client.query('COMMIT');
@@ -464,5 +469,185 @@ export class TeamRunStore {
         );
       return { status: 'ok', team_id: teamId, state };
     });
+  }
+  /** Denial-only owner control: available after pause, expired consent or source revocation. */
+  private async retainedRoot(client: PoolClient, context: Context, teamId: string) {
+    const row = (
+      await client.query(
+        `SELECT r.*,w.body,w.digest FROM cos.mission_team_roots r
+      JOIN cos.mission_team_work_orders w ON w.scope_id=r.scope_id AND w.id=r.id
+      WHERE r.scope_id=$1 AND r.id=$2 FOR UPDATE OF r`,
+        [context.scopeId, teamId],
+      )
+    ).rows[0];
+    const origin = row?.body?.origin;
+    return row &&
+      digest(row.body) === row.digest &&
+      origin?.scopeId === context.scopeId &&
+      origin.ownerId === context.ownerId &&
+      origin.agentGroupId === context.agentGroupId &&
+      origin.sessionId === context.sessionId
+      ? row
+      : null;
+  }
+  async cancel(context: Context, teamId: string): Promise<Result> {
+    if (!id(teamId) || context.origin) return { status: 'denied' };
+    return this.transaction(
+      context,
+      async (client) => {
+        const root = await this.retainedRoot(client, context, teamId);
+        if (!root || ['completed', 'partial'].includes(root.state)) return { status: 'denied' };
+        const attempts = (
+          await client.query(
+            `SELECT a.* FROM cos.mission_team_steps s
+        JOIN cos.mission_attempts a ON a.scope_id=s.scope_id AND a.mission_id=s.child_mission_id
+        WHERE s.scope_id=$1 AND s.team_id=$2 ORDER BY a.mission_id,a.id`,
+            [context.scopeId, teamId],
+          )
+        ).rows;
+        const identities = attempts.map((a) => ({
+          scopeId: a.scope_id,
+          missionId: a.mission_id,
+          attemptId: a.id,
+          generation: a.generation,
+          agentGroupId: a.agent_group_id,
+          sessionId: a.session_id,
+          provider: 'codex' as const,
+        }));
+        if (!identities.every(validCosMissionIdentity)) return { status: 'denied' };
+        if (['cancelling', 'cancelled'].includes(root.state))
+          return { status: 'ok', team_id: teamId, state: root.state, identities };
+        await client.query(
+          `UPDATE cos.mission_attempts a SET state='cancelled',lease_owner=NULL,lease_until=NULL,
+        version=a.version+1,updated_at=clock_timestamp() FROM cos.mission_team_steps s
+        WHERE s.scope_id=$1 AND s.team_id=$2 AND a.scope_id=s.scope_id AND a.mission_id=s.child_mission_id AND a.state<>'cancelled'`,
+          [context.scopeId, teamId],
+        );
+        await client.query(
+          `UPDATE cos.missions m SET state=CASE WHEN EXISTS(SELECT 1 FROM cos.mission_attempts a
+        WHERE a.scope_id=m.scope_id AND a.mission_id=m.id AND a.allocation->>'stop_confirmed' IS DISTINCT FROM 'true') THEN 'cancelling' ELSE 'cancelled' END,
+        generation=m.generation+1,version=m.version+1,updated_at=clock_timestamp() FROM cos.mission_team_steps s
+        WHERE s.scope_id=$1 AND s.team_id=$2 AND m.scope_id=s.scope_id AND m.id=s.child_mission_id AND m.state NOT IN ('cancelling','cancelled')`,
+          [context.scopeId, teamId],
+        );
+        await client.query(
+          "UPDATE cos.mission_team_steps SET state='cancelled',version=version+1,updated_at=clock_timestamp() WHERE scope_id=$1 AND team_id=$2 AND state<>'cancelled'",
+          [context.scopeId, teamId],
+        );
+        const state = attempts.some((a) => a.allocation.stop_confirmed !== true) ? 'cancelling' : 'cancelled';
+        await client.query(
+          'UPDATE cos.mission_team_roots SET state=$3,generation=generation+1,version=version+1,provenance=provenance||$4::jsonb,updated_at=clock_timestamp() WHERE scope_id=$1 AND id=$2',
+          [
+            context.scopeId,
+            teamId,
+            state,
+            JSON.stringify({
+              cancelled_generation: root.generation,
+              cancel_owner_id: context.ownerId,
+              cancel_ingress_id: context.ingressId,
+            }),
+          ],
+        );
+        await client.query(
+          "UPDATE cos.proposals SET state=CASE WHEN state='pending' THEN 'rejected' ELSE 'conflict' END,updated_at=clock_timestamp() WHERE scope_id=$1 AND id=$2 AND state IN ('pending','approved')",
+          [context.scopeId, root.proposal_id],
+        );
+        await client.query(
+          "UPDATE cos.outbox SET delivered_at=clock_timestamp() WHERE scope_id=$1 AND payload->>'proposal_id'=$2 AND kind IN ('approval_preview','proposal_apply') AND delivered_at IS NULL",
+          [context.scopeId, root.proposal_id],
+        );
+        return { status: 'ok', team_id: teamId, state, identities };
+      },
+      false,
+    );
+  }
+  /** Called only after exact native stops have been independently recorded by MissionRunStore.confirmStopped. */
+  async confirmCancellation(context: Context, teamId: string): Promise<Result> {
+    if (!id(teamId) || context.origin) return { status: 'denied' };
+    return this.transaction(
+      context,
+      async (client) => {
+        const root = await this.retainedRoot(client, context, teamId);
+        if (!root || !['cancelling', 'cancelled'].includes(root.state)) return { status: 'denied' };
+        const pending = await client.query(
+          `SELECT 1 FROM cos.mission_team_steps s JOIN cos.mission_attempts a
+        ON a.scope_id=s.scope_id AND a.mission_id=s.child_mission_id WHERE s.scope_id=$1 AND s.team_id=$2
+        AND a.allocation->>'stop_confirmed' IS DISTINCT FROM 'true' LIMIT 1`,
+          [context.scopeId, teamId],
+        );
+        if (pending.rowCount) return { status: 'ok', team_id: teamId, state: 'cancelling' };
+        const reservations = (
+          await client.query(
+            `SELECT b.*,s.child_mission_id FROM cos.mission_team_reservations b
+        JOIN cos.mission_team_steps s ON s.scope_id=b.scope_id AND s.team_id=b.team_id AND s.step_id=b.step_id
+        WHERE b.scope_id=$1 AND b.team_id=$2 ORDER BY b.step_id FOR UPDATE OF b`,
+            [context.scopeId, teamId],
+          )
+        ).rows;
+        const prepared = [];
+        for (const reservation of reservations) {
+          if (reservation.state === 'cancelled') continue;
+          if (reservation.state !== 'reserved') return { status: 'denied' };
+          const counts = (
+            await client.query(
+              'SELECT kind,count(*)::int AS n FROM cos.mission_budget_reservations WHERE scope_id=$1 AND mission_id=$2 GROUP BY kind',
+              [context.scopeId, reservation.child_mission_id],
+            )
+          ).rows;
+          const usage = {
+            attempt: counts.find((c) => c.kind === 'attempt')?.n ?? 0,
+            model: counts.find((c) => c.kind === 'model')?.n ?? 0,
+            tool: counts.find((c) => c.kind === 'tool')?.n ?? 0,
+          };
+          const unused = {
+            attempt: reservation.max_attempts - usage.attempt,
+            model: reservation.max_turns - usage.model,
+            tool: reservation.max_tool_calls - usage.tool,
+          };
+          if (Object.values(unused).some((n) => !Number.isSafeInteger(n) || n < 0)) return { status: 'denied' };
+          prepared.push({ stepId: reservation.step_id, usage, unused });
+        }
+        for (const { stepId, usage, unused } of prepared) {
+          const body = {
+            generation: root.provenance.cancelled_generation,
+            usage,
+            unused,
+            confirmed_stopped: true,
+            provider_usage: usage.model ? 'uncertain' : 'no_model_calls',
+          };
+          await client.query(
+            "INSERT INTO cos.mission_team_budget_events(scope_id,team_id,step_id,id,kind,body) VALUES($1,$2,$3,$4,'released',$5) ON CONFLICT DO NOTHING",
+            [
+              context.scopeId,
+              teamId,
+              stepId,
+              'team-release-' + digest({ team: teamId, step: stepId }),
+              JSON.stringify(body),
+            ],
+          );
+          if (usage.model)
+            await client.query(
+              "INSERT INTO cos.mission_team_budget_events(scope_id,team_id,step_id,id,kind,body) VALUES($1,$2,$3,$4,'uncertain',$5) ON CONFLICT DO NOTHING",
+              [
+                context.scopeId,
+                teamId,
+                stepId,
+                'team-uncertain-' + digest({ team: teamId, step: stepId }),
+                JSON.stringify({ generation: body.generation, model_reservations: usage.model, billed_tokens: null }),
+              ],
+            );
+          await client.query(
+            "UPDATE cos.mission_team_reservations SET state='cancelled',usage=$4,updated_at=clock_timestamp() WHERE scope_id=$1 AND team_id=$2 AND step_id=$3 AND state='reserved'",
+            [context.scopeId, teamId, stepId, JSON.stringify(body)],
+          );
+        }
+        await client.query(
+          "UPDATE cos.mission_team_roots SET state='cancelled',version=version+1,updated_at=clock_timestamp() WHERE scope_id=$1 AND id=$2 AND state='cancelling'",
+          [context.scopeId, teamId],
+        );
+        return { status: 'ok', team_id: teamId, state: 'cancelled' };
+      },
+      false,
+    );
   }
 }

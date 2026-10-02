@@ -748,3 +748,110 @@ test('S06-T04 an exhausted required specialist blocks the root; no apparently co
   assert.equal(steps.find((s) => s.step_id === 'technical')!.provenance.failure_reason, 'worker_failed');
   assert.equal(steps.find((s) => s.step_id === 'synthesis')!.child_mission_id, null);
 });
+test('S06-T06/T03 cancellation fences the whole generation, retains credit through uncertain stops, and settles once while paused', async () => {
+  await admin.query(
+    "UPDATE cos.mission_attempts SET allocation=allocation||'{\"stop_confirmed\":true}'::jsonb,state='failed',lease_owner=NULL,lease_until=NULL WHERE scope_id=$1 AND state<>'submitted'",
+    [scope],
+  );
+  const p = await store.requestTeam(context, randomUUID(), await input()),
+    teamId = String(p.team_id);
+  await approve(p);
+  const teams = new TeamRunStore(store.database, store.teams, knowledge, { nativeCapacity: 3, maxWorkers: 2 });
+  const runs = new MissionRunStore(
+    store.database,
+    store.missions,
+    knowledge.artifacts,
+    {},
+    { nativeCapacity: 3, maxWorkers: 2 },
+  );
+  await teams.claimReady(context, teamId);
+  const children = (await rows('mission_team_steps')).filter(
+    (s) => s.team_id === teamId && s.child_mission_id !== null,
+  );
+  const identities: CosMissionIdentity[] = [],
+    leases: MissionDispatchLease[] = [];
+  for (const child of children) {
+    const attempt = (await rows('mission_attempts')).find((a) => a.mission_id === child.child_mission_id)!;
+    const claim = await runs.claimDispatch(context, attempt.id, 'fixture-host');
+    assert.equal(claim.status, 'ok');
+    identities.push(claim.identity as CosMissionIdentity);
+    leases.push(claim.lease as MissionDispatchLease);
+    await runs.markDispatchReady(identities.at(-1)!, leases.at(-1)!, digest('fixture native receipt'));
+    await runs.beginExecution(identities.at(-1)!, leases.at(-1)!);
+  }
+  assert.equal(
+    (await runs.reserve(identities[0], 'fixture-turn', 'model', digest('fixture physical reservation'))).status,
+    'ok',
+  );
+  assert.equal((await teams.cancel({ ...context, ownerId: 'foreign' }, teamId)).status, 'denied');
+  assert.equal(
+    (await teams.cancel({ ...context, origin: { kind: 'schedule', runId: 'foreign', generation: 1 } }, teamId)).status,
+    'denied',
+  );
+  await admin.query("UPDATE cos.scopes SET status='paused' WHERE id=$1", [scope]);
+  try {
+    const canceled = await Promise.all([teams.cancel(context, teamId), teams.cancel(context, teamId)]);
+    assert.deepEqual(
+      canceled.map((c) => ({ status: c.status, state: c.state })),
+      [
+        { status: 'ok', state: 'cancelling' },
+        { status: 'ok', state: 'cancelling' },
+      ],
+    );
+    const root = (await rows('mission_team_roots')).find((r) => r.id === teamId)!;
+    assert.equal(root.generation, 2);
+    assert.equal(
+      (await rows('mission_team_budget_events')).filter((e) => e.team_id === teamId && e.kind === 'released').length,
+      0,
+    );
+    for (const [i, identity] of identities.entries()) {
+      assert.equal((await runs.authorizeDispatch(identity, leases[i])).status, 'denied');
+      assert.equal((await runs.reserve(identity, 'late-call', 'model', digest('late'))).status, 'denied');
+      assert.equal((await runs.readContext(identity, leases[i], 'late-context')).status, 'denied');
+      assert.equal(
+        (
+          await runs.submitResult(identity, leases[i], randomUUID(), 'late-result', {
+            format: 'cos-research-result/v1',
+            outcome: 'blocked',
+            claims: [],
+            criteria: [{ id: 'tradeoff', claim_ids: [] }],
+            limitations: ['Canceled fixture.'],
+          })
+        ).status,
+        'denied',
+      );
+      assert.equal((await runs.retry(context, identity.attemptId)).status, 'denied');
+    }
+    assert.equal((await teams.confirmCancellation(context, teamId)).state, 'cancelling');
+    assert.equal((await runs.confirmStopped(identities[0])).status, 'ok');
+    assert.equal((await teams.confirmCancellation(context, teamId)).state, 'cancelling');
+    assert.equal(
+      (await rows('mission_team_reservations')).filter((r) => r.team_id === teamId && r.state !== 'reserved').length,
+      0,
+    );
+    assert.equal((await runs.confirmStopped(identities[1])).status, 'ok');
+    const done = await Promise.all([
+      teams.confirmCancellation(context, teamId),
+      teams.confirmCancellation(context, teamId),
+    ]);
+    assert.equal(
+      done.every((d) => d.status === 'ok' && d.state === 'cancelled'),
+      true,
+    );
+    const events = (await rows('mission_team_budget_events')).filter((e) => e.team_id === teamId);
+    assert.equal(events.filter((e) => e.kind === 'released').length, 4);
+    assert.equal(events.filter((e) => e.kind === 'uncertain').length, 1);
+    const released = events.find((e) => e.kind === 'released' && e.step_id === children[0].step_id)!;
+    assert.equal(released.body.usage.model, 1);
+    assert.equal(released.body.unused.model, 3);
+    const before = await rows('mission_team_budget_events');
+    assert.equal((await teams.cancel(context, teamId)).state, 'cancelled');
+    assert.deepEqual(await rows('mission_team_budget_events'), before);
+    assert.equal(
+      (await rows('mission_team_steps')).filter((s) => s.team_id === teamId && s.state !== 'cancelled').length,
+      0,
+    );
+  } finally {
+    await admin.query("UPDATE cos.scopes SET status='active' WHERE id=$1", [scope]);
+  }
+});
