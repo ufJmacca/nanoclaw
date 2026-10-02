@@ -3,7 +3,7 @@
 S05 adds bounded research over admitted notes: propose a work order, approve it,
 follow or cancel the specialist, and receive a reviewed answer. The complete
 fixture demonstration, final ARM64 image checks and Pi acceptance pass. The
-candidate awaits human review and merge. Keep real mission execution disabled
+S05 merge and its exact merged-source release are accepted. Keep real mission execution disabled
 until the required confined live-provider smoke test has passed under a current
 model allowance.
 
