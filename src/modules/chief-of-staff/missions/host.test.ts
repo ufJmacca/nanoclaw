@@ -116,6 +116,7 @@ function setup() {
     next_after: null,
   });
   const runs = {
+    retireUnallocated: vi.fn(async () => ({ status: 'ok', retired: [], next_after: null })),
     pendingDispatch: vi.fn(async () => pending()),
     inspectRecovery: vi.fn(async () => ({
       status: 'ok',
@@ -304,5 +305,17 @@ it('S05 private membership changes deny discovery without allocating a specialis
   await host.pump(f.binding);
   expect(f.runs.pendingDispatch).not.toHaveBeenCalled();
   expect(f.runs.claimDispatch).not.toHaveBeenCalled();
+  expect(f.options.wake).not.toHaveBeenCalled();
+});
+it('S05 host retires unallocated work while delegation is disabled without allocating or waking', async () => {
+  const f = setup(),
+    host = f.create();
+  f.state.admitted = false;
+  await host.pump(f.binding);
+  expect(f.runs.retireUnallocated).toHaveBeenCalledWith(
+    expect.objectContaining({ scopeId: f.binding.scopeId, ownerId: f.binding.ownerId, sessionId: f.binding.sessionId }),
+    null,
+  );
+  expect(f.runs.pendingDispatch).not.toHaveBeenCalled();
   expect(f.options.wake).not.toHaveBeenCalled();
 });

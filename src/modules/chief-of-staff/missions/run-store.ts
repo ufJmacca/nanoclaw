@@ -42,6 +42,7 @@ type AttemptRow = {
   session_id: string;
   state: string;
   lease_owner: string | null;
+  lease_until: Date | null;
   lease_current: boolean;
   allocation: Record<string, unknown>;
   provenance: Record<string, unknown>;
@@ -214,6 +215,59 @@ export class MissionRunStore {
       });
       if (digest(this.proposals.authority?.(context) ?? null) !== digest(authority)) return { status: 'denied' };
       return { status: 'ok', items, next_after: rows.length === 20 ? rows.at(-1)!.id : null };
+    });
+  }
+  /** Denial-only maintenance. No absence assertion is made for an attempt that has ever acquired a lease. */
+  async retireUnallocated(context: Context, after: string | null = null): Promise<Result> {
+    if (context.origin || (after !== null && !id(after))) return { status: 'denied' };
+    return this.transaction(context.scopeId, async (client) => {
+      const candidates = (
+        await client.query(
+          `SELECT a.* FROM cos.mission_attempts a
+         JOIN cos.missions m ON m.scope_id=a.scope_id AND m.id=a.mission_id AND m.generation=a.generation
+         JOIN cos.mission_work_orders w ON w.scope_id=m.scope_id AND w.id=m.id
+         JOIN cos.scopes s ON s.id=m.scope_id
+         WHERE a.scope_id=$1 AND s.owner_id=$2 AND s.agent_group_id=$3
+           AND w.body->'origin'->>'sessionId'=$4
+           AND m.state='queued' AND a.state='queued'
+           AND a.lease_owner IS NULL AND a.lease_until IS NULL AND a.allocation='{}'::jsonb
+           AND ($5::text IS NULL OR a.id>$5) ORDER BY a.id LIMIT 20`,
+          [context.scopeId, context.ownerId, context.agentGroupId, context.sessionId, after],
+        )
+      ).rows as AttemptRow[];
+      const retired: CosMissionIdentity[] = [];
+      for (const candidate of candidates) {
+        const identity = identityOf(candidate);
+        // Match dispatch's parent-then-attempt lock order, and repeat every state check under those locks.
+        const m = await this.mission(client, context.scopeId, candidate.mission_id),
+          a = await this.attempt(client, identity);
+        if (
+          !m ||
+          !same(a, identity) ||
+          !validCosMissionIdentity(identity) ||
+          !(await this.owner(client, context, m)) ||
+          m.state !== 'queued' ||
+          m.generation !== identity.generation ||
+          a!.state !== 'queued' ||
+          a!.lease_owner !== null ||
+          a!.lease_until !== null ||
+          Object.keys(a!.allocation).length !== 0 ||
+          (await this.current(client, m))
+        )
+          continue;
+        await client.query(
+          `UPDATE cos.mission_attempts SET state='failed',allocation='{"stop_confirmed":true}'::jsonb,
+           provenance=provenance||'{"failure_reason":"admission_denied","never_allocated":true}'::jsonb,
+           version=version+1,updated_at=clock_timestamp() WHERE scope_id=$1 AND id=$2`,
+          [context.scopeId, identity.attemptId],
+        );
+        await client.query(
+          "UPDATE cos.missions SET state='failed',version=version+1,updated_at=clock_timestamp() WHERE scope_id=$1 AND id=$2",
+          [context.scopeId, identity.missionId],
+        );
+        retired.push(identity);
+      }
+      return { status: 'ok', retired, next_after: candidates.length === 20 ? candidates.at(-1)!.id : null };
     });
   }
   async inspect(context: Context, missionId: string): Promise<Result> {

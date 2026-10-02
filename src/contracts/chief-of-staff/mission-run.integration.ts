@@ -192,6 +192,108 @@ const reserve = (
   kind: 'model' | 'tool' = 'model',
   payload = digest('fixture-call'),
 ) => store.missionRuns.reserve(i, id, kind, payload);
+test('S05-T06 retires only never-allocated invalid work while preserving valid and already-claimed attempts', async () => {
+  const valid = await mission(),
+    revoked = await mission(),
+    expired = await mission(),
+    claimed = await mission();
+  assert.equal(
+    (await store.missionRuns.claimDispatch(context, claimed.identity.attemptId, 'retirement-fixture')).status,
+    'ok',
+  );
+  await admin.query("UPDATE cos.sources SET status='revoked' WHERE scope_id=$1 AND id=ANY($2::text[])", [
+    scope,
+    [revoked.input.sources[0].source_id, claimed.input.sources[0].source_id],
+  ]);
+  const work = (await rows('mission_work_orders')).find((w) => w.id === expired.identity.missionId);
+  const body = { ...work.body, issuedAt: '2020-01-01T00:00:00.000Z', deadlineAt: '2020-01-01T00:10:00.000Z' };
+  await admin.query('UPDATE cos.mission_work_orders SET body=$3,digest=$4 WHERE scope_id=$1 AND id=$2', [
+    scope,
+    expired.identity.missionId,
+    JSON.stringify(body),
+    digest(body),
+  ]);
+  for (const patch of [{ ownerId: 'foreign' }, { agentGroupId: 'foreign' }, { sessionId: 'foreign' }]) {
+    const denied = await store.missionRuns.retireUnallocated({ ...context, ...patch });
+    assert.ok(denied.status === 'denied' || (denied.retired as any[]).length === 0);
+  }
+  const result = await store.missionRuns.retireUnallocated(context);
+  assert.equal(result.status, 'ok');
+  assert.deepEqual(
+    (result.retired as CosMissionIdentity[]).map((i) => i.attemptId).sort(),
+    [revoked.identity.attemptId, expired.identity.attemptId].sort(),
+  );
+  assert.doesNotMatch(JSON.stringify(result), /SOURCE_CANARY|sources|question|policyDigest/);
+  const attempts = await rows('mission_attempts');
+  for (const i of [revoked.identity, expired.identity]) {
+    const row = attempts.find((a) => a.id === i.attemptId);
+    assert.equal(row.state, 'failed');
+    assert.equal(row.allocation.stop_confirmed, true);
+  }
+  assert.equal(attempts.find((a) => a.id === valid.identity.attemptId).state, 'queued');
+  const allocated = attempts.find((a) => a.id === claimed.identity.attemptId);
+  assert.equal(allocated.state, 'allocating');
+  assert.equal(allocated.allocation.stop_confirmed, undefined);
+  assert.deepEqual((await store.missionRuns.retireUnallocated(context)).retired, []);
+  enabled = false;
+  try {
+    const disabled = await store.missionRuns.retireUnallocated(context);
+    assert.deepEqual(disabled.retired, [valid.identity]);
+  } finally {
+    enabled = true;
+  }
+  // Turning authority back on cannot revive an attempt already retired under the parent lock.
+  assert.equal((await store.missionRuns.claimDispatch(context, valid.identity.attemptId, 'late')).status, 'denied');
+});
+test(
+  'S05-T06 retirement rechecks a concurrent dispatch claim before asserting never-allocated absence',
+  { timeout: 10000 },
+  async () => {
+    const { identity, input } = await mission();
+    const pool = new pg.Pool(await fixtureDatabaseConfig()),
+      connection = await pool.connect(),
+      original = connection.query.bind(connection);
+    let enumerated!: () => void, proceed!: () => void;
+    const seen = new Promise<void>((resolve) => {
+      enumerated = resolve;
+    });
+    const resume = new Promise<void>((resolve) => {
+      proceed = resolve;
+    });
+    let paused = false;
+    connection.query = (async (...args: unknown[]) => {
+      const result = await (original as (...a: unknown[]) => Promise<unknown>)(...args);
+      if (!paused && typeof args[0] === 'string' && args[0].includes('SELECT a.* FROM cos.mission_attempts a')) {
+        paused = true;
+        enumerated();
+        await resume;
+      }
+      return result;
+    }) as typeof connection.query;
+    connection.release();
+    const runs = new MissionRunStore(new BoundedDatabase(pool), store.missions);
+    const retirement = runs.retireUnallocated(context);
+    try {
+      await seen;
+      assert.equal((await store.missionRuns.claimDispatch(context, identity.attemptId, 'concurrent')).status, 'ok');
+      await admin.query("UPDATE cos.sources SET status='revoked' WHERE scope_id=$1 AND id=$2", [
+        scope,
+        input.sources[0].source_id,
+      ]);
+      proceed();
+      const result = await retirement;
+      assert.equal(result.status, 'ok');
+      assert.ok(!(result.retired as CosMissionIdentity[]).some((i) => i.attemptId === identity.attemptId));
+      const row = (await rows('mission_attempts')).find((a) => a.id === identity.attemptId);
+      assert.equal(row.state, 'allocating');
+      assert.equal(row.allocation.stop_confirmed, undefined);
+    } finally {
+      proceed();
+      await retirement;
+      await pool.end();
+    }
+  },
+);
 test('S05-T05 queued dispatch discovery returns only approved current-owner metadata and preserves original ingress', async () => {
   const previous = authority.contextGeneration;
   authority.contextGeneration = randomUUID();
@@ -231,7 +333,7 @@ test('S05-T05 queued dispatch discovery returns only approved current-owner meta
     enabled = true;
   }
 });
-test('S05-T05 queued discovery is bounded and its cursor reaches later work without replaying earlier attempts', async () => {
+test('S05-T05/T06 queued discovery and retirement are bounded and their cursors reach later work', async () => {
   const previous = authority.contextGeneration;
   authority.contextGeneration = randomUUID();
   try {
@@ -253,8 +355,22 @@ test('S05-T05 queued discovery is bounded and its cursor reaches later work with
       21,
     );
     assert.equal((await store.missionRuns.pendingDispatch(context, '../foreign')).status, 'denied');
+    enabled = false;
+    const retiredFirst = await store.missionRuns.retireUnallocated(context);
+    assert.equal((retiredFirst.retired as any[]).length, 20);
+    const retiredSecond = await store.missionRuns.retireUnallocated(context, String(retiredFirst.next_after));
+    assert.equal((retiredSecond.retired as any[]).length, 1);
+    assert.equal(retiredSecond.next_after, null);
+    assert.deepEqual(
+      [...(retiredFirst.retired as CosMissionIdentity[]), ...(retiredSecond.retired as CosMissionIdentity[])]
+        .map((i) => i.attemptId)
+        .sort(),
+      [...(first.items as any[]), ...(second.items as any[])].map((i) => i.identity.attemptId).sort(),
+    );
+    assert.equal((await store.missionRuns.retireUnallocated(context, '../foreign')).status, 'denied');
   } finally {
     authority.contextGeneration = previous;
+    enabled = true;
   }
 });
 test('S05-T06 recovery inspects exact attempt metadata after authority loss without disclosing context or granting execution', async () => {

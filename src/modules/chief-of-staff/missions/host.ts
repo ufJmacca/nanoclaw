@@ -33,6 +33,7 @@ export class MissionHost implements SpecialistLifecycle {
   private readonly launcher: MissionLauncher & { shutdown(): Promise<void> };
   private readonly settled = new Set<string>();
   private readonly cursors = new Map<string, string | null>();
+  private readonly retirementCursors = new Map<string, string | null>();
   private closed = false;
   private inFlight?: Promise<void>;
   private closing?: Promise<void>;
@@ -159,6 +160,22 @@ export class MissionHost implements SpecialistLifecycle {
         sessionId: binding.sessionId,
         ingressId: 'host-mission-dispatch',
       };
+      this.options.assertHostAuthority();
+      if (!this.options.admitted()) return;
+      const retirement = await this.options.runs.retireUnallocated(
+        context,
+        this.retirementCursors.get(binding.scopeId) ?? null,
+      );
+      if (this.closed) return;
+      if (retirement.status === 'denied') {
+        this.retirementCursors.delete(binding.scopeId);
+        return;
+      }
+      if (retirement.status !== 'ok') throw Error('mission_retirement_unavailable');
+      this.retirementCursors.set(
+        binding.scopeId,
+        typeof retirement.next_after === 'string' ? retirement.next_after : null,
+      );
       if (!(await this.admitted(context))) return;
       const pending = await this.options.runs.pendingDispatch(context, this.cursors.get(binding.scopeId) ?? null);
       if (this.closed) return;
