@@ -36,6 +36,7 @@ after(async () => {
       'mission_work_orders',
       'mission_context_manifests',
       'mission_template_versions',
+      'artifacts',
     ])
       if ((await admin.query('SELECT to_regclass($1) AS present', ['cos.' + table])).rows[0].present)
         await admin.query(`DELETE FROM cos.${table} WHERE scope_id=$1`, [scope]);
@@ -43,6 +44,26 @@ after(async () => {
   }
   await runtime?.end();
   await admin?.end();
+});
+test('S05-T08 result artifacts remain distinct from publishable coordinator answers and support quarantine', async () => {
+  const artifact = 'mission-result-' + randomUUID();
+  await runtime.query(
+    "INSERT INTO cos.artifacts(id,scope_id,kind,digest,byte_length,lifecycle,provenance) VALUES($1,$2,'mission_result',$3,2,'published','{}')",
+    [artifact, scope, 'f'.repeat(64)],
+  );
+  assert.equal(
+    (await runtime.query("SELECT id FROM cos.artifacts WHERE scope_id=$1 AND kind IN ('answer','summary')", [scope]))
+      .rowCount,
+    0,
+  );
+  await runtime.query("UPDATE cos.artifacts SET lifecycle='quarantined' WHERE scope_id=$1 AND id=$2", [
+    scope,
+    artifact,
+  ]);
+  assert.equal(
+    (await runtime.query('SELECT lifecycle FROM cos.artifacts WHERE id=$1', [artifact])).rows[0].lifecycle,
+    'quarantined',
+  );
 });
 test('S05-T03/T09 runtime cannot rewrite reviewed templates, approved orders, usage or results', async () => {
   for (const table of ['mission_template_versions', ...immutable, ...mutable])
