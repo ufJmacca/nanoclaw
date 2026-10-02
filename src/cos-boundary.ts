@@ -5,7 +5,7 @@ import type { Session } from './types.js';
 import type { InboundEvent } from './channels/adapter.js';
 import type { Binding } from './modules/chief-of-staff/bridge/identity.js';
 import { hasCosMissionBoundary } from './cos-mission-boundary.js';
-import { missionExecutionReady, prepareMissionLaunch } from './cos-mission-execution.js';
+import { missionExecutionReady, prepareMissionLaunch, permitMissionRpc } from './cos-mission-execution.js';
 
 export type CosBinding = Binding & { sessionId: string };
 export function hasCosStateBoundary(agentGroupId: string, sessionId: string): boolean {
@@ -109,6 +109,7 @@ export function setCosBoundaryHooks(value: Hooks | null): void {
   hooks = value;
 }
 export async function permitCosOutbound(session: Session, message: Outbound): Promise<boolean> {
+  if (hasCosMissionBoundary(session.agent_group_id, session.id, getDb())) return permitMissionRpc(session, message);
   const boundary = cosBoundary(session);
   if (!boundary.restricted) return true;
   if (!boundary.binding || boundary.paused || !hooks) return false;

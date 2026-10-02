@@ -99,3 +99,64 @@ it('S05-T03 a stale passed session cannot override the actual native identity or
   expect(permitCosExecution(session)).toBe(false);
   await expect(prepareCosLaunch(session)).rejects.toThrow('restricted_launch_denied');
 });
+const rpcMessage = () => ({
+  kind: 'system',
+  channel_type: null,
+  platform_id: null,
+  thread_id: null,
+  content: JSON.stringify({
+    action: 'cos_mission_rpc',
+    delivery_id: '11111111-1111-4111-8111-111111111111',
+    request: {
+      protocol: 'cos-mission-rpc/v1',
+      request_id: '22222222-2222-4222-8222-222222222222',
+      method: 'cos_mission_context_get',
+      params: {},
+    },
+  }),
+});
+it('S05-T03/T04 admits only valid specialist RPC through a dedicated current grant', async () => {
+  const rpc = vi.fn(async () => true);
+  expect(await permitCosOutbound(session, rpcMessage())).toBe(false);
+  remove = installCosMissionExecutionHooks({
+    ready: () => true,
+    launch: async () => ({ containerName: 'child', args: [] }),
+    rpc,
+  });
+  expect(await permitCosOutbound(session, rpcMessage())).toBe(true);
+  expect(rpc).toHaveBeenCalledWith(identity, session);
+  for (const patch of [
+    { kind: 'chat' },
+    { channel_type: 'mattermost' },
+    { platform_id: 'private' },
+    { thread_id: 'thread' },
+    { content: 'broken' },
+    { content: JSON.stringify({ ...JSON.parse(rpcMessage().content), action: 'cos_rpc' }) },
+    { content: ' '.repeat(25000) + rpcMessage().content },
+  ])
+    expect(await permitCosOutbound(session, { ...rpcMessage(), ...patch })).toBe(false);
+  expect(rpc).toHaveBeenCalledTimes(1);
+});
+it.each(['stop', 'closed', 'replaced', 'denied', 'unavailable'])(
+  'S05-T07/T10 rechecks %s before allowing specialist RPC',
+  async (change) => {
+    let ready = true;
+    const launch = async () => ({ containerName: 'child', args: [] });
+    remove = installCosMissionExecutionHooks({
+      ready: () => ready,
+      launch,
+      rpc: async () => {
+        if (change === 'stop') stopCosMissionAttempt(identity, 'authority_lost', getDb());
+        if (change === 'closed') updateSession(session.id, { status: 'closed' });
+        if (change === 'replaced') {
+          remove();
+          remove = installCosMissionExecutionHooks({ ready: () => true, launch, rpc: async () => true });
+        }
+        if (change === 'denied') ready = false;
+        if (change === 'unavailable') throw new Error('database unavailable');
+        return true;
+      },
+    });
+    expect(await permitCosOutbound(session, rpcMessage())).toBe(false);
+  },
+);

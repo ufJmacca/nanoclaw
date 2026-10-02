@@ -4,6 +4,7 @@ import {
   MISSION_WORKER_PROTOCOL,
   validMissionWorkerRequest,
   validMissionWorkerResponse,
+  validMissionRpcEnvelope,
 } from './mission-worker-protocol.js';
 import { validRequest, validResponse } from './protocol.js';
 
@@ -13,6 +14,17 @@ const request = {
   method: 'cos_mission_context_get',
   params: {},
 };
+it('accepts only the exact unrouted specialist delivery envelope', () => {
+  const envelope = { action: 'cos_mission_rpc', request, delivery_id: request.request_id };
+  expect(validMissionRpcEnvelope(envelope)).toBe(true);
+  for (const patch of [
+    { action: 'cos_rpc' },
+    { delivery_id: '------------------------------------' },
+    { session_id: 'sibling' },
+    { request: { ...request, params: { source_id: 'sibling' } } },
+  ])
+    expect(validMissionRpcEnvelope({ ...envelope, ...patch })).toBe(false);
+});
 it('S05-T03 specialist wire accepts only its assigned context and result submission', () => {
   expect(MISSION_WORKER_PROTOCOL).toBe(request.protocol);
   expect(validMissionWorkerRequest(request)).toBe(true);

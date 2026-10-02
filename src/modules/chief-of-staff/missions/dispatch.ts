@@ -49,6 +49,7 @@ type Entry = {
   phase: 'allocating' | 'ready' | 'running';
   expires: number;
 };
+export type MissionWorkerGrant = { identity: CosMissionIdentity; lease: MissionDispatchLease };
 /** Asynchronous host dispatcher: never waits for a worker's result and never sends through native A2A routes. */
 export class MissionDispatch {
   private readonly entries = new Map<string, Entry>();
@@ -62,6 +63,7 @@ export class MissionDispatch {
     this.remove = installCosMissionExecutionHooks({
       ready: (identity) => this.ready(identity),
       launch: (identity, session) => this.launch(identity, session),
+      rpc: async (_identity, session) => (await this.workerGrant(session)) !== null,
     });
     const interval = dependencies.pollIntervalMs ?? 5000;
     if (interval > 0) {
@@ -108,6 +110,18 @@ export class MissionDispatch {
     } catch {
       return false;
     }
+  }
+  /** The caller cannot choose a scope or attempt: both come from its permanent native identity. */
+  async workerGrant(session: Session): Promise<MissionWorkerGrant | null> {
+    const boundary = missionBoundary(session, getDb());
+    if (!boundary.restricted || !boundary.identity) return null;
+    const entry = this.entries.get(boundary.identity.attemptId);
+    if (!entry || entry.phase !== 'running' || digest(entry.input.identity) !== digest(boundary.identity)) return null;
+    if (!(await this.verify(entry))) {
+      await this.fence(entry);
+      return null;
+    }
+    return { identity: { ...entry.input.identity }, lease: { ...entry.lease } };
   }
   private async wake(session: Session) {
     return this.dependencies.wake

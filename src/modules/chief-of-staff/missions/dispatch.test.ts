@@ -120,6 +120,28 @@ function setup() {
   };
   return { value, runs, launcher, wake, stop, stopped, admitted, local, dispatcher, context };
 }
+it('S05-T03/T10 binds worker calls to the running native child and fences database uncertainty', async () => {
+  const f = setup();
+  try {
+    f.wake.mockResolvedValueOnce(false);
+    await f.dispatcher.dispatch(f.context, f.value.identity.attemptId);
+    const session = getSession(f.value.identity.sessionId)!;
+    expect(await f.dispatcher.workerGrant(session)).toBeNull();
+    await prepareCosLaunch(session);
+    expect(await f.dispatcher.workerGrant(session)).toEqual({
+      identity: f.value.identity,
+      lease: { owner: 'host', fence: 1 },
+    });
+    expect(await f.dispatcher.workerGrant({ ...session, agent_provider: 'claude' })).toBeNull();
+    f.runs.authorizeDispatch.mockRejectedValueOnce(new Error('offline'));
+    expect(await f.dispatcher.workerGrant(session)).toBeNull();
+    expect(f.stop).toHaveBeenCalledWith(f.value.identity, 'mission_authority_lost');
+    expect(await f.dispatcher.workerGrant(session)).toBeNull();
+    expect(permitCosExecution(session)).toBe(false);
+  } finally {
+    await f.dispatcher.close();
+  }
+});
 it('S05-T05 native false wake stays deferred with its original input and no execution transition', async () => {
   const f = setup();
   f.wake.mockResolvedValue(false);

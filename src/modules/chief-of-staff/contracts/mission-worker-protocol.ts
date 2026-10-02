@@ -16,6 +16,11 @@ export type MissionWorkerResponse = {
   status: 'ok' | 'pending' | 'denied' | 'conflict' | 'unavailable';
   result?: unknown;
 };
+export type MissionRpcEnvelope = {
+  action: 'cos_mission_rpc';
+  request: MissionWorkerRequest;
+  delivery_id: string;
+};
 const object = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
 const uuid = (v: unknown): v is string =>
   typeof v === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
@@ -43,6 +48,16 @@ export function validMissionWorkerRequest(v: unknown): v is MissionWorkerRequest
     Object.keys(v.params).length === 1 &&
     Object.hasOwn(v.params, 'result') &&
     validMissionResult(v.params.result)
+  );
+}
+export function validMissionRpcEnvelope(v: unknown): v is MissionRpcEnvelope {
+  return (
+    object(v) &&
+    Object.keys(v).length === 3 &&
+    Object.keys(v).every((key) => ['action', 'request', 'delivery_id'].includes(key)) &&
+    v.action === 'cos_mission_rpc' &&
+    uuid(v.delivery_id) &&
+    validMissionWorkerRequest(v.request)
   );
 }
 export function validMissionWorkerResponse(v: unknown, requestId: string): v is MissionWorkerResponse {
