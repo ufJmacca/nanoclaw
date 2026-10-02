@@ -10,6 +10,13 @@ import { recordMissionExposure } from './exposure.js';
 import { KnowledgeArtifactsBusy, type KnowledgeArtifacts } from '../knowledge/artifacts.js';
 import { validMissionResult } from '../contracts/mission-result.js';
 import { checkResearchResult } from './result-checks.js';
+import {
+  defaultMissionWorkerCapacity,
+  missionWorkerCapacity,
+  lockMissionWorkerAdmission,
+  missionWorkerOccupancy,
+  type MissionWorkerCapacity,
+} from './worker-admission.js';
 
 export type MissionDispatchLease = { owner: string; fence: number };
 const validLease = (v: MissionDispatchLease) =>
@@ -65,12 +72,16 @@ const activeAttempts = ['queued', 'allocating', 'ready', 'running'];
  * Only future allocation code may change queued -> allocating -> ready -> running.
  * completed/partial/blocked/cancelled cannot retry; failed can retry within the original approval and limits. */
 export class MissionRunStore {
+  readonly workerCapacity: number;
   constructor(
     readonly database: BoundedDatabase,
     readonly proposals: MissionProposalStore,
     readonly artifacts?: KnowledgeArtifacts,
     readonly resultHooks: { afterPublication?(): Promise<void> } = {},
-  ) {}
+    capacity: MissionWorkerCapacity = defaultMissionWorkerCapacity(),
+  ) {
+    this.workerCapacity = missionWorkerCapacity(capacity);
+  }
 
   private async transaction(scopeId: string, operation: (client: PoolClient) => Promise<Result>): Promise<Result> {
     try {
@@ -591,6 +602,7 @@ export class MissionRunStore {
   async claimDispatch(context: Context, attemptId: string, owner: string): Promise<Result> {
     if (!id(attemptId) || !id(owner) || context.origin) return { status: 'denied' };
     return this.transaction(context.scopeId, async (client) => {
+      await lockMissionWorkerAdmission(client);
       const lookup = (
         await client.query('SELECT * FROM cos.mission_attempts WHERE scope_id=$1 AND id=$2', [
           context.scopeId,
@@ -612,6 +624,14 @@ export class MissionRunStore {
       )
         return { status: 'denied' };
       if (a.lease_current && a.lease_owner !== owner) return { status: 'pending' };
+      const occupancy = await missionWorkerOccupancy(client, attemptId);
+      // S05 keeps its existing native queue policy when no team reserves capacity. With teams present,
+      // all workers share the same bound and a coordinator slot. Replays renew their existing slot.
+      if (
+        (m.body.format === 'cos-team-child-work-order/v1' || occupancy.teams > 0) &&
+        occupancy.active >= this.workerCapacity
+      )
+        return { status: 'pending' };
       const origin = m.body.origin;
       const order = await this.proposals.captureChange(
         client,

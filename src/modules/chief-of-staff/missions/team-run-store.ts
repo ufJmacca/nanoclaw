@@ -1,5 +1,4 @@
 import type { PoolClient } from 'pg';
-import { MAX_CONCURRENT_CONTAINERS } from '../../../config.js';
 import { BoundedDatabase, DatabaseUnavailable } from '../store/client.js';
 import { digest, type Context, type Result } from '../domain/contracts.js';
 import type { MissionChange } from '../contracts/protocol.js';
@@ -7,6 +6,13 @@ import type { KnowledgeStore } from '../knowledge/store.js';
 import type { TeamProposalStore } from './team-proposal-store.js';
 import { sealTeamChildWorkOrder, validateTeamChildWorkOrder } from './team-work-order.js';
 import { queueMissionAttempt } from './attempt.js';
+import {
+  defaultMissionWorkerCapacity,
+  missionWorkerCapacity,
+  lockMissionWorkerAdmission,
+  missionWorkerOccupancy,
+  type MissionWorkerCapacity,
+} from './worker-admission.js';
 
 const id = (v: unknown): v is string => typeof v === 'string' && /^[a-zA-Z0-9_-]{1,100}$/.test(v);
 /** One host pool, parent-before-child locking and bounded credit escrow. No model/container wait occurs here. */
@@ -16,21 +22,9 @@ export class TeamRunStore {
     readonly database: BoundedDatabase,
     readonly proposals: TeamProposalStore,
     readonly knowledge?: KnowledgeStore,
-    capacity: { nativeCapacity: number; maxWorkers: number } = {
-      nativeCapacity: MAX_CONCURRENT_CONTAINERS,
-      maxWorkers: 2,
-    },
+    capacity: MissionWorkerCapacity = defaultMissionWorkerCapacity(),
   ) {
-    if (
-      !Number.isSafeInteger(capacity.nativeCapacity) ||
-      capacity.nativeCapacity < 1 ||
-      capacity.nativeCapacity > 64 ||
-      !Number.isSafeInteger(capacity.maxWorkers) ||
-      capacity.maxWorkers < 1 ||
-      capacity.maxWorkers > 2
-    )
-      throw Error('team_capacity_invalid');
-    this.workerCapacity = Math.min(capacity.maxWorkers, capacity.nativeCapacity - 1);
+    this.workerCapacity = missionWorkerCapacity(capacity);
   }
   private async transaction(context: Context, operation: (client: PoolClient) => Promise<Result>): Promise<Result> {
     if (context.origin) return { status: 'denied' };
@@ -81,14 +75,10 @@ export class TeamRunStore {
     if (!id(teamId)) return { status: 'denied' };
     return this.transaction(context, async (client) => {
       // Serialise global team credit-to-native-slot admission before any root/child lock.
-      await client.query('SELECT pg_advisory_xact_lock(73101004)');
+      await lockMissionWorkerAdmission(client);
       const current = await this.root(client, context, teamId);
       if (!current) return { status: 'denied' };
-      const active = (
-        await client.query(`SELECT count(DISTINCT a.id)::int AS n FROM cos.mission_team_steps s
-        JOIN cos.mission_attempts a ON a.scope_id=s.scope_id AND a.mission_id=s.child_mission_id
-        WHERE a.allocation->>'stop_confirmed' IS DISTINCT FROM 'true'`)
-      ).rows[0].n;
+      const { active } = await missionWorkerOccupancy(client);
       const rootActive = (
         await client.query(
           `SELECT count(DISTINCT a.id)::int AS n FROM cos.mission_team_steps s

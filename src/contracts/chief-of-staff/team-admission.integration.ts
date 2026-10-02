@@ -17,6 +17,8 @@ import { MISSION_DEFAULT_LIMITS } from '../../modules/chief-of-staff/contracts/m
 import { digest } from '../../modules/chief-of-staff/domain/contracts.js';
 import { TeamRunStore } from '../../modules/chief-of-staff/missions/team-run-store.js';
 import type { TeamChildWorkOrder } from '../../modules/chief-of-staff/missions/team-work-order.js';
+import { RESEARCH_TEMPLATE } from '../../modules/chief-of-staff/missions/work-order.js';
+import { MissionRunStore } from '../../modules/chief-of-staff/missions/run-store.js';
 
 const scope = 'team-admission-' + randomUUID();
 const context = { scopeId: scope, ownerId: 'owner', agentGroupId: scope, sessionId: scope, ingressId: randomUUID() };
@@ -30,6 +32,7 @@ const authority = {
     policyDigest: digest('fixture consent'),
   },
   templateBundleDigest: digest(TEAM_TEMPLATES),
+  templateDigest: digest(RESEARCH_TEMPLATE),
   teamPolicyDigest: digest('fixture team admission revision one'),
 };
 let enabled = true,
@@ -386,7 +389,14 @@ test('S06-T02/T03/PG01 concurrent ready admission creates stable isolated childr
   assert.equal(discovery.status, 'ok');
   assert.equal((discovery.items as unknown[]).length, 2);
   for (const attempt of attempts) {
-    const claim = await store.missionRuns.claimDispatch(context, attempt.id, 'fixture-host');
+    const dispatch = new MissionRunStore(
+      store.database,
+      store.missions,
+      knowledge.artifacts,
+      {},
+      { nativeCapacity: 3, maxWorkers: 2 },
+    );
+    const claim = await dispatch.claimDispatch(context, attempt.id, 'fixture-host');
     assert.equal(claim.status, 'ok');
     assert.equal((claim.order as TeamChildWorkOrder).body.team.teamId, p.team_id);
     assert.equal((claim.order as TeamChildWorkOrder).context.artifacts.length, 0);
@@ -410,4 +420,68 @@ test('S06-T02/PG02 shared host admission preserves coordinator capacity across m
   assert.equal((await rows('mission_attempts')).length, 2);
   const disabled = new TeamRunStore(store.database, store.teams, knowledge, { nativeCapacity: 1, maxWorkers: 2 });
   assert.equal((await disabled.claimReady(context, String(p.team_id))).capacity_available, 0);
+});
+async function singleAttempt() {
+  if (
+    !(
+      await admin.query('SELECT 1 FROM cos.mission_template_versions WHERE scope_id=$1 AND id=$2', [
+        scope,
+        RESEARCH_TEMPLATE.id,
+      ])
+    ).rowCount
+  )
+    await admin.query(
+      'INSERT INTO cos.mission_template_versions(scope_id,id,version,body,digest,reviewed_by,provenance) VALUES($1,$2,1,$3,$4,$5,$6)',
+      [
+        scope,
+        RESEARCH_TEMPLATE.id,
+        JSON.stringify(RESEARCH_TEMPLATE),
+        digest(RESEARCH_TEMPLATE),
+        context.ownerId,
+        '{}',
+      ],
+    );
+  const { steps: _steps, partial_policy: _partial, ...request } = await input();
+  const p = await store.requestMission(context, randomUUID(), { ...request, limits: { ...MISSION_DEFAULT_LIMITS } });
+  assert.equal(p.status, 'ok');
+  await approve(p);
+  return (await rows('mission_attempts')).find((a) => a.mission_id === p.mission_id)!;
+}
+test('S06-T02/PG02 ordinary single-worker dispatch cannot consume capacity reserved by teams', async () => {
+  const attempt = await singleAttempt();
+  const dispatch = new MissionRunStore(
+    store.database,
+    store.missions,
+    knowledge.artifacts,
+    {},
+    { nativeCapacity: 3, maxWorkers: 2 },
+  );
+  assert.equal((await dispatch.claimDispatch(context, attempt.id, 'fixture-host')).status, 'pending');
+  assert.equal((await rows('mission_attempts')).find((a) => a.id === attempt.id)!.state, 'queued');
+  // No native workers were launched by this admission fixture; confirm the exact scoped simulated attempts absent.
+  await admin.query(
+    "UPDATE cos.mission_attempts SET allocation=allocation||'{\"stop_confirmed\":true}'::jsonb,state='failed',lease_owner=NULL,lease_until=NULL WHERE scope_id=$1",
+    [scope],
+  );
+});
+test('S06-T02/PG02 already admitted single workers count against team admission; a queued backlog does not', async () => {
+  const first = await singleAttempt(),
+    second = await singleAttempt();
+  const dispatch = new MissionRunStore(
+    store.database,
+    store.missions,
+    knowledge.artifacts,
+    {},
+    { nativeCapacity: 3, maxWorkers: 2 },
+  );
+  assert.equal((await dispatch.claimDispatch(context, first.id, 'fixture-host')).status, 'ok');
+  const p = await store.requestTeam(context, randomUUID(), await input());
+  await approve(p);
+  const teams = new TeamRunStore(store.database, store.teams, knowledge, { nativeCapacity: 3, maxWorkers: 2 });
+  const result = await teams.claimReady(context, String(p.team_id));
+  assert.equal(result.status, 'ok');
+  assert.equal((result.created as string[]).length, 1);
+  assert.equal((await dispatch.claimDispatch(context, second.id, 'fixture-host')).status, 'pending');
+  assert.deepEqual((await teams.claimReady(context, String(p.team_id))).created, []);
+  assert.equal((await dispatch.claimDispatch(context, first.id, 'fixture-host')).status, 'ok');
 });
