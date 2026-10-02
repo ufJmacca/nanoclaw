@@ -493,4 +493,16 @@ export class MissionRunStore {
       return { status: 'ok' };
     });
   }
+  /** Keeps an existing allocation/execution lease alive; an expired fence can never be revived. */
+  async renewDispatch(identity: CosMissionIdentity, lease: MissionDispatchLease): Promise<Result> {
+    if (!validCosMissionIdentity(identity) || !validLease(lease)) return { status: 'denied' };
+    return this.transaction(identity.scopeId, async (client) => {
+      if (!(await this.dispatchCurrent(client, identity, lease))) return { status: 'denied' };
+      await client.query(
+        "UPDATE cos.mission_attempts SET lease_until=clock_timestamp()+interval '30 seconds',updated_at=clock_timestamp() WHERE scope_id=$1 AND id=$2",
+        [identity.scopeId, identity.attemptId],
+      );
+      return { status: 'ok' };
+    });
+  }
 }

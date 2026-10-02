@@ -339,11 +339,13 @@ test('S05-T05/T06 allocation leases preserve dispatch identity and fence expired
   assert.match(JSON.stringify(first.order), /SOURCE_CANARY/);
   assert.equal((await store.missionRuns.claimDispatch(context, identity.attemptId, 'dispatcher-b')).status, 'pending');
   assert.equal((await store.missionRuns.authorizeDispatch(identity, first.lease as any)).status, 'ok');
+  assert.equal((await store.missionRuns.renewDispatch(identity, first.lease as any)).status, 'ok');
   await admin.query(
     "UPDATE cos.mission_attempts SET lease_until=clock_timestamp()-interval '1 second' WHERE scope_id=$1 AND id=$2",
     [scope, identity.attemptId],
   );
   assert.equal((await store.missionRuns.authorizeDispatch(identity, first.lease as any)).status, 'denied');
+  assert.equal((await store.missionRuns.renewDispatch(identity, first.lease as any)).status, 'denied');
   const second = await store.missionRuns.claimDispatch(context, identity.attemptId, 'dispatcher-b');
   assert.equal(second.status, 'ok');
   assert.deepEqual(second.identity, identity);
