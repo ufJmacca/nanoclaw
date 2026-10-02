@@ -1,6 +1,7 @@
 import type { PoolClient } from 'pg';
 import { BoundedDatabase, DatabaseUnavailable } from '../store/client.js';
 import { digest, type Context, type Result } from '../domain/contracts.js';
+import { KnowledgeArtifactsBusy } from '../knowledge/artifacts.js';
 import type { MissionChange } from '../contracts/protocol.js';
 import type { KnowledgeStore } from '../knowledge/store.js';
 import type { TeamProposalStore } from './team-proposal-store.js';
@@ -14,6 +15,7 @@ import { queueMissionAttempt } from './attempt.js';
 import { teamStepUsage } from './team-budget.js';
 import { validTeamReview } from '../contracts/team-review.js';
 import { validTeamRework, type TeamRework } from '../contracts/team-rework.js';
+import { buildTeamReviewSnapshot, type TeamReviewSnapshot } from './team-snapshot.js';
 import {
   defaultMissionWorkerCapacity,
   missionWorkerCapacity,
@@ -75,7 +77,11 @@ export class TeamRunStore {
       row.proposal_state !== 'applied' ||
       row.applied_record_id !== teamId ||
       row.generation < 1 ||
-      !['queued', 'running', 'awaiting_review'].includes(row.state)
+      !(
+        execution
+          ? ['queued', 'running', 'awaiting_review']
+          : ['queued', 'running', 'awaiting_review', 'completed', 'partial', 'blocked', 'failed']
+      ).includes(row.state)
     )
       return null;
     const order = await this.proposals.captureChange(
@@ -415,7 +421,7 @@ export class TeamRunStore {
       !row ||
       !step ||
       row.root_generation !== current.row.generation ||
-      row.reservation_state !== 'reserved' ||
+      !['reserved', 'settled'].includes(row.reservation_state) ||
       digest(step) !== digest(row.definition) ||
       digest(row.body) !== row.digest ||
       row.max_attempts !== step.limits.max_attempts + step.max_rework_count ||
@@ -693,6 +699,67 @@ export class TeamRunStore {
         [context.scopeId, teamId],
       );
       return { status: 'ok', team_id: teamId, rework_id: reworkId, revised_steps: revisedSteps };
+    });
+  }
+  /** Trusted coordinator review orchestration. The artifact lock precedes the root transaction. */
+  async withReviewSnapshot(
+    context: Context,
+    teamId: string,
+    operation: (client: PoolClient, current: TeamReviewSnapshot) => Promise<Result>,
+  ): Promise<Result> {
+    if (!id(teamId) || context.origin || !this.knowledge) return { status: 'denied' };
+    try {
+      return await this.knowledge.artifacts.exclusive(() =>
+        this.transaction(context, async (client) => {
+          const current = await this.root(client, context, teamId, false);
+          if (!current) return { status: 'denied' };
+          if (['queued', 'running'].includes(current.row.state)) return { status: 'pending' };
+          const snapshot = await buildTeamReviewSnapshot(client, context, current, this.knowledge!, (missionId) =>
+            this.retainedChildOrder(client, context, current, missionId),
+          );
+          return snapshot ? operation(client, snapshot) : { status: 'denied' };
+        }),
+      );
+    } catch (error) {
+      if (error instanceof KnowledgeArtifactsBusy) return { status: 'unavailable' };
+      throw error;
+    }
+  }
+  /** Host evidence access only; this neither claims a model turn nor records coordinator completion. */
+  async reviewSnapshot(context: Context, teamId: string): Promise<Result> {
+    return this.withReviewSnapshot(context, teamId, async (client, current) => {
+      const budgets = [];
+      for (const step of current.order.body.request.steps)
+        budgets.push({
+          step_id: step.step_id,
+          limits: {
+            attempt: step.limits.max_attempts + step.max_rework_count,
+            model: step.limits.max_turns,
+            tool: step.limits.max_tool_calls,
+          },
+          usage: await teamStepUsage(client, context.scopeId, teamId, step.step_id),
+        });
+      const history = (
+        await client.query(
+          'SELECT step_id,kind,body FROM cos.mission_team_budget_events WHERE scope_id=$1 AND team_id=$2 ORDER BY step_id,kind',
+          [context.scopeId, teamId],
+        )
+      ).rows;
+      return {
+        status: 'ok',
+        team: {
+          id: teamId,
+          state: current.root.state,
+          generation: current.root.generation,
+          version: current.root.version,
+        },
+        brief: current.brief,
+        result_digest: current.resultDigest,
+        submission_id: current.anchor.id,
+        criteria: current.checks.criteria,
+        budgets,
+        budget_history: history,
+      };
     });
   }
   /** Database events/confirmed stops advance the graph. No model turn or open transaction waits for a worker. */

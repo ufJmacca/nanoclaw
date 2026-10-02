@@ -20,6 +20,7 @@ import { TeamRunStore } from '../../modules/chief-of-staff/missions/team-run-sto
 import type { TeamChildWorkOrder } from '../../modules/chief-of-staff/missions/team-work-order.js';
 import { RESEARCH_TEMPLATE } from '../../modules/chief-of-staff/missions/work-order.js';
 import { MissionRunStore } from '../../modules/chief-of-staff/missions/run-store.js';
+import { checkMissionReview } from '../../modules/chief-of-staff/contracts/mission-review.js';
 import type { CosMissionIdentity } from '../../cos-mission-boundary.js';
 import type { MissionDispatchLease } from '../../modules/chief-of-staff/missions/run-store.js';
 
@@ -1190,4 +1191,83 @@ test('S06-T01/T05 reviewer advice cannot carry uncited influence from a source o
     'denied',
   );
   assert.equal((await rows('mission_team_reworks')).filter((r) => r.team_id === f.teamId).length, 0);
+});
+
+test('S06-T04/T05/T08 final root evidence retains both analyst perspectives despite a writer omission and never completes without coordinator review', async () => {
+  const f = await stoppedAnalyses();
+  await f.teams.advance(context, f.teamId);
+  assert.equal((await f.teams.reviewSnapshot(context, f.teamId)).status, 'pending');
+  await finishTeamStep(f, 'synthesis');
+  await finishTeamStep(f, 'review');
+  const ready = await f.teams.reviewSnapshot(context, f.teamId);
+  assert.equal(ready.status, 'ok');
+  const brief = ready.brief as {
+    format: string;
+    outputs: Array<{ step_id: string; state: string; result: { claims?: Array<{ text: string }>; format: string } }>;
+  };
+  assert.equal(brief.format, 'cos-team-brief/v1');
+  assert.equal(brief.outputs.find((s) => s.step_id === 'technical')!.result.claims![0].text, 'Prefer B for capacity.');
+  assert.equal(brief.outputs.find((s) => s.step_id === 'operations')!.result.claims![0].text, 'Prefer A for cost.');
+  assert.equal(brief.outputs.find((s) => s.step_id === 'review')!.result.format, 'cos-team-review/v1');
+  assert.equal(ready.result_digest, digest(brief));
+  assert.equal((await rows('mission_team_roots')).find((r) => r.id === f.teamId)!.state, 'awaiting_review');
+  assert.equal((await rows('outbox')).filter((o) => o.kind === 'team_review_notification').length, 0);
+  assert.equal((await f.teams.reviewSnapshot({ ...context, sessionId: 'foreign' }, f.teamId)).status, 'denied');
+  const technical = (await rows('mission_team_steps')).find(
+    (s) => s.team_id === f.teamId && s.step_id === 'technical',
+  )!;
+  const artifact = String(technical.provenance.artifact_id);
+  const stored = (await rows('artifacts')).find((a) => a.id === artifact)!;
+  await admin.query('UPDATE cos.artifacts SET provenance=provenance||$3::jsonb WHERE scope_id=$1 AND id=$2', [
+    scope,
+    artifact,
+    JSON.stringify({ session_id: 'forged' }),
+  ]);
+  try {
+    assert.equal((await f.teams.reviewSnapshot(context, f.teamId)).status, 'denied');
+  } finally {
+    await admin.query('UPDATE cos.artifacts SET provenance=$3 WHERE scope_id=$1 AND id=$2', [
+      scope,
+      artifact,
+      stored.provenance,
+    ]);
+  }
+});
+
+test('S06-T04 an approved labelled partial graph permits partial coordinator judgement but cannot become complete', async () => {
+  const f = await stoppedAnalyses(true, (r) => {
+    r.partial_policy = 'allow_labelled';
+  });
+  await f.teams.advance(context, f.teamId);
+  await finishTeamStep(f, 'synthesis');
+  await finishTeamStep(f, 'review');
+  const captured = await f.teams.withReviewSnapshot(context, f.teamId, async (_client, current) => ({
+    status: 'ok',
+    checks: current.checks,
+    submission_id: current.anchor.id,
+    result_digest: current.resultDigest,
+    version: current.root.version,
+    limitations: current.brief.limitations,
+  }));
+  assert.equal(captured.status, 'ok');
+  const checks = captured.checks as {
+    status: 'review_required';
+    outcome: 'answer' | 'partial' | 'blocked';
+    criteria: Array<{ id: string; coverage: 'claimed' | 'missing' }>;
+  };
+  const review = {
+    mission_id: f.teamId,
+    submission_id: captured.submission_id,
+    result_digest: captured.result_digest,
+    expected_version: captured.version,
+    decision: 'partial',
+    criteria: [{ id: 'tradeoff', verdict: 'partial' }],
+  };
+  assert.equal(checks.outcome, 'partial');
+  assert.equal(checkMissionReview(review, checks), 'partial');
+  assert.equal(
+    checkMissionReview({ ...review, decision: 'accept', criteria: [{ id: 'tradeoff', verdict: 'satisfied' }] }, checks),
+    null,
+  );
+  assert.match((captured.limitations as string[]).join('\n'), /Missing required step technical/);
 });
