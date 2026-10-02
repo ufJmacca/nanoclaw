@@ -2481,3 +2481,194 @@ test('S06-PG01 lost consolidated-send commit acknowledgement remains consumed in
   assert.equal(row.delivered_at, null);
   assert.equal(JSON.stringify(row.payload).includes('Prefer A'), false);
 });
+test('S06-T04/T06 terminal retirement preserves failed work, fences every child and holds credits through uncertain stops', async () => {
+  const f = await stoppedAnalyses(true);
+  assert.equal((await f.teams.advance(context, f.teamId)).state, 'blocked');
+  const children = (await rows('mission_team_children')).filter((c) => c.team_id === f.teamId),
+    attempts = (await rows('mission_attempts')).filter((a) => children.some((c) => c.mission_id === a.mission_id)),
+    uncertain = attempts.find((a) => children.find((c) => c.mission_id === a.mission_id)!.step_id === 'operations')!;
+  await admin.query(
+    'UPDATE cos.mission_attempts SET allocation=allocation||\'{"stop_confirmed":false}\'::jsonb WHERE scope_id=$1 AND id=$2',
+    [scope, uncertain.id],
+  );
+  const read = knowledge.artifacts.read;
+  let artifactReads = 0;
+  knowledge.artifacts.read = () => {
+    artifactReads++;
+    throw Error('terminal cleanup must not read private bytes');
+  };
+  try {
+    enabled = false;
+    const retired = await f.teams.retire(context, f.teamId);
+    assert.equal(retired.status, 'ok');
+    assert.equal(retired.root_state, 'blocked');
+    assert.equal(retired.state, 'cancelling');
+    assert.equal((retired.identities as CosMissionIdentity[]).length, 2);
+    for (const attempt of (await rows('mission_attempts')).filter((a) =>
+      children.some((c) => c.mission_id === a.mission_id),
+    )) {
+      assert.equal(attempt.lease_owner, null);
+      assert.equal(attempt.lease_until, null);
+    }
+    assert.deepEqual(await f.teams.retire(context, f.teamId), retired);
+    assert.equal((await f.teams.confirmRetirement(context, f.teamId)).state, 'cancelling');
+    assert.equal(
+      (await rows('mission_team_reservations')).filter((r) => r.team_id === f.teamId && r.state === 'reserved').length,
+      4,
+    );
+    assert.equal((await f.teams.retire({ ...context, ownerId: 'foreign' }, f.teamId)).status, 'denied');
+    const identity = (retired.identities as CosMissionIdentity[]).find((i) => i.attemptId === uncertain.id)!;
+    assert.equal((await f.runs.confirmStopped(identity)).status, 'ok');
+    assert.equal((await f.teams.confirmRetirement(context, f.teamId)).state, 'blocked');
+    const status = await f.teams.inspect(context, f.teamId);
+    assert.equal(status.status, 'ok');
+    assert.equal((status.team as { state: string; failure_reason: string }).failure_reason, 'required_step_failed');
+    const steps = status.steps as Array<{ step_id: string; state: string }>;
+    assert.equal(steps.find((s) => s.step_id === 'technical')!.state, 'failed');
+    assert.equal(steps.find((s) => s.step_id === 'operations')!.state, 'submitted');
+    assert.equal(steps.find((s) => s.step_id === 'synthesis')!.state, 'failed');
+    assert.equal(steps.find((s) => s.step_id === 'review')!.state, 'failed');
+    assert.equal((await f.teams.claimReady(context, f.teamId)).status, 'denied');
+    const released = (await rows('mission_team_budget_events')).filter(
+      (e) => e.team_id === f.teamId && e.kind === 'released',
+    );
+    assert.equal(released.length, 4);
+    assert.equal((await f.teams.confirmRetirement(context, f.teamId)).state, 'blocked');
+    assert.deepEqual(
+      (await rows('mission_team_budget_events')).filter((e) => e.team_id === f.teamId && e.kind === 'released'),
+      released,
+    );
+    assert.equal(artifactReads, 0);
+  } finally {
+    enabled = true;
+    knowledge.artifacts.read = read;
+  }
+});
+test('S06-T06 metadata retirement closes revoked queued graphs without reading sources or granting a new generation', async () => {
+  for (const reason of ['provider', 'source']) {
+    const request = await input(),
+      p = await store.requestTeam(context, randomUUID(), request);
+    assert.equal((await approve(p)).status, 'ok');
+    const teamId = String(p.team_id),
+      teams = new TeamRunStore(store.database, store.teams, knowledge, { nativeCapacity: 3, maxWorkers: 2 });
+    assert.equal((await teams.claimReady(context, teamId)).status, 'ok');
+    assert.equal((await teams.retire(context, teamId)).status, 'denied');
+    if (reason === 'provider') enabled = false;
+    else
+      await admin.query('UPDATE cos.sources SET processing_providers=ARRAY[]::text[] WHERE scope_id=$1 AND id=$2', [
+        scope,
+        request.sources[0].source_id,
+      ]);
+    const read = knowledge.artifacts.read;
+    let artifactReads = 0;
+    knowledge.artifacts.read = () => {
+      artifactReads++;
+      throw Error('retirement must use metadata');
+    };
+    try {
+      const retired = await teams.retire(context, teamId);
+      assert.equal(retired.status, 'ok');
+      assert.equal(retired.root_state, 'failed');
+      for (const identity of retired.identities as CosMissionIdentity[]) {
+        // This storage fixture has no native allocation, independently of the durable dispatch proof.
+        assert.equal((await store.missionRuns.confirmUnallocatedCancellation(context, identity)).status, 'ok');
+        assert.equal(
+          (await store.missionRuns.claimDispatch(context, identity.attemptId, 'late-host')).status,
+          'denied',
+        );
+      }
+      assert.equal((await teams.confirmRetirement(context, teamId)).state, 'failed');
+      assert.equal((await teams.reviewSnapshot(context, teamId)).status, 'denied');
+      assert.equal(artifactReads, 0);
+      assert.equal((await rows('mission_team_roots')).find((r) => r.id === teamId)!.generation, 2);
+    } finally {
+      knowledge.artifacts.read = read;
+      enabled = true;
+      if (reason === 'source')
+        await admin.query(
+          "UPDATE cos.sources SET processing_providers=ARRAY['codex']::text[] WHERE scope_id=$1 AND id=$2",
+          [scope, request.sources[0].source_id],
+        );
+    }
+  }
+});
+test('S06-T03/T06 root expiry retires queued children on actual database time without extending original limits', async () => {
+  const request = await input();
+  request.limits.wall_seconds = 30;
+  for (const step of request.steps) step.limits.wall_seconds = 30;
+  const p = await store.requestTeam(context, randomUUID(), request);
+  assert.equal((await approve(p)).status, 'ok');
+  const teamId = String(p.team_id),
+    teams = new TeamRunStore(store.database, store.teams, knowledge, { nativeCapacity: 3, maxWorkers: 2 });
+  assert.equal((await teams.claimReady(context, teamId)).status, 'ok');
+  assert.equal((await teams.retire(context, teamId)).status, 'denied');
+  const original = (await rows('mission_team_roots')).find((r) => r.id === teamId)!,
+    order = (await rows('mission_team_work_orders')).find((w) => w.id === teamId)!,
+    remaining = (
+      await admin.query(
+        'SELECT GREATEST(0,EXTRACT(epoch FROM ($1::timestamptz-clock_timestamp()))*1000)::int AS remaining',
+        [order.body.deadlineAt],
+      )
+    ).rows[0].remaining;
+  await new Promise((resolve) => setTimeout(resolve, remaining + 500));
+  const read = knowledge.artifacts.read;
+  knowledge.artifacts.read = () => {
+    throw Error('expired root cannot read artifacts');
+  };
+  try {
+    const retired = await teams.retire(context, teamId);
+    assert.equal(retired.status, 'ok');
+    assert.equal(retired.root_state, 'failed');
+    for (const identity of retired.identities as CosMissionIdentity[])
+      assert.equal((await store.missionRuns.confirmUnallocatedCancellation(context, identity)).status, 'ok');
+    assert.equal((await teams.confirmRetirement(context, teamId)).state, 'failed');
+    const after = (await rows('mission_team_roots')).find((r) => r.id === teamId)!;
+    assert.equal(after.provenance.failure_reason, 'deadline');
+    assert.equal(after.generation, original.generation + 1);
+    assert.deepEqual(
+      (await rows('mission_team_work_orders')).find((w) => w.id === teamId),
+      order,
+    );
+    assert.equal((await teams.claimReady(context, teamId)).status, 'denied');
+  } finally {
+    knowledge.artifacts.read = read;
+  }
+});
+test('S06-PG01 lost terminal-retirement commit acknowledgement replays the same fence and original credits in the existing pool', async () => {
+  const f = await stoppedAnalyses(true);
+  assert.equal((await f.teams.advance(context, f.teamId)).state, 'blocked');
+  const client = await store.database.pool.connect(),
+    original = client.query.bind(client);
+  let dropped = false;
+  client.query = (async (...args: unknown[]) => {
+    const result = await (original as (...a: unknown[]) => Promise<unknown>)(...args);
+    if (args[0] === 'COMMIT' && !dropped) {
+      dropped = true;
+      throw Error('fixture_lost_terminal_ack');
+    }
+    return result;
+  }) as typeof client.query;
+  const adapter = {
+      on: store.database.pool.on.bind(store.database.pool),
+      connect: async () => client,
+    } as unknown as pg.Pool,
+    faulty = new TeamRunStore(new BoundedDatabase(adapter), store.teams, knowledge);
+  assert.equal((await faulty.retire(context, f.teamId)).status, 'pending');
+  assert.equal(dropped, true);
+  const committed = (await rows('mission_team_roots')).find((r) => r.id === f.teamId)!;
+  assert.equal(committed.generation, 2);
+  const replay = await f.teams.retire(context, f.teamId);
+  assert.equal(replay.status, 'ok');
+  assert.equal(replay.root_state, 'blocked');
+  assert.equal((await rows('mission_team_roots')).find((r) => r.id === f.teamId)!.generation, committed.generation);
+  assert.equal((await f.teams.confirmRetirement(context, f.teamId)).state, 'blocked');
+  const release = (await rows('mission_team_budget_events')).filter(
+    (e) => e.team_id === f.teamId && e.kind === 'released',
+  );
+  assert.equal(release.length, 4);
+  assert.equal((await f.teams.confirmRetirement(context, f.teamId)).state, 'blocked');
+  assert.deepEqual(
+    (await rows('mission_team_budget_events')).filter((e) => e.team_id === f.teamId && e.kind === 'released'),
+    release,
+  );
+});

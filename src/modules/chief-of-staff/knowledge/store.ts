@@ -443,6 +443,43 @@ export class KnowledgeStore {
   async contextReady(context: KnowledgeContext): Promise<Result> {
     return this.transaction(async (client) => ({ status: (await this.current(client, context)) ? 'ok' : 'denied' }));
   }
+  private async missionSourceMetadata(client: PoolClient, context: KnowledgeContext, selection: MissionSource) {
+    return (
+      await client.query(
+        `SELECT s.id AS source_id,s.version AS source_version,s.title,s.status,
+      r.id AS revision_id,r.digest AS revision_digest,r.artifact_id
+    FROM cos.sources s JOIN cos.source_revisions r ON r.scope_id=s.scope_id AND r.source_id=s.id AND r.id=s.current_revision_id
+    JOIN cos.artifacts a ON a.scope_id=r.scope_id AND a.id=r.artifact_id
+    WHERE s.scope_id=$1 AND s.id=$2 AND r.id=$3 AND s.status IN ('current','stale')
+      AND $4=ANY(s.processing_providers) AND a.lifecycle='published' AND a.kind='source' AND a.digest=r.digest
+      AND s.provenance->>'origin'='selected_staging_file' AND s.access_policy='{"scope_owner_only":true}'::jsonb
+      AND NOT EXISTS(SELECT 1 FROM cos.revocation_tombstones t WHERE t.scope_id=s.scope_id AND t.source_id=s.id)
+    FOR SHARE OF s,r,a`,
+        [context.scopeId, selection.source_id, selection.revision_id, context.provider],
+      )
+    ).rows[0];
+  }
+  /** Trusted denial-only reconciliation shares the admission rules, without reading chunks or private artifact bytes. */
+  async missionSourcesCurrent(
+    client: PoolClient,
+    context: KnowledgeContext,
+    selected: MissionSource[],
+  ): Promise<boolean> {
+    if (
+      context.origin ||
+      context.provider !== 'codex' ||
+      !this.retrievalEnabled() ||
+      !Array.isArray(selected) ||
+      selected.length < 1 ||
+      selected.length > 8 ||
+      !selected.every((s) => s && Object.keys(s).length === 2 && uuid.test(s.source_id) && uuid.test(s.revision_id)) ||
+      new Set(selected.map((s) => s.source_id)).size !== selected.length ||
+      !(await this.current(client, context))
+    )
+      return false;
+    for (const selection of selected) if (!(await this.missionSourceMetadata(client, context, selection))) return false;
+    return this.retrievalEnabled();
+  }
   /** Trusted mission admission only. Caller owns the transaction; no worker receives this client or artifact root. */
   async captureMissionSources(
     client: PoolClient,
@@ -467,20 +504,7 @@ export class KnowledgeStore {
       return null;
     const snapshots: MissionSourceSnapshot[] = [];
     for (const selection of selected) {
-      const row = (
-        await client.query(
-          `SELECT s.id AS source_id,s.version AS source_version,s.title,s.status,
-          r.id AS revision_id,r.digest AS revision_digest,r.artifact_id
-        FROM cos.sources s JOIN cos.source_revisions r ON r.scope_id=s.scope_id AND r.source_id=s.id AND r.id=s.current_revision_id
-        JOIN cos.artifacts a ON a.scope_id=r.scope_id AND a.id=r.artifact_id
-        WHERE s.scope_id=$1 AND s.id=$2 AND r.id=$3 AND s.status IN ('current','stale')
-          AND $4=ANY(s.processing_providers) AND a.lifecycle='published' AND a.kind='source' AND a.digest=r.digest
-          AND s.provenance->>'origin'='selected_staging_file' AND s.access_policy='{"scope_owner_only":true}'::jsonb
-          AND NOT EXISTS(SELECT 1 FROM cos.revocation_tombstones t WHERE t.scope_id=s.scope_id AND t.source_id=s.id)
-        FOR SHARE OF s,r,a`,
-          [context.scopeId, selection.source_id, selection.revision_id, context.provider],
-        )
-      ).rows[0];
+      const row = await this.missionSourceMetadata(client, context, selection);
       if (!row || !this.retrievalEnabled()) return null;
       const chunks = (
         await client.query(

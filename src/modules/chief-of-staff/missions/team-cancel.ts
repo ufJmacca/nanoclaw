@@ -16,6 +16,7 @@ export function createTeamCancellation(dependencies: {
   teams: Pick<TeamRunStore, 'cancel' | 'confirmCancellation'>;
   runs: Pick<MissionRunStore, 'confirmStopped'> & Partial<Pick<MissionRunStore, 'confirmUnallocatedCancellation'>>;
   unallocated?(identity: CosMissionIdentity): boolean;
+  familyReason?: 'owner_cancel' | 'origin_revoked';
   running(identity: CosMissionIdentity): boolean;
   stop(identity: CosMissionIdentity): Promise<void>;
 }) {
@@ -36,7 +37,7 @@ export function createTeamCancellation(dependencies: {
       return { status: 'denied' };
     // Fence every family synchronously before yielding to the first native stop, including late allocations/retries.
     for (const missionId of new Set(identities.map((i) => i.missionId)))
-      stopCosMissionFamily(context.scopeId, missionId, 'owner_cancel', dependencies.db);
+      stopCosMissionFamily(context.scopeId, missionId, dependencies.familyReason ?? 'owner_cancel', dependencies.db);
     let pending = false;
     for (const identity of identities) {
       if (

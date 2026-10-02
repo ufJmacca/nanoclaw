@@ -9,6 +9,9 @@ export class TeamGraphPump {
     readonly options: {
       teams: Pick<TeamRunStore, 'pendingGraphs' | 'advance' | 'claimReady' | 'requestRework'>;
       local(context: Context): boolean;
+      open?(): boolean;
+      retire?(context: Context, teamId: string): Promise<Result>;
+      admit?(context: Context): Promise<boolean>;
     },
   ) {}
   private changed(result: Result): boolean {
@@ -16,10 +19,22 @@ export class TeamGraphPump {
     if (result.status !== 'ok') throw Error('team_transition_unavailable');
     return true;
   }
+  private open(context: Context) {
+    return this.options.open?.() ?? this.options.local(context);
+  }
+  private async retire(context: Context, id: string): Promise<boolean> {
+    if (!this.options.retire) return false;
+    const result = await this.options.retire(context, id);
+    if (result.status === 'denied') return false;
+    if (result.status === 'ok' && ['blocked', 'failed', 'cancelling', 'cancelled'].includes(String(result.state)))
+      return true;
+    if (result.status === 'pending' && result.state === 'cancelling') return true;
+    throw Error('team_retirement_unavailable');
+  }
   async drain(context: Context): Promise<void> {
-    if (context.origin || !this.options.local(context)) return;
+    if (context.origin || !this.open(context)) return;
     const page = await this.options.teams.pendingGraphs(context, this.cursors.get(context.scopeId) ?? null);
-    if (!this.options.local(context)) return;
+    if (!this.open(context)) return;
     if (page.status === 'denied') {
       this.cursors.delete(context.scopeId);
       return;
@@ -35,7 +50,11 @@ export class TeamGraphPump {
     )
       throw Error('team_discovery_invalid');
     for (const id of page.items as string[]) {
-      if (!this.options.local(context)) return;
+      if (!this.open(context)) return;
+      if (await this.retire(context, id)) continue;
+      if (!this.options.local(context)) continue;
+      if (this.options.admit && !(await this.options.admit(context))) continue;
+      if (!this.options.local(context)) continue;
       const advanced = await this.options.teams.advance(context, id);
       if (!this.options.local(context)) return;
       if (!this.changed(advanced)) continue;
@@ -49,7 +68,10 @@ export class TeamGraphPump {
         const reworked = await this.options.teams.requestRework(context, id, submissionId);
         if (!this.options.local(context)) return;
         if (!this.changed(reworked)) continue;
-      } else if (['blocked', 'failed'].includes(String(advanced.state))) continue;
+      } else if (['blocked', 'failed'].includes(String(advanced.state))) {
+        if (this.open(context)) await this.retire(context, id);
+        continue;
+      }
       if (!this.options.local(context)) return;
       this.changed(await this.options.teams.claimReady(context, id));
     }

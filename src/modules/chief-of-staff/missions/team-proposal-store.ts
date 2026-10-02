@@ -195,6 +195,64 @@ export class TeamProposalStore {
   async validateChange(client: PoolClient, context: Context, change: TeamChange): Promise<boolean> {
     return (await this.captureChange(client, context, change)) !== null;
   }
+  /** Metadata-only loss detection for already-approved roots. A true result cannot authorise any disclosure or launch. */
+  async metadataCurrent(client: PoolClient, context: Context, body: TeamWorkOrderBody): Promise<boolean> {
+    const authority = this.authority?.(context);
+    if (
+      !authority ||
+      !this.knowledge ||
+      context.origin ||
+      body.format !== 'cos-team-work-order/v1' ||
+      !validTeamRequest(body.request) ||
+      body.origin.scopeId !== context.scopeId ||
+      body.origin.ownerId !== context.ownerId ||
+      body.origin.agentGroupId !== context.agentGroupId ||
+      body.origin.sessionId !== context.sessionId ||
+      digest(authority) !== body.authorityDigest
+    )
+      return false;
+    const templates = [];
+    for (const templateId of [...new Set(body.request.steps.map((s) => s.template_id))].sort()) {
+      const expected = TEAM_TEMPLATES[templateId],
+        row = (
+          await client.query(
+            'SELECT body,digest,reviewed_by FROM cos.mission_template_versions WHERE scope_id=$1 AND id=$2 AND version=$3',
+            [context.scopeId, templateId, expected.version],
+          )
+        ).rows[0];
+      if (
+        !row ||
+        row.reviewed_by !== context.ownerId ||
+        row.digest !== digest(expected) ||
+        digest(row.body) !== row.digest
+      )
+        return false;
+      templates.push({ id: templateId, version: expected.version, digest: row.digest });
+    }
+    if (digest(templates) !== digest(body.templates)) return false;
+    for (const kind of ['goal', 'project'] as const) {
+      const selected = body.request[`${kind}_id`],
+        pinned = body.related[kind];
+      if (!selected) {
+        if (pinned !== null) return false;
+        continue;
+      }
+      const row = (
+        await client.query(
+          "SELECT id,version FROM cos.records WHERE scope_id=$1 AND id=$2 AND kind=$3 AND lifecycle='active' FOR SHARE",
+          [context.scopeId, selected, kind],
+        )
+      ).rows[0];
+      if (!row || digest(row) !== digest(pinned)) return false;
+    }
+    return (
+      (await this.knowledge.missionSourcesCurrent(
+        client,
+        { ...context, provider: 'codex', generation: authority.contextGeneration },
+        body.request.sources,
+      )) && digest(this.authority?.(context) ?? null) === digest(authority)
+    );
+  }
   async linkProposal(client: PoolClient, context: Context, change: TeamChange, proposalId: string) {
     const row = await client.query(
       "UPDATE cos.mission_team_roots SET proposal_id=$3 WHERE scope_id=$1 AND id=$2 AND state='proposed' AND proposal_id IS NULL RETURNING id",

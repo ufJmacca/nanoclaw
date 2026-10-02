@@ -194,6 +194,7 @@ export function startCosHostModule(assertHostAuthority: () => void): { service: 
         assertHostAuthority,
         facts,
         running: missionExecution.running,
+        unallocated: missionExecution.unallocated,
         stop: missionExecution.stop,
         wake: wakeContainer,
       }),

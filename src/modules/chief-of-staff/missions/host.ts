@@ -16,6 +16,7 @@ import { createMissionLauncher } from './launcher.js';
 import { createMissionRpcHandler } from './rpc.js';
 import type { TeamRunStore } from './team-run-store.js';
 import { TeamGraphPump } from './team-graph-pump.js';
+import { createTeamRetirement } from './team-retirement.js';
 
 type Options = {
   root: string;
@@ -27,6 +28,7 @@ type Options = {
   assertHostAuthority(): void;
   facts(binding: CosBinding): Promise<ChannelFacts>;
   running(identity: CosMissionIdentity): boolean;
+  unallocated?(identity: CosMissionIdentity): boolean;
   stop(identity: CosMissionIdentity): Promise<void>;
   wake(session: Session): Promise<boolean>;
 };
@@ -52,7 +54,23 @@ export class MissionHost implements SpecialistLifecycle {
     options.assertHostAuthority();
     if (options.teams) {
       if (options.teams.database !== options.runs.database) throw Error('team_runtime_pool_mismatch');
-      this.graphs = new TeamGraphPump({ teams: options.teams, local: (context) => this.local(context) });
+      this.graphs = new TeamGraphPump({
+        teams: options.teams,
+        local: (context) => this.local(context),
+        admit: (context) => this.admitted(context),
+        open: () => {
+          options.assertHostAuthority();
+          return !this.closed && options.admitted();
+        },
+        retire: createTeamRetirement({
+          db: options.db,
+          teams: options.teams,
+          runs: options.runs,
+          running: options.running,
+          stop: options.stop,
+          unallocated: options.unallocated,
+        }),
+      });
     }
     const allocation = adapters.allocation ?? new NativeMissionAllocation({ root: options.root });
     this.launcher =
@@ -184,8 +202,8 @@ export class MissionHost implements SpecialistLifecycle {
         binding.scopeId,
         typeof retirement.next_after === 'string' ? retirement.next_after : null,
       );
-      if (!(await this.admitted(context))) return;
       await this.graphs?.drain(context);
+      if (!(await this.admitted(context))) return;
       if (this.closed || !this.local(context)) return;
       const pending = await this.options.runs.pendingDispatch(context, this.cursors.get(binding.scopeId) ?? null);
       if (this.closed) return;

@@ -95,3 +95,36 @@ it('S06-PG01 retains its cursor on uncertain transitions and rejects malformed d
   }
   expect(t.teams.claimReady).toHaveBeenCalledTimes(1);
 });
+it('S06-T04/T06 performs metadata-only retirement while model admission is paused, without advancing or claiming', async () => {
+  const t = fixture(),
+    retire = vi.fn(async () => ({ status: 'ok', state: 'blocked' }) as Result);
+  t.local.mockReturnValue(false);
+  const pump = new TeamGraphPump({ teams: t.teams, local: t.local, open: () => true, retire });
+  await pump.drain(context);
+  expect(retire).toHaveBeenCalledExactlyOnceWith(context, t.teamId);
+  expect(t.teams.advance).not.toHaveBeenCalled();
+  expect(t.teams.claimReady).not.toHaveBeenCalled();
+});
+it('S06-T04/T06 retires a newly blocked graph in the same sweep and retains uncertain native stops', async () => {
+  const t = fixture(),
+    retire = vi.fn(async (): Promise<Result> => ({ status: 'denied' }));
+  t.teams.advance.mockResolvedValue({ status: 'ok', state: 'blocked' });
+  retire.mockResolvedValueOnce({ status: 'denied' }).mockResolvedValueOnce({ status: 'pending', state: 'cancelling' });
+  const pump = new TeamGraphPump({ teams: t.teams, local: t.local, open: () => true, retire });
+  await pump.drain(context);
+  expect(retire).toHaveBeenCalledTimes(2);
+  expect(t.teams.claimReady).not.toHaveBeenCalled();
+  retire.mockResolvedValue({ status: 'pending' });
+  await expect(pump.drain(context)).rejects.toThrow('team_retirement_unavailable');
+});
+it('S06-T01/T05 fresh private-origin denial permits cleanup but cannot advance or create a ready intent', async () => {
+  const t = fixture(),
+    retire = vi.fn(async (): Promise<Result> => ({ status: 'denied' })),
+    admit = vi.fn(async () => false);
+  const pump = new TeamGraphPump({ teams: t.teams, local: t.local, open: () => true, retire, admit });
+  await pump.drain(context);
+  expect(retire).toHaveBeenCalledOnce();
+  expect(admit).toHaveBeenCalledExactlyOnceWith(context);
+  expect(t.teams.advance).not.toHaveBeenCalled();
+  expect(t.teams.claimReady).not.toHaveBeenCalled();
+});

@@ -4,7 +4,7 @@ import { digest, type Context, type Result } from '../domain/contracts.js';
 import { KnowledgeArtifactsBusy } from '../knowledge/artifacts.js';
 import type { MissionChange } from '../contracts/protocol.js';
 import type { KnowledgeStore } from '../knowledge/store.js';
-import type { TeamProposalStore } from './team-proposal-store.js';
+import type { TeamProposalStore, TeamWorkOrderBody } from './team-proposal-store.js';
 import { sealTeamChildWorkOrder, validateTeamChildWorkOrder, type TeamChildWorkOrder } from './team-work-order.js';
 import type { TeamInputArtifact } from '../contracts/team-inputs.js';
 import { validTeamRequest, type TeamStep } from '../contracts/team-protocol.js';
@@ -103,7 +103,10 @@ export class TeamRunStore {
           await client.query(
             `SELECT r.id FROM cos.mission_team_roots r JOIN cos.mission_team_work_orders w ON w.scope_id=r.scope_id AND w.id=r.id
         WHERE r.scope_id=$1 AND w.body->'origin'->>'ownerId'=$2 AND w.body->'origin'->>'agentGroupId'=$3
-        AND w.body->'origin'->>'sessionId'=$4 AND r.state IN ('queued','running','awaiting_review')
+        AND w.body->'origin'->>'sessionId'=$4 AND (r.state IN ('queued','running','awaiting_review') OR
+          (r.state IN ('blocked','failed','cancelling','cancelled') AND
+          (EXISTS(SELECT 1 FROM cos.mission_team_root_reservations b WHERE b.scope_id=r.scope_id AND b.team_id=r.id AND b.state='reserved') OR
+           EXISTS(SELECT 1 FROM cos.mission_team_reservations b WHERE b.scope_id=r.scope_id AND b.team_id=r.id AND b.state='reserved'))))
         AND ($5::text IS NULL OR r.id>$5) ORDER BY r.id LIMIT 5`,
             [context.scopeId, context.ownerId, context.agentGroupId, context.sessionId, after],
           )
@@ -1100,6 +1103,17 @@ export class TeamRunStore {
             version: root.version,
             deadline_at: root.body.deadlineAt,
             partial_policy: request.partial_policy,
+            failure_reason: ['required_step_failed', 'deadline', 'authority_lost', 'worker_failed'].includes(
+              root.provenance.failure_reason,
+            )
+              ? root.provenance.failure_reason
+              : null,
+            cleanup:
+              root.provenance.retired_generation === undefined
+                ? null
+                : root.provenance.retirement_confirmed === true
+                  ? 'confirmed_stopped'
+                  : 'pending_stop',
           },
           steps,
           budget,
@@ -1120,6 +1134,170 @@ export class TeamRunStore {
       false,
     );
   }
+  private async childAttempts(client: PoolClient, context: Context, teamId: string) {
+    const attempts = (
+      await client.query(
+        `SELECT a.* FROM cos.mission_team_children s JOIN cos.mission_attempts a ON a.scope_id=s.scope_id AND a.mission_id=s.mission_id
+      WHERE s.scope_id=$1 AND s.team_id=$2 ORDER BY a.mission_id,a.id`,
+        [context.scopeId, teamId],
+      )
+    ).rows;
+    const identities = attempts.map((a) => ({
+      scopeId: a.scope_id,
+      missionId: a.mission_id,
+      attemptId: a.id,
+      generation: a.generation,
+      agentGroupId: a.agent_group_id,
+      sessionId: a.session_id,
+      provider: 'codex' as const,
+    }));
+    return identities.every(validCosMissionIdentity) ? { attempts, identities } : null;
+  }
+  /** Root lock held. Only denial mutations; preserve submitted/failed evidence for a terminal root. */
+  private async fenceChildren(
+    client: PoolClient,
+    context: Context,
+    teamId: string,
+    preserve: boolean,
+    reason?: string,
+  ) {
+    await client.query(
+      `UPDATE cos.mission_attempts a SET state=CASE WHEN $3::boolean AND a.state IN ('failed','submitted') THEN a.state ELSE 'cancelled' END,
+      lease_owner=NULL,lease_until=NULL,
+      version=a.version+1,updated_at=clock_timestamp() FROM cos.mission_team_children s
+      WHERE s.scope_id=$1 AND s.team_id=$2 AND a.scope_id=s.scope_id AND a.mission_id=s.mission_id
+      AND (a.state<>'cancelled' OR a.lease_owner IS NOT NULL OR a.lease_until IS NOT NULL)`,
+      [context.scopeId, teamId, preserve],
+    );
+    await client.query(
+      `UPDATE cos.missions m SET state=CASE WHEN EXISTS(SELECT 1 FROM cos.mission_attempts a
+      WHERE a.scope_id=m.scope_id AND a.mission_id=m.id AND a.allocation->>'stop_confirmed' IS DISTINCT FROM 'true') THEN 'cancelling' ELSE 'cancelled' END,
+      generation=m.generation+1,version=m.version+1,updated_at=clock_timestamp() FROM cos.mission_team_children s
+      WHERE s.scope_id=$1 AND s.team_id=$2 AND m.scope_id=s.scope_id AND m.id=s.mission_id AND m.state NOT IN ('cancelling','cancelled')`,
+      [context.scopeId, teamId],
+    );
+    await client.query(
+      `UPDATE cos.mission_team_steps SET state=CASE WHEN $3::boolean THEN 'failed' ELSE 'cancelled' END,
+      provenance=provenance||$4::jsonb,version=version+1,updated_at=clock_timestamp()
+      WHERE scope_id=$1 AND team_id=$2 AND state<>'cancelled' AND (NOT $3::boolean OR state NOT IN ('failed','submitted'))`,
+      [context.scopeId, teamId, preserve, JSON.stringify(reason ? { failure_reason: reason } : {})],
+    );
+  }
+  /** Metadata-only retirement. Invalid execution never grants a new generation or reads private source/result bytes. */
+  async retire(context: Context, teamId: string): Promise<Result> {
+    if (!id(teamId) || context.origin) return { status: 'denied' };
+    return this.transaction(
+      context,
+      async (client) => {
+        const root = await this.retainedRoot(client, context, teamId);
+        if (
+          !root ||
+          !['queued', 'running', 'awaiting_review', 'blocked', 'failed'].includes(root.state) ||
+          root.body.format !== 'cos-team-work-order/v1' ||
+          root.body.teamId !== teamId ||
+          !validTeamRequest(root.body.request) ||
+          (await this.approvalState(client, context, teamId, root.proposal_id)) !== 'applied'
+        )
+          return { status: 'denied' };
+        const children = await this.childAttempts(client, context, teamId);
+        if (!children) return { status: 'denied' };
+        const retired = root.provenance.retired_generation;
+        if (retired !== undefined) {
+          if (
+            !Number.isSafeInteger(retired) ||
+            retired < 1 ||
+            root.generation !== retired + 1 ||
+            !['blocked', 'failed'].includes(root.state) ||
+            !['required_step_failed', 'deadline', 'authority_lost', 'worker_failed'].includes(
+              root.provenance.failure_reason,
+            )
+          )
+            return { status: 'denied' };
+        } else {
+          const reservation = (
+            await client.query(
+              'SELECT state FROM cos.mission_team_root_reservations WHERE scope_id=$1 AND team_id=$2',
+              [context.scopeId, teamId],
+            )
+          ).rows[0];
+          if (!reservation || reservation.state !== 'reserved') return { status: 'denied' };
+          const body = root.body as TeamWorkOrderBody;
+          if (
+            !Number.isFinite(Date.parse(body.issuedAt)) ||
+            !Number.isFinite(Date.parse(body.deadlineAt)) ||
+            Date.parse(body.deadlineAt) !== Date.parse(body.issuedAt) + body.request.limits.wall_seconds * 1000
+          )
+            return { status: 'denied' };
+          const expired = !(
+            await client.query('SELECT $1::timestamptz>clock_timestamp() AS current', [body.deadlineAt])
+          ).rows[0].current;
+          const reason =
+            root.state === 'blocked'
+              ? 'required_step_failed'
+              : root.state === 'failed'
+                ? 'worker_failed'
+                : expired
+                  ? 'deadline'
+                  : (await this.proposals.metadataCurrent(client, context, body))
+                    ? null
+                    : 'authority_lost';
+          if (!reason) return { status: 'denied' };
+          await this.fenceChildren(client, context, teamId, true, reason);
+          const state = root.state === 'blocked' ? 'blocked' : 'failed';
+          await client.query(
+            'UPDATE cos.mission_team_roots SET state=$3,generation=generation+1,version=version+1,provenance=provenance||$4::jsonb,updated_at=clock_timestamp() WHERE scope_id=$1 AND id=$2',
+            [
+              context.scopeId,
+              teamId,
+              state,
+              JSON.stringify({ retired_generation: root.generation, failure_reason: reason }),
+            ],
+          );
+          root.state = state;
+        }
+        return {
+          status: 'ok',
+          team_id: teamId,
+          root_state: root.state,
+          state: children.attempts.some((a) => a.allocation.stop_confirmed !== true) ? 'cancelling' : 'cancelled',
+          identities: children.identities,
+        };
+      },
+      false,
+    );
+  }
+  async confirmRetirement(context: Context, teamId: string): Promise<Result> {
+    if (!id(teamId) || context.origin) return { status: 'denied' };
+    return this.transaction(
+      context,
+      async (client) => {
+        const root = await this.retainedRoot(client, context, teamId),
+          retired = root?.provenance.retired_generation;
+        if (
+          !root ||
+          !['blocked', 'failed'].includes(root.state) ||
+          !Number.isSafeInteger(retired) ||
+          retired < 1 ||
+          root.generation !== retired + 1 ||
+          (await this.approvalState(client, context, teamId, root.proposal_id)) !== 'applied'
+        )
+          return { status: 'denied' };
+        const children = await this.childAttempts(client, context, teamId);
+        if (!children) return { status: 'denied' };
+        if (children.attempts.some((a) => a.allocation.stop_confirmed !== true))
+          return { status: 'ok', team_id: teamId, state: 'cancelling' };
+        if (!(await settleTeamCredits(client, context.scopeId, teamId, retired, 'settled')))
+          return { status: 'pending', state: 'cancelling' };
+        if (root.provenance.retirement_confirmed !== true)
+          await client.query(
+            'UPDATE cos.mission_team_roots SET provenance=provenance||\'{"retirement_confirmed":true}\'::jsonb,version=version+1,updated_at=clock_timestamp() WHERE scope_id=$1 AND id=$2',
+            [context.scopeId, teamId],
+          );
+        return { status: 'ok', team_id: teamId, state: root.state };
+      },
+      false,
+    );
+  }
   async cancel(context: Context, teamId: string): Promise<Result> {
     if (!id(teamId) || context.origin) return { status: 'denied' };
     return this.transaction(
@@ -1127,43 +1305,12 @@ export class TeamRunStore {
       async (client) => {
         const root = await this.retainedRoot(client, context, teamId);
         if (!root || ['completed', 'partial'].includes(root.state)) return { status: 'denied' };
-        const attempts = (
-          await client.query(
-            `SELECT a.* FROM cos.mission_team_children s
-        JOIN cos.mission_attempts a ON a.scope_id=s.scope_id AND a.mission_id=s.mission_id
-        WHERE s.scope_id=$1 AND s.team_id=$2 ORDER BY a.mission_id,a.id`,
-            [context.scopeId, teamId],
-          )
-        ).rows;
-        const identities = attempts.map((a) => ({
-          scopeId: a.scope_id,
-          missionId: a.mission_id,
-          attemptId: a.id,
-          generation: a.generation,
-          agentGroupId: a.agent_group_id,
-          sessionId: a.session_id,
-          provider: 'codex' as const,
-        }));
-        if (!identities.every(validCosMissionIdentity)) return { status: 'denied' };
+        const children = await this.childAttempts(client, context, teamId);
+        if (!children) return { status: 'denied' };
+        const { attempts, identities } = children;
         if (['cancelling', 'cancelled'].includes(root.state))
           return { status: 'ok', team_id: teamId, state: root.state, identities };
-        await client.query(
-          `UPDATE cos.mission_attempts a SET state='cancelled',lease_owner=NULL,lease_until=NULL,
-        version=a.version+1,updated_at=clock_timestamp() FROM cos.mission_team_children s
-        WHERE s.scope_id=$1 AND s.team_id=$2 AND a.scope_id=s.scope_id AND a.mission_id=s.mission_id AND a.state<>'cancelled'`,
-          [context.scopeId, teamId],
-        );
-        await client.query(
-          `UPDATE cos.missions m SET state=CASE WHEN EXISTS(SELECT 1 FROM cos.mission_attempts a
-        WHERE a.scope_id=m.scope_id AND a.mission_id=m.id AND a.allocation->>'stop_confirmed' IS DISTINCT FROM 'true') THEN 'cancelling' ELSE 'cancelled' END,
-        generation=m.generation+1,version=m.version+1,updated_at=clock_timestamp() FROM cos.mission_team_children s
-        WHERE s.scope_id=$1 AND s.team_id=$2 AND m.scope_id=s.scope_id AND m.id=s.mission_id AND m.state NOT IN ('cancelling','cancelled')`,
-          [context.scopeId, teamId],
-        );
-        await client.query(
-          "UPDATE cos.mission_team_steps SET state='cancelled',version=version+1,updated_at=clock_timestamp() WHERE scope_id=$1 AND team_id=$2 AND state<>'cancelled'",
-          [context.scopeId, teamId],
-        );
+        await this.fenceChildren(client, context, teamId, false);
         const state = attempts.some((a) => a.allocation.stop_confirmed !== true) ? 'cancelling' : 'cancelled';
         await client.query(
           'UPDATE cos.mission_team_roots SET state=$3,generation=generation+1,version=version+1,provenance=provenance||$4::jsonb,updated_at=clock_timestamp() WHERE scope_id=$1 AND id=$2',

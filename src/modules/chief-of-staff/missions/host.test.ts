@@ -219,6 +219,11 @@ it('S06-T02/PG02 feeds team intents into the existing native dispatcher after re
     events: string[] = [],
     teamId = 'team-' + 'a'.repeat(64);
   const teams = {
+    inspect: vi.fn(async () => ({ status: 'ok', team: { state: 'running' } })),
+    retire: vi.fn(async () => ({ status: 'denied' })),
+    confirmRetirement: vi.fn(),
+    cancel: vi.fn(),
+    confirmCancellation: vi.fn(),
     pendingGraphs: vi.fn(async () => ({ status: 'ok', items: [teamId], next_after: null })),
     advance: vi.fn(async () => {
       events.push('advance');
@@ -355,4 +360,33 @@ it('S05 host retires unallocated work while delegation is disabled without alloc
   );
   expect(f.runs.pendingDispatch).not.toHaveBeenCalled();
   expect(f.options.wake).not.toHaveBeenCalled();
+});
+it('S06-T04/T06 the same native host retires failed roots while paused without worker discovery or model wake', async () => {
+  const f = setup(),
+    teamId = 'team-' + 'b'.repeat(64);
+  f.state.admitted = false;
+  f.db.exec('UPDATE cos_identity_boundaries SET paused=1');
+  const teams = {
+    pendingGraphs: vi.fn(async () => ({ status: 'ok', items: [teamId], next_after: null })),
+    inspect: vi.fn(async () => ({ status: 'ok', team: { state: 'blocked' } })),
+    retire: vi.fn(async () => ({ status: 'ok', state: 'cancelled', identities: [] })),
+    confirmRetirement: vi.fn(async () => ({ status: 'ok', state: 'blocked' })),
+    cancel: vi.fn(),
+    confirmCancellation: vi.fn(),
+    advance: vi.fn(),
+    claimReady: vi.fn(),
+    requestRework: vi.fn(),
+  };
+  const host = f.create(teams as unknown as TeamRunStore);
+  await host.pump(f.binding);
+  expect(teams.retire).toHaveBeenCalledExactlyOnceWith(
+    expect.objectContaining({ ownerId: 'owner', sessionId: f.binding.sessionId }),
+    teamId,
+  );
+  expect(teams.confirmRetirement).toHaveBeenCalledOnce();
+  expect(teams.advance).not.toHaveBeenCalled();
+  expect(teams.claimReady).not.toHaveBeenCalled();
+  expect(f.runs.pendingDispatch).not.toHaveBeenCalled();
+  expect(f.options.wake).not.toHaveBeenCalled();
+  expect(f.register).toHaveBeenCalledOnce();
 });
