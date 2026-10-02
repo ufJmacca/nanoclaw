@@ -1,14 +1,6 @@
 import type { CosRequest, CosResponse } from './generated/cos-protocol.js';
-import {
-  COS_PROTOCOL,
-  COS_WAIT_MS,
-  digest,
-  validRequest,
-  validResponse,
-  workChangeSchema,
-} from './generated/cos-protocol.js';
-import { openInboundDb } from '../db/connection.js';
-import { writeMessageOut } from '../db/messages-out.js';
+import { COS_PROTOCOL, COS_WAIT_MS, validRequest, validResponse, workChangeSchema } from './generated/cos-protocol.js';
+import { executeScopedRequest } from './scoped-rpc-client.js';
 import { randomUUID } from 'node:crypto';
 import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
@@ -20,53 +12,19 @@ export async function executeCosRequest(
   waitMs = COS_WAIT_MS,
   signal?: AbortSignal,
 ): Promise<CosResponse> {
-  const response = (status: CosResponse['status']): CosResponse => ({
-    protocol: COS_PROTOCOL,
-    request_id: request.request_id,
-    status,
-  });
-  if (signal?.aborted || process.env.NANOCLAW_COS_PROTOCOL !== COS_PROTOCOL) return response('unavailable');
-  if (!validRequest(request)) return response('denied');
-  const hash = digest(request);
-  const deliveryId = randomUUID();
-  const read = (): CosResponse | null => {
-    const db = openInboundDb();
-    try {
-      const row = db
-        .query('SELECT response FROM cos_rpc_responses WHERE request_id=? AND payload_hash=? AND delivery_id=?')
-        .get(request.request_id, hash, deliveryId) as { response: string } | null;
-      if (!row) return null;
-      const value: unknown = JSON.parse(row.response);
-      return validResponse(value, request.request_id) ? value : response('unavailable');
-    } finally {
-      db.close();
-    }
-  };
-  try {
-    read();
-  } catch {
-    return response('unavailable');
-  }
-  writeMessageOut({
-    id: 'cos-' + deliveryId,
-    kind: 'system',
-    platform_id: null,
-    channel_type: null,
-    thread_id: null,
-    content: JSON.stringify({ action: 'cos_rpc', request, delivery_id: deliveryId }),
-  });
-  const end = Date.now() + Math.max(1, Math.min(waitMs, COS_WAIT_MS));
-  do {
-    if (signal?.aborted) return response('unavailable');
-    try {
-      const value = read();
-      if (value) return value;
-    } catch {
-      return response('unavailable');
-    }
-    await new Promise((resolve) => setTimeout(resolve, Math.min(100, Math.max(1, end - Date.now()))));
-  } while (Date.now() < end);
-  return response(signal?.aborted ? 'unavailable' : 'pending');
+  return executeScopedRequest(
+    request,
+    {
+      protocol: COS_PROTOCOL,
+      action: 'cos_rpc',
+      prefix: 'cos-',
+      validRequest,
+      validResponse,
+      response: (status): CosResponse => ({ protocol: COS_PROTOCOL, request_id: request.request_id, status }),
+    },
+    waitMs,
+    signal,
+  );
 }
 
 const priorityTools: McpToolDefinition[] = (
