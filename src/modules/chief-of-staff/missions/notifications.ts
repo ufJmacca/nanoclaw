@@ -4,6 +4,8 @@ import { digest, type Result } from '../domain/contracts.js';
 import type { KnowledgeContext } from '../knowledge/store.js';
 import { validMissionResult, type MissionResult } from '../contracts/mission-result.js';
 import type { MissionReviews } from './review-store.js';
+import { validTeamBrief } from '../contracts/team-brief.js';
+import { renderTeamNotification } from './team-notification-render.js';
 
 const uuid = (v: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
 export type MissionDeliveryReceipt =
@@ -17,7 +19,17 @@ export class MissionNotifications {
   constructor(
     readonly database: BoundedDatabase,
     readonly reviews: Pick<MissionReviews, 'read'>,
+    readonly route: 'single' | 'team' = 'single',
   ) {}
+  private get kind() {
+    return this.route === 'team' ? 'team_review_notification' : 'mission_review_notification';
+  }
+  private get prefix() {
+    return this.route === 'team' ? 'team-review-' : 'mission-review-';
+  }
+  private get rootField() {
+    return this.route === 'team' ? 'team_id' : 'mission_id';
+  }
   private async transaction(operation: (client: PoolClient) => Promise<Result>): Promise<Result> {
     try {
       return await this.database.run(async (client) => {
@@ -41,18 +53,21 @@ export class MissionNotifications {
       ])
     ).rows[0];
     if (!scope || (active && scope.status !== 'active')) return null;
+    const table = this.route === 'team' ? 'cos.mission_team_reviews' : 'cos.mission_reviews';
+    const columns =
+      this.route === 'team' ? 'r.team_id AS mission_id,r.submission_id AS result_id' : 'r.mission_id,r.result_id';
     const row = (
       await client.query(
-        `SELECT o.*,r.mission_id,r.result_id,r.provenance
-      FROM cos.outbox o JOIN cos.mission_reviews r ON r.scope_id=o.scope_id AND r.id=$2
-      WHERE o.scope_id=$1 AND o.id=$3 AND o.kind='mission_review_notification' FOR UPDATE OF o`,
-        [context.scopeId, reviewId, 'mission-review-' + reviewId],
+        `SELECT o.*,${columns},r.provenance
+      FROM cos.outbox o JOIN ${table} r ON r.scope_id=o.scope_id AND r.id=$2
+      WHERE o.scope_id=$1 AND o.id=$3 AND o.kind=$4 FOR UPDATE OF o`,
+        [context.scopeId, reviewId, this.prefix + reviewId, this.kind],
       )
     ).rows[0];
     if (
       !row ||
       row.payload.review_id !== reviewId ||
-      row.payload.mission_id !== row.mission_id ||
+      row.payload[this.rootField] !== row.mission_id ||
       row.payload.submission_id !== row.result_id ||
       row.payload.result_digest !== row.provenance.result_digest ||
       row.payload.session_id !== context.sessionId ||
@@ -71,10 +86,10 @@ export class MissionNotifications {
         await client.query(
           `SELECT o.payload->>'review_id' AS review_id FROM cos.outbox o
         JOIN cos.scopes s ON s.id=o.scope_id AND s.owner_id=$2 AND s.agent_group_id=$3 AND s.status='active'
-        WHERE o.scope_id=$1 AND o.kind='mission_review_notification' AND o.delivered_at IS NULL AND o.attempts=0
+        WHERE o.scope_id=$1 AND o.kind=$6 AND o.delivered_at IS NULL AND o.attempts=0
         AND o.payload->>'session_id'=$4 AND o.payload->>'context_generation'=$5
         ORDER BY o.created_at,o.id LIMIT 20`,
-          [context.scopeId, context.ownerId, context.agentGroupId, context.sessionId, context.generation],
+          [context.scopeId, context.ownerId, context.agentGroupId, context.sessionId, context.generation, this.kind],
         )
       ).rows;
       return { status: 'ok', review_ids: rows.map((r) => r.review_id).filter((v) => typeof v === 'string' && uuid(v)) };
@@ -107,8 +122,9 @@ export class MissionNotifications {
         : { status: 'denied' };
     });
     if (command.status !== 'ok') return command;
-    const ref = command.reference as { mission_id: string; submission_id: string; result_digest: string };
-    const result = await this.reviews.read(context, ref.mission_id, ref.submission_id);
+    const ref = command.reference as Record<string, string>,
+      rootId = ref[this.rootField];
+    const result = await this.reviews.read(context, rootId, ref.submission_id);
     if (result.status !== 'ok') return result;
     const submission = result.submission as { id: string; digest: string },
       mission = result.mission as { id: string; state: string },
@@ -118,13 +134,18 @@ export class MissionNotifications {
       review.id !== reviewId ||
       submission?.id !== ref.submission_id ||
       submission.digest !== ref.result_digest ||
-      mission?.id !== ref.mission_id ||
+      mission?.id !== rootId ||
       { accept: 'completed', partial: 'partial', reject: 'blocked' }[review.decision] !== mission.state ||
-      !validMissionResult(result.result) ||
       digest(result.result) !== ref.result_digest
     )
       return { status: 'denied' };
-    return { status: 'ok', text: renderMissionNotification(ref.mission_id, mission.state, result.result) };
+    if (this.route === 'team')
+      return validTeamBrief(result.result)
+        ? { status: 'ok', text: renderTeamNotification(rootId, mission.state, result.result) }
+        : { status: 'denied' };
+    return validMissionResult(result.result)
+      ? { status: 'ok', text: renderMissionNotification(rootId, mission.state, result.result) }
+      : { status: 'denied' };
   }
   /** Record an already-performed transport effect even after pause/revocation; this never grants a new send. */
   async finish(

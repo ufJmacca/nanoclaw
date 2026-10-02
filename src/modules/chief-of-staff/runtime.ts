@@ -369,63 +369,64 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
       const recovered = enabled() ? await briefReconciliation?.drain(binding) : undefined;
       if (enabled()) await reviewDispatch?.drain(binding);
       if (enabled()) await outbox?.drain(binding);
-      if (enabled() && d.store?.missionNotifications) {
-        const notifications = d.store.missionNotifications,
-          adapter = getDeliveryAdapter();
-        const current = () => {
-          if (!enabled()) return null;
-          const session = d.session(binding.sessionId);
-          if (!session) return null;
-          const boundary = cosBoundary(session, d.db);
-          if (
-            !boundary.restricted ||
-            !boundary.binding ||
-            boundary.paused ||
-            !boundary.ingressId ||
-            digest(boundary.binding) !== digest(binding)
-          )
-            return null;
-          // Delivery is authorized by the approved mission and its recorded review,
-          // not by extending the original owner event's model/tool authority.
-          // The resolver retains all context-generation and automation fences.
-          return resolveKnowledgeContext(
-            session,
-            {
-              scopeId: binding.scopeId,
-              ownerId: binding.ownerId,
-              sessionId: session.id,
-              agentGroupId: binding.agentGroupId,
-              ingressId: boundary.ingressId,
-            },
-            d.db,
-          );
-        };
-        const context = current();
-        if (context && adapter && adapter.isAvailable?.('mattermost') !== false && (await admitted(binding))) {
-          const pending = await notifications.pending(context);
-          if (pending.status === 'ok' && Array.isArray(pending.review_ids)) {
-            const delivery = new MissionNotificationDelivery({
-              notifications,
-              current,
-              admitted: () => admitted(binding),
-              send: (_context, text, id) =>
-                adapter.deliver(
-                  'mattermost',
-                  `mattermost:${binding.instanceId}:${binding.channelId}`,
-                  null,
-                  'chat',
-                  JSON.stringify({ text }),
-                  undefined,
-                  id,
-                ),
-            });
-            for (const reviewId of pending.review_ids) {
-              if (!enabled() || digest(current()) !== digest(context)) break;
-              await delivery.deliver(context, String(reviewId));
+      if (enabled() && d.store)
+        for (const notifications of [d.store.missionNotifications, d.store.teamNotifications]) {
+          if (!notifications || !enabled()) continue;
+          const adapter = getDeliveryAdapter();
+          const current = () => {
+            if (!enabled()) return null;
+            const session = d.session(binding.sessionId);
+            if (!session) return null;
+            const boundary = cosBoundary(session, d.db);
+            if (
+              !boundary.restricted ||
+              !boundary.binding ||
+              boundary.paused ||
+              !boundary.ingressId ||
+              digest(boundary.binding) !== digest(binding)
+            )
+              return null;
+            // Delivery is authorized by the approved mission and its recorded review,
+            // not by extending the original owner event's model/tool authority.
+            // The resolver retains all context-generation and automation fences.
+            return resolveKnowledgeContext(
+              session,
+              {
+                scopeId: binding.scopeId,
+                ownerId: binding.ownerId,
+                sessionId: session.id,
+                agentGroupId: binding.agentGroupId,
+                ingressId: boundary.ingressId,
+              },
+              d.db,
+            );
+          };
+          const context = current();
+          if (context && adapter && adapter.isAvailable?.('mattermost') !== false && (await admitted(binding))) {
+            const pending = await notifications.pending(context);
+            if (pending.status === 'ok' && Array.isArray(pending.review_ids)) {
+              const delivery = new MissionNotificationDelivery({
+                notifications,
+                current,
+                admitted: () => admitted(binding),
+                send: (_context, text, id) =>
+                  adapter.deliver(
+                    'mattermost',
+                    `mattermost:${binding.instanceId}:${binding.channelId}`,
+                    null,
+                    'chat',
+                    JSON.stringify({ text }),
+                    undefined,
+                    id,
+                  ),
+              });
+              for (const reviewId of pending.review_ids) {
+                if (!enabled() || digest(current()) !== digest(context)) break;
+                await delivery.deliver(context, String(reviewId));
+              }
             }
           }
         }
-      }
       // Review results get a delivery opportunity before a new briefing can occupy
       // the shared context. A retained review fence must not consume a due brief.
       const main = d.session(binding.sessionId);

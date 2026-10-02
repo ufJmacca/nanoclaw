@@ -16,7 +16,7 @@ afterEach(() => {
   runtime?.dispose();
   closeDb();
 });
-function fixture(automaticReview = false, teamReview = false) {
+function fixture(automaticReview = false, teamReview = false, teamDelivery = false) {
   const db = initTestDb(),
     generation = randomUUID(),
     reviewId = randomUUID();
@@ -54,7 +54,7 @@ function fixture(automaticReview = false, teamReview = false) {
     begin: vi.fn(async () => {
       if (started) return { status: 'denied' };
       started = true;
-      return { status: 'ok', notification_id: 'mission-review-' + reviewId };
+      return { status: 'ok', notification_id: (teamDelivery ? 'team-review-' : 'mission-review-') + reviewId };
     }),
     read: vi.fn(async () => ({ status: 'ok', text: 'Reviewed fixture result' })),
     finish: vi.fn(async (_c, _r, _a, receipt) => ({ status: 'ok', state: receipt.state })),
@@ -81,7 +81,7 @@ function fixture(automaticReview = false, teamReview = false) {
     db,
     enabled: true,
     store: {
-      missionNotifications,
+      ...(teamDelivery ? { teamNotifications: missionNotifications } : { missionNotifications }),
       pendingOutbox: vi.fn(async () => ({ status: 'ok', items: [] })),
       ...(automaticReview
         ? {
@@ -230,5 +230,27 @@ it('S06-T03/T05 native main review uses team authority and escrow without fallin
   expect(await authorize.reserve!('team-model')).toBe(false);
   f.teamFinalReviews.authorize.mockResolvedValue({ status: 'denied' });
   expect(await authorize()).toBeNull();
+  expect(f.db.prepare('SELECT generation FROM cos_conversation_states').get()).toEqual({ generation: f.generation });
+});
+
+it('S06-T07 host delivers one consolidated team result through the bound existing main conversation', async () => {
+  const f = fixture(false, false, true);
+  await runtime.pump(f.binding);
+  expect(f.deliver).toHaveBeenCalledExactlyOnceWith(
+    'mattermost',
+    'mattermost:fixture:private',
+    null,
+    'chat',
+    JSON.stringify({ text: 'Reviewed fixture result' }),
+    undefined,
+    'team-review-' + f.reviewId,
+  );
+  expect(f.missionNotifications.read).toHaveBeenCalledWith(
+    expect.objectContaining({ sessionId: 'main', generation: f.generation }),
+    f.reviewId,
+    expect.any(String),
+  );
+  await runtime.pump(f.binding);
+  expect(f.deliver).toHaveBeenCalledTimes(1);
   expect(f.db.prepare('SELECT generation FROM cos_conversation_states').get()).toEqual({ generation: f.generation });
 });

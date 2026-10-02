@@ -24,6 +24,8 @@ import { RESEARCH_TEMPLATE } from '../../modules/chief-of-staff/missions/work-or
 import { MissionRunStore } from '../../modules/chief-of-staff/missions/run-store.js';
 import { checkMissionReview } from '../../modules/chief-of-staff/contracts/mission-review.js';
 import { TeamFinalReviews } from '../../modules/chief-of-staff/missions/team-final-review.js';
+import { MissionNotifications } from '../../modules/chief-of-staff/missions/notifications.js';
+import { MissionNotificationDelivery } from '../../modules/chief-of-staff/missions/notification-delivery.js';
 import { TEAM_PARENT_BUDGET_SCHEMA } from '../../modules/chief-of-staff/store/team-parent-budget-schema.js';
 import { teamBudget } from '../../modules/chief-of-staff/missions/team-budget.js';
 import type { CosMissionIdentity } from '../../cos-mission-boundary.js';
@@ -1941,4 +1943,173 @@ test('S06-T05/T07 main-context RPC reads and records a team brief through its ex
   } finally {
     native.close();
   }
+});
+
+async function reviewedTeam() {
+  const f = await stoppedAnalyses();
+  await f.teams.advance(context, f.teamId);
+  await finishTeamStep(f, 'synthesis');
+  await finishTeamStep(f, 'review');
+  const snapshot = await f.teams.reviewSnapshot(context, f.teamId),
+    submissionId = String(snapshot.submission_id),
+    final = new TeamFinalReviews(f.teams),
+    main = { ...context, provider: 'codex', generation: authority.contextGeneration };
+  const claimed = await final.claim(main, f.teamId, submissionId, 'fixture-reviewed-team');
+  assert.equal(claimed.status, 'ok');
+  const identity = claimed.identity as { generation: number },
+    lease = claimed.lease as { owner: string; fence: number },
+    executing = {
+      ...main,
+      origin: {
+        kind: 'mission_review' as const,
+        runId: f.teamId,
+        generation: identity.generation,
+        submissionId,
+        owner: lease.owner,
+        fence: lease.fence,
+      },
+    };
+  for (const [call, kind] of [
+    ['main-turn', 'model'],
+    ['read-result', 'tool'],
+    ['record-review', 'tool'],
+  ] as const)
+    assert.equal((await final.reserve(executing, f.teamId, submissionId, lease, call, kind)).status, 'ok');
+  const captured = await final.read(executing, f.teamId, submissionId),
+    mission = captured.mission as { version: number },
+    submission = captured.submission as { digest: string };
+  const reviewed = await final.review(executing, randomUUID(), {
+    mission_id: f.teamId,
+    submission_id: submissionId,
+    result_digest: submission.digest,
+    expected_version: mission.version,
+    decision: 'accept',
+    criteria: [{ id: 'tradeoff', verdict: 'satisfied' }],
+  });
+  assert.equal(reviewed.status, 'ok');
+  return { ...f, final, main, reviewId: String(reviewed.review_id) };
+}
+test('S06-T05/T07 one consolidated team notification consumes one transport grant across competing pumps and restart', async () => {
+  const f = await reviewedTeam(),
+    notifications = new MissionNotifications(store.database, f.final, 'team'),
+    sent: string[] = [];
+  const delivery = new MissionNotificationDelivery({
+    notifications,
+    admitted: async () => true,
+    current: () => f.main,
+    send: async (_ctx, text, id) => {
+      assert.equal(id, 'team-review-' + f.reviewId);
+      sent.push(text);
+      return undefined;
+    },
+  });
+  const results = await Promise.all([delivery.deliver(f.main, f.reviewId), delivery.deliver(f.main, f.reviewId)]);
+  assert.equal(results.filter((r) => r.state === 'uncertain').length, 1);
+  assert.equal(sent.length, 1);
+  assert.match(sent[0], /Prefer A for cost/);
+  assert.match(sent[0], /Prefer B for capacity/);
+  assert.match(sent[0], /quality judgements are advisory/);
+  const pending = await notifications.pending(f.main);
+  assert.equal(pending.status, 'ok');
+  assert.equal((pending.review_ids as string[]).includes(f.reviewId), false);
+  const restarted = new MissionNotificationDelivery({
+    notifications: new MissionNotifications(store.database, f.final, 'team'),
+    admitted: async () => true,
+    current: () => f.main,
+    send: async () => {
+      throw Error('no_resend');
+    },
+  });
+  assert.equal((await restarted.deliver(f.main, f.reviewId)).status, 'denied');
+  const outbox = (await rows('outbox')).find((r) => r.id === 'team-review-' + f.reviewId)!;
+  assert.equal(outbox.attempts, 1);
+  assert.equal(outbox.payload.delivery.state, 'uncertain');
+  assert.equal(JSON.stringify(outbox.payload).includes('Prefer B'), false);
+});
+test('S06-T05 team delivery rechecks source permission after channel admission but preserves exact already-sent receipt while paused', async () => {
+  const f = await reviewedTeam(),
+    notifications = new MissionNotifications(store.database, f.final, 'team');
+  const root = (await rows('mission_team_work_orders')).find((w) => w.id === f.teamId)!,
+    sourceId = String(root.body.request.sources[0].source_id);
+  let sends = 0;
+  const delivery = new MissionNotificationDelivery({
+    notifications,
+    current: () => f.main,
+    admitted: async () => {
+      await admin.query("UPDATE cos.sources SET processing_providers='{}' WHERE scope_id=$1 AND id=$2", [
+        scope,
+        sourceId,
+      ]);
+      return true;
+    },
+    send: async () => {
+      sends++;
+      return 'should-never-send';
+    },
+  });
+  try {
+    assert.equal((await delivery.deliver(f.main, f.reviewId)).state, 'failed');
+    assert.equal(sends, 0);
+    assert.equal((await notifications.begin(f.main, f.reviewId, randomUUID())).status, 'denied');
+  } finally {
+    await admin.query("UPDATE cos.sources SET processing_providers=ARRAY['codex'] WHERE scope_id=$1 AND id=$2", [
+      scope,
+      sourceId,
+    ]);
+  }
+  const second = await reviewedTeam(),
+    secondNotifications = new MissionNotifications(store.database, second.final, 'team'),
+    attempt = randomUUID();
+  assert.equal((await secondNotifications.begin(second.main, second.reviewId, attempt)).status, 'ok');
+  await admin.query("UPDATE cos.scopes SET status='paused' WHERE id=$1", [scope]);
+  try {
+    assert.equal((await secondNotifications.read(second.main, second.reviewId, attempt)).status, 'denied');
+    assert.equal(
+      (
+        await secondNotifications.finish(second.main, second.reviewId, randomUUID(), {
+          state: 'delivered',
+          platform_receipt: 'foreign',
+        })
+      ).status,
+      'denied',
+    );
+    const receipt = { state: 'delivered' as const, platform_receipt: 'already-performed-fixture' };
+    assert.equal((await secondNotifications.finish(second.main, second.reviewId, attempt, receipt)).status, 'ok');
+    assert.equal((await secondNotifications.finish(second.main, second.reviewId, attempt, receipt)).status, 'ok');
+  } finally {
+    await admin.query("UPDATE cos.scopes SET status='active' WHERE id=$1", [scope]);
+  }
+});
+
+test('S06-PG01 lost consolidated-send commit acknowledgement remains consumed in the existing pool', async () => {
+  const f = await reviewedTeam(),
+    client = await store.database.pool.connect(),
+    original = client.query.bind(client);
+  let dropped = false;
+  client.query = (async (...args: unknown[]) => {
+    const result = await (original as (...a: unknown[]) => Promise<unknown>)(...args);
+    if (args[0] === 'COMMIT' && !dropped) {
+      dropped = true;
+      throw Error('fixture_lost_team_send_ack');
+    }
+    return result;
+  }) as typeof client.query;
+  // The fault adapter uses the existing driver pool and leased client. It creates no second PostgreSQL pool.
+  const adapter = {
+    on: store.database.pool.on.bind(store.database.pool),
+    connect: async () => client,
+  } as unknown as pg.Pool;
+  const faulty = new MissionNotifications(new BoundedDatabase(adapter), f.final, 'team');
+  assert.equal((await faulty.begin(f.main, f.reviewId, randomUUID())).status, 'pending');
+  assert.equal(dropped, true);
+  const recovered = new MissionNotifications(store.database, f.final, 'team');
+  assert.equal((await recovered.begin(f.main, f.reviewId, randomUUID())).status, 'denied');
+  const pending = await recovered.pending(f.main);
+  assert.equal(pending.status, 'ok');
+  assert.equal((pending.review_ids as string[]).includes(f.reviewId), false);
+  const row = (await rows('outbox')).find((r) => r.id === 'team-review-' + f.reviewId)!;
+  assert.equal(row.attempts, 1);
+  assert.equal(row.payload.delivery.state, 'delivering');
+  assert.equal(row.delivered_at, null);
+  assert.equal(JSON.stringify(row.payload).includes('Prefer A'), false);
 });

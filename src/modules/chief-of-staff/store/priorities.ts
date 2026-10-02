@@ -69,6 +69,7 @@ export class PriorityStore {
   readonly missionNotifications?: MissionNotifications;
   readonly missionReviewRuns?: MissionReviewRuns;
   readonly teamFinalReviews?: TeamFinalReviews;
+  readonly teamNotifications?: MissionNotifications;
   constructor(
     readonly database: BoundedDatabase,
     readonly knowledge?: KnowledgeStore,
@@ -88,6 +89,7 @@ export class PriorityStore {
       this.missionNotifications = new MissionNotifications(database, this.missionReviews);
       this.missionReviewRuns = new MissionReviewRuns(this.missionReviews);
       this.teamFinalReviews = new TeamFinalReviews(this.teamRuns);
+      this.teamNotifications = new MissionNotifications(database, this.teamFinalReviews, 'team');
     }
     this.work = new WorkStore(knowledge);
     this.briefs = new BriefRunStore(database);
