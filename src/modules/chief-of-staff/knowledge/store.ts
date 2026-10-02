@@ -1,5 +1,8 @@
 import type { Context, Result, SourceChange } from '../domain/contracts.js';
-import { digest } from '../domain/contracts.js';
+import { canonical, digest } from '../domain/contracts.js';
+import type { MissionSource } from '../contracts/mission-protocol.js';
+import type { MissionSourceSnapshot } from '../missions/work-order.js';
+import { extractChunks } from './text.js';
 import { randomUUID } from 'node:crypto';
 import type { PoolClient } from 'pg';
 import { BoundedDatabase, DatabaseUnavailable } from '../store/client.js';
@@ -439,6 +442,68 @@ export class KnowledgeStore {
   }
   async contextReady(context: KnowledgeContext): Promise<Result> {
     return this.transaction(async (client) => ({ status: (await this.current(client, context)) ? 'ok' : 'denied' }));
+  }
+  /** Trusted mission admission only. Caller owns the transaction; no worker receives this client or artifact root. */
+  async captureMissionSources(
+    client: PoolClient,
+    context: KnowledgeContext,
+    selected: MissionSource[],
+    maxBytes: number,
+  ): Promise<MissionSourceSnapshot[] | null> {
+    if (
+      context.origin ||
+      context.provider !== 'codex' ||
+      !this.retrievalEnabled() ||
+      !Number.isSafeInteger(maxBytes) ||
+      maxBytes < 1024 ||
+      maxBytes > 65536 ||
+      !Array.isArray(selected) ||
+      selected.length < 1 ||
+      selected.length > 8 ||
+      !selected.every((s) => s && Object.keys(s).length === 2 && uuid.test(s.source_id) && uuid.test(s.revision_id)) ||
+      new Set(selected.map((s) => s.source_id)).size !== selected.length ||
+      !(await this.current(client, context))
+    )
+      return null;
+    const snapshots: MissionSourceSnapshot[] = [];
+    for (const selection of selected) {
+      const row = (
+        await client.query(
+          `SELECT s.id AS source_id,s.version AS source_version,s.title,s.status,
+          r.id AS revision_id,r.digest AS revision_digest,r.artifact_id
+        FROM cos.sources s JOIN cos.source_revisions r ON r.scope_id=s.scope_id AND r.source_id=s.id AND r.id=s.current_revision_id
+        JOIN cos.artifacts a ON a.scope_id=r.scope_id AND a.id=r.artifact_id
+        WHERE s.scope_id=$1 AND s.id=$2 AND r.id=$3 AND s.status IN ('current','stale')
+          AND $4=ANY(s.processing_providers) AND a.lifecycle='published' AND a.kind='source' AND a.digest=r.digest
+          AND s.provenance->>'origin'='selected_staging_file' AND s.access_policy='{"scope_owner_only":true}'::jsonb
+          AND NOT EXISTS(SELECT 1 FROM cos.revocation_tombstones t WHERE t.scope_id=s.scope_id AND t.source_id=s.id)
+        FOR SHARE OF s,r,a`,
+          [context.scopeId, selection.source_id, selection.revision_id, context.provider],
+        )
+      ).rows[0];
+      if (!row || !this.retrievalEnabled()) return null;
+      const chunks = (
+        await client.query(
+          'SELECT ordinal,start_line,end_line,text FROM cos.chunks WHERE scope_id=$1 AND revision_id=$2 ORDER BY ordinal LIMIT 513',
+          [context.scopeId, row.revision_id],
+        )
+      ).rows as MissionSourceSnapshot['chunks'];
+      if (!chunks.length || chunks.length > 512) return null;
+      const original = extractChunks(this.artifacts.read(row.artifact_id, row.revision_digest)).map(
+        (chunk, ordinal) => ({
+          ordinal,
+          start_line: chunk.startLine,
+          end_line: chunk.endLine,
+          text: chunk.text,
+        }),
+      );
+      if (digest(chunks) !== digest(original)) return null;
+      const { artifact_id: _artifact, ...source } = row;
+      snapshots.push({ ...source, chunks } as MissionSourceSnapshot);
+      if (Buffer.byteLength(canonical({ format: 'cos-mission-context/v1', sources: snapshots })) > maxBytes)
+        return null;
+    }
+    return this.retrievalEnabled() && (await this.current(client, context)) ? snapshots : null;
   }
   /** Record metadata exposure before returning a calendar view, including empty and unavailable views. */
   async recordCalendarContext(context: KnowledgeContext): Promise<Result> {
