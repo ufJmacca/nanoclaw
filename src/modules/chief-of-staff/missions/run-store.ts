@@ -87,6 +87,12 @@ export class MissionRunStore {
     }
   }
   private async mission(client: PoolClient, scopeId: string, missionId: string): Promise<MissionRow | undefined> {
+    // All team operations lock the parent first, including reservations/cancel/result processing.
+    await client.query(
+      `SELECT r.id FROM cos.mission_team_roots r JOIN cos.mission_team_steps s ON s.scope_id=r.scope_id AND s.team_id=r.id
+      WHERE s.scope_id=$1 AND s.child_mission_id=$2 FOR UPDATE OF r`,
+      [scopeId, missionId],
+    );
     return (
       await client.query(
         `SELECT m.*,w.body,w.digest,p.state AS proposal_state,p.applied_record_id
@@ -123,7 +129,11 @@ export class MissionRunStore {
     );
   }
   private async capture(client: PoolClient, m: MissionRow): Promise<ResearchWorkOrder | null> {
-    if (m.proposal_state !== 'applied' || m.applied_record_id !== m.id) return null;
+    if (
+      m.body.format !== 'cos-team-child-work-order/v1' &&
+      (m.proposal_state !== 'applied' || m.applied_record_id !== m.id)
+    )
+      return null;
     const o = m.body.origin;
     const context: Context = {
       scopeId: o.scopeId,
@@ -167,11 +177,16 @@ export class MissionRunStore {
         FROM cos.mission_attempts a
         JOIN cos.missions m ON m.scope_id=a.scope_id AND m.id=a.mission_id AND m.generation=a.generation
         JOIN cos.mission_work_orders w ON w.scope_id=m.scope_id AND w.id=m.id
-        JOIN cos.proposals p ON p.scope_id=m.scope_id AND p.id=m.proposal_id
+        LEFT JOIN cos.proposals p ON p.scope_id=m.scope_id AND p.id=m.proposal_id
+        LEFT JOIN cos.mission_team_steps ts ON ts.scope_id=m.scope_id AND ts.child_mission_id=m.id
+        LEFT JOIN cos.mission_team_roots tr ON tr.scope_id=ts.scope_id AND tr.id=ts.team_id
+        LEFT JOIN cos.proposals tp ON tp.scope_id=tr.scope_id AND tp.id=tr.proposal_id
         JOIN cos.scopes s ON s.id=m.scope_id
         WHERE a.scope_id=$1 AND s.owner_id=$2 AND s.agent_group_id=$3 AND s.status='active'
           AND m.state='queued' AND a.state IN ('queued','allocating','ready')
-          AND p.state='applied' AND p.applied_record_id=m.id
+          AND ((w.body->>'format'='cos-research-work-order/v1' AND p.state='applied' AND p.applied_record_id=m.id)
+            OR (w.body->>'format'='cos-team-child-work-order/v1' AND ts.state='running' AND tr.state IN ('queued','running')
+              AND tr.generation::text=w.body->'team'->>'generation' AND tr.id=w.body->'team'->>'teamId' AND tp.state='applied' AND tp.applied_record_id=tr.id))
           AND a.allocation->>'stop_confirmed' IS DISTINCT FROM 'true'
           AND w.body->'origin'->>'scopeId'=$1 AND w.body->'origin'->>'ownerId'=$2
           AND w.body->'origin'->>'agentGroupId'=$3 AND w.body->'origin'->>'sessionId'=$4
@@ -592,8 +607,8 @@ export class MissionRunStore {
         m.state !== 'queued' ||
         m.generation !== a.generation ||
         !['queued', 'allocating', 'ready'].includes(a.state) ||
-        m.proposal_state !== 'applied' ||
-        m.applied_record_id !== m.id
+        (m.body.format !== 'cos-team-child-work-order/v1' &&
+          (m.proposal_state !== 'applied' || m.applied_record_id !== m.id))
       )
         return { status: 'denied' };
       if (a.lease_current && a.lease_owner !== owner) return { status: 'pending' };

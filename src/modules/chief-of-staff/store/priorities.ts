@@ -10,6 +10,7 @@ import {
 } from '../contracts/protocol.js';
 import { validTeamRequest, type TeamRequest } from '../contracts/team-protocol.js';
 import { TeamProposalStore, type TeamAuthorityResolver } from '../missions/team-proposal-store.js';
+import { TeamRunStore } from '../missions/team-run-store.js';
 import { validMissionRequest, type MissionRequest } from '../contracts/mission-protocol.js';
 import { MissionProposalStore, type MissionAuthorityResolver } from '../missions/proposal-store.js';
 import { MissionRunStore } from '../missions/run-store.js';
@@ -61,6 +62,7 @@ export class PriorityStore {
   readonly briefArtifacts?: BriefArtifacts;
   readonly missions: MissionProposalStore;
   readonly teams: TeamProposalStore;
+  readonly teamRuns: TeamRunStore;
   readonly missionRuns: MissionRunStore;
   readonly missionReviews?: MissionReviews;
   readonly missionNotifications?: MissionNotifications;
@@ -73,8 +75,11 @@ export class PriorityStore {
     missionAuthority?: MissionAuthorityResolver,
     teamAuthority?: TeamAuthorityResolver,
   ) {
-    this.missions = new MissionProposalStore(knowledge, missionAuthority);
     this.teams = new TeamProposalStore(knowledge, teamAuthority);
+    this.teamRuns = new TeamRunStore(database, this.teams, knowledge);
+    this.missions = new MissionProposalStore(knowledge, missionAuthority, (...args) =>
+      this.teamRuns.captureChild(...args),
+    );
     this.missionRuns = new MissionRunStore(database, this.missions, knowledge?.artifacts);
     if (knowledge) {
       this.missionReviews = new MissionReviews(database, this.missions, knowledge);

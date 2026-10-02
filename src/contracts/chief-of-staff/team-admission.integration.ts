@@ -15,6 +15,8 @@ import { TEAM_TEMPLATES } from '../../modules/chief-of-staff/contracts/team-temp
 import { TEAM_DEFAULT_LIMITS, type TeamRequest } from '../../modules/chief-of-staff/contracts/team-protocol.js';
 import { MISSION_DEFAULT_LIMITS } from '../../modules/chief-of-staff/contracts/mission-protocol.js';
 import { digest } from '../../modules/chief-of-staff/domain/contracts.js';
+import { TeamRunStore } from '../../modules/chief-of-staff/missions/team-run-store.js';
+import type { TeamChildWorkOrder } from '../../modules/chief-of-staff/missions/team-work-order.js';
 
 const scope = 'team-admission-' + randomUUID();
 const context = { scopeId: scope, ownerId: 'owner', agentGroupId: scope, sessionId: scope, ingressId: randomUUID() };
@@ -339,4 +341,73 @@ test('S06-T01 a new team-admission revision cannot revive an older unapproved gr
   } finally {
     authority.teamPolicyDigest = previous;
   }
+});
+test('S06-T02 a corrupt second step cannot commit the first child while reporting denial', async () => {
+  const p = await store.requestTeam(context, randomUUID(), await input());
+  await approve(p);
+  const teams = new TeamRunStore(store.database, store.teams, knowledge, { nativeCapacity: 3, maxWorkers: 2 });
+  await admin.query(
+    "UPDATE cos.mission_team_reservations SET max_turns=1 WHERE scope_id=$1 AND team_id=$2 AND step_id='technical'",
+    [scope, p.team_id],
+  );
+  assert.equal((await teams.claimReady(context, String(p.team_id))).status, 'denied');
+  assert.equal((await rows('mission_attempts')).length, 0);
+  await admin.query(
+    "UPDATE cos.mission_team_reservations SET max_turns=4 WHERE scope_id=$1 AND team_id=$2 AND step_id='technical'",
+    [scope, p.team_id],
+  );
+});
+test('S06-T02/T03/PG01 concurrent ready admission creates stable isolated children once and never starts blocked joins', async () => {
+  const p = await store.requestTeam(context, randomUUID(), await input());
+  assert.equal(p.status, 'ok');
+  await approve(p);
+  // Fixture host has three native slots, one reserved for the coordinator. Same existing database/pool.
+  const teams = new TeamRunStore(store.database, store.teams, knowledge, { nativeCapacity: 3, maxWorkers: 2 });
+  const [a, b] = await Promise.all([
+    teams.claimReady(context, String(p.team_id)),
+    teams.claimReady(context, String(p.team_id)),
+  ]);
+  assert.equal(a.status, 'ok');
+  assert.equal(b.status, 'ok');
+  const steps = (await rows('mission_team_steps')).filter((s) => s.team_id === p.team_id),
+    missions = await rows('missions'),
+    attempts = await rows('mission_attempts');
+  assert.equal(steps.filter((s) => s.state === 'running').length, 2);
+  assert.equal(steps.filter((s) => s.state === 'blocked').length, 2);
+  assert.equal(missions.length, 2);
+  assert.equal(attempts.length, 2);
+  assert.equal(new Set(attempts.map((a) => a.session_id)).size, 2);
+  assert.equal(new Set(attempts.map((a) => a.agent_group_id)).size, 2);
+  assert.equal(
+    missions.every((m) => m.proposal_id === null),
+    true,
+  ); // Root approval is explicit derivation, not a fabricated child approval.
+  const discovery = await store.missionRuns.pendingDispatch(context);
+  assert.equal(discovery.status, 'ok');
+  assert.equal((discovery.items as unknown[]).length, 2);
+  for (const attempt of attempts) {
+    const claim = await store.missionRuns.claimDispatch(context, attempt.id, 'fixture-host');
+    assert.equal(claim.status, 'ok');
+    assert.equal((claim.order as TeamChildWorkOrder).body.team.teamId, p.team_id);
+    assert.equal((claim.order as TeamChildWorkOrder).context.artifacts.length, 0);
+  }
+  const before = await rows('mission_budget_reservations');
+  assert.equal((await teams.claimReady(context, String(p.team_id))).status, 'ok');
+  assert.deepEqual(await rows('mission_budget_reservations'), before);
+  // No native allocation or model ran; retain these queued reservations for the capacity test below.
+});
+test('S06-T02/PG02 shared host admission preserves coordinator capacity across multiple roots', async () => {
+  const p = await store.requestTeam(context, randomUUID(), await input());
+  await approve(p);
+  const teams = new TeamRunStore(store.database, store.teams, knowledge, { nativeCapacity: 3, maxWorkers: 2 });
+  const result = await teams.claimReady(context, String(p.team_id));
+  assert.equal(result.status, 'ok');
+  assert.equal(result.capacity_available, 0);
+  assert.equal(
+    (await rows('mission_team_steps')).filter((s) => s.team_id === p.team_id && s.child_mission_id !== null).length,
+    0,
+  );
+  assert.equal((await rows('mission_attempts')).length, 2);
+  const disabled = new TeamRunStore(store.database, store.teams, knowledge, { nativeCapacity: 1, maxWorkers: 2 });
+  assert.equal((await disabled.claimReady(context, String(p.team_id))).capacity_available, 0);
 });

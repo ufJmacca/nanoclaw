@@ -182,6 +182,20 @@ export function validTeamRequest(v: unknown): v is TeamRequest {
     !ordered(steps)
   )
     return false;
+  // Submitted prose can retain uncited influence from every dependency source. Scope that disclosure explicitly.
+  if (
+    steps.some((s) =>
+      s.depends_on.some((d) =>
+        byId
+          .get(d)!
+          .sources.some(
+            (source) =>
+              !s.sources.some((r) => r.source_id === source.source_id && r.revision_id === source.revision_id),
+          ),
+      ),
+    )
+  )
+    return false;
   for (const key of ['max_attempts', 'max_turns', 'max_tool_calls'] as const) {
     if (
       steps.reduce((sum, s) => sum + s.limits[key] + (key === 'max_attempts' ? s.max_rework_count : 0), 0) >

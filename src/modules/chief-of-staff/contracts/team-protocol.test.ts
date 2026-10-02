@@ -130,6 +130,15 @@ describe('S06-T01/T03 approved bounded team graph contract', () => {
       false,
     );
   });
+  it('does not pass dependency output from a source omitted from the receiving step scope', () => {
+    const r = request(),
+      other = { source_id: 'other', revision_id: 'v2' };
+    r.sources.push(other);
+    r.steps[1].sources = [other];
+    r.steps[2].sources = [other];
+    r.steps[3].sources = [other];
+    expect(validTeamRequest(r)).toBe(false);
+  });
   it('rejects oversized or malformed root input before traversing graphs', () => {
     expect(validTeamRequest(null)).toBe(false);
     expect(validTeamRequest({ ...request(), steps: {} })).toBe(false);
