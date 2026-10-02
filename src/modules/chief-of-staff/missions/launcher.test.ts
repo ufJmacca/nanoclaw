@@ -54,6 +54,7 @@ function input(policy: SubscriptionActivation, canary = 'A') {
       agentGroupId: 'main',
       ingressId: 'ingress',
       bindingDigest: digest('binding'),
+      delegationDigest: 'd'.repeat(64),
       contextGeneration: policy.contextGeneration,
     },
     related: { goal: null, project: null },

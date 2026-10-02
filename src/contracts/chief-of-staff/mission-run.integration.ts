@@ -48,6 +48,7 @@ const scope = 'mission-run-' + randomUUID();
 const context = { scopeId: scope, ownerId: 'owner', agentGroupId: scope, sessionId: scope, ingressId: randomUUID() };
 const authority = {
   bindingDigest: digest('private owner-approved delegation'),
+  delegationDigest: digest('operator delegation revision one'),
   contextGeneration: randomUUID(),
   provider: {
     profile: RESEARCH_TEMPLATE.providerProfile,

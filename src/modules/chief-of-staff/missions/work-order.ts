@@ -26,6 +26,7 @@ export type MissionOrigin = {
   agentGroupId: string;
   ingressId: string;
   bindingDigest: string;
+  delegationDigest: string;
   contextGeneration: string;
 };
 type RelatedRecord = { id: string; version: number } | null;
@@ -118,12 +119,14 @@ function valid(v: unknown): v is Input {
       'agentGroupId',
       'ingressId',
       'bindingDigest',
+      'delegationDigest',
       'contextGeneration',
     ]) ||
     !['scopeId', 'ownerId', 'sessionId', 'agentGroupId', 'ingressId', 'contextGeneration'].every((key) =>
       id((v.origin as Record<string, unknown>)[key]),
     ) ||
     !hash(v.origin.bindingDigest) ||
+    !hash(v.origin.delegationDigest) ||
     !object(v.related) ||
     !exact(v.related, ['goal', 'project']) ||
     !related(v.related.goal, v.request.goal_id) ||

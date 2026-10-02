@@ -19,6 +19,7 @@ const scope = 'mission-approval-' + randomUUID();
 const context = { scopeId: scope, ownerId: 'owner', agentGroupId: scope, sessionId: scope, ingressId: randomUUID() };
 let authority = {
   bindingDigest: digest('private owner-approved delegation'),
+  delegationDigest: digest('operator delegation revision one'),
   contextGeneration: randomUUID(),
   provider: {
     profile: RESEARCH_TEMPLATE.providerProfile,
@@ -223,6 +224,28 @@ test('S05-T07 changed native context or private binding cannot inherit an existi
     } finally {
       authority = saved;
     }
+  }
+});
+test('S05-T07 re-enabling delegation cannot resurrect a previously approved mission', async () => {
+  const saved = authority;
+  try {
+    const input = await request(),
+      id = randomUUID();
+    const proposal = await store.requestMission(context, id, input);
+    assert.equal(proposal.status, 'ok');
+    enabled = false;
+    assert.equal((await store.requestMission(context, id, input)).status, 'denied');
+    authority = { ...authority, delegationDigest: digest('operator delegation revision three') };
+    enabled = true;
+    assert.equal((await store.requestMission(context, id, input)).status, 'denied');
+    assert.equal((await approve(proposal)).status, 'conflict');
+    assert.ok(!(await rows('mission_attempts')).some((a) => a.mission_id === proposal.mission_id));
+    const fresh = await store.requestMission(context, randomUUID(), input);
+    assert.equal(fresh.status, 'ok');
+    assert.equal((await approve(fresh)).status, 'ok');
+  } finally {
+    enabled = true;
+    authority = saved;
   }
 });
 test('S05-T03 model cannot bypass admission with a forged work order or attach it to another origin', async () => {

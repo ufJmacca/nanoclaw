@@ -8,6 +8,7 @@ import { RESEARCH_TEMPLATE, sealResearchWorkOrder, type ResearchWorkOrder } from
 
 export type MissionAuthority = {
   bindingDigest: string;
+  delegationDigest: string;
   contextGeneration: string;
   provider: ResearchWorkOrder['body']['provider'];
 };
@@ -66,7 +67,12 @@ export class MissionProposalStore {
     const order = sealResearchWorkOrder({
       missionId,
       request,
-      origin: { ...context, bindingDigest: authority.bindingDigest, contextGeneration: authority.contextGeneration },
+      origin: {
+        ...context,
+        bindingDigest: authority.bindingDigest,
+        delegationDigest: authority.delegationDigest,
+        contextGeneration: authority.contextGeneration,
+      },
       related,
       sources,
       provider: authority.provider,
@@ -182,6 +188,7 @@ export class MissionProposalStore {
       body.origin.sessionId !== context.sessionId ||
       body.origin.agentGroupId !== context.agentGroupId ||
       body.origin.bindingDigest !== authority.bindingDigest ||
+      body.origin.delegationDigest !== authority.delegationDigest ||
       body.origin.contextGeneration !== authority.contextGeneration ||
       digest(body.provider) !== digest(authority.provider)
     )

@@ -45,6 +45,7 @@ function input(canary = 'A') {
       agentGroupId: 'main',
       ingressId: 'ingress',
       bindingDigest: digest('binding'),
+      delegationDigest: 'd'.repeat(64),
       contextGeneration: randomUUID(),
     },
     related: { goal: null, project: null },

@@ -23,6 +23,7 @@ function fixture() {
       agentGroupId: 'group',
       ingressId: 'event',
       bindingDigest: 'a'.repeat(64),
+      delegationDigest: 'd'.repeat(64),
       contextGeneration: 'context',
     },
     related: { goal: null, project: null },

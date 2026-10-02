@@ -20,6 +20,7 @@ const input = () => ({
     agentGroupId: 'cos',
     ingressId: 'event',
     bindingDigest: 'a'.repeat(64),
+    delegationDigest: 'd'.repeat(64),
     contextGeneration: 'generation',
   },
   related: { goal: null, project: { id: 'pilot', version: 2 } },
@@ -77,6 +78,17 @@ describe('S05-T02/T03 immutable admitted work orders', () => {
     const other = input();
     other.provider.profile = 'ordinary-codex';
     expect(() => sealResearchWorkOrder(other)).toThrow('work_order_denied');
+  });
+  it('pins the operator delegation revision and refuses unpinned historical work', () => {
+    const first = input(),
+      second = input();
+    second.origin.delegationDigest = 'e'.repeat(64);
+    expect(sealResearchWorkOrder(first).digest).not.toBe(sealResearchWorkOrder(second).digest);
+    for (const delegationDigest of [undefined, null, '', 'invalid']) {
+      expect(() => sealResearchWorkOrder({ ...first, origin: { ...first.origin, delegationDigest } })).toThrow(
+        'work_order_denied',
+      );
+    }
   });
   it('keeps untrusted note instructions as evidence without adding tool authority', () => {
     const malicious = input();
