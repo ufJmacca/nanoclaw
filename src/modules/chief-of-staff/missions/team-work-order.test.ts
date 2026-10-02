@@ -101,6 +101,7 @@ const artifact = (step_id: string) => ({
 function submitted(id: string) {
   const a = artifact(id);
   a.result_digest = digest(a.result);
+  a.artifact_id = digest('artifact-' + id) + '-' + a.result_digest;
   return a;
 }
 describe('S06-T05/T08 host-pinned review evidence', () => {
@@ -150,6 +151,7 @@ describe('S06-T05/T08 host-pinned review evidence', () => {
       a = submitted('synthesis');
     a.result.claims[0].citations[0].source_id = 'foreign';
     a.result_digest = digest(a.result);
+    a.artifact_id = digest('artifact-synthesis') + '-' + a.result_digest;
     i.artifacts = [a];
     expect(checkWorkerResult(sealTeamChildWorkOrder(i), review()).status).toBe('invalid');
   });

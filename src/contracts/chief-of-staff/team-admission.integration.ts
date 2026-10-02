@@ -558,3 +558,193 @@ test('S06-T05/T07 analyst result shape and context are pinned; submitted childre
   assert.deepEqual(pending.items, []);
   assert.equal((await rows('outbox')).filter((o) => o.kind === 'mission_result_notification').length, 0);
 });
+test('S06-T02/T05/T07 joins require verified submitted artifacts and exact stops, then dispatch once with declared inputs only', async () => {
+  await admin.query(
+    "UPDATE cos.mission_attempts SET allocation=allocation||'{\"stop_confirmed\":true}'::jsonb,state='failed',lease_owner=NULL,lease_until=NULL WHERE scope_id=$1 AND state<>'submitted'",
+    [scope],
+  );
+  const r = await input(),
+    p = await store.requestTeam(context, randomUUID(), r),
+    teamId = String(p.team_id);
+  await approve(p);
+  const teams = new TeamRunStore(store.database, store.teams, knowledge, { nativeCapacity: 3, maxWorkers: 2 });
+  const runs = new MissionRunStore(
+    store.database,
+    store.missions,
+    knowledge.artifacts,
+    {},
+    { nativeCapacity: 3, maxWorkers: 2 },
+  );
+  await teams.claimReady(context, teamId);
+  const children = (await rows('mission_team_steps')).filter((s) => s.team_id === teamId && s.state === 'running');
+  const identities: CosMissionIdentity[] = [];
+  for (const child of children) {
+    const attempt = (await rows('mission_attempts')).find((a) => a.mission_id === child.child_mission_id)!;
+    const claim = await runs.claimDispatch(context, attempt.id, 'fixture-host'),
+      identity = claim.identity as CosMissionIdentity,
+      lease = claim.lease as MissionDispatchLease;
+    assert.equal(claim.status, 'ok');
+    await runs.markDispatchReady(identity, lease, digest('fixture native receipt'));
+    await runs.beginExecution(identity, lease);
+    const result = {
+      format: 'cos-research-result/v1',
+      outcome: 'answer',
+      claims: [
+        {
+          id: child.step_id,
+          kind: 'inference',
+          text: child.step_id === 'technical' ? 'Prefer B for capacity.' : 'Prefer A for cost.',
+          citations: [{ ...r.sources[0], ordinal: 0, start_line: 1, end_line: 1 }],
+        },
+      ],
+      criteria: [{ id: 'tradeoff', claim_ids: [child.step_id] }],
+      limitations: ['Fixture notes only.'],
+    };
+    assert.equal((await runs.submitResult(identity, lease, randomUUID(), 'submission', result)).status, 'ok');
+    identities.push(identity);
+  }
+  assert.equal((await teams.advance(context, teamId)).status, 'ok');
+  assert.equal(
+    (await rows('mission_team_steps')).find((s) => s.team_id === teamId && s.step_id === 'synthesis')!.state,
+    'blocked',
+  );
+  assert.deepEqual((await teams.claimReady(context, teamId)).created, []);
+  for (const identity of identities) assert.equal((await runs.confirmStopped(identity)).status, 'ok');
+  const advanced = await Promise.all([teams.advance(context, teamId), teams.advance(context, teamId)]);
+  assert.equal(
+    advanced.every((a) => a.status === 'ok'),
+    true,
+  );
+  const claimed = await Promise.all([teams.claimReady(context, teamId), teams.claimReady(context, teamId)]);
+  assert.deepEqual(
+    claimed.map((c) => c.status),
+    ['ok', 'ok'],
+  );
+  assert.equal(claimed.flatMap((c) => c.created as string[]).length, 1);
+  const writer = (await rows('mission_team_steps')).find((s) => s.team_id === teamId && s.step_id === 'synthesis')!;
+  const attempt = (await rows('mission_attempts')).find((a) => a.mission_id === writer.child_mission_id)!;
+  const claim = await runs.claimDispatch(context, attempt.id, 'fixture-host');
+  assert.equal(claim.status, 'ok');
+  const order = claim.order as TeamChildWorkOrder;
+  assert.deepEqual(
+    order.context.artifacts.map((a) => a.step_id),
+    ['operations', 'technical'],
+  );
+  assert.equal(JSON.stringify(order.context).includes('Prefer A for cost.'), true);
+  assert.equal(JSON.stringify(order.context).includes('Prefer B for capacity.'), true);
+  assert.equal(
+    (await rows('mission_team_steps')).find((s) => s.team_id === teamId && s.step_id === 'review')!.state,
+    'blocked',
+  );
+  await admin.query("UPDATE cos.sources SET status='revoked',version=version+1 WHERE scope_id=$1 AND id=$2", [
+    scope,
+    r.sources[0].source_id,
+  ]);
+  assert.equal(
+    (await runs.authorizeDispatch(claim.identity as CosMissionIdentity, claim.lease as MissionDispatchLease)).status,
+    'denied',
+  );
+});
+async function stoppedAnalyses(failTechnical = false) {
+  // This file exercises trusted admission/storage only, with no native worker or model process.
+  await admin.query(
+    "UPDATE cos.mission_attempts SET allocation=allocation||'{\"stop_confirmed\":true}'::jsonb,state='failed',lease_owner=NULL,lease_until=NULL WHERE scope_id=$1 AND state<>'submitted'",
+    [scope],
+  );
+  const r = await input();
+  if (failTechnical) r.steps.find((s) => s.step_id === 'technical')!.limits.max_attempts = 1;
+  const p = await store.requestTeam(context, randomUUID(), r),
+    teamId = String(p.team_id);
+  await approve(p);
+  const teams = new TeamRunStore(store.database, store.teams, knowledge, { nativeCapacity: 3, maxWorkers: 2 });
+  const runs = new MissionRunStore(
+    store.database,
+    store.missions,
+    knowledge.artifacts,
+    {},
+    { nativeCapacity: 3, maxWorkers: 2 },
+  );
+  await teams.claimReady(context, teamId);
+  const children = (await rows('mission_team_steps')).filter((s) => s.team_id === teamId && s.state === 'running');
+  const submissions: string[] = [];
+  for (const child of children) {
+    const attempt = (await rows('mission_attempts')).find((a) => a.mission_id === child.child_mission_id)!;
+    const claim = await runs.claimDispatch(context, attempt.id, 'fixture-host'),
+      identity = claim.identity as CosMissionIdentity,
+      lease = claim.lease as MissionDispatchLease;
+    assert.equal(claim.status, 'ok');
+    if (failTechnical && child.step_id === 'technical') {
+      assert.equal((await runs.fail(identity, 'provider_failed')).status, 'ok');
+    } else {
+      await runs.markDispatchReady(identity, lease, digest('fixture native receipt'));
+      await runs.beginExecution(identity, lease);
+      const result = {
+        format: 'cos-research-result/v1',
+        outcome: 'answer',
+        claims: [
+          {
+            id: child.step_id,
+            kind: 'inference',
+            text: child.step_id === 'technical' ? 'Prefer B for capacity.' : 'Prefer A for cost.',
+            citations: [{ ...r.sources[0], ordinal: 0, start_line: 1, end_line: 1 }],
+          },
+        ],
+        criteria: [{ id: 'tradeoff', claim_ids: [child.step_id] }],
+        limitations: ['Fixture notes only.'],
+      };
+      const submitted = await runs.submitResult(identity, lease, randomUUID(), 'submission', result);
+      assert.equal(submitted.status, 'ok');
+      submissions.push(String(submitted.submission_id));
+    }
+    assert.equal((await runs.confirmStopped(identity)).status, 'ok');
+  }
+  return { teams, runs, teamId, submissions };
+}
+test('S06-T05/T07 failed provenance checks cannot partially accept another analyst or unblock a writer', async () => {
+  const { teams, teamId, submissions } = await stoppedAnalyses();
+  const artifact = (
+    await admin.query(
+      'SELECT a.* FROM cos.artifacts a JOIN cos.mission_result_submissions s ON s.scope_id=a.scope_id AND s.artifact_id=a.id WHERE s.scope_id=$1 AND s.id=$2',
+      [scope, submissions.at(-1)],
+    )
+  ).rows[0];
+  for (const patch of [
+    { attempt_id: 'foreign' },
+    { session_id: 'private-worker' },
+    { work_order_digest: digest('forged') },
+    { processing_provider: 'foreign' },
+  ]) {
+    await admin.query('UPDATE cos.artifacts SET provenance=$3 WHERE scope_id=$1 AND id=$2', [
+      scope,
+      artifact.id,
+      { ...artifact.provenance, ...patch },
+    ]);
+    assert.equal((await teams.advance(context, teamId)).status, 'denied');
+    assert.equal(
+      (await rows('mission_team_steps')).filter((s) => s.team_id === teamId && s.state === 'submitted').length,
+      0,
+    );
+    assert.equal(
+      (await rows('mission_team_steps')).find((s) => s.team_id === teamId && s.step_id === 'synthesis')!.state,
+      'blocked',
+    );
+    await admin.query('UPDATE cos.artifacts SET provenance=$3 WHERE scope_id=$1 AND id=$2', [
+      scope,
+      artifact.id,
+      artifact.provenance,
+    ]);
+  }
+  assert.equal((await teams.advance(context, teamId)).status, 'ok');
+  assert.equal((await teams.claimReady(context, teamId)).status, 'ok');
+});
+test('S06-T04 an exhausted required specialist blocks the root; no apparently complete synthesis is admitted', async () => {
+  const { teams, teamId } = await stoppedAnalyses(true);
+  const advanced = await teams.advance(context, teamId);
+  assert.equal(advanced.status, 'ok');
+  assert.equal(advanced.state, 'blocked');
+  assert.equal((await teams.claimReady(context, teamId)).status, 'denied');
+  const steps = (await rows('mission_team_steps')).filter((s) => s.team_id === teamId);
+  assert.equal(steps.find((s) => s.step_id === 'technical')!.state, 'failed');
+  assert.equal(steps.find((s) => s.step_id === 'technical')!.provenance.failure_reason, 'worker_failed');
+  assert.equal(steps.find((s) => s.step_id === 'synthesis')!.child_mission_id, null);
+});

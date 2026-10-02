@@ -4,7 +4,11 @@ import { digest, type Context, type Result } from '../domain/contracts.js';
 import type { MissionChange } from '../contracts/protocol.js';
 import type { KnowledgeStore } from '../knowledge/store.js';
 import type { TeamProposalStore } from './team-proposal-store.js';
-import { sealTeamChildWorkOrder, validateTeamChildWorkOrder } from './team-work-order.js';
+import { sealTeamChildWorkOrder, validateTeamChildWorkOrder, type TeamChildWorkOrder } from './team-work-order.js';
+import type { TeamInputArtifact } from '../contracts/team-inputs.js';
+import type { TeamStep } from '../contracts/team-protocol.js';
+import { validMissionResult } from '../contracts/mission-result.js';
+import { readVerifiedSubmission } from './submission-reader.js';
 import { queueMissionAttempt } from './attempt.js';
 import {
   defaultMissionWorkerCapacity,
@@ -15,6 +19,10 @@ import {
 } from './worker-admission.js';
 
 const id = (v: unknown): v is string => typeof v === 'string' && /^[a-zA-Z0-9_-]{1,100}$/.test(v);
+type CurrentTeam = {
+  row: { id: string; generation: number; state: string };
+  order: NonNullable<Awaited<ReturnType<TeamProposalStore['captureChange']>>>;
+};
 /** One host pool, parent-before-child locking and bounded credit escrow. No model/container wait occurs here. */
 export class TeamRunStore {
   readonly workerCapacity: number;
@@ -97,11 +105,26 @@ export class TeamRunStore {
           [context.scopeId, teamId],
         )
       ).rows;
+      const prepared = new Map<string, TeamChildWorkOrder>();
       // Validate every ready row before the first mutation. A denied admission must not have created a child.
       for (const row of ready) {
         const step = current.order.body.request.steps.find((s) => s.step_id === row.step_id);
         if (!step || digest(step) !== digest(row.definition) || row.child_mission_id !== null)
           return { status: 'denied' };
+        const artifacts = await this.inputs(client, context, current, step, new Set([step.step_id]));
+        if (!artifacts) return { status: 'denied' };
+        prepared.set(
+          step.step_id,
+          sealTeamChildWorkOrder({
+            missionId:
+              'mission-' +
+              digest({ scope: context.scopeId, team: teamId, generation: current.row.generation, step: step.step_id }),
+            stepId: step.step_id,
+            rootGeneration: current.row.generation,
+            approved: current.order,
+            artifacts,
+          }),
+        );
         const reservation = (
           await client.query(
             "SELECT * FROM cos.mission_team_reservations WHERE scope_id=$1 AND team_id=$2 AND step_id=$3 AND state='reserved' FOR UPDATE",
@@ -121,18 +144,8 @@ export class TeamRunStore {
         if (available <= 0) break;
         const step = current.order.body.request.steps.find((s) => s.step_id === row.step_id);
         if (!step) throw Error('team_step_integrity');
-        // Dependency joins are enabled only after independently verified submissions have been implemented.
-        if (step.depends_on.length) continue;
-        const missionId =
-          'mission-' +
-          digest({ scope: context.scopeId, team: teamId, generation: current.row.generation, step: step.step_id });
-        const order = sealTeamChildWorkOrder({
-          missionId,
-          stepId: step.step_id,
-          rootGeneration: current.row.generation,
-          approved: current.order,
-          artifacts: [],
-        });
+        const order = prepared.get(step.step_id)!,
+          missionId = order.body.missionId;
         const provenance = {
           team_id: teamId,
           team_generation: current.row.generation,
@@ -148,7 +161,9 @@ export class TeamRunStore {
             ...source,
             chunks: chunks.map(({ text, ...locator }) => ({ ...locator, digest: digest(text) })),
           })),
-          artifacts: [],
+          artifacts: order.context.artifacts.map((a) =>
+            a.state === 'submitted' ? (({ result: _result, ...locator }) => locator)(a) : a,
+          ),
         };
         await client.query(
           'INSERT INTO cos.mission_context_manifests(scope_id,digest,body,provenance) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING',
@@ -218,25 +233,236 @@ export class TeamRunStore {
       digest(change.work_order) !== row.digest
     )
       return null;
-    const order = { body: row.body, digest: row.digest, context: {} };
     const step = current.order.body.request.steps.find((s) => s.step_id === row.step_id);
     if (
       !step ||
       digest(step) !== digest(row.definition) ||
-      step.depends_on.length ||
       row.max_attempts !== step.limits.max_attempts + step.max_rework_count ||
       row.max_turns !== step.limits.max_turns ||
       row.max_tool_calls !== step.limits.max_tool_calls
     )
       return null;
-    const rebuilt = sealTeamChildWorkOrder({
-      missionId: change.mission_id,
-      stepId: step.step_id,
+    const rebuilt = await this.childOrder(client, context, current, step.step_id);
+    return rebuilt && rebuilt.digest === row.digest ? rebuilt : null;
+  }
+  private async inputs(
+    client: PoolClient,
+    context: Context,
+    current: CurrentTeam,
+    step: TeamStep,
+    seen: Set<string>,
+  ): Promise<TeamInputArtifact[] | null> {
+    const inputs: TeamInputArtifact[] = [];
+    for (const dependency of step.depends_on) {
+      const row = (
+        await client.query(
+          `SELECT s.*,m.generation,m.state AS mission_state FROM cos.mission_team_steps s
+        LEFT JOIN cos.missions m ON m.scope_id=s.scope_id AND m.id=s.child_mission_id
+        WHERE s.scope_id=$1 AND s.team_id=$2 AND s.step_id=$3 FOR SHARE OF s`,
+          [context.scopeId, current.row.id, dependency],
+        )
+      ).rows[0];
+      const definition = current.order.body.request.steps.find((s) => s.step_id === dependency);
+      if (!row || !definition || digest(row.definition) !== digest(definition)) return null;
+      if (row.state === 'failed') {
+        if (definition.required && current.order.body.request.partial_policy !== 'allow_labelled') return null;
+        inputs.push({
+          step_id: dependency,
+          state: 'failed',
+          required: definition.required,
+          reason: row.provenance.failure_reason === 'missing_coverage' ? 'missing_coverage' : 'worker_failed',
+        });
+        continue;
+      }
+      if (row.state !== 'submitted' || row.mission_state !== 'awaiting_review' || !id(row.provenance.submission_id))
+        return null;
+      const order = await this.childOrder(client, context, current, dependency, seen);
+      if (!order || !this.knowledge) return null;
+      const verified = await readVerifiedSubmission(
+        client,
+        this.knowledge.artifacts,
+        context.scopeId,
+        row.child_mission_id,
+        row.provenance.submission_id,
+        row.generation,
+        order,
+        true,
+      );
+      if (
+        !verified ||
+        !validMissionResult(verified.result) ||
+        verified.submission.digest !== row.provenance.result_digest ||
+        verified.submission.artifact_id !== row.provenance.artifact_id
+      )
+        return null;
+      inputs.push({
+        step_id: dependency,
+        state: 'submitted',
+        mission_id: row.child_mission_id,
+        submission_id: verified.submission.id,
+        artifact_id: verified.submission.artifact_id,
+        result_digest: verified.submission.digest,
+        result: verified.result,
+      });
+    }
+    return inputs;
+  }
+  private async childOrder(
+    client: PoolClient,
+    context: Context,
+    current: CurrentTeam,
+    stepId: string,
+    ancestors = new Set<string>(),
+  ): Promise<TeamChildWorkOrder | null> {
+    if (ancestors.has(stepId) || ancestors.size >= 6) return null;
+    const seen = new Set(ancestors).add(stepId);
+    const row = (
+      await client.query(
+        `SELECT s.*,w.body,w.digest,b.state AS reservation_state,b.max_attempts,b.max_turns,b.max_tool_calls
+      FROM cos.mission_team_steps s JOIN cos.mission_work_orders w ON w.scope_id=s.scope_id AND w.id=s.child_mission_id
+      JOIN cos.mission_team_reservations b ON b.scope_id=s.scope_id AND b.team_id=s.team_id AND b.step_id=s.step_id
+      WHERE s.scope_id=$1 AND s.team_id=$2 AND s.step_id=$3 FOR SHARE OF s,b`,
+        [context.scopeId, current.row.id, stepId],
+      )
+    ).rows[0];
+    const step = current.order.body.request.steps.find((s) => s.step_id === stepId);
+    if (
+      !row ||
+      !step ||
+      !['running', 'submitted'].includes(row.state) ||
+      row.reservation_state !== 'reserved' ||
+      digest(step) !== digest(row.definition) ||
+      digest(row.body) !== row.digest ||
+      row.max_attempts !== step.limits.max_attempts + step.max_rework_count ||
+      row.max_turns !== step.limits.max_turns ||
+      row.max_tool_calls !== step.limits.max_tool_calls
+    )
+      return null;
+    const artifacts = await this.inputs(client, context, current, step, seen);
+    if (!artifacts) return null;
+    const order = sealTeamChildWorkOrder({
+      missionId: row.child_mission_id,
+      stepId,
       rootGeneration: current.row.generation,
       approved: current.order,
-      artifacts: [],
+      artifacts,
     });
-    order.context = rebuilt.context;
-    return validateTeamChildWorkOrder(order) && rebuilt.digest === row.digest ? rebuilt : null;
+    return validateTeamChildWorkOrder(order) && order.digest === row.digest ? order : null;
+  }
+  /** Database events/confirmed stops advance the graph. No model turn or open transaction waits for a worker. */
+  async advance(context: Context, teamId: string): Promise<Result> {
+    if (!id(teamId) || !this.knowledge) return { status: 'denied' };
+    return this.transaction(context, async (client) => {
+      const current = await this.root(client, context, teamId);
+      if (!current) return { status: 'denied' };
+      const rows = (
+        await client.query(
+          'SELECT * FROM cos.mission_team_steps WHERE scope_id=$1 AND team_id=$2 ORDER BY step_id FOR UPDATE',
+          [context.scopeId, teamId],
+        )
+      ).rows;
+      if (
+        rows.length !== current.order.body.request.steps.length ||
+        rows.some(
+          (r) => digest(r.definition) !== digest(current.order.body.request.steps.find((s) => s.step_id === r.step_id)),
+        )
+      )
+        return { status: 'denied' };
+      const changes: Array<{ stepId: string; state: string; provenance: Record<string, unknown> }> = [];
+      for (const row of rows) {
+        if (row.state !== 'running') continue;
+        const attempt = (
+          await client.query(
+            `SELECT m.state,m.generation,a.state AS attempt_state,a.allocation FROM cos.missions m
+          JOIN cos.mission_attempts a ON a.scope_id=m.scope_id AND a.mission_id=m.id AND a.generation=m.generation
+          WHERE m.scope_id=$1 AND m.id=$2 FOR UPDATE OF m`,
+            [context.scopeId, row.child_mission_id],
+          )
+        ).rows[0];
+        if (!attempt || attempt.allocation.stop_confirmed !== true) continue;
+        if (attempt.state === 'awaiting_review' && attempt.attempt_state === 'submitted') {
+          const order = await this.childOrder(client, context, current, row.step_id);
+          if (!order) return { status: 'denied' };
+          const submission = (
+            await client.query(
+              'SELECT id FROM cos.mission_result_submissions WHERE scope_id=$1 AND mission_id=$2 AND generation=$3',
+              [context.scopeId, row.child_mission_id, attempt.generation],
+            )
+          ).rows[0];
+          if (!submission) return { status: 'denied' };
+          const verified = await readVerifiedSubmission(
+            client,
+            this.knowledge!.artifacts,
+            context.scopeId,
+            row.child_mission_id,
+            submission.id,
+            attempt.generation,
+            order,
+            true,
+          );
+          if (!verified) return { status: 'denied' };
+          const missing = validMissionResult(verified.result) && verified.result.outcome === 'blocked';
+          changes.push({
+            stepId: row.step_id,
+            state: missing ? 'failed' : 'submitted',
+            provenance: {
+              submission_id: submission.id,
+              result_digest: verified.submission.digest,
+              artifact_id: verified.submission.artifact_id,
+              ...(missing ? { failure_reason: 'missing_coverage' } : {}),
+            },
+          });
+        } else if (attempt.state === 'failed' && attempt.attempt_state === 'failed') {
+          // A stopped failure with retry credits is retained for bounded retry orchestration, never joined as success.
+          const definition = current.order.body.request.steps.find((s) => s.step_id === row.step_id)!;
+          const usage = (
+            await client.query(
+              "SELECT count(*)::int AS n FROM cos.mission_budget_reservations WHERE scope_id=$1 AND mission_id=$2 AND kind='attempt'",
+              [context.scopeId, row.child_mission_id],
+            )
+          ).rows[0].n;
+          if (usage >= definition.limits.max_attempts)
+            changes.push({ stepId: row.step_id, state: 'failed', provenance: { failure_reason: 'worker_failed' } });
+        }
+      }
+      for (const change of changes) {
+        await client.query(
+          'UPDATE cos.mission_team_steps SET state=$4,provenance=provenance||$5::jsonb,version=version+1,updated_at=clock_timestamp() WHERE scope_id=$1 AND team_id=$2 AND step_id=$3',
+          [context.scopeId, teamId, change.stepId, change.state, JSON.stringify(change.provenance)],
+        );
+        const row = rows.find((r) => r.step_id === change.stepId)!;
+        row.state = change.state;
+      }
+      const failedRequired = rows.some((r) => r.state === 'failed' && r.definition.required);
+      if (failedRequired && current.order.body.request.partial_policy === 'block') {
+        await client.query(
+          "UPDATE cos.mission_team_roots SET state='blocked',provenance=provenance||$3::jsonb,version=version+1,updated_at=clock_timestamp() WHERE scope_id=$1 AND id=$2 AND state<>'blocked'",
+          [context.scopeId, teamId, JSON.stringify({ failure_reason: 'required_step_failed' })],
+        );
+        return { status: 'ok', team_id: teamId, state: 'blocked' };
+      }
+      for (const row of rows) {
+        if (row.state !== 'blocked') continue;
+        const definition = current.order.body.request.steps.find((s) => s.step_id === row.step_id)!;
+        if (
+          definition.depends_on.every((d) =>
+            rows.some((r) => r.step_id === d && ['submitted', 'failed'].includes(r.state)),
+          )
+        )
+          await client.query(
+            "UPDATE cos.mission_team_steps SET state='ready',version=version+1,updated_at=clock_timestamp() WHERE scope_id=$1 AND team_id=$2 AND step_id=$3 AND state='blocked'",
+            [context.scopeId, teamId, row.step_id],
+          );
+      }
+      const state = rows.every((r) => ['submitted', 'failed'].includes(r.state))
+        ? 'awaiting_review'
+        : current.row.state;
+      if (state !== current.row.state)
+        await client.query(
+          'UPDATE cos.mission_team_roots SET state=$3,version=version+1,updated_at=clock_timestamp() WHERE scope_id=$1 AND id=$2',
+          [context.scopeId, teamId, state],
+        );
+      return { status: 'ok', team_id: teamId, state };
+    });
   }
 }

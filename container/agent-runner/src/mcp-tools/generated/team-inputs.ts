@@ -70,7 +70,9 @@ export function validateTeamInputs(
         !/^mission-[a-f0-9]{64}$/.test(v.mission_id) ||
         typeof v.submission_id !== 'string' ||
         !/^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(v.submission_id) ||
-        !id(v.artifact_id) ||
+        typeof v.artifact_id !== 'string' ||
+        !/^[a-f0-9]{64}-[a-f0-9]{64}$/.test(v.artifact_id) ||
+        !v.artifact_id.endsWith('-' + v.result_digest) ||
         !hash(v.result_digest) ||
         !validMissionResult(v.result) ||
         digest(v.result) !== v.result_digest
