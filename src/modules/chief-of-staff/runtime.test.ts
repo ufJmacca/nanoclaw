@@ -32,7 +32,7 @@ afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
 });
-it('S06-T06 runtime cancels the entire team through exact native execution and confirms physical absence', async () => {
+it.each([false, true])('S06-T06 runtime cancels the entire team with never-allocated proof %s', async (unallocated) => {
   const db = initTestDb(),
     teamId = 'team-' + 'a'.repeat(64);
   const binding: CosBinding = {
@@ -68,9 +68,10 @@ it('S06-T06 runtime cancels the entire team through exact native execution and c
     sessionId: 'worker-session',
     provider: 'codex',
   };
-  installCosMissionBoundary(child, db);
+  if (!unallocated) installCosMissionBoundary(child, db);
   let present = true;
   const missionExecution = {
+    unallocated: vi.fn(() => unallocated),
     running: vi.fn(() => present),
     stop: vi.fn(async (identity: CosMissionIdentity) => {
       expect(identity).toEqual(child);
@@ -82,7 +83,14 @@ it('S06-T06 runtime cancels the entire team through exact native execution and c
     cancel: vi.fn(async () => ({ status: 'ok', state: 'cancelling', identities: [child] })),
     confirmCancellation: vi.fn(async () => ({ status: 'ok', team_id: teamId, state: 'cancelled' })),
   };
-  const missionRuns = { confirmStopped: vi.fn(async () => ({ status: 'ok' })), cancel: vi.fn() };
+  const missionRuns = {
+    confirmStopped: vi.fn(async () => ({ status: 'ok' })),
+    cancel: vi.fn(),
+    confirmUnallocatedCancellation: vi.fn(async () => {
+      expect(isCosMissionStopped(child, db)).toBe(true);
+      return { status: 'ok', never_allocated: true };
+    }),
+  };
   const register = vi.spyOn(delivery, 'registerDeliveryAction').mockImplementation(() => {});
   runtime = createCosRuntime({
     db,
@@ -121,8 +129,14 @@ it('S06-T06 runtime cancels the entire team through exact native execution and c
     expect.objectContaining({ ownerId: 'owner', ingressId: 'owner-cancel' }),
     teamId,
   );
-  expect(missionExecution.stop).toHaveBeenCalledTimes(1);
-  expect(missionRuns.confirmStopped).toHaveBeenCalledWith(child);
+  expect(missionExecution.stop).toHaveBeenCalledTimes(unallocated ? 0 : 1);
+  expect(missionRuns.confirmStopped).toHaveBeenCalledTimes(unallocated ? 0 : 1);
+  if (unallocated)
+    expect(missionRuns.confirmUnallocatedCancellation).toHaveBeenCalledWith(
+      expect.objectContaining({ ownerId: 'owner', ingressId: 'owner-cancel' }),
+      child,
+    );
+  else expect(missionRuns.confirmStopped).toHaveBeenCalledWith(child);
   expect(teamRuns.confirmCancellation).toHaveBeenCalledTimes(1);
   expect(missionRuns.cancel).not.toHaveBeenCalled();
   const saved = JSON.parse(

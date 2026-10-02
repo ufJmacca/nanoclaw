@@ -63,3 +63,31 @@ it('S05 a queued native wake counts as present and uncertain Docker stop propaga
   await expect(f.execution.stop(f.identity)).rejects.toThrow('uncertain');
   expect(f.options.stop).toHaveBeenCalledWith('session');
 });
+it('S06-T06 local absence of allocation permits only a separate database proof; unknown execution stays uncertain', () => {
+  const f = fixture();
+  f.db.exec('DELETE FROM cos_mission_boundaries');
+  expect(f.execution.running(f.identity)).toBe(true);
+  expect(f.execution.unallocated(f.identity)).toBe(true);
+  expect(f.options.probe.present).not.toHaveBeenCalled();
+  f.options.running.mockReturnValue(true);
+  expect(f.execution.unallocated(f.identity)).toBe(false);
+  f.options.running.mockReturnValue(false);
+  f.options.session.mockReturnValue({ agent_group_id: f.identity.agentGroupId });
+  expect(f.execution.unallocated(f.identity)).toBe(false);
+  f.options.session.mockReturnValue(undefined);
+  installCosMissionBoundary(f.identity, f.db);
+  f.db.exec("UPDATE cos_mission_boundaries SET identity='{}'");
+  expect(f.execution.unallocated(f.identity)).toBe(false);
+});
+it('S06-T06 retained allocation intent or lost host authority denies never-allocated confirmation', () => {
+  const f = fixture();
+  f.db.exec('DELETE FROM cos_mission_boundaries');
+  f.db.exec('CREATE TABLE cos_mission_allocations(attempt_id TEXT, identity TEXT)');
+  f.db.prepare('INSERT INTO cos_mission_allocations VALUES(?,?)').run(f.identity.attemptId, JSON.stringify(f.identity));
+  expect(f.execution.unallocated(f.identity)).toBe(false);
+  f.db.exec('DELETE FROM cos_mission_allocations');
+  f.options.assertHostAuthority.mockImplementation(() => {
+    throw Error('lost');
+  });
+  expect(f.execution.unallocated(f.identity)).toBe(false);
+});

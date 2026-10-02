@@ -561,6 +561,55 @@ export class MissionRunStore {
       return { status: 'ok' };
     });
   }
+  /** Host-only cancellation reconciliation after a durable local family fence and independently absent native allocation.
+   * Every dispatch lease records a permanent allocation fence before native effects. Empty allocation therefore proves
+   * that this exact cancelled attempt never had permission to allocate. Unknown leased attempts still need native stops. */
+  async confirmUnallocatedCancellation(context: Context, identity: CosMissionIdentity): Promise<Result> {
+    if (context.origin || !validCosMissionIdentity(identity) || identity.scopeId !== context.scopeId)
+      return { status: 'denied' };
+    return this.transaction(context.scopeId, async (client) => {
+      const m = await this.mission(client, identity.scopeId, identity.missionId),
+        a = await this.attempt(client, identity);
+      if (
+        !m ||
+        !same(a, identity) ||
+        !(await this.owner(client, context, m)) ||
+        digest(m.body) !== m.digest ||
+        !['cancelling', 'cancelled'].includes(m.state) ||
+        m.generation <= identity.generation ||
+        a!.state !== 'cancelled' ||
+        a!.lease_owner !== null ||
+        a!.lease_until !== null
+      )
+        return { status: 'denied' };
+      const replay =
+        a!.provenance.never_allocated === true && digest(a!.allocation) === digest({ stop_confirmed: true });
+      if (!replay && Object.keys(a!.allocation).length !== 0) return { status: 'denied' };
+      const calls = (
+        await client.query(
+          'SELECT kind FROM cos.mission_budget_reservations WHERE scope_id=$1 AND mission_id=$2 AND attempt_id=$3 AND generation=$4',
+          [identity.scopeId, identity.missionId, identity.attemptId, identity.generation],
+        )
+      ).rows;
+      if (calls.length !== 1 || calls[0].kind !== 'attempt') return { status: 'denied' };
+      if (!replay)
+        await client.query(
+          `UPDATE cos.mission_attempts SET allocation='{"stop_confirmed":true}'::jsonb,
+        provenance=provenance||'{"never_allocated":true}'::jsonb,version=version+1,updated_at=clock_timestamp() WHERE scope_id=$1 AND id=$2`,
+          [identity.scopeId, identity.attemptId],
+        );
+      const pending = await client.query(
+        "SELECT 1 FROM cos.mission_attempts WHERE scope_id=$1 AND mission_id=$2 AND allocation->>'stop_confirmed' IS DISTINCT FROM 'true' LIMIT 1",
+        [identity.scopeId, identity.missionId],
+      );
+      if (!pending.rowCount && m.state === 'cancelling')
+        await client.query(
+          "UPDATE cos.missions SET state='cancelled',version=version+1,updated_at=clock_timestamp() WHERE scope_id=$1 AND id=$2",
+          [identity.scopeId, identity.missionId],
+        );
+      return { status: 'ok', never_allocated: true };
+    });
+  }
   /** Host recovery metadata remains readable after authority loss; it never grants execution or returns source bytes. */
   async retainedAttempt(context: Context, sessionId: string, attemptId: string): Promise<Result> {
     if (context.origin || !id(sessionId) || !id(attemptId)) return { status: 'denied' };

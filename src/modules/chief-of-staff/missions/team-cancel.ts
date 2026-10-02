@@ -1,6 +1,7 @@
 import type Database from 'better-sqlite3';
 import {
   cosMissionIdentities,
+  hasCosMissionBoundary,
   validCosMissionIdentity,
   type CosMissionIdentity,
 } from '../../../cos-mission-boundary.js';
@@ -13,7 +14,8 @@ import type { TeamRunStore } from './team-run-store.js';
 export function createTeamCancellation(dependencies: {
   db: Database.Database;
   teams: Pick<TeamRunStore, 'cancel' | 'confirmCancellation'>;
-  runs: Pick<MissionRunStore, 'confirmStopped'>;
+  runs: Pick<MissionRunStore, 'confirmStopped'> & Partial<Pick<MissionRunStore, 'confirmUnallocatedCancellation'>>;
+  unallocated?(identity: CosMissionIdentity): boolean;
   running(identity: CosMissionIdentity): boolean;
   stop(identity: CosMissionIdentity): Promise<void>;
 }) {
@@ -37,6 +39,17 @@ export function createTeamCancellation(dependencies: {
       stopCosMissionFamily(context.scopeId, missionId, 'owner_cancel', dependencies.db);
     let pending = false;
     for (const identity of identities) {
+      if (
+        !hasCosMissionBoundary(identity.agentGroupId, identity.sessionId, dependencies.db) &&
+        dependencies.unallocated?.(identity) &&
+        dependencies.runs.confirmUnallocatedCancellation
+      ) {
+        const proof = await dependencies.runs.confirmUnallocatedCancellation(context, identity);
+        if (proof.status === 'ok' && proof.never_allocated === true) continue;
+        // No physical absence follows from an uncertain or malformed proof.
+        pending = true;
+        continue;
+      }
       if (dependencies.running(identity)) {
         try {
           await dependencies.stop(identity);

@@ -561,6 +561,77 @@ test('S06-T02/PG02 bounded owner graph discovery pages fairly without opening wo
     }
   }
 });
+test('S06-T06 never-allocated cancellation proves absence only before any dispatch lease and settles once after pause', async () => {
+  for (const dispatch of [false, true]) {
+    const p = await store.requestTeam(context, randomUUID(), await input());
+    assert.equal((await approve(p)).status, 'ok');
+    const teamId = String(p.team_id),
+      teams = new TeamRunStore(store.database, store.teams, knowledge, { nativeCapacity: 3, maxWorkers: 2 }),
+      runs = new MissionRunStore(
+        store.database,
+        store.missions,
+        knowledge.artifacts,
+        {},
+        { nativeCapacity: 3, maxWorkers: 2 },
+      );
+    assert.equal((await teams.claimReady(context, teamId)).status, 'ok');
+    const children = (await rows('mission_team_children')).filter((r) => r.team_id === teamId),
+      attempts = (await rows('mission_attempts')).filter((a) => children.some((c) => c.mission_id === a.mission_id));
+    assert.equal(attempts.length, 2);
+    const identities = attempts.map(
+      (a): CosMissionIdentity => ({
+        scopeId: a.scope_id,
+        missionId: a.mission_id,
+        attemptId: a.id,
+        generation: a.generation,
+        agentGroupId: a.agent_group_id,
+        sessionId: a.session_id,
+        provider: 'codex',
+      }),
+    );
+    assert.equal((await runs.confirmUnallocatedCancellation(context, identities[0])).status, 'denied');
+    if (dispatch)
+      assert.equal((await runs.claimDispatch(context, identities[0].attemptId, 'fixture-host')).status, 'ok');
+    assert.equal((await teams.cancel(context, teamId)).status, 'ok');
+    enabled = false;
+    try {
+      for (const patch of [{ ownerId: 'foreign' }, { sessionId: 'foreign' }, { agentGroupId: 'foreign' }])
+        assert.equal(
+          (await runs.confirmUnallocatedCancellation({ ...context, ...patch }, identities[1])).status,
+          'denied',
+        );
+      assert.equal(
+        (await runs.confirmUnallocatedCancellation(context, { ...identities[1], generation: 2 })).status,
+        'denied',
+      );
+      for (const [i, identity] of identities.entries()) {
+        const result = await runs.confirmUnallocatedCancellation(context, identity);
+        assert.equal(result.status, dispatch && i === 0 ? 'denied' : 'ok');
+        if (dispatch && i === 0) {
+          assert.equal((await teams.confirmCancellation(context, teamId)).state, 'cancelling');
+          // Trusted fixture stop evidence, not an assertion made by never-allocated retirement.
+          assert.equal((await runs.confirmStopped(identity)).status, 'ok');
+        } else {
+          assert.equal(result.never_allocated, true);
+          assert.deepEqual(await runs.confirmUnallocatedCancellation(context, identity), result);
+        }
+        assert.equal((await runs.claimDispatch(context, identity.attemptId, 'late-host')).status, 'denied');
+      }
+      assert.equal((await teams.confirmCancellation(context, teamId)).state, 'cancelled');
+      const released = (await rows('mission_team_budget_events')).filter(
+        (e) => e.team_id === teamId && e.kind === 'released',
+      );
+      assert.equal(released.length, 4);
+      assert.equal((await teams.confirmCancellation(context, teamId)).state, 'cancelled');
+      assert.deepEqual(
+        (await rows('mission_team_budget_events')).filter((e) => e.team_id === teamId && e.kind === 'released'),
+        released,
+      );
+    } finally {
+      enabled = true;
+    }
+  }
+});
 test('S06-T01 preview and apply revalidate template integrity and current source/provider consent', async () => {
   const p = await store.requestTeam(context, randomUUID(), await input());
   assert.equal(p.status, 'ok');
@@ -688,6 +759,7 @@ test('S06-T01 a new team-admission revision cannot revive an older unapproved gr
   }
 });
 test('S06-T02 a corrupt second step cannot commit the first child while reporting denial', async () => {
+  const before = await rows('mission_attempts');
   const p = await store.requestTeam(context, randomUUID(), await input());
   await approve(p);
   const teams = new TeamRunStore(store.database, store.teams, knowledge, { nativeCapacity: 3, maxWorkers: 2 });
@@ -696,7 +768,7 @@ test('S06-T02 a corrupt second step cannot commit the first child while reportin
     [scope, p.team_id],
   );
   assert.equal((await teams.claimReady(context, String(p.team_id))).status, 'denied');
-  assert.equal((await rows('mission_attempts')).length, 0);
+  assert.deepEqual(await rows('mission_attempts'), before);
   await admin.query(
     "UPDATE cos.mission_team_reservations SET max_turns=4 WHERE scope_id=$1 AND team_id=$2 AND step_id='technical'",
     [scope, p.team_id],
@@ -715,8 +787,8 @@ test('S06-T02/T03/PG01 concurrent ready admission creates stable isolated childr
   assert.equal(a.status, 'ok');
   assert.equal(b.status, 'ok');
   const steps = (await rows('mission_team_steps')).filter((s) => s.team_id === p.team_id),
-    missions = await rows('missions'),
-    attempts = await rows('mission_attempts');
+    missions = (await rows('missions')).filter((m) => m.provenance.team_id === p.team_id),
+    attempts = (await rows('mission_attempts')).filter((a) => missions.some((m) => m.id === a.mission_id));
   assert.equal(steps.filter((s) => s.state === 'running').length, 2);
   assert.equal(steps.filter((s) => s.state === 'blocked').length, 2);
   assert.equal(missions.length, 2);
@@ -759,7 +831,7 @@ test('S06-T02/PG02 shared host admission preserves coordinator capacity across m
     (await rows('mission_team_steps')).filter((s) => s.team_id === p.team_id && s.child_mission_id !== null).length,
     0,
   );
-  assert.equal((await rows('mission_attempts')).length, 2);
+  assert.equal((await rows('mission_attempts')).filter((a) => a.allocation.stop_confirmed !== true).length, 2);
   const disabled = new TeamRunStore(store.database, store.teams, knowledge, { nativeCapacity: 1, maxWorkers: 2 });
   assert.equal((await disabled.claimReady(context, String(p.team_id))).capacity_available, 0);
 });

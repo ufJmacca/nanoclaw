@@ -42,6 +42,7 @@ export type RuntimeDependencies = {
   launcher?: CoordinatorLauncher;
   running?(sessionId: string): boolean;
   missionExecution?: {
+    unallocated?(identity: CosMissionIdentity): boolean;
     running(identity: CosMissionIdentity): boolean;
     stop(identity: CosMissionIdentity): Promise<void>;
   };
@@ -372,6 +373,7 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
                 runs: d.store.missionRuns,
                 running: d.missionExecution.running,
                 stop: d.missionExecution.stop,
+                unallocated: d.missionExecution.unallocated,
               })
             : undefined,
         knowledge: d.store!.knowledge,
