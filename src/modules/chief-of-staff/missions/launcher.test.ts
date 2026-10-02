@@ -27,7 +27,7 @@ import {
   createSubscriptionCoordinator,
   installSubscriptionCoordinator,
 } from '../../../providers/codex-subscription-coordinator.js';
-function input(policy: SubscriptionActivation, canary = 'A') {
+function input(policy: SubscriptionActivation, canary = 'A', contextGeneration = policy.contextGeneration) {
   const identity: CosMissionIdentity = {
     scopeId: 'private',
     missionId: 'mission-' + randomUUID(),
@@ -55,7 +55,7 @@ function input(policy: SubscriptionActivation, canary = 'A') {
       ingressId: 'ingress',
       bindingDigest: digest('binding'),
       delegationDigest: 'd'.repeat(64),
-      contextGeneration: policy.contextGeneration,
+      contextGeneration,
     },
     related: { goal: null, project: null },
     sources: [
@@ -136,19 +136,27 @@ async function setup() {
   const reserve = vi.fn(async () => ({ status: 'ok' as const, reserved: true }));
   const running = vi.fn(() => false),
     authorize = vi.fn(async () => true);
+  const currentAuthority = {
+    bindingDigest: digest('binding'),
+    delegationDigest: 'd'.repeat(64),
+    contextGeneration: policy.contextGeneration,
+    provider: { profile: RESEARCH_TEMPLATE.providerProfile, model: policy.model, policyDigest: digest(policy) },
+  };
+  const authority = vi.fn(() => currentAuthority);
   const launcher = createMissionLauncher({
     targetRoot: fixture.root + '/target',
     db: getDb(),
     runs: { reserve },
     running,
+    authority,
   });
   cleanup.push(() => launcher.shutdown());
   const allocate = async (canary = 'A') => {
-    const value = input(policy, canary),
+    const value = input(policy, canary, currentAuthority.contextGeneration),
       paths = await new NativeMissionAllocation({ root: fixture.root + '/missions' }).prepare(value, async () => true);
     return { value, paths, session: getSession(value.identity.sessionId)! };
   };
-  return { policy, savePolicy, launcher, reserve, running, authorize, allocate };
+  return { policy, savePolicy, launcher, reserve, running, authorize, allocate, currentAuthority, authority };
 }
 function mount(args: string[], destination: string) {
   return args
@@ -209,6 +217,33 @@ it('S05 actual turn socket requires one fresh root reservation and counts the ex
   f.authorize.mockResolvedValue(false);
   expect(await turn(socket, randomUUID())).toBe(403);
   expect(f.reserve).toHaveBeenCalledTimes(2);
+});
+it('S05 launcher accepts host-verified renewed main context without changing the policy generation or child isolation', async () => {
+  const f = await setup();
+  f.currentAuthority.contextGeneration = randomUUID();
+  const a = await f.allocate();
+  const launch = await f.launcher.prepare(a.value, a.paths, a.session, f.authorize);
+  expect(mount(launch.args, '/home/node/.codex')).toBe(a.paths.providerDirectory);
+  expect(a.value.order.body.origin.contextGeneration).not.toBe(f.policy.contextGeneration);
+  expect(await turn(mount(launch.args, '/run/cos/turn.sock'), randomUUID())).toBe(200);
+  expect(f.authority).toHaveBeenCalledWith({
+    scopeId: 'private',
+    ownerId: 'owner',
+    agentGroupId: 'main',
+    sessionId: 'main',
+    ingressId: 'ingress',
+  });
+});
+it('S05 delegation change closes an existing worker and prevents another launch under the old authority', async () => {
+  const f = await setup(),
+    a = await f.allocate(),
+    b = await f.allocate('B');
+  const launch = await f.launcher.prepare(a.value, a.paths, a.session, f.authorize);
+  f.currentAuthority.delegationDigest = 'e'.repeat(64);
+  expect(await turn(mount(launch.args, '/run/cos/turn.sock'), randomUUID())).toBe(403);
+  expect(f.reserve).not.toHaveBeenCalled();
+  expect(isCosMissionStopped(a.value.identity, getDb())).toBe(true);
+  await expect(f.launcher.prepare(b.value, b.paths, b.session, f.authorize)).rejects.toThrow('mission_launch_denied');
 });
 it('S05 changed policy or revoked local identity closes turns; expired consent cannot prepare another launch', async () => {
   const f = await setup(),

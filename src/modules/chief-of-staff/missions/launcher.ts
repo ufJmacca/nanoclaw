@@ -16,6 +16,7 @@ import { restrictedLaunch } from '../bridge/restricted-launch.js';
 import type { MissionLauncher } from './dispatch.js';
 import type { MissionRunStore } from './run-store.js';
 import type { NativeMissionInput, NativeMissionPaths } from './native-allocation.js';
+import type { MissionAuthorityResolver } from './proposal-store.js';
 
 /** Uses the existing subscription owner; never prepares or resets the main CoS conversation. */
 export function createMissionLauncher(options: {
@@ -23,6 +24,7 @@ export function createMissionLauncher(options: {
   db: Database.Database;
   runs: Pick<MissionRunStore, 'reserve'>;
   running(sessionId: string): boolean;
+  authority: MissionAuthorityResolver;
 }): MissionLauncher & { shutdown(): Promise<void> } {
   ensureModelBudget(options.db);
   const entries = new Map<string, { close(): Promise<void> }>(),
@@ -85,10 +87,22 @@ export function createMissionLauncher(options: {
             createHash('sha256').update(account).digest('hex'),
           );
           const body = input.order.body;
+          const origin = body.origin;
+          const authority = options.authority({
+            scopeId: origin.scopeId,
+            ownerId: origin.ownerId,
+            agentGroupId: origin.agentGroupId,
+            sessionId: origin.sessionId,
+            ingressId: origin.ingressId,
+          });
           return policy &&
             policy.model === body.provider.model &&
             digest(policy) === body.provider.policyDigest &&
-            policy.contextGeneration === body.origin.contextGeneration
+            authority &&
+            authority.contextGeneration === origin.contextGeneration &&
+            authority.bindingDigest === origin.bindingDigest &&
+            authority.delegationDigest === origin.delegationDigest &&
+            digest(authority.provider) === digest(body.provider)
             ? policy
             : null;
         };
