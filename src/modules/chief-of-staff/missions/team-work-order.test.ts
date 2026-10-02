@@ -6,6 +6,10 @@ import { MISSION_DEFAULT_LIMITS } from '../contracts/mission-protocol.js';
 import type { TeamWorkOrderBody } from './team-proposal-store.js';
 import { sealTeamChildWorkOrder, validateTeamChildWorkOrder } from './team-work-order.js';
 import { checkWorkerResult } from './result-checks.js';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { researchRuntimeFiles } from './runtime-files.js';
 const source = {
   source_id: 'options',
   revision_id: 'v1',
@@ -104,6 +108,44 @@ function submitted(id: string) {
   a.artifact_id = digest('artifact-' + id) + '-' + a.result_digest;
   return a;
 }
+describe('S06 native launch rechecks every exact team role', () => {
+  it.each(['technical', 'operations', 'synthesis', 'review'])('mounts only sealed files for %s', (stepId) => {
+    const i = input(stepId);
+    i.artifacts = i.approved.body.request.steps.find((s) => s.step_id === stepId)!.depends_on.map(submitted);
+    const order = sealTeamChildWorkOrder(i),
+      directory = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-team-runtime-'));
+    const template = TEAM_TEMPLATES[order.body.team.step.template_id];
+    const binding = {
+      missionId: order.body.missionId,
+      attemptId: '33333333-3333-4333-8333-333333333333',
+      inputId: 'fixture-input',
+      generation: 1,
+      workOrderDigest: order.digest,
+      contextDigest: order.body.contextDigest,
+      templateDigest: order.body.template.digest,
+    };
+    try {
+      for (const [name, value] of Object.entries({
+        'work-order.json': order.body,
+        'context.json': order.context,
+        'template.json': template,
+      }))
+        fs.writeFileSync(path.join(directory, name), JSON.stringify(value), { mode: 0o400 });
+      expect(researchRuntimeFiles(directory, binding, order.body.provider.model)).toEqual(
+        ['work-order.json', 'context.json', 'template.json'].map((name) => path.join(directory, name)),
+      );
+      fs.chmodSync(path.join(directory, 'template.json'), 0o600);
+      const altered = { ...template, instructions: template.instructions + '\nUnreviewed instruction' };
+      fs.writeFileSync(path.join(directory, 'template.json'), JSON.stringify(altered));
+      fs.chmodSync(path.join(directory, 'template.json'), 0o400);
+      expect(() =>
+        researchRuntimeFiles(directory, { ...binding, templateDigest: digest(altered) }, order.body.provider.model),
+      ).toThrow('mission_artifacts_denied');
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+});
 describe('S06-T05/T08 host-pinned review evidence', () => {
   const review = () => ({
     format: 'cos-team-review/v1',
