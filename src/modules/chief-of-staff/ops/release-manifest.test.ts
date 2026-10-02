@@ -5,6 +5,28 @@ const sha = 'a'.repeat(40),
   tree = 'b'.repeat(40),
   image = 'sha256:' + 'c'.repeat(64),
   agent = 'sha256:' + 'd'.repeat(64);
+it('S05 pins all nine migrations without widening historical releases or admitting future slices', () => {
+  const current = {
+    ...manifest(),
+    slice: 'S05',
+    postgres: { minimum: 9, maximum: 9 },
+    sqlite: { minimum: 22, maximum: 22 },
+    migrations: MIGRATIONS.map(({ version, checksum }) => ({ version, checksum })),
+  };
+  expect(validateReleaseManifest(current)).toEqual(current);
+  for (const patch of [
+    { slice: 'S04' },
+    { slice: 'S06' },
+    { slice: ['S05'] },
+    { postgres: { minimum: 6, maximum: 9 } },
+    { postgres: { minimum: 9, maximum: 10 } },
+    { migrations: current.migrations.slice(0, 8) },
+    ...current.migrations.map((_, index) => ({
+      migrations: current.migrations.map((m, i) => (i === index ? { ...m, checksum: '0'.repeat(64) } : m)),
+    })),
+  ])
+    expect(() => validateReleaseManifest({ ...current, ...patch })).toThrow('release_not_transferable');
+});
 it('S04 requires six exact pinned migrations and rejects earlier schema or later slice claims', () => {
   const current = {
     ...manifest(),
