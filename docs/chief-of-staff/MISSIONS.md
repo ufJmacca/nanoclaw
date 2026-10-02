@@ -103,6 +103,45 @@ consent lineage; an interrupted renewal closes mission admission until recovered
 The specialist launcher rechecks these pins before launch and on every credential
 or model callback. Actual model invocations still require fresh budget reservations.
 
+## Specialist team configuration
+
+The S06 operator command is implemented and fixture-tested; S06 deployment and
+acceptance are still pending. Teams require the existing single-worker delegation
+and a separate reviewed team configuration. A simple request keeps the single-worker
+route. Team roles get fresh specialist contexts; the main CoS keeps its shared
+conversation.
+
+Use the same paused, private-owner, maintenance and database checks described above:
+
+```text
+cos:admin team-configure --scope <bound-scope> --request-id <uuid> --manifest <absolute-private-file>
+```
+
+The private manifest has exactly these fields:
+
+```json
+{
+  "expectedRevision": 0,
+  "enabled": false,
+  "templateBundleDigest": "<canonical digest of the installed TEAM_TEMPLATES>",
+  "policyDigest": "<canonical digest of the installed TEAM_ADMISSION_POLICY>",
+  "reviewRef": "<operator review reference>"
+}
+```
+
+The command verifies all four canonical analyst, writer and reviewer templates
+before inserting any missing entry. It cannot overwrite conflicting templates or
+reviewers. The policy caps graphs at six steps and two workers, keeps public
+retrieval disabled, and permits only approved rework within the original limits.
+Native capacity may impose a lower worker limit to preserve the coordinator.
+
+The returned revision belongs to team configuration alone. Exact request replay,
+file permissions and stale-revision rules match single-worker configuration.
+Permission is saved only after acknowledged template installation and renewed
+host checks. Configuration leaves CoS paused and does not authorise model usage,
+reset context, replenish budgets, send a message or launch a worker. Each team
+pins this revision; re-enabling teams cannot revive an older graph's permission.
+
 ## Source deletion and retained specialist data
 
 Approved source deletion tracks every specialist context that received the source,

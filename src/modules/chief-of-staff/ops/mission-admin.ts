@@ -2,18 +2,20 @@ import path from 'node:path';
 import type { CosBinding } from '../../../cos-boundary.js';
 import { configureDelegation, readDelegationManifest } from '../missions/delegation.js';
 import { installReviewedMissionTemplate } from '../missions/template-admin.js';
+import { installReviewedTeamTemplates } from '../missions/template-admin.js';
+import { configureTeamAdmission, readTeamAdmissionManifest } from '../missions/team-admission.js';
 import { connectChecked } from '../store/preflight.js';
 import { parseDatabaseConfig } from '../store/config.js';
 import { migrationStatus, SCHEMA_VERSION } from '../store/migrations.js';
 import { databaseFingerprint } from './target-identity.js';
 export type MissionAdminArguments = {
-  command: 'mission-configure';
+  command: 'mission-configure' | 'team-configure';
   scopeId: string;
   requestId: string;
   manifestFile: string;
 };
 export function isMissionCommand(args: { command: string }): args is MissionAdminArguments {
-  return args.command === 'mission-configure';
+  return args.command === 'mission-configure' || args.command === 'team-configure';
 }
 export function parseMissionArguments(args: string[]): MissionAdminArguments {
   const invalid = () => Error('invalid_admin_arguments');
@@ -38,7 +40,7 @@ export function parseMissionArguments(args: string[]): MissionAdminArguments {
     /[\0\r\n]/.test(manifestFile)
   )
     throw invalid();
-  return { command: 'mission-configure', scopeId, requestId, manifestFile };
+  return { command: args[0] as MissionAdminArguments['command'], scopeId, requestId, manifestFile };
 }
 /** Context admin holds target/host leases, requires a paused binding and revalidates private membership. */
 export async function runMissionAdmin(options: {
@@ -53,7 +55,9 @@ export async function runMissionAdmin(options: {
   const { args, binding } = options;
   if (args.scopeId !== binding.scopeId || binding.provider !== 'codex') throw Error('context_binding_changed');
   await options.check();
-  const change = readDelegationManifest(args.manifestFile);
+  const team = args.command === 'team-configure',
+    prefix = team ? 'team' : 'mission';
+  const change = team ? readTeamAdmissionManifest(args.manifestFile) : readDelegationManifest(args.manifestFile);
   const client = await connectChecked(options.env, 'runtime', 'migration');
   let transaction = false;
   try {
@@ -61,27 +65,35 @@ export async function runMissionAdmin(options: {
       (await databaseFingerprint(client, parseDatabaseConfig(options.env, 'runtime', 'migration'))) !==
       options.databaseFingerprint
     )
-      throw Error('mission_database_mismatch');
+      throw Error(prefix + '_database_mismatch');
     if (!(await client.query('SELECT pg_try_advisory_lock(73101003) AS locked')).rows[0]?.locked)
-      throw Error('mission_configuration_busy');
-    if ((await migrationStatus(client)) !== SCHEMA_VERSION) throw Error('mission_schema_incompatible');
+      throw Error(prefix + '_configuration_busy');
+    if ((await migrationStatus(client)) !== SCHEMA_VERSION) throw Error(prefix + '_schema_incompatible');
     await options.check();
     await client.query('BEGIN');
     transaction = true;
-    await installReviewedMissionTemplate(client, binding, args.requestId, change);
+    if (team) await installReviewedTeamTemplates(client, binding, args.requestId, change);
+    else await installReviewedMissionTemplate(client, binding, args.requestId, change);
     await options.check();
     await client.query('COMMIT');
     transaction = false;
     // An uncertain database outcome cannot grant authority. A retry checks the exact installed template.
     await options.check();
     options.assertAuthority();
-    const record = configureDelegation(options.root, binding, args.requestId, change);
+    const record = team
+      ? configureTeamAdmission(options.root, binding, args.requestId, change)
+      : configureDelegation(options.root, binding, args.requestId, change);
     return {
       status: 'configured_paused',
       scope_id: binding.scopeId,
       revision: record.revision,
       enabled: record.enabled,
-      template_digest: record.templateDigest,
+      ...('templateDigest' in record
+        ? { template_digest: record.templateDigest }
+        : {
+            template_bundle_digest: record.templateBundleDigest,
+            policy_digest: record.policyDigest,
+          }),
       live_model: 'not_invoked',
     };
   } finally {

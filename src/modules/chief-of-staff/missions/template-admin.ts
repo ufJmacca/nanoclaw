@@ -3,6 +3,8 @@ import type { CosBinding } from '../../../cos-boundary.js';
 import { digest } from '../domain/contracts.js';
 import { parseDelegationChange } from './delegation.js';
 import { RESEARCH_TEMPLATE } from './work-order.js';
+import { parseTeamAdmissionChange } from './team-admission.js';
+import { TEAM_TEMPLATES } from '../contracts/team-templates.js';
 
 /** Migration-role caller owns the maintenance lock and transaction. Never reachable from worker RPC. */
 export async function installReviewedMissionTemplate(
@@ -53,4 +55,61 @@ export async function installReviewedMissionTemplate(
       JSON.stringify({ request_id: requestId, review_ref: change.reviewRef, binding_digest: digest(binding) }),
     ],
   );
+}
+
+/** Migration-role caller owns maintenance and the transaction; never exposed to workers. */
+export async function installReviewedTeamTemplates(
+  client: Pick<pg.Client, 'query'>,
+  binding: CosBinding,
+  requestId: string,
+  input: unknown,
+): Promise<void> {
+  const change = parseTeamAdmissionChange(input);
+  const scope = (
+    await client.query(
+      'SELECT owner_id,instance_id,channel_id,agent_group_id,status FROM cos.scopes WHERE id=$1 FOR UPDATE',
+      [binding.scopeId],
+    )
+  ).rows[0];
+  if (
+    !scope ||
+    scope.owner_id !== binding.ownerId ||
+    scope.instance_id !== binding.instanceId ||
+    scope.channel_id !== binding.channelId ||
+    scope.agent_group_id !== binding.agentGroupId ||
+    scope.status !== 'active'
+  )
+    throw Error('context_binding_changed');
+  const missing: (typeof TEAM_TEMPLATES)[keyof typeof TEAM_TEMPLATES][] = [];
+  // Verify the entire bundle before mutating even the first absent template.
+  for (const id of Object.keys(TEAM_TEMPLATES).sort() as (keyof typeof TEAM_TEMPLATES)[]) {
+    const template = TEAM_TEMPLATES[id],
+      expected = digest(template);
+    const existing = (
+      await client.query(
+        'SELECT body,digest,reviewed_by FROM cos.mission_template_versions WHERE scope_id=$1 AND id=$2 AND version=$3 FOR UPDATE',
+        [binding.scopeId, template.id, template.version],
+      )
+    ).rows[0];
+    if (!existing) missing.push(template);
+    else if (
+      existing.digest !== expected ||
+      digest(existing.body) !== expected ||
+      existing.reviewed_by !== binding.ownerId
+    )
+      throw Error('team_template_conflict');
+  }
+  for (const template of missing)
+    await client.query(
+      'INSERT INTO cos.mission_template_versions(scope_id,id,version,body,digest,reviewed_by,provenance) VALUES($1,$2,$3,$4,$5,$6,$7)',
+      [
+        binding.scopeId,
+        template.id,
+        template.version,
+        JSON.stringify(template),
+        digest(template),
+        binding.ownerId,
+        JSON.stringify({ request_id: requestId, review_ref: change.reviewRef, binding_digest: digest(binding) }),
+      ],
+    );
 }

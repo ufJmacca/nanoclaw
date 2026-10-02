@@ -30,6 +30,9 @@ import { TEAM_PARENT_BUDGET_SCHEMA } from '../../modules/chief-of-staff/store/te
 import { teamBudget } from '../../modules/chief-of-staff/missions/team-budget.js';
 import type { CosMissionIdentity } from '../../cos-mission-boundary.js';
 import type { MissionDispatchLease } from '../../modules/chief-of-staff/missions/run-store.js';
+import { installReviewedTeamTemplates } from '../../modules/chief-of-staff/missions/template-admin.js';
+import { TEAM_ADMISSION_POLICY } from '../../modules/chief-of-staff/missions/team-admission.js';
+import type { CosBinding } from '../../cos-boundary.js';
 
 const scope = 'team-admission-' + randomUUID();
 const context = { scopeId: scope, ownerId: 'owner', agentGroupId: scope, sessionId: scope, ingressId: randomUUID() };
@@ -164,11 +167,29 @@ async function input(): Promise<TeamRequest> {
   };
 }
 async function templates() {
-  for (const t of Object.values(TEAM_TEMPLATES))
-    await admin.query(
-      'INSERT INTO cos.mission_template_versions(scope_id,id,version,body,digest,reviewed_by,provenance) VALUES($1,$2,$3,$4,$5,$6,$7)',
-      [scope, t.id, t.version, JSON.stringify(t), digest(t), 'owner', '{}'],
-    );
+  await installReviewedTeamTemplates(admin, teamBinding(), randomUUID(), teamConfiguration());
+}
+function teamBinding(): CosBinding {
+  return {
+    scopeId: scope,
+    ownerId: 'owner',
+    botId: 'bot',
+    agentGroupId: scope,
+    sessionId: scope,
+    messagingGroupId: scope,
+    provider: 'codex',
+    instanceId: 'fixture',
+    channelId: scope,
+  };
+}
+function teamConfiguration() {
+  return {
+    expectedRevision: 0,
+    enabled: true,
+    templateBundleDigest: digest(TEAM_TEMPLATES),
+    policyDigest: digest(TEAM_ADMISSION_POLICY),
+    reviewRef: 'fixture-reviewed-team',
+  };
 }
 async function rows(table: string) {
   return (await admin.query(`SELECT * FROM cos.${table} WHERE scope_id=$1 ORDER BY created_at`, [scope])).rows;
@@ -290,7 +311,40 @@ test('S06-T03 migration 13 backfills original parent slack for active and settle
 test('S06-T01 team request requires separately admitted authority and every exact reviewed template', async () => {
   const r = await input();
   assert.equal((await store.requestTeam(context, randomUUID(), r)).status, 'denied');
+  // The final template conflicts while earlier entries are missing. No earlier entry may be inserted.
+  await admin.query('BEGIN');
+  try {
+    const t = TEAM_TEMPLATES['team-writer'],
+      invalid = { ...t, tools: ['shell'] };
+    await admin.query(
+      'INSERT INTO cos.mission_template_versions(scope_id,id,version,body,digest,reviewed_by,provenance) VALUES($1,$2,$3,$4,$5,$6,$7)',
+      [scope, t.id, t.version, JSON.stringify(invalid), digest(invalid), 'owner', '{}'],
+    );
+    await assert.rejects(templates(), /team_template_conflict/);
+    assert.equal((await rows('mission_template_versions')).length, 1);
+  } finally {
+    await admin.query('ROLLBACK');
+  }
   await templates();
+  const installed = await rows('mission_template_versions');
+  assert.equal(installed.length, 4);
+  for (const row of installed) {
+    assert.equal(row.reviewed_by, 'owner');
+    assert.equal(row.digest, digest(TEAM_TEMPLATES[row.id as keyof typeof TEAM_TEMPLATES]));
+    assert.equal(row.provenance.review_ref, teamConfiguration().reviewRef);
+    assert.equal(row.provenance.binding_digest, digest(teamBinding()));
+  }
+  await templates();
+  assert.deepEqual(await rows('mission_template_versions'), installed);
+  await store.database.run(async (client) => {
+    await assert.rejects(
+      client.query(
+        "INSERT INTO cos.mission_template_versions(scope_id,id,version,body,digest,reviewed_by,provenance) VALUES($1,'forbidden',1,'{}',$2,'owner','{}')",
+        [scope, digest('forbidden')],
+      ),
+      (error: unknown) => !!error && typeof error === 'object' && 'code' in error && error.code === '42501',
+    );
+  });
   enabled = false;
   try {
     assert.equal((await store.requestTeam(context, randomUUID(), r)).status, 'denied');

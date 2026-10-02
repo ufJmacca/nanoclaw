@@ -5,6 +5,13 @@ it.each([
   'unsafe_mission_purge',
   'mission_purge_conflict',
   'mission_purge_authority_required',
+  'invalid_team_configuration',
+  'unsafe_team_configuration',
+  'team_configuration_conflict',
+  'team_configuration_busy',
+  'team_database_mismatch',
+  'team_schema_incompatible',
+  'team_template_conflict',
 ])('reports %s without exposing appended private diagnostics', (code) => {
   expect(safeAdminError(new Error(code))).toBe(code);
   expect(safeAdminError(new Error(code + ': PRIVATE_CANARY'))).toBe('unreachable');
@@ -13,11 +20,11 @@ import { SCHEMA_VERSION } from '../store/migrations.js';
 import { DatabasePreflightError } from '../store/preflight.js';
 import { DatabaseConfigurationError } from '../store/config.js';
 describe('S01 owner administration', () => {
-  it('routes exact mission configuration through owner administration', () => {
+  it.each(['mission-configure', 'team-configure'])('routes exact %s through owner administration', (command) => {
     const requestId = '11111111-1111-4111-8111-111111111111';
     expect(
       parseAdminArguments([
-        'mission-configure',
+        command,
         '--scope',
         'fixture',
         '--request-id',
@@ -25,7 +32,7 @@ describe('S01 owner administration', () => {
         '--manifest',
         '/private/mission.json',
       ]),
-    ).toEqual({ command: 'mission-configure', scopeId: 'fixture', requestId, manifestFile: '/private/mission.json' });
+    ).toEqual({ command, scopeId: 'fixture', requestId, manifestFile: '/private/mission.json' });
   });
   it('requires a private policy path for activation and stable identities for explicit resume', () => {
     expect(parseAdminArguments(['model-activate', '--scope', 'fixture', '--policy', '/private/fixture.json'])).toEqual({

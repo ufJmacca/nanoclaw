@@ -80,5 +80,12 @@ it('S05 production bootstrap creates specialists from the checked service store 
     }),
   );
   await options.connect();
-  expect(f.connect).toHaveBeenCalledWith(expect.any(Object), expect.any(Object), options.admission, {}, f.authority);
+  expect(f.connect).toHaveBeenCalledWith(
+    expect.any(Object),
+    expect.any(Object),
+    options.admission,
+    {},
+    f.authority,
+    expect.any(Function),
+  );
 });
