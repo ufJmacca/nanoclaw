@@ -526,6 +526,25 @@ export class MissionRunStore {
     });
   }
   /** Host recovery metadata remains readable after authority loss; it never grants execution or returns source bytes. */
+  async retainedAttempt(context: Context, sessionId: string, attemptId: string): Promise<Result> {
+    if (context.origin || !id(sessionId) || !id(attemptId)) return { status: 'denied' };
+    return this.transaction(context.scopeId, async (client) => {
+      const row = (
+        await client.query('SELECT * FROM cos.mission_attempts WHERE scope_id=$1 AND id=$2 AND session_id=$3', [
+          context.scopeId,
+          attemptId,
+          sessionId,
+        ])
+      ).rows[0] as AttemptRow | undefined;
+      if (!row) return { status: 'denied' };
+      const m = await this.mission(client, context.scopeId, row.mission_id),
+        identity = identityOf(row);
+      if (!m || !(await this.owner(client, context, m)) || !validCosMissionIdentity(identity))
+        return { status: 'denied' };
+      return { status: 'ok', identity };
+    });
+  }
+  /** Host recovery metadata remains readable after authority loss; it never grants execution or returns source bytes. */
   async inspectRecovery(identity: CosMissionIdentity): Promise<Result> {
     if (!validCosMissionIdentity(identity)) return { status: 'denied' };
     return this.transaction(identity.scopeId, async (client) => {

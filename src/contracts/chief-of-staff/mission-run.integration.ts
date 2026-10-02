@@ -43,6 +43,7 @@ import type { MissionReview } from '../../modules/chief-of-staff/contracts/missi
 import { MissionNotifications } from '../../modules/chief-of-staff/missions/notifications.js';
 import { MissionNotificationDelivery } from '../../modules/chief-of-staff/missions/notification-delivery.js';
 import { MissionReviewRuns } from '../../modules/chief-of-staff/missions/review-runs.js';
+import { purgeMissionContexts } from '../../modules/chief-of-staff/ops/mission-purge.js';
 
 const scope = 'mission-run-' + randomUUID();
 const context = { scopeId: scope, ownerId: 'owner', agentGroupId: scope, sessionId: scope, ingressId: randomUUID() };
@@ -404,6 +405,93 @@ test('S05-T06 recovery inspects exact attempt metadata after authority loss with
     });
   } finally {
     enabled = true;
+  }
+});
+test('S05-T07 retention resolves only the exact child recorded under the owned original main context', async () => {
+  const { identity } = await mission();
+  enabled = false;
+  try {
+    assert.deepEqual(await store.missionRuns.retainedAttempt(context, identity.sessionId, identity.attemptId), {
+      status: 'ok',
+      identity,
+    });
+    for (const patch of [{ ownerId: 'foreign' }, { sessionId: 'foreign' }, { agentGroupId: 'foreign' }])
+      assert.equal(
+        (await store.missionRuns.retainedAttempt({ ...context, ...patch }, identity.sessionId, identity.attemptId))
+          .status,
+        'denied',
+      );
+    assert.equal((await store.missionRuns.retainedAttempt(context, 'foreign', identity.attemptId)).status, 'denied');
+    assert.equal((await store.missionRuns.retainedAttempt(context, identity.sessionId, randomUUID())).status, 'denied');
+  } finally {
+    enabled = true;
+  }
+});
+test('S05-T07 source deletion reconciles an exposure committed before any native allocation and permanently denies its identity', async () => {
+  const { identity, input } = await mission();
+  assert.equal((await store.missionRuns.claimDispatch(context, identity.attemptId, 'purge-fixture')).status, 'ok');
+  const proposal = await store.propose(context, randomUUID(), {
+    kind: 'source_delete',
+    source_id: input.sources[0].source_id,
+    expected_version: 1,
+    reason: 'Fixture retention test',
+  });
+  assert.equal(proposal.status, 'ok');
+  assert.equal((await approve(proposal)).status, 'ok');
+  await admin.query(
+    "UPDATE cos.revocation_tombstones SET purge_after=clock_timestamp()-interval '1 second' WHERE scope_id=$1 AND source_id=$2",
+    [scope, input.sources[0].source_id],
+  );
+  assert.equal((await knowledge.purgeDue(scope)).status, 'pending');
+  const native = initTestDb();
+  migrateNative(native);
+  const binding: CosBinding = {
+    scopeId: scope,
+    ownerId: context.ownerId,
+    agentGroupId: context.agentGroupId,
+    sessionId: context.sessionId,
+    provider: 'codex',
+    instanceId: 'fixture',
+    channelId: scope,
+    messagingGroupId: 'fixture-messages',
+    botId: 'bot',
+  };
+  installCosBoundary(binding, native);
+  const root = fs.mkdtempSync(path.join(base, 'native-retention-')),
+    dataRoot = path.join(root, 'data');
+  fs.mkdirSync(dataRoot, { mode: 0o700 });
+  const previous = knowledge.hooks.purgeContexts;
+  try {
+    knowledge.hooks.purgeContexts = async (job) => {
+      assert.deepEqual(job.contexts, [{ sessionId: identity.sessionId, generation: identity.attemptId }]);
+      const resolved = await store.missionRuns.retainedAttempt(context, identity.sessionId, identity.attemptId);
+      assert.deepEqual(resolved, { status: 'ok', identity });
+      return purgeMissionContexts({
+        root,
+        dataRoot,
+        db: native,
+        binding,
+        identities: [resolved.identity as CosMissionIdentity],
+        check: async () => {},
+        assertAuthority: () => {},
+        retire: async (i) => {
+          assert.equal((await store.missionRuns.fail(i, 'admission_denied')).status, 'ok');
+          return store.missionRuns.confirmStopped(i);
+        },
+      });
+    };
+    assert.equal((await knowledge.purgeDue(scope)).status, 'ok');
+    assert.equal(isCosMissionStopped(identity, native), true);
+    assert.equal((await store.missionRuns.claimDispatch(context, identity.attemptId, 'late')).status, 'denied');
+    const row = (await rows('mission_attempts')).find((a) => a.id === identity.attemptId);
+    assert.equal(row.state, 'failed');
+    assert.equal(row.allocation.stop_confirmed, true);
+    assert.ok((await rows('outbox')).find((o) => o.id === 'knowledge-purge-' + proposal.proposal_id).delivered_at);
+    assert.equal((await knowledge.purgeDue(scope)).status, 'ok');
+  } finally {
+    knowledge.hooks.purgeContexts = previous;
+    closeDb();
+    fs.rmSync(root, { recursive: true, force: true });
   }
 });
 test('S05-T05/T07 coordinator RPC proposes without launching, inspects the approved mission and durably cancels', async () => {
