@@ -116,6 +116,10 @@ function strictRead(file: string, binding: CosBinding): MissionDelegation | null
   if (value.requestDigest !== digest({ binding, change })) throw Error('mission_configuration_conflict');
   return value as MissionDelegation;
 }
+export function readDelegationManifest(file: string): DelegationChange {
+  if (!path.isAbsolute(file) || fs.realpathSync(file) !== file) throw Error('unsafe_mission_configuration');
+  return parseDelegationChange(readRecord(file));
+}
 /** Host-owned read only. Missing, replaced or malformed configuration never enables delegation. */
 export function readDelegation(root: string, binding: CosBinding): MissionDelegation | null {
   try {

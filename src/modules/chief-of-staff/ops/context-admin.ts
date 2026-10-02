@@ -33,6 +33,7 @@ import { issueActivation, resumeContext, rebindRecoveredActivation } from './mod
 
 import { isKnowledgeCommand, runKnowledgeAdmin, type KnowledgeAdminArguments } from './knowledge-admin.js';
 import { isCalendarCommand, runCalendarAdmin, type CalendarAdminArguments } from './calendar-admin.js';
+import { isMissionCommand, runMissionAdmin, type MissionAdminArguments } from './mission-admin.js';
 import {
   isCalendarAccountCommand,
   runCalendarAccountAdmin,
@@ -40,6 +41,7 @@ import {
 } from './calendar-account-admin.js';
 
 export type ContextAdminArguments =
+  | MissionAdminArguments
   | KnowledgeAdminArguments
   | CalendarAdminArguments
   | CalendarAccountArguments
@@ -241,6 +243,17 @@ export async function contextAdminCommand(
         assertAuthority();
       };
       await check();
+      if (isMissionCommand(args)) {
+        return runMissionAdmin({
+          args,
+          env,
+          root,
+          binding,
+          databaseFingerprint: target.binding.databaseFingerprint,
+          check,
+          assertAuthority,
+        });
+      }
       if (isKnowledgeCommand(args)) {
         if (args.command === 'source-purge') inbound = openInboundDb(binding.agentGroupId, binding.sessionId);
         return runKnowledgeAdmin({

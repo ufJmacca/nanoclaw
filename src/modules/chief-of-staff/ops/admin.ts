@@ -2,6 +2,7 @@ import path from 'node:path';
 import { isKnowledgeCommand, parseKnowledgeArguments } from './knowledge-admin.js';
 import { isCalendarCommand, parseCalendarArguments } from './calendar-admin.js';
 import { isCalendarAccountCommand, parseCalendarAccountArguments } from './calendar-account-admin.js';
+import { isMissionCommand, parseMissionArguments } from './mission-admin.js';
 import { pathToFileURL } from 'node:url';
 import { DatabaseConfigurationError, parseDatabaseConfig, externalDatabaseConfig } from '../store/config.js';
 import { connectChecked, DatabasePreflightError } from '../store/preflight.js';
@@ -16,6 +17,7 @@ import { contextAdminCommand, type ContextAdminArguments } from './context-admin
 
 type AdminArguments = { command: 'status' } | { command: 'bind'; binding: BindingRequest } | ContextAdminArguments;
 export function parseAdminArguments(args: string[]): AdminArguments {
+  if (isMissionCommand({ command: args[0] })) return parseMissionArguments(args);
   if (isKnowledgeCommand({ command: args[0] })) return parseKnowledgeArguments(args);
   if (isCalendarCommand({ command: args[0] })) return parseCalendarArguments(args);
   if (isCalendarAccountCommand({ command: args[0] })) return parseCalendarAccountArguments(args);
@@ -119,6 +121,13 @@ export function safeAdminError(error: unknown): string {
     if (
       [
         'invalid_admin_arguments',
+        'invalid_mission_configuration',
+        'unsafe_mission_configuration',
+        'mission_configuration_conflict',
+        'mission_configuration_busy',
+        'mission_database_mismatch',
+        'mission_schema_incompatible',
+        'mission_template_conflict',
         'invalid_source_manifest',
         'invalid_calendar_manifest',
         'calendar_disabled',
@@ -302,7 +311,7 @@ export async function bindCommand(request: BindingRequest, env: NodeJS.ProcessEn
     }
   }
 }
-function adminEnvironment(): NodeJS.ProcessEnv {
+function adminEnvironment(command: AdminArguments['command']): NodeJS.ProcessEnv {
   const keys = [
     'COS_ENABLED',
     'COS_TARGET_STATE_DIR',
@@ -312,6 +321,7 @@ function adminEnvironment(): NodeJS.ProcessEnv {
     'MATTERMOST_URL',
     'MATTERMOST_BOT_TOKEN',
     'MATTERMOST_INSTANCE',
+    ...(command === 'mission-configure' ? ['COS_PG_MIGRATION_USER', 'COS_PG_MIGRATION_PASSWORD'] : []),
     ...[
       'HOST',
       'PORT',
@@ -339,7 +349,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   Promise.resolve()
     .then(async () => {
       const args = parseAdminArguments(process.argv.slice(2)),
-        env = adminEnvironment();
+        env = adminEnvironment(args.command);
       if (args.command === 'status') return adminStatus(env);
       if (args.command === 'bind') return bindCommand(args.binding, env);
       return contextAdminCommand(args, env);

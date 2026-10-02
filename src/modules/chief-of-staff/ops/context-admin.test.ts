@@ -20,6 +20,11 @@ vi.mock('./calendar-account-admin.js', async () => ({
   runCalendarAccountAdmin: vi.fn(),
 }));
 import { runCalendarAccountAdmin } from './calendar-account-admin.js';
+vi.mock('./mission-admin.js', async () => ({
+  ...(await vi.importActual('./mission-admin.js')),
+  runMissionAdmin: vi.fn(),
+}));
+import { runMissionAdmin } from './mission-admin.js';
 import { connectCosHostStore } from '../host-store.js';
 import type { PriorityStore } from '../store/priorities.js';
 import { initDb, closeDb } from '../../../db/connection.js';
@@ -367,6 +372,40 @@ it('calendar commands use native owner and maintenance authority without a model
   expect(() => assertAuthority()).toThrow();
   expect(fs.existsSync(state + '/conversations')).toBe(false);
   expect(fs.existsSync(state + '/model-activation.json')).toBe(false);
+  run.mockClear();
+  quiescent.mockResolvedValueOnce(false);
+  await expect(contextAdminCommand(args, env, dependencies)).rejects.toThrow('target_not_quiescent');
+  facts.mockResolvedValueOnce({
+    id: 'private',
+    type: 'P',
+    delete_at: 0,
+    members: ['owner', 'bot', 'outsider'],
+    activeSubscription: true,
+  });
+  await expect(contextAdminCommand(args, env, dependencies)).rejects.toThrow('private_owner_membership_required');
+  expect(run).not.toHaveBeenCalled();
+});
+it('mission configuration requires private owner, pause and maintenance authority without consuming model access', async () => {
+  fs.rmSync(state + '/codex-auth', { recursive: true });
+  const args = {
+    command: 'mission-configure' as const,
+    scopeId: 'fixture',
+    requestId: randomUUID(),
+    manifestFile: state + '/mission.json',
+  };
+  const run = vi.mocked(runMissionAdmin);
+  run.mockClear();
+  run.mockImplementation(async (options) => {
+    await options.check();
+    expect(options.binding).toMatchObject({ scopeId: 'fixture', ownerId: 'owner', provider: 'codex' });
+    expect(options.databaseFingerprint).toBe(targetBinding.databaseFingerprint);
+    expect(options.root).toBe(state);
+    return { status: 'configured_paused' };
+  });
+  expect(await contextAdminCommand(args, env, dependencies)).toEqual({ status: 'configured_paused' });
+  expect(() => run.mock.calls[0][0].assertAuthority()).toThrow();
+  expect(fs.existsSync(state + '/model-activation.json')).toBe(false);
+  expect(fs.existsSync(state + '/conversations')).toBe(false);
   run.mockClear();
   quiescent.mockResolvedValueOnce(false);
   await expect(contextAdminCommand(args, env, dependencies)).rejects.toThrow('target_not_quiescent');

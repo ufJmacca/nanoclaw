@@ -14,9 +14,28 @@ import { PriorityStore } from '../../modules/chief-of-staff/store/priorities.js'
 import { RESEARCH_TEMPLATE } from '../../modules/chief-of-staff/missions/work-order.js';
 import { MISSION_DEFAULT_LIMITS } from '../../modules/chief-of-staff/contracts/mission-protocol.js';
 import { digest } from '../../modules/chief-of-staff/domain/contracts.js';
+import { installReviewedMissionTemplate } from '../../modules/chief-of-staff/missions/template-admin.js';
+import type { CosBinding } from '../../cos-boundary.js';
 
 const scope = 'mission-approval-' + randomUUID();
 const context = { scopeId: scope, ownerId: 'owner', agentGroupId: scope, sessionId: scope, ingressId: randomUUID() };
+const binding: CosBinding = {
+  scopeId: scope,
+  ownerId: 'owner',
+  agentGroupId: scope,
+  sessionId: scope,
+  instanceId: 'fixture',
+  channelId: scope,
+  messagingGroupId: 'fixture-messaging',
+  botId: 'fixture-bot',
+  provider: 'codex',
+};
+const delegation = {
+  expectedRevision: 0,
+  enabled: true,
+  templateDigest: digest(RESEARCH_TEMPLATE),
+  reviewRef: 'fixture-operator-review',
+};
 let authority = {
   bindingDigest: digest('private owner-approved delegation'),
   delegationDigest: digest('operator delegation revision one'),
@@ -122,18 +141,9 @@ async function rows(table: string) {
 test('S05-T03 no mission proposal without an operator-reviewed template and explicit current delegation authority', async () => {
   const input = await request();
   assert.equal((await store.requestMission(context, randomUUID(), input)).status, 'denied');
-  await admin.query(
-    'INSERT INTO cos.mission_template_versions(scope_id,id,version,body,digest,reviewed_by,provenance) VALUES($1,$2,$3,$4,$5,$6,$7)',
-    [
-      scope,
-      RESEARCH_TEMPLATE.id,
-      RESEARCH_TEMPLATE.version,
-      JSON.stringify(RESEARCH_TEMPLATE),
-      digest(RESEARCH_TEMPLATE),
-      'fixture-operator',
-      '{}',
-    ],
-  );
+  await admin.query('BEGIN');
+  await installReviewedMissionTemplate(admin, binding, randomUUID(), delegation);
+  await admin.query('COMMIT');
   enabled = false;
   try {
     assert.equal((await store.requestMission(context, randomUUID(), input)).status, 'denied');
@@ -143,6 +153,46 @@ test('S05-T03 no mission proposal without an operator-reviewed template and expl
   const unconfigured = new PriorityStore(store.database, knowledge);
   assert.equal((await unconfigured.requestMission(context, randomUUID(), input)).status, 'denied');
   assert.equal((await rows('mission_attempts')).length, 0);
+});
+test('S05-T03 operator template installation replays exact bytes and never overwrites altered review or scope', async () => {
+  const before = await rows('mission_template_versions');
+  await admin.query('BEGIN');
+  try {
+    await installReviewedMissionTemplate(admin, binding, randomUUID(), delegation);
+    assert.deepEqual(await rows('mission_template_versions'), before);
+    for (const patch of [{ ownerId: 'foreign' }, { channelId: 'foreign' }, { agentGroupId: 'foreign' }]) {
+      await assert.rejects(
+        installReviewedMissionTemplate(admin, { ...binding, ...patch }, randomUUID(), delegation),
+        /context_binding_changed/,
+      );
+    }
+    await admin.query("UPDATE cos.mission_template_versions SET reviewed_by='foreign' WHERE scope_id=$1", [scope]);
+    await assert.rejects(
+      installReviewedMissionTemplate(admin, binding, randomUUID(), delegation),
+      /mission_template_conflict/,
+    );
+    await admin.query('UPDATE cos.mission_template_versions SET reviewed_by=$2,body=$3 WHERE scope_id=$1', [
+      scope,
+      binding.ownerId,
+      JSON.stringify({ ...RESEARCH_TEMPLATE, instructions: 'changed' }),
+    ]);
+    await assert.rejects(
+      installReviewedMissionTemplate(admin, binding, randomUUID(), delegation),
+      /mission_template_conflict/,
+    );
+  } finally {
+    await admin.query('ROLLBACK');
+  }
+  assert.deepEqual(await rows('mission_template_versions'), before);
+  const runtime = await connectFixtureDatabase(process.env, 'runtime');
+  try {
+    await assert.rejects(
+      runtime.query('UPDATE cos.mission_template_versions SET reviewed_by=$2 WHERE scope_id=$1', [scope, 'model']),
+      (error: any) => error.code === '42501',
+    );
+  } finally {
+    await runtime.end();
+  }
 });
 test('S05-T05 request returns a stable ID and full exact approval preview without launching or reserving attempts', async () => {
   const input = await request(),

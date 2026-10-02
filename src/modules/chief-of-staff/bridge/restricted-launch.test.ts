@@ -56,6 +56,7 @@ function research() {
       agentGroupId: 'parent-group',
       ingressId: 'event',
       bindingDigest: 'b'.repeat(64),
+      delegationDigest: 'd'.repeat(64),
       contextGeneration: 'parent-context',
     },
     related: { goal: null, project: null },
