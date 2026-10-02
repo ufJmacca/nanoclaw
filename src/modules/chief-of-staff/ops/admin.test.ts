@@ -1,5 +1,14 @@
 import { describe, it, expect, vi } from 'vitest';
 import { parseAdminArguments, adminStatus, safeAdminError } from './admin.js';
+it.each([
+  'specialist_release_required',
+  'unsafe_mission_purge',
+  'mission_purge_conflict',
+  'mission_purge_authority_required',
+])('reports %s without exposing appended private diagnostics', (code) => {
+  expect(safeAdminError(new Error(code))).toBe(code);
+  expect(safeAdminError(new Error(code + ': PRIVATE_CANARY'))).toBe('unreachable');
+});
 import { SCHEMA_VERSION } from '../store/migrations.js';
 import { DatabasePreflightError } from '../store/preflight.js';
 import { DatabaseConfigurationError } from '../store/config.js';

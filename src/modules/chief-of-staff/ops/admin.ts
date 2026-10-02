@@ -121,6 +121,10 @@ export function safeAdminError(error: unknown): string {
     if (
       [
         'invalid_admin_arguments',
+        'specialist_release_required',
+        'unsafe_mission_purge',
+        'mission_purge_conflict',
+        'mission_purge_authority_required',
         'invalid_mission_configuration',
         'unsafe_mission_configuration',
         'mission_configuration_conflict',
