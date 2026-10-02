@@ -21,7 +21,7 @@ const identityKeys = [
   'sessionId',
   'provider',
 ] as const;
-function validIdentity(value: unknown): value is CosMissionIdentity {
+export function validCosMissionIdentity(value: unknown): value is CosMissionIdentity {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const v = value as Record<string, unknown>;
   return (
@@ -59,7 +59,7 @@ export function missionBoundary(session: Session, db: Database.Database): Bounda
   try {
     const identity: unknown = JSON.parse(rows[0].identity);
     if (
-      !validIdentity(identity) ||
+      !validCosMissionIdentity(identity) ||
       identity.attemptId !== rows[0].attempt_id ||
       identity.agentGroupId !== rows[0].agent_group_id ||
       identity.sessionId !== rows[0].session_id ||
@@ -79,7 +79,7 @@ export function missionBoundary(session: Session, db: Database.Database): Bounda
 }
 /** Record before allocation. Exact replay is safe; reuse of any execution identity is forbidden. */
 export function installCosMissionBoundary(identity: CosMissionIdentity, db: Database.Database): void {
-  if (!validIdentity(identity)) throw new Error('invalid_mission_identity');
+  if (!validCosMissionIdentity(identity)) throw new Error('invalid_mission_identity');
   ensureSchema(db);
   db.transaction(() => {
     if (
@@ -105,7 +105,7 @@ export function installCosMissionBoundary(identity: CosMissionIdentity, db: Data
         row.attempt_id !== identity.attemptId ||
         row.agent_group_id !== identity.agentGroupId ||
         row.session_id !== identity.sessionId ||
-        !validIdentity(stored) ||
+        !validCosMissionIdentity(stored) ||
         !identityKeys.every((key) => stored[key] === identity[key])
       )
         throw new Error('mission_identity_conflict');

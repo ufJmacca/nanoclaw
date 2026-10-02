@@ -4,6 +4,7 @@ import type { KnowledgeContext, KnowledgeStore } from '../knowledge/store.js';
 import { validWorkChange, validWorkRead, validMissionChange, type WorkRead } from '../contracts/protocol.js';
 import { validMissionRequest, type MissionRequest } from '../contracts/mission-protocol.js';
 import { MissionProposalStore, type MissionAuthorityResolver } from '../missions/proposal-store.js';
+import { MissionRunStore } from '../missions/run-store.js';
 import { WorkStore } from './work.js';
 import { validScheduleChange } from '../contracts/schedule-protocol.js';
 import { BriefScheduleStore } from '../automation/schedule-store.js';
@@ -48,6 +49,7 @@ export class PriorityStore {
   readonly briefs: BriefRunStore;
   readonly briefArtifacts?: BriefArtifacts;
   readonly missions: MissionProposalStore;
+  readonly missionRuns: MissionRunStore;
   constructor(
     readonly database: BoundedDatabase,
     readonly knowledge?: KnowledgeStore,
@@ -56,6 +58,7 @@ export class PriorityStore {
     missionAuthority?: MissionAuthorityResolver,
   ) {
     this.missions = new MissionProposalStore(knowledge, missionAuthority);
+    this.missionRuns = new MissionRunStore(database, this.missions);
     this.work = new WorkStore(knowledge);
     this.briefs = new BriefRunStore(database);
     if (knowledge)

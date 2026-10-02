@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { queueMissionAttempt } from './attempt.js';
 import type { PoolClient } from 'pg';
 import { digest, type Context, type Result } from '../domain/contracts.js';
 import { validMissionChange, type MissionChange } from '../contracts/protocol.js';
@@ -209,34 +209,12 @@ export class MissionProposalStore {
       !(await this.validateChange(client, context, change))
     )
       return { status: 'conflict' };
-    const attemptId = randomUUID(),
-      groupId = 'cos-mission-' + randomUUID(),
-      sessionId = randomUUID(),
-      inputId = 'cos-mission-input-' + randomUUID();
-    const provenance = {
+    await queueMissionAttempt(client, context.scopeId, change.mission_id, 1, change.work_order_digest, {
       proposal_id: proposal.id,
       owner_id: context.ownerId,
       decision_ingress_id: proposal.decision_ingress_id,
       work_order_digest: change.work_order_digest,
-    };
-    await client.query(
-      "INSERT INTO cos.mission_attempts(scope_id,id,mission_id,generation,dispatch_revision,input_id,agent_group_id,session_id,state,provenance) VALUES($1,$2,$3,1,1,$4,$5,$6,'queued',$7)",
-      [context.scopeId, attemptId, change.mission_id, inputId, groupId, sessionId, JSON.stringify(provenance)],
-    );
-    await client.query(
-      "INSERT INTO cos.mission_budget_reservations(scope_id,mission_id,call_id,attempt_id,generation,kind,payload_digest) VALUES($1,$2,$3,$4,1,'attempt',$5)",
-      [
-        context.scopeId,
-        change.mission_id,
-        'attempt-' + attemptId,
-        attemptId,
-        digest({ attemptId, inputId, groupId, sessionId, generation: 1, workOrder: change.work_order_digest }),
-      ],
-    );
-    await client.query(
-      "UPDATE cos.missions SET state='queued',generation=1,version=version+1,provenance=provenance||$3::jsonb,updated_at=clock_timestamp() WHERE scope_id=$1 AND id=$2",
-      [context.scopeId, change.mission_id, JSON.stringify(provenance)],
-    );
+    });
     return { status: 'ok', record_id: change.mission_id };
   }
 }
