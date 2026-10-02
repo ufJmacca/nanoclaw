@@ -12,6 +12,7 @@ import { backupNativeDatabase, installServiceOverride, restoreServiceOverride } 
 import { backupConversations, verifyConversationBackup } from './conversation-backup.js';
 import { backupCalendarState, verifyCalendarBackup } from '../calendar/backup.js';
 import { fenceLegacyCoordinators } from './legacy-rollback.js';
+import { assertNativeReleaseCompatibility } from './native-release-compatibility.js';
 import { artifactHash, verifyReleaseBundle, verifyLoadedImages } from './release-artifacts.js';
 import { payloadDigest } from './payload.js';
 import { waitForTargetProcess } from './service-readiness.js';
@@ -133,6 +134,18 @@ export function createTargetEffects(
       await check.end();
     }
   };
+  const nativeCompatible = (candidate: ReleaseManifest | null) => {
+    const db = new Database(central, { readonly: true, fileMustExist: true });
+    try {
+      assertNativeReleaseCompatibility(db, candidate);
+      return true;
+    } catch (error) {
+      if (error instanceof Error && error.message === 'specialist_release_required') return false;
+      throw error;
+    } finally {
+      db.close();
+    }
+  };
   const stopAndVerify = async () => {
     await commands.service('stop');
     const stopped = await commands.observe();
@@ -203,7 +216,8 @@ export function createTargetEffects(
       if (
         priorManifest.releaseId !== previous.releaseId ||
         digest(priorManifest) !== previous.manifestDigest ||
-        !supportsReleaseSchema(manifest, await schema())
+        !supportsReleaseSchema(manifest, await schema()) ||
+        !nativeCompatible(manifest)
       )
         throw new Error('deployment_recovery_denied');
       const priorEffects = createTargetEffects(settings, priorManifest, previous.manifestDigest);
@@ -234,6 +248,7 @@ export function createTargetEffects(
       )
         throw new Error('binding_setup_conflict');
       verifyTargetPaths(settings, 1024 * 1024 * 1024);
+      if (!nativeCompatible(manifest)) throw new Error('specialist_release_required');
       verifyInstalledProfiles(settings, manifest);
       if ((await commands.observe()).cwd !== settings.installationRoot) throw new Error('wrong_service_installation');
       for (const login of ['runtime', 'migration'] as const) {
@@ -393,11 +408,13 @@ export function createTargetEffects(
       lease();
       if (!supportsReleaseSchema(manifest, await schema())) throw new Error('schema_incompatible');
       await effects.artifacts();
+      if (!nativeCompatible(manifest)) throw new Error('specialist_release_required');
       installServiceOverride(override);
       await commands.service('daemon-reload');
       await commands.service('restart');
     },
     async health() {
+      if (!nativeCompatible(manifest)) return false;
       let running = false;
       for (let attempt = 0; attempt < 40; attempt++) {
         try {
@@ -432,6 +449,7 @@ export function createTargetEffects(
     async reconcile(phase) {
       if (phase === 'activate') {
         try {
+          if (!nativeCompatible(manifest)) return 'retry_safe';
           await observeProcess(payload);
           return 'done';
         } catch {
@@ -451,11 +469,14 @@ export function createTargetEffects(
       if (previous.releaseId !== previousReleaseId) throw new Error('rollback_identity_mismatch');
       // A failed predecessor is retained as recovery evidence, never promoted to known-good rollback code.
       if (previous.recoveryFrom) return false;
+      let rollbackManifest: ReleaseManifest | null = null;
       if (previousReleaseId) {
         if (!manifest.previousReleaseIds.includes(previousReleaseId)) return false;
         const prior = validateReleaseManifest(
           readPrivate(path.join(settings.releaseRoot, previousReleaseId, 'release.json')),
         );
+        rollbackManifest = prior;
+        if (!nativeCompatible(prior)) return false;
         const priorReceipt = readPrivate<{ status: string; manifestDigest: string }>(
           path.join(settings.stateRoot, 'releases', previousReleaseId, 'deployment.json'),
         );
@@ -470,7 +491,10 @@ export function createTargetEffects(
         )
           return false;
       }
+      if (!nativeCompatible(rollbackManifest)) return false;
       await stopAndVerify();
+      // A child may have been allocated while preflight awaited image/schema checks.
+      if (!nativeCompatible(rollbackManifest)) return false;
       if (previousReleaseId === null) {
         const db = new Database(central, { fileMustExist: true });
         try {

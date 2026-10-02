@@ -1,7 +1,9 @@
 import type Database from 'better-sqlite3';
 import type { CosBinding } from '../../../cos-boundary.js';
+import { assertNativeReleaseCompatibility } from './native-release-compatibility.js';
 /** Service and its workers must already be stopped. Older hosts do not understand the permanent CoS boundary. */
 export function fenceLegacyCoordinators(db: Database.Database): { fencedScopes: number } {
+  assertNativeReleaseCompatibility(db, null);
   if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='cos_identity_boundaries'").get())
     return { fencedScopes: 0 };
   return db
