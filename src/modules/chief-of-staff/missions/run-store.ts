@@ -6,6 +6,15 @@ import type { ResearchWorkOrder } from './work-order.js';
 import type { MissionProposalStore } from './proposal-store.js';
 import { queueMissionAttempt } from './attempt.js';
 
+export type MissionDispatchLease = { owner: string; fence: number };
+const validLease = (v: MissionDispatchLease) =>
+  !!v &&
+  Object.keys(v).length === 2 &&
+  typeof v.owner === 'string' &&
+  /^[a-zA-Z0-9_-]{1,100}$/.test(v.owner) &&
+  Number.isSafeInteger(v.fence) &&
+  v.fence > 0;
+
 type MissionRow = {
   id: string;
   scope_id: string;
@@ -27,6 +36,8 @@ type AttemptRow = {
   agent_group_id: string;
   session_id: string;
   state: string;
+  lease_owner: string | null;
+  lease_current: boolean;
   allocation: Record<string, unknown>;
   provenance: Record<string, unknown>;
 };
@@ -81,7 +92,7 @@ export class MissionRunStore {
   private async attempt(client: PoolClient, identity: CosMissionIdentity): Promise<AttemptRow | undefined> {
     return (
       await client.query(
-        'SELECT * FROM cos.mission_attempts WHERE scope_id=$1 AND mission_id=$2 AND id=$3 FOR UPDATE',
+        'SELECT *,lease_until>clock_timestamp() AS lease_current FROM cos.mission_attempts WHERE scope_id=$1 AND mission_id=$2 AND id=$3 FOR UPDATE',
         [identity.scopeId, identity.missionId, identity.attemptId],
       )
     ).rows[0];
@@ -361,6 +372,124 @@ export class MissionRunStore {
             [identity.scopeId, identity.missionId],
           );
       }
+      return { status: 'ok' };
+    });
+  }
+  /** Lease acquisition never creates another attempt or refreshes its deadline/budget. */
+  async claimDispatch(context: Context, attemptId: string, owner: string): Promise<Result> {
+    if (!id(attemptId) || !id(owner) || context.origin) return { status: 'denied' };
+    return this.transaction(context.scopeId, async (client) => {
+      const lookup = (
+        await client.query('SELECT * FROM cos.mission_attempts WHERE scope_id=$1 AND id=$2', [
+          context.scopeId,
+          attemptId,
+        ])
+      ).rows[0] as AttemptRow | undefined;
+      if (!lookup) return { status: 'denied' };
+      const m = await this.mission(client, context.scopeId, lookup.mission_id),
+        a = await this.attempt(client, identityOf(lookup));
+      if (
+        !m ||
+        !a ||
+        !(await this.owner(client, context, m)) ||
+        m.state !== 'queued' ||
+        m.generation !== a.generation ||
+        !['queued', 'allocating', 'ready'].includes(a.state) ||
+        m.proposal_state !== 'applied' ||
+        m.applied_record_id !== m.id
+      )
+        return { status: 'denied' };
+      if (a.lease_current && a.lease_owner !== owner) return { status: 'pending' };
+      const origin = m.body.origin;
+      const order = await this.proposals.captureChange(
+        client,
+        {
+          scopeId: origin.scopeId,
+          ownerId: origin.ownerId,
+          agentGroupId: origin.agentGroupId,
+          sessionId: origin.sessionId,
+          ingressId: origin.ingressId,
+        },
+        { kind: 'research_mission', mission_id: m.id, work_order_digest: m.digest, work_order: m.body },
+      );
+      if (!order) return { status: 'denied' };
+      const oldFence = a.allocation.dispatch_fence ?? 0;
+      if (!Number.isSafeInteger(oldFence) || Number(oldFence) < 0 || Number(oldFence) >= Number.MAX_SAFE_INTEGER)
+        return { status: 'denied' };
+      const fence = a.lease_current && a.lease_owner === owner ? Number(oldFence) : Number(oldFence) + 1;
+      if (fence < 1) return { status: 'denied' };
+      const updated = (
+        await client.query(
+          "UPDATE cos.mission_attempts SET state=CASE WHEN state='queued' THEN 'allocating' ELSE state END,lease_owner=$3,lease_until=clock_timestamp()+interval '30 seconds',allocation=allocation||$4::jsonb,version=version+1,updated_at=clock_timestamp() WHERE scope_id=$1 AND id=$2 RETURNING input_id",
+          [context.scopeId, attemptId, owner, JSON.stringify({ dispatch_fence: fence })],
+        )
+      ).rows[0];
+      return { status: 'ok', identity: identityOf(a), inputId: updated.input_id, order, lease: { owner, fence } };
+    });
+  }
+  private async dispatchCurrent(client: PoolClient, identity: CosMissionIdentity, lease: MissionDispatchLease) {
+    const m = await this.mission(client, identity.scopeId, identity.missionId),
+      a = await this.attempt(client, identity);
+    if (
+      !m ||
+      !a ||
+      !same(a, identity) ||
+      m.generation !== identity.generation ||
+      !['queued', 'running'].includes(m.state) ||
+      !['allocating', 'ready', 'running'].includes(a.state) ||
+      a.lease_owner !== lease.owner ||
+      !a.lease_current ||
+      a.allocation.dispatch_fence !== lease.fence ||
+      !(await this.current(client, m))
+    )
+      return null;
+    return { mission: m, attempt: a };
+  }
+  async authorizeDispatch(identity: CosMissionIdentity, lease: MissionDispatchLease): Promise<Result> {
+    if (!validCosMissionIdentity(identity) || !validLease(lease)) return { status: 'denied' };
+    return this.transaction(identity.scopeId, async (client) => ({
+      status: (await this.dispatchCurrent(client, identity, lease)) ? 'ok' : 'denied',
+    }));
+  }
+  async markDispatchReady(
+    identity: CosMissionIdentity,
+    lease: MissionDispatchLease,
+    receiptDigest: string,
+  ): Promise<Result> {
+    if (!validCosMissionIdentity(identity) || !validLease(lease) || !/^[a-f0-9]{64}$/.test(receiptDigest))
+      return { status: 'denied' };
+    return this.transaction(identity.scopeId, async (client) => {
+      const current = await this.dispatchCurrent(client, identity, lease);
+      if (!current || !['allocating', 'ready'].includes(current.attempt.state)) return { status: 'denied' };
+      const existing = current.attempt.allocation.native_receipt;
+      if (existing && existing !== receiptDigest) return { status: 'conflict' };
+      await client.query(
+        "UPDATE cos.mission_attempts SET state='ready',allocation=allocation||$3::jsonb,version=version+1,updated_at=clock_timestamp() WHERE scope_id=$1 AND id=$2",
+        [identity.scopeId, identity.attemptId, JSON.stringify({ native_receipt: receiptDigest })],
+      );
+      return { status: 'ok' };
+    });
+  }
+  /** Called by the restricted launch hook immediately before native spawning, never by an approval callback. */
+  async beginExecution(identity: CosMissionIdentity, lease: MissionDispatchLease): Promise<Result> {
+    if (!validCosMissionIdentity(identity) || !validLease(lease)) return { status: 'denied' };
+    return this.transaction(identity.scopeId, async (client) => {
+      const current = await this.dispatchCurrent(client, identity, lease);
+      if (
+        !current ||
+        !['ready', 'running'].includes(current.attempt.state) ||
+        typeof current.attempt.allocation.native_receipt !== 'string'
+      )
+        return { status: 'denied' };
+      if (current.attempt.state === 'running') return { status: 'ok' };
+      await client.query(
+        "UPDATE cos.mission_attempts SET state='running',version=version+1,updated_at=clock_timestamp() WHERE scope_id=$1 AND id=$2",
+        [identity.scopeId, identity.attemptId],
+      );
+      await client.query(
+        "UPDATE cos.missions SET state='running',version=version+1,updated_at=clock_timestamp() WHERE scope_id=$1 AND id=$2",
+        [identity.scopeId, identity.missionId],
+      );
       return { status: 'ok' };
     });
   }

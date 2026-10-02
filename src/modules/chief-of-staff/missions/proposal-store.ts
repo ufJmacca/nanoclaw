@@ -138,8 +138,11 @@ export class MissionProposalStore {
 
   /** Current authority is checked on request replay, preview and apply; a historical snapshot is no access grant. */
   async validateChange(client: PoolClient, context: Context, change: MissionChange): Promise<boolean> {
+    return (await this.captureChange(client, context, change)) !== null;
+  }
+  async captureChange(client: PoolClient, context: Context, change: MissionChange): Promise<ResearchWorkOrder | null> {
     const authority = this.authority?.(context);
-    if (!authority || context.origin || !validMissionChange(change)) return false;
+    if (!authority || context.origin || !validMissionChange(change)) return null;
     const row = (
       await client.query('SELECT body,digest FROM cos.mission_work_orders WHERE scope_id=$1 AND id=$2', [
         context.scopeId,
@@ -152,7 +155,7 @@ export class MissionProposalStore {
       digest(row.body) !== row.digest ||
       digest(row.body) !== digest(change.work_order)
     )
-      return false;
+      return null;
     const body = row.body as ResearchWorkOrder['body'];
     if (
       body.origin.scopeId !== context.scopeId ||
@@ -163,11 +166,11 @@ export class MissionProposalStore {
       body.origin.contextGeneration !== authority.contextGeneration ||
       digest(body.provider) !== digest(authority.provider)
     )
-      return false;
+      return null;
     if (
       !(await client.query('SELECT $1::timestamptz > clock_timestamp() AS current', [body.deadlineAt])).rows[0].current
     )
-      return false;
+      return null;
     const current = await this.seal(
       client,
       { ...context, ingressId: body.origin.ingressId },
@@ -176,7 +179,7 @@ export class MissionProposalStore {
       body.issuedAt,
       authority,
     );
-    return !!current && current.digest === row.digest;
+    return current && current.digest === row.digest ? current : null;
   }
 
   async linkProposal(client: PoolClient, context: Context, change: MissionChange, proposalId: string): Promise<void> {

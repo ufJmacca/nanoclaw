@@ -331,3 +331,59 @@ test('S05-T09 invalid call identities and expired work orders cannot consume a r
   assert.equal((await reserve(identity)).status, 'denied');
   assert.equal(((await store.missionRuns.inspect(context, identity.missionId)).mission as any).usage.model, 0);
 });
+test('S05-T05/T06 allocation leases preserve dispatch identity and fence expired dispatchers', async () => {
+  const { identity } = await mission();
+  const first = await store.missionRuns.claimDispatch(context, identity.attemptId, 'dispatcher-a');
+  assert.equal(first.status, 'ok');
+  assert.deepEqual(first.identity, identity);
+  assert.match(JSON.stringify(first.order), /SOURCE_CANARY/);
+  assert.equal((await store.missionRuns.claimDispatch(context, identity.attemptId, 'dispatcher-b')).status, 'pending');
+  assert.equal((await store.missionRuns.authorizeDispatch(identity, first.lease as any)).status, 'ok');
+  await admin.query(
+    "UPDATE cos.mission_attempts SET lease_until=clock_timestamp()-interval '1 second' WHERE scope_id=$1 AND id=$2",
+    [scope, identity.attemptId],
+  );
+  assert.equal((await store.missionRuns.authorizeDispatch(identity, first.lease as any)).status, 'denied');
+  const second = await store.missionRuns.claimDispatch(context, identity.attemptId, 'dispatcher-b');
+  assert.equal(second.status, 'ok');
+  assert.deepEqual(second.identity, identity);
+  assert.equal(second.inputId, first.inputId);
+  assert.ok((second.lease as any).fence > (first.lease as any).fence);
+  assert.equal(
+    (await store.missionRuns.markDispatchReady(identity, first.lease as any, digest('native allocation'))).status,
+    'denied',
+  );
+  assert.equal(
+    (await store.missionRuns.markDispatchReady(identity, second.lease as any, digest('native allocation'))).status,
+    'ok',
+  );
+  assert.equal(
+    (await store.missionRuns.markDispatchReady(identity, second.lease as any, digest('changed allocation'))).status,
+    'conflict',
+  );
+  // Ready is still pending execution. A false/deferred native wake must leave this state and budget unchanged.
+  assert.equal((await reserve(identity)).status, 'denied');
+  const prepared = (await store.missionRuns.inspect(context, identity.missionId)).mission as any;
+  assert.equal(prepared.state, 'queued');
+  assert.equal(prepared.attempts[0].state, 'ready');
+  assert.deepEqual(prepared.usage, { attempt: 1, model: 0, tool: 0 });
+  assert.equal((await store.missionRuns.beginExecution(identity, second.lease as any)).status, 'ok');
+  assert.equal((await reserve(identity)).reserved, true);
+});
+test('S05-T07 current source access and cancellation override a previously acquired allocation lease', async () => {
+  const { identity, input } = await mission();
+  const claimed = await store.missionRuns.claimDispatch(context, identity.attemptId, 'dispatcher');
+  assert.equal(claimed.status, 'ok');
+  await admin.query("UPDATE cos.sources SET status='revoked' WHERE scope_id=$1 AND id=$2", [
+    scope,
+    input.sources[0].source_id,
+  ]);
+  assert.equal((await store.missionRuns.authorizeDispatch(identity, claimed.lease as any)).status, 'denied');
+  assert.equal(
+    (await store.missionRuns.markDispatchReady(identity, claimed.lease as any, digest('native'))).status,
+    'denied',
+  );
+  await store.missionRuns.cancel(context, identity.missionId);
+  assert.equal((await store.missionRuns.beginExecution(identity, claimed.lease as any)).status, 'denied');
+  assert.equal((await store.missionRuns.claimDispatch(context, identity.attemptId, 'dispatcher')).status, 'denied');
+});
