@@ -1810,8 +1810,10 @@ test('S06-T03/T05/T07 final review uses the retained main context, charges root 
     final.review(executing, requestId, review),
     final.review(executing, requestId, review),
   ]);
-  assert.equal([x, y].filter((r) => r.status === 'ok').length, 1);
+  // Serialization may acknowledge the replay immediately; both acknowledgements must identify one durable review.
+  assert.ok([x, y].some((r) => r.status === 'ok'));
   const receipt = [x, y].find((r) => r.status === 'ok')!;
+  for (const r of [x, y].filter((r) => r.status === 'ok')) assert.deepEqual(r, receipt);
   assert.deepEqual(await final.review(executing, requestId, review), receipt);
   assert.equal(receipt.state, 'completed');
   assert.equal((await final.review(executing, requestId, { ...review, decision: 'partial' })).status, 'conflict');

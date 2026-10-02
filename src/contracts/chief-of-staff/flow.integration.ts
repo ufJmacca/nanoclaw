@@ -6,7 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { fixtureDatabaseConfig, connectFixtureDatabase, fixtureRuntimeUser } from './fixture-database.js';
 import { migrate } from '../../modules/chief-of-staff/store/migrations.js';
 import { BoundedDatabase } from '../../modules/chief-of-staff/store/client.js';
-import { PriorityStore } from '../../modules/chief-of-staff/store/priorities.js';
+import type { PriorityStore } from '../../modules/chief-of-staff/store/priorities.js';
 import { McpFixture } from './mcp-fixture.js';
 import { HostFixture } from './host-fixture-client.js';
 import { renderPriorities } from '../../modules/chief-of-staff/domain/render.js';
@@ -25,6 +25,7 @@ test(
     const root = fs.mkdtempSync(path.join(fixtureParent, 'flow-')),
       scope = 'fixture-' + randomUUID();
     process.chdir(root);
+    const { PriorityStore } = await import('../../modules/chief-of-staff/store/priorities.js');
     const { initDb, closeDb } = await import('../../db/connection.js');
     const { runMigrations } = await import('../../db/migrations/index.js');
     const { subscribeMattermostChannelStrict } = await import('../../channels/mattermost-subscription.js');
@@ -111,6 +112,9 @@ test(
         'cos_request_status',
         'cos_source_change_propose',
         'cos_source_get',
+        'cos_team_cancel',
+        'cos_team_get',
+        'cos_team_request',
         'cos_work_change_propose',
         'cos_work_read',
       ]);

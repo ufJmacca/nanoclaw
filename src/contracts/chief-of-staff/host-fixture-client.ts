@@ -10,11 +10,16 @@ export class HostFixture {
     number,
     { resolve(value: any): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> }
   >();
-  constructor() {
+  constructor(options?: { nativeCapacity: 3 }) {
     const extension = import.meta.url.endsWith('.ts') ? 'ts' : 'js';
     const selected = selectedFixtureEnvironment(process.env, false);
     this.process = fork(fileURLToPath(new URL('./host-fixture-worker.' + extension, import.meta.url)), [], {
-      env: { ...safeHostEnvironment('docker'), ...selected, COS_FIXTURE_HOST_PROCESS: 'S01' },
+      env: {
+        ...safeHostEnvironment('docker'),
+        ...selected,
+        COS_FIXTURE_HOST_PROCESS: 'S01',
+        ...(options?.nativeCapacity === 3 ? { MAX_CONCURRENT_CONTAINERS: '3' } : {}),
+      },
       execArgv: extension === 'ts' ? ['--import', import.meta.resolve('tsx')] : [],
       stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
     });

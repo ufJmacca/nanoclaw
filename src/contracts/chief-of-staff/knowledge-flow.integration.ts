@@ -10,7 +10,7 @@ import { randomUUID } from 'node:crypto';
 import { connectFixtureDatabase, fixtureDatabaseConfig, fixtureRuntimeUser } from './fixture-database.js';
 import { migrate } from '../../modules/chief-of-staff/store/migrations.js';
 import { BoundedDatabase } from '../../modules/chief-of-staff/store/client.js';
-import { PriorityStore } from '../../modules/chief-of-staff/store/priorities.js';
+import type { PriorityStore } from '../../modules/chief-of-staff/store/priorities.js';
 import { KnowledgeStore, type Evidence } from '../../modules/chief-of-staff/knowledge/store.js';
 import { KnowledgeArtifacts } from '../../modules/chief-of-staff/knowledge/artifacts.js';
 import { createConversationState } from '../../modules/chief-of-staff/bridge/conversation-state.js';
@@ -36,6 +36,7 @@ test(
     const artifacts = new KnowledgeArtifacts(knowledgeRoot + '/artifacts', knowledgeRoot + '/staging');
     const scope = 'demo-knowledge-' + randomUUID();
     process.chdir(root);
+    const { PriorityStore } = await import('../../modules/chief-of-staff/store/priorities.js');
     const { initDb, closeDb } = await import('../../db/connection.js');
     const { runMigrations } = await import('../../db/migrations/index.js');
     const { subscribeMattermostChannelStrict } = await import('../../channels/mattermost-subscription.js');
@@ -125,6 +126,9 @@ test(
           'cos_request_status',
           'cos_source_change_propose',
           'cos_source_get',
+          'cos_team_cancel',
+          'cos_team_get',
+          'cos_team_request',
           'cos_work_change_propose',
           'cos_work_read',
         ]);
