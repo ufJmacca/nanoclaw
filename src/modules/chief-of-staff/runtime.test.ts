@@ -446,7 +446,7 @@ it('S02 processes due retention work while paused without admitting ordinary out
   expect(db.prepare('SELECT paused FROM cos_identity_boundaries').get()).toEqual({ paused: 1 });
 });
 
-it.each(['existing', 'due', 'refresh'])(
+it.each(['existing', 'due', 'refresh', 'review-fence', 'review-corrupt'])(
   'S04 wires %s scheduled work, checked delivery and retirement into the host pump',
   async (mode) => {
     const db = initTestDb();
@@ -483,6 +483,23 @@ it.each(['existing', 'due', 'refresh'])(
       deadlineAt: new Date(Date.now() + 120000).toISOString(),
     };
     if (mode === 'existing') expect(installScheduledOrigin(db, binding, session, lease)).toBe(true);
+    if (mode.startsWith('review-')) {
+      expect(
+        installReviewOrigin(db, binding, session, {
+          identity: {
+            missionId: 'mission',
+            submissionId: randomUUID(),
+            attemptId: randomUUID(),
+            generation: 1,
+            sessionId: session.id,
+            contextGeneration: generation,
+          },
+          lease: { owner: 'review-host', fence: 1 },
+          deadlineAt: new Date(Date.now() + 30000).toISOString(),
+        }),
+      ).toBe(true);
+      if (mode === 'review-corrupt') db.prepare("UPDATE cos_mission_review_origins SET grant_json='invalid'").run();
+    }
     const run = {
       id: lease.runId,
       generation: 1,
@@ -600,6 +617,14 @@ it.each(['existing', 'due', 'refresh'])(
         launcher: { ready: () => true, prepare: vi.fn(), renewBriefContext },
       });
       await runtime.pump(binding);
+      if (mode.startsWith('review-')) {
+        expect(briefs.reserveDue).not.toHaveBeenCalled();
+        expect(wake).not.toHaveBeenCalled();
+        expect(renewBriefContext).not.toHaveBeenCalled();
+        expect(calendar.refresh).not.toHaveBeenCalled();
+        expect(deliver).not.toHaveBeenCalled();
+        return;
+      }
       if (mode !== 'existing') {
         expect(briefs.reserveDue).toHaveBeenCalledOnce();
         expect(wake).toHaveBeenCalledOnce();

@@ -12,7 +12,16 @@ import { createAgentGroup } from '../../db/agent-groups.js';
 import { createSession, getSession } from '../../db/sessions.js';
 import { installCosMissionBoundary } from '../../cos-mission-boundary.js';
 import { installCosMissionExecutionHooks } from '../../cos-mission-execution.js';
-import { permitCosOutbound } from '../../cos-boundary.js';
+import { installCosBoundary, permitCosOutbound, type CosBinding } from '../../cos-boundary.js';
+import { INBOUND_SCHEMA } from '../../db/schema.js';
+import { ensureConversationSchema } from '../../modules/chief-of-staff/bridge/conversation-state.js';
+import { createCosRuntime } from '../../modules/chief-of-staff/runtime.js';
+import { NativeMissionReviewTasks } from '../../modules/chief-of-staff/missions/review-task.js';
+import { NativeBriefTasks } from '../../modules/chief-of-staff/automation/native-tasks.js';
+import { reviewContext, readReviewOrigin } from '../../modules/chief-of-staff/missions/review-origin.js';
+import { resolveKnowledgeContext } from '../../modules/chief-of-staff/knowledge/context.js';
+import { getDeliveryAdapter, setDeliveryAdapter } from '../../delivery.js';
+import type { Session } from '../../types.js';
 import { createMissionRpcHandler } from '../../modules/chief-of-staff/missions/rpc.js';
 import { createRpcHandler } from '../../modules/chief-of-staff/bridge/rpc.js';
 import { createMissionCancellation } from '../../modules/chief-of-staff/missions/cancel.js';
@@ -567,6 +576,124 @@ test('S05-T08 requires exact review version, criteria, digest and an independent
   );
   assert.equal((await f.reviews.review({ ...f.k, sessionId: 'specialist' }, randomUUID(), f.review)).status, 'denied');
   assert.equal((await rows('mission_reviews')).filter((r) => r.mission_id === f.identity.missionId).length, 0);
+});
+test('S05-T05/T06/T08 host pump dispatches and retires review in the existing conversation before delivering its result', async () => {
+  const native = initTestDb(),
+    inbox = new Database(':memory:');
+  inbox.exec(INBOUND_SCHEMA);
+  const binding: CosBinding = {
+    scopeId: scope,
+    ownerId: context.ownerId,
+    agentGroupId: scope,
+    sessionId: scope,
+    messagingGroupId: 'mg',
+    provider: 'codex',
+    instanceId: 'fixture',
+    channelId: scope,
+    botId: 'bot',
+  };
+  const main = {
+    id: scope,
+    agent_group_id: scope,
+    messaging_group_id: 'mg',
+    agent_provider: 'codex',
+    status: 'active',
+    thread_id: null,
+  } as Session;
+  const previousAuthority = { ...authority },
+    previousAdapter = getDeliveryAdapter();
+  authority.bindingDigest = digest(binding);
+  authority.contextGeneration = randomUUID();
+  let runtime: ReturnType<typeof createCosRuntime> | undefined,
+    running = false,
+    wakes = 0;
+  const sent: string[] = [];
+  try {
+    const f = await submitted('answer', true, 600, { max_turns: 3, max_tool_calls: 8 }, 1);
+    installCosBoundary(binding, native);
+    ensureConversationSchema(native);
+    native
+      .prepare('UPDATE cos_identity_boundaries SET paused=0,ingress_id=?,ingress_at=?')
+      .run(context.ingressId, new Date(Date.now() - 600000).toISOString());
+    native
+      .prepare(
+        "INSERT INTO cos_conversation_states(scope_id,binding_digest,account_fingerprint,generation,status,updated_at) VALUES(?,?,?,?,'active',?)",
+      )
+      .run(scope, digest(binding), 'a'.repeat(64), authority.contextGeneration, new Date().toISOString());
+    setDeliveryAdapter({
+      deliver: async (_channel, destination, _thread, _kind, content) => {
+        assert.equal(destination, `mattermost:fixture:${scope}`);
+        sent.push(content);
+        return 'fixture-post';
+      },
+    });
+    runtime = createCosRuntime({
+      db: native,
+      enabled: true,
+      store,
+      facts: async () => ({ id: scope, type: 'P', delete_at: 0, members: ['owner', 'bot'], activeSubscription: true }),
+      session: () => main,
+      destination: () => undefined,
+      stop: () => {},
+      running: () => running,
+      wake: async () => {
+        wakes++;
+        return false;
+      },
+      launcher: { ready: () => true } as any,
+      withBriefTasks: (_s, operation) => operation(new NativeBriefTasks(inbox)),
+      withReviewTasks: (_s, operation) => operation(new NativeMissionReviewTasks(inbox)),
+    });
+    await runtime.pump(binding);
+    assert.equal(wakes, 1);
+    const grant = readReviewOrigin(native, binding)!;
+    assert.equal(grant.identity.missionId, f.identity.missionId);
+    const task = {
+      identity: grant.identity,
+      inputId: 'cos-mission-review-' + digest({ scope, identity: grant.identity }),
+      issuedAt: String((await rows('mission_work_orders')).find((r) => r.id === f.identity.missionId).body.issuedAt),
+    };
+    assert.equal(new NativeMissionReviewTasks(inbox).state(binding, task), 'pending');
+    const automatic = reviewContext(main, native)!;
+    const k = resolveKnowledgeContext(main, automatic, native)!;
+    assert.equal(
+      (
+        await store.missionReviewRuns!.reserve(
+          k,
+          f.identity.missionId,
+          f.review.submission_id,
+          grant.lease,
+          randomUUID(),
+          'model',
+        )
+      ).status,
+      'ok',
+    );
+    assert.equal((await f.reviews.review(k, randomUUID(), f.review)).state, 'completed');
+    running = true;
+    await runtime.pump(binding);
+    assert.equal(sent.length, 0); // stop request alone is insufficient
+    assert.equal(reviewContext(main, native), null);
+    running = false;
+    await runtime.pump(binding);
+    assert.equal(readReviewOrigin(native, binding), null);
+    assert.equal(new NativeMissionReviewTasks(inbox).state(binding, task), 'completed');
+    assert.equal(sent.length, 1);
+    assert.match(sent[0], /Research result/);
+    await runtime.pump(binding);
+    assert.equal(sent.length, 1);
+    assert.equal(runtime.controller.localContext(main), null); // old ingress never became model authority
+    assert.equal(
+      (native.prepare('SELECT generation FROM cos_conversation_states').get() as any).generation,
+      authority.contextGeneration,
+    );
+  } finally {
+    runtime?.dispose();
+    Object.assign(authority, previousAuthority);
+    setDeliveryAdapter(previousAdapter ?? { deliver: async () => undefined, isAvailable: () => false });
+    inbox.close();
+    closeDb();
+  }
 });
 test('S05-T03/T08 automatic coordinator RPC is limited to its exact leased result and spends root tool reservations', async () => {
   const f = await submitted('answer', true, 600, { max_turns: 3, max_tool_calls: 8 }, 1);

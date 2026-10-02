@@ -22,6 +22,9 @@ import { BriefDispatch } from './automation/brief-dispatch.js';
 import { BriefRefresh } from './automation/brief-refresh.js';
 import { createMissionCancellation } from './missions/cancel.js';
 import { MissionNotificationDelivery } from './missions/notification-delivery.js';
+import { MissionReviewDispatch } from './missions/review-dispatch.js';
+import { NativeMissionReviewTasks } from './missions/review-task.js';
+import { reviewContext } from './missions/review-origin.js';
 
 export type RuntimeDependencies = {
   db: Database.Database;
@@ -32,10 +35,11 @@ export type RuntimeDependencies = {
   session(id: string): Session | undefined;
   destination(id: string): MessagingGroup | undefined;
   stop(sessionId: string): void;
-  wake(session: Session): Promise<void>;
+  wake(session: Session): Promise<boolean | void>;
   launcher?: CoordinatorLauncher;
   running?(sessionId: string): boolean;
   withBriefTasks?<T>(session: Session, operation: (tasks: NativeBriefTasks) => T): T;
+  withReviewTasks?<T>(session: Session, operation: (tasks: NativeMissionReviewTasks) => T): T;
 };
 export function createCosRuntime(dependencies: RuntimeDependencies) {
   const d = dependencies;
@@ -108,7 +112,9 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
     decide: (...args) => (d.store ? d.store.decide(...args) : Promise.resolve({ status: 'unavailable' })),
     acknowledge: (proposal) => deletePendingApproval('cos-' + proposal),
     stop: d.stop,
-    wake: d.wake,
+    wake: async (session) => {
+      await d.wake(session);
+    },
     project: (session, event) => {
       writeSessionMessage(session.agent_group_id, session.id, {
         id: `${event.message.id}:${session.agent_group_id}`,
@@ -239,7 +245,29 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
           const fresh = resolveKnowledgeContext(session, ownerContext, d.db);
           return fresh ? await d.store.knowledge.contextReady(fresh) : { status: 'denied' };
         },
+        wake: async (session) => {
+          await d.wake(session);
+        },
+      })
+    : null;
+  const reviewDispatch = d.store?.missionReviewRuns
+    ? new MissionReviewDispatch({
+        db: d.db,
+        runs: d.store.missionReviewRuns,
+        session: d.session,
+        admitted: briefAdmission,
+        running: (id) => d.running?.(id) ?? true,
+        stop: d.stop,
         wake: d.wake,
+        withTasks: async (session, operation) => {
+          if (d.withReviewTasks) return await d.withReviewTasks(session, operation);
+          const inbound = openInboundDb(session.agent_group_id, session.id);
+          try {
+            return await operation(new NativeMissionReviewTasks(inbound));
+          } finally {
+            inbound.close();
+          }
+        },
       })
     : null;
   const outbox = d.store
@@ -334,11 +362,8 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
     controller,
     pump: async (binding: CosBinding) => {
       if (enabled()) await invalidations?.drain(binding);
-      if (enabled()) {
-        const recovered = await briefReconciliation?.drain(binding);
-        if (recovered?.status === 'ok' && ['absent', 'dispatched'].includes(String(recovered.state)))
-          await briefDispatch?.drain(binding);
-      }
+      const recovered = enabled() ? await briefReconciliation?.drain(binding) : undefined;
+      if (enabled()) await reviewDispatch?.drain(binding);
       if (enabled()) await outbox?.drain(binding);
       if (enabled() && d.store?.missionNotifications) {
         const notifications = d.store.missionNotifications,
@@ -397,6 +422,17 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
           }
         }
       }
+      // Review results get a delivery opportunity before a new briefing can occupy
+      // the shared context. A retained review fence must not consume a due brief.
+      const main = d.session(binding.sessionId);
+      if (
+        enabled() &&
+        main &&
+        reviewContext(main, d.db) === undefined &&
+        recovered?.status === 'ok' &&
+        ['absent', 'dispatched'].includes(String(recovered.state))
+      )
+        await briefDispatch?.drain(binding);
       // An approved source change may enqueue invalidation in this same pump.
       if (enabled()) await invalidations?.drain(binding);
       // Retention is an already-approved deletion obligation, independent of model pause.
