@@ -10,6 +10,7 @@ import { readPrivate, readTarget, writeAtomic } from './target-state.js';
 import { maintenanceLeaseForOwner, assertMaintenanceLease } from './maintenance.js';
 import { backupNativeDatabase, installServiceOverride, restoreServiceOverride } from './native-installation.js';
 import { backupConversations, verifyConversationBackup } from './conversation-backup.js';
+import { backupMissionState, verifyMissionBackup } from './mission-backup.js';
 import { backupCalendarState, verifyCalendarBackup } from '../calendar/backup.js';
 import { fenceLegacyCoordinators } from './legacy-rollback.js';
 import { assertNativeReleaseCompatibility } from './native-release-compatibility.js';
@@ -348,6 +349,7 @@ export function createTargetEffects(
           }
       }
       const conversations = await backupConversations(path.join(settings.stateRoot, 'conversations'), receipt);
+      const missions = await backupMissionState(settings.stateRoot, receipt);
       const calendar = await backupCalendarState(calendarBackup);
       await verifyQuiescent();
       writeAtomic(receipt, 'native-state.json', {
@@ -357,6 +359,7 @@ export function createTargetEffects(
         groupsRoot: path.join(settings.installationRoot, 'groups'),
         sessions: backups,
         conversations,
+        missions,
         calendar,
         configurationPreserved: true,
       });
@@ -366,6 +369,7 @@ export function createTargetEffects(
       // Revalidate the preserved central backup before either store is changed.
       await backupNativeDatabase(central, receipt);
       await verifyConversationBackup(path.join(settings.stateRoot, 'conversations'), receipt);
+      await verifyMissionBackup(settings.stateRoot, receipt);
       await verifyCalendarBackup(calendarBackup);
       await verifyQuiescent();
       const env: NodeJS.ProcessEnv = {

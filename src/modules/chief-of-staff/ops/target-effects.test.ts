@@ -295,6 +295,10 @@ it('includes native history in the actual deployment backup and blocks migration
   const source = path.join(settings.stateRoot, 'conversations', generation);
   fs.mkdirSync(source, { recursive: true, mode: 0o700 });
   fs.writeFileSync(path.join(source, 'history.jsonl'), 'retained history');
+  const specialist = path.join(settings.stateRoot, 'missions', generation, 'provider');
+  fs.mkdirSync(specialist, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(specialist, 'history.jsonl'), 'retained specialist history');
+  fs.writeFileSync(path.join(specialist, 'auth.json'), 'SECRET');
   const db = new Database(path.join(settings.dataRoot, 'v2.db'));
   db.exec('CREATE TABLE sessions(id TEXT, agent_group_id TEXT)');
   db.exec('CREATE TABLE cos_conversation_states(generation TEXT)');
@@ -310,6 +314,13 @@ it('includes native history in the actual deployment backup and blocks migration
     expect(record.conversations.present).toBe(true);
     expect(record.conversations.files).toBe(1);
     expect(record.calendar.present).toBe(false);
+    expect(record.missions.files).toBe(1);
+    const missionCopy = path.join(receipt, 'mission-backup/history/missions', generation, 'provider/history.jsonl');
+    expect(fs.readFileSync(missionCopy, 'utf8')).toBe('retained specialist history');
+    fs.appendFileSync(missionCopy, 'corrupt');
+    await expect(effects.migrate()).rejects.toThrow('mission_backup_conflict');
+    expect(calls.database).not.toHaveBeenCalled();
+    fs.writeFileSync(missionCopy, 'retained specialist history');
     const calendarReceipt = path.join(receipt, 'calendar-backup.json'),
       calendarBytes = fs.readFileSync(calendarReceipt);
     fs.writeFileSync(calendarReceipt, JSON.stringify({ forged: true }));
