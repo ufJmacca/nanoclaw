@@ -144,6 +144,44 @@ it('S05-T03/T10 binds worker calls to the running native child and fences databa
     await f.dispatcher.close();
   }
 });
+it('S05-T06 shutdown waits for a claimed attempt in flight and cannot allocate or wake it afterward', async () => {
+  const f = setup();
+  let release!: () => void;
+  f.runs.claimDispatch.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        release = () => resolve({ status: 'ok', ...f.value, lease: { owner: 'host', fence: 1 } });
+      }),
+  );
+  const dispatching = f.dispatcher.dispatch(f.context, f.value.identity.attemptId);
+  await vi.waitFor(() => expect(f.runs.claimDispatch).toHaveBeenCalledOnce());
+  let closed = false;
+  const closing = f.dispatcher.close().then(() => {
+    closed = true;
+  });
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(closed).toBe(false);
+  release();
+  expect((await dispatching).status).toBe('denied');
+  await closing;
+  expect(f.wake).not.toHaveBeenCalled();
+  expect(f.launcher.prepare).not.toHaveBeenCalled();
+  expect(f.runs.fail).toHaveBeenCalledWith(f.value.identity, 'admission_denied');
+});
+it('S05-PG02 synchronous fencing removes child execution permission before asynchronous cleanup', async () => {
+  const f = setup();
+  try {
+    await f.dispatcher.dispatch(f.context, f.value.identity.attemptId);
+    const session = getSession(f.value.identity.sessionId)!;
+    expect(permitCosExecution(session)).toBe(true);
+    f.dispatcher.fenceLocal();
+    expect(permitCosExecution(session)).toBe(false);
+    expect(await f.dispatcher.workerGrant(session)).toBeNull();
+  } finally {
+    await f.dispatcher.close();
+  }
+});
 it('S05-T08 acknowledges a submitted result without renewing execution, then reconciles its stop', async () => {
   const f = setup();
   try {

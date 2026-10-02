@@ -60,6 +60,9 @@ export class MissionDispatch {
   private readonly timer?: ReturnType<typeof setInterval>;
   private closed = false;
   private polling = false;
+  private launches = 0;
+  private closing?: Promise<void>;
+  private readonly idle = new Set<() => void>();
   constructor(readonly dependencies: Dependencies) {
     this.remove = installCosMissionExecutionHooks({
       ready: (identity) => this.ready(identity),
@@ -74,6 +77,11 @@ export class MissionDispatch {
   }
   private now() {
     return (this.dependencies.clock ?? (() => performance.now()))();
+  }
+  private notifyIdle() {
+    if (this.active.size || this.polling || this.launches) return;
+    for (const resolve of this.idle) resolve();
+    this.idle.clear();
   }
   private local(entry: Entry) {
     if (entry.phase !== 'allocating') {
@@ -160,6 +168,7 @@ export class MissionDispatch {
   private async launch(identity: CosMissionIdentity, session: Session): Promise<CosLaunch> {
     const entry = this.entries.get(identity.attemptId);
     if (!entry) throw new Error('restricted_launch_denied');
+    this.launches++;
     try {
       if (!entry.paths || !this.ready(identity) || !(await this.verify(entry)))
         throw new Error('restricted_launch_denied');
@@ -174,6 +183,9 @@ export class MissionDispatch {
     } catch (error) {
       await this.fence(entry);
       throw new Error('restricted_launch_denied', { cause: error });
+    } finally {
+      this.launches--;
+      this.notifyIdle();
     }
   }
   async dispatch(context: Context, attemptId: string): Promise<Result> {
@@ -225,6 +237,7 @@ export class MissionDispatch {
       return { status: 'denied' };
     } finally {
       this.active.delete(attemptId);
+      this.notifyIdle();
     }
   }
   async poll(): Promise<void> {
@@ -249,6 +262,7 @@ export class MissionDispatch {
       }
     } finally {
       this.polling = false;
+      this.notifyIdle();
     }
   }
   /** Local fences survive process/database loss; reconciliation never reopens their identities. */
@@ -260,11 +274,26 @@ export class MissionDispatch {
         await this.dependencies.runs.confirmStopped(identity);
     }
   }
-  async close(): Promise<void> {
+  /** Synchronous denial for service health loss; cleanup may still need bounded database/native calls. */
+  fenceLocal(): void {
     if (this.closed) return;
     this.closed = true;
     clearInterval(this.timer);
     this.remove();
-    for (const entry of [...this.entries.values()]) await this.fence(entry);
+  }
+  close(): Promise<void> {
+    if (this.closing) return this.closing;
+    this.fenceLocal();
+    this.closing = (async () => {
+      for (const entry of [...this.entries.values()]) await this.fence(entry);
+      if (this.active.size || this.polling || this.launches)
+        await new Promise<void>((resolve) => this.idle.add(resolve));
+      // A claim may have returned after the first sweep; it cannot outlive its owning pool/launcher.
+      for (const entry of [...this.entries.values()]) await this.fence(entry);
+    })().catch((error) => {
+      this.closing = undefined;
+      throw error;
+    });
+    return this.closing;
   }
 }
