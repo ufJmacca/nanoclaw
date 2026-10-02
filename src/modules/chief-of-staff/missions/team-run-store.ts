@@ -123,7 +123,7 @@ export class TeamRunStore {
     if (!id(teamId)) return { status: 'denied' };
     return this.transaction(context, async (client) => {
       // Serialise global team credit-to-native-slot admission before any root/child lock.
-      await lockMissionWorkerAdmission(client);
+      if (!(await lockMissionWorkerAdmission(client))) return { status: 'pending' };
       const current = await this.root(client, context, teamId);
       if (!current) return { status: 'denied' };
       const { active } = await missionWorkerOccupancy(client);
@@ -569,7 +569,7 @@ export class TeamRunStore {
   async requestRework(context: Context, teamId: string, reviewSubmissionId: string): Promise<Result> {
     if (!id(teamId) || !id(reviewSubmissionId) || !this.knowledge) return { status: 'denied' };
     return this.transaction(context, async (client) => {
-      await lockMissionWorkerAdmission(client);
+      if (!(await lockMissionWorkerAdmission(client))) return { status: 'pending' };
       const current = await this.root(client, context, teamId, false);
       if (!current) return { status: 'denied' };
       const existing = (
@@ -812,7 +812,7 @@ export class TeamRunStore {
   async advance(context: Context, teamId: string): Promise<Result> {
     if (!id(teamId) || !this.knowledge) return { status: 'denied' };
     return this.transaction(context, async (client) => {
-      await lockMissionWorkerAdmission(client);
+      if (!(await lockMissionWorkerAdmission(client))) return { status: 'pending' };
       const current = await this.root(client, context, teamId);
       if (!current) return { status: 'denied' };
       const rows = (

@@ -7,7 +7,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import type pg from 'pg';
+import pg from 'pg';
+import { connectionFault } from './connection-fault.js';
 import { connectFixtureDatabase, fixtureDatabaseConfig, fixtureRuntimeUser } from './fixture-database.js';
 import { migrate } from '../../modules/chief-of-staff/store/migrations.js';
 import { BoundedDatabase } from '../../modules/chief-of-staff/store/client.js';
@@ -784,8 +785,8 @@ test('S06-T02/T03/PG01 concurrent ready admission creates stable isolated childr
     teams.claimReady(context, String(p.team_id)),
     teams.claimReady(context, String(p.team_id)),
   ]);
-  assert.equal(a.status, 'ok');
-  assert.equal(b.status, 'ok');
+  assert.ok([a, b].some((r) => r.status === 'ok'));
+  assert.ok([a, b].every((r) => ['ok', 'pending'].includes(r.status)));
   const steps = (await rows('mission_team_steps')).filter((s) => s.team_id === p.team_id),
     missions = (await rows('missions')).filter((m) => m.provenance.team_id === p.team_id),
     attempts = (await rows('mission_attempts')).filter((a) => missions.some((m) => m.id === a.mission_id));
@@ -1024,15 +1025,12 @@ test('S06-T02/T05/T07 joins require verified submitted artifacts and exact stops
   for (const identity of identities) assert.equal((await runs.confirmStopped(identity)).status, 'ok');
   const advanced = await Promise.all([teams.advance(context, teamId), teams.advance(context, teamId)]);
   assert.equal(
-    advanced.every((a) => a.status === 'ok'),
+    advanced.every((a) => ['ok', 'pending'].includes(a.status)) && advanced.some((a) => a.status === 'ok'),
     true,
   );
   const claimed = await Promise.all([teams.claimReady(context, teamId), teams.claimReady(context, teamId)]);
-  assert.deepEqual(
-    claimed.map((c) => c.status),
-    ['ok', 'ok'],
-  );
-  assert.equal(claimed.flatMap((c) => c.created as string[]).length, 1);
+  assert.ok(claimed.every((c) => ['ok', 'pending'].includes(c.status)));
+  assert.equal(claimed.flatMap((c) => (c.created as string[]) ?? []).length, 1);
   const writer = (await rows('mission_team_steps')).find((s) => s.team_id === teamId && s.step_id === 'synthesis')!;
   const attempt = (await rows('mission_attempts')).find((a) => a.mission_id === writer.child_mission_id)!;
   const claim = await runs.claimDispatch(context, attempt.id, 'fixture-host');
@@ -1300,7 +1298,7 @@ test('S06-T03/PG01 stopped worker retry uses only original attempt/turn/tool esc
   const before = (await rows('mission_team_budget_events')).filter((e) => e.team_id === teamId);
   const advanced = await Promise.all([teams.advance(context, teamId), teams.advance(context, teamId)]);
   assert.equal(
-    advanced.every((a) => a.status === 'ok'),
+    advanced.every((a) => ['ok', 'pending'].includes(a.status)) && advanced.some((a) => a.status === 'ok'),
     true,
   );
   const attempts = (await rows('mission_attempts')).filter((a) => a.mission_id === step.child_mission_id);
@@ -1552,9 +1550,12 @@ test('S06-T03/T05/T07 bounded reviewer rework retains all immutable children, pi
   const firstWriter = await finishTeamStep(f, 'synthesis', undefined, 2);
   const firstReview = await finishTeamStep(f, 'review', 'synthesis');
   const request = () => f.teams.requestRework(context, f.teamId, String(firstReview.submitted.submission_id));
-  const [a, b] = await Promise.all([request(), request()]);
-  assert.equal(a.status, 'ok');
-  assert.deepEqual(a, b);
+  const replies = await Promise.all([request(), request()]);
+  assert.ok(replies.every((r) => ['ok', 'pending'].includes(r.status)));
+  const a = replies.find((r) => r.status === 'ok')!;
+  assert.ok(a);
+  for (const r of replies.filter((r) => r.status === 'ok')) assert.deepEqual(r, a);
+  assert.deepEqual(await request(), a);
   assert.deepEqual(a.revised_steps, ['synthesis', 'review']);
   assert.equal(
     (await f.runs.reserve(firstWriter.identity, randomUUID(), 'model', digest('late old call'))).status,
@@ -2673,4 +2674,178 @@ test('S06-PG01 lost terminal-retirement commit acknowledgement replays the same 
     (await rows('mission_team_budget_events')).filter((e) => e.team_id === f.teamId && e.kind === 'released'),
     release,
   );
+});
+
+test('S06-PG02 contended worker admission yields before occupying the coordinator pool', async () => {
+  const teamIds: string[] = [];
+  for (let n = 0; n < 6; n++) {
+    const p = await store.requestTeam(context, randomUUID(), await input());
+    assert.equal((await approve(p)).status, 'ok');
+    teamIds.push(String(p.team_id));
+  }
+  const teams = new TeamRunStore(store.database, store.teams, knowledge, { nativeCapacity: 3, maxWorkers: 2 });
+  const before = (await rows('mission_team_budget_events')).filter((e) => teamIds.includes(e.team_id));
+  await admin.query('SELECT pg_advisory_lock(73101006)');
+  const claims = teamIds.flatMap((teamId) => [teams.claimReady(context, teamId), teams.claimReady(context, teamId)]);
+  try {
+    await delay(100);
+    const response = await Promise.race([
+      store.context(context),
+      delay(2000).then(() => ({ status: 'fixture_deadline' })),
+    ]);
+    assert.equal(response.status, 'ok');
+    const results = await Promise.race([Promise.all(claims), delay(2000).then(() => null)]);
+    assert.ok(results, 'worker contention must promptly release every host-pool client');
+    assert.ok(results.every((r) => r.status === 'pending'));
+    assert.equal(store.database.pool.waitingCount, 0);
+    assert.equal(store.database.pool.idleCount, store.database.pool.totalCount);
+    assert.equal(
+      (await rows('mission_team_children')).some((c) => teamIds.includes(c.team_id)),
+      false,
+    );
+    assert.deepEqual(
+      (await rows('mission_team_budget_events')).filter((e) => teamIds.includes(e.team_id)),
+      before,
+    );
+  } finally {
+    await admin.query('SELECT pg_advisory_unlock(73101006)');
+    await Promise.all(claims);
+  }
+  // Storage-only earlier children have no physical allocation. Retain their evidence and close fixture occupancy.
+  await admin.query(
+    'UPDATE cos.mission_attempts SET allocation=allocation||\'{"stop_confirmed":true}\'::jsonb WHERE scope_id=$1',
+    [scope],
+  );
+  const admitted = await Promise.all(teamIds.map((teamId) => teams.claimReady(context, teamId)));
+  assert.ok(admitted.every((r) => ['ok', 'pending'].includes(r.status)));
+  for (const teamId of teamIds) assert.equal((await teams.claimReady(context, teamId)).status, 'ok');
+  const children = (await rows('mission_team_children')).filter((c) => teamIds.includes(c.team_id));
+  assert.equal(children.length, 2);
+  assert.equal(new Set(children.map((c) => c.mission_id)).size, 2);
+  assert.equal(
+    (await rows('mission_attempts')).filter((a) => children.some((c) => c.mission_id === a.mission_id)).length,
+    2,
+  );
+  assert.deepEqual(
+    (await rows('mission_team_budget_events')).filter((e) => teamIds.includes(e.team_id)),
+    before,
+  );
+  assert.equal((await store.context(context)).status, 'ok');
+});
+
+test('S06-PG01 lost child-admission acknowledgement retains two original intents and escrow on replay', async () => {
+  // These are storage fixtures; no native execution was allocated by the earlier tests.
+  await admin.query(
+    'UPDATE cos.mission_attempts SET allocation=allocation||\'{"stop_confirmed":true}\'::jsonb WHERE scope_id=$1',
+    [scope],
+  );
+  const p = await store.requestTeam(context, randomUUID(), await input());
+  assert.equal((await approve(p)).status, 'ok');
+  const teamId = String(p.team_id),
+    before = (await rows('mission_team_budget_events')).filter((e) => e.team_id === teamId);
+  const client = await store.database.pool.connect(),
+    original = client.query.bind(client);
+  let dropped = false;
+  client.query = (async (...args: unknown[]) => {
+    const result = await (original as (...a: unknown[]) => Promise<unknown>)(...args);
+    if (args[0] === 'COMMIT' && !dropped) {
+      dropped = true;
+      throw Error('fixture_lost_child_admission_ack');
+    }
+    return result;
+  }) as typeof client.query;
+  const adapter = {
+    on: store.database.pool.on.bind(store.database.pool),
+    connect: async () => client,
+  } as unknown as pg.Pool;
+  const faulty = new TeamRunStore(new BoundedDatabase(adapter), store.teams, knowledge, {
+    nativeCapacity: 3,
+    maxWorkers: 2,
+  });
+  assert.equal((await faulty.claimReady(context, teamId)).status, 'pending');
+  assert.equal(dropped, true);
+  const children = (await rows('mission_team_children')).filter((c) => c.team_id === teamId);
+  assert.equal(children.length, 2);
+  const teams = new TeamRunStore(store.database, store.teams, knowledge, { nativeCapacity: 3, maxWorkers: 2 });
+  for (let n = 0; n < 3; n++) assert.deepEqual((await teams.claimReady(context, teamId)).created, []);
+  assert.deepEqual(
+    (await rows('mission_team_children')).filter((c) => c.team_id === teamId),
+    children,
+  );
+  assert.equal(
+    (await rows('mission_attempts')).filter((a) => children.some((c) => c.mission_id === a.mission_id)).length,
+    2,
+  );
+  assert.deepEqual(
+    (await rows('mission_team_budget_events')).filter((e) => e.team_id === teamId),
+    before,
+  );
+});
+
+test('S06-PG01 a real TLS-preserving LAN partition grants no child or budget reset and bounded host recovery replays once', async () => {
+  await admin.query(
+    'UPDATE cos.mission_attempts SET allocation=allocation||\'{"stop_confirmed":true}\'::jsonb WHERE scope_id=$1',
+    [scope],
+  );
+  const p = await store.requestTeam(context, randomUUID(), await input());
+  assert.equal((await approve(p)).status, 'ok');
+  const teamId = String(p.team_id),
+    before = (await rows('mission_team_budget_events')).filter((e) => e.team_id === teamId);
+  // Replace the single fixture-host pool; no worker receives a pool or credentials.
+  await store.database.pool.end();
+  const relay = await connectionFault(await fixtureDatabaseConfig());
+  const database = new BoundedDatabase(new pg.Pool(relay.config), 350);
+  knowledge = new KnowledgeStore(database, knowledge.artifacts);
+  store = new PriorityStore(
+    database,
+    knowledge,
+    undefined,
+    undefined,
+    () => authority,
+    () => (enabled ? authority : null),
+  );
+  const teams = new TeamRunStore(database, store.teams, knowledge, { nativeCapacity: 3, maxWorkers: 2 });
+  try {
+    await database.run((c) => c.query('SELECT 1'));
+    relay.partition();
+    const replies = await Promise.all([
+      teams.claimReady(context, teamId),
+      teams.claimReady(context, teamId),
+      teams.advance(context, teamId),
+    ]);
+    assert.ok(replies.every((r) => ['pending', 'unavailable'].includes(r.status)));
+    assert.equal(
+      (await rows('mission_team_children')).some((c) => c.team_id === teamId),
+      false,
+    );
+    assert.deepEqual(
+      (await rows('mission_team_budget_events')).filter((e) => e.team_id === teamId),
+      before,
+    );
+    relay.restore();
+    await delay(1100);
+    const recovered = await teams.claimReady(context, teamId);
+    assert.equal(recovered.status, 'ok');
+    assert.equal((recovered.created as string[]).length, 2);
+    assert.deepEqual((await teams.claimReady(context, teamId)).created, []);
+    assert.equal((await rows('mission_team_children')).filter((c) => c.team_id === teamId).length, 2);
+    assert.deepEqual(
+      (await rows('mission_team_budget_events')).filter((e) => e.team_id === teamId),
+      before,
+    );
+  } finally {
+    relay.restore();
+    await database.pool.end();
+    await relay.close();
+    const restored = BoundedDatabase.fromConfig(await fixtureDatabaseConfig());
+    knowledge = new KnowledgeStore(restored, knowledge.artifacts);
+    store = new PriorityStore(
+      restored,
+      knowledge,
+      undefined,
+      undefined,
+      () => authority,
+      () => (enabled ? authority : null),
+    );
+  }
 });

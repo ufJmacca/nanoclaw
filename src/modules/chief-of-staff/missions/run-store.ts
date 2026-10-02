@@ -661,7 +661,7 @@ export class MissionRunStore {
   async claimDispatch(context: Context, attemptId: string, owner: string): Promise<Result> {
     if (!id(attemptId) || !id(owner) || context.origin) return { status: 'denied' };
     return this.transaction(context.scopeId, async (client) => {
-      await lockMissionWorkerAdmission(client);
+      if (!(await lockMissionWorkerAdmission(client))) return { status: 'pending' };
       const lookup = (
         await client.query('SELECT * FROM cos.mission_attempts WHERE scope_id=$1 AND id=$2', [
           context.scopeId,

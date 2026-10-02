@@ -18,9 +18,9 @@ export function missionWorkerCapacity(capacity: MissionWorkerCapacity): number {
     throw Error('team_capacity_invalid');
   return Math.min(capacity.maxWorkers, capacity.nativeCapacity - 1);
 }
-/** Acquire before root/mission row locks. Shared by team intent creation and ordinary attempt leasing. */
-export async function lockMissionWorkerAdmission(client: PoolClient): Promise<void> {
-  await client.query('SELECT pg_advisory_xact_lock(73101006)');
+/** Try before root/mission locks. Contention retains no worker intent and promptly releases the host-pool client. */
+export async function lockMissionWorkerAdmission(client: PoolClient): Promise<boolean> {
+  return (await client.query('SELECT pg_try_advisory_xact_lock(73101006) AS locked')).rows[0]?.locked === true;
 }
 /** Team intents already reserve a slot; ordinary queued backlog does not. A lost lease is not proof of stop. */
 export async function missionWorkerOccupancy(client: PoolClient, exceptAttempt: string | null = null) {
