@@ -68,7 +68,11 @@ export class MissionProposalStore {
       missionId,
       request,
       origin: {
-        ...context,
+        scopeId: context.scopeId,
+        ownerId: context.ownerId,
+        sessionId: context.sessionId,
+        agentGroupId: context.agentGroupId,
+        ingressId: context.ingressId,
         bindingDigest: authority.bindingDigest,
         delegationDigest: authority.delegationDigest,
         contextGeneration: authority.contextGeneration,

@@ -465,3 +465,27 @@ test('S05-T06 failed proposal publication rolls back work order, manifest and mi
   assert.equal(recovered.status, 'ok');
   assert.equal(recovered.mission_id, missionId);
 });
+
+test('S05-T05 exact approval preview accepts the full native channel binding without changing the sealed origin', async () => {
+  await admin.query('BEGIN');
+  await installReviewedMissionTemplate(admin, binding, randomUUID(), delegation);
+  await admin.query('COMMIT');
+  const proposed = await store.requestMission(context, randomUUID(), await request());
+  assert.equal(proposed.status, 'ok');
+  assert.equal(await store.previewCurrent(binding, String(proposed.proposal_id), proposed.change as any), true);
+  const order = (await rows('mission_work_orders')).find((row) => row.id === proposed.mission_id);
+  assert.deepEqual(
+    Object.keys(order.body.origin).sort(),
+    [
+      'scopeId',
+      'ownerId',
+      'sessionId',
+      'agentGroupId',
+      'ingressId',
+      'bindingDigest',
+      'delegationDigest',
+      'contextGeneration',
+    ].sort(),
+  );
+  assert.equal(order.body.origin.ingressId, context.ingressId);
+});
