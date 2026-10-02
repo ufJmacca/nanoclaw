@@ -122,6 +122,24 @@ function setup() {
   };
   return { value, runs, launcher, wake, stop, stopped, admitted, local, dispatcher, context };
 }
+it('S06 retires a verified exited worker without waiting for its otherwise valid lease to expire', async () => {
+  const f = setup();
+  try {
+    expect((await f.dispatcher.dispatch(f.context, f.value.identity.attemptId)).status).toBe('ok');
+    f.stopped.mockResolvedValue(false);
+    await f.dispatcher.poll();
+    expect(f.runs.fail).not.toHaveBeenCalled();
+    f.stopped.mockResolvedValue(true);
+    await f.dispatcher.poll();
+    expect(f.runs.fail).toHaveBeenCalledWith(f.value.identity, 'admission_denied');
+    expect(f.runs.confirmStopped).toHaveBeenCalledWith(f.value.identity);
+    expect(f.dispatcher.owns(f.value.identity)).toBe(false);
+    await f.dispatcher.poll();
+    expect(f.runs.fail).toHaveBeenCalledTimes(1);
+  } finally {
+    await f.dispatcher.close();
+  }
+});
 it('S05-T03/T10 binds worker calls to the running native child and fences database uncertainty', async () => {
   const f = setup();
   try {
