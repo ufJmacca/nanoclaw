@@ -344,16 +344,32 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
         const notifications = d.store.missionNotifications,
           adapter = getDeliveryAdapter();
         const current = () => {
-          const session = d.session(binding.sessionId),
-            context = session && controller.localContext(session);
-          return session &&
-            context &&
-            !context.origin &&
-            context.scopeId === binding.scopeId &&
-            context.agentGroupId === binding.agentGroupId &&
-            context.ownerId === binding.ownerId
-            ? resolveKnowledgeContext(session, context, d.db)
-            : null;
+          if (!enabled()) return null;
+          const session = d.session(binding.sessionId);
+          if (!session) return null;
+          const boundary = cosBoundary(session, d.db);
+          if (
+            !boundary.restricted ||
+            !boundary.binding ||
+            boundary.paused ||
+            !boundary.ingressId ||
+            digest(boundary.binding) !== digest(binding)
+          )
+            return null;
+          // Delivery is authorized by the approved mission and its recorded review,
+          // not by extending the original owner event's model/tool authority.
+          // The resolver retains all context-generation and automation fences.
+          return resolveKnowledgeContext(
+            session,
+            {
+              scopeId: binding.scopeId,
+              ownerId: binding.ownerId,
+              sessionId: session.id,
+              agentGroupId: binding.agentGroupId,
+              ingressId: boundary.ingressId,
+            },
+            d.db,
+          );
         };
         const context = current();
         if (context && adapter && adapter.isAvailable?.('mattermost') !== false && (await admitted(binding))) {

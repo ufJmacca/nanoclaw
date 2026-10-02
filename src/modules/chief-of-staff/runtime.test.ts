@@ -15,17 +15,149 @@ import { ensureConversationSchema } from './bridge/conversation-state.js';
 import { installScheduledOrigin } from './automation/scheduled-origin.js';
 import type { TurnAuthorization } from './bridge/turn-authorization.js';
 import { digest } from './domain/contracts.js';
-import { setDeliveryAdapter } from '../../delivery.js';
+import { getDeliveryAdapter, setDeliveryAdapter } from '../../delivery.js';
 import { NativeBriefTasks } from './automation/native-tasks.js';
 import Database from 'better-sqlite3';
 import { INBOUND_SCHEMA } from '../../db/schema.js';
 import { readScheduledLease } from './automation/scheduled-origin.js';
+import { installReviewOrigin } from './missions/review-origin.js';
 
 let runtime: ReturnType<typeof createCosRuntime> | undefined;
 afterEach(() => {
   runtime?.dispose();
   closeDb();
   vi.useRealTimers();
+});
+it('S05 delivers an approved mission notification after owner ingress expires without renewing model authority', async () => {
+  const db = initTestDb(),
+    generation = randomUUID();
+  const binding: CosBinding = {
+    scopeId: 'scope',
+    agentGroupId: 'group',
+    messagingGroupId: 'mg',
+    sessionId: 'session',
+    provider: 'codex',
+    instanceId: 'fixture',
+    channelId: 'private',
+    ownerId: 'owner',
+    botId: 'bot',
+  };
+  const session = {
+    id: 'session',
+    agent_group_id: 'group',
+    messaging_group_id: 'mg',
+    thread_id: null,
+    status: 'active',
+    agent_provider: 'codex',
+  } as Session;
+  installCosBoundary(binding, db);
+  ensureConversationSchema(db);
+  db.prepare('UPDATE cos_identity_boundaries SET paused=0,ingress_id=?,ingress_at=?').run(
+    'old-owner-event',
+    new Date(Date.now() - 600000).toISOString(),
+  );
+  db.prepare(
+    "INSERT INTO cos_conversation_states(scope_id,binding_digest,account_fingerprint,generation,status,updated_at) VALUES(?,?,?,?,'active',?)",
+  ).run(binding.scopeId, digest(binding), 'a'.repeat(64), generation, new Date().toISOString());
+  const notifications = {
+    pending: vi.fn().mockResolvedValue({ status: 'ok', review_ids: ['review'] }),
+    begin: vi.fn().mockResolvedValue({ status: 'ok', notification_id: 'mission-review-review' }),
+    read: vi.fn().mockResolvedValue({ status: 'ok', text: 'Reviewed result' }),
+    finish: vi.fn().mockResolvedValue({ status: 'ok', state: 'delivered' }),
+  };
+  const facts = vi.fn(async () => ({
+    id: 'private',
+    type: 'P',
+    delete_at: 0,
+    members: ['owner', 'bot'],
+    activeSubscription: true,
+  }));
+  const deliver = vi.fn().mockResolvedValue('verified-post');
+  const previousAdapter = getDeliveryAdapter();
+  setDeliveryAdapter({ deliver });
+  runtime = createCosRuntime({
+    db,
+    enabled: true,
+    store: {
+      pendingOutbox: vi.fn().mockResolvedValue({ status: 'ok', items: [] }),
+      missionNotifications: notifications,
+    } as unknown as PriorityStore,
+    session: () => session,
+    destination: () => undefined,
+    facts,
+    stop: vi.fn(),
+    wake: vi.fn(),
+  });
+  try {
+    expect(runtime.controller.localContext(session)).toBeNull();
+    await runtime.pump(binding);
+    expect(deliver).toHaveBeenCalledExactlyOnceWith(
+      'mattermost',
+      'mattermost:fixture:private',
+      null,
+      'chat',
+      JSON.stringify({ text: 'Reviewed result' }),
+      undefined,
+      'mission-review-review',
+    );
+    expect(runtime.controller.localContext(session)).toBeNull();
+    expect(notifications.read).toHaveBeenCalledWith(
+      expect.objectContaining({ generation, ingressId: 'old-owner-event' }),
+      'review',
+      expect.any(String),
+    );
+    deliver.mockClear();
+    // Pause and private membership remain delivery gates regardless of age.
+    db.prepare('UPDATE cos_identity_boundaries SET paused=1').run();
+    await runtime.pump(binding);
+    expect(deliver).not.toHaveBeenCalled();
+    db.prepare('UPDATE cos_identity_boundaries SET paused=0').run();
+    facts.mockResolvedValue({
+      id: 'private',
+      type: 'P',
+      delete_at: 0,
+      members: ['owner', 'bot', 'foreign'],
+      activeSubscription: true,
+    });
+    await runtime.pump(binding);
+    expect(deliver).not.toHaveBeenCalled();
+    facts.mockResolvedValue({
+      id: 'private',
+      type: 'P',
+      delete_at: 0,
+      members: ['owner', 'bot'],
+      activeSubscription: true,
+    });
+    expect(
+      installReviewOrigin(db, binding, session, {
+        identity: {
+          missionId: 'mission',
+          submissionId: randomUUID(),
+          attemptId: randomUUID(),
+          generation: 1,
+          sessionId: session.id,
+          contextGeneration: generation,
+        },
+        lease: { owner: 'host', fence: 1 },
+        deadlineAt: new Date(Date.now() + 30000).toISOString(),
+      }),
+    ).toBe(true);
+    await runtime.pump(binding);
+    expect(deliver).not.toHaveBeenCalled();
+    // Even an interrupted/malformed origin retains its closed fence.
+    db.prepare("UPDATE cos_mission_review_origins SET grant_json='invalid',interrupted=1").run();
+    await runtime.pump(binding);
+    expect(deliver).not.toHaveBeenCalled();
+    db.prepare('DELETE FROM cos_mission_review_origins').run();
+    notifications.read.mockImplementation(async () => {
+      db.prepare('UPDATE cos_conversation_states SET generation=?').run(randomUUID());
+      return { status: 'ok', text: 'Must not be sent from the old context' };
+    });
+    await runtime.pump(binding);
+    expect(deliver).not.toHaveBeenCalled();
+  } finally {
+    setDeliveryAdapter(previousAdapter ?? { deliver: async () => undefined, isAvailable: () => false });
+  }
 });
 it('S02 checks current source authority before native admission and prepared private output', async () => {
   const db = initTestDb();
