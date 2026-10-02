@@ -21,12 +21,116 @@ import Database from 'better-sqlite3';
 import { INBOUND_SCHEMA } from '../../db/schema.js';
 import { readScheduledLease } from './automation/scheduled-origin.js';
 import { installReviewOrigin } from './missions/review-origin.js';
+import * as delivery from '../../delivery.js';
+import { installCosMissionBoundary, type CosMissionIdentity } from '../../cos-mission-boundary.js';
+import { isCosMissionStopped } from '../../cos-mission-stop.js';
 
 let runtime: ReturnType<typeof createCosRuntime> | undefined;
 afterEach(() => {
   runtime?.dispose();
   closeDb();
   vi.useRealTimers();
+  vi.restoreAllMocks();
+});
+it('S06-T06 runtime cancels the entire team through exact native execution and confirms physical absence', async () => {
+  const db = initTestDb(),
+    teamId = 'team-' + 'a'.repeat(64);
+  const binding: CosBinding = {
+    scopeId: 'scope',
+    agentGroupId: 'group',
+    messagingGroupId: 'mg',
+    sessionId: 'session',
+    provider: 'codex',
+    instanceId: 'fixture',
+    channelId: 'private',
+    ownerId: 'owner',
+    botId: 'bot',
+  };
+  const session = {
+    id: 'session',
+    agent_group_id: 'group',
+    messaging_group_id: 'mg',
+    thread_id: null,
+    status: 'active',
+    agent_provider: 'codex',
+  } as Session;
+  installCosBoundary(binding, db);
+  db.prepare('UPDATE cos_identity_boundaries SET paused=0,ingress_id=?,ingress_at=?').run(
+    'owner-cancel',
+    new Date().toISOString(),
+  );
+  const child: CosMissionIdentity = {
+    scopeId: 'scope',
+    missionId: 'child-mission',
+    attemptId: 'attempt',
+    generation: 1,
+    agentGroupId: 'worker',
+    sessionId: 'worker-session',
+    provider: 'codex',
+  };
+  installCosMissionBoundary(child, db);
+  let present = true;
+  const missionExecution = {
+    running: vi.fn(() => present),
+    stop: vi.fn(async (identity: CosMissionIdentity) => {
+      expect(identity).toEqual(child);
+      expect(isCosMissionStopped(child, db)).toBe(true);
+      present = false;
+    }),
+  };
+  const teamRuns = {
+    cancel: vi.fn(async () => ({ status: 'ok', state: 'cancelling', identities: [child] })),
+    confirmCancellation: vi.fn(async () => ({ status: 'ok', team_id: teamId, state: 'cancelled' })),
+  };
+  const missionRuns = { confirmStopped: vi.fn(async () => ({ status: 'ok' })), cancel: vi.fn() };
+  const register = vi.spyOn(delivery, 'registerDeliveryAction').mockImplementation(() => {});
+  runtime = createCosRuntime({
+    db,
+    enabled: true,
+    store: { teamRuns, missionRuns } as unknown as PriorityStore,
+    missionExecution,
+    facts: async () => ({
+      id: 'private',
+      type: 'P',
+      delete_at: 0,
+      members: ['owner', 'bot'],
+      activeSubscription: true,
+    }),
+    session: () => session,
+    destination: () => undefined,
+    stop: vi.fn(),
+    wake: vi.fn(),
+  });
+  const handler = register.mock.calls.find(([action]) => action === 'cos_rpc')![1],
+    requestId = randomUUID();
+  await handler(
+    {
+      action: 'cos_rpc',
+      delivery_id: randomUUID(),
+      request: {
+        protocol: 'cos-rpc/v1',
+        request_id: requestId,
+        method: 'cos_team_cancel',
+        params: { team_id: teamId },
+      },
+    },
+    session,
+    db,
+  );
+  expect(teamRuns.cancel).toHaveBeenCalledWith(
+    expect.objectContaining({ ownerId: 'owner', ingressId: 'owner-cancel' }),
+    teamId,
+  );
+  expect(missionExecution.stop).toHaveBeenCalledTimes(1);
+  expect(missionRuns.confirmStopped).toHaveBeenCalledWith(child);
+  expect(teamRuns.confirmCancellation).toHaveBeenCalledTimes(1);
+  expect(missionRuns.cancel).not.toHaveBeenCalled();
+  const saved = JSON.parse(
+    (db.prepare('SELECT response FROM cos_rpc_responses WHERE request_id=?').get(requestId) as { response: string })
+      .response,
+  );
+  expect(saved).toMatchObject({ status: 'ok', result: { state: 'cancelled' } });
+  expect(JSON.stringify(saved)).not.toContain('worker-session');
 });
 it('S05 delivers an approved mission notification after owner ingress expires without renewing model authority', async () => {
   const db = initTestDb(),

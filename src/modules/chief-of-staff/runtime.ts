@@ -26,6 +26,8 @@ import { MissionReviewDispatch } from './missions/review-dispatch.js';
 import { NativeMissionReviewTasks } from './missions/review-task.js';
 import { reviewContext } from './missions/review-origin.js';
 import { CoordinatorReviewRuns } from './missions/coordinator-review-runs.js';
+import { createTeamCancellation } from './missions/team-cancel.js';
+import type { CosMissionIdentity } from '../../cos-mission-boundary.js';
 
 export type RuntimeDependencies = {
   db: Database.Database;
@@ -39,6 +41,10 @@ export type RuntimeDependencies = {
   wake(session: Session): Promise<boolean | void>;
   launcher?: CoordinatorLauncher;
   running?(sessionId: string): boolean;
+  missionExecution?: {
+    running(identity: CosMissionIdentity): boolean;
+    stop(identity: CosMissionIdentity): Promise<void>;
+  };
   withBriefTasks?<T>(session: Session, operation: (tasks: NativeBriefTasks) => T): T;
   withReviewTasks?<T>(session: Session, operation: (tasks: NativeMissionReviewTasks) => T): T;
 };
@@ -358,6 +364,16 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
           runs: d.store!.missionRuns,
           stop: (identity) => d.stop(identity.sessionId),
         }),
+        cancelTeam:
+          d.missionExecution && d.store?.teamRuns
+            ? createTeamCancellation({
+                db: d.db,
+                teams: d.store.teamRuns,
+                runs: d.store.missionRuns,
+                running: d.missionExecution.running,
+                stop: d.missionExecution.stop,
+              })
+            : undefined,
         knowledge: d.store!.knowledge,
         resolveKnowledgeContext: async (session, context) => resolveKnowledgeContext(session, context, d.db),
       }),

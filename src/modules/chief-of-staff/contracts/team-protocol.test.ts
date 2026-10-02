@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { MISSION_DEFAULT_LIMITS, validMissionRequest } from './mission-protocol.js';
 import { TEAM_DEFAULT_LIMITS, teamOrder, validTeamRequest } from './team-protocol.js';
+import fs from 'node:fs';
+import { COS_PROTOCOL, validRequest } from './protocol.js';
 
 const source = { source_id: 'options', revision_id: 'v1' };
 const criterion = { id: 'recommendation', description: 'Compare technical and operational tradeoffs.' };
@@ -31,6 +33,33 @@ const request = () => ({
     step('synthesis', 'team-writer', ['technical', 'operations']),
     step('review', 'team-reviewer', ['synthesis']),
   ],
+});
+it('S06-T01/T05 exposes exact team proposal/status/cancel wire contracts without caller authority', () => {
+  const wire = (method: string, params: unknown) => ({
+    protocol: COS_PROTOCOL,
+    request_id: '11111111-1111-4111-8111-111111111111',
+    method,
+    params,
+  });
+  expect(validRequest(wire('cos_team_request', { request: request() }))).toBe(true);
+  for (const patch of [{ approved: true }, { owner_id: 'foreign' }, { tools: ['shell'] }])
+    expect(validRequest(wire('cos_team_request', { request: { ...request(), ...patch } }))).toBe(false);
+  const team_id = 'team-' + 'a'.repeat(64);
+  for (const method of ['cos_team_get', 'cos_team_cancel']) {
+    expect(validRequest(wire(method, { team_id }))).toBe(true);
+    for (const params of [
+      {},
+      { team_id: 'mission' },
+      { team_id: '../team' },
+      { team_id, owner_id: 'foreign' },
+      { team_id, generation: 2 },
+    ])
+      expect(validRequest(wire(method, params))).toBe(false);
+  }
+  for (const file of ['team-protocol.ts', 'team-templates.ts'])
+    expect(fs.readFileSync('container/agent-runner/src/mcp-tools/generated/' + file, 'utf8')).toBe(
+      fs.readFileSync('src/modules/chief-of-staff/contracts/' + file, 'utf8'),
+    );
 });
 
 describe('S06-T01/T03 approved bounded team graph contract', () => {

@@ -33,6 +33,7 @@ import type { MissionDispatchLease } from '../../modules/chief-of-staff/missions
 import { installReviewedTeamTemplates } from '../../modules/chief-of-staff/missions/template-admin.js';
 import { TEAM_ADMISSION_POLICY } from '../../modules/chief-of-staff/missions/team-admission.js';
 import type { CosBinding } from '../../cos-boundary.js';
+import { createTeamCancellation } from '../../modules/chief-of-staff/missions/team-cancel.js';
 
 const scope = 'team-admission-' + randomUUID();
 const context = { scopeId: scope, ownerId: 'owner', agentGroupId: scope, sessionId: scope, ingressId: randomUUID() };
@@ -397,6 +398,123 @@ test('S06-T01/T03/PG01 one exact approval admits a graph and escrows all step cr
   assert.deepEqual(await rows('mission_team_reservations'), before);
   assert.equal((await rows('mission_team_budget_events')).length, 4);
   assert.equal((await rows('mission_attempts')).length, 0); // Approval persists intent; a host dispatcher performs native allocation later.
+});
+test('S06-T04/T06 owner team status retains bounded step and original budget metadata through pause and cancellation', async () => {
+  const proposal = await store.requestTeam(context, randomUUID(), await input()),
+    teamId = String(proposal.team_id);
+  assert.equal(proposal.status, 'ok');
+  const proposed = await store.teamRuns.inspect(context, teamId);
+  assert.equal(proposed.status, 'ok');
+  assert.equal((proposed.team as { state: string }).state, 'proposed');
+  assert.equal(proposed.budget, null);
+  assert.equal((await approve(proposal)).status, 'ok');
+  const queued = await store.teamRuns.inspect(context, teamId);
+  assert.equal(queued.status, 'ok');
+  assert.equal((queued.team as { state: string }).state, 'queued');
+  assert.equal((queued.steps as unknown[]).length, 4);
+  const expected = queued.budget;
+  enabled = false;
+  try {
+    assert.deepEqual(await store.teamRuns.inspect(context, teamId), queued);
+    for (const patch of [
+      { ownerId: 'foreign' },
+      { scopeId: 'foreign' },
+      { agentGroupId: 'foreign' },
+      { sessionId: 'foreign' },
+      { origin: { kind: 'schedule' as const, runId: 'run', generation: 1 } },
+    ])
+      assert.equal((await store.teamRuns.inspect({ ...context, ...patch }, teamId)).status, 'denied');
+    assert.equal((await store.teamRuns.cancel(context, teamId)).status, 'ok');
+    assert.equal((await store.teamRuns.confirmCancellation(context, teamId)).status, 'ok');
+    const cancelled = await store.teamRuns.inspect(context, teamId);
+    assert.equal(cancelled.status, 'ok');
+    assert.equal((cancelled.team as { state: string }).state, 'cancelled');
+    assert.equal((cancelled.budget as { parent: { state: string } }).parent.state, 'cancelled');
+    assert.equal((cancelled.root_budget_history as { kind: string }[]).filter((e) => e.kind === 'released').length, 1);
+    assert.deepEqual((cancelled.budget as { limits: unknown }).limits, (expected as { limits: unknown }).limits);
+    assert.equal(JSON.stringify(cancelled).includes('Compare A and B.'), false);
+    assert.equal(JSON.stringify(cancelled).includes('A costs less.'), false);
+  } finally {
+    enabled = true;
+  }
+});
+test('S06-T01/T06/T07 owner RPC proposes one replayable graph, reads its metadata and cancels without launching', async () => {
+  const native = new Database(':memory:'),
+    main = { ...context, provider: 'codex', generation: authority.contextGeneration };
+  let stops = 0;
+  try {
+    const handler = createRpcHandler({
+      store,
+      knowledge,
+      resolveContext: async () => context,
+      resolveKnowledgeContext: async () => main,
+      cancelTeam: createTeamCancellation({
+        db: native,
+        teams: store.teamRuns,
+        runs: store.missionRuns,
+        running: () => {
+          throw Error('fixture_unallocated_must_not_probe');
+        },
+        stop: async () => {
+          stops++;
+        },
+      }),
+    });
+    const call = async (method: string, params: Record<string, unknown>, requestId = randomUUID()) => {
+      await handler(
+        { request: { protocol: 'cos-rpc/v1', request_id: requestId, method, params }, delivery_id: randomUUID() },
+        {} as never,
+        native,
+      );
+      const row = native.prepare('SELECT response FROM cos_rpc_responses WHERE request_id=?').get(requestId) as {
+        response: string;
+      };
+      assert.ok(row);
+      return JSON.parse(row.response);
+    };
+    const request = await input(),
+      requestId = randomUUID(),
+      proposed = await call('cos_team_request', { request }, requestId);
+    assert.equal(proposed.status, 'ok');
+    assert.equal(proposed.result.confirmation_token, undefined);
+    assert.deepEqual(await call('cos_team_request', { request }, requestId), proposed);
+    const teamId = proposed.result.team_id;
+    assert.equal((await call('cos_team_get', { team_id: teamId })).result.team.state, 'proposed');
+    assert.equal((await rows('mission_team_children')).filter((r) => r.team_id === teamId).length, 0);
+    const cancelled = await call('cos_team_cancel', { team_id: teamId });
+    assert.equal(cancelled.status, 'ok');
+    assert.equal(cancelled.result.state, 'cancelled');
+    assert.equal(cancelled.result.identities, undefined);
+    assert.equal(stops, 0);
+    const stopped = await call('cos_team_get', { team_id: teamId });
+    assert.equal(stopped.result.team.state, 'cancelled');
+    assert.equal(stopped.result.budget, null);
+    assert.equal(
+      stopped.result.steps.every((s: { state: string }) => s.state === 'cancelled'),
+      true,
+    );
+    await admin.query(
+      "INSERT INTO cos.mission_team_root_reservations(scope_id,team_id,max_attempts,max_turns,max_tool_calls,state) VALUES($1,$2,0,0,0,'reserved')",
+      [scope, teamId],
+    );
+    try {
+      assert.equal((await store.teamRuns.inspect(context, teamId)).status, 'denied');
+      assert.equal((await store.teamRuns.confirmCancellation(context, teamId)).status, 'denied');
+      assert.equal((await rows('mission_team_root_budget_events')).filter((r) => r.team_id === teamId).length, 0);
+    } finally {
+      await admin.query('DELETE FROM cos.mission_team_root_reservations WHERE scope_id=$1 AND team_id=$2', [
+        scope,
+        teamId,
+      ]);
+    }
+    assert.equal(
+      (await rows('outbox')).filter((r) => r.kind === 'team_review_notification' && r.payload.team_id === teamId)
+        .length,
+      0,
+    );
+  } finally {
+    native.close();
+  }
 });
 test('S06-T01 preview and apply revalidate template integrity and current source/provider consent', async () => {
   const p = await store.requestTeam(context, randomUUID(), await input());

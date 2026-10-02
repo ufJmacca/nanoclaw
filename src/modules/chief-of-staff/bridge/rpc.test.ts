@@ -5,6 +5,8 @@ import { digest } from '../domain/contracts.js';
 import type { PriorityStore } from '../store/priorities.js';
 import type { Session } from '../../../types.js';
 import type { KnowledgeStore } from '../knowledge/store.js';
+import { TEAM_DEFAULT_LIMITS } from '../contracts/team-protocol.js';
+import { MISSION_DEFAULT_LIMITS } from '../contracts/mission-protocol.js';
 const databases: Database.Database[] = [];
 const request = {
   protocol: 'cos-rpc/v1',
@@ -34,11 +36,122 @@ function fixture(allowed = true) {
       confirmation_token: 'PRIVATE_APPROVAL',
     }),
     missionRuns: { inspect: vi.fn().mockResolvedValue({ status: 'ok', mission: { id: 'mission', state: 'running' } }) },
+    requestTeam: vi
+      .fn()
+      .mockResolvedValue({
+        status: 'ok',
+        team_id: 'team-' + 'a'.repeat(64),
+        confirmation_token: 'PRIVATE_TEAM_APPROVAL',
+      }),
+    teamRuns: { inspect: vi.fn().mockResolvedValue({ status: 'ok', team: { state: 'running' } }) },
   };
   const resolveContext = vi.fn().mockResolvedValue(allowed ? context : null);
   const handler = createRpcHandler({ resolveContext, store: store as unknown as PriorityStore });
   return { db, handler, store, resolveContext };
 }
+it('S06-T01/T06 coordinator team tools preserve owner scope and hide approval and native identities', async () => {
+  const f = fixture(),
+    team_id = 'team-' + 'a'.repeat(64);
+  const sources = [{ source_id: 'note', revision_id: 'revision' }],
+    acceptance_criteria = [{ id: 'cost', description: 'Compare costs.' }];
+  const step = (step_id: string, template_id: string, depends_on: string[] = []) => ({
+    step_id,
+    template_id,
+    template_version: 1,
+    depends_on,
+    input_artifact_refs: depends_on.map((step_id) => ({ step_id, result_schema: 'cos-research-result/v1' })),
+    sources,
+    required: true,
+    acceptance_criteria,
+    result_schema: template_id === 'team-reviewer' ? 'cos-team-review/v1' : 'cos-research-result/v1',
+    max_rework_count: 0,
+    limits: { ...MISSION_DEFAULT_LIMITS },
+  });
+  const teamRequest = {
+    question: 'Compare technical and operational costs.',
+    goal_id: null,
+    project_id: null,
+    sources,
+    acceptance_criteria,
+    limits: { ...TEAM_DEFAULT_LIMITS },
+    partial_policy: 'block',
+    steps: [
+      step('technical', 'team-technical-analyst'),
+      step('operations', 'team-operational-analyst'),
+      step('writer', 'team-writer', ['technical', 'operations']),
+      step('review', 'team-reviewer', ['writer']),
+    ],
+  };
+  const cancelTeam = vi
+    .fn()
+    .mockResolvedValue({ status: 'ok', state: 'cancelling', identities: [{ sessionId: 'PRIVATE_NATIVE_ID' }] });
+  const handler = createRpcHandler({
+    resolveContext: f.resolveContext,
+    store: f.store as unknown as PriorityStore,
+    cancelTeam,
+  });
+  for (const [method, params] of [
+    ['cos_team_request', { request: teamRequest }],
+    ['cos_team_get', { team_id }],
+    ['cos_team_cancel', { team_id }],
+  ] as const)
+    await handler(
+      {
+        action: 'cos_rpc',
+        delivery_id: '22222222-2222-4222-8222-222222222222',
+        request: { ...request, method, params },
+      },
+      {} as Session,
+      f.db,
+    );
+  expect(f.store.requestTeam).toHaveBeenCalledWith(
+    expect.objectContaining({ ownerId: 'owner' }),
+    request.request_id,
+    teamRequest,
+  );
+  expect(f.store.teamRuns.inspect).toHaveBeenCalledWith(expect.objectContaining({ sessionId: 'session' }), team_id);
+  expect(cancelTeam).toHaveBeenCalledWith(expect.objectContaining({ scopeId: 'fixture' }), team_id);
+  expect(JSON.stringify(f.db.prepare('SELECT response FROM cos_rpc_responses').all())).not.toMatch(
+    /PRIVATE_TEAM_APPROVAL|PRIVATE_NATIVE_ID/,
+  );
+});
+it.each(['schedule', 'mission_review'] as const)(
+  'S06-T05 automatic %s context cannot use owner team controls',
+  async (kind) => {
+    const f = fixture(),
+      cancelTeam = vi.fn(),
+      reserveTool = vi.fn(async () => ({ status: 'ok' as const }));
+    f.resolveContext.mockResolvedValue({
+      scopeId: 'fixture',
+      ownerId: 'owner',
+      sessionId: 'session',
+      agentGroupId: 'group',
+      origin: { kind, runId: 'run', generation: 1 },
+      ingressId: 'automatic',
+    });
+    const handler = createRpcHandler({
+      resolveContext: f.resolveContext,
+      store: f.store as unknown as PriorityStore,
+      cancelTeam,
+      reserveTool,
+    });
+    for (const method of ['cos_team_get', 'cos_team_cancel'])
+      await handler(
+        {
+          action: 'cos_rpc',
+          delivery_id: '22222222-2222-4222-8222-222222222222',
+          request: { ...request, method, params: { team_id: 'team-' + 'a'.repeat(64) } },
+        },
+        {} as Session,
+        f.db,
+      );
+    expect(f.store.teamRuns.inspect).not.toHaveBeenCalled();
+    expect(cancelTeam).not.toHaveBeenCalled();
+    expect(f.db.prepare('SELECT count(*) AS n FROM cos_rpc_responses').get()).toEqual({ n: 2 });
+    for (const row of f.db.prepare('SELECT response FROM cos_rpc_responses').all() as { response: string }[])
+      expect(JSON.parse(row.response).status).toBe('denied');
+  },
+);
 it('S05 routes coordinator mission controls through owner context and keeps approvals out of model results', async () => {
   const f = fixture();
   const cancelMission = vi.fn().mockResolvedValue({ status: 'ok', state: 'cancelling' });

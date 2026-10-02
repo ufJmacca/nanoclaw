@@ -10,6 +10,7 @@ import type { KnowledgeStore, KnowledgeContext } from '../knowledge/store.js';
 import type { CalendarReadInput, WorkChange, WorkRead } from '../contracts/protocol.js';
 import type { ScheduleChange } from '../contracts/schedule-protocol.js';
 import type { MissionRequest } from '../contracts/mission-protocol.js';
+import type { TeamRequest } from '../contracts/team-protocol.js';
 
 export function ensureRpcSchema(db: Database.Database): void {
   db.exec(`CREATE TABLE IF NOT EXISTS cos_rpc_responses (
@@ -26,6 +27,7 @@ export function createRpcHandler(dependencies: {
   store: PriorityStore;
   reserveTool?(context: Context, callId: string): Promise<Result>;
   cancelMission?(context: Context, missionId: string): Promise<Result>;
+  cancelTeam?(context: Context, teamId: string): Promise<Result>;
   knowledge?: KnowledgeStore;
   resolveKnowledgeContext?(session: Session, context: Context, db: Database.Database): Promise<KnowledgeContext | null>;
 }): DeliveryActionHandler {
@@ -70,9 +72,27 @@ export function createRpcHandler(dependencies: {
         !['cos_mission_result_get', 'cos_mission_review'].includes(request.method)
       )
         result = { status: 'denied' };
-      else if (request.method.startsWith('cos_mission_') && context.origin?.kind === 'schedule')
+      else if (
+        (request.method.startsWith('cos_mission_') || request.method.startsWith('cos_team_')) &&
+        context.origin?.kind === 'schedule'
+      )
         result = { status: 'denied' };
-      else if (request.method === 'cos_mission_request')
+      else if (request.method === 'cos_team_request')
+        result = await dependencies.store.requestTeam(
+          context,
+          request.request_id,
+          request.params.request as TeamRequest,
+        );
+      else if (request.method === 'cos_team_get')
+        result = await dependencies.store.teamRuns.inspect(context, String(request.params.team_id));
+      else if (request.method === 'cos_team_cancel') {
+        const stopped = await dependencies.cancelTeam?.(context, String(request.params.team_id));
+        if (!stopped) result = { status: 'denied' };
+        else {
+          const { identities: _identities, ...safe } = stopped;
+          result = safe;
+        }
+      } else if (request.method === 'cos_mission_request')
         result = await dependencies.store.requestMission(
           context,
           request.request_id,

@@ -135,6 +135,14 @@ reviewers. The policy caps graphs at six steps and two workers, keeps public
 retrieval disabled, and permits only approved rework within the original limits.
 Native capacity may impose a lower worker limit to preserve the coordinator.
 
+The coordinator now has `cos_team_request`, `cos_team_get` and `cos_team_cancel`.
+Requests create a proposal for exact owner approval. Status shows bounded step
+states and original budget history without copying source prose or worker history.
+Cancellation fences every retained child and stays pending until native absence
+is independently confirmed. Cancelling before approval launches nothing and
+creates no fictitious budget release. Scheduled and automatic review tasks cannot
+use owner team controls. Specialist tools remain context-read and result-submit.
+
 The returned revision belongs to team configuration alone. Exact request replay,
 file permissions and stale-revision rules match single-worker configuration.
 Permission is saved only after acknowledged template installation and renewed

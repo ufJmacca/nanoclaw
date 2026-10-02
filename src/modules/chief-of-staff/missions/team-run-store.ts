@@ -7,7 +7,7 @@ import type { KnowledgeStore } from '../knowledge/store.js';
 import type { TeamProposalStore } from './team-proposal-store.js';
 import { sealTeamChildWorkOrder, validateTeamChildWorkOrder, type TeamChildWorkOrder } from './team-work-order.js';
 import type { TeamInputArtifact } from '../contracts/team-inputs.js';
-import type { TeamStep } from '../contracts/team-protocol.js';
+import { validTeamRequest, type TeamStep } from '../contracts/team-protocol.js';
 import { validMissionResult } from '../contracts/mission-result.js';
 import { readVerifiedSubmission } from './submission-reader.js';
 import { validCosMissionIdentity } from '../../../cos-mission-boundary.js';
@@ -994,6 +994,101 @@ export class TeamRunStore {
       ? row
       : null;
   }
+  private async approvalState(client: PoolClient, context: Context, teamId: string, proposalId: string) {
+    const proposal = (
+      await client.query('SELECT applied_record_id FROM cos.proposals WHERE scope_id=$1 AND id=$2', [
+        context.scopeId,
+        proposalId,
+      ])
+    ).rows[0];
+    if (!proposal || (proposal.applied_record_id !== null && proposal.applied_record_id !== teamId)) return null;
+    if (proposal.applied_record_id === teamId) return 'applied';
+    // An unapproved cancellation needs no credit settlement only when no admission ever existed.
+    const tables = [
+      'mission_team_steps',
+      'mission_team_children',
+      'mission_team_reservations',
+      'mission_team_root_reservations',
+      'mission_team_budget_events',
+      'mission_team_root_budget_events',
+      'mission_team_calls',
+    ];
+    const admitted = await client.query(
+      tables.map((table) => `SELECT 1 FROM cos.${table} WHERE scope_id=$1 AND team_id=$2`).join(' UNION ALL ') +
+        ' LIMIT 1',
+      [context.scopeId, teamId],
+    );
+    return admitted.rowCount ? null : 'unapplied';
+  }
+  /** Owner metadata inspection does not disclose artifacts or renew execution/source/model permission. */
+  async inspect(context: Context, teamId: string): Promise<Result> {
+    if (!/^team-[a-f0-9]{64}$/.test(teamId) || context.origin) return { status: 'denied' };
+    return this.transaction(
+      context,
+      async (client) => {
+        const root = await this.retainedRoot(client, context, teamId);
+        if (
+          !root ||
+          root.body.format !== 'cos-team-work-order/v1' ||
+          root.body.teamId !== teamId ||
+          !validTeamRequest(root.body.request)
+        )
+          return { status: 'denied' };
+        const request = root.body.request;
+        const approval = await this.approvalState(client, context, teamId, root.proposal_id);
+        if (!approval || (root.state === 'proposed' && approval === 'applied')) return { status: 'denied' };
+        const rows = (
+          await client.query(
+            'SELECT step_id,state,version,definition FROM cos.mission_team_steps WHERE scope_id=$1 AND team_id=$2 ORDER BY step_id',
+            [context.scopeId, teamId],
+          )
+        ).rows;
+        if (approval === 'unapplied' ? rows.length !== 0 : rows.length !== request.steps.length)
+          return { status: 'denied' };
+        const steps = [];
+        for (const step of request.steps) {
+          const row = rows.find((r) => r.step_id === step.step_id);
+          if (row && digest(row.definition) !== digest(step)) return { status: 'denied' };
+          steps.push({
+            step_id: step.step_id,
+            template_id: step.template_id,
+            depends_on: step.depends_on,
+            required: step.required,
+            state: row?.state ?? (root.state === 'cancelled' ? 'cancelled' : 'proposed'),
+            version: row?.version ?? 0,
+          });
+        }
+        const budget = approval === 'unapplied' ? null : await teamBudget(client, context.scopeId, teamId);
+        if (approval === 'applied' && !budget) return { status: 'denied' };
+        return {
+          status: 'ok',
+          team: {
+            id: teamId,
+            state: root.state,
+            generation: root.generation,
+            version: root.version,
+            deadline_at: root.body.deadlineAt,
+            partial_policy: request.partial_policy,
+          },
+          steps,
+          budget,
+          budget_history: (
+            await client.query(
+              'SELECT step_id,kind,body FROM cos.mission_team_budget_events WHERE scope_id=$1 AND team_id=$2 ORDER BY step_id,kind',
+              [context.scopeId, teamId],
+            )
+          ).rows,
+          root_budget_history: (
+            await client.query(
+              'SELECT kind,body FROM cos.mission_team_root_budget_events WHERE scope_id=$1 AND team_id=$2 ORDER BY created_at,id',
+              [context.scopeId, teamId],
+            )
+          ).rows,
+        };
+      },
+      false,
+    );
+  }
   async cancel(context: Context, teamId: string): Promise<Result> {
     if (!id(teamId) || context.origin) return { status: 'denied' };
     return this.transaction(
@@ -1073,6 +1168,12 @@ export class TeamRunStore {
       async (client) => {
         const root = await this.retainedRoot(client, context, teamId);
         if (!root || !['cancelling', 'cancelled'].includes(root.state)) return { status: 'denied' };
+        const approval = await this.approvalState(client, context, teamId, root.proposal_id);
+        if (!approval) return { status: 'denied' };
+        if (approval === 'unapplied')
+          return root.state === 'cancelled'
+            ? { status: 'ok', team_id: teamId, state: 'cancelled' }
+            : { status: 'denied' };
         const pending = await client.query(
           `SELECT 1 FROM cos.mission_team_children s JOIN cos.mission_attempts a
         ON a.scope_id=s.scope_id AND a.mission_id=s.mission_id WHERE s.scope_id=$1 AND s.team_id=$2

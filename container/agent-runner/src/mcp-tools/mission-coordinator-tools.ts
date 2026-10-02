@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { COS_PROTOCOL, validRequest, type CosRequest, type CosResponse } from './generated/cos-protocol.js';
 import { missionRequestSchema } from './generated/mission-protocol.js';
 import { missionReviewSchema } from './generated/mission-review.js';
+import { teamRequestSchema } from './generated/team-protocol.js';
 import type { McpToolDefinition } from './types.js';
 const definitions = {
   cos_mission_request: {
@@ -36,6 +37,24 @@ const definitions = {
     properties: { request_id: { type: 'string', format: 'uuid' }, review: missionReviewSchema },
     description:
       'Record coordinator review of an exact result digest and mission version. Assess every approved criterion. Accept requires a comprehensive answer and every criterion satisfied; partial or blocked results cannot become comprehensive completion. Semantic judgement is advisory. Retry with the same request_id and unchanged review. The host queues the reviewed notification; do not send a duplicate answer.',
+  },
+  cos_team_request: {
+    required: ['request_id', 'request'],
+    properties: { request_id: { type: 'string', format: 'uuid' }, request: teamRequestSchema },
+    description:
+      'Propose a bounded graph only when independent technical and operational work helps: separate analysts, then writer and reviewer. One exact owner approval is required before dispatch. Retain the same request_id on retry. Use single-worker missions for simple tasks. No public retrieval, expanded sources, tools, credentials or extra budgets.',
+  },
+  cos_team_get: {
+    required: ['team_id'],
+    properties: { team_id: { type: 'string', pattern: '^team-[a-f0-9]{64}$' } },
+    description:
+      'Inspect original team step states, deadline and parent/child budget history. Metadata does not authorise execution or access submitted evidence. Failed, blocked, partial and cancelled work must remain visible; awaiting_review is not completion.',
+  },
+  cos_team_cancel: {
+    required: ['team_id'],
+    properties: { team_id: { type: 'string', pattern: '^team-[a-f0-9]{64}$' } },
+    description:
+      'Request owner cancellation of the whole team and fence every retained descendant. Pending or cancelling means physical stop and settlement still require reconciliation. Do not report stopped until cancellation is confirmed.',
   },
 } as const;
 export function missionCoordinatorRequest(tool: unknown, args: unknown): CosRequest | null {

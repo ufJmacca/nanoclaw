@@ -181,6 +181,7 @@ export function startCosHostModule(assertHostAuthority: () => void): { service: 
     destination: getMessagingGroup,
     stop,
     running,
+    missionExecution,
     wake: wakeContainer,
     specialists: (store) =>
       new MissionHost({
