@@ -4,6 +4,7 @@ import { before, after, test } from 'node:test';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import type pg from 'pg';
 import { connectFixtureDatabase, fixtureDatabaseConfig, fixtureRuntimeUser } from './fixture-database.js';
 import { migrate } from '../../modules/chief-of-staff/store/migrations.js';
@@ -854,4 +855,113 @@ test('S06-T06/T03 cancellation fences the whole generation, retains credit throu
   } finally {
     await admin.query("UPDATE cos.scopes SET status='active' WHERE id=$1", [scope]);
   }
+});
+test('S06-T03/PG01 stopped worker retry uses only original attempt/turn/tool escrow and cannot borrow rework credits through S05', async () => {
+  await admin.query(
+    "UPDATE cos.mission_attempts SET allocation=allocation||'{\"stop_confirmed\":true}'::jsonb,state='failed',lease_owner=NULL,lease_until=NULL WHERE scope_id=$1 AND state<>'submitted'",
+    [scope],
+  );
+  const p = await store.requestTeam(context, randomUUID(), await input()),
+    teamId = String(p.team_id);
+  await approve(p);
+  const teams = new TeamRunStore(store.database, store.teams, knowledge, { nativeCapacity: 3, maxWorkers: 2 });
+  const runs = new MissionRunStore(
+    store.database,
+    store.missions,
+    knowledge.artifacts,
+    {},
+    { nativeCapacity: 3, maxWorkers: 2 },
+  );
+  await teams.claimReady(context, teamId);
+  const step = (await rows('mission_team_steps')).find((s) => s.team_id === teamId && s.step_id === 'technical')!;
+  const old = (await rows('mission_attempts')).find((a) => a.mission_id === step.child_mission_id)!;
+  const claim = await runs.claimDispatch(context, old.id, 'fixture-host'),
+    identity = claim.identity as CosMissionIdentity,
+    lease = claim.lease as MissionDispatchLease;
+  assert.equal(claim.status, 'ok');
+  await runs.markDispatchReady(identity, lease, digest('fixture native receipt'));
+  await runs.beginExecution(identity, lease);
+  assert.equal((await runs.reserve(identity, 'fixture-first-turn', 'model', digest('first turn'))).status, 'ok');
+  await runs.fail(identity, 'provider_failed');
+  await runs.confirmStopped(identity);
+  assert.equal((await runs.retry(context, old.id)).status, 'denied');
+  const before = (await rows('mission_team_budget_events')).filter((e) => e.team_id === teamId);
+  const advanced = await Promise.all([teams.advance(context, teamId), teams.advance(context, teamId)]);
+  assert.equal(
+    advanced.every((a) => a.status === 'ok'),
+    true,
+  );
+  const attempts = (await rows('mission_attempts')).filter((a) => a.mission_id === step.child_mission_id);
+  assert.equal(attempts.length, 2);
+  const retry = attempts.find((a) => a.id !== old.id)!;
+  assert.equal(retry.provenance.retry_of, old.id);
+  assert.equal(retry.generation, 2);
+  assert.notEqual(retry.agent_group_id, old.agent_group_id);
+  assert.notEqual(retry.session_id, old.session_id);
+  const next = await runs.claimDispatch(context, retry.id, 'fixture-host');
+  assert.equal(next.status, 'ok');
+  assert.deepEqual((next.order as TeamChildWorkOrder).body, (claim.order as TeamChildWorkOrder).body);
+  assert.deepEqual(
+    (await rows('mission_team_budget_events')).filter((e) => e.team_id === teamId),
+    before,
+  );
+  const reservations = (await rows('mission_budget_reservations')).filter(
+    (b) => b.mission_id === step.child_mission_id,
+  );
+  assert.equal(reservations.filter((b) => b.kind === 'attempt').length, 2);
+  assert.equal(reservations.filter((b) => b.kind === 'model').length, 1);
+  await runs.fail(next.identity as CosMissionIdentity, 'provider_failed');
+  await runs.confirmStopped(next.identity as CosMissionIdentity);
+  assert.equal((await teams.advance(context, teamId)).state, 'blocked');
+  assert.equal((await rows('mission_attempts')).filter((a) => a.mission_id === step.child_mission_id).length, 2);
+});
+test('S06-T03 a shorter step deadline removes model/tool/context authority while the original root deadline remains current', async () => {
+  await admin.query(
+    "UPDATE cos.mission_attempts SET allocation=allocation||'{\"stop_confirmed\":true}'::jsonb,state='failed',lease_owner=NULL,lease_until=NULL WHERE scope_id=$1 AND state<>'submitted'",
+    [scope],
+  );
+  const request = await input();
+  request.steps.find((s) => s.step_id === 'technical')!.limits.wall_seconds = 30;
+  const p = await store.requestTeam(context, randomUUID(), request),
+    teamId = String(p.team_id);
+  await approve(p);
+  const teams = new TeamRunStore(store.database, store.teams, knowledge, { nativeCapacity: 3, maxWorkers: 2 });
+  const runs = new MissionRunStore(
+    store.database,
+    store.missions,
+    knowledge.artifacts,
+    {},
+    { nativeCapacity: 3, maxWorkers: 2 },
+  );
+  await teams.claimReady(context, teamId);
+  const step = (await rows('mission_team_steps')).find((s) => s.team_id === teamId && s.step_id === 'technical')!;
+  const attempt = (await rows('mission_attempts')).find((a) => a.mission_id === step.child_mission_id)!;
+  const claim = await runs.claimDispatch(context, attempt.id, 'fixture-host'),
+    identity = claim.identity as CosMissionIdentity,
+    lease = claim.lease as MissionDispatchLease;
+  assert.equal(claim.status, 'ok');
+  await runs.markDispatchReady(identity, lease, digest('fixture native receipt'));
+  await runs.beginExecution(identity, lease);
+  assert.equal((await runs.readContext(identity, lease, 'before-deadline')).status, 'ok');
+  const order = claim.order as TeamChildWorkOrder;
+  const milliseconds = (
+    await admin.query('SELECT GREATEST(0,EXTRACT(EPOCH FROM ($1::timestamptz-clock_timestamp()))*1000)::int AS n', [
+      order.body.deadlineAt,
+    ])
+  ).rows[0].n;
+  await delay(milliseconds + 250);
+  assert.equal(
+    (await admin.query('SELECT $1::timestamptz <= clock_timestamp() AS expired', [order.body.deadlineAt])).rows[0]
+      .expired,
+    true,
+  );
+  const root = (await rows('mission_team_work_orders')).find((w) => w.id === teamId)!;
+  assert.equal(
+    (await admin.query('SELECT $1::timestamptz > clock_timestamp() AS current', [root.body.deadlineAt])).rows[0]
+      .current,
+    true,
+  );
+  assert.equal((await runs.reserve(identity, 'late-turn', 'model', digest('late physical turn'))).status, 'denied');
+  assert.equal((await runs.readContext(identity, lease, 'after-deadline')).status, 'denied');
+  assert.equal((await runs.authorizeDispatch(identity, lease)).status, 'denied');
 });

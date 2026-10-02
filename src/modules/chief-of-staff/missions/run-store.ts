@@ -440,6 +440,7 @@ export class MissionRunStore {
       const m = await this.mission(client, context.scopeId, previous.mission_id);
       if (
         !m ||
+        m.body.format === 'cos-team-child-work-order/v1' ||
         !(await this.owner(client, context, m)) ||
         !['failed', 'queued', 'running'].includes(m.state) ||
         !(await this.current(client, m))
