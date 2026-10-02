@@ -86,19 +86,19 @@ check root root_checks
 check runner runner_checks
 source scripts/cos-source-fixture.sh
 source_fixture() {
-  local demo_arguments=()
-  if [[ "$1" == demo ]]; then demo_arguments=(--demo --fixture); fi
+  local mode=$1
+  if [[ "$mode" == demo ]]; then set -- --demo --fixture; else set --; fi
   if [[ "$profile" == test ]]; then
-    prepare_source_fixture "$dev" "$id-$1" "$directory/context" "$fixture_image" "$runner_volume" || return
+    prepare_source_fixture "$dev" "$id-$mode" "$directory/context" "$fixture_image" "$runner_volume" || return
     "${source_fixture_driver[@]}" --env-file "$test_directory/test.env" \
       --mount "type=bind,src=$test_directory/ca.pem,dst=/selected-ca.pem,readonly" \
       -e COS_TEST_PGSSLROOTCERT=/selected-ca.pem \
       -e "COS_FIXTURE_IMAGE=$fixture_image" -e "COS_FIXTURE_RUNNER_VOLUME=$runner_volume" \
       -e "COS_FIXTURE_SOURCE_ROOT=$directory/context" -e "COS_FIXTURE_HOST_ROOT=$source_fixture_host_root" \
       "$fixture_image" --import tsx src/contracts/chief-of-staff/run.ts --slice "$slice" --db-profile test \
-      "${demo_arguments[@]}"
+      "$@"
   else
-    bash scripts/cos-runtime-fixture.sh "$id-$1" source "$1" "$root" "$fixture_image" "$fixture_image" "$runner_volume" ''
+    bash scripts/cos-runtime-fixture.sh "$id-$mode" source "$mode" "$root" "$fixture_image" "$fixture_image" "$runner_volume" ''
   fi
 }
 check slice source_fixture slice
