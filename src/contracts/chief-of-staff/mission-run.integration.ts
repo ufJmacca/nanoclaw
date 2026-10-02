@@ -257,6 +257,39 @@ test('S05-T05 queued discovery is bounded and its cursor reaches later work with
     authority.contextGeneration = previous;
   }
 });
+test('S05-T06 recovery inspects exact attempt metadata after authority loss without disclosing context or granting execution', async () => {
+  const { identity } = await mission();
+  const active = await store.missionRuns.inspectRecovery(identity);
+  assert.deepEqual(active, {
+    status: 'ok',
+    identity,
+    context,
+    state: 'queued',
+    attempt_state: 'queued',
+    current_generation: true,
+    admitted: true,
+    stop_confirmed: false,
+  });
+  enabled = false;
+  try {
+    const denied = await store.missionRuns.inspectRecovery(identity);
+    assert.equal(denied.status, 'ok');
+    assert.equal(denied.admitted, false);
+    assert.doesNotMatch(JSON.stringify(denied), /SOURCE_CANARY|question|sources|policyDigest/);
+    assert.equal((await store.missionRuns.inspectRecovery({ ...identity, sessionId: 'foreign' })).status, 'denied');
+    assert.equal((await store.missionRuns.claimDispatch(context, identity.attemptId, 'recovery')).status, 'denied');
+    await store.missionRuns.fail(identity, 'admission_denied');
+    await store.missionRuns.confirmStopped(identity);
+    assert.deepEqual(await store.missionRuns.inspectRecovery(identity), {
+      ...denied,
+      state: 'failed',
+      attempt_state: 'failed',
+      stop_confirmed: true,
+    });
+  } finally {
+    enabled = true;
+  }
+});
 test('S05-T05/T07 coordinator RPC proposes without launching, inspects the approved mission and durably cancels', async () => {
   const native = initTestDb();
   migrateNative(native);

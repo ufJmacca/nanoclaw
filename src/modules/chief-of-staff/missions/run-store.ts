@@ -471,6 +471,34 @@ export class MissionRunStore {
       return { status: 'ok' };
     });
   }
+  /** Host recovery metadata remains readable after authority loss; it never grants execution or returns source bytes. */
+  async inspectRecovery(identity: CosMissionIdentity): Promise<Result> {
+    if (!validCosMissionIdentity(identity)) return { status: 'denied' };
+    return this.transaction(identity.scopeId, async (client) => {
+      const m = await this.mission(client, identity.scopeId, identity.missionId),
+        a = await this.attempt(client, identity);
+      if (!m || !same(a, identity) || digest(m.body) !== m.digest) return { status: 'denied' };
+      const o = m.body.origin;
+      const context: Context = {
+        scopeId: o.scopeId,
+        ownerId: o.ownerId,
+        agentGroupId: o.agentGroupId,
+        sessionId: o.sessionId,
+        ingressId: o.ingressId,
+      };
+      if (!(await this.owner(client, context, m))) return { status: 'denied' };
+      return {
+        status: 'ok',
+        identity: identityOf(a!),
+        context,
+        state: m.state,
+        attempt_state: a!.state,
+        current_generation: m.generation === identity.generation,
+        admitted: await this.current(client, m),
+        stop_confirmed: a!.allocation.stop_confirmed === true,
+      };
+    });
+  }
   /** Lease acquisition never creates another attempt or refreshes its deadline/budget. */
   async claimDispatch(context: Context, attemptId: string, owner: string): Promise<Result> {
     if (!id(attemptId) || !id(owner) || context.origin) return { status: 'denied' };
