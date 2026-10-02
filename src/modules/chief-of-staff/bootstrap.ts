@@ -20,6 +20,7 @@ import { createCoordinatorLauncher } from './bridge/coordinator-launcher.js';
 import { RestrictedExecutionProbe } from './bridge/native-execution.js';
 import { getInstallSlug } from '../../install-slug.js';
 import { sessionDir } from '../../session-manager.js';
+import { createMissionAuthorityResolver } from './missions/authority.js';
 
 /** Narrow host-service profile: never load migration or test credentials into this module. */
 export function startCosHostModule(assertHostAuthority: () => void): { service: CosService; stop(): Promise<void> } {
@@ -137,6 +138,7 @@ export function startCosHostModule(assertHostAuthority: () => void): { service: 
     }
   };
   const launcher = createCoordinatorLauncher({ targetRoot, db: getDb(), running });
+  const missionAuthority = createMissionAuthorityResolver({ targetRoot, db: getDb(), admitted, assertHostAuthority });
   const facts = guardConversationAccess({
     active: activeBinding,
     facts: transportFacts,
@@ -160,7 +162,13 @@ export function startCosHostModule(assertHostAuthority: () => void): { service: 
     running,
     wake: wakeContainer,
     connect: () =>
-      connectCosHostStore(selected, { targetRoot, installationRoot: process.cwd(), dataRoot: DATA_DIR }, admitted),
+      connectCosHostStore(
+        selected,
+        { targetRoot, installationRoot: process.cwd(), dataRoot: DATA_DIR },
+        admitted,
+        {},
+        missionAuthority,
+      ),
   });
   // PostgreSQL availability never holds up unrelated channel startup.
   void service.tick();
