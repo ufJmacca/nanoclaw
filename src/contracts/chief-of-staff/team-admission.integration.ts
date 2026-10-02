@@ -1473,3 +1473,146 @@ test('S06-T03 a final main-context grant expires on database time without changi
   assert.equal((await f.teams.cancel(context, f.teamId)).status, 'ok');
   assert.equal((await f.teams.confirmCancellation(context, f.teamId)).status, 'ok');
 });
+
+test('S06-T05/T06 main-review recovery retires exact retained identity after source loss and cancellation without artifact access', async () => {
+  const f = await stoppedAnalyses();
+  await f.teams.advance(context, f.teamId);
+  await finishTeamStep(f, 'synthesis');
+  await finishTeamStep(f, 'review');
+  const initial = await f.teams.reviewSnapshot(context, f.teamId),
+    submissionId = String(initial.submission_id),
+    final = new TeamFinalReviews(f.teams),
+    main = { ...context, provider: 'codex', generation: authority.contextGeneration };
+  const claimed = await final.claim(main, f.teamId, submissionId, 'fixture-recovery-review');
+  assert.equal(claimed.status, 'ok');
+  const identity = claimed.identity as { generation: number },
+    lease = claimed.lease as { owner: string; fence: number };
+  const executing = {
+    ...main,
+    origin: {
+      kind: 'mission_review' as const,
+      runId: f.teamId,
+      generation: identity.generation,
+      submissionId,
+      owner: lease.owner,
+      fence: lease.fence,
+    },
+  };
+  const root = (await rows('mission_team_work_orders')).find((w) => w.id === f.teamId)!;
+  const sourceId = String(root.body.request.sources[0].source_id);
+  await admin.query("UPDATE cos.sources SET processing_providers='{}' WHERE scope_id=$1 AND id=$2", [scope, sourceId]);
+  const artifacts = knowledge.artifacts,
+    read = artifacts.read;
+  let artifactReads = 0;
+  artifacts.read = () => {
+    artifactReads++;
+    throw Error('recovery_must_not_read_artifacts');
+  };
+  try {
+    assert.equal(
+      (await final.reserve(executing, f.teamId, submissionId, lease, 'revoked-call', 'model')).status,
+      'denied',
+    );
+    const inspected = await final.inspect(main, f.teamId, submissionId);
+    assert.equal(inspected.status, 'ok');
+    assert.deepEqual(inspected.identity, claimed.identity);
+    assert.deepEqual(inspected.lease, claimed.lease);
+    await admin.query("UPDATE cos.scopes SET status='paused' WHERE id=$1", [scope]);
+    assert.equal(
+      (await final.retire(main, f.teamId, submissionId, { ...lease, fence: lease.fence + 1 })).status,
+      'denied',
+    );
+    assert.equal((await final.retire(main, f.teamId, submissionId, lease)).status, 'ok');
+    assert.equal((await final.retire(main, f.teamId, submissionId, lease)).status, 'ok');
+    assert.equal((await f.teams.cancel(context, f.teamId)).status, 'ok');
+    const retained = await final.inspect(main, f.teamId, submissionId);
+    assert.equal(retained.status, 'ok');
+    assert.deepEqual(retained.identity, claimed.identity);
+    assert.equal(retained.retired, true);
+    assert.equal((await final.inspect({ ...main, generation: randomUUID() }, f.teamId, submissionId)).status, 'denied');
+    assert.equal(artifactReads, 0);
+  } finally {
+    artifacts.read = read;
+    await admin.query("UPDATE cos.scopes SET status='active' WHERE id=$1", [scope]);
+    await admin.query("UPDATE cos.sources SET processing_providers=ARRAY['codex'] WHERE scope_id=$1 AND id=$2", [
+      scope,
+      sourceId,
+    ]);
+  }
+  assert.equal((await f.teams.confirmCancellation(context, f.teamId)).status, 'ok');
+});
+
+test('S06-T03/T05 retained main review acknowledgement replays after credit use without another invocation grant', async () => {
+  const f = await stoppedAnalyses();
+  await f.teams.advance(context, f.teamId);
+  await finishTeamStep(f, 'synthesis');
+  await finishTeamStep(f, 'review');
+  const initial = await f.teams.reviewSnapshot(context, f.teamId),
+    submissionId = String(initial.submission_id),
+    final = new TeamFinalReviews(f.teams),
+    main = { ...context, provider: 'codex', generation: authority.contextGeneration };
+  assert.ok(
+    ((await final.pending(main)).items as Array<{ mission_id: string }>).some((i) => i.mission_id === f.teamId),
+  );
+  const claimed = await final.claim(main, f.teamId, submissionId, 'fixture-replay-main');
+  assert.equal(claimed.status, 'ok');
+  const identity = claimed.identity as { generation: number },
+    lease = claimed.lease as { owner: string; fence: number };
+  const executing = {
+    ...main,
+    origin: {
+      kind: 'mission_review' as const,
+      runId: f.teamId,
+      generation: identity.generation,
+      submissionId,
+      owner: lease.owner,
+      fence: lease.fence,
+    },
+  };
+  for (let i = 0; i < 20; i++) {
+    const r = await final.reserve(executing, f.teamId, submissionId, lease, 'exhaust-main-' + i, 'model');
+    if (r.status === 'denied') break;
+    assert.equal(r.status, 'ok');
+  }
+  assert.deepEqual(await final.claim(main, f.teamId, submissionId, 'fixture-replay-main'), claimed);
+  assert.equal(
+    (await final.reserve(executing, f.teamId, submissionId, lease, 'exhausted-new-call', 'model')).status,
+    'denied',
+  );
+  assert.equal((await final.retire(main, f.teamId, submissionId, lease)).status, 'ok');
+  assert.equal((await final.claim(main, f.teamId, submissionId, 'fixture-replay-main')).status, 'denied');
+  await f.teams.cancel(context, f.teamId);
+  await f.teams.confirmCancellation(context, f.teamId);
+});
+
+test('S06-T05/T07 graph rework cannot replace evidence while retained main review is unretired', async () => {
+  const f = await stoppedAnalyses(false, (r) => {
+    r.limits.max_attempts = 9;
+    r.steps.find((s) => s.step_id === 'synthesis')!.max_rework_count = 1;
+  });
+  await f.teams.advance(context, f.teamId);
+  await finishTeamStep(f, 'synthesis');
+  const review = await finishTeamStep(f, 'review', 'synthesis');
+  const initial = await f.teams.reviewSnapshot(context, f.teamId),
+    submissionId = String(initial.submission_id),
+    final = new TeamFinalReviews(f.teams),
+    main = { ...context, provider: 'codex', generation: authority.contextGeneration };
+  const claimed = await final.claim(main, f.teamId, submissionId, 'fixture-rework-fence');
+  assert.equal(claimed.status, 'ok');
+  const before = (await rows('mission_team_roots')).find((r) => r.id === f.teamId)!;
+  assert.equal(
+    (await f.teams.requestRework(context, f.teamId, String(review.submitted.submission_id))).status,
+    'denied',
+  );
+  assert.deepEqual(
+    (await rows('mission_team_roots')).find((r) => r.id === f.teamId),
+    before,
+  );
+  assert.equal(
+    (await final.retire(main, f.teamId, submissionId, claimed.lease as { owner: string; fence: number })).status,
+    'ok',
+  );
+  assert.equal((await f.teams.requestRework(context, f.teamId, String(review.submitted.submission_id))).status, 'ok');
+  await f.teams.cancel(context, f.teamId);
+  await f.teams.confirmCancellation(context, f.teamId);
+});

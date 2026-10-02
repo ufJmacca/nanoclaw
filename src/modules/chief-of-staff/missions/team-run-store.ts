@@ -561,6 +561,17 @@ export class TeamRunStore {
           : { status: 'denied' };
       if (current.row.state !== 'awaiting_review' || !(await this.root(client, context, teamId)))
         return { status: 'denied' };
+      // The main context may already contain this exact bundle. Retire its native review before changing inputs.
+      const provenance = (current.row as typeof current.row & { provenance: Record<string, unknown> }).provenance;
+      const reviewGrant = provenance.coordinator_review as { owner?: unknown; fence?: unknown } | undefined;
+      if (
+        reviewGrant !== undefined &&
+        (typeof reviewGrant?.owner !== 'string' ||
+          !Number.isSafeInteger(reviewGrant.fence) ||
+          digest(provenance.coordinator_review_retired ?? null) !==
+            digest({ owner: reviewGrant.owner, fence: reviewGrant.fence }))
+      )
+        return { status: 'denied' };
       const steps = (
         await client.query(
           'SELECT * FROM cos.mission_team_steps WHERE scope_id=$1 AND team_id=$2 ORDER BY step_id FOR UPDATE',
