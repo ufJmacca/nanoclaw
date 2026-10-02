@@ -12,7 +12,7 @@ import { validMissionResult } from '../contracts/mission-result.js';
 import { readVerifiedSubmission } from './submission-reader.js';
 import { validCosMissionIdentity } from '../../../cos-mission-boundary.js';
 import { queueMissionAttempt } from './attempt.js';
-import { teamStepUsage } from './team-budget.js';
+import { teamStepUsage, teamBudget } from './team-budget.js';
 import { settleTeamCredits } from './team-settlement.js';
 import { validTeamReview } from '../contracts/team-review.js';
 import { validTeamRework, type TeamRework } from '../contracts/team-rework.js';
@@ -740,6 +740,8 @@ export class TeamRunStore {
   /** Host evidence access only; this neither claims a model turn nor records coordinator completion. */
   async reviewSnapshot(context: Context, teamId: string): Promise<Result> {
     return this.withReviewSnapshot(context, teamId, async (client, current) => {
+      const rootBudget = await teamBudget(client, context.scopeId, teamId);
+      if (!rootBudget) return { status: 'denied' };
       const budgets = [];
       for (const step of current.order.body.request.steps)
         budgets.push({
@@ -771,6 +773,13 @@ export class TeamRunStore {
         criteria: current.checks.criteria,
         budgets,
         budget_history: history,
+        root_budget: rootBudget,
+        root_budget_history: (
+          await client.query(
+            'SELECT kind,body FROM cos.mission_team_root_budget_events WHERE scope_id=$1 AND team_id=$2 ORDER BY created_at,id',
+            [context.scopeId, teamId],
+          )
+        ).rows,
       };
     });
   }

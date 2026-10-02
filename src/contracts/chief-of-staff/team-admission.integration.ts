@@ -22,6 +22,8 @@ import { RESEARCH_TEMPLATE } from '../../modules/chief-of-staff/missions/work-or
 import { MissionRunStore } from '../../modules/chief-of-staff/missions/run-store.js';
 import { checkMissionReview } from '../../modules/chief-of-staff/contracts/mission-review.js';
 import { TeamFinalReviews } from '../../modules/chief-of-staff/missions/team-final-review.js';
+import { TEAM_PARENT_BUDGET_SCHEMA } from '../../modules/chief-of-staff/store/team-parent-budget-schema.js';
+import { teamBudget } from '../../modules/chief-of-staff/missions/team-budget.js';
 import type { CosMissionIdentity } from '../../cos-mission-boundary.js';
 import type { MissionDispatchLease } from '../../modules/chief-of-staff/missions/run-store.js';
 
@@ -73,6 +75,8 @@ after(async () => {
   if (admin) {
     await admin.query('UPDATE cos.sources SET current_revision_id=NULL WHERE scope_id=$1', [scope]);
     for (const table of [
+      'mission_team_root_budget_events',
+      'mission_team_root_reservations',
       'mission_team_budget_events',
       'mission_team_calls',
       'mission_team_reviews',
@@ -179,6 +183,106 @@ async function approve(p: Record<string, unknown>) {
   );
   return store.apply(scope, String(p.proposal_id));
 }
+
+test('S06-T03 migration 13 backfills original parent slack for active and settled version 12 graphs', async () => {
+  // Exact backfill statements execute inside a rollback-only transaction. Refuse any existing root before this fixture.
+  assert.equal((await admin.query('SELECT count(*)::int AS n FROM cos.mission_team_roots')).rows[0].n, 0);
+  const request = await input();
+  request.limits.max_turns = 20;
+  await admin.query('BEGIN');
+  try {
+    const contextDigest = digest({ format: 'cos-mission-context/v1', sources: [] });
+    await admin.query(
+      'INSERT INTO cos.mission_context_manifests(scope_id,digest,body,provenance) VALUES($1,$2,$3,$4)',
+      [
+        scope,
+        contextDigest,
+        JSON.stringify({ format: 'cos-mission-manifest/v1', sources: [] }),
+        JSON.stringify({ fixture: true }),
+      ],
+    );
+    for (const state of ['queued', 'cancelled']) {
+      const teamId = 'team-legacy-' + state,
+        issuedAt = new Date().toISOString();
+      const body = {
+        format: 'cos-team-work-order/v1',
+        teamId,
+        request,
+        origin: {
+          ...context,
+          bindingDigest: authority.bindingDigest,
+          delegationDigest: authority.delegationDigest,
+          contextGeneration: authority.contextGeneration,
+        },
+        related: { goal: null, project: null },
+        templates: Object.values(TEAM_TEMPLATES).map((t) => ({ id: t.id, version: t.version, digest: digest(t) })),
+        provider: authority.provider,
+        issuedAt,
+        deadlineAt: new Date(Date.parse(issuedAt) + 600000).toISOString(),
+        contextDigest,
+        authorityDigest: digest(authority),
+      };
+      await admin.query(
+        'INSERT INTO cos.mission_team_work_orders(scope_id,id,body,digest,context_digest,provenance) VALUES($1,$2,$3,$4,$5,$6)',
+        [scope, teamId, JSON.stringify(body), digest(body), contextDigest, JSON.stringify({ fixture: true })],
+      );
+      await admin.query(
+        'INSERT INTO cos.mission_team_roots(scope_id,id,state,generation,provenance) VALUES($1,$2,$3,1,$4)',
+        [scope, teamId, state, JSON.stringify({ fixture: true })],
+      );
+      for (const step of request.steps) {
+        await admin.query(
+          'INSERT INTO cos.mission_team_steps(scope_id,team_id,step_id,definition,state,provenance) VALUES($1,$2,$3,$4,$5,$6)',
+          [
+            scope,
+            teamId,
+            step.step_id,
+            JSON.stringify(step),
+            state === 'cancelled' ? 'cancelled' : 'ready',
+            JSON.stringify({ fixture: true }),
+          ],
+        );
+        await admin.query(
+          'INSERT INTO cos.mission_team_reservations(scope_id,team_id,step_id,max_attempts,max_turns,max_tool_calls,state) VALUES($1,$2,$3,$4,$5,$6,$7)',
+          [
+            scope,
+            teamId,
+            step.step_id,
+            step.limits.max_attempts,
+            step.limits.max_turns,
+            step.limits.max_tool_calls,
+            state === 'cancelled' ? 'cancelled' : 'reserved',
+          ],
+        );
+      }
+    }
+    const backfill = TEAM_PARENT_BUDGET_SCHEMA.slice(
+      TEAM_PARENT_BUDGET_SCHEMA.indexOf('INSERT INTO cos.mission_team_root_reservations'),
+    );
+    await admin.query(backfill);
+    for (const state of ['queued', 'cancelled']) {
+      const teamId = 'team-legacy-' + state,
+        budget = await teamBudget(admin, scope, teamId);
+      assert.ok(budget);
+      assert.equal(budget.limits.model, 20);
+      assert.equal(budget.parent.limits.model, 4);
+      assert.equal(budget.usage.model, 0);
+      assert.equal(budget.parent.state, state === 'queued' ? 'reserved' : 'cancelled');
+      const events = (
+        await admin.query(
+          'SELECT kind,body FROM cos.mission_team_root_budget_events WHERE scope_id=$1 AND team_id=$2',
+          [scope, teamId],
+        )
+      ).rows;
+      assert.equal(events.filter((e) => e.kind === 'reserved').length, 1);
+      assert.equal(events.filter((e) => e.kind === 'released').length, state === 'queued' ? 0 : 1);
+      assert.equal(events.find((e) => e.kind === 'reserved')!.body.backfilled, true);
+    }
+  } finally {
+    await admin.query('ROLLBACK');
+  }
+});
+
 test('S06-T01 team request requires separately admitted authority and every exact reviewed template', async () => {
   const r = await input();
   assert.equal((await store.requestTeam(context, randomUUID(), r)).status, 'denied');
@@ -1615,4 +1719,144 @@ test('S06-T05/T07 graph rework cannot replace evidence while retained main revie
   assert.equal((await f.teams.requestRework(context, f.teamId, String(review.submitted.submission_id))).status, 'ok');
   await f.teams.cancel(context, f.teamId);
   await f.teams.confirmCancellation(context, f.teamId);
+});
+
+test('S06-T03/PG01 coordinator can use approved parent slack once and root audit includes every child call', async () => {
+  const f = await stoppedAnalyses(false, (r) => {
+    for (const s of r.steps) s.limits.max_turns = 2;
+    r.limits.max_turns = 12;
+  });
+  await f.teams.advance(context, f.teamId);
+  await finishTeamStep(f, 'synthesis');
+  await finishTeamStep(f, 'review');
+  const initial = await f.teams.reviewSnapshot(context, f.teamId),
+    submissionId = String(initial.submission_id),
+    final = new TeamFinalReviews(f.teams),
+    main = { ...context, provider: 'codex', generation: authority.contextGeneration };
+  const claimed = await final.claim(main, f.teamId, submissionId, 'fixture-parent-slack');
+  assert.equal(claimed.status, 'ok');
+  const identity = claimed.identity as { generation: number },
+    lease = claimed.lease as { owner: string; fence: number },
+    executing = {
+      ...main,
+      origin: {
+        kind: 'mission_review' as const,
+        runId: f.teamId,
+        generation: identity.generation,
+        submissionId,
+        owner: lease.owner,
+        fence: lease.fence,
+      },
+    };
+  const stepAvailable = (initial.budgets as Array<{ limits: { model: number }; usage: { model: number } }>).reduce(
+    (n, b) => n + b.limits.model - b.usage.model,
+    0,
+  );
+  for (let i = 0; i < stepAvailable + 4; i++)
+    assert.deepEqual(await final.reserve(executing, f.teamId, submissionId, lease, 'parent-slack-' + i, 'model'), {
+      status: 'ok',
+      reserved: true,
+    });
+  assert.equal(
+    (await final.reserve(executing, f.teamId, submissionId, lease, 'beyond-parent', 'model')).status,
+    'denied',
+  );
+  assert.deepEqual(
+    await final.reserve(executing, f.teamId, submissionId, lease, 'parent-slack-' + stepAvailable, 'model'),
+    { status: 'ok', reserved: false },
+  );
+  const snapshot = await f.teams.reviewSnapshot(context, f.teamId),
+    budget = snapshot.root_budget as {
+      limits: { model: number };
+      usage: { model: number };
+      parent: { limits: { model: number }; usage: { model: number } };
+    };
+  assert.equal(budget.limits.model, 12);
+  assert.equal(budget.usage.model, 12);
+  assert.equal(budget.parent.limits.model, 4);
+  assert.equal(budget.parent.usage.model, 4);
+  assert.equal(
+    (await rows('mission_team_calls')).filter((r) => r.team_id === f.teamId && r.step_id === null).length,
+    4,
+  );
+  assert.equal((await f.teams.cancel(context, f.teamId)).status, 'ok');
+  assert.equal((await f.teams.confirmCancellation(context, f.teamId)).status, 'ok');
+  const events = (await rows('mission_team_root_budget_events')).filter((r) => r.team_id === f.teamId);
+  assert.equal(events.filter((e) => e.kind === 'reserved').length, 1);
+  assert.equal(events.filter((e) => e.kind === 'released').length, 1);
+  const release = events.find((e) => e.kind === 'released')!;
+  assert.equal(release.body.usage.model, 4);
+  assert.equal(release.body.unused.model, 0);
+  assert.equal(release.body.root_usage.model, 12);
+  assert.equal(events.find((e) => e.kind === 'uncertain')!.body.billed_tokens, null);
+  const count = events.length;
+  assert.equal((await f.teams.confirmCancellation(context, f.teamId)).status, 'ok');
+  assert.equal((await rows('mission_team_root_budget_events')).filter((r) => r.team_id === f.teamId).length, count);
+  await assert.rejects(
+    () =>
+      store.database.pool.query('UPDATE cos.mission_team_root_budget_events SET body=body WHERE scope_id=$1', [scope]),
+    /permission denied/,
+  );
+});
+
+test('S06-T03/T05 corrupt parent credit or retirement metadata cannot grant more main review calls', async () => {
+  const f = await stoppedAnalyses(false, (r) => {
+    r.limits.max_turns = 20;
+  });
+  await f.teams.advance(context, f.teamId);
+  await finishTeamStep(f, 'synthesis');
+  await finishTeamStep(f, 'review');
+  const initial = await f.teams.reviewSnapshot(context, f.teamId),
+    submissionId = String(initial.submission_id),
+    final = new TeamFinalReviews(f.teams),
+    main = { ...context, provider: 'codex', generation: authority.contextGeneration };
+  const claimed = await final.claim(main, f.teamId, submissionId, 'fixture-corrupt-ledger');
+  assert.equal(claimed.status, 'ok');
+  const identity = claimed.identity as { generation: number },
+    lease = claimed.lease as { owner: string; fence: number },
+    executing = {
+      ...main,
+      origin: {
+        kind: 'mission_review' as const,
+        runId: f.teamId,
+        generation: identity.generation,
+        submissionId,
+        owner: lease.owner,
+        fence: lease.fence,
+      },
+    };
+  await admin.query(
+    'UPDATE cos.mission_team_root_reservations SET max_turns=max_turns+1 WHERE scope_id=$1 AND team_id=$2',
+    [scope, f.teamId],
+  );
+  try {
+    assert.equal(
+      (await final.reserve(executing, f.teamId, submissionId, lease, 'forged-parent-call', 'model')).status,
+      'denied',
+    );
+    assert.equal((await f.teams.reviewSnapshot(context, f.teamId)).status, 'denied');
+  } finally {
+    await admin.query(
+      'UPDATE cos.mission_team_root_reservations SET max_turns=max_turns-1 WHERE scope_id=$1 AND team_id=$2',
+      [scope, f.teamId],
+    );
+  }
+  await admin.query(
+    "UPDATE cos.mission_team_roots SET provenance=jsonb_set(provenance,'{coordinator_review_retired}',$3::jsonb) WHERE scope_id=$1 AND id=$2",
+    [scope, f.teamId, JSON.stringify({ ...lease, unexpected: true })],
+  );
+  try {
+    assert.equal((await final.authorize(executing, f.teamId, submissionId, lease)).status, 'denied');
+    assert.equal((await final.claim(main, f.teamId, submissionId, 'fixture-corrupt-ledger')).status, 'denied');
+    assert.equal((await final.inspect(main, f.teamId, submissionId)).status, 'denied');
+    assert.equal((await final.retire(main, f.teamId, submissionId, lease)).status, 'denied');
+  } finally {
+    await admin.query(
+      "UPDATE cos.mission_team_roots SET provenance=provenance-'coordinator_review_retired' WHERE scope_id=$1 AND id=$2",
+      [scope, f.teamId],
+    );
+  }
+  assert.equal((await final.retire(main, f.teamId, submissionId, lease)).status, 'ok');
+  assert.equal((await f.teams.cancel(context, f.teamId)).status, 'ok');
+  assert.equal((await f.teams.confirmCancellation(context, f.teamId)).status, 'ok');
 });

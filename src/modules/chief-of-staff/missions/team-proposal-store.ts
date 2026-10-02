@@ -6,6 +6,7 @@ import { TEAM_TEMPLATES } from '../contracts/team-templates.js';
 import type { KnowledgeStore } from '../knowledge/store.js';
 import type { MissionAuthority } from './proposal-store.js';
 import type { MissionOrigin, ResearchWorkOrder } from './work-order.js';
+import { teamParentLimits } from './team-budget.js';
 
 /** Separate host-owned team admission; enabling single-worker delegation does not enable teams. */
 export type TeamAuthority = MissionAuthority & { templateBundleDigest: string; teamPolicyDigest: string };
@@ -230,6 +231,20 @@ export class TeamProposalStore {
       owner_id: context.ownerId,
       work_order_digest: order.digest,
     };
+    const parentLimits = teamParentLimits(order.body.request);
+    await client.query(
+      "INSERT INTO cos.mission_team_root_reservations(scope_id,team_id,max_attempts,max_turns,max_tool_calls,state) VALUES($1,$2,$3,$4,$5,'reserved')",
+      [context.scopeId, change.team_id, parentLimits.attempt, parentLimits.model, parentLimits.tool],
+    );
+    await client.query(
+      "INSERT INTO cos.mission_team_root_budget_events(scope_id,team_id,id,kind,body) VALUES($1,$2,$3,'reserved',$4)",
+      [
+        context.scopeId,
+        change.team_id,
+        'team-parent-reserve-' + change.team_id,
+        JSON.stringify({ limits: parentLimits, ...provenance }),
+      ],
+    );
     for (const id of teamOrder(order.body.request)!) {
       const step = order.body.request.steps.find((s) => s.step_id === id)!;
       await client.query(

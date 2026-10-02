@@ -6,7 +6,7 @@ import { validMissionReview, checkMissionReview } from '../contracts/mission-rev
 import type { MissionReviewLease, MissionReviewIdentity } from './review-runs.js';
 import type { TeamRunStore } from './team-run-store.js';
 import type { TeamReviewSnapshot } from './team-snapshot.js';
-import { teamStepUsage } from './team-budget.js';
+import { teamBudget } from './team-budget.js';
 import { settleTeamCredits } from './team-settlement.js';
 import { recordResearchExposure } from './exposure.js';
 import { DatabaseUnavailable } from '../store/client.js';
@@ -265,16 +265,10 @@ export class TeamFinalReviews {
     ).rows[0].deadline.toISOString() as string;
   }
   private async capacity(client: PoolClient, context: KnowledgeContext, current: TeamReviewSnapshot) {
-    let model = 0,
-      tool = 0;
-    for (const step of current.order.body.request.steps) {
-      const usage = await teamStepUsage(client, context.scopeId, current.root.id, step.step_id);
-      if (usage.model > step.limits.max_turns || usage.tool > step.limits.max_tool_calls)
-        return { model: -1, tool: -1 };
-      model += step.limits.max_turns - usage.model;
-      tool += step.limits.max_tool_calls - usage.tool;
-    }
-    return { model, tool };
+    const budget = await teamBudget(client, context.scopeId, current.root.id);
+    if (!budget || budget.parent.state !== 'reserved' || budget.steps.some((s) => s.state !== 'reserved'))
+      return { model: -1, tool: -1 };
+    return { model: budget.limits.model - budget.usage.model, tool: budget.limits.tool - budget.usage.tool };
   }
   private async save(client: PoolClient, context: KnowledgeContext, teamId: string, value: Grant) {
     await client.query(
@@ -438,14 +432,21 @@ export class TeamFinalReviews {
           ? { status: 'ok', reserved: false }
           : { status: 'conflict' };
       let stepId: string | null = null;
-      for (const step of current.order.body.request.steps) {
-        const usage = await teamStepUsage(client, context.scopeId, teamId, step.step_id);
-        if (usage[kind] < (kind === 'model' ? step.limits.max_turns : step.limits.max_tool_calls)) {
+      const budget = await teamBudget(client, context.scopeId, teamId);
+      if (
+        !budget ||
+        budget.parent.state !== 'reserved' ||
+        budget.steps.some((s) => s.state !== 'reserved') ||
+        budget.usage[kind] >= budget.limits[kind]
+      )
+        return { status: 'denied' };
+      for (const step of budget.steps) {
+        if (step.usage[kind] < step.limits[kind]) {
           stepId = step.step_id;
           break;
         }
       }
-      if (!stepId) return { status: 'denied' };
+      if (stepId === null && budget.parent.usage[kind] >= budget.parent.limits[kind]) return { status: 'denied' };
       await client.query(
         'INSERT INTO cos.mission_team_calls(scope_id,team_id,step_id,call_id,generation,kind,payload_digest,provenance) VALUES($1,$2,$3,$4,$5,$6,$7,$8)',
         [
