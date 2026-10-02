@@ -5,6 +5,7 @@ import type { Session } from './types.js';
 import type { InboundEvent } from './channels/adapter.js';
 import type { Binding } from './modules/chief-of-staff/bridge/identity.js';
 import { hasCosMissionBoundary } from './cos-mission-boundary.js';
+import { missionExecutionReady, prepareMissionLaunch } from './cos-mission-execution.js';
 
 export type CosBinding = Binding & { sessionId: string };
 export function hasCosStateBoundary(agentGroupId: string, sessionId: string): boolean {
@@ -148,12 +149,14 @@ export async function permitCosOutbound(session: Session, message: Outbound): Pr
   }
 }
 export function permitCosExecution(session: Session): boolean {
+  if (hasCosMissionBoundary(session.agent_group_id, session.id, getDb())) return missionExecutionReady(session);
   const boundary = cosBoundary(session);
   if (!boundary.restricted) return true;
   return !!boundary.binding && !boundary.paused && !!hooks?.executionReady(boundary.binding);
 }
 /** Only ordinary identities may use the generic launcher. Recheck after every asynchronous preparation. */
 export async function prepareCosLaunch(session: Session): Promise<CosLaunch | null> {
+  if (hasCosMissionBoundary(session.agent_group_id, session.id, getDb())) return prepareMissionLaunch(session);
   const boundary = cosBoundary(session);
   if (!boundary.restricted) return null;
   const currentHooks = hooks;
