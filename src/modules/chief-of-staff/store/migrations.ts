@@ -14,8 +14,9 @@ import { MISSION_RESULT_SCHEMA, MISSION_RESULT_CHECKSUM } from './mission-result
 import { MISSION_REVIEW_SCHEMA, MISSION_REVIEW_CHECKSUM } from './mission-review-schema.js';
 import { TEAM_SCHEMA, TEAM_CHECKSUM } from './team-schema.js';
 import { TEAM_LINEAGE_SCHEMA, TEAM_LINEAGE_CHECKSUM } from './team-lineage-schema.js';
+import { TEAM_FINAL_REVIEW_SCHEMA, TEAM_FINAL_REVIEW_CHECKSUM } from './team-final-review-schema.js';
 export { INITIAL_SCHEMA, INITIAL_CHECKSUM } from './schema-definition.js';
-export const SCHEMA_VERSION = 11;
+export const SCHEMA_VERSION = 12;
 export const MIGRATIONS = [
   { version: 1, checksum: INITIAL_CHECKSUM, sql: INITIAL_SCHEMA },
   { version: 2, checksum: KNOWLEDGE_CHECKSUM, sql: KNOWLEDGE_SCHEMA },
@@ -28,6 +29,7 @@ export const MIGRATIONS = [
   { version: 9, checksum: MISSION_REVIEW_CHECKSUM, sql: MISSION_REVIEW_SCHEMA },
   { version: 10, checksum: TEAM_CHECKSUM, sql: TEAM_SCHEMA },
   { version: 11, checksum: TEAM_LINEAGE_CHECKSUM, sql: TEAM_LINEAGE_SCHEMA },
+  { version: 12, checksum: TEAM_FINAL_REVIEW_CHECKSUM, sql: TEAM_FINAL_REVIEW_SCHEMA },
 ] as const;
 const LOCK_ID = 73101001;
 const identifier = (value: string) => '"' + value.replaceAll('"', '""') + '"';
@@ -99,7 +101,7 @@ export async function migrate(client: pg.Client, runtimeRole: string): Promise<n
       `GRANT SELECT,INSERT,UPDATE,DELETE ON cos.mission_team_roots,cos.mission_team_steps,cos.mission_team_reservations TO ${identifier(runtimeRole)}`,
     );
     const immutableTeams =
-      'cos.mission_team_work_orders,cos.mission_team_dependencies,cos.mission_team_budget_events,cos.mission_team_children,cos.mission_team_reworks';
+      'cos.mission_team_work_orders,cos.mission_team_dependencies,cos.mission_team_budget_events,cos.mission_team_children,cos.mission_team_reworks,cos.mission_team_calls,cos.mission_team_reviews';
     await client.query(`GRANT SELECT,INSERT ON ${immutableTeams} TO ${identifier(runtimeRole)}`);
     await client.query(`REVOKE UPDATE,DELETE,TRUNCATE ON ${immutableTeams} FROM ${identifier(runtimeRole)}`);
     await client.query('COMMIT');

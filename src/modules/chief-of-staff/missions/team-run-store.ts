@@ -13,6 +13,7 @@ import { readVerifiedSubmission } from './submission-reader.js';
 import { validCosMissionIdentity } from '../../../cos-mission-boundary.js';
 import { queueMissionAttempt } from './attempt.js';
 import { teamStepUsage } from './team-budget.js';
+import { settleTeamCredits } from './team-settlement.js';
 import { validTeamReview } from '../contracts/team-review.js';
 import { validTeamRework, type TeamRework } from '../contracts/team-rework.js';
 import { buildTeamReviewSnapshot, type TeamReviewSnapshot } from './team-snapshot.js';
@@ -1059,61 +1060,16 @@ export class TeamRunStore {
           [context.scopeId, teamId],
         );
         if (pending.rowCount) return { status: 'ok', team_id: teamId, state: 'cancelling' };
-        const reservations = (
-          await client.query(
-            `SELECT b.*,s.child_mission_id FROM cos.mission_team_reservations b
-        JOIN cos.mission_team_steps s ON s.scope_id=b.scope_id AND s.team_id=b.team_id AND s.step_id=b.step_id
-        WHERE b.scope_id=$1 AND b.team_id=$2 ORDER BY b.step_id FOR UPDATE OF b`,
-            [context.scopeId, teamId],
-          )
-        ).rows;
-        const prepared = [];
-        for (const reservation of reservations) {
-          if (reservation.state === 'cancelled') continue;
-          if (reservation.state !== 'reserved') return { status: 'denied' };
-          const usage = await teamStepUsage(client, context.scopeId, teamId, reservation.step_id);
-          const unused = {
-            attempt: reservation.max_attempts - usage.attempt,
-            model: reservation.max_turns - usage.model,
-            tool: reservation.max_tool_calls - usage.tool,
-          };
-          if (Object.values(unused).some((n) => !Number.isSafeInteger(n) || n < 0)) return { status: 'denied' };
-          prepared.push({ stepId: reservation.step_id, usage, unused });
-        }
-        for (const { stepId, usage, unused } of prepared) {
-          const body = {
-            generation: root.provenance.cancelled_generation,
-            usage,
-            unused,
-            confirmed_stopped: true,
-            provider_usage: usage.model ? 'uncertain' : 'no_model_calls',
-          };
-          await client.query(
-            "INSERT INTO cos.mission_team_budget_events(scope_id,team_id,step_id,id,kind,body) VALUES($1,$2,$3,$4,'released',$5) ON CONFLICT DO NOTHING",
-            [
-              context.scopeId,
-              teamId,
-              stepId,
-              'team-release-' + digest({ team: teamId, step: stepId }),
-              JSON.stringify(body),
-            ],
-          );
-          if (usage.model)
-            await client.query(
-              "INSERT INTO cos.mission_team_budget_events(scope_id,team_id,step_id,id,kind,body) VALUES($1,$2,$3,$4,'uncertain',$5) ON CONFLICT DO NOTHING",
-              [
-                context.scopeId,
-                teamId,
-                stepId,
-                'team-uncertain-' + digest({ team: teamId, step: stepId }),
-                JSON.stringify({ generation: body.generation, model_reservations: usage.model, billed_tokens: null }),
-              ],
-            );
-          await client.query(
-            "UPDATE cos.mission_team_reservations SET state='cancelled',usage=$4,updated_at=clock_timestamp() WHERE scope_id=$1 AND team_id=$2 AND step_id=$3 AND state='reserved'",
-            [context.scopeId, teamId, stepId, JSON.stringify(body)],
-          );
-        }
+        if (
+          !(await settleTeamCredits(
+            client,
+            context.scopeId,
+            teamId,
+            Number(root.provenance.cancelled_generation),
+            'cancelled',
+          ))
+        )
+          return { status: 'pending', team_id: teamId, state: 'cancelling' };
         await client.query(
           "UPDATE cos.mission_team_roots SET state='cancelled',version=version+1,updated_at=clock_timestamp() WHERE scope_id=$1 AND id=$2 AND state='cancelling'",
           [context.scopeId, teamId],

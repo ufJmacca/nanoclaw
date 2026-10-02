@@ -4,9 +4,10 @@ import type { PoolClient } from 'pg';
 export async function teamStepUsage(client: PoolClient, scopeId: string, teamId: string, stepId: string) {
   const rows = (
     await client.query(
-      `SELECT b.kind,count(*)::int AS n FROM cos.mission_budget_reservations b
+      `SELECT kind,count(*)::int AS n FROM (SELECT b.kind FROM cos.mission_budget_reservations b
     JOIN cos.mission_team_children c ON c.scope_id=b.scope_id AND c.mission_id=b.mission_id
-    WHERE c.scope_id=$1 AND c.team_id=$2 AND c.step_id=$3 GROUP BY b.kind`,
+    WHERE c.scope_id=$1 AND c.team_id=$2 AND c.step_id=$3
+    UNION ALL SELECT kind FROM cos.mission_team_calls WHERE scope_id=$1 AND team_id=$2 AND step_id=$3) usage GROUP BY kind`,
       [scopeId, teamId, stepId],
     )
   ).rows;

@@ -21,6 +21,7 @@ import type { TeamChildWorkOrder } from '../../modules/chief-of-staff/missions/t
 import { RESEARCH_TEMPLATE } from '../../modules/chief-of-staff/missions/work-order.js';
 import { MissionRunStore } from '../../modules/chief-of-staff/missions/run-store.js';
 import { checkMissionReview } from '../../modules/chief-of-staff/contracts/mission-review.js';
+import { TeamFinalReviews } from '../../modules/chief-of-staff/missions/team-final-review.js';
 import type { CosMissionIdentity } from '../../cos-mission-boundary.js';
 import type { MissionDispatchLease } from '../../modules/chief-of-staff/missions/run-store.js';
 
@@ -73,6 +74,8 @@ after(async () => {
     await admin.query('UPDATE cos.sources SET current_revision_id=NULL WHERE scope_id=$1', [scope]);
     for (const table of [
       'mission_team_budget_events',
+      'mission_team_calls',
+      'mission_team_reviews',
       'mission_team_reworks',
       'mission_team_children',
       'mission_team_reservations',
@@ -322,6 +325,8 @@ test('S06-T01 runtime cannot rewrite approved graph or root budget history', asy
     'mission_team_budget_events',
     'mission_team_children',
     'mission_team_reworks',
+    'mission_team_calls',
+    'mission_team_reviews',
   ]) {
     const p = (
       await store.database.pool.query(
@@ -1270,4 +1275,201 @@ test('S06-T04 an approved labelled partial graph permits partial coordinator jud
     null,
   );
   assert.match((captured.limitations as string[]).join('\n'), /Missing required step technical/);
+});
+
+test('S06-T03/T05/T07 final review uses the retained main context, charges root escrow and records one notification intent', async () => {
+  const f = await stoppedAnalyses();
+  await f.teams.advance(context, f.teamId);
+  await finishTeamStep(f, 'synthesis');
+  await finishTeamStep(f, 'review');
+  const initial = await f.teams.reviewSnapshot(context, f.teamId),
+    submissionId = String(initial.submission_id);
+  const final = new TeamFinalReviews(f.teams),
+    main = { ...context, provider: 'codex', generation: authority.contextGeneration };
+  assert.equal((await final.read({ ...main, generation: randomUUID() }, f.teamId, submissionId)).status, 'denied');
+  const claimed = await final.claim(main, f.teamId, submissionId, 'fixture-main-review');
+  assert.equal(claimed.status, 'ok');
+  const identity = claimed.identity as { generation: number; sessionId: string; contextGeneration: string },
+    lease = claimed.lease as { owner: string; fence: number };
+  assert.equal(identity.sessionId, context.sessionId);
+  assert.equal(identity.contextGeneration, authority.contextGeneration);
+  const executing = {
+    ...main,
+    origin: {
+      kind: 'mission_review' as const,
+      runId: f.teamId,
+      generation: identity.generation,
+      submissionId,
+      owner: lease.owner,
+      fence: lease.fence,
+    },
+  };
+  const [a, b] = await Promise.all([
+    final.reserve(executing, f.teamId, submissionId, lease, 'same-model-call', 'model'),
+    final.reserve(executing, f.teamId, submissionId, lease, 'same-model-call', 'model'),
+  ]);
+  assert.equal([a, b].filter((r) => r.status === 'ok' && r.reserved === true).length, 1);
+  assert.ok([a, b].every((r) => r.status === 'ok' || r.status === 'unavailable' || r.status === 'pending'));
+  assert.deepEqual(await final.reserve(executing, f.teamId, submissionId, lease, 'same-model-call', 'model'), {
+    status: 'ok',
+    reserved: false,
+  });
+  assert.equal((await final.reserve(executing, f.teamId, submissionId, lease, 'read-result', 'tool')).status, 'ok');
+  const read = await final.read(executing, f.teamId, submissionId);
+  assert.equal(read.status, 'ok');
+  const mission = read.mission as { version: number },
+    submission = read.submission as { digest: string };
+  const requestId = randomUUID(),
+    review = {
+      mission_id: f.teamId,
+      submission_id: submissionId,
+      result_digest: submission.digest,
+      expected_version: mission.version,
+      decision: 'accept',
+      criteria: [{ id: 'tradeoff', verdict: 'satisfied' }],
+    };
+  assert.equal((await final.review(main, randomUUID(), review)).status, 'denied');
+  assert.equal((await final.reserve(executing, f.teamId, submissionId, lease, 'record-review', 'tool')).status, 'ok');
+  const [x, y] = await Promise.all([
+    final.review(executing, requestId, review),
+    final.review(executing, requestId, review),
+  ]);
+  assert.equal([x, y].filter((r) => r.status === 'ok').length, 1);
+  const receipt = [x, y].find((r) => r.status === 'ok')!;
+  assert.deepEqual(await final.review(executing, requestId, review), receipt);
+  assert.equal(receipt.state, 'completed');
+  assert.equal((await final.review(executing, requestId, { ...review, decision: 'partial' })).status, 'conflict');
+  assert.equal((await final.reserve(executing, f.teamId, submissionId, lease, 'late-model', 'model')).status, 'denied');
+  assert.equal((await rows('mission_team_reviews')).filter((r) => r.team_id === f.teamId).length, 1);
+  const notifications = (await rows('outbox')).filter(
+    (o) => o.kind === 'team_review_notification' && o.payload.team_id === f.teamId,
+  );
+  assert.equal(notifications.length, 1);
+  assert.equal(notifications[0].payload.session_id, context.sessionId);
+  assert.equal(notifications[0].payload.context_generation, authority.contextGeneration);
+  assert.equal((await rows('mission_team_calls')).filter((r) => r.team_id === f.teamId).length, 3);
+  const exposure = (await rows('evidence_refs')).filter(
+    (e) => e.session_id === context.sessionId && e.context_generation === authority.contextGeneration,
+  );
+  assert.ok(exposure.length > 0);
+  assert.equal(
+    (await rows('mission_team_reservations')).filter((r) => r.team_id === f.teamId && r.state !== 'settled').length,
+    0,
+  );
+});
+
+test('S06-T03/PG01 final coordinator turns cannot exceed aggregate original credits', async () => {
+  const f = await stoppedAnalyses();
+  await f.teams.advance(context, f.teamId);
+  await finishTeamStep(f, 'synthesis');
+  await finishTeamStep(f, 'review');
+  const initial = await f.teams.reviewSnapshot(context, f.teamId),
+    submissionId = String(initial.submission_id),
+    final = new TeamFinalReviews(f.teams),
+    main = { ...context, provider: 'codex', generation: authority.contextGeneration };
+  const claimed = await final.claim(main, f.teamId, submissionId, 'fixture-credit-review');
+  assert.equal(claimed.status, 'ok');
+  const identity = claimed.identity as { generation: number },
+    lease = claimed.lease as { owner: string; fence: number };
+  const executing = {
+    ...main,
+    origin: {
+      kind: 'mission_review' as const,
+      runId: f.teamId,
+      generation: identity.generation,
+      submissionId,
+      owner: lease.owner,
+      fence: lease.fence,
+    },
+  };
+  const allocated = (initial.budgets as Array<{ limits: { model: number }; usage: { model: number } }>).reduce(
+    (n, b) => n + b.limits.model - b.usage.model,
+    0,
+  );
+  for (let i = 0; i < allocated; i++)
+    assert.deepEqual(await final.reserve(executing, f.teamId, submissionId, lease, 'turn-' + i, 'model'), {
+      status: 'ok',
+      reserved: true,
+    });
+  assert.equal(
+    (await final.reserve(executing, f.teamId, submissionId, lease, 'excess-turn', 'model')).status,
+    'denied',
+  );
+  assert.deepEqual(await final.reserve(executing, f.teamId, submissionId, lease, 'turn-0', 'model'), {
+    status: 'ok',
+    reserved: false,
+  });
+  const calls = (await rows('mission_team_calls')).filter((r) => r.team_id === f.teamId);
+  assert.equal(calls.length, allocated);
+  const current = await f.teams.reviewSnapshot(context, f.teamId);
+  assert.equal(
+    (current.budgets as Array<{ limits: { model: number }; usage: { model: number } }>).every(
+      (b) => b.limits.model === b.usage.model,
+    ),
+    true,
+  );
+  assert.equal(
+    (
+      await final.reserve(
+        { ...executing, generation: randomUUID() },
+        f.teamId,
+        submissionId,
+        lease,
+        'foreign-generation',
+        'tool',
+      )
+    ).status,
+    'denied',
+  );
+  assert.equal((await f.teams.cancel(context, f.teamId)).status, 'ok');
+  assert.equal((await f.teams.confirmCancellation(context, f.teamId)).status, 'ok');
+  assert.equal(
+    (await final.reserve(executing, f.teamId, submissionId, lease, 'cancelled-call', 'tool')).status,
+    'denied',
+  );
+});
+
+test('S06-T03 a final main-context grant expires on database time without changing the original root deadline', async () => {
+  const f = await stoppedAnalyses();
+  await f.teams.advance(context, f.teamId);
+  await finishTeamStep(f, 'synthesis');
+  await finishTeamStep(f, 'review');
+  const initial = await f.teams.reviewSnapshot(context, f.teamId),
+    submissionId = String(initial.submission_id),
+    final = new TeamFinalReviews(f.teams),
+    main = { ...context, provider: 'codex', generation: authority.contextGeneration };
+  const claimed = await final.claim(main, f.teamId, submissionId, 'fixture-clock-review');
+  assert.equal(claimed.status, 'ok');
+  const identity = claimed.identity as { generation: number },
+    lease = claimed.lease as { owner: string; fence: number },
+    executing = {
+      ...main,
+      origin: {
+        kind: 'mission_review' as const,
+        runId: f.teamId,
+        generation: identity.generation,
+        submissionId,
+        owner: lease.owner,
+        fence: lease.fence,
+      },
+    };
+  assert.equal((await final.authorize(executing, f.teamId, submissionId, lease)).status, 'ok');
+  const remaining = (
+    await admin.query('SELECT GREATEST(0,EXTRACT(EPOCH FROM ($1::timestamptz-clock_timestamp()))*1000)::int AS n', [
+      claimed.deadline_at,
+    ])
+  ).rows[0].n;
+  await delay(remaining + 80); // No transaction or runtime-pool client remains held during this wait.
+  assert.equal((await final.authorize(executing, f.teamId, submissionId, lease)).status, 'denied');
+  assert.equal(
+    (await final.reserve(executing, f.teamId, submissionId, lease, 'expired-model', 'model')).status,
+    'denied',
+  );
+  const root = (await rows('mission_team_work_orders')).find((w) => w.id === f.teamId)!;
+  assert.equal(
+    (await admin.query('SELECT $1::timestamptz>clock_timestamp() AS current', [root.body.deadlineAt])).rows[0].current,
+    true,
+  );
+  assert.equal((await f.teams.cancel(context, f.teamId)).status, 'ok');
+  assert.equal((await f.teams.confirmCancellation(context, f.teamId)).status, 'ok');
 });
