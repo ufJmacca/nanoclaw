@@ -1,8 +1,8 @@
 # Research mission configuration
 
-S05 is still in development. The operator configuration command is implemented;
-production specialist dispatch, the complete demonstration and Pi acceptance
-remain pending. Keep real mission execution disabled until the required confined
+S05 is still in development. Operator configuration and production specialist
+dispatch are implemented; the complete demonstration and Pi acceptance remain
+pending. Keep real mission execution disabled until the required confined
 live-provider smoke test has passed under a current model allowance.
 
 The main CoS remains one NanoClaw AgentGroup with its existing shared conversation.
@@ -62,3 +62,23 @@ scheduled-brief renewal may supply the current generation through its recorded
 consent lineage; an interrupted renewal closes mission admission until recovered.
 The specialist launcher rechecks these pins before launch and on every credential
 or model callback. Actual model invocations still require fresh budget reservations.
+
+## Source deletion and retained specialist data
+
+Approved source deletion tracks every specialist context that received the source,
+including sources the specialist did not cite. The existing `source-purge` command
+now resolves those contexts against the owned mission records before cleaning
+their local data. It runs under the same paused binding, private-membership,
+maintenance and whole-installation quiescence checks as main-context purge.
+
+The command permanently fences each affected attempt, reconciles its stopped
+state, and removes its prepared context, provider history, scratch directories and
+tagged CoS response cache. It preserves native messages, session and allocation
+records, other agents, master credentials and backups. An uncertain stop or
+ownership mismatch leaves deletion unfinished. Interrupted deletion can be retried;
+data recreated after a completed purge is treated as a conflict.
+
+Main-conversation history still requires the existing explicit context recovery
+before its retired generation can be purged. Already-delivered messages, native
+message history, provider disclosures and backup retention are separate boundaries;
+source purge does not claim to retract them.
