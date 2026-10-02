@@ -21,6 +21,7 @@ import { RestrictedExecutionProbe } from './bridge/native-execution.js';
 import { getInstallSlug } from '../../install-slug.js';
 import { sessionDir } from '../../session-manager.js';
 import { createMissionAuthorityResolver } from './missions/authority.js';
+import { createTeamAuthorityResolver } from './missions/team-authority.js';
 import { MissionHost } from './missions/host.js';
 import { createMissionExecution } from './missions/execution.js';
 import { cosMissionIdentities, hasCosMissionBoundary } from '../../cos-mission-boundary.js';
@@ -158,6 +159,7 @@ export function startCosHostModule(assertHostAuthority: () => void): { service: 
   };
   const launcher = createCoordinatorLauncher({ targetRoot, db: getDb(), running });
   const missionAuthority = createMissionAuthorityResolver({ targetRoot, db: getDb(), admitted, assertHostAuthority });
+  const teamAuthority = createTeamAuthorityResolver({ targetRoot, db: getDb(), missionAuthority });
   const facts = guardConversationAccess({
     active: activeBinding,
     facts: transportFacts,
@@ -200,6 +202,7 @@ export function startCosHostModule(assertHostAuthority: () => void): { service: 
         admitted,
         {},
         missionAuthority,
+        teamAuthority,
       ),
   });
   // PostgreSQL availability never holds up unrelated channel startup.

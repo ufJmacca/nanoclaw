@@ -143,3 +143,27 @@ it('honors explicit retrieval and retention settings and rejects malformed setti
   await expect(connectCosHostStore({ COS_KNOWLEDGE_RETENTION_DAYS: '-1' }, roots, () => true)).rejects.toThrow();
   expect(f.connect).not.toHaveBeenCalled();
 });
+it('S06-T01/T05 keeps team admission separate and fences both through the same host admission and pool', async () => {
+  fixture();
+  const roots = { targetRoot: '/state', installationRoot: '/install', dataRoot: '/install/data' };
+  const context = { scopeId: 'scope', ownerId: 'owner', agentGroupId: 'main', sessionId: 'main', ingressId: 'event' };
+  const authority = {
+    bindingDigest: 'a'.repeat(64),
+    delegationDigest: 'b'.repeat(64),
+    contextGeneration: 'retained',
+    provider: { profile: 'codex-subscription/research-v1', model: 'fixture', policyDigest: 'c'.repeat(64) },
+  };
+  const team = { ...authority, templateBundleDigest: 'd'.repeat(64), teamPolicyDigest: 'e'.repeat(64) };
+  const admitted = vi.fn(() => true),
+    resolve = vi.fn(() => authority),
+    resolveTeam = vi.fn(() => team);
+  const store = await connectCosHostStore({}, roots, admitted, {}, resolve, resolveTeam);
+  expect(store.missions.authority?.(context)).toEqual(authority);
+  expect(store.teams.authority?.(context)).toEqual(team);
+  expect(store.teams.knowledge?.database).toBe(store.database);
+  admitted.mockReturnValue(false);
+  expect(store.teams.authority?.(context)).toBeNull();
+  expect(resolveTeam).toHaveBeenCalledTimes(1);
+  const singleOnly = await connectCosHostStore({}, roots, () => true, {}, resolve);
+  expect(singleOnly.teams.authority).toBeUndefined();
+});
