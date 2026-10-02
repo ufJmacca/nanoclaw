@@ -14,7 +14,7 @@ import {
 } from './conversation-ownership.js';
 export type RetainedContext = { sessionId: string; generation: string };
 type Entry = { file: string; stat: fs.Stats };
-function inventory(root: string): Entry[] {
+export function inventoryRetainedTree(root: string): Entry[] {
   const entries: Entry[] = [];
   const visit = (file: string, depth: number) => {
     if (depth > 64 || entries.length >= 100000) throw new Error('unsafe_conversation_purge');
@@ -31,6 +31,26 @@ function inventory(root: string): Entry[] {
   };
   visit(root, 0);
   return entries;
+}
+/** Caller validates the owned root and holds maintenance/quiescence throughout. */
+export function removeRetainedTree(entries: Entry[], guard: () => void): void {
+  for (const entry of [...entries].reverse()) {
+    guard();
+    const now = fs.lstatSync(entry.file);
+    if (
+      now.dev !== entry.stat.dev ||
+      now.ino !== entry.stat.ino ||
+      now.isSymbolicLink() ||
+      now.uid !== process.getuid?.() ||
+      now.mode & 0o022 ||
+      (!now.isDirectory() &&
+        (!now.isFile() || now.nlink !== 1 || now.size !== entry.stat.size || now.mtimeMs !== entry.stat.mtimeMs))
+    )
+      throw new Error('unsafe_conversation_purge');
+    if (now.isDirectory()) fs.rmdirSync(entry.file);
+    else fs.unlinkSync(entry.file);
+    syncConversationDirectory(path.dirname(entry.file));
+  }
 }
 export async function purgeRetiredContexts(o: {
   root: string;
@@ -72,30 +92,14 @@ export async function purgeRetiredContexts(o: {
       present = !!fs.lstatSync(directory, { throwIfNoEntry: false });
     if (owner.state === 'purged' && present) throw new Error('conversation_purge_conflict');
     if (present) privateConversationDirectory(directory);
-    plans.push({ generation, owner, entries: present ? inventory(directory) : [] });
+    plans.push({ generation, owner, entries: present ? inventoryRetainedTree(directory) : [] });
   }
   await o.check();
   guard();
   for (const plan of plans) {
     if (o.db.prepare('SELECT 1 FROM cos_conversation_states WHERE generation=?').get(plan.generation))
       return { status: 'pending', code: 'context_recovery_required' };
-    for (const entry of plan.entries.reverse()) {
-      guard();
-      const now = fs.lstatSync(entry.file);
-      if (
-        now.dev !== entry.stat.dev ||
-        now.ino !== entry.stat.ino ||
-        now.isSymbolicLink() ||
-        now.uid !== process.getuid?.() ||
-        now.mode & 0o022 ||
-        (!now.isDirectory() &&
-          (!now.isFile() || now.nlink !== 1 || now.size !== entry.stat.size || now.mtimeMs !== entry.stat.mtimeMs))
-      )
-        throw new Error('unsafe_conversation_purge');
-      if (now.isDirectory()) fs.rmdirSync(entry.file);
-      else fs.unlinkSync(entry.file);
-      syncConversationDirectory(path.dirname(entry.file));
-    }
+    removeRetainedTree(plan.entries, guard);
     guard();
     // Only host-owned CoS response cache rows carry this generation's provenance.
     // Native messages, approvals and ordinary untagged RPC data are preserved.
