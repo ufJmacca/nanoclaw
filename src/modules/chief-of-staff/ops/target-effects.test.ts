@@ -25,6 +25,103 @@ import { targetBinding } from './target-host.js';
 import { writeAtomic } from './target-state.js';
 import { digest } from '../domain/contracts.js';
 import type { DeploymentReceipt } from './deployment.js';
+it('S05 target activation and legacy rollback refuse permanent child state even when PostgreSQL matches old code', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-child-downgrade-'));
+  const settings = {
+    stateRoot: root + '/state',
+    releaseRoot: root + '/releases',
+    stagingRoot: root + '/staging',
+    sourceRoot: root + '/source',
+    userHome: root,
+    installationRoot: root,
+    dataRoot: root + '/data',
+    service: 'nano.service',
+    hostFingerprint: '1'.repeat(64),
+    databaseFingerprint: '2'.repeat(64),
+  } as DeploymentSettings;
+  fs.mkdirSync(settings.dataRoot, { mode: 0o700 });
+  const db = new Database(settings.dataRoot + '/v2.db');
+  db.exec(
+    "CREATE TABLE cos_mission_boundaries(opaque TEXT); INSERT INTO cos_mission_boundaries VALUES('retained'); CREATE TABLE messages(body TEXT); INSERT INTO messages VALUES('KEEP'); CREATE TABLE host_execution_lease(singleton_id INTEGER,pid INTEGER)",
+  );
+  db.close();
+  vi.spyOn(maintenance, 'maintenanceLeaseForOwner').mockReturnValue({} as any);
+  vi.spyOn(maintenance, 'assertMaintenanceLease').mockReturnValue({} as any);
+  vi.spyOn(migrations, 'migrationStatus').mockResolvedValue(6);
+  const install = vi
+    .spyOn(nativeInstallation, 'installServiceOverride')
+    .mockReturnValue({ file: '/fixture', sha256: 'a'.repeat(64) });
+  calls.database.mockResolvedValue({ end: vi.fn() });
+  calls.service.mockClear();
+  calls.observe.mockResolvedValue({ pid: 0, cwd: root, activeState: 'inactive' });
+  calls.ownedContainers.mockResolvedValue([]);
+  const manifest = fixtureRelease('S04'),
+    receipt = path.join(settings.stateRoot, 'releases', manifest.releaseId);
+  fs.mkdirSync(receipt, { recursive: true, mode: 0o700 });
+  writeAtomic(receipt, 'baseline.json', {
+    version: 1,
+    bindingDigest: digest(targetBinding(settings)),
+    releaseId: null,
+    executable: '/legacy/node',
+    entryPoint: '/legacy/index.js',
+    unit: 'legacy',
+  });
+  try {
+    const effects = createTargetEffects(settings, manifest, digest(manifest));
+    vi.spyOn(effects, 'artifacts').mockResolvedValue();
+    await expect(effects.activate()).rejects.toThrow('specialist_release_required');
+    expect(install).not.toHaveBeenCalled();
+    expect(calls.service).not.toHaveBeenCalled();
+    await expect(effects.rollback(null)).resolves.toBe(false);
+    expect(calls.service).not.toHaveBeenCalled();
+    const prior = { ...fixtureRelease('S04'), releaseId: 'release-prior' };
+    const candidate = { ...manifest, previousReleaseIds: [prior.releaseId] };
+    fs.mkdirSync(path.join(settings.releaseRoot, prior.releaseId), { recursive: true, mode: 0o700 });
+    writeAtomic(path.join(settings.releaseRoot, prior.releaseId), 'release.json', prior);
+    writeAtomic(receipt, 'baseline.json', {
+      version: 1,
+      bindingDigest: digest(targetBinding(settings)),
+      releaseId: prior.releaseId,
+      executable: '/prior/node',
+      entryPoint: '/prior/index.js',
+      unit: 'prior',
+    });
+    await expect(createTargetEffects(settings, candidate, digest(candidate)).rollback(prior.releaseId)).resolves.toBe(
+      false,
+    );
+    expect(calls.service).not.toHaveBeenCalled();
+    const check = new Database(settings.dataRoot + '/v2.db', { readonly: true });
+    expect(check.prepare('SELECT * FROM messages').all()).toEqual([{ body: 'KEEP' }]);
+    expect(check.prepare('SELECT * FROM cos_mission_boundaries').all()).toEqual([{ opaque: 'retained' }]);
+    check.close();
+    // Even if preflight sees no children, a final in-flight allocation before shutdown must block restoration.
+    const mutable = new Database(settings.dataRoot + '/v2.db');
+    mutable.exec('DELETE FROM cos_mission_boundaries');
+    mutable.close();
+    writeAtomic(receipt, 'baseline.json', {
+      version: 1,
+      bindingDigest: digest(targetBinding(settings)),
+      releaseId: null,
+      executable: '/legacy/node',
+      entryPoint: '/legacy/index.js',
+      unit: 'legacy',
+    });
+    calls.service.mockImplementation(async (action) => {
+      if (action === 'stop') {
+        const late = new Database(settings.dataRoot + '/v2.db');
+        late.exec("INSERT INTO cos_mission_boundaries VALUES('late-child')");
+        late.close();
+      }
+    });
+    await expect(effects.rollback(null)).resolves.toBe(false);
+    expect(calls.service.mock.calls).toEqual([['stop']]);
+  } finally {
+    vi.restoreAllMocks();
+    calls.database.mockReset();
+    calls.service.mockReset();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
 it('cannot stop, migrate, activate or roll back without the current Pi-owned maintenance lease', async () => {
   const settings = {
     stateRoot: '/tmp/nonexistent-cos-target-fixture',
@@ -56,6 +153,7 @@ it.each([
   ['S02', 2, 'S01'],
   ['S03', 3, 'S02'],
   ['S04', 6, 'S03'],
+  ['S05', 9, 'S04'],
 ] as const)(
   'activates %s only on schema %s and refuses predecessor rollback after migration',
   async (slice, version, priorSlice) => {
@@ -88,6 +186,10 @@ it.each([
     const previous = { ...fixtureRelease(priorSlice), releaseId: 'release-prior' };
     const manifest = { ...fixtureRelease(slice), previousReleaseIds: [previous.releaseId] };
     const receipt = path.join(settings.stateRoot, 'releases', manifest.releaseId);
+    fs.mkdirSync(settings.dataRoot, { recursive: true, mode: 0o700 });
+    const native = new Database(path.join(settings.dataRoot, 'v2.db'));
+    native.exec('CREATE TABLE agent_groups(id TEXT,folder TEXT,agent_provider TEXT)');
+    native.close();
     try {
       const effects = createTargetEffects(settings, manifest, digest(manifest));
       const artifacts = vi.spyOn(effects, 'artifacts').mockResolvedValue(undefined);
@@ -122,9 +224,6 @@ it.each([
         status: 'healthy',
         manifestDigest: digest(previous),
       });
-      const db = new Database(path.join(settings.dataRoot, 'v2.db'));
-      db.exec('CREATE TABLE agent_groups(id TEXT,folder TEXT,agent_provider TEXT)');
-      db.close();
       calls.service.mockClear();
       await expect(effects.rollback(previous.releaseId)).resolves.toBe(false);
       expect(calls.service).not.toHaveBeenCalled();
@@ -196,6 +295,10 @@ it('includes native history in the actual deployment backup and blocks migration
   const source = path.join(settings.stateRoot, 'conversations', generation);
   fs.mkdirSync(source, { recursive: true, mode: 0o700 });
   fs.writeFileSync(path.join(source, 'history.jsonl'), 'retained history');
+  const specialist = path.join(settings.stateRoot, 'missions', generation, 'provider');
+  fs.mkdirSync(specialist, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(specialist, 'history.jsonl'), 'retained specialist history');
+  fs.writeFileSync(path.join(specialist, 'auth.json'), 'SECRET');
   const db = new Database(path.join(settings.dataRoot, 'v2.db'));
   db.exec('CREATE TABLE sessions(id TEXT, agent_group_id TEXT)');
   db.exec('CREATE TABLE cos_conversation_states(generation TEXT)');
@@ -211,6 +314,13 @@ it('includes native history in the actual deployment backup and blocks migration
     expect(record.conversations.present).toBe(true);
     expect(record.conversations.files).toBe(1);
     expect(record.calendar.present).toBe(false);
+    expect(record.missions.files).toBe(1);
+    const missionCopy = path.join(receipt, 'mission-backup/history/missions', generation, 'provider/history.jsonl');
+    expect(fs.readFileSync(missionCopy, 'utf8')).toBe('retained specialist history');
+    fs.appendFileSync(missionCopy, 'corrupt');
+    await expect(effects.migrate()).rejects.toThrow('mission_backup_conflict');
+    expect(calls.database).not.toHaveBeenCalled();
+    fs.writeFileSync(missionCopy, 'retained specialist history');
     const calendarReceipt = path.join(receipt, 'calendar-backup.json'),
       calendarBytes = fs.readFileSync(calendarReceipt);
     fs.writeFileSync(calendarReceipt, JSON.stringify({ forged: true }));

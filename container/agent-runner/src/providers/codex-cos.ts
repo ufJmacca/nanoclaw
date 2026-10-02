@@ -7,6 +7,7 @@ import { createSubscriptionTurnClient } from './codex-turn-client.js';
 import { stopSubscriptionAppServer, subscriptionProcessEnvironment } from './codex-subscription-check.js';
 import { subscriptionConfig, subscriptionThreadParams } from './codex-subscription-policy.js';
 import { cosDynamicTools, createCosToolDispatch } from './codex-cos-tools.js';
+import { missionDynamicTools, createMissionToolDispatch } from './codex-mission-tools.js';
 import {
   initializeCodexAppServer,
   spawnCodexAppServer,
@@ -21,12 +22,13 @@ import { runOneTurn } from './codex.js';
 import type { AgentProvider, AgentQuery, ProviderEvent, QueryInput } from './types.js';
 
 const PREFIX = 'cos-codex-subscription-v1:';
+const MISSION_PREFIX = 'cos-mission-codex-subscription-v1:';
 const CONTEXT_ERROR = 'cos_context_recovery_required';
-function decode(continuation?: string) {
+function decode(prefix: string, continuation?: string) {
   if (continuation === undefined) return undefined;
-  if (!continuation.startsWith(PREFIX) || !/^[a-zA-Z0-9_-]{1,128}$/.test(continuation.slice(PREFIX.length)))
+  if (!continuation.startsWith(prefix) || !/^[a-zA-Z0-9_-]{1,128}$/.test(continuation.slice(prefix.length)))
     throw new Error(CONTEXT_ERROR);
-  return continuation.slice(PREFIX.length);
+  return continuation.slice(prefix.length);
 }
 function writeConfig(config: string) {
   const directory = '/home/node/.codex';
@@ -58,10 +60,16 @@ export class CosCodexProvider implements AgentProvider {
   readonly supportsNativeSlashCommands = false;
   private readonly config: string;
   private readonly environment: NodeJS.ProcessEnv;
+  private readonly specialist: boolean;
+  private readonly prefix: string;
   constructor(
-    private readonly options: { model: string; proxyUrl: string },
+    private readonly options: { model: string; proxyUrl: string; profile?: 'coordinator' | 'research' },
     private readonly dependencies = runtime,
   ) {
+    if (options.profile !== undefined && options.profile !== 'coordinator' && options.profile !== 'research')
+      throw new Error('cos_provider_profile_unavailable');
+    this.specialist = options.profile === 'research';
+    this.prefix = this.specialist ? MISSION_PREFIX : PREFIX;
     this.config = subscriptionConfig(options.model);
     this.environment = subscriptionProcessEnvironment(options.proxyUrl);
   }
@@ -76,7 +84,7 @@ export class CosCodexProvider implements AgentProvider {
     let ended = false,
       wake: (() => void) | undefined,
       server: AppServer | undefined;
-    const dispatch = createCosToolDispatch();
+    const dispatch = this.specialist ? createMissionToolDispatch() : createCosToolDispatch();
     const cancelled = () => cancellation.signal.aborted;
     const self = this;
     async function* events(): AsyncGenerator<ProviderEvent> {
@@ -86,7 +94,7 @@ export class CosCodexProvider implements AgentProvider {
       try {
         if (cancelled()) return;
         try {
-          threadId = decode(input.continuation);
+          threadId = decode(self.prefix, input.continuation);
         } catch {
           yield {
             type: 'error',
@@ -136,7 +144,7 @@ export class CosCodexProvider implements AgentProvider {
             const params = subscriptionThreadParams(self.options.model, input.systemContext?.instructions ?? '');
             const resumed = await sendCodexRequest(current, threadId ? 'thread/resume' : 'thread/start', {
               ...params,
-              ...(threadId ? { threadId } : { dynamicTools: cosDynamicTools }),
+              ...(threadId ? { threadId } : { dynamicTools: self.specialist ? missionDynamicTools : cosDynamicTools }),
             });
             const returnedId = (resumed.result as { thread?: { id?: string } } | undefined)?.thread?.id;
             if (
@@ -151,7 +159,7 @@ export class CosCodexProvider implements AgentProvider {
             threadId = returnedId;
             if (cancelled()) return;
             // Persist before dispatching any model work; ordinary restarts resume this same ID.
-            yield { type: 'init', continuation: PREFIX + threadId };
+            yield { type: 'init', continuation: self.prefix + threadId };
             yield* runOneTurn(
               current,
               threadId,
@@ -159,7 +167,7 @@ export class CosCodexProvider implements AgentProvider {
               self.options.model,
               undefined,
               input.cwd,
-              (id) => PREFIX + id,
+              (id) => self.prefix + id,
               () => true,
               () => {},
               async () => {

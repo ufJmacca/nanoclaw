@@ -4,6 +4,9 @@ import { CALENDAR_CHECKSUM } from '../store/calendar-schema.js';
 import { WORK_CHECKSUM } from '../store/work-schema.js';
 import { SCHEDULE_CHECKSUM } from '../store/schedule-schema.js';
 import { BRIEF_CHECKSUM } from '../store/brief-schema.js';
+import { MISSION_CHECKSUM } from '../store/mission-schema.js';
+import { MISSION_RESULT_CHECKSUM } from '../store/mission-result-schema.js';
+import { MISSION_REVIEW_CHECKSUM } from '../store/mission-review-schema.js';
 export const REQUIRED_RELEASE_CHECKS = [
   'root',
   'runner',
@@ -16,7 +19,7 @@ export const REQUIRED_RELEASE_CHECKS = [
 export type ReleaseManifest = {
   contract: 'cos-release/v1';
   releaseId: string;
-  slice: 'S01' | 'S02' | 'S03' | 'S04';
+  slice: 'S01' | 'S02' | 'S03' | 'S04' | 'S05';
   platform: 'linux/arm64';
   source: {
     repository: 'ufJmacca/nanoclaw';
@@ -48,7 +51,8 @@ export function validateReleaseManifest(value: unknown): ReleaseManifest {
   if (
     !object(value) ||
     value.contract !== 'cos-release/v1' ||
-    !['S01', 'S02', 'S03', 'S04'].includes(String(value.slice)) ||
+    typeof value.slice !== 'string' ||
+    !['S01', 'S02', 'S03', 'S04', 'S05'].includes(value.slice) ||
     value.platform !== 'linux/arm64' ||
     value.rpc !== 'cos-rpc/v1' ||
     !matches(value.releaseId, /^release-[a-zA-Z0-9_-]{1,120}$/) ||
@@ -69,7 +73,19 @@ export function validateReleaseManifest(value: unknown): ReleaseManifest {
   )
     return reject();
   const postgres = value.postgres,
-    schemaVersion = value.slice === 'S01' ? 1 : value.slice === 'S02' ? 2 : value.slice === 'S03' ? 3 : 6;
+    schemaVersion =
+      value.slice === 'S01' ? 1 : value.slice === 'S02' ? 2 : value.slice === 'S03' ? 3 : value.slice === 'S04' ? 6 : 9;
+  const checksums = [
+    INITIAL_CHECKSUM,
+    KNOWLEDGE_CHECKSUM,
+    CALENDAR_CHECKSUM,
+    WORK_CHECKSUM,
+    SCHEDULE_CHECKSUM,
+    BRIEF_CHECKSUM,
+    MISSION_CHECKSUM,
+    MISSION_RESULT_CHECKSUM,
+    MISSION_REVIEW_CHECKSUM,
+  ];
   if (
     !object(postgres) ||
     !Number.isSafeInteger(postgres.minimum) ||
@@ -82,22 +98,9 @@ export function validateReleaseManifest(value: unknown): ReleaseManifest {
     Number(value.sqlite.minimum) > Number(value.sqlite.maximum) ||
     !Array.isArray(value.migrations) ||
     value.migrations.length !== schemaVersion ||
-    !object(value.migrations[0]) ||
-    value.migrations[0].version !== 1 ||
-    value.migrations[0].checksum !== INITIAL_CHECKSUM ||
-    (schemaVersion >= 2 &&
-      (!object(value.migrations[1]) ||
-        value.migrations[1].version !== 2 ||
-        value.migrations[1].checksum !== KNOWLEDGE_CHECKSUM)) ||
-    (schemaVersion >= 3 &&
-      (!object(value.migrations[2]) ||
-        value.migrations[2].version !== 3 ||
-        value.migrations[2].checksum !== CALENDAR_CHECKSUM)) ||
-    (schemaVersion === 6 &&
-      [WORK_CHECKSUM, SCHEDULE_CHECKSUM, BRIEF_CHECKSUM].some((checksum, i) => {
-        const migration = (value.migrations as unknown[])[i + 3];
-        return !object(migration) || migration.version !== i + 4 || migration.checksum !== checksum;
-      })) ||
+    value.migrations.some(
+      (migration, i) => !object(migration) || migration.version !== i + 1 || migration.checksum !== checksums[i],
+    ) ||
     !Array.isArray(value.previousReleaseIds) ||
     value.previousReleaseIds.length > 20 ||
     new Set(value.previousReleaseIds).size !== value.previousReleaseIds.length ||

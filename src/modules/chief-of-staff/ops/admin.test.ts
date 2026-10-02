@@ -1,9 +1,32 @@
 import { describe, it, expect, vi } from 'vitest';
 import { parseAdminArguments, adminStatus, safeAdminError } from './admin.js';
+it.each([
+  'specialist_release_required',
+  'unsafe_mission_purge',
+  'mission_purge_conflict',
+  'mission_purge_authority_required',
+])('reports %s without exposing appended private diagnostics', (code) => {
+  expect(safeAdminError(new Error(code))).toBe(code);
+  expect(safeAdminError(new Error(code + ': PRIVATE_CANARY'))).toBe('unreachable');
+});
 import { SCHEMA_VERSION } from '../store/migrations.js';
 import { DatabasePreflightError } from '../store/preflight.js';
 import { DatabaseConfigurationError } from '../store/config.js';
 describe('S01 owner administration', () => {
+  it('routes exact mission configuration through owner administration', () => {
+    const requestId = '11111111-1111-4111-8111-111111111111';
+    expect(
+      parseAdminArguments([
+        'mission-configure',
+        '--scope',
+        'fixture',
+        '--request-id',
+        requestId,
+        '--manifest',
+        '/private/mission.json',
+      ]),
+    ).toEqual({ command: 'mission-configure', scopeId: 'fixture', requestId, manifestFile: '/private/mission.json' });
+  });
   it('requires a private policy path for activation and stable identities for explicit resume', () => {
     expect(parseAdminArguments(['model-activate', '--scope', 'fixture', '--policy', '/private/fixture.json'])).toEqual({
       command: 'model-activate',

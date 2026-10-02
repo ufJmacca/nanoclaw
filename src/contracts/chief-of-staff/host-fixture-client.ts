@@ -15,7 +15,7 @@ export class HostFixture {
     const selected = selectedFixtureEnvironment(process.env, false);
     this.process = fork(fileURLToPath(new URL('./host-fixture-worker.' + extension, import.meta.url)), [], {
       env: { ...safeHostEnvironment('docker'), ...selected, COS_FIXTURE_HOST_PROCESS: 'S01' },
-      execArgv: extension === 'ts' ? ['--import', 'tsx'] : [],
+      execArgv: extension === 'ts' ? ['--import', import.meta.resolve('tsx')] : [],
       stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
     });
     this.process.stdout?.resume();
@@ -29,7 +29,15 @@ export class HostFixture {
       if (!waiter) return;
       clearTimeout(waiter.timer);
       this.pending.delete(message.id);
-      if (message.error) waiter.reject(new Error('fixture_host_command_failed'));
+      if (message.error)
+        waiter.reject(
+          new Error(
+            'fixture_host_command_failed:' +
+              (typeof message.reason === 'string' && /^[a-zA-Z0-9_]{1,100}$/.test(message.reason)
+                ? message.reason
+                : 'unavailable'),
+          ),
+        );
       else waiter.resolve(message.value);
     });
     this.process.on('exit', () => this.fail());

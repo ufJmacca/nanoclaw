@@ -9,8 +9,11 @@ import { CALENDAR_SCHEMA, CALENDAR_CHECKSUM } from './calendar-schema.js';
 import { WORK_SCHEMA, WORK_CHECKSUM } from './work-schema.js';
 import { SCHEDULE_SCHEMA, SCHEDULE_CHECKSUM } from './schedule-schema.js';
 import { BRIEF_SCHEMA, BRIEF_CHECKSUM } from './brief-schema.js';
+import { MISSION_SCHEMA, MISSION_CHECKSUM } from './mission-schema.js';
+import { MISSION_RESULT_SCHEMA, MISSION_RESULT_CHECKSUM } from './mission-result-schema.js';
+import { MISSION_REVIEW_SCHEMA, MISSION_REVIEW_CHECKSUM } from './mission-review-schema.js';
 export { INITIAL_SCHEMA, INITIAL_CHECKSUM } from './schema-definition.js';
-export const SCHEMA_VERSION = 6;
+export const SCHEMA_VERSION = 9;
 export const MIGRATIONS = [
   { version: 1, checksum: INITIAL_CHECKSUM, sql: INITIAL_SCHEMA },
   { version: 2, checksum: KNOWLEDGE_CHECKSUM, sql: KNOWLEDGE_SCHEMA },
@@ -18,6 +21,9 @@ export const MIGRATIONS = [
   { version: 4, checksum: WORK_CHECKSUM, sql: WORK_SCHEMA },
   { version: 5, checksum: SCHEDULE_CHECKSUM, sql: SCHEDULE_SCHEMA },
   { version: 6, checksum: BRIEF_CHECKSUM, sql: BRIEF_SCHEMA },
+  { version: 7, checksum: MISSION_CHECKSUM, sql: MISSION_SCHEMA },
+  { version: 8, checksum: MISSION_RESULT_CHECKSUM, sql: MISSION_RESULT_SCHEMA },
+  { version: 9, checksum: MISSION_REVIEW_CHECKSUM, sql: MISSION_REVIEW_SCHEMA },
 ] as const;
 const LOCK_ID = 73101001;
 const identifier = (value: string) => '"' + value.replaceAll('"', '""') + '"';
@@ -74,6 +80,17 @@ export async function migrate(client: pg.Client, runtimeRole: string): Promise<n
     );
     await client.query(`GRANT SELECT,INSERT ON cos.brief_call_reservations TO ${identifier(runtimeRole)}`);
     await client.query(`REVOKE UPDATE,DELETE,TRUNCATE ON cos.brief_call_reservations FROM ${identifier(runtimeRole)}`);
+    await client.query(`GRANT SELECT ON cos.mission_template_versions TO ${identifier(runtimeRole)}`);
+    await client.query(
+      `REVOKE INSERT,UPDATE,DELETE,TRUNCATE ON cos.mission_template_versions FROM ${identifier(runtimeRole)}`,
+    );
+    await client.query(
+      `GRANT SELECT,INSERT,UPDATE,DELETE ON cos.missions,cos.mission_attempts TO ${identifier(runtimeRole)}`,
+    );
+    const immutableMissions =
+      'cos.mission_context_manifests,cos.mission_work_orders,cos.mission_budget_reservations,cos.mission_result_submissions,cos.mission_reviews';
+    await client.query(`GRANT SELECT,INSERT ON ${immutableMissions} TO ${identifier(runtimeRole)}`);
+    await client.query(`REVOKE UPDATE,DELETE,TRUNCATE ON ${immutableMissions} FROM ${identifier(runtimeRole)}`);
     await client.query('COMMIT');
     return SCHEMA_VERSION;
   } catch (error) {

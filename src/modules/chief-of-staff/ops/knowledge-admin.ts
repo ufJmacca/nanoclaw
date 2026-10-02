@@ -3,6 +3,8 @@ import path from 'node:path';
 import fs from 'node:fs';
 import type Database from 'better-sqlite3';
 import { purgeRetiredContexts } from './conversation-purge.js';
+import { purgeMissionContexts } from './mission-purge.js';
+import { validCosMissionIdentity, type CosMissionIdentity } from '../../../cos-mission-boundary.js';
 import { randomUUID } from 'node:crypto';
 import type { CosBinding } from '../../../cos-boundary.js';
 import type { ImportSource, InventoryPage } from '../knowledge/store.js';
@@ -146,12 +148,56 @@ export async function runKnowledgeAdmin(options: {
       ? {
           purgeContexts: async (job) => {
             if (job.scopeId !== binding.scopeId || !options.inbound) throw new Error('context_binding_changed');
+            if (!Array.isArray(job.contexts) || job.contexts.length > 1000) throw new Error('unsafe_mission_purge');
+            const main = job.contexts.filter((c) => c.sessionId === binding.sessionId),
+              identities: CosMissionIdentity[] = [];
+            const origin = {
+              scopeId: binding.scopeId,
+              ownerId: binding.ownerId,
+              agentGroupId: binding.agentGroupId,
+              sessionId: binding.sessionId,
+              ingressId: 'host-retention',
+            };
+            for (const context of job.contexts.filter((c) => c.sessionId !== binding.sessionId)) {
+              await options.check();
+              const result = await store.missionRuns.retainedAttempt(origin, context.sessionId, context.generation);
+              if (result.status !== 'ok') return result;
+              const identity = result.identity;
+              if (
+                !validCosMissionIdentity(identity) ||
+                identity.scopeId !== binding.scopeId ||
+                identity.sessionId !== context.sessionId ||
+                identity.attemptId !== context.generation
+              )
+                throw new Error('unsafe_mission_purge');
+              identities.push(identity);
+            }
+            if (identities.length) {
+              const children = await purgeMissionContexts({
+                root: options.roots.targetRoot,
+                dataRoot: options.roots.dataRoot,
+                db: options.db,
+                binding,
+                identities,
+                check: options.check,
+                assertAuthority: options.assertAuthority,
+                retire: async (identity) => {
+                  await options.check();
+                  const failed = await store.missionRuns.fail(identity, 'admission_denied');
+                  if (!['ok', 'denied'].includes(failed.status)) return failed;
+                  await options.check();
+                  return store.missionRuns.confirmStopped(identity);
+                },
+              });
+              if (children.status !== 'ok') return children;
+            }
+            if (!main.length) return { status: 'ok', generations: 0, attempts: identities.length };
             return purgeRetiredContexts({
               root: options.roots.targetRoot,
               db: options.db,
               inbound: options.inbound,
               binding,
-              contexts: job.contexts,
+              contexts: main,
               check: options.check,
               assertAuthority: options.assertAuthority,
             });

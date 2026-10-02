@@ -2,6 +2,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { getInstallSlug } from '../../../install-slug.js';
+import { digest } from '../domain/contracts.js';
+import { validMissionRuntimeConfig, type MissionRuntimeBinding } from '../contracts/mission-runtime.js';
+import { researchRuntimeFiles } from '../missions/runtime-files.js';
 export type RestrictedLaunchInput = {
   image: string;
   sessionDirectory: string;
@@ -9,8 +12,9 @@ export type RestrictedLaunchInput = {
   gatewaySocket: string;
   uid: number;
   gid: number;
-  entry: 'coordinator' | 'mcp';
+  entry: 'coordinator' | 'mcp' | 'research';
   subscription?: { providerDirectory: string; credentialSocket: string; turnSocket: string; contextGeneration: string };
+  research?: { contextDirectory: string; binding: MissionRuntimeBinding };
 };
 function ownedPath(file: string, kind: 'directory' | 'file' | 'socket'): void {
   if (!path.isAbsolute(file) || path.resolve(file) !== file || /[,\r\n\0]/.test(file) || fs.realpathSync(file) !== file)
@@ -23,11 +27,25 @@ function ownedPath(file: string, kind: 'directory' | 'file' | 'socket'): void {
   )
     throw new Error('unsafe_restricted_mount');
 }
-function restrictedConfiguration(file: string, subscription?: RestrictedLaunchInput['subscription']): void {
+function restrictedConfiguration(
+  file: string,
+  subscription?: RestrictedLaunchInput['subscription'],
+  research?: RestrictedLaunchInput['research'],
+): string[] {
   const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
   try {
     if (fs.fstatSync(fd).size > 4096) throw new Error('invalid_restricted_config');
     const config = JSON.parse(fs.readFileSync(fd, 'utf8'));
+    if (research) {
+      if (
+        !subscription ||
+        !validMissionRuntimeConfig(config) ||
+        config.contextGeneration !== subscription.contextGeneration ||
+        digest(config.mission) !== digest(research.binding)
+      )
+        throw new Error('invalid_restricted_config');
+      return researchRuntimeFiles(research.contextDirectory, research.binding, config.model);
+    }
     if (
       !config ||
       Array.isArray(config) ||
@@ -61,6 +79,7 @@ function restrictedConfiguration(file: string, subscription?: RestrictedLaunchIn
       )
     )
       throw new Error('invalid_restricted_config');
+    return [];
   } finally {
     fs.closeSync(fd);
   }
@@ -69,7 +88,8 @@ function restrictedConfiguration(file: string, subscription?: RestrictedLaunchIn
 export function restrictedLaunch(input: RestrictedLaunchInput): { containerName: string; args: string[] } {
   if (
     !/^sha256:[a-f0-9]{64}$/.test(input.image) ||
-    !['coordinator', 'mcp'].includes(input.entry) ||
+    !['coordinator', 'mcp', 'research'].includes(input.entry) ||
+    (input.entry === 'research' ? !input.research || !input.subscription : input.research !== undefined) ||
     !Number.isSafeInteger(input.uid) ||
     input.uid <= 0 ||
     !Number.isSafeInteger(input.gid) ||
@@ -88,14 +108,23 @@ export function restrictedLaunch(input: RestrictedLaunchInput): { containerName:
   ownedPath(input.gatewaySocket, 'socket');
   for (const file of [input.configurationFile, input.gatewaySocket])
     if (file.startsWith(input.sessionDirectory + '/')) throw new Error('host_control_must_be_separate');
-  restrictedConfiguration(input.configurationFile, input.subscription);
+  if (input.research) {
+    const context = input.research.contextDirectory;
+    const overlaps = (left: string, right: string) =>
+      left === right || left.startsWith(right + '/') || right.startsWith(left + '/');
+    if (overlaps(context, input.sessionDirectory) || overlaps(context, input.subscription!.providerDirectory))
+      throw new Error('unsafe_restricted_mount');
+  }
+  const researchFiles = restrictedConfiguration(input.configurationFile, input.subscription, input.research);
   if (input.subscription) {
-    if (input.entry !== 'coordinator') throw new Error('invalid_restricted_profile');
+    if (input.entry !== 'coordinator' && input.entry !== 'research') throw new Error('invalid_restricted_profile');
     const native = input.subscription;
     ownedPath(native.providerDirectory, 'directory');
     if (
       (fs.statSync(native.providerDirectory).mode & 0o777) !== 0o700 ||
-      native.providerDirectory.startsWith(input.sessionDirectory + '/')
+      native.providerDirectory === input.sessionDirectory ||
+      native.providerDirectory.startsWith(input.sessionDirectory + '/') ||
+      input.sessionDirectory.startsWith(native.providerDirectory + '/')
     )
       throw new Error('unsafe_restricted_mount');
     for (const socket of [native.credentialSocket, native.turnSocket]) {
@@ -107,6 +136,7 @@ export function restrictedLaunch(input: RestrictedLaunchInput): { containerName:
   if (!fs.existsSync(agent)) fs.mkdirSync(agent, { mode: 0o700 });
   ownedPath(agent, 'directory');
   const containerName = 'nanoclaw-cos-' + randomUUID();
+  const protocol = input.entry === 'research' ? 'cos-mission-rpc/v1' : 'cos-rpc/v1';
   return {
     containerName,
     args: [
@@ -116,7 +146,7 @@ export function restrictedLaunch(input: RestrictedLaunchInput): { containerName:
       '--label',
       'nanoclaw-install=' + getInstallSlug(process.cwd()),
       '--label',
-      'nanoclaw.cos-protocol=cos-rpc/v1',
+      'nanoclaw.cos-protocol=' + protocol,
       '--name',
       containerName,
       '--network=none',
@@ -134,7 +164,7 @@ export function restrictedLaunch(input: RestrictedLaunchInput): { containerName:
       '-e',
       'HOME=/home/node',
       '-e',
-      'NANOCLAW_COS_PROTOCOL=cos-rpc/v1',
+      'NANOCLAW_COS_PROTOCOL=' + protocol,
       '--mount',
       `type=bind,src=${input.sessionDirectory},dst=/workspace`,
       '--mount',
@@ -153,6 +183,10 @@ export function restrictedLaunch(input: RestrictedLaunchInput): { containerName:
             `type=bind,src=${input.subscription.turnSocket},dst=/run/cos/turn.sock,readonly`,
           ]
         : []),
+      ...researchFiles.flatMap((file) => [
+        '--mount',
+        `type=bind,src=${file},dst=/run/cos/mission/${path.basename(file)},readonly`,
+      ]),
       '-w',
       '/workspace/agent',
       '--entrypoint',
@@ -161,7 +195,11 @@ export function restrictedLaunch(input: RestrictedLaunchInput): { containerName:
       input.image,
       '--',
       'bun',
-      input.entry === 'mcp' ? '/app/src/cos-mcp.ts' : '/app/src/cos-runner.ts',
+      input.entry === 'mcp'
+        ? '/app/src/cos-mcp.ts'
+        : input.entry === 'research'
+          ? '/app/src/cos-mission-runner.ts'
+          : '/app/src/cos-runner.ts',
     ],
   };
 }

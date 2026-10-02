@@ -27,11 +27,110 @@ function fixture(allowed = true) {
     propose: vi.fn(),
     readWork: vi.fn(),
     status: vi.fn(),
+    requestMission: vi.fn().mockResolvedValue({
+      status: 'ok',
+      mission_id: 'mission',
+      proposal_id: 'proposal',
+      confirmation_token: 'PRIVATE_APPROVAL',
+    }),
+    missionRuns: { inspect: vi.fn().mockResolvedValue({ status: 'ok', mission: { id: 'mission', state: 'running' } }) },
   };
   const resolveContext = vi.fn().mockResolvedValue(allowed ? context : null);
   const handler = createRpcHandler({ resolveContext, store: store as unknown as PriorityStore });
   return { db, handler, store, resolveContext };
 }
+it('S05 routes coordinator mission controls through owner context and keeps approvals out of model results', async () => {
+  const f = fixture();
+  const cancelMission = vi.fn().mockResolvedValue({ status: 'ok', state: 'cancelling' });
+  const handler = createRpcHandler({
+    resolveContext: f.resolveContext,
+    store: f.store as unknown as PriorityStore,
+    cancelMission,
+  });
+  const limits = {
+    max_attempts: 2,
+    max_turns: 4,
+    max_tool_calls: 24,
+    max_concurrent_workers: 1,
+    wall_seconds: 600,
+    context_bytes: 32768,
+    result_bytes: 8192,
+  };
+  const mission = {
+    question: 'Compare notes',
+    goal_id: null,
+    project_id: null,
+    sources: [{ source_id: 'note', revision_id: 'revision' }],
+    acceptance_criteria: [{ id: 'comparison', description: 'Compare costs.' }],
+    limits,
+  };
+  for (const [method, params] of [
+    ['cos_mission_request', { request: mission }],
+    ['cos_mission_get', { mission_id: 'mission' }],
+    ['cos_mission_cancel', { mission_id: 'mission' }],
+  ] as const)
+    await handler(
+      {
+        action: 'cos_rpc',
+        delivery_id: '22222222-2222-4222-8222-222222222222',
+        request: { ...request, method, params },
+      },
+      {} as Session,
+      f.db,
+    );
+  expect(f.store.requestMission).toHaveBeenCalledWith(
+    expect.objectContaining({ scopeId: 'fixture', ownerId: 'owner' }),
+    request.request_id,
+    mission,
+  );
+  expect(f.store.missionRuns.inspect).toHaveBeenCalledWith(
+    expect.objectContaining({ sessionId: 'session' }),
+    'mission',
+  );
+  expect(cancelMission).toHaveBeenCalledWith(expect.objectContaining({ ownerId: 'owner' }), 'mission');
+  expect(JSON.stringify(f.db.prepare('SELECT response FROM cos_rpc_responses').all())).not.toContain(
+    'PRIVATE_APPROVAL',
+  );
+});
+it('S05 scheduled runs cannot request or cancel owner missions and absent stop integration denies cancellation', async () => {
+  const f = fixture();
+  const cancelMission = vi.fn().mockResolvedValue({ status: 'ok' });
+  f.resolveContext.mockResolvedValue({
+    scopeId: 'fixture',
+    ownerId: 'owner',
+    sessionId: 'session',
+    agentGroupId: 'group',
+    ingressId: 'scheduled',
+    origin: { kind: 'schedule', runId: 'run', generation: 1 },
+  });
+  const handler = createRpcHandler({
+    resolveContext: f.resolveContext,
+    store: f.store as unknown as PriorityStore,
+    cancelMission,
+    reserveTool: async () => ({ status: 'ok' }),
+  });
+  const content = {
+    action: 'cos_rpc',
+    delivery_id: '22222222-2222-4222-8222-222222222222',
+    request: { ...request, method: 'cos_mission_cancel', params: { mission_id: 'mission' } },
+  };
+  await handler(content, {} as Session, f.db);
+  expect(cancelMission).not.toHaveBeenCalled();
+  expect(
+    JSON.parse((f.db.prepare('SELECT response FROM cos_rpc_responses').get() as { response: string }).response).status,
+  ).toBe('denied');
+  f.resolveContext.mockResolvedValue({
+    scopeId: 'fixture',
+    ownerId: 'owner',
+    sessionId: 'session',
+    agentGroupId: 'group',
+    ingressId: 'owner',
+  });
+  await f.handler(content, {} as Session, f.db);
+  expect(
+    JSON.parse((f.db.prepare('SELECT response FROM cos_rpc_responses').get() as { response: string }).response).status,
+  ).toBe('denied');
+});
 afterEach(() => {
   for (const db of databases.splice(0)) db.close();
 });

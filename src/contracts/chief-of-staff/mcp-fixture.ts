@@ -32,6 +32,9 @@ export class McpFixture {
       if (relative.startsWith('..') || path.isAbsolute(relative)) throw new Error('Fixture path outside repository');
       return path.join(hostRepository, relative);
     };
+    const sourceRoot = process.env.COS_FIXTURE_SOURCE_ROOT ?? hostRepository;
+    if (!path.isAbsolute(sourceRoot) || path.resolve(sourceRoot) !== sourceRoot || /[\r\n\0,]/.test(sourceRoot))
+      throw Error('invalid_fixture_source_root');
     this.child = spawn(
       'docker',
       launch?.args ?? [
@@ -59,7 +62,7 @@ export class McpFixture {
         ...(dependenciesVolume
           ? [
               '--mount',
-              `type=bind,src=${hostPath(path.join(repository, 'container/agent-runner/src'))},dst=/app/src,readonly`,
+              `type=bind,src=${path.join(sourceRoot, 'container/agent-runner/src')},dst=/app/src,readonly`,
               '--mount',
               `type=volume,src=${dependenciesVolume},dst=/app/node_modules,readonly`,
             ]

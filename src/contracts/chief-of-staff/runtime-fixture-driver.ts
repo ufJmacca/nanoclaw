@@ -15,6 +15,8 @@ import { databaseFingerprint } from '../../modules/chief-of-staff/ops/target-ide
 import { connectChecked } from '../../modules/chief-of-staff/store/preflight.js';
 import { parseDatabaseConfig } from '../../modules/chief-of-staff/store/config.js';
 import { guardedFixtureOperation, type FixtureRunReceipt } from './guarded-fixture-operation.js';
+import { stopFixtureWorkers } from './fixture-workers.js';
+import { sourceFixtureEnvironment, validatePreparedFixtureSource } from './source-fixture.js';
 import { startFixtureProcess } from './fixture-process.js';
 
 export type RuntimeFixtureRequest = {
@@ -23,7 +25,7 @@ export type RuntimeFixtureRequest = {
   execution: 'source' | 'packaged';
   mode: 'slice' | 'demo';
   /** Absent only in historical S01 requests; never normalize their replay identity. */
-  slice?: 'S01' | 'S02' | 'S03' | 'S04';
+  slice?: 'S01' | 'S02' | 'S03' | 'S04' | 'S05';
   sourceCommit: string;
   sourceTree: string;
   hostImage: string;
@@ -60,7 +62,7 @@ export function validateRuntimeFixtureRequest(value: unknown): RuntimeFixtureReq
     !/^[a-zA-Z0-9_-]{1,100}$/.test(request.owner ?? '') ||
     !['source', 'packaged'].includes(request.execution) ||
     !['slice', 'demo'].includes(request.mode) ||
-    (explicitSlice && !['S01', 'S02', 'S03', 'S04'].includes(request.slice ?? '')) ||
+    (explicitSlice && !['S01', 'S02', 'S03', 'S04', 'S05'].includes(request.slice ?? '')) ||
     ![request.sourceCommit, request.sourceTree].every((v) => /^[a-f0-9]{40}$/.test(v ?? '')) ||
     ![request.hostImage, request.workerImage].every((v) => /^sha256:[a-f0-9]{64}$/.test(v ?? '')) ||
     ![request.databaseFingerprint, request.bindingDigest].every((v) => /^[a-f0-9]{64}$/.test(v ?? '')) ||
@@ -151,7 +153,10 @@ export async function runRuntimeFixtureDriver(file: string) {
     readPrivate<NodeJS.ProcessEnv>(path.join(root, 'runtime.json')),
     path.join(root, 'ca.pem'),
   );
-  if (source) {
+  if (source && process.env.COS_FIXTURE_WORK_ROOT) {
+    sourceFixtureEnvironment(request.hostRoot, process.env);
+    validatePreparedFixtureSource(JSON.parse(fs.readFileSync('build-info.json', 'utf8')), request);
+  } else if (source) {
     const git = (args: string[]) =>
       execFileSync('git', args, { env: safeHostEnvironment('docker'), encoding: 'utf8' }).trim();
     if (
@@ -206,6 +211,12 @@ export async function runRuntimeFixtureDriver(file: string) {
   const stop = async () => {
     if (heartbeat) clearInterval(heartbeat);
     await child?.stop();
+    if (request.slice === 'S05') {
+      const location = source
+        ? sourceFixtureEnvironment(request.hostRoot, process.env).COS_FIXTURE_HOST_ROOT!
+        : request.hostRoot;
+      await stopFixtureWorkers(location, request.workerImage);
+    }
   };
   try {
     return await guardedFixtureOperation({
@@ -265,7 +276,9 @@ export async function runRuntimeFixtureDriver(file: string) {
             COS_FIXTURE_DATABASE_PROFILE: 'runtime-disposable',
             COS_FIXTURE_GUARD_SOCKET: guard.socket,
             COS_FIXTURE_GUARD_TOKEN: guard.token,
-            COS_FIXTURE_HOST_ROOT: request.hostRoot,
+            ...(source
+              ? sourceFixtureEnvironment(request.hostRoot, process.env)
+              : { COS_FIXTURE_HOST_ROOT: request.hostRoot }),
             COS_FIXTURE_IMAGE: request.workerImage,
             COS_FIXTURE_RUNNER_VOLUME: request.runnerVolume,
           },

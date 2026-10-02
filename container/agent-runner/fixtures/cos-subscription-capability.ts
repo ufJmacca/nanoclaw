@@ -915,6 +915,11 @@ try {
             'cos_change_propose',
             'cos_context_get',
             'cos_knowledge_search',
+            'cos_mission_cancel',
+            'cos_mission_get',
+            'cos_mission_request',
+            'cos_mission_result_get',
+            'cos_mission_review',
             'cos_request_status',
             'cos_source_change_propose',
             'cos_source_get',
@@ -935,7 +940,7 @@ try {
         .sort();
     assert.deepEqual(declared(requests[5]), ['clock__curr_time', ...s01Tools]);
     const expected = ['clock__curr_time', ...cosDynamicTools.map((tool) => tool.name)].sort();
-    assert.equal(expected.length, 14);
+    assert.equal(expected.length, 19);
     assert.deepEqual(declared(requests[6]), expected);
     assert.deepEqual(declared(requests.at(-1)), expected);
   }

@@ -3,8 +3,8 @@
 set -euo pipefail
 umask 077
 [[ "$(uname -s)" == Darwin ]] || { echo 'cos:release requires the Mac host' >&2; exit 1; }
-[[ ( $# == 6 || ( $# == 7 && "${7:-}" == --local-only ) ) && "$1" == --slice && "$2" == S04 && "$3" == --target && "$4" == pi && "$5" == --db-profile ]] || {
-  echo 'Usage: cos:release --slice S04 --target pi --db-profile test|runtime-disposable [--local-only]' >&2; exit 1;
+[[ ( $# == 6 || ( $# == 7 && "${7:-}" == --local-only ) ) && "$1" == --slice && "$2" == S05 && "$3" == --target && "$4" == pi && "$5" == --db-profile ]] || {
+  echo 'Usage: cos:release --slice S05 --target pi --db-profile test|runtime-disposable [--local-only]' >&2; exit 1;
 }
 slice=$2 profile=$6
 [[ "$profile" == test || "$profile" == runtime-disposable ]] || exit 1
@@ -84,11 +84,21 @@ runner_checks() {
 }
 check root root_checks
 check runner runner_checks
+source scripts/cos-source-fixture.sh
 source_fixture() {
+  local mode=$1
+  if [[ "$mode" == demo ]]; then set -- --demo --fixture; else set --; fi
   if [[ "$profile" == test ]]; then
-    cli fixture "$id" "$1" "$root" "$fixture_image" "$runner_volume"
+    prepare_source_fixture "$dev" "$id-$mode" "$directory/context" "$fixture_image" "$runner_volume" || return
+    "${source_fixture_driver[@]}" --env-file "$test_directory/test.env" \
+      --mount "type=bind,src=$test_directory/ca.pem,dst=/selected-ca.pem,readonly" \
+      -e COS_TEST_PGSSLROOTCERT=/selected-ca.pem \
+      -e "COS_FIXTURE_IMAGE=$fixture_image" -e "COS_FIXTURE_RUNNER_VOLUME=$runner_volume" \
+      -e "COS_FIXTURE_SOURCE_ROOT=$directory/context" -e "COS_FIXTURE_HOST_ROOT=$source_fixture_host_root" \
+      "$fixture_image" --import tsx src/contracts/chief-of-staff/run.ts --slice "$slice" --db-profile test \
+      "$@"
   else
-    bash scripts/cos-runtime-fixture.sh "$id-$1" source "$1" "$root" "$fixture_image" "$fixture_image" "$runner_volume" ''
+    bash scripts/cos-runtime-fixture.sh "$id-$mode" source "$mode" "$root" "$fixture_image" "$fixture_image" "$runner_volume" ''
   fi
 }
 check slice source_fixture slice

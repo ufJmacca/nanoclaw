@@ -5,11 +5,14 @@ import { CALENDAR_CHECKSUM } from '../../modules/chief-of-staff/store/calendar-s
 import { WORK_CHECKSUM } from '../../modules/chief-of-staff/store/work-schema.js';
 import { SCHEDULE_CHECKSUM } from '../../modules/chief-of-staff/store/schedule-schema.js';
 import { BRIEF_CHECKSUM } from '../../modules/chief-of-staff/store/brief-schema.js';
+import { MISSION_CHECKSUM } from '../../modules/chief-of-staff/store/mission-schema.js';
+import { MISSION_RESULT_CHECKSUM } from '../../modules/chief-of-staff/store/mission-result-schema.js';
+import { MISSION_REVIEW_CHECKSUM } from '../../modules/chief-of-staff/store/mission-review-schema.js';
 /** Synthetic identities for release-contract tests; never a transferable artifact receipt. */
-export function fixtureRelease(slice: 'S01' | 'S02' | 'S03' | 'S04' = 'S01'): ReleaseManifest {
+export function fixtureRelease(slice: ReleaseManifest['slice'] = 'S01'): ReleaseManifest {
   const commit = 'a'.repeat(40),
     imageIds = ['sha256:' + 'c'.repeat(64), 'sha256:' + 'd'.repeat(64)],
-    schemaVersion = slice === 'S01' ? 1 : slice === 'S02' ? 2 : slice === 'S03' ? 3 : 6;
+    schemaVersion = slice === 'S01' ? 1 : slice === 'S02' ? 2 : slice === 'S03' ? 3 : slice === 'S04' ? 6 : 9;
   return {
     contract: 'cos-release/v1',
     releaseId: 'release-fixture',
@@ -26,7 +29,9 @@ export function fixtureRelease(slice: 'S01' | 'S02' | 'S03' | 'S04' = 'S01'): Re
             ? 'refs/heads/cos/s02-grounded-knowledge'
             : slice === 'S03'
               ? 'refs/heads/cos/s03-calendar-awareness'
-              : 'refs/heads/cos/s04-daily-brief-and-commitments',
+              : slice === 'S04'
+                ? 'refs/heads/cos/s04-daily-brief-and-commitments'
+                : 'refs/heads/cos/s05-isolated-research-missions',
       syncContract: 'cos-source-sync/github-pinned-v1',
     },
     buildInputDigest: 'e'.repeat(64),
@@ -39,11 +44,18 @@ export function fixtureRelease(slice: 'S01' | 'S02' | 'S03' | 'S04' = 'S01'): Re
       { version: 1, checksum: INITIAL_CHECKSUM },
       ...(schemaVersion >= 2 ? [{ version: 2, checksum: KNOWLEDGE_CHECKSUM }] : []),
       ...(schemaVersion >= 3 ? [{ version: 3, checksum: CALENDAR_CHECKSUM }] : []),
-      ...(schemaVersion === 6
+      ...(schemaVersion >= 6
         ? [
             { version: 4, checksum: WORK_CHECKSUM },
             { version: 5, checksum: SCHEDULE_CHECKSUM },
             { version: 6, checksum: BRIEF_CHECKSUM },
+          ]
+        : []),
+      ...(schemaVersion === 9
+        ? [
+            { version: 7, checksum: MISSION_CHECKSUM },
+            { version: 8, checksum: MISSION_RESULT_CHECKSUM },
+            { version: 9, checksum: MISSION_REVIEW_CHECKSUM },
           ]
         : []),
     ],

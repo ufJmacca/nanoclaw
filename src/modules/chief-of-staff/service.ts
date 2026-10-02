@@ -3,7 +3,19 @@ import { createCosRuntime, type RuntimeDependencies } from './runtime.js';
 import { DatabasePreflightError } from './store/preflight.js';
 import { DatabaseConfigurationError } from './store/config.js';
 import type { CosBinding } from '../../cos-boundary.js';
-export type ServiceDependencies = Omit<RuntimeDependencies, 'store'> & { connect(): Promise<PriorityStore> };
+import { interruptReviewOrigin } from './missions/review-origin.js';
+import { interruptScheduledOrigin } from './automation/scheduled-origin.js';
+import { cosMissionIdentities } from '../../cos-mission-boundary.js';
+import { stopCosMissionAttempt } from '../../cos-mission-stop.js';
+export type SpecialistLifecycle = {
+  pump(binding: CosBinding): Promise<void>;
+  fenceLocal(): void;
+  close(): Promise<void>;
+};
+export type ServiceDependencies = Omit<RuntimeDependencies, 'store'> & {
+  connect(): Promise<PriorityStore>;
+  specialists?(store: PriorityStore): SpecialistLifecycle;
+};
 export class CosService {
   runtime: ReturnType<typeof createCosRuntime>;
   status = 'disabled';
@@ -11,21 +23,62 @@ export class CosService {
   private inFlight: Promise<void> | undefined;
   private stopped = false;
   private closed = false;
+  private specialists?: SpecialistLifecycle;
+  private specialistsFenced = false;
   constructor(readonly dependencies: ServiceDependencies) {
     this.runtime = createCosRuntime({ ...dependencies, enabled: false });
+  }
+  private fenceSpecialists(): void {
+    this.specialistsFenced = !!this.specialists;
+    this.specialists?.fenceLocal();
+  }
+  private async closeSpecialists(): Promise<void> {
+    this.fenceSpecialists();
+    const current = this.specialists;
+    await current?.close();
+    if (this.specialists === current) {
+      this.specialists = undefined;
+      this.specialistsFenced = false;
+    }
+  }
+  private fenceExecutions(): void {
+    const d = this.dependencies;
+    // This also runs before the first successful PostgreSQL connection after a restart.
+    for (const identity of cosMissionIdentities(d.db)) {
+      try {
+        stopCosMissionAttempt(identity, 'authority_lost', d.db);
+        const session = d.session(identity.sessionId);
+        if (session && session.agent_group_id !== identity.agentGroupId) continue;
+        d.stop(identity.sessionId);
+      } catch {
+        // Retain each durable denial; one uncertain stop must not leave other specialists admitted.
+      }
+    }
+    const bindings = d.db.prepare('SELECT binding FROM cos_identity_boundaries').all() as Array<{ binding: string }>;
+    for (const item of bindings) {
+      try {
+        const binding = JSON.parse(item.binding) as CosBinding;
+        interruptReviewOrigin(d.db, binding);
+        interruptScheduledOrigin(d.db, binding);
+        d.stop(binding.sessionId);
+      } catch {
+        // One uncertain local stop must not prevent fencing the remaining CoS bindings.
+      }
+    }
   }
   async tick(): Promise<void> {
     if (this.stopped || !this.dependencies.enabled || this.inFlight) return;
     const run = async () => {
       try {
+        // Retain an uncertain cleanup owner. Never install replacement hooks over it.
+        if (this.specialistsFenced) await this.closeSpecialists();
         if (this.dependencies.admission && !this.dependencies.admission()) {
           this.status = 'maintenance';
           this.runtime.dispose();
           this.runtime = createCosRuntime({ ...this.dependencies, enabled: false });
-          const bindings = this.dependencies.db.prepare('SELECT binding FROM cos_identity_boundaries').all() as Array<{
-            binding: string;
-          }>;
-          for (const item of bindings) this.dependencies.stop((JSON.parse(item.binding) as CosBinding).sessionId);
+          this.fenceSpecialists();
+          this.fenceExecutions();
+          await this.closeSpecialists();
           if (this.store) {
             const old = this.store;
             this.store = undefined;
@@ -42,15 +95,25 @@ export class CosService {
         }
         await this.store.database.run((client) => client.query('SELECT 1'));
         if (this.stopped) return;
+        if (!this.specialists) this.specialists = this.dependencies.specialists?.(this.store);
         this.status = 'ready';
         const rows = this.dependencies.db.prepare('SELECT binding FROM cos_identity_boundaries').all() as Array<{
           binding: string;
         }>;
         for (const row of rows) {
           if (this.stopped) return;
-          await this.runtime.pump(JSON.parse(row.binding) as CosBinding);
+          const binding = JSON.parse(row.binding) as CosBinding;
+          await this.runtime.pump(binding);
+          if (!this.stopped) await this.specialists?.pump(binding);
         }
       } catch (error) {
+        this.fenceSpecialists();
+        this.fenceExecutions();
+        try {
+          await this.closeSpecialists();
+        } catch {
+          // Keep the fenced lifecycle and pool for a later cleanup retry.
+        }
         this.status =
           error instanceof DatabaseConfigurationError
             ? 'misconfigured'
@@ -67,9 +130,13 @@ export class CosService {
     }
   }
   async stop(): Promise<void> {
+    if (this.closed) return;
     this.stopped = true;
     this.runtime.dispose();
+    this.fenceSpecialists();
+    this.fenceExecutions();
     await this.inFlight;
+    await this.closeSpecialists();
     if (!this.closed) {
       this.closed = true;
       await this.store?.database.pool.end();

@@ -109,6 +109,26 @@ it('checks database identity before touching knowledge roots', async () => {
   expect(f.open).not.toHaveBeenCalled();
   expect(f.check.end).toHaveBeenCalledOnce();
 });
+it('passes only the trusted mission resolver and closes it when host admission is lost', async () => {
+  fixture();
+  const roots = { targetRoot: '/state', installationRoot: '/install', dataRoot: '/install/data' };
+  const context = { scopeId: 'scope', ownerId: 'owner', agentGroupId: 'main', sessionId: 'main', ingressId: 'event' };
+  const authority = {
+    bindingDigest: 'a'.repeat(64),
+    delegationDigest: 'b'.repeat(64),
+    contextGeneration: 'retained',
+    provider: { profile: 'codex-subscription/research-v1', model: 'fixture', policyDigest: 'c'.repeat(64) },
+  };
+  const resolve = vi.fn(() => authority),
+    admitted = vi.fn(() => true);
+  const store = await connectCosHostStore({}, roots, admitted, {}, resolve);
+  expect(store.missions.authority?.(context)).toEqual(authority);
+  admitted.mockReturnValue(false);
+  expect(store.missions.authority?.(context)).toBeNull();
+  expect(resolve).toHaveBeenCalledTimes(1);
+  const unconfigured = await connectCosHostStore({}, roots, () => true);
+  expect(unconfigured.missions.authority).toBeUndefined();
+});
 it('honors explicit retrieval and retention settings and rejects malformed settings before connection', async () => {
   fixture();
   const roots = { targetRoot: '/state', installationRoot: '/install', dataRoot: '/install/data' };

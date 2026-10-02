@@ -1,6 +1,8 @@
 /** Canonical CoS wire contract; copied verbatim into the runner and checked for drift. */
 import { createHash } from 'node:crypto';
 import { validScheduleChange, type ScheduleChange } from './schedule-protocol.js';
+import { validMissionRequest } from './mission-protocol.js';
+import { validMissionReview } from './mission-review.js';
 import { answerDraftSchema, validAnswerDraft, validAnswerCitation, type AnswerCitation } from './answer-protocol.js';
 /** Provider guidance; the wire validator additionally checks real dates and state transitions. */
 export const workChangeSchema = {
@@ -99,6 +101,11 @@ export type CosMethod =
   | 'cos_change_propose'
   | 'cos_work_change_propose'
   | 'cos_work_read'
+  | 'cos_mission_request'
+  | 'cos_mission_get'
+  | 'cos_mission_cancel'
+  | 'cos_mission_result_get'
+  | 'cos_mission_review'
   | 'cos_brief_schedule_propose'
   | 'cos_brief_request'
   | 'cos_request_status'
@@ -209,6 +216,24 @@ export function validRequest(value: unknown): value is CosRequest {
   if (value.method === 'cos_work_change_propose')
     return keys(value.params, ['change']) && validWorkChange(value.params.change);
   if (value.method === 'cos_work_read') return validWorkRead(value.params);
+  if (value.method === 'cos_mission_request')
+    return keys(value.params, ['request']) && validMissionRequest(value.params.request);
+  if (value.method === 'cos_mission_review')
+    return keys(value.params, ['review']) && validMissionReview(value.params.review);
+  if (value.method === 'cos_mission_result_get')
+    return (
+      keys(value.params, ['mission_id', 'submission_id']) &&
+      typeof value.params.mission_id === 'string' &&
+      /^[a-zA-Z0-9_-]{1,100}$/.test(value.params.mission_id) &&
+      typeof value.params.submission_id === 'string' &&
+      uuid.test(value.params.submission_id)
+    );
+  if (value.method === 'cos_mission_get' || value.method === 'cos_mission_cancel')
+    return (
+      keys(value.params, ['mission_id']) &&
+      typeof value.params.mission_id === 'string' &&
+      /^[a-zA-Z0-9_-]{1,100}$/.test(value.params.mission_id)
+    );
   if (value.method === 'cos_brief_schedule_propose')
     return keys(value.params, ['change']) && validScheduleChange(value.params.change);
   if (value.method === 'cos_source_change_propose')
@@ -383,9 +408,37 @@ export function validWorkChange(v: unknown): v is WorkChange {
     new Set(v.evidence.map(canonical)).size === v.evidence.length
   );
 }
-export type ProposalChange = Change | SourceChange | WorkChange | ScheduleChange;
+/** Host-created approval envelope. Admission verifies the entire body against immutable storage. */
+export type MissionChange = {
+  kind: 'research_mission';
+  mission_id: string;
+  work_order_digest: string;
+  work_order: Record<string, unknown>;
+};
+export function validMissionChange(value: unknown): value is MissionChange {
+  return (
+    object(value) &&
+    keys(value, ['kind', 'mission_id', 'work_order_digest', 'work_order']) &&
+    Object.keys(value).length === 4 &&
+    value.kind === 'research_mission' &&
+    typeof value.mission_id === 'string' &&
+    /^mission-[a-f0-9]{64}$/.test(value.mission_id) &&
+    typeof value.work_order_digest === 'string' &&
+    /^[a-f0-9]{64}$/.test(value.work_order_digest) &&
+    object(value.work_order) &&
+    Buffer.byteLength(JSON.stringify(value.work_order)) <= 24576 &&
+    digest(value.work_order) === value.work_order_digest
+  );
+}
+export type ProposalChange = Change | SourceChange | WorkChange | ScheduleChange | MissionChange;
 export function validProposalChange(value: unknown): value is ProposalChange {
-  return validChange(value) || validSourceChange(value) || validWorkChange(value) || validScheduleChange(value);
+  return (
+    validChange(value) ||
+    validSourceChange(value) ||
+    validWorkChange(value) ||
+    validScheduleChange(value) ||
+    validMissionChange(value)
+  );
 }
 
 export type CosResponse = {

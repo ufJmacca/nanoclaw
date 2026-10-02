@@ -4,7 +4,7 @@ import { cosBoundary } from '../../../cos-boundary.js';
 import { hasTable } from '../../../db/connection.js';
 import { digest, type Context } from '../domain/contracts.js';
 import type { KnowledgeContext } from './store.js';
-import { scheduledContext } from '../automation/scheduled-origin.js';
+import { automationContext } from '../automation/origin.js';
 
 /** Read-only authority lookup. Missing history is never repaired or replaced by a tool request. */
 export function resolveKnowledgeContext(
@@ -15,9 +15,9 @@ export function resolveKnowledgeContext(
   const boundary = cosBoundary(session, db);
   if (!boundary.restricted || !boundary.binding || boundary.paused) return null;
   if (context.origin) {
-    const scheduled = scheduledContext(session, db);
-    if (!scheduled || digest(scheduled) !== digest(context)) return null;
-  } else if (boundary.ingressId !== context.ingressId || scheduledContext(session, db) !== undefined) return null;
+    const automatic = automationContext(session, db);
+    if (!automatic || digest(automatic) !== digest(context)) return null;
+  } else if (boundary.ingressId !== context.ingressId || automationContext(session, db) !== undefined) return null;
   const binding = boundary.binding;
   if (
     binding.scopeId !== context.scopeId ||

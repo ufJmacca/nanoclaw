@@ -118,6 +118,7 @@ import {
   getActiveContainerCount,
   isContainerRunning,
   hasContainerExecution,
+  killContainer,
   startContainerAdmissions,
   wakeContainer,
 } from './container-runner.js';
@@ -582,6 +583,27 @@ describe('container execution isolation', () => {
       ]);
       db.close();
     }
+  });
+  it('S05-T07 stopping a capacity-queued review removes only its wake and preserves the other queued session', async () => {
+    runnerMocks.maxConcurrentContainers = 1;
+    const groups = ['occupied', 'review', 'unrelated'].map((name) =>
+      agentGroup('queue-stop-' + name, 'queue-stop-' + name),
+    );
+    const sessions = groups.map((group) => session('session-' + group.id, group.id));
+    for (const group of groups) runnerMocks.groups.set(group.id, group);
+    for (const item of sessions) runnerMocks.sessions.set(item.id, item);
+    expect(await wakeContainer(sessions[0])).toBe(true);
+    expect(await wakeContainer(sessions[1])).toBe(false);
+    expect(await wakeContainer(sessions[2])).toBe(false);
+    killContainer(sessions[1].id, 'fixture review retired');
+    expect(hasContainerExecution(sessions[1].id)).toBe(false);
+    expect(hasContainerExecution(sessions[0].id)).toBe(true);
+    expect(hasContainerExecution(sessions[2].id)).toBe(true);
+    expect(runnerMocks.stopContainer).not.toHaveBeenCalled();
+    runnerMocks.spawned[0].emit('close', 0);
+    await vi.waitFor(() => expect(isContainerRunning(sessions[2].id)).toBe(true));
+    expect(isContainerRunning(sessions[1].id)).toBe(false);
+    expect(runnerMocks.spawn).toHaveBeenCalledTimes(2);
   });
 
   it('rejects a reused session id that changes channel or agent identity', async () => {

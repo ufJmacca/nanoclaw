@@ -22,6 +22,21 @@ import { startSubscriptionEgress } from '../../modules/chief-of-staff/bridge/sub
 import { safeHostEnvironment } from '../../host-environment.js';
 import { startSubscriptionBroker } from '../../providers/codex-subscription-broker.js';
 import { startSubscriptionTurns } from '../../modules/chief-of-staff/bridge/subscription-turns.js';
+import { randomUUID } from 'node:crypto';
+import { restrictedLaunch } from '../../modules/chief-of-staff/bridge/restricted-launch.js';
+import { sealResearchWorkOrder, RESEARCH_TEMPLATE } from '../../modules/chief-of-staff/missions/work-order.js';
+import { MISSION_DEFAULT_LIMITS } from '../../modules/chief-of-staff/contracts/mission-protocol.js';
+import { digest } from '../../modules/chief-of-staff/domain/contracts.js';
+import { ensureSchema, openInboundDb, openOutboundDb } from '../../db/session-db.js';
+import { initTestDb, closeDb } from '../../db/connection.js';
+import { runMigrations } from '../../db/migrations/index.js';
+import { createAgentGroup } from '../../db/agent-groups.js';
+import { createSession } from '../../db/sessions.js';
+import { installCosMissionBoundary, type CosMissionIdentity } from '../../cos-mission-boundary.js';
+import { createMissionRpcHandler } from '../../modules/chief-of-staff/missions/rpc.js';
+import { ensureRpcSchema } from '../../modules/chief-of-staff/bridge/rpc.js';
+import { RestrictedExecutionProbe } from '../../modules/chief-of-staff/bridge/native-execution.js';
+import { getInstallSlug } from '../../install-slug.js';
 
 const execute = promisify(execFile);
 const docker = (args: string[]) =>
@@ -717,3 +732,504 @@ test(
     }
   },
 );
+
+/** Real research entry points and native RPC; synthetic admission/provider only, no PostgreSQL claim. */
+for (const cancel of [false, true])
+  test(
+    'S05-T02/T03/T04/T12 two native specialists keep separate context, provider state and restricted mounts' +
+      (cancel ? ' during exact-child stop' : ''),
+    { timeout: 120000 },
+    async () => {
+      const f = await fixture(),
+        closers: Array<() => Promise<void>> = [];
+      const db = initTestDb();
+      runMigrations(db);
+      let stopped = false;
+      let providerFailure: unknown;
+      const pumps: Promise<void>[] = [],
+        runs: Promise<unknown>[] = [];
+      try {
+        const store = f.create();
+        const children: Array<{
+          role: string;
+          identity: CosMissionIdentity;
+          canary: string;
+          providerDirectory: string;
+          base: string;
+          inputId: string;
+          outbound: Database.Database;
+          launch: ReturnType<typeof restrictedLaunch>;
+          reads(): number;
+          reservations(): number;
+          revoke(): void;
+        }> = [];
+        for (const role of ['alpha', 'bravo']) {
+          const base = path.join(f.root, role),
+            sessionDirectory = path.join(base, 'cos-v1'),
+            providerDirectory = path.join(base, 'provider'),
+            contextDirectory = path.join(base, 'context');
+          for (const directory of [base, sessionDirectory, providerDirectory, contextDirectory])
+            fs.mkdirSync(directory, { mode: 0o700 });
+          const identity: CosMissionIdentity = {
+            scopeId: 'fixture',
+            missionId: 'mission-' + role,
+            attemptId: randomUUID(),
+            generation: 1,
+            agentGroupId: 'group-' + role,
+            sessionId: 'session-' + role,
+            provider: 'codex',
+          };
+          const inputId = 'input-' + role,
+            canary = 'SPECIALIST_' + role.toUpperCase() + '_PRIVATE_CANARY';
+          const order = sealResearchWorkOrder({
+            missionId: identity.missionId,
+            request: {
+              question: 'Compare the admitted note.',
+              goal_id: null,
+              project_id: null,
+              sources: [{ source_id: 'note-' + role, revision_id: 'revision-' + role }],
+              acceptance_criteria: [{ id: 'comparison', description: 'Cite the assigned source.' }],
+              limits: { ...MISSION_DEFAULT_LIMITS },
+            },
+            origin: {
+              scopeId: 'fixture',
+              ownerId: 'owner',
+              agentGroupId: 'main',
+              sessionId: 'main',
+              ingressId: 'ingress',
+              bindingDigest: digest('fixture'),
+              delegationDigest: digest('fixture-delegation'),
+              contextGeneration: randomUUID(),
+            },
+            related: { goal: null, project: null },
+            sources: [
+              {
+                source_id: 'note-' + role,
+                revision_id: 'revision-' + role,
+                source_version: 1,
+                revision_digest: digest(canary),
+                title: 'Assigned note',
+                status: 'current',
+                chunks: [{ ordinal: 0, start_line: 1, end_line: 1, text: canary }],
+              },
+            ],
+            provider: {
+              profile: RESEARCH_TEMPLATE.providerProfile,
+              model: 'gpt-6-astra',
+              policyDigest: digest('fixture-policy'),
+            },
+            reviewedTemplateDigest: digest(RESEARCH_TEMPLATE),
+            issuedAt: new Date().toISOString(),
+          });
+          for (const [name, value] of Object.entries({
+            'work-order.json': order.body,
+            'context.json': order.context,
+            'template.json': RESEARCH_TEMPLATE,
+          }))
+            fs.writeFileSync(path.join(contextDirectory, name), JSON.stringify(value), { mode: 0o400 });
+          const mission = {
+            missionId: identity.missionId,
+            attemptId: identity.attemptId,
+            inputId,
+            generation: 1,
+            workOrderDigest: order.digest,
+            contextDigest: order.body.contextDigest,
+            templateDigest: digest(RESEARCH_TEMPLATE),
+          };
+          const configurationFile = path.join(base, 'configuration.json');
+          fs.writeFileSync(
+            configurationFile,
+            JSON.stringify({
+              provider: 'codex',
+              model: 'gpt-6-astra',
+              runtime: 'codex-subscription/v1',
+              profile: 'research',
+              contextGeneration: identity.attemptId,
+              agentGroupId: identity.agentGroupId,
+              assistantName: 'CoS Research',
+              groupName: 'CoS Research',
+              maxMessagesPerPrompt: 1,
+              mcpServers: {},
+              mission,
+            }),
+            { mode: 0o600 },
+          );
+          for (const kind of ['inbound', 'outbound'] as const)
+            ensureSchema(path.join(sessionDirectory, kind + '.db'), kind);
+          const inbound = openInboundDb(path.join(sessionDirectory, 'inbound.db')),
+            outbound = openOutboundDb(path.join(sessionDirectory, 'outbound.db'));
+          closers.push(async () => {
+            inbound.close();
+            outbound.close();
+          });
+          ensureRpcSchema(inbound);
+          inbound.prepare('INSERT INTO messages_in(id,seq,kind,timestamp,content) VALUES(?,1,?,?,?)').run(
+            inputId,
+            'task',
+            new Date().toISOString(),
+            JSON.stringify({
+              text: 'Perform the approved read-only research work order using only its admitted context.',
+              mission: {
+                mission_id: identity.missionId,
+                attempt_id: identity.attemptId,
+                generation: 1,
+                work_order_digest: order.digest,
+              },
+            }),
+          );
+          createAgentGroup({
+            id: identity.agentGroupId,
+            name: 'CoS research',
+            folder: identity.agentGroupId,
+            agent_provider: 'codex',
+            created_at: new Date().toISOString(),
+          });
+          const session: Session = {
+            id: identity.sessionId,
+            agent_group_id: identity.agentGroupId,
+            messaging_group_id: null,
+            thread_id: null,
+            agent_provider: 'codex',
+            status: 'active',
+            container_status: 'running',
+            created_at: new Date().toISOString(),
+            last_active: null,
+          };
+          createSession(session);
+          installCosMissionBoundary(identity, db);
+          let allowed = true,
+            reads = 0,
+            reservations = 0;
+          const lease = { owner: 'fixture-host', fence: 1 };
+          const handler = createMissionRpcHandler({
+            resolve: async () => (allowed ? { identity, lease } : null),
+            runs: {
+              readContext: async (actual) => {
+                assert.deepEqual(actual, identity);
+                reads++;
+                return { status: 'ok', work_order: order.body, context: order.context };
+              },
+            },
+            submit: async () => {
+              throw Error('fixture does not submit results');
+            },
+          });
+          const seen = new Set<string>();
+          pumps.push(
+            (async () => {
+              while (!stopped) {
+                for (const row of outbound
+                  .prepare('SELECT id,kind,content FROM messages_out ORDER BY seq')
+                  .all() as Array<{ id: string; kind: string; content: string }>) {
+                  if (seen.has(row.id)) continue;
+                  assert.equal(row.kind, 'system');
+                  await handler(JSON.parse(row.content), session, inbound);
+                  seen.add(row.id);
+                }
+                await new Promise((resolve) => setTimeout(resolve, 20));
+              }
+            })(),
+          );
+          // Surface asynchronous fixture failures in the test body so its cleanup still runs.
+          void pumps.at(-1)!.catch((error) => {
+            providerFailure ??= error;
+          });
+          const credentialSocket = path.join(f.root, role + '-credential.sock'),
+            turnSocket = path.join(f.root, role + '-turn.sock'),
+            gatewaySocket = path.join(f.root, role + '-gateway.sock');
+          const broker = await startSubscriptionBroker({
+            socket: credentialSocket,
+            store,
+            authorize: async () => allowed,
+          });
+          closers.push(() => broker.close());
+          const turns = await startSubscriptionTurns({
+            socket: turnSocket,
+            authorize: async () => allowed,
+            reserve: () => {
+              reservations++;
+              return reservations === 1;
+            },
+          });
+          closers.push(() => turns.close());
+          const gateway = await f.gateway(gatewaySocket, turns.allowed);
+          closers.push(() => gateway.close());
+          const launch = restrictedLaunch({
+            image: f.image,
+            sessionDirectory,
+            configurationFile,
+            gatewaySocket,
+            uid: process.getuid!(),
+            gid: process.getgid!(),
+            entry: 'research',
+            subscription: { providerDirectory, credentialSocket, turnSocket, contextGeneration: identity.attemptId },
+            research: { contextDirectory, binding: mission },
+          });
+          launch.args = launch.args.map((arg) =>
+            arg.startsWith('type=bind,') ? arg.replace('src=' + f.root + '/', 'src=' + f.hostRoot + '/') : arg,
+          );
+          launch.args.splice(
+            launch.args.indexOf(f.image),
+            0,
+            '--mount',
+            `type=bind,src=${f.hostRoot}/ca.pem,dst=/etc/ssl/certs/ca-certificates.crt,readonly`,
+          );
+          f.trackContainer(launch.containerName);
+          children.push({
+            role,
+            identity,
+            canary,
+            base,
+            providerDirectory,
+            inputId,
+            outbound,
+            launch,
+            reads: () => reads,
+            reservations: () => reservations,
+            revoke() {
+              allowed = false;
+            },
+          });
+        }
+        const toolManifests: string[][] = [];
+        const pending = new Map<string, () => void>(),
+          requests: Array<{ role: string; input: string }> = [];
+        const respondChecked = (
+          body: { input?: unknown; generate?: boolean; tools?: unknown },
+          send: (events: unknown[]) => void,
+        ) => {
+          // Astra declares its tools in additional_tools, through an isolated V8 wrapper.
+          assert.equal(body.tools, undefined);
+          for (const item of (body.input ?? []) as Array<{
+            type: string;
+            tools?: Array<{ name: string; tools: Array<{ name: string; description: string }> }>;
+          }>) {
+            if (item.type !== 'additional_tools') continue;
+            assert.deepEqual(
+              item.tools?.map((tool) => tool.name),
+              ['functions'],
+            );
+            const functions = item.tools![0].tools;
+            assert.deepEqual(functions.map((tool) => tool.name).sort(), [
+              'exec',
+              'request_user_input',
+              'request_user_input_async',
+              'wait',
+            ]);
+            const description = functions.find((tool) => tool.name === 'exec')!.description;
+            const names = [...description.matchAll(/### `([^`]+)`/g)].map((match) => match[1]).sort();
+            assert.deepEqual(names, ['clock__curr_time', 'cos_mission_context_get', 'cos_result_submit']);
+            toolManifests.push(names);
+          }
+          if (body.generate === false) {
+            send([
+              {
+                type: 'response.completed',
+                response: { id: 'warmup', object: 'response', status: 'completed', output: [] },
+              },
+            ]);
+            return;
+          }
+          const input = JSON.stringify(body.input),
+            child = children.find((c) => input.includes(c.identity.missionId));
+          assert.ok(child, 'model request must include the exact stable mission input');
+          const other = children.find((c) => c !== child)!;
+          assert.equal(input.includes(other.canary), false);
+          requests.push({ role: child.role, input });
+          const hasContext = input.includes(child.canary),
+            id = 'response-' + randomUUID();
+          const item = hasContext
+            ? {
+                id: 'msg-' + id,
+                type: 'message',
+                role: 'assistant',
+                status: 'completed',
+                content: [{ type: 'output_text', text: 'Synthetic specialist complete.', annotations: [] }],
+              }
+            : {
+                id: 'fc-' + id,
+                type: 'custom_tool_call',
+                call_id: 'call-' + id,
+                namespace: 'functions',
+                name: 'exec',
+                input: `if(typeof process!=='undefined'||typeof require!=='undefined'||typeof fetch!=='undefined')throw Error('ambient capability');
+const names=ALL_TOOLS.map(tool=>tool.name).sort();if(JSON.stringify(names)!==JSON.stringify(['clock__curr_time','cos_mission_context_get','cos_result_submit']))throw Error('unexpected tools');text(await tools.cos_mission_context_get({}));`,
+                status: 'completed',
+              };
+          const events = [
+            { type: 'response.created', response: { id, object: 'response', status: 'in_progress', output: [] } },
+            { type: 'response.output_item.added', output_index: 0, item: { ...item, status: 'in_progress' } },
+            { type: 'response.output_item.done', output_index: 0, item },
+            {
+              type: 'response.completed',
+              response: {
+                id,
+                object: 'response',
+                status: 'completed',
+                output: [item],
+                usage: { input_tokens: 10, output_tokens: 3, total_tokens: 13 },
+              },
+            },
+          ];
+          if (hasContext) pending.set(child.role, () => send(events));
+          else send(events);
+        };
+        const respond = (body: Parameters<typeof respondChecked>[0], send: Parameters<typeof respondChecked>[1]) => {
+          try {
+            respondChecked(body, send);
+            // eslint-disable-next-line no-catch-all/no-catch-all -- Rethrown by the test body after its asynchronous barrier, preserving container cleanup.
+          } catch (error) {
+            providerFailure = error;
+          }
+        };
+        f.modelResponse(async (request, response) => {
+          const chunks: Buffer[] = [];
+          for await (const chunk of request) chunks.push(Buffer.from(chunk));
+          const raw = Buffer.concat(chunks);
+          respond(
+            JSON.parse((request.headers['content-encoding'] === 'zstd' ? zstdDecompressSync(raw) : raw).toString()),
+            (events) => {
+              response.writeHead(200, { 'content-type': 'text/event-stream' });
+              response.end(events.map((e) => 'data: ' + JSON.stringify(e) + '\n\n').join(''));
+            },
+          );
+        });
+        const websocket = new WebSocketServer({ noServer: true });
+        f.backend.on('upgrade', (request, socket, head) =>
+          websocket.handleUpgrade(request, socket, head, (client) =>
+            client.on('message', (message) =>
+              respond(JSON.parse(message.toString()), (events) =>
+                events.forEach((event) => client.send(JSON.stringify(event), () => {})),
+              ),
+            ),
+          ),
+        );
+        closers.push(async () => {
+          for (const client of websocket.clients) client.terminate();
+          await new Promise<void>((resolve) => websocket.close(() => resolve()));
+        });
+        for (const child of children) {
+          const running = docker(child.launch.args);
+          void running.catch(() => {});
+          runs.push(running);
+        }
+        const deadline = Date.now() + 30000;
+        while (pending.size < 2 && !providerFailure && Date.now() < deadline)
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        if (providerFailure) throw providerFailure;
+        assert.ok(toolManifests.length >= 2, 'both native app servers must declare the specialist tools');
+        assert.equal(
+          pending.size,
+          2,
+          'both native specialists must read their context and overlap at the model barrier',
+        );
+        for (const child of children) {
+          const other = children.find((c) => c !== child)!,
+            inspected = JSON.parse((await docker(['inspect', child.launch.containerName])).stdout)[0];
+          assert.equal(inspected.HostConfig.NetworkMode, 'none');
+          assert.equal(inspected.HostConfig.ReadonlyRootfs, true);
+          assert.deepEqual(inspected.HostConfig.CapDrop, ['ALL']);
+          assert.ok(inspected.HostConfig.SecurityOpt.includes('no-new-privileges'));
+          assert.equal(inspected.Image, f.image);
+          const mounts = inspected.Mounts.filter((m: { Type: string }) => m.Type === 'bind');
+          assert.deepEqual(
+            mounts.map((m: { Destination: string }) => m.Destination).sort(),
+            [
+              '/etc/ssl/certs/ca-certificates.crt',
+              '/home/node/.codex',
+              '/run/cos/mission/context.json',
+              '/run/cos/mission/template.json',
+              '/run/cos/mission/work-order.json',
+              '/run/cos/subscription.sock',
+              '/run/cos/turn.sock',
+              '/run/nanoclaw/codex-credentials.sock',
+              '/workspace',
+              '/workspace/agent/container.json',
+              '/workspace/inbound.db',
+            ].sort(),
+          );
+          assert.equal(
+            mounts.some((m: { Source: string }) => m.Source.includes('/' + other.role + '/')),
+            false,
+          );
+          assert.deepEqual(
+            mounts
+              .filter((m: { RW: boolean }) => m.RW)
+              .map((m: { Destination: string }) => m.Destination)
+              .sort(),
+            ['/home/node/.codex', '/workspace'],
+          );
+          assert.equal(
+            mounts.some(
+              (m: { Destination: string }) =>
+                m.Destination.startsWith('/app') || m.Destination === '/var/run/docker.sock',
+            ),
+            false,
+          );
+          const probe = `import fs from 'node:fs';import net from 'node:net';import assert from 'node:assert/strict';
+        assert.equal(fs.existsSync(${JSON.stringify(other.base)}),false);assert.equal(fs.existsSync('/var/run/docker.sock'),false);
+        assert.equal(Object.keys(process.env).some(k=>/^(COS_(TEST_)?PG|PGPASSWORD|OPENAI_API_KEY|SSH_)/.test(k)),false);
+        const context=fs.readFileSync('/run/cos/mission/context.json','utf8');assert.ok(context.includes(${JSON.stringify(child.canary)}));assert.equal(context.includes(${JSON.stringify(other.canary)}),false);
+        for(const file of ['/workspace/inbound.db','/run/cos/mission/context.json','/app/src/forbidden-write']){assert.throws(()=>fs.writeFileSync(file,'FORBIDDEN'));}
+        const denied=await new Promise(resolve=>{const socket=net.connect({host:'192.0.2.1',port:5432});socket.setTimeout(1000);socket.once('connect',()=>{socket.destroy();resolve(false)});socket.once('error',()=>resolve(true));socket.once('timeout',()=>{socket.destroy();resolve(true)});});assert.equal(denied,true);console.log('specialist-isolation-passed');`;
+          assert.equal(
+            (await docker(['exec', child.launch.containerName, 'bun', '-e', probe])).stdout.trim(),
+            'specialist-isolation-passed',
+          );
+          assert.equal(child.reads(), 1);
+          assert.equal(child.reservations(), 1);
+        }
+        if (cancel) {
+          const child = children[0];
+          child.revoke();
+          const probe = new RestrictedExecutionProbe(getInstallSlug(process.cwd()));
+          const workspace = path.join(f.hostRoot, child.role, 'cos-v1');
+          assert.equal(probe.present(workspace), true);
+          probe.stop(workspace);
+          const end = Date.now() + 10000;
+          while (probe.present(workspace) && Date.now() < end) await new Promise((resolve) => setTimeout(resolve, 50));
+          assert.equal(probe.present(workspace), false);
+          assert.equal(
+            (
+              await docker(['inspect', '--format', '{{.State.Running}}', children[1].launch.containerName])
+            ).stdout.trim(),
+            'true',
+          );
+        }
+        for (const [role, send] of pending) if (!cancel || role !== children[0].role) send();
+        const finished = await Promise.allSettled(runs);
+        if (providerFailure) throw providerFailure;
+        for (const child of children) {
+          const status = (
+            child.outbound.prepare('SELECT status FROM processing_ack WHERE message_id=?').get(child.inputId) as {
+              status: string;
+            }
+          ).status;
+          if (cancel && child === children[0]) assert.notEqual(status, 'completed');
+          else {
+            assert.equal(status, 'completed');
+            assert.equal(finished[children.indexOf(child)].status, 'fulfilled');
+          }
+          const history = fs
+            .readdirSync(child.providerDirectory, { recursive: true })
+            .filter((name) => String(name).endsWith('.jsonl'))
+            .map((name) => fs.readFileSync(path.join(child.providerDirectory, String(name)), 'utf8'))
+            .join('\n');
+          assert.ok(history.includes(child.canary));
+          assert.equal(history.includes(children.find((c) => c !== child)!.canary), false);
+          const cache = JSON.parse(fs.readFileSync(path.join(child.providerDirectory, 'auth.json'), 'utf8'));
+          assert.equal(cache.tokens.refresh_token, '');
+          assert.equal(cache.tokens.access_token, jwt(0));
+          assert.equal(child.outbound.prepare("SELECT 1 FROM messages_out WHERE kind<>'system'").get(), undefined);
+          assert.ok(requests.some((r) => r.role === child.role && r.input.includes(child.canary)));
+        }
+      } finally {
+        stopped = true;
+        await Promise.allSettled(pumps);
+        for (const close of closers.reverse()) await close();
+        await f.close();
+        await Promise.allSettled(runs);
+        closeDb();
+      }
+    },
+  );

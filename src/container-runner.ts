@@ -455,6 +455,9 @@ function startTrackedContainer(session: Session, agentGroup: AgentGroup, contain
 
 /** Kill a container for a session. */
 export function killContainer(sessionId: string, reason: string): void {
+  // A stopped session must not launch later when another container releases capacity.
+  // In-flight spawns retain their reservation until their actual outcome is known.
+  queuedWakes.delete(sessionId);
   const entry = activeContainers.get(sessionId);
   if (!entry) return;
 

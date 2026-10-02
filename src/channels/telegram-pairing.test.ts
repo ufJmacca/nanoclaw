@@ -18,6 +18,7 @@ import {
 } from './telegram-pairing.js';
 
 let tmpDir: string;
+const wrongCode = (code: string) => (code === '9999' ? '0000' : '9999');
 
 beforeEach(() => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tg-pair-'));
@@ -112,9 +113,9 @@ describe('tryConsume', () => {
   });
 
   it('returns null on no match (silent drop)', async () => {
-    await createPairing('main');
+    const r = await createPairing('main');
     const out = await tryConsume({
-      text: '@nanobot 9999',
+      text: '@nanobot ' + wrongCode(r.code),
       botUsername: 'nanobot',
       platformId: 'x',
       isGroup: false,
@@ -144,7 +145,7 @@ describe('tryConsume', () => {
   it('cannot consume an invalidated pairing', async () => {
     const r = await createPairing('main');
     // Invalidate by sending a wrong code
-    await tryConsume({ text: '9999', botUsername: 'b', platformId: 'p', isGroup: false });
+    await tryConsume({ text: wrongCode(r.code), botUsername: 'b', platformId: 'p', isGroup: false });
     const out = await tryConsume({ text: `@b ${r.code}`, botUsername: 'b', platformId: 'p', isGroup: false });
     expect(out).toBeNull();
     expect(getStatus(r.code)).toBe('invalidated');
@@ -173,7 +174,7 @@ describe('waitForPairing', () => {
     const r = await createPairing('main');
     const waiter = waitForPairing(r.code, { pollMs: 30 });
     setTimeout(() => {
-      tryConsume({ text: '0000', botUsername: 'b', platformId: 'tg:1', isGroup: false });
+      tryConsume({ text: wrongCode(r.code), botUsername: 'b', platformId: 'tg:1', isGroup: false });
     }, 60);
     await expect(waiter).rejects.toThrow(/invalidated/);
   });
@@ -212,10 +213,10 @@ describe('attempt tracking', () => {
       onAttempt: (a) => attempts.push(a.candidate),
     });
     setTimeout(() => {
-      tryConsume({ text: '9999', botUsername: 'b', platformId: 'tg:1', isGroup: false });
+      tryConsume({ text: wrongCode(r.code), botUsername: 'b', platformId: 'tg:1', isGroup: false });
     }, 60);
-    await expect(waiter).rejects.toThrow(/invalidated by wrong code \(9999\)/);
-    expect(attempts).toEqual(['9999']);
+    await expect(waiter).rejects.toThrow('invalidated by wrong code (' + wrongCode(r.code) + ')');
+    expect(attempts).toEqual([wrongCode(r.code)]);
     expect(getStatus(r.code)).toBe('invalidated');
   });
 
@@ -244,7 +245,7 @@ describe('attempt tracking', () => {
 
   it('a second code attempt after invalidation does not match', async () => {
     const r = await createPairing('main');
-    await tryConsume({ text: '9999', botUsername: 'b', platformId: 'p', isGroup: false });
+    await tryConsume({ text: wrongCode(r.code), botUsername: 'b', platformId: 'p', isGroup: false });
     const retry = await tryConsume({ text: r.code, botUsername: 'b', platformId: 'p', isGroup: false });
     expect(retry).toBeNull();
   });

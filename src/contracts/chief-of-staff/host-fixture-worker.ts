@@ -21,6 +21,7 @@ import {
   subscriptionActivation,
 } from '../../modules/chief-of-staff/bridge/model-policy.js';
 import { readPrivate } from '../../modules/chief-of-staff/ops/target-state.js';
+import type { MissionAuthority } from '../../modules/chief-of-staff/missions/proposal-store.js';
 
 if (process.env.COS_FIXTURE_HOST_PROCESS !== 'S01' || !process.send) throw new Error('fixture_only');
 let handle: ((command: string, value: any) => Promise<unknown>) | undefined;
@@ -31,6 +32,14 @@ async function start(input: {
   knowledgeRoot?: string;
   calendar?: boolean;
   brief?: { clock: string; events: unknown[] };
+  mission?: {
+    repository: string;
+    hostRepository: string;
+    image: string;
+    sourceRoot?: string;
+    runnerVolume?: string;
+    authority: MissionAuthority;
+  };
 }) {
   if (!path.isAbsolute(input.root) || !input.root.includes('/.cos-plan-state/fixtures/flow-'))
     throw new Error('fixture_root_required');
@@ -57,7 +66,50 @@ async function start(input: {
       !input.knowledgeRoot.startsWith(path.join(os.tmpdir(), 'cos-knowledge-demo-')))
   )
     throw new Error('fixture_knowledge_root_required');
-  const database = new BoundedDatabase(new pg.Pool(relay.config), 600);
+  // Real Docker ownership probes can occupy this fixture event loop for over 600 ms.
+  // Keep outage detection bounded without changing production database deadlines.
+  const database = new BoundedDatabase(new pg.Pool(relay.config), input.mission ? 3000 : 600);
+  const databaseFailures: Array<{ code: string; frame: string; elapsed: number }> = [];
+  if (input.mission) {
+    const run = database.run.bind(database);
+    database.run = ((operation, mutation, signal) => {
+      const started = Date.now();
+      let captured = false;
+      const capture = (error: unknown) => {
+        captured = true;
+        const code = String((error as { code?: unknown })?.code ?? 'operation');
+        const frame =
+          error instanceof Error
+            ? (error.stack
+                ?.match(/\/([a-zA-Z0-9-]+)\.(?:js|ts):(\d+):\d+/)
+                ?.slice(1)
+                .join(':') ?? 'unknown')
+            : 'unknown';
+        databaseFailures.push({
+          code: /^[a-zA-Z0-9_]{1,40}$/.test(code) ? code : 'unknown',
+          frame,
+          elapsed: Date.now() - started,
+        });
+        if (databaseFailures.length > 8) databaseFailures.shift();
+      };
+      return run(
+        async (client) => {
+          try {
+            return await operation(client);
+          } catch (error) {
+            capture(error);
+            throw error;
+          }
+        },
+        mutation,
+        signal,
+      ).catch((error) => {
+        if (!captured) capture(error);
+        throw error;
+      });
+    }) as typeof database.run;
+  }
+
   if (input.calendar && !input.knowledgeRoot) throw new Error('fixture_calendar_requires_knowledge_root');
   if (input.brief && (!input.calendar || !Number.isFinite(Date.parse(input.brief.clock))))
     throw new Error('fixture_brief_requires_calendar_clock');
@@ -121,7 +173,16 @@ async function start(input: {
             }).reader,
         })
       : undefined;
-  const store = new PriorityStore(database, knowledge, connector, view);
+  const authority = input.mission
+    ? (context: { scopeId: string; ownerId: string; agentGroupId: string; sessionId: string }) =>
+        context.scopeId === input.binding.scopeId &&
+        context.ownerId === input.binding.ownerId &&
+        context.agentGroupId === input.binding.agentGroupId &&
+        context.sessionId === input.binding.sessionId
+          ? input.mission!.authority
+          : null
+    : undefined;
+  const store = new PriorityStore(database, knowledge, connector, view, authority);
   if (input.brief) {
     store.briefs.options.clock = () => new Date(fixtureClock!);
     store.briefArtifacts!.collector.options.clock = () => new Date(fixtureClock!);
@@ -149,6 +210,23 @@ async function start(input: {
     members: [binding.ownerId, binding.botId],
     activeSubscription: true,
   });
+  const specialists =
+    input.mission && authority
+      ? await (
+          await import('./mission-fixture-host.js')
+        ).createMissionFixtureHost({
+          root: input.root,
+          repository: input.mission.repository,
+          hostRepository: input.mission.hostRepository,
+          image: input.mission.image,
+          sourceRoot: input.mission.sourceRoot,
+          runnerVolume: input.mission.runnerVolume,
+          db,
+          store,
+          authority,
+          binding,
+        })
+      : undefined;
   const runtime = createCosRuntime({
     db,
     enabled: true,
@@ -156,9 +234,11 @@ async function start(input: {
     facts,
     session: getSession,
     destination: getMessagingGroup,
-    stop: () => {},
+    stop: (id) => {
+      specialists?.stopSession(id);
+    },
     wake: async () => {},
-    ...(input.brief
+    ...(input.brief || input.mission
       ? {
           running: () => false,
           launcher: {
@@ -199,7 +279,7 @@ async function start(input: {
   const drains = new Map<string, Promise<void>>();
   let deliveryFailed = false;
   const timer = setInterval(() => {
-    for (const current of [session, ordinary])
+    for (const current of [session, ordinary, ...(specialists?.sessions() ?? [])])
       if (!drains.has(current.id)) {
         const drain = deliverSessionMessages(current)
           .then(
@@ -239,7 +319,9 @@ async function start(input: {
       return true;
     }
     if (command === 'pump') {
+      specialists?.check();
       await runtime.pump(binding);
+      await specialists?.host.pump(binding);
       return true;
     }
     if (input.brief && command === 'clock') {
@@ -247,7 +329,7 @@ async function start(input: {
       fixtureClock = value;
       return true;
     }
-    if (input.brief && command === 'sync-acks') {
+    if ((input.brief || input.mission) && command === 'sync-acks') {
       const directory = sessionDir(session.agent_group_id, session.id),
         inbound = openInboundDb(path.join(directory, 'inbound.db')),
         outbound = openOutboundDb(path.join(directory, 'outbound.db'));
@@ -258,6 +340,35 @@ async function start(input: {
         outbound.close();
       }
       return true;
+    }
+    if (input.mission && command === 'mission-review-ready') {
+      return (await runtime.controller.context(session))?.origin?.kind === 'mission_review';
+    }
+    if (input.mission && command === 'mission-hold-next') {
+      specialists!.holdNext();
+      return true;
+    }
+    if (input.mission && command === 'mission-states') return specialists!.states();
+    if (input.mission && command === 'mission-stale-submit')
+      return store.missionRuns.submitResult(value.identity, value.lease, value.requestId, value.callId, value.result);
+    if (input.mission && command === 'mission-diagnostics')
+      return { worker: specialists?.diagnostics(), database: databaseFailures };
+    if (input.mission && command === 'reserve-fixture-review') {
+      const context = await runtime.controller.context(session);
+      if (context?.origin?.kind !== 'mission_review') return false;
+      const { resolveKnowledgeContext } = await import('../../modules/chief-of-staff/knowledge/context.js');
+      const retained = resolveKnowledgeContext(session, context, db),
+        origin = context.origin;
+      if (!retained) return false;
+      const result = await store.missionReviewRuns!.reserve(
+        retained,
+        origin.runId,
+        origin.submissionId,
+        { owner: origin.owner, fence: origin.fence },
+        value,
+        'model',
+      );
+      return result.status === 'ok' && result.reserved === true;
     }
     if (input.brief && command === 'brief-diagnostics') {
       const directory = sessionDir(session.agent_group_id, session.id);
@@ -325,6 +436,7 @@ async function start(input: {
       clearInterval(timer);
       await stopAndDrainDeliveryPolls();
       await Promise.all(drains.values());
+      await specialists?.close();
       runtime.dispose();
       await store.database.pool.end();
       await relay.close();
@@ -346,8 +458,15 @@ process.on('message', (message: any) => {
       process.send!({ id: message.id, value }, () => {
         if (message.command === 'shutdown') process.disconnect();
       });
-    } catch {
-      process.send!({ id: message.id, error: 'fixture_host_command_failed' }, () => {
+    } catch (error) {
+      const reason =
+        error instanceof Error && /^[a-z_]{1,80}$/.test(error.message)
+          ? error.message
+          : typeof (error as { code?: unknown })?.code === 'string' &&
+              /^[A-Z_]{1,40}$/.test(String((error as { code: string }).code))
+            ? (error as { code: string }).code
+            : 'unavailable';
+      process.send!({ id: message.id, error: 'fixture_host_command_failed', reason }, () => {
         if (message.command === 'start') process.exit(1);
       });
     }

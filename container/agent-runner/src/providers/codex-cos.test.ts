@@ -4,14 +4,14 @@ import { CosCodexProvider } from './codex-cos.js';
 import type { AppServer, JsonRpcNotification } from './codex-app-server.js';
 import type { ProviderEvent } from './types.js';
 
-function fixture(options: { stale?: boolean; unauthorized?: boolean; forged?: boolean } = {}) {
+function fixture(options: { stale?: boolean; unauthorized?: boolean; forged?: boolean; profile?: 'research' } = {}) {
   const writes: any[] = [],
     spawns: any[] = [];
   let refreshed = 0,
     stopped = 0,
     prepare = 0;
   const provider = new CosCodexProvider(
-    { model: 'gpt-6-astra', proxyUrl: 'http://127.0.0.1:1234' },
+    { model: 'gpt-6-astra', proxyUrl: 'http://127.0.0.1:1234', profile: options.profile },
     {
       credentials: () => ({
         prepare: async () => {
@@ -111,6 +111,27 @@ function fixture(options: { stale?: boolean; unauthorized?: boolean; forged?: bo
   return { provider, run, writes, spawns, counts: () => ({ refreshed, stopped, prepare }) };
 }
 
+test('S05 specialist uses the native Codex transport with only research tools and its own continuation namespace', async () => {
+  const f = fixture({ profile: 'research' });
+  const events = await f.run();
+  const init = events.find((event) => event.type === 'init') as { continuation: string };
+  expect(init.continuation).toBe('cos-mission-codex-subscription-v1:persistent-thread');
+  expect(f.writes.find((r) => r.method === 'thread/start').params.dynamicTools.map((t: any) => t.name)).toEqual([
+    'cos_mission_context_get',
+    'cos_result_submit',
+  ]);
+  await f.run(init.continuation);
+  expect(f.writes.filter((r) => r.method === 'thread/start')).toHaveLength(1);
+  expect(f.writes.filter((r) => r.method === 'thread/resume')).toHaveLength(1);
+  const previous = f.counts().prepare;
+  await f.run('cos-codex-subscription-v1:main-private-context');
+  expect(f.counts().prepare).toBe(previous);
+  expect(JSON.stringify(f.writes)).not.toContain('main-private-context');
+  const coordinator = fixture();
+  await coordinator.run(init.continuation);
+  expect(coordinator.spawns).toHaveLength(0);
+});
+
 test('CoS keeps one native thread across queued replies and a new provider query', async () => {
   const f = fixture({ forged: true });
   const events = await f.run(undefined, 'Recall amber from another visual reply thread');
@@ -139,6 +160,11 @@ test('CoS keeps one native thread across queued replies and a new provider query
     'cos_brief_schedule_propose',
     'cos_work_read',
     'cos_brief_request',
+    'cos_mission_request',
+    'cos_mission_get',
+    'cos_mission_cancel',
+    'cos_mission_result_get',
+    'cos_mission_review',
   ]);
   expect(f.writes.find((r) => r.method === 'thread/resume').params.dynamicTools).toBeUndefined();
   expect(f.writes.find((r) => r.id === 999).error.code).toBe(-32601);

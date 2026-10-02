@@ -32,12 +32,91 @@ test('native CoS exposes only its fixed approved tools and dispatches validated 
     'cos_brief_schedule_propose',
     'cos_work_read',
     'cos_brief_request',
+    'cos_mission_request',
+    'cos_mission_get',
+    'cos_mission_cancel',
+    'cos_mission_result_get',
+    'cos_mission_review',
   ]);
   expect((await dispatch.handle(call())).success).toBe(true);
   expect(calls).toHaveLength(1);
   expect(calls[0]).toMatchObject({ method: 'cos_context_get', params: { view: 'today' } });
   expect((await dispatch.handle(call())).success).toBe(false);
   expect(calls).toHaveLength(1);
+  dispatch.close();
+});
+test('S05 coordinator review tools require exact result identity and a stable review request ID', async () => {
+  const { dispatch, calls } = fixture();
+  const submission_id = '11111111-1111-4111-8111-111111111111',
+    request_id = '22222222-2222-4222-8222-222222222222';
+  const review = {
+    mission_id: 'mission',
+    submission_id,
+    result_digest: 'a'.repeat(64),
+    expected_version: 3,
+    decision: 'partial',
+    criteria: [{ id: 'cost', verdict: 'partial' }],
+  };
+  expect(
+    (
+      await dispatch.handle(
+        call({ tool: 'cos_mission_result_get', arguments: { mission_id: 'mission', submission_id } }),
+      )
+    ).success,
+  ).toBe(true);
+  expect(
+    (await dispatch.handle(call({ callId: 'review', tool: 'cos_mission_review', arguments: { request_id, review } })))
+      .success,
+  ).toBe(true);
+  expect(calls[1]).toMatchObject({ method: 'cos_mission_review', request_id, params: { review } });
+  expect(
+    (await dispatch.handle(call({ callId: 'bad-review', tool: 'cos_mission_review', arguments: { review } }))).success,
+  ).toBe(false);
+  expect(calls).toHaveLength(2);
+});
+test('S05 coordinator tools keep stable proposal identity and exclude specialist or template authority', async () => {
+  const { dispatch, calls } = fixture();
+  const request_id = '11111111-1111-4111-8111-111111111111';
+  const request = {
+    question: 'Compare alternatives',
+    goal_id: null,
+    project_id: null,
+    sources: [{ source_id: 'note', revision_id: 'revision' }],
+    acceptance_criteria: [{ id: 'cost', description: 'Compare costs.' }],
+    limits: {
+      max_attempts: 2,
+      max_turns: 4,
+      max_tool_calls: 24,
+      max_concurrent_workers: 1,
+      wall_seconds: 600,
+      context_bytes: 32768,
+      result_bytes: 8192,
+    },
+  };
+  expect(
+    (await dispatch.handle(call({ tool: 'cos_mission_request', arguments: { request_id, request } }))).success,
+  ).toBe(true);
+  expect(calls[0]).toMatchObject({ method: 'cos_mission_request', request_id, params: { request } });
+  for (const tool of ['cos_mission_get', 'cos_mission_cancel']) {
+    expect((await dispatch.handle(call({ callId: tool, tool, arguments: { mission_id: 'mission' } }))).success).toBe(
+      true,
+    );
+    expect(calls.at(-1)).toMatchObject({ method: tool, params: { mission_id: 'mission' } });
+  }
+  for (const [i, args] of [
+    { request },
+    { request_id, request, approved: true },
+    { request_id, request, provider: 'claude' },
+    { request_id, request: { ...request, template_id: 'privileged' } },
+  ].entries())
+    expect(
+      (await dispatch.handle(call({ callId: 'bad-mission-' + i, tool: 'cos_mission_request', arguments: args })))
+        .success,
+    ).toBe(false);
+  expect((await dispatch.handle(call({ callId: 'submit', tool: 'cos_result_submit', arguments: {} }))).success).toBe(
+    false,
+  );
+  expect(calls).toHaveLength(3);
   dispatch.close();
 });
 test('S02 dispatches answer preparation with a stable request ID and rejects forged authority', async () => {

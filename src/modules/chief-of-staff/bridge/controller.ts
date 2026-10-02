@@ -1,4 +1,6 @@
-import { interruptScheduledOrigin, scheduledContext } from '../automation/scheduled-origin.js';
+import { interruptScheduledOrigin } from '../automation/scheduled-origin.js';
+import { interruptReviewOrigin } from '../missions/review-origin.js';
+import { automationContext } from '../automation/origin.js';
 import type Database from 'better-sqlite3';
 import type { Session } from '../../../types.js';
 import type { InboundEvent } from '../../../channels/adapter.js';
@@ -20,6 +22,7 @@ export type ControllerDependencies = {
   wake(session: Session): Promise<void>;
   now?(): number;
   verifyScheduled?(context: Context): Promise<boolean>;
+  verifyReview?(context: Context): Promise<boolean>;
 };
 export class CosController {
   constructor(readonly dependencies: ControllerDependencies) {}
@@ -36,6 +39,7 @@ export class CosController {
     if (control?.kind === 'pause') {
       d.db.prepare('UPDATE cos_identity_boundaries SET paused=1 WHERE scope_id=?').run(binding.scopeId);
       interruptScheduledOrigin(d.db, binding);
+      interruptReviewOrigin(d.db, binding);
       d.stop(binding.sessionId);
       return true;
     }
@@ -80,7 +84,9 @@ export class CosController {
     if (pending.payload_digest !== payloadDigest || pending.projected !== 0) return true;
     // A new owner message preempts automation. Keep its local fence until the
     // trusted scheduler durably reconciles the old run, including uncertain sends.
-    if (interruptScheduledOrigin(d.db, binding)) d.stop(binding.sessionId);
+    const scheduledInterrupted = interruptScheduledOrigin(d.db, binding),
+      reviewInterrupted = interruptReviewOrigin(d.db, binding);
+    if (scheduledInterrupted || reviewInterrupted) d.stop(binding.sessionId);
     // The receipt stays pending if writing native SQLite fails. Exact retries finish the
     // projection even after a crash between the two databases; native insertion is idempotent.
     // No attachments, reply redirection or generic command routing cross this boundary.
@@ -114,8 +120,8 @@ export class CosController {
     const boundary = cosBoundary(session, d.db);
     if (!boundary.restricted || !boundary.binding || boundary.paused) return null;
     const now = d.now?.() ?? Date.now();
-    const scheduled = scheduledContext(session, d.db, now);
-    if (scheduled !== undefined) return scheduled;
+    const automatic = automationContext(session, d.db, now);
+    if (automatic !== undefined) return automatic;
     if (!boundary.ingressId || !boundary.ingressAt) return null;
     const at = Date.parse(boundary.ingressAt);
     if (!Number.isFinite(at) || at < now - 300_000 || at > now + 30_000) return null;
@@ -140,7 +146,12 @@ export class CosController {
       return null;
     if (context.origin) {
       try {
-        if (!(await this.dependencies.verifyScheduled?.(context))) return null;
+        if (
+          !(await (context.origin.kind === 'mission_review'
+            ? this.dependencies.verifyReview?.(context)
+            : this.dependencies.verifyScheduled?.(context)))
+        )
+          return null;
       } catch {
         return null;
       }
