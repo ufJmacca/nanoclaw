@@ -3,6 +3,11 @@ import { initTestDb, closeDb } from '../../db/connection.js';
 import { ensureCosBoundarySchema, installCosBoundary, type CosBinding } from '../../cos-boundary.js';
 import { CosService } from './service.js';
 import type { PriorityStore } from './store/priorities.js';
+import { randomUUID } from 'node:crypto';
+import { digest } from './domain/contracts.js';
+import { ensureConversationSchema } from './bridge/conversation-state.js';
+import { installReviewOrigin, reviewContext } from './missions/review-origin.js';
+import type { Session } from '../../types.js';
 const services: CosService[] = [];
 afterEach(async () => {
   for (const service of services.splice(0)) await service.stop();
@@ -113,3 +118,63 @@ it('closes only CoS admission during maintenance and reconnects after verified r
   expect(f.connect).toHaveBeenCalledTimes(2);
   expect(f.service.status).toBe('ready');
 });
+it.each(['database', 'maintenance'])(
+  'S05-T10 %s closes an active review origin before any database recovery',
+  async (failure) => {
+    const f = fixture(true);
+    await f.service.tick();
+    const binding: CosBinding = {
+      scopeId: 'scope',
+      agentGroupId: 'group',
+      messagingGroupId: 'mg',
+      sessionId: 'main',
+      provider: 'codex',
+      instanceId: 'fixture',
+      channelId: 'private',
+      ownerId: 'owner',
+      botId: 'bot',
+    };
+    const session = {
+      id: 'main',
+      agent_group_id: 'group',
+      messaging_group_id: 'mg',
+      agent_provider: 'codex',
+      status: 'active',
+      thread_id: null,
+    } as Session;
+    installCosBoundary(binding, f.db);
+    ensureConversationSchema(f.db);
+    f.db
+      .prepare('UPDATE cos_identity_boundaries SET paused=0,ingress_id=?,ingress_at=?')
+      .run('owner-event', new Date().toISOString());
+    const generation = randomUUID();
+    f.db
+      .prepare(
+        "INSERT INTO cos_conversation_states(scope_id,binding_digest,account_fingerprint,generation,status,updated_at) VALUES(?,?,?,?,'active',?)",
+      )
+      .run('scope', digest(binding), 'a'.repeat(64), generation, new Date().toISOString());
+    expect(
+      installReviewOrigin(f.db, binding, session, {
+        identity: {
+          missionId: 'mission',
+          attemptId: randomUUID(),
+          submissionId: randomUUID(),
+          generation: 1,
+          sessionId: 'main',
+          contextGeneration: generation,
+        },
+        lease: { owner: 'host', fence: 1 },
+        deadlineAt: new Date(Date.now() + 30000).toISOString(),
+      }),
+    ).toBe(true);
+    f.stop.mockImplementation(() => {
+      expect(reviewContext(session, f.db)).toBeNull();
+    });
+    if (failure === 'database') f.query.mockRejectedValueOnce(Error('fixture partition'));
+    else f.admission.mockReturnValue(false);
+    await f.service.tick();
+    expect(f.stop).toHaveBeenCalledExactlyOnceWith('main');
+    expect(reviewContext(session, f.db)).toBeNull();
+    expect(f.db.prepare('SELECT count(*) AS n FROM cos_mission_review_origins').get()).toEqual({ n: 1 });
+  },
+);

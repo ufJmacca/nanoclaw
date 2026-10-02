@@ -3,6 +3,8 @@ import { createCosRuntime, type RuntimeDependencies } from './runtime.js';
 import { DatabasePreflightError } from './store/preflight.js';
 import { DatabaseConfigurationError } from './store/config.js';
 import type { CosBinding } from '../../cos-boundary.js';
+import { interruptReviewOrigin } from './missions/review-origin.js';
+import { interruptScheduledOrigin } from './automation/scheduled-origin.js';
 export type ServiceDependencies = Omit<RuntimeDependencies, 'store'> & { connect(): Promise<PriorityStore> };
 export class CosService {
   runtime: ReturnType<typeof createCosRuntime>;
@@ -14,6 +16,20 @@ export class CosService {
   constructor(readonly dependencies: ServiceDependencies) {
     this.runtime = createCosRuntime({ ...dependencies, enabled: false });
   }
+  private fenceExecutions(): void {
+    const d = this.dependencies;
+    const bindings = d.db.prepare('SELECT binding FROM cos_identity_boundaries').all() as Array<{ binding: string }>;
+    for (const item of bindings) {
+      try {
+        const binding = JSON.parse(item.binding) as CosBinding;
+        interruptReviewOrigin(d.db, binding);
+        interruptScheduledOrigin(d.db, binding);
+        d.stop(binding.sessionId);
+      } catch {
+        // One uncertain local stop must not prevent fencing the remaining CoS bindings.
+      }
+    }
+  }
   async tick(): Promise<void> {
     if (this.stopped || !this.dependencies.enabled || this.inFlight) return;
     const run = async () => {
@@ -22,10 +38,7 @@ export class CosService {
           this.status = 'maintenance';
           this.runtime.dispose();
           this.runtime = createCosRuntime({ ...this.dependencies, enabled: false });
-          const bindings = this.dependencies.db.prepare('SELECT binding FROM cos_identity_boundaries').all() as Array<{
-            binding: string;
-          }>;
-          for (const item of bindings) this.dependencies.stop((JSON.parse(item.binding) as CosBinding).sessionId);
+          this.fenceExecutions();
           if (this.store) {
             const old = this.store;
             this.store = undefined;
@@ -51,6 +64,7 @@ export class CosService {
           await this.runtime.pump(JSON.parse(row.binding) as CosBinding);
         }
       } catch (error) {
+        this.fenceExecutions();
         this.status =
           error instanceof DatabaseConfigurationError
             ? 'misconfigured'
