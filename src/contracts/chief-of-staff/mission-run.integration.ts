@@ -15,6 +15,7 @@ import { RESEARCH_TEMPLATE } from '../../modules/chief-of-staff/missions/work-or
 import { MISSION_DEFAULT_LIMITS } from '../../modules/chief-of-staff/contracts/mission-protocol.js';
 import type { CosMissionIdentity } from '../../cos-mission-boundary.js';
 import { digest } from '../../modules/chief-of-staff/domain/contracts.js';
+import type { MissionDispatchLease } from '../../modules/chief-of-staff/missions/run-store.js';
 
 const scope = 'mission-run-' + randomUUID();
 const context = { scopeId: scope, ownerId: 'owner', agentGroupId: scope, sessionId: scope, ingressId: randomUUID() };
@@ -337,6 +338,11 @@ test('S05-T05/T06 allocation leases preserve dispatch identity and fence expired
   assert.equal(first.status, 'ok');
   assert.deepEqual(first.identity, identity);
   assert.match(JSON.stringify(first.order), /SOURCE_CANARY/);
+  assert.ok(
+    (await rows('evidence_refs')).some(
+      (e) => e.session_id === identity.sessionId && e.context_generation === identity.attemptId,
+    ),
+  );
   assert.equal((await store.missionRuns.claimDispatch(context, identity.attemptId, 'dispatcher-b')).status, 'pending');
   assert.equal((await store.missionRuns.authorizeDispatch(identity, first.lease as any)).status, 'ok');
   assert.equal((await store.missionRuns.renewDispatch(identity, first.lease as any)).status, 'ok');
@@ -388,4 +394,85 @@ test('S05-T07 current source access and cancellation override a previously acqui
   await store.missionRuns.cancel(context, identity.missionId);
   assert.equal((await store.missionRuns.beginExecution(identity, claimed.lease as any)).status, 'denied');
   assert.equal((await store.missionRuns.claimDispatch(context, identity.attemptId, 'dispatcher')).status, 'denied');
+});
+async function dispatched(identity: CosMissionIdentity) {
+  const claim = await store.missionRuns.claimDispatch(context, identity.attemptId, 'read-dispatcher');
+  assert.equal(claim.status, 'ok');
+  const lease = claim.lease as MissionDispatchLease;
+  assert.equal((await store.missionRuns.markDispatchReady(identity, lease, digest('native-fixture'))).status, 'ok');
+  assert.equal((await store.missionRuns.beginExecution(identity, lease)).status, 'ok');
+  return lease;
+}
+test('S05-T02/T03 specialist context returns only the assigned exact revision after a fresh root tool reservation', async () => {
+  const a = await mission(),
+    b = await mission(),
+    lease = await dispatched(a.identity),
+    call = randomUUID();
+  const read = await store.missionRuns.readContext(a.identity, lease, call);
+  assert.equal(read.status, 'ok');
+  const captured = read.context as {
+    sources: Array<{ source_id: string; revision_id: string; chunks: Array<{ text: string }> }>;
+  };
+  assert.deepEqual(
+    captured.sources.map((s) => ({ source_id: s.source_id, revision_id: s.revision_id })),
+    a.input.sources,
+  );
+  assert.ok(captured.sources[0].chunks[0].text.includes('SOURCE_CANARY_'));
+  assert.ok(!JSON.stringify(read).includes(b.input.sources[0].source_id));
+  assert.deepEqual(read.template, RESEARCH_TEMPLATE);
+  const exposed = (await rows('evidence_refs')).filter((e) => e.session_id === a.identity.sessionId);
+  assert.ok(exposed.length > 0);
+  assert.ok(
+    exposed.every(
+      (e) =>
+        e.context_generation === a.identity.attemptId &&
+        e.source_id === a.input.sources[0].source_id &&
+        e.processing_provider === 'codex',
+    ),
+  );
+  assert.equal(((await store.missionRuns.inspect(context, a.identity.missionId)).mission as any).usage.tool, 1);
+  assert.deepEqual(await store.missionRuns.readContext(a.identity, lease, call), { status: 'pending' });
+  assert.equal(((await store.missionRuns.inspect(context, a.identity.missionId)).mission as any).usage.tool, 1);
+});
+test('S05-T09 concurrent context reads consume the root tool cap without uncharged disclosure', async () => {
+  const { identity } = await mission(),
+    lease = await dispatched(identity);
+  const results = await Promise.all(
+    Array.from({ length: 6 }, () => store.missionRuns.readContext(identity, lease, randomUUID())),
+  );
+  assert.equal(results.filter((r) => r.status === 'ok').length, 2);
+  assert.ok(results.filter((r) => r.status !== 'ok').every((r) => r.context === undefined));
+  assert.equal(((await store.missionRuns.inspect(context, identity.missionId)).mission as any).usage.tool, 2);
+});
+test('S05-T07 context read refuses stale dispatch fences, altered child identities and cancellation', async () => {
+  const { identity } = await mission(),
+    lease = await dispatched(identity);
+  for (const [i, l] of [
+    [{ ...identity, sessionId: 'foreign' }, lease],
+    [{ ...identity, generation: 2 }, lease],
+    [identity, { ...lease, fence: lease.fence + 1 }],
+    [identity, { ...lease, owner: 'foreign' }],
+  ] as Array<[CosMissionIdentity, MissionDispatchLease]>)
+    assert.equal((await store.missionRuns.readContext(i, l, randomUUID())).status, 'denied');
+  assert.equal(((await store.missionRuns.inspect(context, identity.missionId)).mission as any).usage.tool, 0);
+  await store.missionRuns.cancel(context, identity.missionId);
+  assert.equal((await store.missionRuns.readContext(identity, lease, randomUUID())).status, 'denied');
+});
+test('S05-T03/T10 context source revocation and lease expiry deny disclosure before reserving another tool call', async () => {
+  for (const failure of ['source', 'lease']) {
+    const { identity, input } = await mission(),
+      lease = await dispatched(identity);
+    if (failure === 'source')
+      await admin.query("UPDATE cos.sources SET status='revoked' WHERE scope_id=$1 AND id=$2", [
+        scope,
+        input.sources[0].source_id,
+      ]);
+    else
+      await admin.query(
+        "UPDATE cos.mission_attempts SET lease_until=clock_timestamp()-interval '1 second' WHERE scope_id=$1 AND id=$2",
+        [scope, identity.attemptId],
+      );
+    assert.deepEqual(await store.missionRuns.readContext(identity, lease, randomUUID()), { status: 'denied' });
+    assert.equal(((await store.missionRuns.inspect(context, identity.missionId)).mission as any).usage.tool, 0);
+  }
 });

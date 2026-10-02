@@ -2,9 +2,10 @@ import type { PoolClient } from 'pg';
 import { validCosMissionIdentity, type CosMissionIdentity } from '../../../cos-mission-boundary.js';
 import { BoundedDatabase, DatabaseUnavailable } from '../store/client.js';
 import { digest, type Context, type Result } from '../domain/contracts.js';
-import type { ResearchWorkOrder } from './work-order.js';
+import { RESEARCH_TEMPLATE, type ResearchWorkOrder } from './work-order.js';
 import type { MissionProposalStore } from './proposal-store.js';
 import { queueMissionAttempt } from './attempt.js';
+import { recordMissionExposure } from './exposure.js';
 
 export type MissionDispatchLease = { owner: string; fence: number };
 const validLease = (v: MissionDispatchLease) =>
@@ -114,8 +115,8 @@ export class MissionRunStore {
       ).rowCount
     );
   }
-  private async current(client: PoolClient, m: MissionRow): Promise<boolean> {
-    if (m.proposal_state !== 'applied' || m.applied_record_id !== m.id) return false;
+  private async capture(client: PoolClient, m: MissionRow): Promise<ResearchWorkOrder | null> {
+    if (m.proposal_state !== 'applied' || m.applied_record_id !== m.id) return null;
     const o = m.body.origin;
     const context: Context = {
       scopeId: o.scopeId,
@@ -124,12 +125,15 @@ export class MissionRunStore {
       agentGroupId: o.agentGroupId,
       ingressId: o.ingressId,
     };
-    return this.proposals.validateChange(client, context, {
+    return this.proposals.captureChange(client, context, {
       kind: 'research_mission',
       mission_id: m.id,
       work_order_digest: m.digest,
       work_order: m.body,
     });
+  }
+  private async current(client: PoolClient, m: MissionRow): Promise<boolean> {
+    return (await this.capture(client, m)) !== null;
   }
   private async usage(client: PoolClient, scopeId: string, missionId: string) {
     const rows = (
@@ -202,28 +206,38 @@ export class MissionRunStore {
         !(await this.current(client, m))
       )
         return { status: 'denied' };
-      const old = (
-        await client.query(
-          'SELECT attempt_id,generation,kind,payload_digest FROM cos.mission_budget_reservations WHERE scope_id=$1 AND mission_id=$2 AND call_id=$3',
-          [identity.scopeId, identity.missionId, callId],
-        )
-      ).rows[0];
-      if (old)
-        return old.attempt_id === identity.attemptId &&
-          old.generation === identity.generation &&
-          old.kind === kind &&
-          old.payload_digest === payloadDigest
-          ? { status: 'ok', reserved: false }
-          : { status: 'conflict' };
-      const usage = await this.usage(client, identity.scopeId, identity.missionId);
-      const limit = kind === 'model' ? m.body.request.limits.max_turns : m.body.request.limits.max_tool_calls;
-      if (usage[kind] >= limit) return { status: 'denied' };
-      await client.query(
-        'INSERT INTO cos.mission_budget_reservations(scope_id,mission_id,call_id,attempt_id,generation,kind,payload_digest) VALUES($1,$2,$3,$4,$5,$6,$7)',
-        [identity.scopeId, identity.missionId, callId, identity.attemptId, identity.generation, kind, payloadDigest],
-      );
-      return { status: 'ok', reserved: true };
+      return this.reserveCall(client, m, identity, callId, kind, payloadDigest);
     });
+  }
+  private async reserveCall(
+    client: PoolClient,
+    m: MissionRow,
+    identity: CosMissionIdentity,
+    callId: string,
+    kind: 'model' | 'tool',
+    payloadDigest: string,
+  ): Promise<Result> {
+    const old = (
+      await client.query(
+        'SELECT attempt_id,generation,kind,payload_digest FROM cos.mission_budget_reservations WHERE scope_id=$1 AND mission_id=$2 AND call_id=$3',
+        [identity.scopeId, identity.missionId, callId],
+      )
+    ).rows[0];
+    if (old)
+      return old.attempt_id === identity.attemptId &&
+        old.generation === identity.generation &&
+        old.kind === kind &&
+        old.payload_digest === payloadDigest
+        ? { status: 'ok', reserved: false }
+        : { status: 'conflict' };
+    const usage = await this.usage(client, identity.scopeId, identity.missionId);
+    const limit = kind === 'model' ? m.body.request.limits.max_turns : m.body.request.limits.max_tool_calls;
+    if (usage[kind] >= limit) return { status: 'denied' };
+    await client.query(
+      'INSERT INTO cos.mission_budget_reservations(scope_id,mission_id,call_id,attempt_id,generation,kind,payload_digest) VALUES($1,$2,$3,$4,$5,$6,$7)',
+      [identity.scopeId, identity.missionId, callId, identity.attemptId, identity.generation, kind, payloadDigest],
+    );
+    return { status: 'ok', reserved: true };
   }
   async fail(
     identity: CosMissionIdentity,
@@ -418,6 +432,8 @@ export class MissionRunStore {
         return { status: 'denied' };
       const fence = a.lease_current && a.lease_owner === owner ? Number(oldFence) : Number(oldFence) + 1;
       if (fence < 1) return { status: 'denied' };
+      // Persist conservative exposure before host files/provider state can be materialized.
+      await recordMissionExposure(client, identityOf(a), order);
       const updated = (
         await client.query(
           "UPDATE cos.mission_attempts SET state=CASE WHEN state='queued' THEN 'allocating' ELSE state END,lease_owner=$3,lease_until=clock_timestamp()+interval '30 seconds',allocation=allocation||$4::jsonb,version=version+1,updated_at=clock_timestamp() WHERE scope_id=$1 AND id=$2 RETURNING input_id",
@@ -439,17 +455,43 @@ export class MissionRunStore {
       !['allocating', 'ready', 'running'].includes(a.state) ||
       a.lease_owner !== lease.owner ||
       !a.lease_current ||
-      a.allocation.dispatch_fence !== lease.fence ||
-      !(await this.current(client, m))
+      a.allocation.dispatch_fence !== lease.fence
     )
       return null;
-    return { mission: m, attempt: a };
+    const order = await this.capture(client, m);
+    return order ? { mission: m, attempt: a, order } : null;
   }
   async authorizeDispatch(identity: CosMissionIdentity, lease: MissionDispatchLease): Promise<Result> {
     if (!validCosMissionIdentity(identity) || !validLease(lease)) return { status: 'denied' };
     return this.transaction(identity.scopeId, async (client) => ({
       status: (await this.dispatchCurrent(client, identity, lease)) ? 'ok' : 'denied',
     }));
+  }
+  /** Fresh disclosure and its root reservation share a transaction. A replay is not another disclosure grant. */
+  async readContext(identity: CosMissionIdentity, lease: MissionDispatchLease, callId: string): Promise<Result> {
+    if (!validCosMissionIdentity(identity) || !validLease(lease) || !id(callId)) return { status: 'denied' };
+    return this.transaction(identity.scopeId, async (client) => {
+      const current = await this.dispatchCurrent(client, identity, lease);
+      if (!current || current.mission.state !== 'running' || current.attempt.state !== 'running')
+        return { status: 'denied' };
+      const reservation = await this.reserveCall(
+        client,
+        current.mission,
+        identity,
+        callId,
+        'tool',
+        digest({ method: 'cos_mission_context_get', work_order: current.order.digest }),
+      );
+      if (reservation.status !== 'ok') return reservation;
+      if (reservation.reserved !== true) return { status: 'pending' };
+      await recordMissionExposure(client, identity, current.order);
+      return {
+        status: 'ok',
+        work_order: current.order.body,
+        context: current.order.context,
+        template: RESEARCH_TEMPLATE,
+      };
+    });
   }
   async markDispatchReady(
     identity: CosMissionIdentity,
