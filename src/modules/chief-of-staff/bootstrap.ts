@@ -17,6 +17,9 @@ import type { CosBinding } from '../../cos-boundary.js';
 import { connectCosHostStore } from './host-store.js';
 import { CosService } from './service.js';
 import { createCoordinatorLauncher } from './bridge/coordinator-launcher.js';
+import { RestrictedExecutionProbe } from './bridge/native-execution.js';
+import { getInstallSlug } from '../../install-slug.js';
+import { sessionDir } from '../../session-manager.js';
 
 /** Narrow host-service profile: never load migration or test credentials into this module. */
 export function startCosHostModule(assertHostAuthority: () => void): { service: CosService; stop(): Promise<void> } {
@@ -113,7 +116,27 @@ export function startCosHostModule(assertHostAuthority: () => void): { service: 
       return false;
     }
   };
-  const launcher = createCoordinatorLauncher({ targetRoot, db: getDb(), running: hasContainerExecution });
+  const executionProbe = new RestrictedExecutionProbe(getInstallSlug());
+  const running = (id: string): boolean => {
+    try {
+      assertHostAuthority();
+      const session = getSession(id);
+      return !session || hasContainerExecution(id) || executionProbe.present(sessionDir(session.agent_group_id, id));
+    } catch {
+      return true;
+    }
+  };
+  const stop = (id: string): void => {
+    try {
+      assertHostAuthority();
+      killContainer(id, 'CoS execution fenced');
+      const session = getSession(id);
+      if (session) executionProbe.stop(sessionDir(session.agent_group_id, id));
+    } catch {
+      log.warn('CoS execution stop requires reconciliation');
+    }
+  };
+  const launcher = createCoordinatorLauncher({ targetRoot, db: getDb(), running });
   const facts = guardConversationAccess({
     active: activeBinding,
     facts: transportFacts,
@@ -121,7 +144,7 @@ export function startCosHostModule(assertHostAuthority: () => void): { service: 
       try {
         launcher.invalidate(binding.scopeId);
       } finally {
-        killContainer(binding.sessionId, 'CoS conversation access revoked');
+        stop(binding.sessionId);
       }
     },
   });
@@ -133,11 +156,9 @@ export function startCosHostModule(assertHostAuthority: () => void): { service: 
     facts,
     session: getSession,
     destination: getMessagingGroup,
-    stop: (id) => killContainer(id, 'CoS emergency pause'),
-    running: hasContainerExecution,
-    wake: async (session) => {
-      await wakeContainer(session);
-    },
+    stop,
+    running,
+    wake: wakeContainer,
     connect: () =>
       connectCosHostStore(selected, { targetRoot, installationRoot: process.cwd(), dataRoot: DATA_DIR }, admitted),
   });
