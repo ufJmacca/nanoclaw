@@ -31,6 +31,8 @@ import { MissionRunStore, type MissionDispatchLease } from '../../modules/chief-
 import type { MissionResult } from '../../modules/chief-of-staff/contracts/mission-result.js';
 import { MissionReviews } from '../../modules/chief-of-staff/missions/review-store.js';
 import type { MissionReview } from '../../modules/chief-of-staff/contracts/mission-review.js';
+import { MissionNotifications } from '../../modules/chief-of-staff/missions/notifications.js';
+import { MissionNotificationDelivery } from '../../modules/chief-of-staff/missions/notification-delivery.js';
 
 const scope = 'mission-run-' + randomUUID();
 const context = { scopeId: scope, ownerId: 'owner', agentGroupId: scope, sessionId: scope, ingressId: randomUUID() };
@@ -302,6 +304,7 @@ test('S05-T08 coordinator reads the exact artifact and records review with one a
     id: f.review.submission_id,
     digest: f.review.result_digest,
     review_id: null,
+    notification_state: null,
   });
   assert.equal((await rows('missions')).find((r) => r.id === f.identity.missionId).state, 'awaiting_review');
   assert.equal(
@@ -424,6 +427,132 @@ test('S05-T08 artifact corruption, changed provider authority and review replay 
   await admin.query("UPDATE cos.sources SET status='revoked' WHERE id=$1", [f.input.sources[0].source_id]);
   assert.equal((await f.reviews.review(f.k, requestId, f.review)).status, 'denied');
   assert.equal((await f.reviews.read(f.k, f.identity.missionId, f.review.submission_id)).status, 'denied');
+});
+test('S05-T08 notification reserves one send and records metadata-only receipts without retrying unknown outcomes', async () => {
+  const f = await submitted();
+  const review = await f.reviews.review(f.k, randomUUID(), f.review);
+  const notifications = new MissionNotifications(store.database, f.reviews);
+  const reviewId = String(review.review_id),
+    attemptId = randomUUID();
+  assert.deepEqual(await notifications.pending(f.k), { status: 'ok', review_ids: [reviewId] });
+  assert.deepEqual(await notifications.begin({ ...f.k, ownerId: 'foreign' }, reviewId, attemptId), {
+    status: 'denied',
+  });
+  const started = await notifications.begin(f.k, reviewId, attemptId);
+  assert.equal(started.status, 'ok');
+  assert.notEqual((await notifications.begin(f.k, reviewId, attemptId)).status, 'ok');
+  assert.notEqual((await notifications.begin(f.k, reviewId, randomUUID())).status, 'ok');
+  const output = await notifications.read(f.k, reviewId, attemptId);
+  assert.equal(output.status, 'ok');
+  assert.match(String(output.text), /coordinator review/i);
+  assert.match(String(output.text), new RegExp('L' + f.result.claims[0].citations[0].start_line));
+  assert.equal(
+    (await notifications.finish(f.k, reviewId, randomUUID(), { state: 'delivered', platform_receipt: 'wrong' })).status,
+    'denied',
+  );
+  assert.equal((await notifications.finish(f.k, reviewId, attemptId, { state: 'uncertain' })).state, 'uncertain');
+  assert.notEqual((await notifications.begin(f.k, reviewId, randomUUID())).status, 'ok');
+  assert.equal((await notifications.read(f.k, reviewId, attemptId)).status, 'denied');
+  const receipt = { state: 'delivered' as const, platform_receipt: 'verified-fixture-post' };
+  assert.equal((await notifications.finish(f.k, reviewId, attemptId, receipt)).state, 'delivered');
+  assert.equal((await notifications.finish(f.k, reviewId, attemptId, receipt)).state, 'delivered');
+  const command = (await rows('outbox')).find((r) => r.id === started.notification_id);
+  assert.equal(command.attempts, 1);
+  assert.deepEqual(await notifications.pending(f.k), { status: 'ok', review_ids: [] });
+  assert.equal(
+    ((await store.missionRuns.inspect(context, f.identity.missionId)).mission as any).submission.notification_state,
+    'delivered',
+  );
+  assert.ok(command.delivered_at);
+  assert.equal(JSON.stringify(command.payload).includes('RESULT_CANARY'), false);
+});
+test('S05-T07 notification rechecks evidence and context after reservation but can retain an already-sent receipt', async () => {
+  const f = await submitted();
+  const review = await f.reviews.review(f.k, randomUUID(), f.review);
+  const notifications = new MissionNotifications(store.database, f.reviews),
+    attempt = randomUUID(),
+    reviewId = String(review.review_id);
+  assert.equal((await notifications.begin(f.k, reviewId, attempt)).status, 'ok');
+  assert.equal((await notifications.read({ ...f.k, generation: randomUUID() }, reviewId, attempt)).status, 'denied');
+  await admin.query("UPDATE cos.sources SET status='revoked' WHERE id=$1", [f.input.sources[0].source_id]);
+  assert.equal((await notifications.read(f.k, reviewId, attempt)).status, 'denied');
+  assert.equal(
+    (
+      await notifications.finish(f.k, reviewId, attempt, {
+        state: 'delivered',
+        platform_receipt: 'previously-sent-fixture',
+      })
+    ).state,
+    'delivered',
+  );
+});
+test('S05-T05/T06 concurrent notification pumps with a real durable intent invoke the fixture transport once', async () => {
+  const f = await submitted('partial');
+  const review = await f.reviews.review(f.k, randomUUID(), {
+    ...f.review,
+    decision: 'partial',
+    criteria: [{ id: 'tradeoff', verdict: 'partial' }],
+  });
+  assert.equal(review.status, 'ok');
+  const notifications = new MissionNotifications(store.database, f.reviews);
+  const sent: string[] = [];
+  const delivery = new MissionNotificationDelivery({
+    notifications,
+    admitted: async () => true,
+    current: () => f.k,
+    send: async (_context, text, notificationId) => {
+      sent.push(text);
+      assert.equal(notificationId, 'mission-review-' + review.review_id);
+      return 'fixture-post';
+    },
+  });
+  const results = await Promise.all([
+    delivery.deliver(f.k, String(review.review_id)),
+    delivery.deliver(f.k, String(review.review_id)),
+  ]);
+  assert.equal(results.filter((r) => r.state === 'delivered').length, 1);
+  assert.equal(sent.length, 1);
+  assert.match(sent[0], /Research result — partial/);
+  const restarted = new MissionNotificationDelivery({
+    notifications: new MissionNotifications(store.database, f.reviews),
+    admitted: async () => true,
+    current: () => f.k,
+    send: async () => {
+      throw Error('must not resend');
+    },
+  });
+  assert.equal((await restarted.deliver(f.k, String(review.review_id))).status, 'denied');
+});
+test('S05-PG03 lost notification-reservation acknowledgement cannot grant a later send', async () => {
+  const f = await submitted();
+  const reviewed = await f.reviews.review(f.k, randomUUID(), f.review),
+    reviewId = String(reviewed.review_id);
+  const pool = new pg.Pool(await fixtureDatabaseConfig()),
+    connection = await pool.connect(),
+    original = connection.query.bind(connection);
+  let dropped = false;
+  connection.query = (async (...args: unknown[]) => {
+    const result = await (original as (...a: unknown[]) => Promise<unknown>)(...args);
+    if (args[0] === 'COMMIT' && !dropped) {
+      dropped = true;
+      throw Error('fixture_lost_ack');
+    }
+    return result;
+  }) as typeof connection.query;
+  connection.release();
+  const faulty = new MissionNotifications(new BoundedDatabase(pool), f.reviews);
+  try {
+    assert.equal((await faulty.begin(f.k, reviewId, randomUUID())).status, 'pending');
+  } finally {
+    await pool.end();
+  }
+  const recovered = new MissionNotifications(store.database, f.reviews);
+  assert.equal((await recovered.begin(f.k, reviewId, randomUUID())).status, 'denied');
+  assert.deepEqual(await recovered.pending(f.k), { status: 'ok', review_ids: [] });
+  const row = (await rows('outbox')).find((r) => r.id === 'mission-review-' + reviewId);
+  assert.equal(row.attempts, 1);
+  assert.equal(row.payload.delivery.state, 'delivering');
+  assert.equal(row.delivered_at, null);
 });
 test('S05-T08 review rejects mismatched result provider and attempt provenance', async () => {
   const f = await submitted();

@@ -168,8 +168,11 @@ export class MissionRunStore {
       const submission =
         (
           await client.query(
-            `SELECT s.id,s.digest,r.id AS review_id FROM cos.mission_result_submissions s
+            `SELECT s.id,s.digest,r.id AS review_id,
+        CASE WHEN o.id IS NULL THEN NULL ELSE COALESCE(o.payload->'delivery'->>'state','queued') END AS notification_state
+        FROM cos.mission_result_submissions s
         LEFT JOIN cos.mission_reviews r ON r.scope_id=s.scope_id AND r.mission_id=s.mission_id AND r.result_id=s.id
+        LEFT JOIN cos.outbox o ON o.scope_id=r.scope_id AND o.id='mission-review-' || r.id AND o.kind='mission_review_notification'
         WHERE s.scope_id=$1 AND s.mission_id=$2 AND s.generation=$3`,
             [context.scopeId, missionId, m.generation],
           )
