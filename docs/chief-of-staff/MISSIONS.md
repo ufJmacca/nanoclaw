@@ -1,13 +1,53 @@
-# Research mission configuration
+# Research missions
 
-S05 is still in development. Operator configuration and production specialist
-dispatch are implemented; the complete demonstration and Pi acceptance remain
-pending. Keep real mission execution disabled until the required confined
-live-provider smoke test has passed under a current model allowance.
+S05 adds bounded research over admitted notes: propose a work order, approve it,
+follow or cancel the specialist, and receive a reviewed answer. The complete
+fixture demonstration, final ARM64 image checks and Pi acceptance pass. The
+candidate awaits human review and merge. Keep real mission execution disabled
+until the required confined live-provider smoke test has passed under a current
+model allowance.
 
 The main CoS remains one NanoClaw AgentGroup with its existing shared conversation.
 A research specialist receives a separate AgentGroup, session and provider context
 for each admitted attempt. Mattermost reply threads only group messages visually.
+
+## What to try after live activation
+
+Use the existing private CoS channel and notes already admitted through the
+knowledge setup. Ask: “Compare the alternatives in these notes and recommend an
+approach for Pilot Alpha.” Review the proposed sources, deliverable, acceptance
+criteria and limits before approving the exact work order.
+
+CoS returns a mission ID promptly. You can ask for its progress or cancel it while
+continuing the main conversation. The specialist can read only the approved note
+revisions and submit a result. The main CoS reviews the cited answer before
+returning it to the originating context. A blocked, partial or cancelled mission
+must remain visibly distinct from successful completion.
+
+Deployment alone does not activate this flow. It needs admitted notes, reviewed
+delegation configuration, current private membership and a current subscription
+allowance. The earlier live allowance has expired; fixture success does not renew
+it or count as a live-provider smoke test.
+
+## Fixture verification
+
+The S05 demonstration covers approval through reviewed notification, then repeats
+with cancellation, a host database connection interruption and a host-process
+crash. Separate overlapping-specialist tests inspect actual prompts, mounts,
+provider state and tool access for cross-attempt leakage. These use synthetic
+messages and provider responses, with authenticated external test PostgreSQL.
+
+On the Mac, with the repository development container running, a clean committed
+candidate and the private test database profile configured, run:
+
+```sh
+bash scripts/cos-release.sh --slice S05 --target pi --db-profile test --local-only
+```
+
+This runs the registered S05 tests and demo, builds Linux/ARM64 images locally,
+tests both worker profiles and exports the exact tested images. It performs
+read-only Pi preflight but does not deploy, send messages or call a live model.
+Project dependencies and tooling stay in containers.
 
 ## Operator setup
 
