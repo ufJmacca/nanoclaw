@@ -23,14 +23,19 @@ it.each([
     db.close();
   }
 });
-it('S05 compatible code can preserve specialist state while malformed catalog objects deny old code', () => {
-  const db = new Database(':memory:');
-  try {
-    db.exec("CREATE TABLE cos_mission_boundaries(opaque TEXT); INSERT INTO cos_mission_boundaries VALUES('retained')");
-    expect(() => assertNativeReleaseCompatibility(db, fixtureRelease('S05'))).not.toThrow();
-    db.exec('DROP TABLE cos_mission_boundaries; CREATE VIEW cos_mission_boundaries AS SELECT 1');
-    expect(() => assertNativeReleaseCompatibility(db, fixtureRelease('S04'))).toThrow('specialist_release_required');
-  } finally {
-    db.close();
-  }
-});
+it.each(['S05', 'S06'] as const)(
+  '%s compatible code preserves specialist state while malformed catalog objects deny old code',
+  (slice) => {
+    const db = new Database(':memory:');
+    try {
+      db.exec(
+        "CREATE TABLE cos_mission_boundaries(opaque TEXT); INSERT INTO cos_mission_boundaries VALUES('retained')",
+      );
+      expect(() => assertNativeReleaseCompatibility(db, fixtureRelease(slice))).not.toThrow();
+      db.exec('DROP TABLE cos_mission_boundaries; CREATE VIEW cos_mission_boundaries AS SELECT 1');
+      expect(() => assertNativeReleaseCompatibility(db, fixtureRelease('S04'))).toThrow('specialist_release_required');
+    } finally {
+      db.close();
+    }
+  },
+);
