@@ -8,7 +8,7 @@ import type { MissionAuthority } from './proposal-store.js';
 import type { MissionOrigin, ResearchWorkOrder } from './work-order.js';
 
 /** Separate host-owned team admission; enabling single-worker delegation does not enable teams. */
-export type TeamAuthority = MissionAuthority & { templateBundleDigest: string };
+export type TeamAuthority = MissionAuthority & { templateBundleDigest: string; teamPolicyDigest: string };
 export type TeamAuthorityResolver = (context: Context) => TeamAuthority | null;
 export type TeamWorkOrderBody = {
   format: 'cos-team-work-order/v1';
@@ -21,6 +21,7 @@ export type TeamWorkOrderBody = {
   issuedAt: string;
   deadlineAt: string;
   contextDigest: string;
+  authorityDigest: string;
 };
 export class TeamProposalStore {
   constructor(
@@ -35,6 +36,7 @@ export class TeamProposalStore {
       context.origin ||
       !validTeamRequest(request) ||
       authority.templateBundleDigest !== digest(TEAM_TEMPLATES) ||
+      !/^[a-f0-9]{64}$/.test(authority.teamPolicyDigest) ||
       authority.provider.profile !== 'codex-subscription/research-v1'
     )
       return null;
@@ -98,6 +100,7 @@ export class TeamProposalStore {
       issuedAt,
       deadlineAt: new Date(Date.parse(issuedAt) + request.limits.wall_seconds * 1000).toISOString(),
       contextDigest: digest(contextSnapshot),
+      authorityDigest: digest(authority),
     };
     if (digest(this.authority?.(context) ?? null) !== digest(authority)) return null;
     return { body, digest: digest(body), context: contextSnapshot };

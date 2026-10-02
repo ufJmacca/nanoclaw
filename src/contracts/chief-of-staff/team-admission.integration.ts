@@ -28,6 +28,7 @@ const authority = {
     policyDigest: digest('fixture consent'),
   },
   templateBundleDigest: digest(TEAM_TEMPLATES),
+  teamPolicyDigest: digest('fixture team admission revision one'),
 };
 let enabled = true,
   admin: pg.Client,
@@ -316,5 +317,26 @@ test('S06-T01 runtime cannot rewrite approved graph or root budget history', asy
       store.database.pool.query(`UPDATE cos.${table} SET scope_id=scope_id WHERE scope_id=$1`, [scope]),
       { code: '42501' },
     );
+  }
+});
+test('S06-T01 a new team-admission revision cannot revive an older unapproved graph', async () => {
+  const p = await store.requestTeam(context, randomUUID(), await input());
+  assert.equal(p.status, 'ok');
+  const previous = authority.teamPolicyDigest;
+  authority.teamPolicyDigest = digest('fixture team admission revision two');
+  try {
+    assert.equal(
+      (
+        await store.decide(
+          { ...context, ingressId: randomUUID() },
+          String(p.proposal_id),
+          String(p.confirmation_token),
+          'approve',
+        )
+      ).status,
+      'denied',
+    );
+  } finally {
+    authority.teamPolicyDigest = previous;
   }
 });

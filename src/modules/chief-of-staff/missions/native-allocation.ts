@@ -20,9 +20,15 @@ import {
 import { ensureRpcSchema } from '../bridge/rpc.js';
 import { canonical, digest } from '../domain/contracts.js';
 import { RESEARCH_TEMPLATE, sealResearchWorkOrder, type ResearchWorkOrder } from './work-order.js';
+import { validateTeamChildWorkOrder, type TeamChildWorkOrder } from './team-work-order.js';
+import { TEAM_TEMPLATES } from '../contracts/team-templates.js';
 import type { Session } from '../../../types.js';
 
-export type NativeMissionInput = { identity: CosMissionIdentity; inputId: string; order: ResearchWorkOrder };
+export type NativeMissionInput = {
+  identity: CosMissionIdentity;
+  inputId: string;
+  order: ResearchWorkOrder | TeamChildWorkOrder;
+};
 export type NativeMissionPaths = {
   sessionDirectory: string;
   providerDirectory: string;
@@ -121,6 +127,11 @@ export class NativeMissionAllocation {
       order.body.contextDigest !== digest(order.context)
     )
       throw new Error('mission_allocation_denied');
+    if (order.body.format === 'cos-team-child-work-order/v1') {
+      if (!validateTeamChildWorkOrder(order)) throw new Error('mission_allocation_denied');
+      return TEAM_TEMPLATES[order.body.team.step.template_id];
+    }
+    if (order.body.format !== 'cos-research-work-order/v1') throw new Error('mission_allocation_denied');
     const b = order.body;
     const checked = sealResearchWorkOrder({
       missionId: b.missionId,
@@ -133,9 +144,10 @@ export class NativeMissionAllocation {
       issuedAt: b.issuedAt,
     });
     if (checked.digest !== order.digest) throw new Error('mission_allocation_denied');
+    return RESEARCH_TEMPLATE;
   }
   async prepare(input: NativeMissionInput, admitted: () => Promise<boolean>): Promise<NativeMissionPaths> {
-    this.validate(input);
+    const template = this.validate(input);
     const { identity: i, order, inputId } = input,
       db = getDb(),
       paths = this.paths(i);
@@ -254,7 +266,7 @@ export class NativeMissionAllocation {
       retainedPath('context', path.join(paths.contextDirectory, file));
     exactFile(path.join(paths.contextDirectory, 'work-order.json'), order.body);
     exactFile(path.join(paths.contextDirectory, 'context.json'), order.context);
-    exactFile(path.join(paths.contextDirectory, 'template.json'), RESEARCH_TEMPLATE);
+    exactFile(path.join(paths.contextDirectory, 'template.json'), template);
     finished('context');
     await allowed();
     for (const file of ['inbound.db', 'outbound.db']) {

@@ -18,6 +18,10 @@ import { digest } from '../domain/contracts.js';
 import { MISSION_DEFAULT_LIMITS } from '../contracts/mission-protocol.js';
 import { sealResearchWorkOrder, RESEARCH_TEMPLATE } from './work-order.js';
 import { NativeMissionAllocation } from './native-allocation.js';
+import { sealTeamChildWorkOrder } from './team-work-order.js';
+import { TEAM_TEMPLATES } from '../contracts/team-templates.js';
+import { TEAM_DEFAULT_LIMITS } from '../contracts/team-protocol.js';
+import type { TeamWorkOrderBody } from './team-proposal-store.js';
 import { purgeMissionContexts } from '../ops/mission-purge.js';
 import { installCosBoundary, type CosBinding } from '../../../cos-boundary.js';
 import { isCosMissionStopped } from '../../../cos-mission-stop.js';
@@ -81,6 +85,62 @@ afterEach(() => {
 });
 const allocator = (afterEffect?: (step: string) => void) =>
   new NativeMissionAllocation({ root: fixture.root + '/private', afterEffect });
+it('S06-T05 native allocation installs only the exact baked team role with its fresh specialist context', async () => {
+  const i = input('TEAM'),
+    b = i.order.body;
+  i.identity.missionId = 'mission-' + digest('team-child');
+  const step = (step_id: string, template_id: keyof typeof TEAM_TEMPLATES, depends_on: string[] = []) => ({
+    step_id,
+    template_id,
+    template_version: 1 as const,
+    depends_on,
+    input_artifact_refs: depends_on.map((step_id) => ({ step_id, result_schema: 'cos-research-result/v1' })),
+    sources: b.request.sources,
+    required: true,
+    acceptance_criteria: b.request.acceptance_criteria,
+    result_schema: TEAM_TEMPLATES[template_id].resultSchema as 'cos-research-result/v1' | 'cos-team-review/v1',
+    max_rework_count: 0 as const,
+    limits: { ...MISSION_DEFAULT_LIMITS },
+  });
+  const body: TeamWorkOrderBody = {
+    format: 'cos-team-work-order/v1',
+    teamId: 'team-' + digest('team'),
+    request: {
+      ...b.request,
+      limits: { ...TEAM_DEFAULT_LIMITS },
+      partial_policy: 'block',
+      steps: [
+        step('technical', 'team-technical-analyst'),
+        step('operations', 'team-operational-analyst'),
+        step('synthesis', 'team-writer', ['technical', 'operations']),
+        step('review', 'team-reviewer', ['synthesis']),
+      ],
+    },
+    origin: b.origin,
+    related: b.related,
+    templates: Object.values(TEAM_TEMPLATES).map((t) => ({ id: t.id, version: t.version, digest: digest(t) })),
+    provider: b.provider,
+    issuedAt: b.issuedAt,
+    deadlineAt: b.deadlineAt,
+    contextDigest: b.contextDigest,
+    authorityDigest: digest('fixture team authority'),
+  };
+  const order = sealTeamChildWorkOrder({
+    missionId: i.identity.missionId,
+    stepId: 'technical',
+    rootGeneration: 1,
+    approved: { body, digest: digest(body), context: i.order.context },
+    artifacts: [],
+  });
+  const prepared = await allocator().prepare({ ...i, order }, async () => true);
+  expect(JSON.parse(fs.readFileSync(prepared.contextDirectory + '/template.json', 'utf8'))).toEqual(
+    TEAM_TEMPLATES['team-technical-analyst'],
+  );
+  expect(JSON.parse(fs.readFileSync(prepared.contextDirectory + '/context.json', 'utf8'))).toEqual(order.context);
+  expect(fs.statSync(prepared.contextDirectory + '/template.json').mode & 0o777).toBe(0o400);
+  expect(getSession(i.identity.sessionId)?.agent_group_id).toBe(i.identity.agentGroupId);
+  expect(permitCosExecution(getSession(i.identity.sessionId)!)).toBe(false);
+});
 const purgeBinding: CosBinding = {
   scopeId: 'private',
   sessionId: 'main',

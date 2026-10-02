@@ -30,12 +30,12 @@ export const TEAM_DEFAULT_LIMITS: Readonly<TeamLimits> = Object.freeze({
   result_bytes: 8192,
 });
 const object = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
-const exact = (v: Record<string, unknown>, keys: string[]) =>
+const exact = (v: Record<string, unknown>, keys: readonly string[]) =>
   Object.keys(v).length === keys.length && keys.every((k) => Object.hasOwn(v, k));
 const id = (v: unknown): v is string => typeof v === 'string' && /^[a-zA-Z0-9_-]{1,100}$/.test(v);
 const integer = (v: unknown, min: number, max: number) =>
   typeof v === 'number' && Number.isSafeInteger(v) && v >= min && v <= max;
-const stepKeys = [
+export const TEAM_STEP_KEYS = Object.freeze([
   'step_id',
   'template_id',
   'template_version',
@@ -47,7 +47,7 @@ const stepKeys = [
   'result_schema',
   'max_rework_count',
   'limits',
-];
+]);
 const rootKeys = [
   'question',
   'goal_id',
@@ -119,7 +119,7 @@ export function validTeamRequest(v: unknown): v is TeamRequest {
   for (const raw of v.steps) {
     if (
       !object(raw) ||
-      !exact(raw, stepKeys) ||
+      !exact(raw, TEAM_STEP_KEYS) ||
       !id(raw.step_id) ||
       ids.has(raw.step_id) ||
       typeof raw.template_id !== 'string' ||
