@@ -25,6 +25,7 @@ import { MissionNotificationDelivery } from './missions/notification-delivery.js
 import { MissionReviewDispatch } from './missions/review-dispatch.js';
 import { NativeMissionReviewTasks } from './missions/review-task.js';
 import { reviewContext } from './missions/review-origin.js';
+import { CoordinatorReviewRuns } from './missions/coordinator-review-runs.js';
 
 export type RuntimeDependencies = {
   db: Database.Database;
@@ -44,16 +45,19 @@ export type RuntimeDependencies = {
 export function createCosRuntime(dependencies: RuntimeDependencies) {
   const d = dependencies;
   let disposed = false;
+  const reviewRuns = d.store?.missionReviewRuns
+    ? new CoordinatorReviewRuns(d.store.missionReviewRuns, d.store.teamFinalReviews)
+    : undefined;
   const enabled = () => !disposed && d.enabled && !!d.store && (d.admission?.() ?? true);
   const reviewAuthority = async (context: Context, receiptOnly: boolean): Promise<boolean> => {
-    if (!enabled() || context.origin?.kind !== 'mission_review' || !d.store?.missionReviewRuns) return false;
+    if (!enabled() || context.origin?.kind !== 'mission_review' || !reviewRuns) return false;
     const session = d.session(context.sessionId),
       retained = session && resolveKnowledgeContext(session, context, d.db);
     const origin = context.origin;
     return (
       !!retained &&
       (
-        await d.store.missionReviewRuns.authorize(
+        await reviewRuns.authorize(
           retained,
           origin.runId,
           origin.submissionId,
@@ -70,8 +74,8 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
       return d.store.briefs.reserveCall(context, origin.runId, origin.generation, kind, callId);
     const session = d.session(context.sessionId),
       retained = session && resolveKnowledgeContext(session, context, d.db);
-    if (!retained || !d.store.missionReviewRuns) return { status: 'denied' };
-    const result = await d.store.missionReviewRuns.reserve(
+    if (!retained || !reviewRuns) return { status: 'denied' };
+    const result = await reviewRuns.reserve(
       retained,
       origin.runId,
       origin.submissionId,
@@ -250,10 +254,10 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
         },
       })
     : null;
-  const reviewDispatch = d.store?.missionReviewRuns
+  const reviewDispatch = reviewRuns
     ? new MissionReviewDispatch({
         db: d.db,
-        runs: d.store.missionReviewRuns,
+        runs: reviewRuns,
         session: d.session,
         admitted: briefAdmission,
         running: (id) => d.running?.(id) ?? true,

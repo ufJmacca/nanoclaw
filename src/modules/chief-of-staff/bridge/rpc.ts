@@ -80,25 +80,29 @@ export function createRpcHandler(dependencies: {
         );
       else if (request.method === 'cos_mission_get')
         result = await dependencies.store.missionRuns.inspect(context, String(request.params.mission_id));
-      else if (request.method === 'cos_mission_result_get')
+      else if (request.method === 'cos_mission_result_get') {
+        const reviews = String(request.params.mission_id).startsWith('team-')
+          ? dependencies.store.teamFinalReviews
+          : dependencies.store.missionReviews;
         result =
-          knowledgeContext && dependencies.store.missionReviews
-            ? await dependencies.store.missionReviews.read(
+          knowledgeContext && reviews
+            ? await reviews.read(
                 knowledgeContext,
                 String(request.params.mission_id),
                 String(request.params.submission_id),
               )
             : { status: 'denied' };
-      else if (request.method === 'cos_mission_review')
+      } else if (request.method === 'cos_mission_review') {
+        const missionId = (request.params.review as { mission_id?: unknown } | null)?.mission_id;
+        const reviews =
+          typeof missionId === 'string' && missionId.startsWith('team-')
+            ? dependencies.store.teamFinalReviews
+            : dependencies.store.missionReviews;
         result =
-          knowledgeContext && dependencies.store.missionReviews
-            ? await dependencies.store.missionReviews.review(
-                knowledgeContext,
-                request.request_id,
-                request.params.review,
-              )
+          knowledgeContext && reviews
+            ? await reviews.review(knowledgeContext, request.request_id, request.params.review)
             : { status: 'denied' };
-      else if (request.method === 'cos_mission_cancel')
+      } else if (request.method === 'cos_mission_cancel')
         result = (await dependencies.cancelMission?.(context, String(request.params.mission_id))) ?? {
           status: 'denied',
         };

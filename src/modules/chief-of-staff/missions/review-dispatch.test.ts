@@ -10,12 +10,13 @@ import { digest } from '../domain/contracts.js';
 import { NativeMissionReviewTasks } from './review-task.js';
 import { readReviewOrigin, reviewContext } from './review-origin.js';
 import { MissionReviewDispatch } from './review-dispatch.js';
+import { CoordinatorReviewRuns } from './coordinator-review-runs.js';
 const databases: Database.Database[] = [];
 afterEach(() => {
   for (const db of databases.splice(0)) db.close();
   closeDb();
 });
-function fixture() {
+function fixture(missionId = 'mission') {
   const db = initTestDb(),
     inbound = new Database(':memory:');
   databases.push(inbound);
@@ -50,7 +51,7 @@ function fixture() {
     "INSERT INTO cos_conversation_states(scope_id,binding_digest,account_fingerprint,generation,status,updated_at) VALUES(?,?,?,?,'active',?)",
   ).run(binding.scopeId, digest(binding), 'a'.repeat(64), generation, new Date().toISOString());
   const identity = {
-    missionId: 'mission',
+    missionId,
     submissionId: randomUUID(),
     attemptId: randomUUID(),
     generation: 1,
@@ -265,4 +266,44 @@ it('S05-T11 leaves a busy main session free of review origins and tasks', async 
   expect(f.runs.claim).not.toHaveBeenCalled();
   expect(readReviewOrigin(f.db, f.binding)).toBeNull();
   expect(f.inbound.prepare('SELECT count(*) AS n FROM messages_in').get()).toEqual({ n: 0 });
+});
+
+it('S06-T05/T06/T07 team wakes reuse the main native task and retain its identity for pause/cancellation recovery', async () => {
+  const f = fixture('team-' + 'a'.repeat(64));
+  const teams = { ...f.runs, reserve: vi.fn(async () => ({ status: 'ok' as const, reserved: false })) },
+    singles = {
+      ...teams,
+      pending: vi.fn(async () => ({ status: 'ok' as const, items: [] })),
+      claim: vi.fn(async () => ({ status: 'denied' as const })),
+    },
+    runs = new CoordinatorReviewRuns(singles, teams),
+    d = { ...f.d, runs };
+  const dispatch = new MissionReviewDispatch(d);
+  expect((await dispatch.drain(f.binding)).status).toBe('pending');
+  expect(f.wake).toHaveBeenCalledExactlyOnceWith(f.session);
+  expect(teams.claim).toHaveBeenCalledTimes(1);
+  expect(singles.claim).not.toHaveBeenCalled();
+  expect(readReviewOrigin(f.db, f.binding)?.identity).toEqual(f.identity);
+  expect((await new MissionReviewDispatch(d).drain(f.binding)).status).toBe('pending');
+  expect(teams.claim).toHaveBeenCalledTimes(1);
+  expect(f.inbound.prepare('SELECT count(*) AS n FROM messages_in').get()).toEqual({ n: 1 });
+  const task = f.inbound.prepare('SELECT content,thread_id FROM messages_in').get() as {
+    content: string;
+    thread_id: string | null;
+  };
+  expect(task.thread_id).toBeNull();
+  expect(JSON.parse(task.content).cosMissionReview.missionId).toBe(f.identity.missionId);
+  f.setState('cancelled');
+  f.db.prepare('UPDATE cos_identity_boundaries SET paused=1').run();
+  expect((await dispatch.drain(f.binding)).state).toBe('retired');
+  expect(readReviewOrigin(f.db, f.binding)).toBeNull();
+  expect(teams.retire).toHaveBeenCalledWith(
+    expect.objectContaining({ sessionId: f.session.id, generation: f.identity.contextGeneration }),
+    f.identity.missionId,
+    f.identity.submissionId,
+    expect.any(Object),
+  );
+  expect(f.db.prepare('SELECT generation FROM cos_conversation_states').get()).toEqual({
+    generation: f.identity.contextGeneration,
+  });
 });

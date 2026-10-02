@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import Database from 'better-sqlite3';
+import { createRpcHandler } from '../../modules/chief-of-staff/bridge/rpc.js';
 import { randomUUID } from 'node:crypto';
 import { before, after, test } from 'node:test';
 import fs from 'node:fs';
@@ -1859,4 +1861,84 @@ test('S06-T03/T05 corrupt parent credit or retirement metadata cannot grant more
   assert.equal((await final.retire(main, f.teamId, submissionId, lease)).status, 'ok');
   assert.equal((await f.teams.cancel(context, f.teamId)).status, 'ok');
   assert.equal((await f.teams.confirmCancellation(context, f.teamId)).status, 'ok');
+});
+
+test('S06-T05/T07 main-context RPC reads and records a team brief through its existing two review tools', async () => {
+  const f = await stoppedAnalyses();
+  await f.teams.advance(context, f.teamId);
+  await finishTeamStep(f, 'synthesis');
+  await finishTeamStep(f, 'review');
+  const initial = await f.teams.reviewSnapshot(context, f.teamId),
+    submissionId = String(initial.submission_id),
+    final = new TeamFinalReviews(f.teams),
+    main = { ...context, provider: 'codex', generation: authority.contextGeneration };
+  const claimed = await final.claim(main, f.teamId, submissionId, 'fixture-native-team-review');
+  assert.equal(claimed.status, 'ok');
+  const identity = claimed.identity as { generation: number },
+    lease = claimed.lease as { owner: string; fence: number },
+    executing = {
+      ...main,
+      origin: {
+        kind: 'mission_review' as const,
+        runId: f.teamId,
+        generation: identity.generation,
+        submissionId,
+        owner: lease.owner,
+        fence: lease.fence,
+      },
+    };
+  assert.equal(
+    (await final.reserve(executing, f.teamId, submissionId, lease, 'fixture-model-grant', 'model')).status,
+    'ok',
+  );
+  const native = new Database(':memory:');
+  try {
+    const handler = createRpcHandler({
+      store: { ...store, teamFinalReviews: final } as unknown as PriorityStore,
+      knowledge,
+      resolveContext: async () => executing,
+      resolveKnowledgeContext: async () => executing,
+      reserveTool: (_context, callId) => final.reserve(executing, f.teamId, submissionId, lease, callId, 'tool'),
+    });
+    const call = async (method: string, params: Record<string, unknown>) => {
+      const requestId = randomUUID();
+      await handler(
+        { request: { protocol: 'cos-rpc/v1', request_id: requestId, method, params }, delivery_id: randomUUID() },
+        {} as never,
+        native,
+      );
+      const saved = native.prepare('SELECT response FROM cos_rpc_responses WHERE request_id=?').get(requestId) as {
+        response: string;
+      };
+      return JSON.parse(saved.response);
+    };
+    const read = await call('cos_mission_result_get', { mission_id: f.teamId, submission_id: submissionId });
+    assert.equal(read.status, 'ok');
+    assert.equal(read.result.result.format, 'cos-team-brief/v1');
+    assert.equal(
+      read.result.result.outputs.filter((o: { template_id: string }) => o.template_id.endsWith('analyst')).length,
+      2,
+    );
+    const reviewed = await call('cos_mission_review', {
+      review: {
+        mission_id: f.teamId,
+        submission_id: submissionId,
+        result_digest: read.result.submission.digest,
+        expected_version: read.result.mission.version,
+        decision: 'accept',
+        criteria: [{ id: 'tradeoff', verdict: 'satisfied' }],
+      },
+    });
+    assert.equal(reviewed.status, 'ok');
+    assert.equal(reviewed.result.state, 'completed');
+    assert.equal((await rows('mission_team_reviews')).filter((r) => r.team_id === f.teamId).length, 1);
+    assert.equal(
+      (await rows('outbox')).filter((r) => r.kind === 'team_review_notification' && r.payload.team_id === f.teamId)
+        .length,
+      1,
+    );
+    assert.equal((await rows('mission_team_calls')).filter((r) => r.team_id === f.teamId).length, 3);
+  } finally {
+    native.close();
+  }
 });
