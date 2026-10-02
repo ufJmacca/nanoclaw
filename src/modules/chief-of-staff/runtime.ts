@@ -21,6 +21,7 @@ import { BriefReconciliation } from './automation/brief-reconciliation.js';
 import { BriefDispatch } from './automation/brief-dispatch.js';
 import { BriefRefresh } from './automation/brief-refresh.js';
 import { createMissionCancellation } from './missions/cancel.js';
+import { MissionNotificationDelivery } from './missions/notification-delivery.js';
 
 export type RuntimeDependencies = {
   db: Database.Database;
@@ -313,6 +314,47 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
           await briefDispatch?.drain(binding);
       }
       if (enabled()) await outbox?.drain(binding);
+      if (enabled() && d.store?.missionNotifications) {
+        const notifications = d.store.missionNotifications,
+          adapter = getDeliveryAdapter();
+        const current = () => {
+          const session = d.session(binding.sessionId),
+            context = session && controller.localContext(session);
+          return session &&
+            context &&
+            !context.origin &&
+            context.scopeId === binding.scopeId &&
+            context.agentGroupId === binding.agentGroupId &&
+            context.ownerId === binding.ownerId
+            ? resolveKnowledgeContext(session, context, d.db)
+            : null;
+        };
+        const context = current();
+        if (context && adapter && adapter.isAvailable?.('mattermost') !== false && (await admitted(binding))) {
+          const pending = await notifications.pending(context);
+          if (pending.status === 'ok' && Array.isArray(pending.review_ids)) {
+            const delivery = new MissionNotificationDelivery({
+              notifications,
+              current,
+              admitted: () => admitted(binding),
+              send: (_context, text, id) =>
+                adapter.deliver(
+                  'mattermost',
+                  `mattermost:${binding.instanceId}:${binding.channelId}`,
+                  null,
+                  'chat',
+                  JSON.stringify({ text }),
+                  undefined,
+                  id,
+                ),
+            });
+            for (const reviewId of pending.review_ids) {
+              if (!enabled() || digest(current()) !== digest(context)) break;
+              await delivery.deliver(context, String(reviewId));
+            }
+          }
+        }
+      }
       // An approved source change may enqueue invalidation in this same pump.
       if (enabled()) await invalidations?.drain(binding);
       // Retention is an already-approved deletion obligation, independent of model pause.
