@@ -58,7 +58,7 @@ export class PriorityStore {
     missionAuthority?: MissionAuthorityResolver,
   ) {
     this.missions = new MissionProposalStore(knowledge, missionAuthority);
-    this.missionRuns = new MissionRunStore(database, this.missions);
+    this.missionRuns = new MissionRunStore(database, this.missions, knowledge?.artifacts);
     this.work = new WorkStore(knowledge);
     this.briefs = new BriefRunStore(database);
     if (knowledge)

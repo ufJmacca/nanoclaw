@@ -24,6 +24,7 @@ type Dependencies = {
     MissionRunStore,
     | 'claimDispatch'
     | 'authorizeDispatch'
+    | 'authorizeWorker'
     | 'markDispatchReady'
     | 'beginExecution'
     | 'renewDispatch'
@@ -100,12 +101,15 @@ export class MissionDispatch {
       this.local(entry)
     );
   }
-  private async verify(entry: Entry): Promise<boolean> {
+  private async verify(entry: Entry, worker = false): Promise<boolean> {
     try {
       if (!this.local(entry) || !(await this.dependencies.admitted(entry.context))) return false;
       return (
-        (await this.dependencies.runs.authorizeDispatch(entry.input.identity, entry.lease)).status === 'ok' &&
-        this.local(entry)
+        (
+          await (worker
+            ? this.dependencies.runs.authorizeWorker(entry.input.identity, entry.lease)
+            : this.dependencies.runs.authorizeDispatch(entry.input.identity, entry.lease))
+        ).status === 'ok' && this.local(entry)
       );
     } catch {
       return false;
@@ -117,7 +121,7 @@ export class MissionDispatch {
     if (!boundary.restricted || !boundary.identity) return null;
     const entry = this.entries.get(boundary.identity.attemptId);
     if (!entry || entry.phase !== 'running' || digest(entry.input.identity) !== digest(boundary.identity)) return null;
-    if (!(await this.verify(entry))) {
+    if (!(await this.verify(entry, true))) {
       await this.fence(entry);
       return null;
     }
@@ -150,7 +154,7 @@ export class MissionDispatch {
     if (owned) await this.stop(i).catch(() => undefined);
     await this.dependencies.launcher.close(i.sessionId).catch(() => undefined);
     const failed = await this.dependencies.runs.fail(i, 'admission_denied').catch(() => ({ status: 'unavailable' }));
-    if (failed.status === 'ok' && (await this.dependencies.stopped(i).catch(() => false)))
+    if (['ok', 'denied'].includes(failed.status) && (await this.dependencies.stopped(i).catch(() => false)))
       await this.dependencies.runs.confirmStopped(i).catch(() => undefined);
   }
   private async launch(identity: CosMissionIdentity, session: Session): Promise<CosLaunch> {

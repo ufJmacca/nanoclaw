@@ -5,6 +5,15 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import pg from 'pg';
+import Database from 'better-sqlite3';
+import { initTestDb, closeDb } from '../../db/connection.js';
+import { runMigrations as migrateNative } from '../../db/migrations/index.js';
+import { createAgentGroup } from '../../db/agent-groups.js';
+import { createSession, getSession } from '../../db/sessions.js';
+import { installCosMissionBoundary } from '../../cos-mission-boundary.js';
+import { installCosMissionExecutionHooks } from '../../cos-mission-execution.js';
+import { permitCosOutbound } from '../../cos-boundary.js';
+import { createMissionRpcHandler } from '../../modules/chief-of-staff/missions/rpc.js';
 import { connectFixtureDatabase, fixtureDatabaseConfig, fixtureRuntimeUser } from './fixture-database.js';
 import { migrate } from '../../modules/chief-of-staff/store/migrations.js';
 import { BoundedDatabase } from '../../modules/chief-of-staff/store/client.js';
@@ -15,7 +24,8 @@ import { RESEARCH_TEMPLATE } from '../../modules/chief-of-staff/missions/work-or
 import { MISSION_DEFAULT_LIMITS } from '../../modules/chief-of-staff/contracts/mission-protocol.js';
 import type { CosMissionIdentity } from '../../cos-mission-boundary.js';
 import { digest } from '../../modules/chief-of-staff/domain/contracts.js';
-import type { MissionDispatchLease } from '../../modules/chief-of-staff/missions/run-store.js';
+import { MissionRunStore, type MissionDispatchLease } from '../../modules/chief-of-staff/missions/run-store.js';
+import type { MissionResult } from '../../modules/chief-of-staff/contracts/mission-result.js';
 
 const scope = 'mission-run-' + randomUUID();
 const context = { scopeId: scope, ownerId: 'owner', agentGroupId: scope, sessionId: scope, ingressId: randomUUID() };
@@ -164,6 +174,269 @@ const reserve = (
   kind: 'model' | 'tool' = 'model',
   payload = digest('fixture-call'),
 ) => store.missionRuns.reserve(i, id, kind, payload);
+const blockedResult = (): MissionResult => ({
+  format: 'cos-research-result/v1',
+  outcome: 'blocked',
+  claims: [],
+  criteria: [{ id: 'tradeoff', claim_ids: [] }],
+  limitations: ['RESULT_CANARY: insufficient cost evidence.'],
+});
+test('S05-T03/T08 actual native RPC and external PostgreSQL deliver context then an unreviewed receipt', async () => {
+  const { identity } = await mission();
+  const lease = await dispatched(identity),
+    native = initTestDb();
+  migrateNative(native);
+  createAgentGroup({
+    id: identity.agentGroupId,
+    name: 'research fixture',
+    folder: identity.agentGroupId,
+    agent_provider: 'codex',
+    created_at: new Date().toISOString(),
+  });
+  createSession({
+    id: identity.sessionId,
+    agent_group_id: identity.agentGroupId,
+    messaging_group_id: null,
+    thread_id: null,
+    agent_provider: 'codex',
+    status: 'active',
+    container_status: 'stopped',
+    last_active: null,
+    created_at: new Date().toISOString(),
+  });
+  installCosMissionBoundary(identity, native);
+  const inbox = new Database(':memory:'),
+    session = getSession(identity.sessionId)!;
+  const allowed = async () => (await store.missionRuns.authorizeWorker(identity, lease)).status === 'ok';
+  const remove = installCosMissionExecutionHooks({
+    ready: () => true,
+    launch: async () => {
+      throw new Error('fixture does not launch models');
+    },
+    rpc: allowed,
+  });
+  const handler = createMissionRpcHandler({
+    resolve: async () => ((await allowed()) ? { identity, lease } : null),
+    runs: store.missionRuns,
+    submit: (...args) => store.missionRuns.submitResult(...args),
+  });
+  try {
+    async function call(method: string, params: unknown) {
+      const request = { protocol: 'cos-mission-rpc/v1', request_id: randomUUID(), method, params },
+        delivery_id = randomUUID();
+      const content = { action: 'cos_mission_rpc', request, delivery_id };
+      assert.equal(
+        await permitCosOutbound(session, {
+          kind: 'system',
+          channel_type: null,
+          platform_id: null,
+          thread_id: null,
+          content: JSON.stringify(content),
+        }),
+        true,
+      );
+      await handler(content, session, inbox);
+      return JSON.parse(
+        (
+          inbox
+            .prepare('SELECT response FROM cos_rpc_responses WHERE request_id=? AND payload_hash=? AND delivery_id=?')
+            .get(request.request_id, digest(request), delivery_id) as { response: string }
+        ).response,
+      );
+    }
+    const read = await call('cos_mission_context_get', {});
+    assert.equal(read.status, 'ok');
+    assert.equal(read.result.work_order.missionId, identity.missionId);
+    assert.equal(read.result.context.sources.length, 1);
+    const submitted = await call('cos_result_submit', { result: blockedResult() });
+    assert.equal(submitted.status, 'ok');
+    assert.equal(submitted.result.state, 'awaiting_review');
+    assert.equal((await call('cos_mission_context_get', {})).status, 'denied');
+    assert.equal(
+      (await rows('mission_budget_reservations')).filter(
+        (r) => r.attempt_id === identity.attemptId && r.kind === 'tool',
+      ).length,
+      2,
+    );
+    assert.equal(
+      await permitCosOutbound(session, {
+        kind: 'chat',
+        channel_type: 'mattermost',
+        platform_id: 'private',
+        thread_id: null,
+        content: JSON.stringify({ text: 'Must not publish directly' }),
+      }),
+      false,
+    );
+  } finally {
+    remove();
+    inbox.close();
+    closeDb();
+  }
+});
+test('S05-T06/T07 interrupted or revoked publication leaves no accepted result and its orphan is reclaimable', async () => {
+  for (const change of ['crash', 'revoked']) {
+    const { identity, input } = await mission();
+    const lease = await dispatched(identity);
+    const submissions = new MissionRunStore(store.database, store.missions, knowledge.artifacts, {
+      afterPublication: async () => {
+        if (change === 'crash') throw new Error('fixture crash after publication');
+        await admin.query("UPDATE cos.sources SET status='revoked' WHERE id=$1", [input.sources[0].source_id]);
+      },
+    });
+    const before = new Set(fs.readdirSync(knowledge.artifacts.root));
+    const submit = submissions.submitResult(identity, lease, randomUUID(), randomUUID(), blockedResult());
+    if (change === 'crash') await assert.rejects(submit, /fixture crash/);
+    else assert.equal((await submit).status, 'denied');
+    const orphans = fs
+      .readdirSync(knowledge.artifacts.root)
+      .filter((name) => name.endsWith('.blob') && !before.has(name));
+    assert.equal(orphans.length, 1);
+    assert.equal(
+      (await rows('mission_result_submissions')).filter((r) => r.attempt_id === identity.attemptId).length,
+      0,
+    );
+    assert.equal((await rows('missions')).find((r) => r.id === identity.missionId).state, 'running');
+    fs.utimesSync(path.join(knowledge.artifacts.root, orphans[0]), new Date(0), new Date(0));
+    assert.equal((await knowledge.reconcileArtifacts(0)).status, 'ok');
+    assert.equal(fs.existsSync(path.join(knowledge.artifacts.root, orphans[0])), false);
+    assert.equal(
+      (await rows('mission_budget_reservations')).filter(
+        (r) => r.attempt_id === identity.attemptId && r.kind === 'tool',
+      ).length,
+      1,
+    );
+  }
+});
+test('S05-T08 checked quotations remain candidates and accepted-result replay still requires current source authority', async () => {
+  const { identity, input } = await mission();
+  const lease = await dispatched(identity);
+  const result: MissionResult = {
+    format: 'cos-research-result/v1',
+    outcome: 'answer',
+    claims: [
+      {
+        id: 'comparison',
+        kind: 'quote',
+        text: 'A costs less; B has more capacity.',
+        citations: [{ ...input.sources[0], ordinal: 0, start_line: 2, end_line: 2 }],
+      },
+    ],
+    criteria: [{ id: 'tradeoff', claim_ids: ['comparison'] }],
+    limitations: [],
+  };
+  const requestId = randomUUID(),
+    callId = randomUUID();
+  const accepted = await store.missionRuns.submitResult(identity, lease, requestId, callId, result);
+  assert.equal(accepted.status, 'ok');
+  assert.equal(accepted.state, 'awaiting_review');
+  const revoke = await store.propose(context, randomUUID(), {
+    kind: 'source_revoke',
+    source_id: input.sources[0].source_id,
+    expected_version: 1,
+    reason: 'Fixture owner withdrew this note.',
+  });
+  assert.equal(revoke.status, 'ok');
+  assert.equal((await approve(revoke)).status, 'ok');
+  const submission = (await rows('mission_result_submissions')).find((r) => r.id === accepted.submission_id);
+  assert.equal((await rows('artifacts')).find((r) => r.id === submission.artifact_id).lifecycle, 'quarantined');
+  assert.equal((await store.missionRuns.submitResult(identity, lease, requestId, callId, result)).status, 'denied');
+  assert.equal((await store.missionRuns.authorizeWorker(identity, lease)).status, 'denied');
+  assert.equal((await rows('mission_reviews')).filter((r) => r.mission_id === identity.missionId).length, 0);
+});
+test('S05-T08 accepts a bounded result only as purgeable evidence awaiting coordinator review', async () => {
+  const { identity } = await mission();
+  const lease = await dispatched(identity),
+    requestId = randomUUID(),
+    callId = randomUUID();
+  const result = blockedResult();
+  const receipt = await store.missionRuns.submitResult(identity, lease, requestId, callId, result);
+  assert.equal(receipt.status, 'ok');
+  assert.equal(receipt.state, 'awaiting_review');
+  const submission = (await rows('mission_result_submissions')).find((r) => r.attempt_id === identity.attemptId);
+  assert.ok(submission);
+  assert.equal(JSON.stringify(submission).includes('RESULT_CANARY'), false);
+  const artifact = (await rows('artifacts')).find((r) => r.id === submission.artifact_id);
+  assert.equal(artifact.kind, 'mission_result');
+  assert.deepEqual(JSON.parse(knowledge.artifacts.read(artifact.id, artifact.digest)), result);
+  assert.equal((await rows('derivation_links')).filter((r) => r.artifact_id === artifact.id).length > 0, true);
+  assert.equal((await rows('mission_reviews')).filter((r) => r.mission_id === identity.missionId).length, 0);
+  assert.equal((await rows('missions')).find((r) => r.id === identity.missionId).state, 'awaiting_review');
+  assert.equal((await reserve(identity)).status, 'denied');
+  assert.equal((await store.missionRuns.readContext(identity, lease, randomUUID())).status, 'denied');
+  assert.equal((await store.missionRuns.authorizeDispatch(identity, lease)).status, 'denied');
+  assert.equal((await store.missionRuns.authorizeWorker(identity, lease)).status, 'ok');
+  assert.deepEqual(await store.missionRuns.submitResult(identity, lease, requestId, callId, result), receipt);
+  assert.equal(
+    (
+      await store.missionRuns.submitResult(identity, lease, requestId, randomUUID(), {
+        ...result,
+        limitations: ['Different result.'],
+      })
+    ).status,
+    'conflict',
+  );
+  assert.equal((await store.missionRuns.inspect(context, identity.missionId)).status, 'ok');
+  assert.equal((await store.missionRuns.confirmStopped(identity)).status, 'ok');
+  assert.equal((await store.missionRuns.authorizeWorker(identity, lease)).status, 'denied');
+  assert.equal((await rows('missions')).find((r) => r.id === identity.missionId).state, 'awaiting_review');
+});
+test('S05-T07/T08 refuses invalid, stale or cancelled result submissions before artifact publication', async () => {
+  for (const change of ['criteria', 'citation', 'revoked', 'cancelled', 'lease']) {
+    const { identity, input } = await mission();
+    const lease = await dispatched(identity);
+    let result: unknown = blockedResult();
+    if (change === 'criteria') result = { ...blockedResult(), criteria: [{ id: 'invented', claim_ids: [] }] };
+    if (change === 'citation')
+      result = {
+        format: 'cos-research-result/v1',
+        outcome: 'answer',
+        claims: [
+          {
+            id: 'claim',
+            kind: 'inference',
+            text: 'Other mission canary',
+            citations: [{ source_id: 'foreign', revision_id: 'foreign', ordinal: 0, start_line: 1, end_line: 1 }],
+          },
+        ],
+        criteria: [{ id: 'tradeoff', claim_ids: ['claim'] }],
+        limitations: [],
+      };
+    if (change === 'revoked')
+      await admin.query("UPDATE cos.sources SET status='revoked' WHERE id=$1", [input.sources[0].source_id]);
+    if (change === 'cancelled') await store.missionRuns.cancel(context, identity.missionId);
+    if (change === 'lease') lease.fence++;
+    const before = fs.readdirSync(knowledge.artifacts.root).filter((name) => name.endsWith('.blob')).length;
+    assert.equal(
+      (await store.missionRuns.submitResult(identity, lease, randomUUID(), randomUUID(), result)).status,
+      'denied',
+    );
+    assert.equal(fs.readdirSync(knowledge.artifacts.root).filter((name) => name.endsWith('.blob')).length, before);
+    assert.equal(
+      (await rows('mission_result_submissions')).filter((r) => r.attempt_id === identity.attemptId).length,
+      0,
+    );
+  }
+});
+test('S05-T09 root tool exhaustion denies result submission and concurrent submissions retain one result', async () => {
+  const first = await mission({ max_turns: 2, max_tool_calls: 1, max_attempts: 2 });
+  const firstLease = await dispatched(first.identity);
+  await store.missionRuns.readContext(first.identity, firstLease, randomUUID());
+  assert.equal(
+    (await store.missionRuns.submitResult(first.identity, firstLease, randomUUID(), randomUUID(), blockedResult()))
+      .status,
+    'denied',
+  );
+  const { identity } = await mission();
+  const lease = await dispatched(identity);
+  const receipts = await Promise.all(
+    Array.from({ length: 3 }, () =>
+      store.missionRuns.submitResult(identity, lease, randomUUID(), randomUUID(), blockedResult()),
+    ),
+  );
+  assert.equal(receipts.filter((r) => r.status === 'ok').length, 1);
+  assert.equal((await rows('mission_result_submissions')).filter((r) => r.attempt_id === identity.attemptId).length, 1);
+});
 test('S05-T09 atomic root reservations bound concurrent calls and exact replay is not permission to invoke again', async () => {
   const { identity } = await mission();
   assert.equal((await reserve(identity)).status, 'denied');

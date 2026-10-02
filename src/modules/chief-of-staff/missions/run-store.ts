@@ -1,11 +1,15 @@
 import type { PoolClient } from 'pg';
+import { randomUUID } from 'node:crypto';
 import { validCosMissionIdentity, type CosMissionIdentity } from '../../../cos-mission-boundary.js';
 import { BoundedDatabase, DatabaseUnavailable } from '../store/client.js';
-import { digest, type Context, type Result } from '../domain/contracts.js';
+import { canonical, digest, type Context, type Result } from '../domain/contracts.js';
 import { RESEARCH_TEMPLATE, type ResearchWorkOrder } from './work-order.js';
 import type { MissionProposalStore } from './proposal-store.js';
 import { queueMissionAttempt } from './attempt.js';
 import { recordMissionExposure } from './exposure.js';
+import { KnowledgeArtifactsBusy, type KnowledgeArtifacts } from '../knowledge/artifacts.js';
+import { validMissionResult } from '../contracts/mission-result.js';
+import { checkResearchResult } from './result-checks.js';
 
 export type MissionDispatchLease = { owner: string; fence: number };
 const validLease = (v: MissionDispatchLease) =>
@@ -63,6 +67,8 @@ export class MissionRunStore {
   constructor(
     readonly database: BoundedDatabase,
     readonly proposals: MissionProposalStore,
+    readonly artifacts?: KnowledgeArtifacts,
+    readonly resultHooks: { afterPublication?(): Promise<void> } = {},
   ) {}
 
   private async transaction(scopeId: string, operation: (client: PoolClient) => Promise<Result>): Promise<Result> {
@@ -369,7 +375,8 @@ export class MissionRunStore {
     return this.transaction(identity.scopeId, async (client) => {
       const m = await this.mission(client, identity.scopeId, identity.missionId),
         a = await this.attempt(client, identity);
-      if (!m || !same(a, identity) || !['failed', 'cancelled'].includes(a!.state)) return { status: 'denied' };
+      if (!m || !same(a, identity) || !['failed', 'cancelled', 'submitted'].includes(a!.state))
+        return { status: 'denied' };
       if (a!.allocation.stop_confirmed !== true)
         await client.query(
           'UPDATE cos.mission_attempts SET allocation=allocation||\'{"stop_confirmed":true}\'::jsonb,version=version+1,updated_at=clock_timestamp() WHERE scope_id=$1 AND id=$2',
@@ -443,7 +450,12 @@ export class MissionRunStore {
       return { status: 'ok', identity: identityOf(a), inputId: updated.input_id, order, lease: { owner, fence } };
     });
   }
-  private async dispatchCurrent(client: PoolClient, identity: CosMissionIdentity, lease: MissionDispatchLease) {
+  private async dispatchCurrent(
+    client: PoolClient,
+    identity: CosMissionIdentity,
+    lease: MissionDispatchLease,
+    receipt = false,
+  ) {
     const m = await this.mission(client, identity.scopeId, identity.missionId),
       a = await this.attempt(client, identity);
     if (
@@ -451,8 +463,9 @@ export class MissionRunStore {
       !a ||
       !same(a, identity) ||
       m.generation !== identity.generation ||
-      !['queued', 'running'].includes(m.state) ||
-      !['allocating', 'ready', 'running'].includes(a.state) ||
+      a.allocation.stop_confirmed === true ||
+      (!(receipt && m.state === 'awaiting_review' && a.state === 'submitted') &&
+        (!['queued', 'running'].includes(m.state) || !['allocating', 'ready', 'running'].includes(a.state))) ||
       a.lease_owner !== lease.owner ||
       !a.lease_current ||
       a.allocation.dispatch_fence !== lease.fence
@@ -466,6 +479,151 @@ export class MissionRunStore {
     return this.transaction(identity.scopeId, async (client) => ({
       status: (await this.dispatchCurrent(client, identity, lease)) ? 'ok' : 'denied',
     }));
+  }
+  /** Allows acknowledgement of an accepted submission, but never a new launch/model/context reservation. */
+  async authorizeWorker(identity: CosMissionIdentity, lease: MissionDispatchLease): Promise<Result> {
+    if (!validCosMissionIdentity(identity) || !validLease(lease)) return { status: 'denied' };
+    return this.transaction(identity.scopeId, async (client) => {
+      const current = await this.dispatchCurrent(client, identity, lease, true);
+      return { status: current && ['running', 'submitted'].includes(current.attempt.state) ? 'ok' : 'denied' };
+    });
+  }
+  async submitResult(
+    identity: CosMissionIdentity,
+    lease: MissionDispatchLease,
+    requestId: string,
+    callId: string,
+    result: unknown,
+  ): Promise<Result> {
+    if (
+      !this.artifacts ||
+      !validCosMissionIdentity(identity) ||
+      !validLease(lease) ||
+      !id(callId) ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(requestId) ||
+      !validMissionResult(result)
+    )
+      return { status: 'denied' };
+    const artifacts = this.artifacts,
+      resultDigest = digest(result);
+    const existing = async (client: PoolClient): Promise<Result | null> => {
+      const old = (
+        await client.query(
+          `SELECT s.id,s.digest,s.body,s.artifact_id,a.digest AS artifact_digest,a.lifecycle
+        FROM cos.mission_result_submissions s JOIN cos.artifacts a ON a.scope_id=s.scope_id AND a.id=s.artifact_id
+        WHERE s.scope_id=$1 AND s.attempt_id=$2`,
+          [identity.scopeId, identity.attemptId],
+        )
+      ).rows[0];
+      if (!old) return null;
+      if (old.body.request_id !== requestId || old.digest !== resultDigest) return { status: 'conflict' };
+      if (
+        old.lifecycle !== 'published' ||
+        digest(JSON.parse(artifacts.read(old.artifact_id, old.artifact_digest))) !== resultDigest
+      )
+        return { status: 'denied' };
+      return { status: 'ok', state: 'awaiting_review', submission_id: old.id };
+    };
+    try {
+      return await artifacts.exclusive(async (artifactLease) => {
+        const before = await this.transaction(identity.scopeId, async (client) => {
+          const current = await this.dispatchCurrent(client, identity, lease, true);
+          if (!current) return { status: 'denied' };
+          const previous = await existing(client);
+          if (previous) return previous;
+          if (current.mission.state !== 'running' || current.attempt.state !== 'running') return { status: 'denied' };
+          const checks = checkResearchResult(current.order, result);
+          if (checks.status !== 'review_required') return { status: 'denied' };
+          const reserved = await this.reserveCall(
+            client,
+            current.mission,
+            identity,
+            callId,
+            'tool',
+            digest({ method: 'cos_result_submit', requestId, resultDigest, workOrder: current.order.digest }),
+          );
+          if (reserved.status !== 'ok') return reserved;
+          return reserved.reserved === true ? { status: 'ok', checks } : { status: 'pending' };
+        });
+        if (before.status !== 'ok' || before.submission_id) return before;
+        const captured = artifacts.publishText(
+          digest({ kind: 'mission_result', identity, requestId }),
+          canonical(result),
+          artifactLease,
+        );
+        await this.resultHooks.afterPublication?.();
+        return this.transaction(identity.scopeId, async (client) => {
+          // Pair publication with the existing orphan-cleanup barrier, including uncertain commits.
+          await client.query('SELECT pg_advisory_xact_lock(73101004)');
+          const current = await this.dispatchCurrent(client, identity, lease, true);
+          if (!current) return { status: 'denied' };
+          const previous = await existing(client);
+          if (previous) return previous;
+          if (current.mission.state !== 'running' || current.attempt.state !== 'running') return { status: 'denied' };
+          const checks = checkResearchResult(current.order, result);
+          if (checks.status !== 'review_required' || digest(checks) !== digest(before.checks))
+            return { status: 'denied' };
+          // Verify published bytes again before their durable metadata can be accepted.
+          if (digest(JSON.parse(artifacts.read(captured.id, captured.digest))) !== resultDigest)
+            return { status: 'denied' };
+          const submissionId = randomUUID();
+          await client.query(
+            `INSERT INTO cos.artifacts(id,scope_id,kind,digest,byte_length,lifecycle,provenance)
+            VALUES($1,$2,'mission_result',$3,$4,'published',$5)`,
+            [
+              captured.id,
+              identity.scopeId,
+              captured.digest,
+              captured.byteLength,
+              JSON.stringify({
+                mission_id: identity.missionId,
+                attempt_id: identity.attemptId,
+                generation: identity.generation,
+                session_id: identity.sessionId,
+                context_generation: identity.attemptId,
+                processing_provider: identity.provider,
+                submission_id: submissionId,
+                work_order_digest: current.order.digest,
+                result_digest: resultDigest,
+              }),
+            ],
+          );
+          await recordMissionExposure(client, identity, current.order);
+          await client.query(
+            `INSERT INTO cos.derivation_links(scope_id,artifact_id,evidence_id)
+            SELECT scope_id,$1,id FROM cos.evidence_refs WHERE scope_id=$2 AND session_id=$3 AND context_generation=$4 AND processing_provider='codex'
+            ON CONFLICT DO NOTHING`,
+            [captured.id, identity.scopeId, identity.sessionId, identity.attemptId],
+          );
+          await client.query(
+            `INSERT INTO cos.mission_result_submissions(scope_id,id,mission_id,attempt_id,generation,body,digest,artifact_id)
+            VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,
+            [
+              identity.scopeId,
+              submissionId,
+              identity.missionId,
+              identity.attemptId,
+              identity.generation,
+              JSON.stringify({ request_id: requestId, checks, artifact_digest: captured.digest }),
+              resultDigest,
+              captured.id,
+            ],
+          );
+          await client.query(
+            "UPDATE cos.mission_attempts SET state='submitted',version=version+1,updated_at=clock_timestamp() WHERE scope_id=$1 AND id=$2",
+            [identity.scopeId, identity.attemptId],
+          );
+          await client.query(
+            "UPDATE cos.missions SET state='awaiting_review',version=version+1,updated_at=clock_timestamp() WHERE scope_id=$1 AND id=$2",
+            [identity.scopeId, identity.missionId],
+          );
+          return { status: 'ok', state: 'awaiting_review', submission_id: submissionId };
+        });
+      });
+    } catch (error) {
+      if (error instanceof KnowledgeArtifactsBusy) return { status: 'unavailable' };
+      throw error;
+    }
   }
   /** Fresh disclosure and its root reservation share a transaction. A replay is not another disclosure grant. */
   async readContext(identity: CosMissionIdentity, lease: MissionDispatchLease, callId: string): Promise<Result> {

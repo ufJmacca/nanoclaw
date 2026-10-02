@@ -82,6 +82,7 @@ function setup() {
   const runs = {
     claimDispatch: vi.fn(async () => ({ status: 'ok' as const, ...value, lease: { owner: 'host', fence: 1 } })),
     authorizeDispatch: vi.fn(async () => ({ status: 'ok' as const })),
+    authorizeWorker: vi.fn(async () => ({ status: 'ok' as const })),
     markDispatchReady: vi.fn(async () => ({ status: 'ok' as const })),
     beginExecution: vi.fn(async () => ({ status: 'ok' as const })),
     renewDispatch: vi.fn(async () => ({ status: 'ok' as const })),
@@ -133,11 +134,28 @@ it('S05-T03/T10 binds worker calls to the running native child and fences databa
       lease: { owner: 'host', fence: 1 },
     });
     expect(await f.dispatcher.workerGrant({ ...session, agent_provider: 'claude' })).toBeNull();
-    f.runs.authorizeDispatch.mockRejectedValueOnce(new Error('offline'));
+    f.runs.authorizeWorker.mockRejectedValueOnce(new Error('offline'));
     expect(await f.dispatcher.workerGrant(session)).toBeNull();
     expect(f.stop).toHaveBeenCalledWith(f.value.identity, 'mission_authority_lost');
     expect(await f.dispatcher.workerGrant(session)).toBeNull();
     expect(permitCosExecution(session)).toBe(false);
+  } finally {
+    await f.dispatcher.close();
+  }
+});
+it('S05-T08 acknowledges a submitted result without renewing execution, then reconciles its stop', async () => {
+  const f = setup();
+  try {
+    await f.dispatcher.dispatch(f.context, f.value.identity.attemptId);
+    // Submission closed execution but still permits its current-lease acknowledgement.
+    f.runs.authorizeDispatch.mockResolvedValue({ status: 'denied' } as never);
+    f.runs.renewDispatch.mockResolvedValue({ status: 'denied' } as never);
+    f.runs.fail.mockResolvedValue({ status: 'denied' } as never);
+    expect(await f.dispatcher.workerGrant(getSession(f.value.identity.sessionId)!)).not.toBeNull();
+    await f.dispatcher.poll();
+    expect(f.stop).toHaveBeenCalledOnce();
+    expect(f.runs.confirmStopped).toHaveBeenCalledWith(f.value.identity);
+    expect(await f.dispatcher.workerGrant(getSession(f.value.identity.sessionId)!)).toBeNull();
   } finally {
     await f.dispatcher.close();
   }
