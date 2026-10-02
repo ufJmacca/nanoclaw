@@ -82,3 +82,16 @@ Main-conversation history still requires the existing explicit context recovery
 before its retired generation can be purged. Already-delivered messages, native
 message history, provider disclosures and backup retention are separate boundaries;
 source purge does not claim to retract them.
+
+## Deployment preservation
+
+Before migration, the deployment helper snapshots specialist context and provider
+history, delegation records and source-purge receipts alongside native SQLite and
+main-conversation history. It requires the existing maintenance lease and a stopped
+installation, checks the completed snapshot, and verifies it again before migration.
+A changed or corrupt snapshot prevents migration.
+
+These private backups stay on the Pi. Provider access credentials, interrupted
+credential writes and temporary launch controls are excluded. A retry verifies the
+original backup rather than replacing it with later history. Backups do not grant
+mission authority and are never automatically restored over newer messages or data.
