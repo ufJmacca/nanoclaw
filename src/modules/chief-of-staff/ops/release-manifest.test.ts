@@ -11,7 +11,7 @@ it('S05 pins all nine migrations without widening historical releases or admitti
     slice: 'S05',
     postgres: { minimum: 9, maximum: 9 },
     sqlite: { minimum: 22, maximum: 22 },
-    migrations: MIGRATIONS.map(({ version, checksum }) => ({ version, checksum })),
+    migrations: MIGRATIONS.slice(0, 9).map(({ version, checksum }) => ({ version, checksum })),
   };
   expect(validateReleaseManifest(current)).toEqual(current);
   for (const patch of [
@@ -21,6 +21,7 @@ it('S05 pins all nine migrations without widening historical releases or admitti
     { postgres: { minimum: 6, maximum: 9 } },
     { postgres: { minimum: 9, maximum: 10 } },
     { migrations: current.migrations.slice(0, 8) },
+    { migrations: MIGRATIONS.map(({ version, checksum }) => ({ version, checksum })) },
     ...current.migrations.map((_, index) => ({
       migrations: current.migrations.map((m, i) => (i === index ? { ...m, checksum: '0'.repeat(64) } : m)),
     })),

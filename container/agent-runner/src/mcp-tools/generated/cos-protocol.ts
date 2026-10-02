@@ -430,14 +430,37 @@ export function validMissionChange(value: unknown): value is MissionChange {
     digest(value.work_order) === value.work_order_digest
   );
 }
-export type ProposalChange = Change | SourceChange | WorkChange | ScheduleChange | MissionChange;
+/** One owner approval covers this immutable graph, never a worker-created extension. */
+export type TeamChange = {
+  kind: 'specialist_team';
+  team_id: string;
+  work_order_digest: string;
+  work_order: Record<string, unknown>;
+};
+export function validTeamChange(value: unknown): value is TeamChange {
+  return (
+    object(value) &&
+    keys(value, ['kind', 'team_id', 'work_order_digest', 'work_order']) &&
+    Object.keys(value).length === 4 &&
+    value.kind === 'specialist_team' &&
+    typeof value.team_id === 'string' &&
+    /^team-[a-f0-9]{64}$/.test(value.team_id) &&
+    typeof value.work_order_digest === 'string' &&
+    /^[a-f0-9]{64}$/.test(value.work_order_digest) &&
+    object(value.work_order) &&
+    Buffer.byteLength(JSON.stringify(value.work_order)) <= 49152 &&
+    digest(value.work_order) === value.work_order_digest
+  );
+}
+export type ProposalChange = Change | SourceChange | WorkChange | ScheduleChange | MissionChange | TeamChange;
 export function validProposalChange(value: unknown): value is ProposalChange {
   return (
     validChange(value) ||
     validSourceChange(value) ||
     validWorkChange(value) ||
     validScheduleChange(value) ||
-    validMissionChange(value)
+    validMissionChange(value) ||
+    validTeamChange(value)
   );
 }
 
