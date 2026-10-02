@@ -64,7 +64,7 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
     facts: d.facts,
     session: d.session,
     verifyScheduled: async (context) =>
-      !!context.origin &&
+      context.origin?.kind === 'schedule' &&
       !!d.store &&
       (await d.store.briefs.authorize(context, context.origin.runId, context.origin.generation)).status === 'ok',
     decide: (...args) => (d.store ? d.store.decide(...args) : Promise.resolve({ status: 'unavailable' })),
@@ -110,7 +110,7 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
   const localBriefContext = (binding: CosBinding) => {
     const session = d.session(binding.sessionId),
       context = session && controller.localContext(session);
-    return session && context?.origin ? resolveKnowledgeContext(session, context, d.db) : null;
+    return session && context?.origin?.kind === 'schedule' ? resolveKnowledgeContext(session, context, d.db) : null;
   };
   const briefAdmission = async (binding: CosBinding) =>
     (d.launcher?.ready(binding) ?? false) && (await admitted(binding));
@@ -244,7 +244,7 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
         createTurnAuthorization({
           local: () => controller.localContext(session),
           reserve: async (context, attemptId) =>
-            !!context.origin &&
+            context.origin?.kind === 'schedule' &&
             !!d.store &&
             (
               await d.store.briefs.reserveCall(
@@ -291,7 +291,7 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
       createRpcHandler({
         resolveContext: (session) => controller.context(session),
         reserveTool: (context, callId) =>
-          context.origin && d.store
+          context.origin?.kind === 'schedule' && d.store
             ? d.store.briefs.reserveCall(context, context.origin.runId, context.origin.generation, 'tool', callId)
             : Promise.resolve({ status: 'denied' }),
         store: d.store!,

@@ -65,6 +65,7 @@ export function createRpcHandler(dependencies: {
       else if (dependencies.knowledge && !knowledgeContext) result = { status: 'denied' };
       else if (access && access.status !== 'ok') result = { status: access.status };
       else if (reservation && reservation.status !== 'ok') result = { status: reservation.status };
+      else if (context.origin?.kind === 'mission_review') result = { status: 'denied' };
       else if (request.method.startsWith('cos_mission_') && context.origin) result = { status: 'denied' };
       else if (request.method === 'cos_mission_request')
         result = await dependencies.store.requestMission(

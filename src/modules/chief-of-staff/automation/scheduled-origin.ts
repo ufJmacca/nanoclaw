@@ -46,6 +46,8 @@ export function installScheduledOrigin(
     !boundary.binding ||
     boundary.paused ||
     digest(boundary.binding) !== digest(binding) ||
+    (hasTable(db, 'cos_mission_review_origins') &&
+      !!db.prepare('SELECT 1 FROM cos_mission_review_origins WHERE scope_id=?').get(binding.scopeId)) ||
     !/^[a-f0-9]{64}$/.test(lease.runId) ||
     !Number.isSafeInteger(lease.generation) ||
     lease.generation < 1 ||
