@@ -11,6 +11,9 @@ import { validMissionResult } from '../contracts/mission-result.js';
 import { readVerifiedSubmission } from './submission-reader.js';
 import { validCosMissionIdentity } from '../../../cos-mission-boundary.js';
 import { queueMissionAttempt } from './attempt.js';
+import { teamStepUsage } from './team-budget.js';
+import { validTeamReview } from '../contracts/team-review.js';
+import { validTeamRework, type TeamRework } from '../contracts/team-rework.js';
 import {
   defaultMissionWorkerCapacity,
   missionWorkerCapacity,
@@ -94,8 +97,8 @@ export class TeamRunStore {
       const { active } = await missionWorkerOccupancy(client);
       const rootActive = (
         await client.query(
-          `SELECT count(DISTINCT a.id)::int AS n FROM cos.mission_team_steps s
-        JOIN cos.mission_attempts a ON a.scope_id=s.scope_id AND a.mission_id=s.child_mission_id
+          `SELECT count(DISTINCT a.id)::int AS n FROM cos.mission_team_children s
+        JOIN cos.mission_attempts a ON a.scope_id=s.scope_id AND a.mission_id=s.mission_id
         WHERE s.scope_id=$1 AND s.team_id=$2 AND a.allocation->>'stop_confirmed' IS DISTINCT FROM 'true'`,
           [context.scopeId, teamId],
         )
@@ -118,16 +121,26 @@ export class TeamRunStore {
           return { status: 'denied' };
         const artifacts = await this.inputs(client, context, current, step, new Set([step.step_id]));
         if (!artifacts) return { status: 'denied' };
+        const revision = Number(row.provenance.next_revision ?? 0);
+        const rework = revision ? await this.reworkInput(client, context, current, step, row.provenance) : undefined;
+        if (revision && !rework) return { status: 'denied' };
         prepared.set(
           step.step_id,
           sealTeamChildWorkOrder({
             missionId:
               'mission-' +
-              digest({ scope: context.scopeId, team: teamId, generation: current.row.generation, step: step.step_id }),
+              digest({
+                scope: context.scopeId,
+                team: teamId,
+                generation: current.row.generation,
+                step: step.step_id,
+                ...(revision ? { revision } : {}),
+              }),
             stepId: step.step_id,
             rootGeneration: current.row.generation,
             approved: current.order,
             artifacts,
+            ...(revision ? { revision, rework: rework! } : {}),
           }),
         );
         if (
@@ -149,6 +162,13 @@ export class TeamRunStore {
           reservation.max_attempts !== step.limits.max_attempts + step.max_rework_count ||
           reservation.max_turns !== step.limits.max_turns ||
           reservation.max_tool_calls !== step.limits.max_tool_calls
+        )
+          return { status: 'denied' };
+        const usage = await teamStepUsage(client, context.scopeId, teamId, step.step_id);
+        if (
+          usage.attempt >= reservation.max_attempts ||
+          usage.model >= reservation.max_turns ||
+          usage.tool >= reservation.max_tool_calls
         )
           return { status: 'denied' };
       }
@@ -200,6 +220,27 @@ export class TeamRunStore {
           missionId,
           JSON.stringify(provenance),
         ]);
+        await client.query(
+          'INSERT INTO cos.mission_team_children(scope_id,team_id,step_id,mission_id,root_generation,revision,reason) VALUES($1,$2,$3,$4,$5,$6,$7)',
+          [
+            context.scopeId,
+            teamId,
+            step.step_id,
+            missionId,
+            current.row.generation,
+            order.body.team.revision ?? 0,
+            JSON.stringify(
+              order.context.rework
+                ? {
+                    kind: 'rework',
+                    rework_id: row.provenance.rework_id,
+                    revision: order.body.team.revision,
+                    rework: order.context.rework,
+                  }
+                : { kind: 'initial' },
+            ),
+          ],
+        );
         await queueMissionAttempt(client, context.scopeId, missionId, 1, order.digest, provenance);
         await client.query(
           "UPDATE cos.mission_team_steps SET child_mission_id=$4,state='running',version=version+1,updated_at=clock_timestamp() WHERE scope_id=$1 AND team_id=$2 AND step_id=$3",
@@ -337,41 +378,322 @@ export class TeamRunStore {
     current: CurrentTeam,
     stepId: string,
     ancestors = new Set<string>(),
-  ): Promise<TeamChildWorkOrder | null> {
-    if (ancestors.has(stepId) || ancestors.size >= 6) return null;
-    const seen = new Set(ancestors).add(stepId);
+  ) {
     const row = (
       await client.query(
-        `SELECT s.*,w.body,w.digest,b.state AS reservation_state,b.max_attempts,b.max_turns,b.max_tool_calls
-      FROM cos.mission_team_steps s JOIN cos.mission_work_orders w ON w.scope_id=s.scope_id AND w.id=s.child_mission_id
-      JOIN cos.mission_team_reservations b ON b.scope_id=s.scope_id AND b.team_id=s.team_id AND b.step_id=s.step_id
-      WHERE s.scope_id=$1 AND s.team_id=$2 AND s.step_id=$3 FOR SHARE OF s,b`,
+        'SELECT child_mission_id FROM cos.mission_team_steps WHERE scope_id=$1 AND team_id=$2 AND step_id=$3 FOR SHARE',
         [context.scopeId, current.row.id, stepId],
       )
     ).rows[0];
-    const step = current.order.body.request.steps.find((s) => s.step_id === stepId);
+    return row?.child_mission_id
+      ? this.retainedChildOrder(client, context, current, row.child_mission_id, ancestors)
+      : null;
+  }
+  /** Reconstruct each order from its immutable manifest, never from a newer mutable dependency pointer. */
+  private async retainedChildOrder(
+    client: PoolClient,
+    context: Context,
+    current: CurrentTeam,
+    missionId: string,
+    ancestors = new Set<string>(),
+  ): Promise<TeamChildWorkOrder | null> {
+    if (ancestors.has(missionId) || ancestors.size >= 18) return null;
+    const seen = new Set(ancestors).add(missionId);
+    const row = (
+      await client.query(
+        `SELECT c.*,w.body,w.digest,x.body AS manifest,s.definition,b.state AS reservation_state,b.max_attempts,b.max_turns,b.max_tool_calls
+      FROM cos.mission_team_children c JOIN cos.mission_work_orders w ON w.scope_id=c.scope_id AND w.id=c.mission_id
+      JOIN cos.mission_context_manifests x ON x.scope_id=w.scope_id AND x.digest=w.context_digest
+      JOIN cos.mission_team_steps s ON s.scope_id=c.scope_id AND s.team_id=c.team_id AND s.step_id=c.step_id
+      JOIN cos.mission_team_reservations b ON b.scope_id=c.scope_id AND b.team_id=c.team_id AND b.step_id=c.step_id
+      WHERE c.scope_id=$1 AND c.team_id=$2 AND c.mission_id=$3 FOR SHARE OF s,b`,
+        [context.scopeId, current.row.id, missionId],
+      )
+    ).rows[0];
+    const step = current.order.body.request.steps.find((s) => s.step_id === row?.step_id);
     if (
       !row ||
       !step ||
-      !['running', 'submitted'].includes(row.state) ||
+      row.root_generation !== current.row.generation ||
       row.reservation_state !== 'reserved' ||
       digest(step) !== digest(row.definition) ||
       digest(row.body) !== row.digest ||
       row.max_attempts !== step.limits.max_attempts + step.max_rework_count ||
       row.max_turns !== step.limits.max_turns ||
-      row.max_tool_calls !== step.limits.max_tool_calls
+      row.max_tool_calls !== step.limits.max_tool_calls ||
+      !Array.isArray(row.manifest.artifacts) ||
+      row.manifest.artifacts.length !== step.depends_on.length ||
+      !this.knowledge
     )
       return null;
-    const artifacts = await this.inputs(client, context, current, step, seen);
-    if (!artifacts) return null;
+    const artifacts: TeamInputArtifact[] = [];
+    for (const locator of row.manifest.artifacts) {
+      if (!locator || !step.depends_on.includes(locator.step_id)) return null;
+      if (locator.state === 'failed') {
+        artifacts.push(locator);
+        continue;
+      }
+      if (locator.state !== 'submitted') return null;
+      const lineage = (
+        await client.query(
+          'SELECT step_id FROM cos.mission_team_children WHERE scope_id=$1 AND team_id=$2 AND mission_id=$3 AND root_generation=$4',
+          [context.scopeId, current.row.id, locator.mission_id, current.row.generation],
+        )
+      ).rows[0];
+      if (lineage?.step_id !== locator.step_id) return null;
+      const inputOrder = await this.retainedChildOrder(client, context, current, locator.mission_id, seen);
+      const submission = (
+        await client.query(
+          'SELECT generation FROM cos.mission_result_submissions WHERE scope_id=$1 AND mission_id=$2 AND id=$3',
+          [context.scopeId, locator.mission_id, locator.submission_id],
+        )
+      ).rows[0];
+      if (!inputOrder || !submission) return null;
+      const verified = await readVerifiedSubmission(
+        client,
+        this.knowledge.artifacts,
+        context.scopeId,
+        locator.mission_id,
+        locator.submission_id,
+        submission.generation,
+        inputOrder,
+        true,
+      );
+      if (
+        !verified ||
+        !validMissionResult(verified.result) ||
+        verified.submission.digest !== locator.result_digest ||
+        verified.submission.artifact_id !== locator.artifact_id
+      )
+        return null;
+      artifacts.push({ ...locator, result: verified.result });
+    }
+    const rework = row.revision ? await this.reworkInput(client, context, current, step, row.reason) : undefined;
+    if (
+      row.revision
+        ? !rework || digest(rework) !== digest(row.reason.rework)
+        : digest(row.reason) !== digest({ kind: 'initial' })
+    )
+      return null;
     const order = sealTeamChildWorkOrder({
-      missionId: row.child_mission_id,
-      stepId,
+      missionId,
+      stepId: step.step_id,
       rootGeneration: current.row.generation,
       approved: current.order,
       artifacts,
+      ...(row.revision ? { revision: row.revision, rework: rework! } : {}),
     });
-    return validateTeamChildWorkOrder(order) && order.digest === row.digest ? order : null;
+    const manifest = {
+      format: 'cos-team-child-manifest/v1',
+      sources: order.context.sources.map(({ chunks, ...source }) => ({
+        ...source,
+        chunks: chunks.map(({ text, ...locator }) => ({ ...locator, digest: digest(text) })),
+      })),
+      artifacts: order.context.artifacts.map((a) =>
+        a.state === 'submitted' ? (({ result: _result, ...locator }) => locator)(a) : a,
+      ),
+    };
+    return validateTeamChildWorkOrder(order) && order.digest === row.digest && digest(manifest) === digest(row.manifest)
+      ? order
+      : null;
+  }
+  private async reworkInput(
+    client: PoolClient,
+    context: Context,
+    current: CurrentTeam,
+    step: TeamStep,
+    provenance: Record<string, unknown>,
+  ): Promise<TeamRework | null> {
+    if (!id(provenance.rework_id)) return null;
+    const row = (
+      await client.query('SELECT * FROM cos.mission_team_reworks WHERE scope_id=$1 AND team_id=$2 AND id=$3', [
+        context.scopeId,
+        current.row.id,
+        provenance.rework_id,
+      ])
+    ).rows[0];
+    if (
+      !row ||
+      digest(row.body) !== row.digest ||
+      row.body.generation !== current.row.generation ||
+      row.body.work_order_digest !== current.order.digest ||
+      !row.body.revised_steps.includes(step.step_id) ||
+      row.body.revisions[step.step_id] !== Number(provenance.next_revision ?? provenance.revision)
+    )
+      return null;
+    const target = row.body.recommendation;
+    const input: TeamRework = {
+      kind: step.step_id === target.step_id ? 'requested_revision' : 'dependency_replay',
+      review_mission_id: row.review_mission_id,
+      review_submission_id: row.review_submission_id,
+      review_digest: row.body.review_digest,
+      target_step_id: target.step_id,
+      criterion_ids: target.criterion_ids,
+      instructions: target.instructions,
+    };
+    return validTeamRework(input) ? input : null;
+  }
+  /** Advisory rework may consume only pre-approved credits. No plan expansion or new deadline is admitted. */
+  async requestRework(context: Context, teamId: string, reviewSubmissionId: string): Promise<Result> {
+    if (!id(teamId) || !id(reviewSubmissionId) || !this.knowledge) return { status: 'denied' };
+    return this.transaction(context, async (client) => {
+      await lockMissionWorkerAdmission(client);
+      const current = await this.root(client, context, teamId, false);
+      if (!current) return { status: 'denied' };
+      const existing = (
+        await client.query(
+          'SELECT * FROM cos.mission_team_reworks WHERE scope_id=$1 AND team_id=$2 AND review_submission_id=$3',
+          [context.scopeId, teamId, reviewSubmissionId],
+        )
+      ).rows[0];
+      if (existing)
+        return digest(existing.body) === existing.digest &&
+          existing.body.generation === current.row.generation &&
+          existing.body.work_order_digest === current.order.digest
+          ? { status: 'ok', team_id: teamId, rework_id: existing.id, revised_steps: existing.body.revised_steps }
+          : { status: 'denied' };
+      if (current.row.state !== 'awaiting_review' || !(await this.root(client, context, teamId)))
+        return { status: 'denied' };
+      const steps = (
+        await client.query(
+          'SELECT * FROM cos.mission_team_steps WHERE scope_id=$1 AND team_id=$2 ORDER BY step_id FOR UPDATE',
+          [context.scopeId, teamId],
+        )
+      ).rows;
+      if (
+        steps.length !== current.order.body.request.steps.length ||
+        steps.some((s) => !['submitted', 'failed'].includes(s.state))
+      )
+        return { status: 'denied' };
+      const reviewer = current.order.body.request.steps.find((s) => s.template_id === 'team-reviewer')!,
+        review = steps.find((s) => s.step_id === reviewer.step_id);
+      if (!review || review.state !== 'submitted' || review.provenance.submission_id !== reviewSubmissionId)
+        return { status: 'denied' };
+      const pending = await client.query(
+        `SELECT 1 FROM cos.mission_team_children c JOIN cos.mission_attempts a ON a.scope_id=c.scope_id AND a.mission_id=c.mission_id WHERE c.scope_id=$1 AND c.team_id=$2 AND a.allocation->>'stop_confirmed' IS DISTINCT FROM 'true' LIMIT 1`,
+        [context.scopeId, teamId],
+      );
+      if (pending.rowCount) return { status: 'denied' };
+      const order = await this.childOrder(client, context, current, reviewer.step_id);
+      const mission = (
+        await client.query('SELECT generation FROM cos.missions WHERE scope_id=$1 AND id=$2', [
+          context.scopeId,
+          review.child_mission_id,
+        ])
+      ).rows[0];
+      if (!order || !mission) return { status: 'denied' };
+      const verified = await readVerifiedSubmission(
+        client,
+        this.knowledge!.artifacts,
+        context.scopeId,
+        review.child_mission_id,
+        reviewSubmissionId,
+        mission.generation,
+        order,
+        true,
+      );
+      if (
+        !verified ||
+        !validTeamReview(verified.result) ||
+        verified.result.recommended_revisions.length !== 1 ||
+        verified.submission.digest !== review.provenance.result_digest ||
+        verified.submission.artifact_id !== review.provenance.artifact_id
+      )
+        return { status: 'denied' };
+      const recommendation = verified.result.recommended_revisions[0],
+        affected = new Set([recommendation.step_id]);
+      const target = current.order.body.request.steps.find((s) => s.step_id === recommendation.step_id);
+      if (!target || recommendation.criterion_ids.some((id) => !target.acceptance_criteria.some((c) => c.id === id)))
+        return { status: 'denied' };
+      for (let i = 0; i < 6; i++)
+        for (const step of current.order.body.request.steps)
+          if (step.depends_on.some((d) => affected.has(d))) affected.add(step.step_id);
+      const revised = current.order.body.request.steps.filter((s) => affected.has(s.step_id));
+      if (
+        !affected.has(reviewer.step_id) ||
+        revised.some((s) => s.template_id !== 'team-reviewer' && s.max_rework_count !== 1)
+      )
+        return { status: 'denied' };
+      const revisions: Record<string, number> = {};
+      for (const definition of revised) {
+        const step = steps.find((s) => s.step_id === definition.step_id);
+        if (!step || step.state !== 'submitted' || digest(step.definition) !== digest(definition))
+          return { status: 'denied' };
+        // Review advice may contain uncited influence from every reviewer source. A role label cannot expand its recipient's scope.
+        if (
+          reviewer.sources.some(
+            (r) => !definition.sources.some((s) => s.source_id === r.source_id && s.revision_id === r.revision_id),
+          )
+        )
+          return { status: 'denied' };
+        const history = (
+          await client.query(
+            'SELECT count(*)::int AS n,max(revision)::int AS revision FROM cos.mission_team_children WHERE scope_id=$1 AND team_id=$2 AND step_id=$3',
+            [context.scopeId, teamId, definition.step_id],
+          )
+        ).rows[0];
+        const next = history.revision + 1;
+        if (next > 2 || (definition.template_id !== 'team-reviewer' && history.n - 1 >= definition.max_rework_count))
+          return { status: 'denied' };
+        revisions[definition.step_id] = next;
+        const usage = await teamStepUsage(client, context.scopeId, teamId, definition.step_id);
+        if (
+          usage.attempt >= definition.limits.max_attempts + definition.max_rework_count ||
+          usage.model >= definition.limits.max_turns ||
+          usage.tool >= definition.limits.max_tool_calls ||
+          !(
+            await client.query('SELECT $1::timestamptz>clock_timestamp() AS current', [
+              new Date(Date.parse(current.order.body.issuedAt) + definition.limits.wall_seconds * 1000).toISOString(),
+            ])
+          ).rows[0].current
+        )
+          return { status: 'denied' };
+      }
+      const revisedSteps = revised.map((s) => s.step_id),
+        reworkId = 'team-rework-' + digest({ team: teamId, submission: reviewSubmissionId }),
+        body = {
+          generation: current.row.generation,
+          work_order_digest: current.order.digest,
+          review_digest: verified.submission.digest,
+          recommendation,
+          revised_steps: revisedSteps,
+          revisions,
+        };
+      await client.query(
+        'INSERT INTO cos.mission_team_reworks(scope_id,team_id,id,review_mission_id,review_submission_id,body,digest) VALUES($1,$2,$3,$4,$5,$6,$7)',
+        [
+          context.scopeId,
+          teamId,
+          reworkId,
+          review.child_mission_id,
+          reviewSubmissionId,
+          JSON.stringify(body),
+          digest(body),
+        ],
+      );
+      for (const definition of revised) {
+        const state = definition.depends_on.some((d) => affected.has(d)) ? 'blocked' : 'ready';
+        await client.query(
+          'UPDATE cos.mission_team_steps SET state=$4,child_mission_id=NULL,provenance=$5,version=version+1,updated_at=clock_timestamp() WHERE scope_id=$1 AND team_id=$2 AND step_id=$3',
+          [
+            context.scopeId,
+            teamId,
+            definition.step_id,
+            state,
+            JSON.stringify({
+              next_revision: revisions[definition.step_id],
+              rework_id: reworkId,
+              previous_child_mission_id: steps.find((s) => s.step_id === definition.step_id)!.child_mission_id,
+            }),
+          ],
+        );
+      }
+      await client.query(
+        `UPDATE cos.mission_team_roots SET state='running',version=version+1,updated_at=clock_timestamp() WHERE scope_id=$1 AND id=$2`,
+        [context.scopeId, teamId],
+      );
+      return { status: 'ok', team_id: teamId, rework_id: reworkId, revised_steps: revisedSteps };
+    });
   }
   /** Database events/confirmed stops advance the graph. No model turn or open transaction waits for a worker. */
   async advance(context: Context, teamId: string): Promise<Result> {
@@ -459,24 +781,22 @@ export class TeamRunStore {
           });
         } else if (attempt.state === 'failed' && attempt.attempt_state === 'failed') {
           const definition = current.order.body.request.steps.find((s) => s.step_id === row.step_id)!;
-          const counts = (
+          const usage = await teamStepUsage(client, context.scopeId, teamId, row.step_id);
+          const order = await this.childOrder(client, context, current, row.step_id);
+          if (!order) return { status: 'denied' };
+          const own = (
             await client.query(
-              'SELECT kind,count(*)::int AS n FROM cos.mission_budget_reservations WHERE scope_id=$1 AND mission_id=$2 GROUP BY kind',
+              `SELECT count(*)::int AS n FROM cos.mission_budget_reservations WHERE scope_id=$1 AND mission_id=$2 AND kind='attempt'`,
               [context.scopeId, row.child_mission_id],
             )
-          ).rows;
-          const usage = {
-            attempt: counts.find((c) => c.kind === 'attempt')?.n ?? 0,
-            model: counts.find((c) => c.kind === 'model')?.n ?? 0,
-            tool: counts.find((c) => c.kind === 'tool')?.n ?? 0,
-          };
-          if (usage.attempt >= definition.limits.max_attempts)
+          ).rows[0].n;
+          const retryCap =
+            order.body.team.revision && definition.template_id !== 'team-reviewer' ? 1 : definition.limits.max_attempts;
+          if (own >= retryCap || usage.attempt >= definition.limits.max_attempts + definition.max_rework_count)
             changes.push({ stepId: row.step_id, state: 'failed', provenance: { failure_reason: 'worker_failed' } });
           else if (usage.model >= definition.limits.max_turns || usage.tool >= definition.limits.max_tool_calls)
             changes.push({ stepId: row.step_id, state: 'failed', provenance: { failure_reason: 'budget_exhausted' } });
           else {
-            const order = await this.childOrder(client, context, current, row.step_id);
-            if (!order) return { status: 'denied' };
             if (
               !(await client.query('SELECT $1::timestamptz > clock_timestamp() AS current', [order.body.deadlineAt]))
                 .rows[0].current
@@ -513,7 +833,7 @@ export class TeamRunStore {
       const occupancy = await missionWorkerOccupancy(client);
       const rootActive = (
         await client.query(
-          `SELECT count(*)::int AS n FROM cos.mission_attempts a JOIN cos.mission_team_steps s ON s.scope_id=a.scope_id AND s.child_mission_id=a.mission_id
+          `SELECT count(*)::int AS n FROM cos.mission_attempts a JOIN cos.mission_team_children s ON s.scope_id=a.scope_id AND s.mission_id=a.mission_id
         WHERE s.scope_id=$1 AND s.team_id=$2 AND a.allocation->>'stop_confirmed' IS DISTINCT FROM 'true'`,
           [context.scopeId, teamId],
         )
@@ -595,8 +915,8 @@ export class TeamRunStore {
         if (!root || ['completed', 'partial'].includes(root.state)) return { status: 'denied' };
         const attempts = (
           await client.query(
-            `SELECT a.* FROM cos.mission_team_steps s
-        JOIN cos.mission_attempts a ON a.scope_id=s.scope_id AND a.mission_id=s.child_mission_id
+            `SELECT a.* FROM cos.mission_team_children s
+        JOIN cos.mission_attempts a ON a.scope_id=s.scope_id AND a.mission_id=s.mission_id
         WHERE s.scope_id=$1 AND s.team_id=$2 ORDER BY a.mission_id,a.id`,
             [context.scopeId, teamId],
           )
@@ -615,15 +935,15 @@ export class TeamRunStore {
           return { status: 'ok', team_id: teamId, state: root.state, identities };
         await client.query(
           `UPDATE cos.mission_attempts a SET state='cancelled',lease_owner=NULL,lease_until=NULL,
-        version=a.version+1,updated_at=clock_timestamp() FROM cos.mission_team_steps s
-        WHERE s.scope_id=$1 AND s.team_id=$2 AND a.scope_id=s.scope_id AND a.mission_id=s.child_mission_id AND a.state<>'cancelled'`,
+        version=a.version+1,updated_at=clock_timestamp() FROM cos.mission_team_children s
+        WHERE s.scope_id=$1 AND s.team_id=$2 AND a.scope_id=s.scope_id AND a.mission_id=s.mission_id AND a.state<>'cancelled'`,
           [context.scopeId, teamId],
         );
         await client.query(
           `UPDATE cos.missions m SET state=CASE WHEN EXISTS(SELECT 1 FROM cos.mission_attempts a
         WHERE a.scope_id=m.scope_id AND a.mission_id=m.id AND a.allocation->>'stop_confirmed' IS DISTINCT FROM 'true') THEN 'cancelling' ELSE 'cancelled' END,
-        generation=m.generation+1,version=m.version+1,updated_at=clock_timestamp() FROM cos.mission_team_steps s
-        WHERE s.scope_id=$1 AND s.team_id=$2 AND m.scope_id=s.scope_id AND m.id=s.child_mission_id AND m.state NOT IN ('cancelling','cancelled')`,
+        generation=m.generation+1,version=m.version+1,updated_at=clock_timestamp() FROM cos.mission_team_children s
+        WHERE s.scope_id=$1 AND s.team_id=$2 AND m.scope_id=s.scope_id AND m.id=s.mission_id AND m.state NOT IN ('cancelling','cancelled')`,
           [context.scopeId, teamId],
         );
         await client.query(
@@ -666,8 +986,8 @@ export class TeamRunStore {
         const root = await this.retainedRoot(client, context, teamId);
         if (!root || !['cancelling', 'cancelled'].includes(root.state)) return { status: 'denied' };
         const pending = await client.query(
-          `SELECT 1 FROM cos.mission_team_steps s JOIN cos.mission_attempts a
-        ON a.scope_id=s.scope_id AND a.mission_id=s.child_mission_id WHERE s.scope_id=$1 AND s.team_id=$2
+          `SELECT 1 FROM cos.mission_team_children s JOIN cos.mission_attempts a
+        ON a.scope_id=s.scope_id AND a.mission_id=s.mission_id WHERE s.scope_id=$1 AND s.team_id=$2
         AND a.allocation->>'stop_confirmed' IS DISTINCT FROM 'true' LIMIT 1`,
           [context.scopeId, teamId],
         );
@@ -684,17 +1004,7 @@ export class TeamRunStore {
         for (const reservation of reservations) {
           if (reservation.state === 'cancelled') continue;
           if (reservation.state !== 'reserved') return { status: 'denied' };
-          const counts = (
-            await client.query(
-              'SELECT kind,count(*)::int AS n FROM cos.mission_budget_reservations WHERE scope_id=$1 AND mission_id=$2 GROUP BY kind',
-              [context.scopeId, reservation.child_mission_id],
-            )
-          ).rows;
-          const usage = {
-            attempt: counts.find((c) => c.kind === 'attempt')?.n ?? 0,
-            model: counts.find((c) => c.kind === 'model')?.n ?? 0,
-            tool: counts.find((c) => c.kind === 'tool')?.n ?? 0,
-          };
+          const usage = await teamStepUsage(client, context.scopeId, teamId, reservation.step_id);
           const unused = {
             attempt: reservation.max_attempts - usage.attempt,
             model: reservation.max_turns - usage.model,

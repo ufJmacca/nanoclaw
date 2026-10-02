@@ -11,6 +11,7 @@ import { KnowledgeArtifactsBusy, type KnowledgeArtifacts } from '../knowledge/ar
 import { validMissionWorkerResult } from '../contracts/mission-worker-protocol.js';
 import { checkWorkerResult } from './result-checks.js';
 import { TEAM_TEMPLATES } from '../contracts/team-templates.js';
+import { teamStepUsage } from './team-budget.js';
 import {
   defaultMissionWorkerCapacity,
   missionWorkerCapacity,
@@ -101,8 +102,8 @@ export class MissionRunStore {
   private async mission(client: PoolClient, scopeId: string, missionId: string): Promise<MissionRow | undefined> {
     // All team operations lock the parent first, including reservations/cancel/result processing.
     await client.query(
-      `SELECT r.id FROM cos.mission_team_roots r JOIN cos.mission_team_steps s ON s.scope_id=r.scope_id AND s.team_id=r.id
-      WHERE s.scope_id=$1 AND s.child_mission_id=$2 FOR UPDATE OF r`,
+      `SELECT r.id FROM cos.mission_team_roots r JOIN cos.mission_team_children s ON s.scope_id=r.scope_id AND s.team_id=r.id
+      WHERE s.scope_id=$1 AND s.mission_id=$2 FOR UPDATE OF r`,
       [scopeId, missionId],
     );
     return (
@@ -165,6 +166,13 @@ export class MissionRunStore {
     return (await this.capture(client, m)) !== null;
   }
   private async usage(client: PoolClient, scopeId: string, missionId: string) {
+    const team = (
+      await client.query('SELECT team_id,step_id FROM cos.mission_team_children WHERE scope_id=$1 AND mission_id=$2', [
+        scopeId,
+        missionId,
+      ])
+    ).rows[0];
+    if (team) return teamStepUsage(client, scopeId, team.team_id, team.step_id);
     const rows = (
       await client.query(
         'SELECT kind,count(*)::int AS n FROM cos.mission_budget_reservations WHERE scope_id=$1 AND mission_id=$2 GROUP BY kind',

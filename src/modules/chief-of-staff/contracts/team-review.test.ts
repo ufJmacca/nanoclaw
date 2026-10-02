@@ -29,7 +29,7 @@ describe('S06-T05/T08 bounded advisory review contract', () => {
   it('retains evidence uncertainty, disagreement, gaps, revisions and confidence without approval authority', () => {
     expect(validTeamReview(reviewFixture())).toBe(true);
     expect(teamReviewSchema.additionalProperties).toBe(false);
-    for (const name of ['team-review.ts', 'team-templates.ts', 'team-inputs.ts'])
+    for (const name of ['team-review.ts', 'team-templates.ts', 'team-inputs.ts', 'team-rework.ts'])
       expect(fs.readFileSync('container/agent-runner/src/mcp-tools/generated/' + name, 'utf8')).toBe(
         fs.readFileSync('src/modules/chief-of-staff/contracts/' + name, 'utf8'),
       );

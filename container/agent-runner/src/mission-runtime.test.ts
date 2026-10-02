@@ -164,3 +164,36 @@ test('S06 team startup rejects rehashed role/schema substitution and undeclared 
     expect(() => loadMissionRuntime(f.root, f.config)).toThrow();
   }
 });
+
+test('S06 rework startup rejects rehashed foreign targets, repeated revision and hidden history', () => {
+  for (const kind of ['valid', 'foreign-target', 'repeated', 'history', 'limits']) {
+    const f = teamFixture(TEAM_TEMPLATES['team-writer']);
+    Object.assign(f.body.team, { revision: kind === 'repeated' ? 2 : 1 });
+    Object.assign(f.body.team.step, {
+      max_rework_count: 1,
+      acceptance_criteria: [{ id: 'tradeoff', description: 'Retain both perspectives.' }],
+    });
+    const rework = {
+      kind: 'requested_revision',
+      review_mission_id: 'mission-' + 'b'.repeat(64),
+      review_submission_id: '22222222-2222-4222-8222-222222222222',
+      review_digest: 'c'.repeat(64),
+      target_step_id: kind === 'foreign-target' ? 'foreign' : 'step',
+      criterion_ids: ['tradeoff'],
+      instructions: 'Clarify uncertainty.',
+    };
+    if (kind === 'history') Object.assign(rework, { history: 'private canary' });
+    if (kind === 'limits') Object.assign(rework, { max_turns: 99 });
+    Object.assign(f.context, { rework });
+    f.body.contextDigest = digest(f.context);
+    f.config.mission.contextDigest = digest(f.context);
+    f.config.mission.workOrderDigest = digest(f.body);
+    for (const [name, value] of Object.entries({ 'context.json': f.context, 'work-order.json': f.body })) {
+      fs.chmodSync(path.join(f.root, name), 0o600);
+      fs.writeFileSync(path.join(f.root, name), JSON.stringify(value));
+      fs.chmodSync(path.join(f.root, name), 0o400);
+    }
+    if (kind === 'valid') expect(() => loadMissionRuntime(f.root, f.config)).not.toThrow();
+    else expect(() => loadMissionRuntime(f.root, f.config)).toThrow();
+  }
+});

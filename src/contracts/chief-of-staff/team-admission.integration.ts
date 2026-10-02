@@ -72,6 +72,8 @@ after(async () => {
     await admin.query('UPDATE cos.sources SET current_revision_id=NULL WHERE scope_id=$1', [scope]);
     for (const table of [
       'mission_team_budget_events',
+      'mission_team_reworks',
+      'mission_team_children',
       'mission_team_reservations',
       'mission_team_dependencies',
       'mission_team_steps',
@@ -313,7 +315,13 @@ test('S06-T01 stale source, foreign session and scheduled origins cannot approve
   );
 });
 test('S06-T01 runtime cannot rewrite approved graph or root budget history', async () => {
-  for (const table of ['mission_team_work_orders', 'mission_team_dependencies', 'mission_team_budget_events']) {
+  for (const table of [
+    'mission_team_work_orders',
+    'mission_team_dependencies',
+    'mission_team_budget_events',
+    'mission_team_children',
+    'mission_team_reworks',
+  ]) {
     const p = (
       await store.database.pool.query(
         "SELECT has_table_privilege(current_user,$1,'SELECT') AS read,has_table_privilege(current_user,$1,'INSERT') AS insert,has_table_privilege(current_user,$1,'UPDATE') AS update,has_table_privilege(current_user,$1,'DELETE') AS delete",
@@ -646,13 +654,14 @@ test('S06-T02/T05/T07 joins require verified submitted artifacts and exact stops
     'denied',
   );
 });
-async function stoppedAnalyses(failTechnical = false) {
+async function stoppedAnalyses(failTechnical = false, configure?: (request: TeamRequest) => void | Promise<void>) {
   // This file exercises trusted admission/storage only, with no native worker or model process.
   await admin.query(
     "UPDATE cos.mission_attempts SET allocation=allocation||'{\"stop_confirmed\":true}'::jsonb,state='failed',lease_owner=NULL,lease_until=NULL WHERE scope_id=$1 AND state<>'submitted'",
     [scope],
   );
   const r = await input();
+  await configure?.(r);
   if (failTechnical) r.steps.find((s) => s.step_id === 'technical')!.limits.max_attempts = 1;
   const p = await store.requestTeam(context, randomUUID(), r),
     teamId = String(p.team_id);
@@ -964,4 +973,221 @@ test('S06-T03 a shorter step deadline removes model/tool/context authority while
   assert.equal((await runs.reserve(identity, 'late-turn', 'model', digest('late physical turn'))).status, 'denied');
   assert.equal((await runs.readContext(identity, lease, 'after-deadline')).status, 'denied');
   assert.equal((await runs.authorizeDispatch(identity, lease)).status, 'denied');
+});
+
+async function finishTeamStep(
+  f: Awaited<ReturnType<typeof stoppedAnalyses>>,
+  stepId: string,
+  revisionTarget?: string,
+  extraModels = 0,
+  expectModelExhausted = false,
+) {
+  assert.equal((await f.teams.claimReady(context, f.teamId)).status, 'ok');
+  const step = (await rows('mission_team_steps')).find((s) => s.team_id === f.teamId && s.step_id === stepId)!;
+  const attempt = (await rows('mission_attempts')).find(
+    (a) => a.mission_id === step.child_mission_id && a.state === 'queued',
+  )!;
+  const claim = await f.runs.claimDispatch(context, attempt.id, 'fixture-host');
+  assert.equal(claim.status, 'ok');
+  const identity = claim.identity as CosMissionIdentity,
+    lease = claim.lease as MissionDispatchLease,
+    order = claim.order as TeamChildWorkOrder;
+  assert.equal((await f.runs.markDispatchReady(identity, lease, digest('fixture native receipt'))).status, 'ok');
+  assert.equal((await f.runs.beginExecution(identity, lease)).status, 'ok');
+  const research = {
+    format: 'cos-research-result/v1',
+    outcome: 'answer',
+    claims: [
+      {
+        id: stepId,
+        kind: 'inference',
+        text: 'Compare both differing perspectives.',
+        citations: [
+          {
+            source_id: order.context.sources[0].source_id,
+            revision_id: order.context.sources[0].revision_id,
+            ordinal: 0,
+            start_line: 1,
+            end_line: 1,
+          },
+        ],
+      },
+    ],
+    criteria: [{ id: 'tradeoff', claim_ids: [stepId] }],
+    limitations: ['Supplied fixture notes only.'],
+  };
+  const result =
+    stepId === 'review'
+      ? {
+          format: 'cos-team-review/v1',
+          evidence_validity: order.context.artifacts.flatMap((a) =>
+            a.state === 'submitted'
+              ? a.result.claims.map((c) => ({
+                  step_id: a.step_id,
+                  claim_id: c.id,
+                  verdict: 'uncertain',
+                  reason: 'Advisory fixture judgement.',
+                }))
+              : [],
+          ),
+          factual_gaps: [],
+          contradictions: [],
+          unmet_criteria: revisionTarget ? ['tradeoff'] : [],
+          recommended_revisions: revisionTarget
+            ? [
+                {
+                  step_id: revisionTarget,
+                  criterion_ids: ['tradeoff'],
+                  instructions: 'Preserve both perspectives and clarify uncertainty.',
+                },
+              ]
+            : [],
+          confidence: 'low',
+        }
+      : research;
+  assert.equal((await f.runs.readContext(identity, lease, randomUUID())).status, 'ok');
+  assert.equal((await f.runs.reserve(identity, randomUUID(), 'model', digest('fixture turn'))).status, 'ok');
+  for (let i = 0; i < extraModels; i++)
+    assert.equal((await f.runs.reserve(identity, randomUUID(), 'model', digest({ fixtureTurn: i }))).status, 'ok');
+  if (expectModelExhausted)
+    assert.equal(
+      (await f.runs.reserve(identity, randomUUID(), 'model', digest('beyond original credit'))).status,
+      'denied',
+    );
+  const submitted = await f.runs.submitResult(identity, lease, randomUUID(), 'submission', result);
+  assert.equal(submitted.status, 'ok');
+  assert.equal((await f.runs.confirmStopped(identity)).status, 'ok');
+  assert.equal((await f.teams.advance(context, f.teamId)).status, 'ok');
+  return { identity, lease, order, submitted };
+}
+
+test('S06-T03/T05/T07 bounded reviewer rework retains all immutable children, pinned earlier inputs and aggregate credits', async () => {
+  const f = await stoppedAnalyses(false, (r) => {
+    r.limits.max_attempts = 9;
+    r.steps.find((s) => s.step_id === 'synthesis')!.max_rework_count = 1;
+  });
+  await f.teams.advance(context, f.teamId);
+  const firstWriter = await finishTeamStep(f, 'synthesis', undefined, 2);
+  const firstReview = await finishTeamStep(f, 'review', 'synthesis');
+  const request = () => f.teams.requestRework(context, f.teamId, String(firstReview.submitted.submission_id));
+  const [a, b] = await Promise.all([request(), request()]);
+  assert.equal(a.status, 'ok');
+  assert.deepEqual(a, b);
+  assert.deepEqual(a.revised_steps, ['synthesis', 'review']);
+  assert.equal(
+    (await f.runs.reserve(firstWriter.identity, randomUUID(), 'model', digest('late old call'))).status,
+    'denied',
+  );
+  const revisedWriter = await finishTeamStep(f, 'synthesis', undefined, 0, true);
+  assert.notEqual(revisedWriter.identity.missionId, firstWriter.identity.missionId);
+  assert.notEqual(revisedWriter.identity.sessionId, firstWriter.identity.sessionId);
+  assert.deepEqual(revisedWriter.order.context.artifacts, firstWriter.order.context.artifacts);
+  assert.equal(revisedWriter.order.body.deadlineAt, firstWriter.order.body.deadlineAt);
+  assert.match(revisedWriter.order.context.rework!.instructions, /clarify uncertainty/);
+  const secondReview = await finishTeamStep(f, 'review', 'synthesis');
+  assert.notEqual(secondReview.identity.missionId, firstReview.identity.missionId);
+  assert.equal(secondReview.order.context.artifacts[0].state, 'submitted');
+  assert.equal(
+    (await f.teams.requestRework(context, f.teamId, String(secondReview.submitted.submission_id))).status,
+    'denied',
+  );
+  const children = (await rows('mission_team_children')).filter((c) => c.team_id === f.teamId);
+  assert.equal(children.length, 6);
+  assert.equal(children.filter((c) => c.step_id === 'synthesis').length, 2);
+  assert.equal(children.filter((c) => c.step_id === 'review').length, 2);
+  assert.equal((await rows('mission_team_reworks')).filter((c) => c.team_id === f.teamId).length, 1);
+  const cancelled = await f.teams.cancel(context, f.teamId);
+  assert.equal((cancelled.identities as CosMissionIdentity[]).length, 6);
+  assert.equal((await f.teams.confirmCancellation(context, f.teamId)).status, 'ok');
+  const settled = (await rows('mission_team_reservations')).filter((c) => c.team_id === f.teamId);
+  for (const step of ['synthesis', 'review']) {
+    const usage = settled.find((c) => c.step_id === step)!.usage.usage;
+    assert.equal(usage.attempt, 2);
+    assert.equal(usage.model, step === 'synthesis' ? 4 : 2);
+  }
+});
+
+test('S06-T03 rework cannot invent downstream rework or reviewer repeat credits, and denial leaves the graph unchanged', async () => {
+  for (const limitation of ['writer-rework', 'review-attempt']) {
+    const f = await stoppedAnalyses(false, (r) => {
+      if (limitation === 'review-attempt') {
+        r.steps.find((s) => s.step_id === 'synthesis')!.max_rework_count = 1;
+        r.steps.find((s) => s.step_id === 'review')!.limits.max_attempts = 1;
+      }
+    });
+    await f.teams.advance(context, f.teamId);
+    await finishTeamStep(f, 'synthesis');
+    const reviewer = await finishTeamStep(f, 'review', 'synthesis');
+    const before = (await rows('mission_team_steps')).filter((s) => s.team_id === f.teamId);
+    assert.equal(
+      (await f.teams.requestRework(context, f.teamId, String(reviewer.submitted.submission_id))).status,
+      'denied',
+    );
+    assert.deepEqual(
+      (await rows('mission_team_steps')).filter((s) => s.team_id === f.teamId),
+      before,
+    );
+    assert.equal((await rows('mission_team_reworks')).filter((r) => r.team_id === f.teamId).length, 0);
+    assert.equal((await rows('mission_team_roots')).find((r) => r.id === f.teamId)!.state, 'awaiting_review');
+  }
+});
+
+test('S06-T03/T05 upstream analyst rework preserves original review inputs and replays only pre-approved downstream work', async () => {
+  const f = await stoppedAnalyses(false, (r) => {
+    r.limits.max_attempts = 10;
+    for (const step of r.steps.filter((s) => ['technical', 'synthesis'].includes(s.step_id))) step.max_rework_count = 1;
+    const reviewer = r.steps.find((s) => s.step_id === 'review')!;
+    reviewer.depends_on = ['technical', 'operations', 'synthesis'];
+    reviewer.input_artifact_refs = reviewer.depends_on.map((step_id) => ({
+      step_id,
+      result_schema: 'cos-research-result/v1',
+    }));
+  });
+  await f.teams.advance(context, f.teamId);
+  const writer = await finishTeamStep(f, 'synthesis'),
+    review = await finishTeamStep(f, 'review', 'technical');
+  const requested = await f.teams.requestRework(context, f.teamId, String(review.submitted.submission_id));
+  assert.equal(requested.status, 'ok');
+  assert.deepEqual(requested.revised_steps, ['technical', 'synthesis', 'review']);
+  const analyst = await finishTeamStep(f, 'technical');
+  assert.equal(analyst.order.context.artifacts.length, 0);
+  const revisedWriter = await finishTeamStep(f, 'synthesis');
+  const oldTechnical = writer.order.context.artifacts.find((a) => a.step_id === 'technical')!,
+    newTechnical = revisedWriter.order.context.artifacts.find((a) => a.step_id === 'technical')!;
+  assert.equal(oldTechnical.state, 'submitted');
+  assert.equal(newTechnical.state, 'submitted');
+  if (oldTechnical.state === 'submitted' && newTechnical.state === 'submitted')
+    assert.notEqual(oldTechnical.mission_id, newTechnical.mission_id);
+  assert.deepEqual(
+    revisedWriter.order.context.artifacts.find((a) => a.step_id === 'operations'),
+    writer.order.context.artifacts.find((a) => a.step_id === 'operations'),
+  );
+  assert.equal(revisedWriter.order.context.rework!.kind, 'dependency_replay');
+  await finishTeamStep(f, 'review');
+  assert.equal((await f.teams.cancel(context, f.teamId)).status, 'ok');
+  assert.equal((await f.teams.confirmCancellation(context, f.teamId)).status, 'ok');
+});
+
+test('S06-T01/T05 reviewer advice cannot carry uncited influence from a source outside the recipient scope', async () => {
+  const f = await stoppedAnalyses(false, async (r) => {
+    const other = await input();
+    r.sources.push(other.sources[0]);
+    r.steps.find((s) => s.step_id === 'technical')!.sources = [r.sources[0]];
+    r.limits.max_attempts = 10;
+    for (const step of r.steps.filter((s) => ['technical', 'synthesis'].includes(s.step_id))) step.max_rework_count = 1;
+    const reviewer = r.steps.find((s) => s.step_id === 'review')!;
+    reviewer.depends_on = ['technical', 'operations', 'synthesis'];
+    reviewer.input_artifact_refs = reviewer.depends_on.map((step_id) => ({
+      step_id,
+      result_schema: 'cos-research-result/v1',
+    }));
+  });
+  await f.teams.advance(context, f.teamId);
+  await finishTeamStep(f, 'synthesis');
+  const reviewer = await finishTeamStep(f, 'review', 'technical');
+  assert.equal(
+    (await f.teams.requestRework(context, f.teamId, String(reviewer.submitted.submission_id))).status,
+    'denied',
+  );
+  assert.equal((await rows('mission_team_reworks')).filter((r) => r.team_id === f.teamId).length, 0);
 });

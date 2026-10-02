@@ -2,6 +2,7 @@ import { canonical, digest } from '../domain/contracts.js';
 import { validTeamRequest, TEAM_STEP_KEYS, type TeamStep } from '../contracts/team-protocol.js';
 import { TEAM_TEMPLATES } from '../contracts/team-templates.js';
 import { validateTeamInputs } from '../contracts/team-inputs.js';
+import { validTeamRework, validTeamReworkForStep, type TeamRework } from '../contracts/team-rework.js';
 export type { TeamInputArtifact } from '../contracts/team-inputs.js';
 import type { TeamWorkOrderBody } from './team-proposal-store.js';
 import { RESEARCH_TEMPLATE, sealResearchWorkOrder, type MissionSourceSnapshot } from './work-order.js';
@@ -14,6 +15,7 @@ type TeamLineage = {
   step: TeamStep;
   partialPolicy: 'block' | 'allow_labelled';
   dependencyRequirements: Array<{ step_id: string; required: boolean; result_schema: string }>;
+  revision?: number;
 };
 type Input = {
   missionId: string;
@@ -21,6 +23,8 @@ type Input = {
   rootGeneration: number;
   approved: { body: TeamWorkOrderBody; digest: string; context: { format: string; sources: MissionSourceSnapshot[] } };
   artifacts: unknown[];
+  revision?: number;
+  rework?: TeamRework;
 };
 const object = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
 const exact = (v: Record<string, unknown>, keys: readonly string[]) =>
@@ -47,7 +51,14 @@ export function sealTeamChildWorkOrder(input: unknown) {
   const denied = () => Error('team_child_order_denied');
   if (
     !object(input) ||
-    !exact(input, ['missionId', 'stepId', 'rootGeneration', 'approved', 'artifacts']) ||
+    !exact(input, [
+      'missionId',
+      'stepId',
+      'rootGeneration',
+      'approved',
+      'artifacts',
+      ...(Object.hasOwn(input, 'revision') ? ['revision', 'rework'] : []),
+    ]) ||
     !object(input.approved) ||
     !exact(input.approved, ['body', 'digest', 'context']) ||
     !object(input.approved.body) ||
@@ -71,6 +82,19 @@ export function sealTeamChildWorkOrder(input: unknown) {
     throw denied();
   const step = b.request.steps.find((s) => s.step_id === i.stepId);
   if (!step) throw denied();
+  if (
+    i.revision !== undefined &&
+    (!Number.isSafeInteger(i.revision) ||
+      i.revision < 1 ||
+      i.revision > 2 ||
+      !validTeamReworkForStep(i.rework, step, i.revision) ||
+      !b.request.steps.some((s) => s.step_id === i.rework!.target_step_id) ||
+      (i.rework.kind === 'requested_revision' &&
+        (i.rework.target_step_id !== step.step_id ||
+          step.max_rework_count !== 1 ||
+          i.rework.criterion_ids.some((c) => !step.acceptance_criteria.some((a) => a.id === c)))))
+  )
+    throw denied();
   const template = TEAM_TEMPLATES[step.template_id];
   if (
     !Array.isArray(b.templates) ||
@@ -96,6 +120,7 @@ export function sealTeamChildWorkOrder(input: unknown) {
         return { step_id: id, required: dependency.required, result_schema: dependency.result_schema };
       })
       .sort((a, b) => a.step_id.localeCompare(b.step_id)),
+    ...(i.revision !== undefined ? { revision: i.revision } : {}),
   };
   const artifacts = validateTeamInputs(lineage, i.artifacts, digest);
   if (!artifacts) throw denied();
@@ -114,7 +139,17 @@ export function sealTeamChildWorkOrder(input: unknown) {
     });
     // S05's structural source/identity validation grants no template authority. This child uses only its exact parent-reviewed role.
     if (Date.parse(base.body.deadlineAt) > Date.parse(b.deadlineAt)) throw denied();
-    const context = { format: 'cos-team-child-context/v1', sources: base.context.sources, artifacts };
+    const context: {
+      format: string;
+      sources: MissionSourceSnapshot[];
+      artifacts: typeof artifacts;
+      rework?: TeamRework;
+    } = {
+      format: 'cos-team-child-context/v1',
+      sources: base.context.sources,
+      artifacts,
+      ...(i.rework ? { rework: i.rework } : {}),
+    };
     if (Buffer.byteLength(canonical(context), 'utf8') > step.limits.context_bytes) throw denied();
     const body = {
       ...base.body,
@@ -159,7 +194,7 @@ export function validateTeamChildWorkOrder(value: unknown): value is TeamChildWo
       'team',
     ]) ||
     b.format !== 'cos-team-child-work-order/v1' ||
-    !exact(c, ['format', 'sources', 'artifacts']) ||
+    !exact(c, ['format', 'sources', 'artifacts', ...(Object.hasOwn(c, 'rework') ? ['rework'] : [])]) ||
     c.format !== 'cos-team-child-context/v1' ||
     !Array.isArray(c.sources) ||
     !Array.isArray(c.artifacts) ||
@@ -174,6 +209,7 @@ export function validateTeamChildWorkOrder(value: unknown): value is TeamChildWo
       'step',
       'partialPolicy',
       'dependencyRequirements',
+      ...(Object.hasOwn(b.team, 'revision') ? ['revision'] : []),
     ]) ||
     typeof b.team.teamId !== 'string' ||
     !/^team-[a-f0-9]{64}$/.test(b.team.teamId) ||
@@ -181,6 +217,12 @@ export function validateTeamChildWorkOrder(value: unknown): value is TeamChildWo
     !hash(b.team.workOrderDigest) ||
     !Number.isSafeInteger(b.team.generation) ||
     Number(b.team.generation) < 1 ||
+    (Object.hasOwn(b.team, 'revision')
+      ? !Number.isSafeInteger(b.team.revision) ||
+        Number(b.team.revision) < 1 ||
+        Number(b.team.revision) > 2 ||
+        !validTeamRework(c.rework)
+      : Object.hasOwn(c, 'rework')) ||
     !object(b.team.step) ||
     !Array.isArray(b.team.dependencyRequirements) ||
     !['block', 'allow_labelled'].includes(String(b.team.partialPolicy))
@@ -200,6 +242,12 @@ export function validateTeamChildWorkOrder(value: unknown): value is TeamChildWo
       !Array.isArray(step.input_artifact_refs) ||
       step.input_artifact_refs.length !== step.depends_on.length ||
       ![0, 1].includes(step.max_rework_count) ||
+      (Object.hasOwn(c, 'rework') && !validTeamReworkForStep(c.rework, step, b.team.revision)) ||
+      (validTeamRework(c.rework) &&
+        c.rework.kind === 'requested_revision' &&
+        (c.rework.target_step_id !== step.step_id ||
+          step.max_rework_count !== 1 ||
+          c.rework.criterion_ids.some((id) => !step.acceptance_criteria.some((a) => a.id === id)))) ||
       !lineage.dependencyRequirements.every(
         (r) =>
           object(r) &&

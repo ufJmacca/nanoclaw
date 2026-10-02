@@ -4,6 +4,7 @@ import { digest } from './mcp-tools/generated/cos-protocol.js';
 import { RESEARCH_TEMPLATE } from './mcp-tools/generated/research-template.js';
 import { TEAM_TEMPLATES } from './mcp-tools/generated/team-templates.js';
 import { validateTeamInputs } from './mcp-tools/generated/team-inputs.js';
+import { validTeamReworkForStep } from './mcp-tools/generated/team-rework.js';
 import { validMissionRuntimeConfig } from './mcp-tools/generated/mission-runtime.js';
 
 /** Startup integrity check only. The host must authorize every model/tool call against current state. */
@@ -49,7 +50,12 @@ export function loadMissionRuntime(directory: string, raw: unknown) {
       typeof body.team?.teamId !== 'string' ||
       !/^team-[a-f0-9]{64}$/.test(body.team.teamId) ||
       !context ||
-      Object.keys(context).length !== 3 ||
+      Object.keys(context).length !== (body.team.revision ? 4 : 3) ||
+      (body.team.revision &&
+        (!Number.isSafeInteger(body.team.revision) ||
+          body.team.revision < 1 ||
+          body.team.revision > 2 ||
+          !validTeamReworkForStep(context.rework, body.team.step, body.team.revision))) ||
       !Array.isArray(context.sources) ||
       !validateTeamInputs(body.team, context.artifacts, digest))
   )

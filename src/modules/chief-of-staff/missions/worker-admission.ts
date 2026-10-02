@@ -27,11 +27,11 @@ export async function missionWorkerOccupancy(client: PoolClient, exceptAttempt: 
   const row = (
     await client.query(
       `SELECT count(*)::int AS active,
-    count(*) FILTER (WHERE s.child_mission_id IS NOT NULL)::int AS teams
-    FROM cos.mission_attempts a LEFT JOIN cos.mission_team_steps s
-      ON s.scope_id=a.scope_id AND s.child_mission_id=a.mission_id
+    count(*) FILTER (WHERE s.mission_id IS NOT NULL)::int AS teams
+    FROM cos.mission_attempts a LEFT JOIN cos.mission_team_children s
+      ON s.scope_id=a.scope_id AND s.mission_id=a.mission_id
     WHERE a.allocation->>'stop_confirmed' IS DISTINCT FROM 'true' AND ($1::text IS NULL OR a.id<>$1)
-      AND (s.child_mission_id IS NOT NULL OR a.allocation ? 'dispatch_fence'
+      AND (s.mission_id IS NOT NULL OR a.allocation ? 'dispatch_fence'
         OR a.state IN ('allocating','ready','running','submitted'))`,
       [exceptAttempt],
     )
