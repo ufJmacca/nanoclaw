@@ -15,6 +15,7 @@ import { databaseFingerprint } from '../../modules/chief-of-staff/ops/target-ide
 import { connectChecked } from '../../modules/chief-of-staff/store/preflight.js';
 import { parseDatabaseConfig } from '../../modules/chief-of-staff/store/config.js';
 import { guardedFixtureOperation, type FixtureRunReceipt } from './guarded-fixture-operation.js';
+import { stopFixtureWorkers } from './fixture-workers.js';
 import { sourceFixtureEnvironment, validatePreparedFixtureSource } from './source-fixture.js';
 import { startFixtureProcess } from './fixture-process.js';
 
@@ -210,6 +211,12 @@ export async function runRuntimeFixtureDriver(file: string) {
   const stop = async () => {
     if (heartbeat) clearInterval(heartbeat);
     await child?.stop();
+    if (request.slice === 'S05') {
+      const location = source
+        ? sourceFixtureEnvironment(request.hostRoot, process.env).COS_FIXTURE_HOST_ROOT!
+        : request.hostRoot;
+      await stopFixtureWorkers(location, request.workerImage);
+    }
   };
   try {
     return await guardedFixtureOperation({

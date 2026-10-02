@@ -3,6 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { safeHostEnvironment } from '../../host-environment.js';
+import { stopFixtureWorkers } from './fixture-workers.js';
 import { parseFixtureArguments, fixtureFiles } from './arguments.js';
 import { assertRuntimeFixtureGuard, selectedFixtureEnvironment } from './fixture-database.js';
 
@@ -51,6 +52,7 @@ try {
       timeout: args.slice === 'S05' ? 300000 : 120000,
     },
   );
+  if (args.slice === 'S05') await stopFixtureWorkers(fixtures.COS_FIXTURE_HOST_ROOT, fixtures.COS_FIXTURE_IMAGE);
   process.exitCode = result.status ?? 1;
 } catch (error) {
   console.error(

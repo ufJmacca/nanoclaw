@@ -15,6 +15,8 @@ prepare_source_fixture() {
   [[ "$source_fixture_host_root" == /* && "$source_fixture_host_root" != / ]] || return 1
   docker run --rm --pull=never --network=none --user 0:0 --mount "type=volume,src=$source_fixture_volume,dst=/fixture" \
     --entrypoint /bin/sh "$image" -c 'chown 1000:1000 /fixture; chmod 700 /fixture'
+  # Docker needs empty mountpoints before overlaying dependencies on the read-only source snapshot.
+  mkdir -p "$source/node_modules" "$source/container/agent-runner/node_modules"
   source_fixture_driver=(docker run --rm -i --pull=never --user 1000:1000 --group-add 0 --workdir /workspace
     --mount "type=bind,src=$source,dst=/workspace,readonly"
     --mount "type=volume,src=$dependencies,dst=/workspace/node_modules,readonly"
