@@ -1,3 +1,6 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { safeHostEnvironment } from '../../host-environment.js';
 import { parseFixtureArguments, fixtureFiles } from './arguments.js';
@@ -10,21 +13,36 @@ try {
   if (profile === 'runtime-disposable') await assertRuntimeFixtureGuard(env);
   const selected = selectedFixtureEnvironment(env, true);
   const fixtures = Object.fromEntries(
-    ['COS_FIXTURE_HOST_ROOT', 'COS_FIXTURE_IMAGE', 'COS_FIXTURE_RUNNER_VOLUME'].map((key) => [key, process.env[key]]),
+    ['COS_FIXTURE_HOST_ROOT', 'COS_FIXTURE_IMAGE', 'COS_FIXTURE_RUNNER_VOLUME', 'COS_FIXTURE_SOURCE_ROOT'].map(
+      (key) => [key, process.env[key]],
+    ),
   );
   if (!fixtures.COS_FIXTURE_HOST_ROOT || !fixtures.COS_FIXTURE_IMAGE)
     throw new Error('explicit_container_fixture_configuration_required');
   const extension = import.meta.url.endsWith('.ts') ? 'ts' : 'js';
-  const files = fixtureFiles(args);
+  const files = fixtureFiles(args),
+    directory = path.dirname(fileURLToPath(import.meta.url));
+  if (process.env.COS_FIXTURE_WORK_ROOT) {
+    const root = process.env.COS_FIXTURE_WORK_ROOT,
+      stat = fs.lstatSync(root);
+    if (
+      extension !== 'ts' ||
+      !path.isAbsolute(root) ||
+      fs.realpathSync(root) !== root ||
+      !stat.isDirectory() ||
+      stat.uid !== process.getuid?.() ||
+      (stat.mode & 0o777) !== 0o700
+    )
+      throw Error('invalid_fixture_workspace');
+    process.chdir(root);
+  }
   const result = spawnSync(
     process.execPath,
     [
-      ...(extension === 'ts' ? ['--import', 'tsx'] : []),
+      ...(extension === 'ts' ? ['--import', import.meta.resolve('tsx')] : []),
       '--test',
       '--test-concurrency=1',
-      ...files.map(
-        (file) => (extension === 'ts' ? 'src' : 'dist') + '/contracts/chief-of-staff/' + file + '.' + extension,
-      ),
+      ...files.map((file) => path.join(directory, file + '.' + extension)),
     ],
     {
       env: { ...safeHostEnvironment('docker'), ...selected, ...fixtures },

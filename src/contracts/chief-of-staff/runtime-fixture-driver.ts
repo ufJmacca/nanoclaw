@@ -15,6 +15,7 @@ import { databaseFingerprint } from '../../modules/chief-of-staff/ops/target-ide
 import { connectChecked } from '../../modules/chief-of-staff/store/preflight.js';
 import { parseDatabaseConfig } from '../../modules/chief-of-staff/store/config.js';
 import { guardedFixtureOperation, type FixtureRunReceipt } from './guarded-fixture-operation.js';
+import { sourceFixtureEnvironment, validatePreparedFixtureSource } from './source-fixture.js';
 import { startFixtureProcess } from './fixture-process.js';
 
 export type RuntimeFixtureRequest = {
@@ -151,7 +152,10 @@ export async function runRuntimeFixtureDriver(file: string) {
     readPrivate<NodeJS.ProcessEnv>(path.join(root, 'runtime.json')),
     path.join(root, 'ca.pem'),
   );
-  if (source) {
+  if (source && process.env.COS_FIXTURE_WORK_ROOT) {
+    sourceFixtureEnvironment(request.hostRoot, process.env);
+    validatePreparedFixtureSource(JSON.parse(fs.readFileSync('build-info.json', 'utf8')), request);
+  } else if (source) {
     const git = (args: string[]) =>
       execFileSync('git', args, { env: safeHostEnvironment('docker'), encoding: 'utf8' }).trim();
     if (
@@ -265,7 +269,9 @@ export async function runRuntimeFixtureDriver(file: string) {
             COS_FIXTURE_DATABASE_PROFILE: 'runtime-disposable',
             COS_FIXTURE_GUARD_SOCKET: guard.socket,
             COS_FIXTURE_GUARD_TOKEN: guard.token,
-            COS_FIXTURE_HOST_ROOT: request.hostRoot,
+            ...(source
+              ? sourceFixtureEnvironment(request.hostRoot, process.env)
+              : { COS_FIXTURE_HOST_ROOT: request.hostRoot }),
             COS_FIXTURE_IMAGE: request.workerImage,
             COS_FIXTURE_RUNNER_VOLUME: request.runnerVolume,
           },

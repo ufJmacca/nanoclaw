@@ -9,6 +9,8 @@ import { readPrivate, writeAtomic } from './target-state.js';
 import { RUNTIME_ENVIRONMENT_KEYS, readLocalExecution, selectRuntimeEnvironment } from './mac-release.js';
 import { readEnvFile } from '../../../env.js';
 import { safeHostEnvironment } from '../../../host-environment.js';
+import { prepareBuildContext } from './build-context.js';
+import { validatePreparedFixtureSource } from '../../../contracts/chief-of-staff/source-fixture.js';
 import { validateRuntimeFixtureRequest } from '../../../contracts/chief-of-staff/runtime-fixture-driver.js';
 
 export function runtimeFixtureTarget(settings: DeploymentSettings, observation: unknown, owner: string) {
@@ -33,7 +35,7 @@ export function runtimeFixtureTarget(settings: DeploymentSettings, observation: 
   };
 }
 
-export function macRuntimeFixtureCommand(args: string[]): string | void {
+export async function macRuntimeFixtureCommand(args: string[]): Promise<string | void> {
   const [operation, owner, ...values] = args;
   if (operation === 'certificate' && args.length === 1) {
     const file = readEnvFile(['COS_PGSSLROOTCERT']).COS_PGSSLROOTCERT;
@@ -59,18 +61,26 @@ export function macRuntimeFixtureCommand(args: string[]): string | void {
     execFileSync('git', args, { encoding: 'utf8', env: safeHostEnvironment('docker') }).trim();
   if (git(['status', '--porcelain'])) throw new Error('clean_candidate_required');
   const ledger = readLocalExecution(path.resolve('.cos-plan-state'), true);
+  const sourceIdentity = { sourceCommit: git(['rev-parse', 'HEAD']), sourceTree: git(['rev-parse', 'HEAD^{tree}']) };
+  if (execution === 'source') {
+    const context = path.join(root, 'source');
+    if (!fs.existsSync(context)) await prepareBuildContext(process.cwd(), sourceIdentity.sourceCommit, context);
+    validatePreparedFixtureSource(
+      JSON.parse(fs.readFileSync(path.join(context, 'build-info.json'), 'utf8')),
+      sourceIdentity,
+    );
+  }
   const request = validateRuntimeFixtureRequest({
     version: 1,
     owner,
     execution,
     mode,
     slice: ledger.active_slice,
-    hostRoot,
+    hostRoot: execution === 'source' ? path.join(hostRoot, '.cos-plan-state/runtime-tests', owner, 'source') : hostRoot,
     hostImage,
     workerImage,
     runnerVolume,
-    sourceCommit: git(['rev-parse', 'HEAD']),
-    sourceTree: git(['rev-parse', 'HEAD^{tree}']),
+    ...sourceIdentity,
     databaseFingerprint: settings.databaseFingerprint,
     bindingDigest: target.bindingDigest,
   });
@@ -86,7 +96,7 @@ export function macRuntimeFixtureCommand(args: string[]): string | void {
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
   process.env.NANOCLAW_LOG_STDERR = 'true';
   try {
-    const result = macRuntimeFixtureCommand(process.argv.slice(2));
+    const result = await macRuntimeFixtureCommand(process.argv.slice(2));
     if (result !== undefined) process.stdout.write(result + '\n');
   } catch {
     process.stderr.write('{"status":"blocked","code":"runtime_fixture_setup_failed"}\n');

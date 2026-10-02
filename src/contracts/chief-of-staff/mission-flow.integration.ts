@@ -142,6 +142,8 @@ test(
           repository,
           hostRepository,
           image,
+          sourceRoot: process.env.COS_FIXTURE_SOURCE_ROOT,
+          runnerVolume: process.env.COS_FIXTURE_RUNNER_VOLUME,
           authority: {
             bindingDigest: digest(binding),
             delegationDigest: digest('fixture-reviewed-delegation'),

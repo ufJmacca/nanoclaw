@@ -15,7 +15,7 @@ export class HostFixture {
     const selected = selectedFixtureEnvironment(process.env, false);
     this.process = fork(fileURLToPath(new URL('./host-fixture-worker.' + extension, import.meta.url)), [], {
       env: { ...safeHostEnvironment('docker'), ...selected, COS_FIXTURE_HOST_PROCESS: 'S01' },
-      execArgv: extension === 'ts' ? ['--import', 'tsx'] : [],
+      execArgv: extension === 'ts' ? ['--import', import.meta.resolve('tsx')] : [],
       stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
     });
     this.process.stdout?.resume();

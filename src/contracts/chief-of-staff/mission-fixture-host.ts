@@ -60,11 +60,22 @@ export async function createMissionFixtureHost(o: {
   repository: string;
   hostRepository: string;
   image: string;
+  sourceRoot?: string;
+  runnerVolume?: string;
   db: Database.Database;
   store: PriorityStore;
   authority: MissionAuthorityResolver;
   binding: CosBinding;
 }) {
+  if (
+    o.runnerVolume &&
+    (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,100}$/.test(o.runnerVolume) ||
+      !o.sourceRoot ||
+      !path.isAbsolute(o.sourceRoot) ||
+      path.resolve(o.sourceRoot) !== o.sourceRoot ||
+      /[\r\n\0,]/.test(o.sourceRoot))
+  )
+    throw Error('invalid_fixture_source_root');
   const target = path.join(o.root, 'missions-private');
   if (!fs.existsSync(target)) fs.mkdirSync(target, { mode: 0o700 });
   const stat = fs.lstatSync(target);
@@ -220,6 +231,19 @@ export async function createMissionFixtureHost(o: {
             '-e',
             'const databaseTarget=' + JSON.stringify(databaseTarget) + ';const holdFixture=' + holdNext + ';' + driver,
           );
+          if (o.runnerVolume) {
+            // Source-stage fixture only. Final release runs use baked code and cannot receive these mounts.
+            launch.args.splice(
+              launch.args.indexOf(o.image),
+              0,
+              '--mount',
+              `type=bind,src=${path.join(o.sourceRoot!, 'container/agent-runner/src')},dst=/app/src,readonly`,
+              '--mount',
+              `type=volume,src=${o.runnerVolume},dst=/app/node_modules,readonly`,
+            );
+            launch.args[launch.args.indexOf('--entrypoint') + 1] = 'bun';
+            launch.args.splice(launch.args.indexOf(o.image) + 1, 2);
+          }
           return launch;
         },
         async close(id) {

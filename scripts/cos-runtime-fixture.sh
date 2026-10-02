@@ -45,7 +45,10 @@ chmod 600 "$directory/ca.pem"
 cli prepare "$owner" "$execution" "$mode" "$host_root" "$host_image" "$worker_image" "$runner_volume"
 if [[ "$execution" == source ]]; then
   [[ "$(docker inspect --format '{{.Image}}' "$dev")" == "$host_image" && "$worker_image" == "$host_image" ]] || exit 1
-  driver=(docker exec -i -w /workspace "$dev" node --import tsx src/contracts/chief-of-staff/runtime-fixture-driver.ts "/workspace/.cos-plan-state/runtime-tests/$owner/request.json")
+  source scripts/cos-source-fixture.sh
+  prepare_source_fixture "$dev" "$owner" "$directory/source" "$host_image" "$runner_volume"
+  driver=("${source_fixture_driver[@]}" --mount "type=bind,src=$directory,dst=/fixture/request"
+    "$host_image" --import tsx src/contracts/chief-of-staff/runtime-fixture-driver.ts /fixture/request/request.json)
 else
   driver=(docker run --rm -i --pull=never --user 1000:1000 --group-add 0
     --mount "type=bind,src=$directory,dst=/fixture/request"

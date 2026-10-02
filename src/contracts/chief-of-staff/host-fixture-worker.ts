@@ -32,7 +32,14 @@ async function start(input: {
   knowledgeRoot?: string;
   calendar?: boolean;
   brief?: { clock: string; events: unknown[] };
-  mission?: { repository: string; hostRepository: string; image: string; authority: MissionAuthority };
+  mission?: {
+    repository: string;
+    hostRepository: string;
+    image: string;
+    sourceRoot?: string;
+    runnerVolume?: string;
+    authority: MissionAuthority;
+  };
 }) {
   if (!path.isAbsolute(input.root) || !input.root.includes('/.cos-plan-state/fixtures/flow-'))
     throw new Error('fixture_root_required');
@@ -212,6 +219,8 @@ async function start(input: {
           repository: input.mission.repository,
           hostRepository: input.mission.hostRepository,
           image: input.mission.image,
+          sourceRoot: input.mission.sourceRoot,
+          runnerVolume: input.mission.runnerVolume,
           db,
           store,
           authority,
