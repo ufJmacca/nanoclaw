@@ -48,11 +48,12 @@ try {
     {
       env: { ...safeHostEnvironment('docker'), ...selected, ...fixtures },
       stdio: 'inherit',
-      // S05 includes all predecessor scenarios plus real worker cancellation, outage and restart.
-      timeout: args.slice === 'S05' ? 300000 : 120000,
+      // Complete native scenarios and actual database-time expiry use a bounded suite deadline.
+      timeout: args.slice === 'S06' ? 600000 : args.slice === 'S05' ? 300000 : 120000,
     },
   );
-  if (args.slice === 'S05') await stopFixtureWorkers(fixtures.COS_FIXTURE_HOST_ROOT, fixtures.COS_FIXTURE_IMAGE);
+  if (['S05', 'S06'].includes(args.slice))
+    await stopFixtureWorkers(fixtures.COS_FIXTURE_HOST_ROOT, fixtures.COS_FIXTURE_IMAGE);
   process.exitCode = result.status ?? 1;
 } catch (error) {
   console.error(

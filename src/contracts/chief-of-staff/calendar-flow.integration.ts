@@ -8,7 +8,6 @@ import { randomUUID } from 'node:crypto';
 import { connectFixtureDatabase, fixtureDatabaseConfig, fixtureRuntimeUser } from './fixture-database.js';
 import { migrate } from '../../modules/chief-of-staff/store/migrations.js';
 import { BoundedDatabase } from '../../modules/chief-of-staff/store/client.js';
-import type { PriorityStore } from '../../modules/chief-of-staff/store/priorities.js';
 import { KnowledgeArtifacts } from '../../modules/chief-of-staff/knowledge/artifacts.js';
 import { CalendarStore } from '../../modules/chief-of-staff/calendar/store.js';
 import { CalendarEvidence } from '../../modules/chief-of-staff/calendar/evidence.js';

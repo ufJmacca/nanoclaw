@@ -5,6 +5,27 @@ const sha = 'a'.repeat(40),
   tree = 'b'.repeat(40),
   image = 'sha256:' + 'c'.repeat(64),
   agent = 'sha256:' + 'd'.repeat(64);
+it('S06 binds thirteen exact migrations without declaring historical rollback compatibility', () => {
+  const current = {
+    ...manifest(),
+    slice: 'S06',
+    postgres: { minimum: 13, maximum: 13 },
+    sqlite: { minimum: 22, maximum: 22 },
+    migrations: MIGRATIONS.map(({ version, checksum }) => ({ version, checksum })),
+  };
+  expect(validateReleaseManifest(current)).toEqual(current);
+  for (const patch of [
+    { slice: 'S07' },
+    { slice: 'S05' },
+    { postgres: { minimum: 9, maximum: 13 } },
+    { postgres: { minimum: 13, maximum: 14 } },
+    { migrations: current.migrations.slice(0, 12) },
+    ...current.migrations.slice(9).map((_, index) => ({
+      migrations: current.migrations.map((m, i) => (i === index + 9 ? { ...m, checksum: '0'.repeat(64) } : m)),
+    })),
+  ])
+    expect(() => validateReleaseManifest({ ...current, ...patch })).toThrow('release_not_transferable');
+});
 it('S05 pins all nine migrations without widening historical releases or admitting future slices', () => {
   const current = {
     ...manifest(),

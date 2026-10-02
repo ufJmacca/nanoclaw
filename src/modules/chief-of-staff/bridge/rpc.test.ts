@@ -36,13 +36,11 @@ function fixture(allowed = true) {
       confirmation_token: 'PRIVATE_APPROVAL',
     }),
     missionRuns: { inspect: vi.fn().mockResolvedValue({ status: 'ok', mission: { id: 'mission', state: 'running' } }) },
-    requestTeam: vi
-      .fn()
-      .mockResolvedValue({
-        status: 'ok',
-        team_id: 'team-' + 'a'.repeat(64),
-        confirmation_token: 'PRIVATE_TEAM_APPROVAL',
-      }),
+    requestTeam: vi.fn().mockResolvedValue({
+      status: 'ok',
+      team_id: 'team-' + 'a'.repeat(64),
+      confirmation_token: 'PRIVATE_TEAM_APPROVAL',
+    }),
     teamRuns: { inspect: vi.fn().mockResolvedValue({ status: 'ok', team: { state: 'running' } }) },
   };
   const resolveContext = vi.fn().mockResolvedValue(allowed ? context : null);

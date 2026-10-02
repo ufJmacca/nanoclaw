@@ -38,7 +38,7 @@ async function inventory(root: string, profile: Profile, destination?: string, a
     profile === 'conversation' ||
     name === 'missions' ||
     name === 'mission-purges' ||
-    /^mission-delegation-[a-f0-9]{64}\.json$/.test(name);
+    /^(?:mission-delegation|team-admission)-[a-f0-9]{64}\.json$/.test(name);
   const hash = createHash('sha256');
   let entries = 0,
     files = 0,
@@ -53,7 +53,7 @@ async function inventory(root: string, profile: Profile, destination?: string, a
       if (!generation.test(parts[0]) || (parts.length === 1 && !stat.isDirectory())) throw unsafe();
     } else {
       if (!selected(parts[0])) throw unsafe();
-      if (parts[0].startsWith('mission-delegation-')) {
+      if (parts[0].startsWith('mission-delegation-') || parts[0].startsWith('team-admission-')) {
         if (parts.length !== 1 || !stat.isFile()) throw unsafe();
       } else if (parts[0] === 'mission-purges') {
         if (
