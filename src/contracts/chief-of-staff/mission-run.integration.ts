@@ -24,11 +24,13 @@ import { KnowledgeStore } from '../../modules/chief-of-staff/knowledge/store.js'
 import { KnowledgeArtifacts } from '../../modules/chief-of-staff/knowledge/artifacts.js';
 import { PriorityStore } from '../../modules/chief-of-staff/store/priorities.js';
 import { RESEARCH_TEMPLATE } from '../../modules/chief-of-staff/missions/work-order.js';
-import { MISSION_DEFAULT_LIMITS } from '../../modules/chief-of-staff/contracts/mission-protocol.js';
+import { MISSION_DEFAULT_LIMITS, type MissionLimits } from '../../modules/chief-of-staff/contracts/mission-protocol.js';
 import type { CosMissionIdentity } from '../../cos-mission-boundary.js';
 import { digest } from '../../modules/chief-of-staff/domain/contracts.js';
 import { MissionRunStore, type MissionDispatchLease } from '../../modules/chief-of-staff/missions/run-store.js';
 import type { MissionResult } from '../../modules/chief-of-staff/contracts/mission-result.js';
+import { MissionReviews } from '../../modules/chief-of-staff/missions/review-store.js';
+import type { MissionReview } from '../../modules/chief-of-staff/contracts/mission-review.js';
 
 const scope = 'mission-run-' + randomUUID();
 const context = { scopeId: scope, ownerId: 'owner', agentGroupId: scope, sessionId: scope, ingressId: randomUUID() };
@@ -145,7 +147,7 @@ async function approve(p: Record<string, unknown>) {
 async function rows(table: string) {
   return (await admin.query(`SELECT * FROM cos.${table} WHERE scope_id=$1 ORDER BY created_at`, [scope])).rows;
 }
-async function mission(limits = { max_turns: 2, max_tool_calls: 2, max_attempts: 2 }) {
+async function mission(limits: Partial<MissionLimits> = { max_turns: 2, max_tool_calls: 2, max_attempts: 2 }) {
   const input = await request();
   Object.assign(input.limits, limits);
   const p = await store.requestMission(context, randomUUID(), input);
@@ -247,6 +249,226 @@ const blockedResult = (): MissionResult => ({
   claims: [],
   criteria: [{ id: 'tradeoff', claim_ids: [] }],
   limitations: ['RESULT_CANARY: insufficient cost evidence.'],
+});
+async function submitted(outcome: 'answer' | 'partial' | 'blocked' = 'answer', stop = true, wallSeconds = 600) {
+  authority.contextGeneration = randomUUID();
+  const { identity, input } = await mission({
+    max_turns: 2,
+    max_tool_calls: 2,
+    max_attempts: 2,
+    wall_seconds: wallSeconds,
+  });
+  const lease = await dispatched(identity);
+  const result: MissionResult =
+    outcome === 'blocked'
+      ? blockedResult()
+      : {
+          format: 'cos-research-result/v1',
+          outcome,
+          claims: [
+            {
+              id: 'comparison',
+              kind: 'quote',
+              text: 'A costs less; B has more capacity.',
+              citations: [{ ...input.sources[0], ordinal: 0, start_line: 2, end_line: 2 }],
+            },
+          ],
+          criteria: [{ id: 'tradeoff', claim_ids: ['comparison'] }],
+          limitations: outcome === 'partial' ? ['Only cost and capacity were compared.'] : [],
+        };
+  const receipt = await store.missionRuns.submitResult(identity, lease, randomUUID(), randomUUID(), result);
+  assert.equal(receipt.status, 'ok');
+  if (stop) assert.equal((await store.missionRuns.confirmStopped(identity)).status, 'ok');
+  const k = { ...context, provider: 'codex', generation: authority.contextGeneration };
+  const reviews = new MissionReviews(store.database, store.missions, knowledge);
+  const m = (await rows('missions')).find((r) => r.id === identity.missionId);
+  const review: MissionReview = {
+    mission_id: identity.missionId,
+    submission_id: String(receipt.submission_id),
+    result_digest: digest(result),
+    expected_version: m.version,
+    decision: 'accept',
+    criteria: [{ id: 'tradeoff', verdict: 'satisfied' }],
+  };
+  return { identity, input, result, k, reviews, review };
+}
+test('S05-T08 coordinator reads the exact artifact and records review with one atomic notification command', async () => {
+  const f = await submitted();
+  const read = await f.reviews.read(f.k, f.identity.missionId, f.review.submission_id);
+  assert.equal(read.status, 'ok');
+  assert.deepEqual(read.result, f.result);
+  const status = await store.missionRuns.inspect(context, f.identity.missionId);
+  assert.deepEqual((status.mission as any).submission, {
+    id: f.review.submission_id,
+    digest: f.review.result_digest,
+    review_id: null,
+  });
+  assert.equal((await rows('missions')).find((r) => r.id === f.identity.missionId).state, 'awaiting_review');
+  assert.equal(
+    (await rows('evidence_refs')).some(
+      (r) =>
+        r.session_id === context.sessionId &&
+        r.context_generation === f.k.generation &&
+        r.source_id === f.input.sources[0].source_id,
+    ),
+    true,
+  );
+  const requestId = randomUUID(),
+    accepted = await f.reviews.review(f.k, requestId, f.review);
+  assert.equal(accepted.status, 'ok');
+  assert.equal(accepted.state, 'completed');
+  assert.deepEqual(await f.reviews.review(f.k, requestId, f.review), accepted);
+  assert.equal((await f.reviews.review(f.k, requestId, { ...f.review, decision: 'partial' })).status, 'conflict');
+  const recorded = (await rows('mission_reviews')).filter((r) => r.mission_id === f.identity.missionId);
+  assert.equal(recorded.length, 1);
+  assert.equal(JSON.stringify(recorded).includes('A costs less'), false);
+  const commands = (await rows('outbox')).filter(
+    (r) => r.kind === 'mission_review_notification' && r.payload.mission_id === f.identity.missionId,
+  );
+  assert.equal(commands.length, 1);
+  assert.equal(JSON.stringify(commands).includes('A costs less'), false);
+  assert.equal(commands[0].delivered_at, null);
+});
+test('S05-T08 a saved result can be reviewed after the original execution deadline without reopening the worker', async () => {
+  const f = await submitted('answer', true, 30);
+  const order = (await rows('mission_work_orders')).find((r) => r.id === f.identity.missionId);
+  await new Promise((resolve) =>
+    setTimeout(resolve, Math.max(0, Date.parse(order.body.deadlineAt) - Date.now() + 150)),
+  );
+  assert.equal((await reserve(f.identity)).status, 'denied');
+  assert.equal((await store.missionRuns.claimDispatch(context, f.identity.attemptId, 'host')).status, 'denied');
+  assert.equal((await f.reviews.read(f.k, f.identity.missionId, f.review.submission_id)).status, 'ok');
+  assert.equal((await f.reviews.review(f.k, randomUUID(), f.review)).state, 'completed');
+  assert.equal((await rows('mission_work_orders')).find((r) => r.id === f.identity.missionId).digest, order.digest);
+});
+test('S05-T08 requires exact review version, criteria, digest and an independently confirmed worker stop', async () => {
+  const f = await submitted('answer', false);
+  assert.equal((await f.reviews.review(f.k, randomUUID(), f.review)).status, 'pending');
+  await store.missionRuns.confirmStopped(f.identity);
+  for (const review of [
+    { ...f.review, expected_version: f.review.expected_version + 1 },
+    { ...f.review, result_digest: '0'.repeat(64) },
+    { ...f.review, criteria: [{ id: 'foreign', verdict: 'satisfied' }] },
+  ])
+    assert.notEqual((await f.reviews.review(f.k, randomUUID(), review)).status, 'ok');
+  assert.equal(
+    (await f.reviews.read({ ...f.k, ownerId: 'foreign' }, f.identity.missionId, f.review.submission_id)).status,
+    'denied',
+  );
+  assert.equal((await f.reviews.review({ ...f.k, sessionId: 'specialist' }, randomUUID(), f.review)).status, 'denied');
+  assert.equal((await rows('mission_reviews')).filter((r) => r.mission_id === f.identity.missionId).length, 0);
+});
+test('S05-T08 the coordinator RPC reads current result bytes and persists an advisory review rather than chat output', async () => {
+  const f = await submitted(),
+    inbox = new Database(':memory:');
+  const handler = createRpcHandler({
+    store,
+    knowledge,
+    resolveContext: async () => context,
+    resolveKnowledgeContext: async () => f.k,
+  });
+  const main = { id: context.sessionId, agent_group_id: context.agentGroupId } as NonNullable<
+    ReturnType<typeof getSession>
+  >;
+  try {
+    async function call(method: string, params: Record<string, unknown>) {
+      const request = { protocol: 'cos-rpc/v1', request_id: randomUUID(), method, params },
+        delivery_id = randomUUID();
+      await handler({ action: 'cos_rpc', request, delivery_id }, main, inbox);
+      return JSON.parse(
+        (
+          inbox
+            .prepare('SELECT response FROM cos_rpc_responses WHERE request_id=? AND payload_hash=? AND delivery_id=?')
+            .get(request.request_id, digest(request), delivery_id) as { response: string }
+        ).response,
+      );
+    }
+    const read = await call('cos_mission_result_get', {
+      mission_id: f.identity.missionId,
+      submission_id: f.review.submission_id,
+    });
+    assert.equal(read.status, 'ok');
+    assert.deepEqual(read.result.result, f.result);
+    const reviewed = await call('cos_mission_review', { review: f.review });
+    assert.equal(reviewed.status, 'ok');
+    assert.equal(reviewed.result.state, 'completed');
+    assert.equal(inbox.prepare("SELECT name FROM sqlite_master WHERE name='messages_in'").get(), undefined);
+    assert.equal(
+      (await rows('outbox')).find((r) => r.payload.review_id === reviewed.result.review_id).delivered_at,
+      null,
+    );
+  } finally {
+    inbox.close();
+  }
+});
+test('S05-T08 artifact corruption, changed provider authority and review replay after revocation cannot disclose results', async () => {
+  const f = await submitted();
+  const previous = authority.provider.policyDigest;
+  authority.provider.policyDigest = digest('different reviewed provider consent');
+  assert.equal((await f.reviews.read(f.k, f.identity.missionId, f.review.submission_id)).status, 'denied');
+  authority.provider.policyDigest = previous;
+  const row = (await rows('mission_result_submissions')).find((r) => r.id === f.review.submission_id);
+  const blob = path.join(knowledge.artifacts.root, row.artifact_id + '.blob');
+  const bytes = fs.readFileSync(blob);
+  fs.writeFileSync(blob, 'tampered fixture result');
+  try {
+    // A failed transaction is conservatively pending and opens the bounded database cooldown.
+    assert.deepEqual(await f.reviews.read(f.k, f.identity.missionId, f.review.submission_id), { status: 'pending' });
+  } finally {
+    fs.writeFileSync(blob, bytes);
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+  }
+  assert.equal((await rows('mission_reviews')).filter((r) => r.mission_id === f.identity.missionId).length, 0);
+  const requestId = randomUUID();
+  assert.equal((await f.reviews.review(f.k, requestId, f.review)).status, 'ok');
+  await admin.query("UPDATE cos.sources SET status='revoked' WHERE id=$1", [f.input.sources[0].source_id]);
+  assert.equal((await f.reviews.review(f.k, requestId, f.review)).status, 'denied');
+  assert.equal((await f.reviews.read(f.k, f.identity.missionId, f.review.submission_id)).status, 'denied');
+});
+test('S05-T08 review rejects mismatched result provider and attempt provenance', async () => {
+  const f = await submitted();
+  const row = (await rows('mission_result_submissions')).find((r) => r.id === f.review.submission_id);
+  const artifact = (await rows('artifacts')).find((r) => r.id === row.artifact_id);
+  try {
+    for (const patch of [{ processing_provider: 'claude' }, { generation: f.identity.generation + 1 }]) {
+      await admin.query('UPDATE cos.artifacts SET provenance=$3 WHERE scope_id=$1 AND id=$2', [
+        scope,
+        row.artifact_id,
+        JSON.stringify({ ...artifact.provenance, ...patch }),
+      ]);
+      assert.equal((await f.reviews.read(f.k, f.identity.missionId, f.review.submission_id)).status, 'denied');
+      assert.equal((await f.reviews.review(f.k, randomUUID(), f.review)).status, 'denied');
+    }
+  } finally {
+    await admin.query('UPDATE cos.artifacts SET provenance=$3 WHERE scope_id=$1 AND id=$2', [
+      scope,
+      row.artifact_id,
+      JSON.stringify(artifact.provenance),
+    ]);
+  }
+  assert.equal((await f.reviews.read(f.k, f.identity.missionId, f.review.submission_id)).status, 'ok');
+});
+test('S05-T07 cancellation and source revocation deny coordinator result reuse and late completion', async () => {
+  for (const action of ['cancel', 'revoke']) {
+    const f = await submitted();
+    if (action === 'cancel') await store.missionRuns.cancel(context, f.identity.missionId);
+    else await admin.query("UPDATE cos.sources SET status='revoked' WHERE id=$1", [f.input.sources[0].source_id]);
+    assert.equal((await f.reviews.read(f.k, f.identity.missionId, f.review.submission_id)).status, 'denied');
+    assert.equal((await f.reviews.review(f.k, randomUUID(), f.review)).status, 'denied');
+    assert.equal((await rows('mission_reviews')).filter((r) => r.mission_id === f.identity.missionId).length, 0);
+  }
+});
+test('S05-T08 partial and blocked specialist results keep honest terminal states', async () => {
+  for (const outcome of ['partial', 'blocked'] as const) {
+    const f = await submitted(outcome);
+    assert.equal((await f.reviews.review(f.k, randomUUID(), f.review)).status, 'denied');
+    const review = {
+      ...f.review,
+      decision: outcome === 'partial' ? 'partial' : 'reject',
+      criteria: [{ id: 'tradeoff', verdict: outcome === 'partial' ? 'partial' : 'not_met' }],
+    };
+    assert.equal((await f.reviews.review(f.k, randomUUID(), review)).state, outcome);
+  }
 });
 test('S05-T03/T08 actual native RPC and external PostgreSQL deliver context then an unreviewed receipt', async () => {
   const { identity } = await mission();

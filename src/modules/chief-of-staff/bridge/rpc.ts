@@ -74,6 +74,24 @@ export function createRpcHandler(dependencies: {
         );
       else if (request.method === 'cos_mission_get')
         result = await dependencies.store.missionRuns.inspect(context, String(request.params.mission_id));
+      else if (request.method === 'cos_mission_result_get')
+        result =
+          knowledgeContext && dependencies.store.missionReviews
+            ? await dependencies.store.missionReviews.read(
+                knowledgeContext,
+                String(request.params.mission_id),
+                String(request.params.submission_id),
+              )
+            : { status: 'denied' };
+      else if (request.method === 'cos_mission_review')
+        result =
+          knowledgeContext && dependencies.store.missionReviews
+            ? await dependencies.store.missionReviews.review(
+                knowledgeContext,
+                request.request_id,
+                request.params.review,
+              )
+            : { status: 'denied' };
       else if (request.method === 'cos_mission_cancel')
         result = (await dependencies.cancelMission?.(context, String(request.params.mission_id))) ?? {
           status: 'denied',

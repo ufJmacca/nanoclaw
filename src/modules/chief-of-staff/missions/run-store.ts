@@ -165,6 +165,15 @@ export class MissionRunStore {
           [context.scopeId, missionId],
         )
       ).rows;
+      const submission =
+        (
+          await client.query(
+            `SELECT s.id,s.digest,r.id AS review_id FROM cos.mission_result_submissions s
+        LEFT JOIN cos.mission_reviews r ON r.scope_id=s.scope_id AND r.mission_id=s.mission_id AND r.result_id=s.id
+        WHERE s.scope_id=$1 AND s.mission_id=$2 AND s.generation=$3`,
+            [context.scopeId, missionId, m.generation],
+          )
+        ).rows[0] ?? null;
       return {
         status: 'ok',
         mission: {
@@ -174,6 +183,7 @@ export class MissionRunStore {
           version: m.version,
           limits: m.body.request.limits,
           deadline_at: m.body.deadlineAt,
+          submission,
           usage: await this.usage(client, context.scopeId, missionId),
           attempts: attempts.map((a) => ({
             id: a.id,

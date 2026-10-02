@@ -41,3 +41,20 @@ it('keeps canonical mission request validation identical in coordinator workers'
     fs.readFileSync('src/modules/chief-of-staff/contracts/mission-protocol.ts', 'utf8'),
   );
 });
+it('S05 coordinator review pins a submission, result digest, mission version and criterion judgements', () => {
+  const submission_id = '11111111-1111-4111-8111-111111111111';
+  expect(validRequest(wire('cos_mission_result_get', { mission_id: 'mission', submission_id }))).toBe(true);
+  expect(
+    validRequest(wire('cos_mission_result_get', { mission_id: 'mission', submission_id, artifact_id: 'forged' })),
+  ).toBe(false);
+  const review = {
+    mission_id: 'mission',
+    submission_id,
+    result_digest: 'a'.repeat(64),
+    expected_version: 3,
+    decision: 'accept',
+    criteria: [{ id: 'cost', verdict: 'satisfied' }],
+  };
+  expect(validRequest(wire('cos_mission_review', { review }))).toBe(true);
+  expect(validRequest(wire('cos_mission_review', { review: { ...review, completed: true } }))).toBe(false);
+});

@@ -2,6 +2,7 @@
 import { createHash } from 'node:crypto';
 import { validScheduleChange, type ScheduleChange } from './schedule-protocol.js';
 import { validMissionRequest } from './mission-protocol.js';
+import { validMissionReview } from './mission-review.js';
 import { answerDraftSchema, validAnswerDraft, validAnswerCitation, type AnswerCitation } from './answer-protocol.js';
 /** Provider guidance; the wire validator additionally checks real dates and state transitions. */
 export const workChangeSchema = {
@@ -103,6 +104,8 @@ export type CosMethod =
   | 'cos_mission_request'
   | 'cos_mission_get'
   | 'cos_mission_cancel'
+  | 'cos_mission_result_get'
+  | 'cos_mission_review'
   | 'cos_brief_schedule_propose'
   | 'cos_brief_request'
   | 'cos_request_status'
@@ -215,6 +218,16 @@ export function validRequest(value: unknown): value is CosRequest {
   if (value.method === 'cos_work_read') return validWorkRead(value.params);
   if (value.method === 'cos_mission_request')
     return keys(value.params, ['request']) && validMissionRequest(value.params.request);
+  if (value.method === 'cos_mission_review')
+    return keys(value.params, ['review']) && validMissionReview(value.params.review);
+  if (value.method === 'cos_mission_result_get')
+    return (
+      keys(value.params, ['mission_id', 'submission_id']) &&
+      typeof value.params.mission_id === 'string' &&
+      /^[a-zA-Z0-9_-]{1,100}$/.test(value.params.mission_id) &&
+      typeof value.params.submission_id === 'string' &&
+      uuid.test(value.params.submission_id)
+    );
   if (value.method === 'cos_mission_get' || value.method === 'cos_mission_cancel')
     return (
       keys(value.params, ['mission_id']) &&

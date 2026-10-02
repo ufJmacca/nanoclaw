@@ -163,6 +163,8 @@ test('CoS keeps one native thread across queued replies and a new provider query
     'cos_mission_request',
     'cos_mission_get',
     'cos_mission_cancel',
+    'cos_mission_result_get',
+    'cos_mission_review',
   ]);
   expect(f.writes.find((r) => r.method === 'thread/resume').params.dynamicTools).toBeUndefined();
   expect(f.writes.find((r) => r.id === 999).error.code).toBe(-32601);

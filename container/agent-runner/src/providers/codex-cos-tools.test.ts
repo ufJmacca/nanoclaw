@@ -35,6 +35,8 @@ test('native CoS exposes only its fixed approved tools and dispatches validated 
     'cos_mission_request',
     'cos_mission_get',
     'cos_mission_cancel',
+    'cos_mission_result_get',
+    'cos_mission_review',
   ]);
   expect((await dispatch.handle(call())).success).toBe(true);
   expect(calls).toHaveLength(1);
@@ -42,6 +44,35 @@ test('native CoS exposes only its fixed approved tools and dispatches validated 
   expect((await dispatch.handle(call())).success).toBe(false);
   expect(calls).toHaveLength(1);
   dispatch.close();
+});
+test('S05 coordinator review tools require exact result identity and a stable review request ID', async () => {
+  const { dispatch, calls } = fixture();
+  const submission_id = '11111111-1111-4111-8111-111111111111',
+    request_id = '22222222-2222-4222-8222-222222222222';
+  const review = {
+    mission_id: 'mission',
+    submission_id,
+    result_digest: 'a'.repeat(64),
+    expected_version: 3,
+    decision: 'partial',
+    criteria: [{ id: 'cost', verdict: 'partial' }],
+  };
+  expect(
+    (
+      await dispatch.handle(
+        call({ tool: 'cos_mission_result_get', arguments: { mission_id: 'mission', submission_id } }),
+      )
+    ).success,
+  ).toBe(true);
+  expect(
+    (await dispatch.handle(call({ callId: 'review', tool: 'cos_mission_review', arguments: { request_id, review } })))
+      .success,
+  ).toBe(true);
+  expect(calls[1]).toMatchObject({ method: 'cos_mission_review', request_id, params: { review } });
+  expect(
+    (await dispatch.handle(call({ callId: 'bad-review', tool: 'cos_mission_review', arguments: { review } }))).success,
+  ).toBe(false);
+  expect(calls).toHaveLength(2);
 });
 test('S05 coordinator tools keep stable proposal identity and exclude specialist or template authority', async () => {
   const { dispatch, calls } = fixture();

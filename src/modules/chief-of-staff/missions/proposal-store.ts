@@ -3,7 +3,7 @@ import type { PoolClient } from 'pg';
 import { digest, type Context, type Result } from '../domain/contracts.js';
 import { validMissionChange, type MissionChange } from '../contracts/protocol.js';
 import type { MissionRequest } from '../contracts/mission-protocol.js';
-import type { KnowledgeStore } from '../knowledge/store.js';
+import type { KnowledgeStore, KnowledgeContext } from '../knowledge/store.js';
 import { RESEARCH_TEMPLATE, sealResearchWorkOrder, type ResearchWorkOrder } from './work-order.js';
 
 export type MissionAuthority = {
@@ -141,6 +141,25 @@ export class MissionProposalStore {
     return (await this.captureChange(client, context, change)) !== null;
   }
   async captureChange(client: PoolClient, context: Context, change: MissionChange): Promise<ResearchWorkOrder | null> {
+    return this.captureExisting(client, context, change, true);
+  }
+  /** Review can outlive execution, but retains exact private origin, source and provider authority checks. */
+  async captureReview(
+    client: PoolClient,
+    context: KnowledgeContext,
+    change: MissionChange,
+  ): Promise<ResearchWorkOrder | null> {
+    if (context.provider !== 'codex') return null;
+    const { provider: _provider, generation: _generation, ...origin } = context;
+    const order = await this.captureExisting(client, origin, change, false);
+    return order && order.body.origin.contextGeneration === context.generation ? order : null;
+  }
+  private async captureExisting(
+    client: PoolClient,
+    context: Context,
+    change: MissionChange,
+    execution: boolean,
+  ): Promise<ResearchWorkOrder | null> {
     const authority = this.authority?.(context);
     if (!authority || context.origin || !validMissionChange(change)) return null;
     const row = (
@@ -168,6 +187,7 @@ export class MissionProposalStore {
     )
       return null;
     if (
+      execution &&
       !(await client.query('SELECT $1::timestamptz > clock_timestamp() AS current', [body.deadlineAt])).rows[0].current
     )
       return null;

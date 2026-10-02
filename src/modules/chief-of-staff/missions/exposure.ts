@@ -9,6 +9,18 @@ export async function recordMissionExposure(
   identity: CosMissionIdentity,
   order: ResearchWorkOrder,
 ) {
+  return recordResearchExposure(
+    client,
+    { scopeId: identity.scopeId, sessionId: identity.sessionId, generation: identity.attemptId },
+    order,
+  );
+}
+/** The coordinator also retains every influencing source before receiving specialist output. */
+export async function recordResearchExposure(
+  client: PoolClient,
+  context: { scopeId: string; sessionId: string; generation: string },
+  order: ResearchWorkOrder,
+) {
   const references = order.context.sources.flatMap((source) =>
     source.chunks.map((chunk) => ({
       id: randomUUID(),
@@ -27,6 +39,6 @@ export async function recordMissionExposure(
     FROM jsonb_to_recordset($4::jsonb) AS r(id text,source_id text,revision_id text,revision_digest text,
       source_version integer,start_line integer,end_line integer)
     ON CONFLICT(scope_id,session_id,context_generation,revision_id,start_line,end_line,source_version) DO NOTHING`,
-    [identity.scopeId, identity.sessionId, identity.attemptId, JSON.stringify(references)],
+    [context.scopeId, context.sessionId, context.generation, JSON.stringify(references)],
   );
 }

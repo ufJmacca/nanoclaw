@@ -6,7 +6,7 @@ import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
 import { answerDraftSchema } from './generated/answer-protocol.js';
 import { scheduleChangeSchema } from './generated/schedule-protocol.js';
-import { missionRequestSchema } from './generated/mission-protocol.js';
+import { missionCoordinatorTools } from './mission-coordinator-tools.js';
 
 export async function executeCosRequest(
   request: CosRequest,
@@ -304,42 +304,6 @@ const briefTool: McpToolDefinition = {
     return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
   },
 };
-const missionTools: McpToolDefinition[] = (
-  ['cos_mission_request', 'cos_mission_get', 'cos_mission_cancel'] as const
-).map((method) => ({
-  tool: {
-    name: method,
-    description:
-      method === 'cos_mission_request'
-        ? 'Propose one bounded read-only comparison of exact admitted note revisions. This returns a mission ID promptly and requires owner approval before launch. Use a stable request_id for retries. Only the reviewed researcher template is available; workers cannot browse or contact accounts.'
-        : method === 'cos_mission_get'
-          ? 'Inspect an owner mission by its ID, including state, deadline, root budget usage and stop confirmation. Awaiting review is not completion.'
-          : 'Cancel one owner mission by ID. Revokes further work and requests the exact specialist stop. Cancelling or pending means stop reconciliation is still required.',
-    inputSchema: {
-      type: 'object',
-      additionalProperties: false,
-      required: method === 'cos_mission_request' ? ['request_id', 'request'] : ['mission_id'],
-      properties: (method === 'cos_mission_request'
-        ? { request_id: { type: 'string', format: 'uuid' }, request: missionRequestSchema }
-        : { mission_id: { type: 'string', pattern: '^[a-zA-Z0-9_-]{1,100}$' } }) as Record<string, object>,
-    },
-  },
-  async handler(args) {
-    const requestId = typeof args.request_id === 'string' ? args.request_id : randomUUID();
-    const allowed = method === 'cos_mission_request' ? ['request_id', 'request'] : ['mission_id'];
-    const result =
-      Object.keys(args).some((key) => !allowed.includes(key)) ||
-      (method === 'cos_mission_request' && typeof args.request_id !== 'string')
-        ? { protocol: COS_PROTOCOL, request_id: requestId, status: 'denied' }
-        : await executeCosRequest({
-            protocol: COS_PROTOCOL,
-            request_id: requestId,
-            method,
-            params: method === 'cos_mission_request' ? { request: args.request } : { mission_id: args.mission_id },
-          });
-    return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
-  },
-}));
 export const cosTools: McpToolDefinition[] = [
   ...priorityTools,
   ...knowledgeTools,
@@ -348,6 +312,6 @@ export const cosTools: McpToolDefinition[] = [
   ...workTools,
   workReadTool,
   briefTool,
-  ...missionTools,
+  ...missionCoordinatorTools(executeCosRequest),
 ];
 if (process.env.NANOCLAW_COS_PROTOCOL === COS_PROTOCOL) registerTools(cosTools);
