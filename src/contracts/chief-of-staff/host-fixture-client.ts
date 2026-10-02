@@ -29,7 +29,15 @@ export class HostFixture {
       if (!waiter) return;
       clearTimeout(waiter.timer);
       this.pending.delete(message.id);
-      if (message.error) waiter.reject(new Error('fixture_host_command_failed'));
+      if (message.error)
+        waiter.reject(
+          new Error(
+            'fixture_host_command_failed:' +
+              (typeof message.reason === 'string' && /^[a-zA-Z0-9_]{1,100}$/.test(message.reason)
+                ? message.reason
+                : 'unavailable'),
+          ),
+        );
       else waiter.resolve(message.value);
     });
     this.process.on('exit', () => this.fail());

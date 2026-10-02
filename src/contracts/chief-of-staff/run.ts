@@ -29,7 +29,8 @@ try {
     {
       env: { ...safeHostEnvironment('docker'), ...selected, ...fixtures },
       stdio: 'inherit',
-      timeout: 120000,
+      // S05 includes all predecessor scenarios plus real worker cancellation, outage and restart.
+      timeout: args.slice === 'S05' ? 300000 : 120000,
     },
   );
   process.exitCode = result.status ?? 1;

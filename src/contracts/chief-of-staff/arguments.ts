@@ -1,4 +1,8 @@
-type FixtureArguments = { slice: 'S01' | 'S02' | 'S03' | 'S04'; demo: boolean; profile: 'test' | 'runtime-disposable' };
+type FixtureArguments = {
+  slice: 'S01' | 'S02' | 'S03' | 'S04' | 'S05';
+  demo: boolean;
+  profile: 'test' | 'runtime-disposable';
+};
 export function parseFixtureArguments(args: string[]): FixtureArguments {
   const values = new Map<string, string | boolean>();
   for (let i = 0; i < args.length; i++) {
@@ -11,7 +15,7 @@ export function parseFixtureArguments(args: string[]): FixtureArguments {
   const demo = values.get('--demo') === true,
     profile = values.get('--db-profile');
   if (
-    !['S01', 'S02', 'S03', 'S04'].includes(String(values.get('--slice'))) ||
+    !['S01', 'S02', 'S03', 'S04', 'S05'].includes(String(values.get('--slice'))) ||
     !['test', 'runtime-disposable'].includes(String(profile)) ||
     (demo && values.get('--fixture') !== true) ||
     (!demo && values.has('--fixture'))
@@ -25,6 +29,17 @@ export function parseFixtureArguments(args: string[]): FixtureArguments {
 }
 
 export function fixtureFiles(args: Pick<FixtureArguments, 'slice' | 'demo'>): string[] {
+  if (args.slice === 'S05')
+    return args.demo
+      ? ['mission-flow.integration']
+      : [
+          ...fixtureFiles({ slice: 'S04', demo: false }),
+          'mission-schema.integration',
+          'mission-approval.integration',
+          'mission-sources.integration',
+          'mission-run.integration',
+          'mission-flow.integration',
+        ];
   if (args.slice === 'S04')
     return args.demo
       ? ['brief-flow.integration']
