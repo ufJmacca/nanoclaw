@@ -414,9 +414,89 @@ test('S05-T05 automatic review claims a stable main-context task only after the 
   assert.deepEqual(next.identity, first.identity);
   assert.equal((next.lease as any).fence, (first.lease as any).fence + 1);
   assert.equal(
+    (await runs.retire(f.k, f.identity.missionId, f.review.submission_id, first.lease as any)).status,
+    'denied',
+  );
+  assert.equal(
+    (await runs.authorize(f.k, f.identity.missionId, f.review.submission_id, next.lease as any)).status,
+    'ok',
+  );
+  assert.equal(
     (await runs.authorize(f.k, f.identity.missionId, f.review.submission_id, first.lease as any)).status,
     'denied',
   );
+});
+test('S05-T06/T07 review recovery reads only metadata and durably retires an exact lease after source revocation', async () => {
+  const f = await submitted('answer', true, 600, { max_tool_calls: 6 }),
+    runs = new MissionReviewRuns(f.reviews);
+  const pending = await runs.pending(f.k);
+  assert.deepEqual(pending, {
+    status: 'ok',
+    items: [{ mission_id: f.identity.missionId, submission_id: f.review.submission_id }],
+  });
+  const claim = await runs.claim(f.k, f.identity.missionId, f.review.submission_id, 'review-host'),
+    lease = claim.lease as any;
+  assert.equal(claim.status, 'ok');
+  await admin.query("UPDATE cos.sources SET status='revoked' WHERE id=$1", [f.input.sources[0].source_id]);
+  const inspected = await runs.inspect(f.k, f.identity.missionId, f.review.submission_id);
+  assert.equal(inspected.status, 'ok');
+  assert.equal(JSON.stringify(inspected).includes('A costs less'), false);
+  assert.deepEqual(inspected.identity, claim.identity);
+  assert.equal((inspected.task as any).inputId, claim.input_id);
+  assert.equal(
+    (await runs.inspect({ ...f.k, ownerId: 'foreign' }, f.identity.missionId, f.review.submission_id)).status,
+    'denied',
+  );
+  assert.equal(
+    (await runs.retire(f.k, f.identity.missionId, f.review.submission_id, { ...lease, fence: lease.fence + 1 })).status,
+    'denied',
+  );
+  assert.equal((await runs.retire(f.k, f.identity.missionId, f.review.submission_id, lease)).status, 'ok');
+  assert.equal((await runs.retire(f.k, f.identity.missionId, f.review.submission_id, lease)).status, 'ok');
+  assert.equal((await runs.inspect(f.k, f.identity.missionId, f.review.submission_id)).retired, true);
+  assert.deepEqual(await runs.pending(f.k), { status: 'ok', items: [] });
+  await admin.query("UPDATE cos.sources SET status='current' WHERE id=$1", [f.input.sources[0].source_id]);
+  assert.equal((await runs.claim(f.k, f.identity.missionId, f.review.submission_id, 'review-host')).status, 'denied');
+  assert.equal((await runs.authorize(f.k, f.identity.missionId, f.review.submission_id, lease, true)).status, 'denied');
+  assert.equal((await f.reviews.review(f.k, randomUUID(), f.review)).state, 'completed');
+});
+test('S05-T06/T07 metadata recovery denies foreign identities and closes expired grants after cancellation', async () => {
+  const f = await submitted('answer', true, 600, { max_tool_calls: 6 }),
+    runs = new MissionReviewRuns(f.reviews);
+  const claim = await runs.claim(f.k, f.identity.missionId, f.review.submission_id, 'review-host'),
+    lease = claim.lease as any;
+  assert.equal(claim.status, 'ok');
+  for (const changed of [
+    { ownerId: 'foreign' },
+    { sessionId: 'foreign' },
+    { agentGroupId: 'foreign' },
+    { generation: randomUUID() },
+    { provider: 'other' },
+    { origin: { kind: 'schedule' as const, runId: randomUUID(), generation: 1 } },
+  ]) {
+    assert.equal(
+      (await runs.inspect({ ...f.k, ...changed }, f.identity.missionId, f.review.submission_id)).status,
+      'denied',
+    );
+    assert.equal(
+      (await runs.retire({ ...f.k, ...changed }, f.identity.missionId, f.review.submission_id, lease)).status,
+      'denied',
+    );
+  }
+  assert.deepEqual(await runs.pending({ ...f.k, generation: randomUUID() }), { status: 'ok', items: [] });
+  await admin.query(
+    "UPDATE cos.mission_attempts SET allocation=jsonb_set(allocation,'{coordinator_review,deadlineAt}',to_jsonb((clock_timestamp()-interval '1 second')::text)) WHERE scope_id=$1 AND id=$2",
+    [scope, f.identity.attemptId],
+  );
+  await store.missionRuns.cancel(context, f.identity.missionId);
+  assert.equal((await runs.inspect(f.k, f.identity.missionId, f.review.submission_id)).status, 'ok');
+  assert.equal((await runs.retire(f.k, f.identity.missionId, f.review.submission_id, lease)).status, 'ok');
+  assert.equal((await runs.renew(f.k, f.identity.missionId, f.review.submission_id, lease)).status, 'denied');
+  assert.equal(
+    (await runs.reserve(f.k, f.identity.missionId, f.review.submission_id, lease, randomUUID(), 'model')).status,
+    'denied',
+  );
+  assert.deepEqual(await runs.pending(f.k), { status: 'ok', items: [] });
 });
 test('S05-T09 coordinator review spends the original root budgets and replay cannot authorize another invocation', async () => {
   const f = await submitted('answer', true, 600, { max_turns: 3, max_tool_calls: 3 }, 1);
