@@ -488,6 +488,153 @@ test('S05-T08 requires exact review version, criteria, digest and an independent
   assert.equal((await f.reviews.review({ ...f.k, sessionId: 'specialist' }, randomUUID(), f.review)).status, 'denied');
   assert.equal((await rows('mission_reviews')).filter((r) => r.mission_id === f.identity.missionId).length, 0);
 });
+test('S05-T03/T08 automatic coordinator RPC is limited to its exact leased result and spends root tool reservations', async () => {
+  const f = await submitted('answer', true, 600, { max_turns: 3, max_tool_calls: 8 }, 1);
+  const runs = new MissionReviewRuns(f.reviews),
+    claimed = await runs.claim(f.k, f.identity.missionId, f.review.submission_id, 'review-host');
+  assert.equal(claimed.status, 'ok');
+  const lease = claimed.lease as any;
+  const automaticContext = {
+    ...context,
+    ingressId: 'fixture-host-review',
+    origin: {
+      kind: 'mission_review' as const,
+      runId: f.identity.missionId,
+      generation: f.identity.generation,
+      submissionId: f.review.submission_id,
+      owner: lease.owner,
+      fence: lease.fence,
+    },
+  };
+  const automaticKnowledge = { ...f.k, ...automaticContext },
+    inbox = new Database(':memory:');
+  for (const patch of [
+    { fence: lease.fence + 1 },
+    { owner: 'foreign' },
+    { generation: f.identity.generation + 1 },
+    { submissionId: randomUUID() },
+  ]) {
+    assert.equal(
+      (
+        await f.reviews.read(
+          { ...automaticKnowledge, origin: { ...automaticContext.origin, ...patch } },
+          f.identity.missionId,
+          f.review.submission_id,
+        )
+      ).status,
+      'denied',
+    );
+  }
+  const reserve = async (callId: string, kind: 'model' | 'tool') => {
+    const result = await runs.reserve(
+      automaticKnowledge,
+      f.identity.missionId,
+      f.review.submission_id,
+      lease,
+      callId,
+      kind,
+    );
+    return result.status === 'ok' && result.reserved !== true ? { status: 'pending' as const } : result;
+  };
+  const handler = createRpcHandler({
+    store,
+    knowledge,
+    resolveContext: async () =>
+      (await runs.authorize(automaticKnowledge, f.identity.missionId, f.review.submission_id, lease, true)).status ===
+      'ok'
+        ? automaticContext
+        : null,
+    resolveKnowledgeContext: async () => automaticKnowledge,
+    reserveTool: async (_context, callId) => reserve(callId, 'tool'),
+  });
+  const main = { id: context.sessionId, agent_group_id: context.agentGroupId } as NonNullable<
+    ReturnType<typeof getSession>
+  >;
+  try {
+    const call = async (method: string, params: Record<string, unknown>) => {
+      const request = { protocol: 'cos-rpc/v1', request_id: randomUUID(), method, params },
+        delivery_id = randomUUID();
+      await handler({ action: 'cos_rpc', request, delivery_id }, main, inbox);
+      return JSON.parse(
+        (
+          inbox
+            .prepare('SELECT response FROM cos_rpc_responses WHERE request_id=? AND payload_hash=? AND delivery_id=?')
+            .get(request.request_id, digest(request), delivery_id) as { response: string }
+        ).response,
+      );
+    };
+    assert.equal((await reserve(randomUUID(), 'model')).status, 'ok');
+    assert.equal((await call('cos_context_get', { view: 'today' })).status, 'denied');
+    assert.equal(
+      (await call('cos_mission_result_get', { mission_id: 'foreign', submission_id: f.review.submission_id })).status,
+      'denied',
+    );
+    const result = await call('cos_mission_result_get', {
+      mission_id: f.identity.missionId,
+      submission_id: f.review.submission_id,
+    });
+    assert.equal(result.status, 'ok');
+    assert.deepEqual(result.result.result, f.result);
+    const reviewed = await call('cos_mission_review', { review: f.review });
+    assert.equal(reviewed.status, 'ok');
+    assert.equal(reviewed.result.state, 'completed');
+    assert.equal(
+      (await runs.authorize(automaticKnowledge, f.identity.missionId, f.review.submission_id, lease)).status,
+      'denied',
+    );
+    assert.equal(
+      (
+        await call('cos_mission_result_get', {
+          mission_id: f.identity.missionId,
+          submission_id: f.review.submission_id,
+        })
+      ).status,
+      'denied',
+    );
+    assert.deepEqual(((await store.missionRuns.inspect(context, f.identity.missionId)).mission as any).usage, {
+      attempt: 1,
+      model: 2,
+      tool: 5,
+    });
+  } finally {
+    inbox.close();
+  }
+});
+test('S05-PG03 lost coordinator-call acknowledgement stays charged and cannot authorize a second invocation', async () => {
+  const f = await submitted('answer', true, 600, { max_tool_calls: 6 });
+  const runs = new MissionReviewRuns(f.reviews),
+    claimed = await runs.claim(f.k, f.identity.missionId, f.review.submission_id, 'review-host');
+  assert.equal(claimed.status, 'ok');
+  const pool = new pg.Pool(await fixtureDatabaseConfig()),
+    connection = await pool.connect(),
+    original = connection.query.bind(connection);
+  let dropped = false;
+  connection.query = (async (...args: unknown[]) => {
+    const result = await (original as (...a: unknown[]) => Promise<unknown>)(...args);
+    if (args[0] === 'COMMIT' && !dropped) {
+      dropped = true;
+      throw Error('fixture_lost_ack');
+    }
+    return result;
+  }) as typeof connection.query;
+  connection.release();
+  const faulty = new MissionReviewRuns(new MissionReviews(new BoundedDatabase(pool), store.missions, knowledge));
+  const callId = randomUUID(),
+    lease = claimed.lease as any;
+  try {
+    assert.equal(
+      (await faulty.reserve(f.k, f.identity.missionId, f.review.submission_id, lease, callId, 'model')).status,
+      'pending',
+    );
+  } finally {
+    await pool.end();
+  }
+  assert.deepEqual(await runs.reserve(f.k, f.identity.missionId, f.review.submission_id, lease, callId, 'model'), {
+    status: 'ok',
+    reserved: false,
+  });
+  assert.equal(((await store.missionRuns.inspect(context, f.identity.missionId)).mission as any).usage.model, 1);
+});
 test('S05-T08 the coordinator RPC reads current result bytes and persists an advisory review rather than chat output', async () => {
   const f = await submitted(),
     inbox = new Database(':memory:');

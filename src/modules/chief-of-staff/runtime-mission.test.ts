@@ -1,20 +1,22 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { initTestDb, closeDb } from '../../db/connection.js';
-import { installCosBoundary, type CosBinding } from '../../cos-boundary.js';
+import { installCosBoundary, prepareCosLaunch, type CosBinding, type CosLaunch } from '../../cos-boundary.js';
 import { setDeliveryAdapter } from '../../delivery.js';
 import type { Session } from '../../types.js';
 import type { PriorityStore } from './store/priorities.js';
 import { createCosRuntime } from './runtime.js';
 import { ensureConversationSchema } from './bridge/conversation-state.js';
 import { digest } from './domain/contracts.js';
+import { installReviewOrigin } from './missions/review-origin.js';
+import type { TurnAuthorization } from './bridge/turn-authorization.js';
 
 let runtime: ReturnType<typeof createCosRuntime>;
 afterEach(() => {
   runtime?.dispose();
   closeDb();
 });
-function fixture() {
+function fixture(automaticReview = false) {
   const db = initTestDb(),
     generation = randomUUID(),
     reviewId = randomUUID();
@@ -66,20 +68,50 @@ function fixture() {
     members: ['owner', 'bot'],
     activeSubscription: true,
   }));
+  const missionReviewRuns = {
+    authorize: vi.fn(async () => ({ status: 'ok' })),
+    reserve: vi.fn(async () => ({ status: 'ok', reserved: true })),
+  };
+  let authorization: TurnAuthorization | undefined;
   runtime = createCosRuntime({
     db,
     enabled: true,
     store: {
       missionNotifications,
       pendingOutbox: vi.fn(async () => ({ status: 'ok', items: [] })),
+      ...(automaticReview
+        ? {
+            missionReviewRuns,
+            context: vi.fn(async () => ({ status: 'ok' })),
+            knowledge: { contextReady: vi.fn(async () => ({ status: 'ok' })) },
+          }
+        : {}),
     } as unknown as PriorityStore,
     session: () => session,
     facts,
     destination: () => undefined,
     stop: vi.fn(),
     wake: vi.fn(),
+    launcher: {
+      ready: () => true,
+      prepare: async (_binding, _session, authorize) => {
+        authorization = authorize;
+        return {} as CosLaunch;
+      },
+    },
   });
-  return { db, binding, generation, reviewId, missionNotifications, deliver, facts };
+  return {
+    db,
+    binding,
+    generation,
+    reviewId,
+    missionNotifications,
+    deliver,
+    facts,
+    session,
+    missionReviewRuns,
+    authorization: () => authorization,
+  };
 }
 it('S05 host pump delivers a reviewed result to the existing bound private main conversation', async () => {
   const f = fixture();
@@ -100,6 +132,42 @@ it('S05 host pump delivers a reviewed result to the existing bound private main 
   );
   await runtime.pump(f.binding);
   expect(f.deliver).toHaveBeenCalledTimes(1);
+});
+it('S05-T09 native review launch requires execution authority and a fresh root reservation even when receipt access remains', async () => {
+  const f = fixture(true),
+    submissionId = randomUUID();
+  const grant = {
+    identity: {
+      missionId: 'mission',
+      submissionId,
+      attemptId: randomUUID(),
+      generation: 1,
+      sessionId: f.session.id,
+      contextGeneration: f.generation,
+    },
+    lease: { owner: 'host', fence: 1 },
+    deadlineAt: new Date(Date.now() + 25000).toISOString(),
+  };
+  expect(installReviewOrigin(f.db, f.binding, f.session, grant)).toBe(true);
+  await prepareCosLaunch(f.session);
+  const authorize = f.authorization()!;
+  expect(await authorize()).toContain('mission-review:mission:1:1');
+  expect(await authorize.reserve!('physical-call')).toBe(true);
+  expect(f.missionReviewRuns.reserve).toHaveBeenCalledWith(
+    expect.objectContaining({ sessionId: 'main', generation: f.generation }),
+    'mission',
+    submissionId,
+    { owner: 'host', fence: 1 },
+    'physical-call',
+    'model',
+  );
+  f.missionReviewRuns.reserve.mockResolvedValue({ status: 'ok', reserved: false });
+  expect(await authorize.reserve!('physical-call')).toBe(false);
+  f.missionReviewRuns.authorize.mockImplementation(async (...args: unknown[]) => ({
+    status: args[4] === true ? 'ok' : 'denied',
+  }));
+  expect(await runtime.controller.context(f.session)).not.toBeNull();
+  expect(await authorize()).toBeNull();
 });
 it.each(['pause', 'membership', 'context'])('S05 host pump withholds result after %s changes', async (change) => {
   const f = fixture();

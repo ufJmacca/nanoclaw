@@ -13,7 +13,7 @@ import type { PriorityStore } from './store/priorities.js';
 import type { CoordinatorLauncher } from './bridge/coordinator-launcher.js';
 import { createTurnAuthorization } from './bridge/turn-authorization.js';
 import { resolveKnowledgeContext } from './knowledge/context.js';
-import { digest, type Context } from './domain/contracts.js';
+import { digest, type Context, type Result } from './domain/contracts.js';
 import { KnowledgeInvalidation } from './knowledge/invalidation.js';
 import { NativeBriefTasks } from './automation/native-tasks.js';
 import { BriefDelivery } from './automation/brief-delivery.js';
@@ -41,6 +41,43 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
   const d = dependencies;
   let disposed = false;
   const enabled = () => !disposed && d.enabled && !!d.store && (d.admission?.() ?? true);
+  const reviewAuthority = async (context: Context, receiptOnly: boolean): Promise<boolean> => {
+    if (!enabled() || context.origin?.kind !== 'mission_review' || !d.store?.missionReviewRuns) return false;
+    const session = d.session(context.sessionId),
+      retained = session && resolveKnowledgeContext(session, context, d.db);
+    const origin = context.origin;
+    return (
+      !!retained &&
+      (
+        await d.store.missionReviewRuns.authorize(
+          retained,
+          origin.runId,
+          origin.submissionId,
+          { owner: origin.owner, fence: origin.fence },
+          receiptOnly,
+        )
+      ).status === 'ok'
+    );
+  };
+  const reserveAutomaticCall = async (context: Context, callId: string, kind: 'model' | 'tool'): Promise<Result> => {
+    if (!enabled() || !context.origin || !d.store) return { status: 'denied' };
+    const origin = context.origin;
+    if (origin.kind === 'schedule')
+      return d.store.briefs.reserveCall(context, origin.runId, origin.generation, kind, callId);
+    const session = d.session(context.sessionId),
+      retained = session && resolveKnowledgeContext(session, context, d.db);
+    if (!retained || !d.store.missionReviewRuns) return { status: 'denied' };
+    const result = await d.store.missionReviewRuns.reserve(
+      retained,
+      origin.runId,
+      origin.submissionId,
+      { owner: origin.owner, fence: origin.fence },
+      callId,
+      kind,
+    );
+    // An accounting receipt is not permission for another physical invocation.
+    return result.status === 'ok' && result.reserved !== true ? { status: 'pending' } : result;
+  };
   const knowledgeAllowed = async (session: Session, context: Context, text?: string): Promise<boolean> => {
     if (!d.store?.knowledge) return true;
     const retained = resolveKnowledgeContext(session, context, d.db);
@@ -67,6 +104,7 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
       context.origin?.kind === 'schedule' &&
       !!d.store &&
       (await d.store.briefs.authorize(context, context.origin.runId, context.origin.generation)).status === 'ok',
+    verifyReview: (context) => reviewAuthority(context, true),
     decide: (...args) => (d.store ? d.store.decide(...args) : Promise.resolve({ status: 'unavailable' })),
     acknowledge: (proposal) => deletePendingApproval('cos-' + proposal),
     stop: d.stop,
@@ -244,19 +282,10 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
         createTurnAuthorization({
           local: () => controller.localContext(session),
           reserve: async (context, attemptId) =>
-            context.origin?.kind === 'schedule' &&
-            !!d.store &&
-            (
-              await d.store.briefs.reserveCall(
-                context,
-                context.origin.runId,
-                context.origin.generation,
-                'model',
-                attemptId,
-              )
-            ).status === 'ok',
+            (await reserveAutomaticCall(context, attemptId, 'model')).status === 'ok',
           verify: async () => {
             const context = await controller.context(session);
+            if (context?.origin?.kind === 'mission_review' && !(await reviewAuthority(context, false))) return null;
             return context &&
               d.store &&
               (await d.store.context(context)).status === 'ok' &&
@@ -290,10 +319,7 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
       'cos_rpc',
       createRpcHandler({
         resolveContext: (session) => controller.context(session),
-        reserveTool: (context, callId) =>
-          context.origin?.kind === 'schedule' && d.store
-            ? d.store.briefs.reserveCall(context, context.origin.runId, context.origin.generation, 'tool', callId)
-            : Promise.resolve({ status: 'denied' }),
+        reserveTool: (context, callId) => reserveAutomaticCall(context, callId, 'tool'),
         store: d.store!,
         cancelMission: createMissionCancellation({
           db: d.db,

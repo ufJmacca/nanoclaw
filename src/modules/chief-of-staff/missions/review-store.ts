@@ -10,6 +10,7 @@ import type { MissionProposalStore } from './proposal-store.js';
 import { checkResearchResult, type ResearchResultChecks } from './result-checks.js';
 import { recordResearchExposure } from './exposure.js';
 import type { ResearchWorkOrder } from './work-order.js';
+import { currentReviewLease } from './review-runs.js';
 const uuid = (v: unknown): v is string =>
   typeof v === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
 const id = (v: unknown): v is string => typeof v === 'string' && /^[a-zA-Z0-9_-]{1,100}$/.test(v);
@@ -69,7 +70,10 @@ export class MissionReviews {
     submissionId: string,
   ): Promise<ReviewSnapshot | null> {
     if (
-      context.origin ||
+      (context.origin &&
+        (context.origin.kind !== 'mission_review' ||
+          context.origin.runId !== missionId ||
+          context.origin.submissionId !== submissionId)) ||
       context.provider !== 'codex' ||
       !uuid(context.generation) ||
       !id(missionId) ||
@@ -101,7 +105,8 @@ export class MissionReviews {
       m.applied_record_id !== missionId
     )
       return null;
-    const order = await this.proposals.captureReview(client, context, {
+    const { origin, ...ownerContext } = context;
+    const order = await this.proposals.captureReview(client, ownerContext, {
       kind: 'research_mission',
       mission_id: missionId,
       work_order_digest: m.digest,
@@ -146,7 +151,15 @@ export class MissionReviews {
       digest(checks) !== digest(submission.body.checks)
     )
       return null;
-    return { mission: m, submission, order, result, checks };
+    const snapshot = { mission: m, submission, order, result, checks };
+    if (
+      origin &&
+      (origin.kind !== 'mission_review' ||
+        origin.generation !== submission.generation ||
+        !(await currentReviewLease(client, snapshot, { owner: origin.owner, fence: origin.fence }, true)))
+    )
+      return null;
+    return snapshot;
   }
   async read(context: KnowledgeContext, missionId: string, submissionId: string): Promise<Result> {
     return this.transaction(async (client) => {
@@ -221,6 +234,7 @@ export class MissionReviews {
             ingress_id: context.ingressId,
             result_digest: input.result_digest,
             work_order_digest: current.order.digest,
+            origin: context.origin ?? null,
           }),
         ],
       );

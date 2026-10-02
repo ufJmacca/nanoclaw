@@ -31,6 +31,31 @@ const storedLease = (v: unknown): v is StoredLease =>
   typeof (v as StoredLease).deadlineAt === 'string' &&
   Number.isFinite(Date.parse((v as StoredLease).deadlineAt));
 
+/** Receipt access may finish the tool response after completion, but never grants another model/tool invocation. */
+export async function currentReviewLease(
+  client: PoolClient,
+  current: ReviewSnapshot,
+  lease: MissionReviewLease,
+  receiptOnly = false,
+): Promise<boolean> {
+  const stored = current.submission.allocation.coordinator_review;
+  const states = receiptOnly ? ['awaiting_review', 'completed', 'partial', 'blocked'] : ['awaiting_review'];
+  return (
+    validLease(lease) &&
+    storedLease(stored) &&
+    stored.owner === lease.owner &&
+    stored.fence === lease.fence &&
+    states.includes(current.mission.state) &&
+    current.submission.allocation.stop_confirmed === true &&
+    (
+      await client.query(
+        'SELECT $1::timestamptz > clock_timestamp() AND $1::timestamptz <= $2::timestamptz AS current',
+        [stored.deadlineAt, current.order.body.deadlineAt],
+      )
+    ).rows[0].current
+  );
+}
+
 /** Only the trusted host may acquire these grants, after establishing that the shared main session is idle.
  * Review never allocates another AgentGroup/context, renews the mission deadline, or creates a new attempt. */
 export class MissionReviewRuns {
@@ -53,20 +78,7 @@ export class MissionReviewRuns {
     return { model: rows.find((r) => r.kind === 'model')?.n ?? 0, tool: rows.find((r) => r.kind === 'tool')?.n ?? 0 };
   }
   private async currentLease(client: PoolClient, current: ReviewSnapshot, lease: MissionReviewLease) {
-    const stored = current.submission.allocation.coordinator_review;
-    return (
-      validLease(lease) &&
-      storedLease(stored) &&
-      stored.owner === lease.owner &&
-      stored.fence === lease.fence &&
-      (await this.live(client, current)) &&
-      (
-        await client.query(
-          'SELECT $1::timestamptz > clock_timestamp() AND $1::timestamptz <= $2::timestamptz AS current',
-          [stored.deadlineAt, current.order.body.deadlineAt],
-        )
-      ).rows[0].current
-    );
+    return currentReviewLease(client, current, lease);
   }
   private async deadline(client: PoolClient, current: ReviewSnapshot): Promise<string> {
     return (
@@ -82,7 +94,7 @@ export class MissionReviewRuns {
     );
   }
   async claim(context: KnowledgeContext, missionId: string, submissionId: string, hostId: string): Promise<Result> {
-    if (!id(hostId)) return { status: 'denied' };
+    if (context.origin || !id(hostId)) return { status: 'denied' };
     return this.reviews.withCurrentSubmission(context, missionId, submissionId, async (client, current) => {
       if (!(await this.live(client, current))) return { status: 'denied' };
       const limits = current.order.body.request.limits,
@@ -124,10 +136,11 @@ export class MissionReviewRuns {
     missionId: string,
     submissionId: string,
     lease: MissionReviewLease,
+    receiptOnly = false,
   ): Promise<Result> {
     if (!validLease(lease)) return { status: 'denied' };
     return this.reviews.withCurrentSubmission(context, missionId, submissionId, async (client, current) => ({
-      status: (await this.currentLease(client, current, lease)) ? 'ok' : 'denied',
+      status: (await currentReviewLease(client, current, lease, receiptOnly)) ? 'ok' : 'denied',
     }));
   }
   async renew(
