@@ -46,9 +46,11 @@ const provider={supportsNativeSlashCommands:false,query(){return {push(){},end()
  fs.writeFileSync('/workspace/agent/fixture-draft.json',JSON.stringify(result),{mode:0o600});
  while(holdFixture&&!cancel.signal.aborted)await new Promise(resolve=>setTimeout(resolve,30));
  if(cancel.signal.aborted)throw Error('fixture_stopped');
- const submitted=await call('cos_result_submit',{result});assert.equal(submitted.status,'ok','fixture submit '+submitted.status);
+ // The host may stop the worker after committing its result, before the RPC acknowledgement is read.
+ // The outer test requires that exact durable submission and stop receipt before review.
+ const submitted=await call('cos_result_submit',{result});
  fs.writeFileSync('/workspace/agent/fixture-submission.json',JSON.stringify(submitted),{mode:0o600});
- yield {type:'result',text:'Fixture researcher submitted; main coordinator must review.'};
+ yield {type:'result',text:submitted.status==='ok'?'Fixture result acknowledged; main coordinator must review.':'Fixture submission acknowledgement uncertain; host must reconcile.'};
  }catch(error){console.error('fixture-provider: '+error.message);throw error;}finally{await turns.end();}
  })()};}};
 const outcome=await runMissionTask({...runtime,provider,signal:cancel.signal});assert.equal(outcome,'processed');
