@@ -21,6 +21,9 @@ import { RestrictedExecutionProbe } from './bridge/native-execution.js';
 import { getInstallSlug } from '../../install-slug.js';
 import { sessionDir } from '../../session-manager.js';
 import { createMissionAuthorityResolver } from './missions/authority.js';
+import { MissionHost } from './missions/host.js';
+import { createMissionExecution } from './missions/execution.js';
+import { cosMissionIdentities, hasCosMissionBoundary } from '../../cos-mission-boundary.js';
 
 /** Narrow host-service profile: never load migration or test credentials into this module. */
 export function startCosHostModule(assertHostAuthority: () => void): { service: CosService; stop(): Promise<void> } {
@@ -118,6 +121,15 @@ export function startCosHostModule(assertHostAuthority: () => void): { service: 
     }
   };
   const executionProbe = new RestrictedExecutionProbe(getInstallSlug());
+  const missionExecution = createMissionExecution({
+    db: getDb(),
+    assertHostAuthority,
+    session: getSession,
+    directory: sessionDir,
+    running: hasContainerExecution,
+    stop: (id) => killContainer(id, 'CoS execution fenced'),
+    probe: executionProbe,
+  });
   const running = (id: string): boolean => {
     try {
       assertHostAuthority();
@@ -130,8 +142,15 @@ export function startCosHostModule(assertHostAuthority: () => void): { service: 
   const stop = (id: string): void => {
     try {
       assertHostAuthority();
-      killContainer(id, 'CoS execution fenced');
+      const identity = cosMissionIdentities(getDb()).find((row) => row.sessionId === id);
+      if (identity) {
+        void missionExecution.stop(identity).catch(() => log.warn('CoS specialist stop requires reconciliation'));
+        return;
+      }
+      // A corrupt child reservation cannot fall through to an ordinary workspace.
       const session = getSession(id);
+      if (hasCosMissionBoundary(session?.agent_group_id ?? '', id, getDb())) return;
+      killContainer(id, 'CoS execution fenced');
       if (session) executionProbe.stop(sessionDir(session.agent_group_id, id));
     } catch {
       log.warn('CoS execution stop requires reconciliation');
@@ -161,6 +180,19 @@ export function startCosHostModule(assertHostAuthority: () => void): { service: 
     stop,
     running,
     wake: wakeContainer,
+    specialists: (store) =>
+      new MissionHost({
+        root: targetRoot,
+        db: getDb(),
+        runs: store.missionRuns,
+        authority: missionAuthority,
+        admitted,
+        assertHostAuthority,
+        facts,
+        running: missionExecution.running,
+        stop: missionExecution.stop,
+        wake: wakeContainer,
+      }),
     connect: () =>
       connectCosHostStore(
         selected,

@@ -78,6 +78,11 @@ export class MissionDispatch {
   private now() {
     return (this.dependencies.clock ?? (() => performance.now()))();
   }
+  /** Host recovery must not mistake this lifecycle's in-flight allocation for an orphan. */
+  owns(identity: CosMissionIdentity): boolean {
+    const entry = this.entries.get(identity.attemptId);
+    return !!entry && digest(entry.input.identity) === digest(identity);
+  }
   private notifyIdle() {
     if (this.active.size || this.polling || this.launches) return;
     for (const resolve of this.idle) resolve();
