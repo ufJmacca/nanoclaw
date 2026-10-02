@@ -170,9 +170,9 @@ isolation_checks() {
     bash scripts/cos-subscription-image-check.sh "$host_image" "$worker" "$directory/native-${worker:7:12}" || return
   done
 }
-check host_image host_checks
-check agent_image agent_checks
 check image_isolation isolation_checks
+check agent_image agent_checks
+check host_image host_checks
 # Export the existing tested identities, without rebuilding. Configuration IDs are hashed from this archive.
 docker save -o "$directory/images.tar" \
   "$(cli field "$id" host-tag)" "$(cli field "$id" agent-standard-tag)" "$(cli field "$id" agent-documents-tag)"
