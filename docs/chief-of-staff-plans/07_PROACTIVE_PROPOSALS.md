@@ -1,6 +1,6 @@
 # S07 — Notice useful work without creating a task avalanche
 
-**Status:** not started  
+**Status:** tested candidate deployed; operator assessment and human review pending  
 **Repository:** `ufJmacca/nanoclaw`  
 **Branch:** `cos/s07-proactive-proposals`  
 **Depends on:** S06 merged, with its acceptance receipt available.  

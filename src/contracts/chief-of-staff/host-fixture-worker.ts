@@ -195,6 +195,7 @@ async function start(input: {
   if (input.brief) {
     store.briefs.options.clock = () => new Date(fixtureClock!);
     store.briefArtifacts!.collector.options.clock = () => new Date(fixtureClock!);
+    store.proactive.options!.collector.options.clock = () => new Date(fixtureClock!);
   }
   let crashAfterDecision = false;
   const decide = store.decide.bind(store);

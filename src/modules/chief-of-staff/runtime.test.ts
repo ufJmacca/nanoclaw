@@ -564,7 +564,7 @@ it('S02 processes due retention work while paused without admitting ordinary out
   expect(db.prepare('SELECT paused FROM cos_identity_boundaries').get()).toEqual({ paused: 1 });
 });
 
-it.each(['existing', 'due', 'refresh', 'review-fence', 'review-corrupt'])(
+it.each(['existing', 'due', 'refresh', 'review-fence', 'review-corrupt', 'proactive-unavailable', 'proactive-denied'])(
   'S04 wires %s scheduled work, checked delivery and retirement into the host pump',
   async (mode) => {
     const db = initTestDb();
@@ -683,6 +683,7 @@ it.each(['existing', 'due', 'refresh', 'review-fence', 'review-corrupt'])(
       }),
       inspect: vi.fn(async () => ({ status: 'ok', run: { ...run }, notification: { state: 'queued' } })),
       authorize: vi.fn().mockResolvedValue({ status: 'ok' }),
+      cancel: vi.fn().mockResolvedValue({ status: 'ok' }),
       beginDelivery: vi.fn().mockResolvedValue({ status: 'ok', notification_id: 'brief-' + run.id, reference }),
       deliveryCurrent: vi.fn().mockResolvedValue({ status: 'ok' }),
       finishDelivery: vi.fn(async (_c, _r, _g, _a, outcome) => {
@@ -708,6 +709,18 @@ it.each(['existing', 'due', 'refresh', 'review-fence', 'review-corrupt'])(
     setDeliveryAdapter({ deliver });
     const stop = vi.fn(),
       wake = vi.fn();
+    const proactive = {
+      scheduledBatch: vi.fn(async (context) => {
+        expect(wake).not.toHaveBeenCalled();
+        expect(context.generation).toBe(reference.context_generation);
+        expect(context.ingressId).toBe(`brief:${run.id}:1`);
+        expect(context.origin).toEqual({ kind: 'schedule', runId: run.id, generation: 1 });
+        return {
+          status: mode === 'proactive-unavailable' ? 'unavailable' : mode === 'proactive-denied' ? 'denied' : 'ok',
+          candidates: [],
+        };
+      }),
+    };
     try {
       runtime = createCosRuntime({
         db,
@@ -717,6 +730,7 @@ it.each(['existing', 'due', 'refresh', 'review-fence', 'review-corrupt'])(
           calendar,
           knowledge,
           briefArtifacts,
+          proactive,
           pendingOutbox: vi.fn().mockResolvedValue({ status: 'ok', items: [] }),
         } as unknown as PriorityStore,
         facts: async () => ({
@@ -735,6 +749,12 @@ it.each(['existing', 'due', 'refresh', 'review-fence', 'review-corrupt'])(
         launcher: { ready: () => true, prepare: vi.fn(), renewBriefContext },
       });
       await runtime.pump(binding);
+      if (mode.startsWith('proactive-')) {
+        expect(proactive.scheduledBatch).toHaveBeenCalledOnce();
+        expect(wake).not.toHaveBeenCalled();
+        expect(inbound.prepare('SELECT * FROM messages_in').all()).toHaveLength(0);
+        return;
+      }
       if (mode.startsWith('review-')) {
         expect(briefs.reserveDue).not.toHaveBeenCalled();
         expect(wake).not.toHaveBeenCalled();
@@ -746,6 +766,7 @@ it.each(['existing', 'due', 'refresh', 'review-fence', 'review-corrupt'])(
       if (mode !== 'existing') {
         expect(briefs.reserveDue).toHaveBeenCalledOnce();
         expect(wake).toHaveBeenCalledOnce();
+        expect(proactive.scheduledBatch).toHaveBeenCalledOnce();
         expect(renewBriefContext).toHaveBeenCalledTimes(mode === 'refresh' ? 1 : 0);
         expect(calendar.refresh).toHaveBeenCalledTimes(mode === 'refresh' ? 1 : 0);
         expect(deliver).not.toHaveBeenCalled();
@@ -816,11 +837,17 @@ it('S04 wires shared-context scheduled admission and model budgets while withhol
     contextReady: vi.fn().mockResolvedValue({ status: 'ok' }),
     answers: { authorizePublication: vi.fn().mockResolvedValue({ status: 'ok' }) },
   };
+  const proactive = { scheduledBatch: vi.fn().mockResolvedValue({ status: 'ok' }) };
   let authorize!: TurnAuthorization;
   runtime = createCosRuntime({
     db,
     enabled: true,
-    store: { briefs, knowledge, context: vi.fn().mockResolvedValue({ status: 'ok' }) } as unknown as PriorityStore,
+    store: {
+      briefs,
+      knowledge,
+      proactive,
+      context: vi.fn().mockResolvedValue({ status: 'ok' }),
+    } as unknown as PriorityStore,
     facts: async () => ({
       id: 'private',
       type: 'P',
@@ -843,6 +870,14 @@ it('S04 wires shared-context scheduled admission and model budgets while withhol
   await prepareCosLaunch(session);
   expect(await authorize()).toBe(`brief:${lease.runId}:1`);
   expect(knowledge.contextReady).toHaveBeenCalledWith(expect.objectContaining({ sessionId: 'session', generation }));
+  expect(proactive.scheduledBatch).toHaveBeenCalledWith(
+    expect.objectContaining({ generation, origin: { kind: 'schedule', runId: lease.runId, generation: 1 } }),
+  );
+  proactive.scheduledBatch.mockResolvedValue({ status: 'unavailable' });
+  expect(await authorize()).toBeNull();
+  expect(await authorize.reserve!('outage-before-model')).toBe(false);
+  expect(briefs.reserveCall).not.toHaveBeenCalled();
+  proactive.scheduledBatch.mockResolvedValue({ status: 'ok' });
   expect(await authorize.reserve!('attempt')).toBe(true);
   expect(briefs.reserveCall).toHaveBeenCalledWith(
     expect.objectContaining({ origin: { kind: 'schedule', runId: lease.runId, generation: 1 } }),

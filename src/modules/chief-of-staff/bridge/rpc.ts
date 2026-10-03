@@ -11,6 +11,11 @@ import type { CalendarReadInput, WorkChange, WorkRead } from '../contracts/proto
 import type { ScheduleChange } from '../contracts/schedule-protocol.js';
 import type { MissionRequest } from '../contracts/mission-protocol.js';
 import type { TeamRequest } from '../contracts/team-protocol.js';
+import type {
+  ProactiveDraft,
+  ProactiveDispositionRequest,
+  ProactivePolicyChange,
+} from '../contracts/proactive-protocol.js';
 
 export function ensureRpcSchema(db: Database.Database): void {
   db.exec(`CREATE TABLE IF NOT EXISTS cos_rpc_responses (
@@ -141,6 +146,12 @@ export function createRpcHandler(dependencies: {
           };
       } else if (request.method === 'cos_change_propose')
         result = await dependencies.store.propose(context, request.request_id, request.params.change as Change);
+      else if (request.method === 'cos_proactive_policy_propose')
+        result = await dependencies.store.propose(
+          context,
+          request.request_id,
+          request.params.change as ProactivePolicyChange,
+        );
       else if (request.method === 'cos_brief_schedule_propose')
         result = await dependencies.store.propose(context, request.request_id, request.params.change as ScheduleChange);
       else if (request.method === 'cos_work_read')
@@ -155,6 +166,26 @@ export function createRpcHandler(dependencies: {
       else if (request.method === 'cos_request_status')
         result = await dependencies.store.status(context, String(request.params.request_id));
       else if (!dependencies.knowledge || !knowledgeContext) result = { status: 'unavailable' };
+      else if (request.method === 'cos_proactive_disposition_propose')
+        result = await dependencies.store.requestProactiveDisposition(
+          knowledgeContext,
+          request.request_id,
+          request.params.request as ProactiveDispositionRequest,
+        );
+      else if (request.method === 'cos_proactive_batch')
+        result =
+          context.origin?.kind === 'schedule'
+            ? await dependencies.store.proactive.scheduledBatch(knowledgeContext)
+            : await dependencies.store.proactive.batch(knowledgeContext, request.request_id);
+      else if (request.method === 'cos_proactive_submit')
+        result = await dependencies.store.proactive.submit(
+          knowledgeContext,
+          request.request_id,
+          String(request.params.batch_id),
+          request.params.draft as ProactiveDraft,
+        );
+      else if (request.method === 'cos_proactive_history')
+        result = await dependencies.store.proactive.history(knowledgeContext, Number(request.params.offset ?? 0));
       else if (request.method === 'cos_brief_request') {
         result = dependencies.store.briefArtifacts
           ? typeof request.params.artifact_id === 'string'

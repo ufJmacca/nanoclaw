@@ -6,6 +6,7 @@ import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
 import { answerDraftSchema } from './generated/answer-protocol.js';
 import { scheduleChangeSchema } from './generated/schedule-protocol.js';
+import { proactiveCoordinatorTools } from './proactive-coordinator-tools.js';
 import { missionCoordinatorTools } from './mission-coordinator-tools.js';
 
 export async function executeCosRequest(
@@ -313,5 +314,6 @@ export const cosTools: McpToolDefinition[] = [
   workReadTool,
   briefTool,
   ...missionCoordinatorTools(executeCosRequest),
+  ...proactiveCoordinatorTools(executeCosRequest),
 ];
 if (process.env.NANOCLAW_COS_PROTOCOL === COS_PROTOCOL) registerTools(cosTools);

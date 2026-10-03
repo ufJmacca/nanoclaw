@@ -11,7 +11,7 @@ it('S06 binds thirteen exact migrations without declaring historical rollback co
     slice: 'S06',
     postgres: { minimum: 13, maximum: 13 },
     sqlite: { minimum: 22, maximum: 22 },
-    migrations: MIGRATIONS.map(({ version, checksum }) => ({ version, checksum })),
+    migrations: MIGRATIONS.slice(0, 13).map(({ version, checksum }) => ({ version, checksum })),
   };
   expect(validateReleaseManifest(current)).toEqual(current);
   for (const patch of [
@@ -239,4 +239,23 @@ it('S03 requires all three pinned migrations and schema 3 without changing histo
   ])
     expect(() => validateReleaseManifest({ ...current, ...patch })).toThrow('release_not_transferable');
   expect(validateReleaseManifest(manifest()).slice).toBe('S01');
+});
+
+it('S07 pins fourteen migrations and cannot promise S06 schema rollback compatibility', () => {
+  const current = {
+    ...manifest(),
+    slice: 'S07',
+    postgres: { minimum: 14, maximum: 14 },
+    sqlite: { minimum: 22, maximum: 22 },
+    migrations: MIGRATIONS.map(({ version, checksum }) => ({ version, checksum })),
+  };
+  expect(validateReleaseManifest(current)).toEqual(current);
+  for (const patch of [
+    { slice: 'S08' },
+    { slice: 'S06' },
+    { postgres: { minimum: 13, maximum: 14 } },
+    { migrations: current.migrations.slice(0, 13) },
+    { migrations: current.migrations.map((m) => (m.version === 14 ? { ...m, checksum: '0'.repeat(64) } : m)) },
+  ])
+    expect(() => validateReleaseManifest({ ...current, ...patch })).toThrow('release_not_transferable');
 });

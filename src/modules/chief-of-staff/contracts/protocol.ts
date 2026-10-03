@@ -4,6 +4,13 @@ import { validScheduleChange, type ScheduleChange } from './schedule-protocol.js
 import { validMissionRequest } from './mission-protocol.js';
 import { validMissionReview } from './mission-review.js';
 import { validTeamRequest } from './team-protocol.js';
+import {
+  validProactivePolicyChange,
+  validProactiveDisposition,
+  validProactiveDraft,
+  type ProactivePolicyChange,
+  type ProactiveDispositionRequest,
+} from './proactive-protocol.js';
 import { answerDraftSchema, validAnswerDraft, validAnswerCitation, type AnswerCitation } from './answer-protocol.js';
 /** Provider guidance; the wire validator additionally checks real dates and state transitions. */
 export const workChangeSchema = {
@@ -112,6 +119,11 @@ export type CosMethod =
   | 'cos_team_cancel'
   | 'cos_brief_schedule_propose'
   | 'cos_brief_request'
+  | 'cos_proactive_policy_propose'
+  | 'cos_proactive_batch'
+  | 'cos_proactive_submit'
+  | 'cos_proactive_disposition_propose'
+  | 'cos_proactive_history'
   | 'cos_request_status'
   | 'cos_knowledge_search'
   | 'cos_source_get'
@@ -220,6 +232,26 @@ export function validRequest(value: unknown): value is CosRequest {
   if (value.method === 'cos_work_change_propose')
     return keys(value.params, ['change']) && validWorkChange(value.params.change);
   if (value.method === 'cos_work_read') return validWorkRead(value.params);
+  if (value.method === 'cos_proactive_policy_propose')
+    return keys(value.params, ['change']) && validProactivePolicyChange(value.params.change);
+  if (value.method === 'cos_proactive_batch') return Object.keys(value.params).length === 0;
+  if (value.method === 'cos_proactive_submit')
+    return (
+      keys(value.params, ['batch_id', 'draft']) &&
+      typeof value.params.batch_id === 'string' &&
+      /^batch-[a-f0-9]{64}$/.test(value.params.batch_id) &&
+      validProactiveDraft(value.params.draft)
+    );
+  if (value.method === 'cos_proactive_disposition_propose')
+    return keys(value.params, ['request']) && validProactiveDisposition(value.params.request);
+  if (value.method === 'cos_proactive_history')
+    return (
+      keys(value.params, ['offset']) &&
+      (value.params.offset === undefined ||
+        (Number.isSafeInteger(value.params.offset) &&
+          Number(value.params.offset) >= 0 &&
+          Number(value.params.offset) <= 10000))
+    );
   if (value.method === 'cos_mission_request')
     return keys(value.params, ['request']) && validMissionRequest(value.params.request);
   if (value.method === 'cos_team_request')
@@ -464,13 +496,38 @@ export function validTeamChange(value: unknown): value is TeamChange {
     digest(value.work_order) === value.work_order_digest
   );
 }
-export type ProposalChange = Change | SourceChange | WorkChange | ScheduleChange | MissionChange | TeamChange;
+export type ProactiveDispositionChange = {
+  kind: 'proactive_disposition';
+  request: ProactiveDispositionRequest;
+  mission: MissionChange | null;
+};
+export function validProactiveDispositionChange(value: unknown): value is ProactiveDispositionChange {
+  return (
+    object(value) &&
+    Object.keys(value).length === 3 &&
+    keys(value, ['kind', 'request', 'mission']) &&
+    value.kind === 'proactive_disposition' &&
+    validProactiveDisposition(value.request) &&
+    (value.mission === null || (value.request.decision === 'accept' && validMissionChange(value.mission)))
+  );
+}
+export type ProposalChange =
+  | Change
+  | SourceChange
+  | WorkChange
+  | ScheduleChange
+  | MissionChange
+  | TeamChange
+  | ProactivePolicyChange
+  | ProactiveDispositionChange;
 export function validProposalChange(value: unknown): value is ProposalChange {
   return (
     validChange(value) ||
     validSourceChange(value) ||
     validWorkChange(value) ||
     validScheduleChange(value) ||
+    validProactivePolicyChange(value) ||
+    validProactiveDispositionChange(value) ||
     validMissionChange(value) ||
     validTeamChange(value)
   );

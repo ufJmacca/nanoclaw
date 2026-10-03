@@ -39,3 +39,21 @@ it.each(['S05', 'S06'] as const)(
     }
   },
 );
+
+it.each([
+  'cos_mission_boundaries',
+  'cos_mission_allocations',
+  'cos_mission_stop_attempts',
+  'cos_mission_stop_families',
+])('S07 preserves retained %s and still denies older code', (table) => {
+  const db = new Database(':memory:');
+  try {
+    db.exec(`CREATE TABLE ${table}(opaque TEXT); INSERT INTO ${table} VALUES('retained')`);
+    const before = db.serialize();
+    expect(() => assertNativeReleaseCompatibility(db, { ...fixtureRelease('S06'), slice: 'S07' })).not.toThrow();
+    expect(() => assertNativeReleaseCompatibility(db, fixtureRelease('S04'))).toThrow('specialist_release_required');
+    expect(db.serialize()).toEqual(before);
+  } finally {
+    db.close();
+  }
+});

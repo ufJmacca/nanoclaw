@@ -12,6 +12,7 @@ import {
 } from '../mcp-tools/generated/cos-protocol.js';
 import { createScopedToolDispatch } from './codex-scoped-tools.js';
 import { missionCoordinatorRequest } from '../mcp-tools/mission-coordinator-tools.js';
+import { proactiveCoordinatorRequest } from '../mcp-tools/proactive-coordinator-tools.js';
 import type { DynamicToolFunctionSpec } from './codex-app-server.js';
 
 export const cosDynamicTools: DynamicToolFunctionSpec[] = cosTools.map(({ tool }) => ({
@@ -22,6 +23,7 @@ export const cosDynamicTools: DynamicToolFunctionSpec[] = cosTools.map(({ tool }
 }));
 
 function requestFor(tool: unknown, args: unknown): CosRequest | null {
+  if (typeof tool === 'string' && tool.startsWith('cos_proactive_')) return proactiveCoordinatorRequest(tool, args);
   if (typeof tool === 'string' && (tool.startsWith('cos_mission_') || tool.startsWith('cos_team_')))
     return missionCoordinatorRequest(tool, args);
   if (!args || typeof args !== 'object' || Array.isArray(args)) return null;

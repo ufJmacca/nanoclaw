@@ -254,7 +254,15 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
           if (!current()) return { status: 'denied' };
           if (refreshed.status !== 'ok') return refreshed;
           const fresh = resolveKnowledgeContext(session, ownerContext, d.db);
-          return fresh ? await d.store.knowledge.contextReady(fresh) : { status: 'denied' };
+          if (!fresh) return { status: 'denied' };
+          const ready = await d.store.knowledge.contextReady(fresh);
+          if (ready.status !== 'ok' || !current()) return ready.status === 'ok' ? { status: 'denied' } : ready;
+          const prepared = await d.store.proactive.scheduledBatch({
+            ...fresh,
+            ingressId: `brief:${run.id}:${run.generation}`,
+            origin: { kind: 'schedule', runId: run.id, generation: run.generation },
+          });
+          return current() ? { status: prepared.status } : { status: 'denied' };
         },
         wake: async (session) => {
           await d.wake(session);
@@ -325,12 +333,18 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
           verify: async () => {
             const context = await controller.context(session);
             if (context?.origin?.kind === 'mission_review' && !(await reviewAuthority(context, false))) return null;
-            return context &&
-              d.store &&
-              (await d.store.context(context)).status === 'ok' &&
-              (await knowledgeAllowed(session, context))
-              ? context
-              : null;
+            if (
+              !context ||
+              !d.store ||
+              (await d.store.context(context)).status !== 'ok' ||
+              !(await knowledgeAllowed(session, context))
+            )
+              return null;
+            if (context.origin?.kind === 'schedule') {
+              const retained = resolveKnowledgeContext(session, context, d.db);
+              if (!retained || (await d.store.proactive.scheduledBatch(retained)).status !== 'ok') return null;
+            }
+            return context;
           },
         }),
       );

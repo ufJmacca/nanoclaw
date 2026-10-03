@@ -12,12 +12,25 @@ import { TEAM_CHECKSUM } from '../../modules/chief-of-staff/store/team-schema.js
 import { TEAM_LINEAGE_CHECKSUM } from '../../modules/chief-of-staff/store/team-lineage-schema.js';
 import { TEAM_FINAL_REVIEW_CHECKSUM } from '../../modules/chief-of-staff/store/team-final-review-schema.js';
 import { TEAM_PARENT_BUDGET_CHECKSUM } from '../../modules/chief-of-staff/store/team-parent-budget-schema.js';
+import { PROACTIVE_CHECKSUM } from '../../modules/chief-of-staff/store/proactive-schema.js';
 /** Synthetic identities for release-contract tests; never a transferable artifact receipt. */
 export function fixtureRelease(slice: ReleaseManifest['slice'] = 'S01'): ReleaseManifest {
   const commit = 'a'.repeat(40),
     imageIds = ['sha256:' + 'c'.repeat(64), 'sha256:' + 'd'.repeat(64)],
     schemaVersion =
-      slice === 'S01' ? 1 : slice === 'S02' ? 2 : slice === 'S03' ? 3 : slice === 'S04' ? 6 : slice === 'S05' ? 9 : 13;
+      slice === 'S01'
+        ? 1
+        : slice === 'S02'
+          ? 2
+          : slice === 'S03'
+            ? 3
+            : slice === 'S04'
+              ? 6
+              : slice === 'S05'
+                ? 9
+                : slice === 'S06'
+                  ? 13
+                  : 14;
   return {
     contract: 'cos-release/v1',
     releaseId: 'release-fixture',
@@ -38,7 +51,9 @@ export function fixtureRelease(slice: ReleaseManifest['slice'] = 'S01'): Release
                 ? 'refs/heads/cos/s04-daily-brief-and-commitments'
                 : slice === 'S05'
                   ? 'refs/heads/cos/s05-isolated-research-missions'
-                  : 'refs/heads/cos/s06-specialist-teams-and-review',
+                  : slice === 'S06'
+                    ? 'refs/heads/cos/s06-specialist-teams-and-review'
+                    : 'refs/heads/cos/s07-proactive-proposals',
       syncContract: 'cos-source-sync/github-pinned-v1',
     },
     buildInputDigest: 'e'.repeat(64),
@@ -65,7 +80,7 @@ export function fixtureRelease(slice: ReleaseManifest['slice'] = 'S01'): Release
             { version: 9, checksum: MISSION_REVIEW_CHECKSUM },
           ]
         : []),
-      ...(schemaVersion === 13
+      ...(schemaVersion >= 13
         ? [
             { version: 10, checksum: TEAM_CHECKSUM },
             { version: 11, checksum: TEAM_LINEAGE_CHECKSUM },
@@ -73,6 +88,7 @@ export function fixtureRelease(slice: ReleaseManifest['slice'] = 'S01'): Release
             { version: 13, checksum: TEAM_PARENT_BUDGET_CHECKSUM },
           ]
         : []),
+      ...(schemaVersion === 14 ? [{ version: 14, checksum: PROACTIVE_CHECKSUM }] : []),
     ],
     previousReleaseIds: [],
     images: [
