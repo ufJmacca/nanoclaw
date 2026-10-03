@@ -63,6 +63,28 @@ export type BriefInputs = {
 };
 
 export type BriefReference = AnswerCitation | { kind: 'work'; work_id: string; version: number };
+export type ProactiveSummary = {
+  suggestion_id: string;
+  version: number;
+  semantic_key: string;
+  title: string;
+  purpose: string;
+  goal_id: string;
+  project_id: string | null;
+  recommendation: string;
+  confidence: string;
+  uncertainty: string;
+  expected_benefit: string;
+  estimated_effort: { minutes: number; assumptions: string };
+  opportunity_cost: string;
+  evidence: BriefReference[];
+  observation_ids: string[];
+  review_at: string;
+  expires_at: string;
+  permission_requirements: string[];
+  action_class: string;
+  route: 'digest' | 'interruption';
+};
 export type BriefAttention = {
   id: string;
   title: string;
@@ -80,7 +102,7 @@ export type BriefSnapshot = {
   decisions: BriefWork[];
   events: BriefEvent[];
   calendar_coverage: BriefCalendarCoverage[];
-  suggested_work: [];
+  suggested_work: ProactiveSummary[];
 };
 const dueInstant = (due: WorkDue) =>
   due.kind === 'instant'
@@ -240,6 +262,15 @@ export function renderBrief(snapshot: BriefSnapshot): string {
             `- ${label(e.summary)} — ${e.start.kind === 'date' ? e.start.date + ' (all day)' : e.start.instant} [${reference(e.evidence)}]`,
         )
       : ['No visible events in the recorded window.']),
-    'Suggested delegated work: none. Any follow-up still requires an owner-approved proposal.',
+    ...(snapshot.suggested_work.length
+      ? [
+          'Suggested work — awaiting owner disposition:',
+          ...snapshot.suggested_work.map(
+            (s) =>
+              `- ${label(s.title)} [${label(s.suggestion_id)} v${s.version}]. ${label(s.purpose)} Goal: ${label(s.goal_id)}${s.project_id ? '; project: ' + label(s.project_id) : ''}. Recommendation: ${label(s.recommendation)} (${label(s.action_class)}). Benefit: ${label(s.expected_benefit)}. Estimated effort: ${s.estimated_effort.minutes} minutes; assumes ${label(s.estimated_effort.assumptions)}. Displaces: ${label(s.opportunity_cost)}. Confidence: ${label(s.confidence)}; uncertainty: ${label(s.uncertainty)}. Evidence: ${s.evidence.map(reference).join('; ')}. Host observations: ${s.observation_ids.map(label).join('; ')}. Review: ${s.review_at}; expires: ${s.expires_at}. Required permissions: ${s.permission_requirements.map(label).join(', ')}.`,
+          ),
+          'Ask CoS to accept, defer until an exact time, or dismiss a suggestion with a reason. Confirm the resulting exact approval preview. A suggestion grants no permission to execute work or change a commitment/project.',
+        ]
+      : ['Suggested delegated work: none. Any follow-up still requires an owner-approved proposal.']),
   ].join('\n');
 }

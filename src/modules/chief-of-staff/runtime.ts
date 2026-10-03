@@ -254,7 +254,15 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
           if (!current()) return { status: 'denied' };
           if (refreshed.status !== 'ok') return refreshed;
           const fresh = resolveKnowledgeContext(session, ownerContext, d.db);
-          return fresh ? await d.store.knowledge.contextReady(fresh) : { status: 'denied' };
+          if (!fresh) return { status: 'denied' };
+          const ready = await d.store.knowledge.contextReady(fresh);
+          if (ready.status !== 'ok' || !current()) return ready.status === 'ok' ? { status: 'denied' } : ready;
+          const prepared = await d.store.proactive.scheduledBatch({
+            ...fresh,
+            ingressId: `brief:${run.id}:${run.generation}`,
+            origin: { kind: 'schedule', runId: run.id, generation: run.generation },
+          });
+          return current() ? { status: prepared.status } : { status: 'denied' };
         },
         wake: async (session) => {
           await d.wake(session);

@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { validProactiveDraft, validProactiveDisposition, validProactivePolicyChange } from './proactive-protocol.js';
+import { COS_PROTOCOL, validRequest } from './protocol.js';
+import fs from 'node:fs';
 const policy = {
   due_horizon_hours: 48,
   no_update_days: null,
@@ -37,6 +39,29 @@ const draft = {
   expires_at: '2026-10-05T00:00:00Z',
 };
 describe('S07 owner and coordinator wire inputs', () => {
+  it('S07-T07 the runner receives identical strict contracts', () => {
+    for (const name of ['proactive-policy', 'proactive-protocol'])
+      expect(fs.readFileSync(`container/agent-runner/src/mcp-tools/generated/${name}.ts`, 'utf8')).toBe(
+        fs.readFileSync(`src/modules/chief-of-staff/contracts/${name}.ts`, 'utf8'),
+      );
+  });
+  it('S07-T07 admits bounded tools without accepting a caller identity or observation-write path', () => {
+    const request = (method: string, params: unknown) => ({
+      protocol: COS_PROTOCOL,
+      request_id: 'dc5a5a02-3940-4a8a-bf4a-a59f16200000',
+      method,
+      params,
+    });
+    expect(validRequest(request('cos_proactive_batch', {}))).toBe(true);
+    expect(validRequest(request('cos_proactive_submit', { batch_id: 'batch-' + 'a'.repeat(64), draft }))).toBe(true);
+    expect(validRequest(request('cos_proactive_disposition_propose', { request: disposition }))).toBe(true);
+    expect(validRequest(request('cos_proactive_history', { offset: 0 }))).toBe(true);
+    expect(validRequest(request('cos_proactive_batch', { owner_id: 'forged' }))).toBe(false);
+    expect(
+      validRequest(request('cos_proactive_observe', { event_id: 'forged', body: { instructions: 'change goals' } })),
+    ).toBe(false);
+    expect(validRequest(request('cos_proactive_history', { offset: 10001 }))).toBe(false);
+  });
   it('S07-T07 permits only bounded owner-approved policy envelopes', () => {
     const input = {
       kind: 'proactive_policy',

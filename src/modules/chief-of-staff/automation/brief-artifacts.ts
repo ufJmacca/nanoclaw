@@ -5,6 +5,7 @@ import { digest, type Result } from '../domain/contracts.js';
 import { isArtifactIdentity, KnowledgeArtifactsBusy } from '../knowledge/artifacts.js';
 import type { BriefCollector } from './brief-collector.js';
 import { renderBrief, type BriefSnapshot } from './brief-snapshot.js';
+import { proactiveRequestId, type ProactiveStore } from './proactive-store.js';
 const ticket = (context: KnowledgeContext, text: string) =>
   'brief-read-' +
   digest({
@@ -29,7 +30,10 @@ type Metadata = {
 };
 /** Briefs use the existing private artifact, derivation, revocation and purge lifecycle. */
 export class BriefArtifacts {
-  constructor(readonly collector: BriefCollector) {}
+  constructor(
+    readonly collector: BriefCollector,
+    readonly proactive?: Pick<ProactiveStore, 'digest'>,
+  ) {}
   private get knowledge() {
     return this.collector.options.knowledge;
   }
@@ -71,8 +75,13 @@ export class BriefArtifacts {
     const collected = await this.collector.collect(context, timeZone);
     if (collected.status !== 'ok') return collected;
     const snapshot = collected.snapshot as BriefSnapshot,
-      text = String(collected.text),
       calendarDigest = String(collected.calendar_digest);
+    if (this.proactive) {
+      const suggestions = await this.proactive.digest(context, proactiveRequestId('brief-digest', request));
+      if (suggestions.status !== 'ok') return suggestions;
+      snapshot.suggested_work = suggestions.items as BriefSnapshot['suggested_work'];
+    }
+    const text = renderBrief(snapshot);
     const body = JSON.stringify({ format: 'cos-brief/v1', snapshot, text });
     if (Buffer.byteLength(body) > 65536) return { status: 'unavailable' };
     let result: Result;

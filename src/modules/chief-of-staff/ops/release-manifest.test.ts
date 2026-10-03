@@ -11,7 +11,7 @@ it('S06 binds thirteen exact migrations without declaring historical rollback co
     slice: 'S06',
     postgres: { minimum: 13, maximum: 13 },
     sqlite: { minimum: 22, maximum: 22 },
-    migrations: MIGRATIONS.map(({ version, checksum }) => ({ version, checksum })),
+    migrations: MIGRATIONS.slice(0, 13).map(({ version, checksum }) => ({ version, checksum })),
   };
   expect(validateReleaseManifest(current)).toEqual(current);
   for (const patch of [

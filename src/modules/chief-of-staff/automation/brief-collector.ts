@@ -5,6 +5,7 @@ import { BoundedDatabase, DatabaseUnavailable } from '../store/client.js';
 import type { WorkStore } from '../store/work.js';
 import type { KnowledgeStore, KnowledgeContext, Evidence } from '../knowledge/store.js';
 import type { CalendarView } from '../calendar/view.js';
+import type { ProactiveStore } from './proactive-store.js';
 import { digest, type Result } from '../domain/contracts.js';
 import {
   buildBriefSnapshot,
@@ -37,6 +38,7 @@ export class BriefCollector {
       knowledge: KnowledgeStore;
       calendarView?: CalendarView;
       clock?: () => Date;
+      proactive?: Pick<ProactiveStore, 'validateDigest'>;
     },
   ) {}
   private async transaction(operation: (client: PoolClient) => Promise<Result>): Promise<Result> {
@@ -63,6 +65,11 @@ export class BriefCollector {
     const d = this.options,
       k = d.knowledge.answers.dependencies;
     if (!(await k.current(client, context))) return false;
+    if (
+      snapshot.suggested_work.length &&
+      (!d.proactive || !(await d.proactive.validateDigest(client, context, snapshot.suggested_work, historical)))
+    )
+      return false;
     if (!historical && context.origin) {
       const refresh = await briefRefreshCoverage(client, context, snapshot.time_zone, true);
       if (

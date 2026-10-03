@@ -113,7 +113,8 @@ export class PriorityStore {
     this.briefs = new BriefRunStore(database);
     if (knowledge)
       this.briefArtifacts = new BriefArtifacts(
-        new BriefCollector({ database, work: this.work, knowledge, calendarView }),
+        new BriefCollector({ database, work: this.work, knowledge, calendarView, proactive: this.proactive }),
+        this.proactive,
       );
   }
   private async workReceiptCurrent(client: PoolClient, context: Context, result: Result): Promise<boolean> {
@@ -294,13 +295,15 @@ export class PriorityStore {
         ? 'cos_team_request'
         : mission
           ? 'cos_mission_request'
-          : validSourceChange(change)
-            ? 'cos_source_change_propose'
-            : validWorkChange(change)
-              ? 'cos_work_change_propose'
-              : validScheduleChange(change)
-                ? 'cos_brief_schedule_propose'
-                : 'cos_change_propose';
+          : validProactivePolicyChange(change)
+            ? 'cos_proactive_policy_propose'
+            : validSourceChange(change)
+              ? 'cos_source_change_propose'
+              : validWorkChange(change)
+                ? 'cos_work_change_propose'
+                : validScheduleChange(change)
+                  ? 'cos_brief_schedule_propose'
+                  : 'cos_change_propose';
     const hash = digest(
       disposition
         ? { method, request: disposition, retained }
@@ -623,6 +626,13 @@ export class PriorityStore {
         work_next_offset: work.next_offset,
         work_truncated: work.truncated,
         brief_schedules: await this.schedules.read(client, context),
+        proactive_policy:
+          (
+            await client.query(
+              'SELECT version,state,policy FROM cos.proactive_policies WHERE scope_id=$1 AND owner_id=$2',
+              [context.scopeId, context.ownerId],
+            )
+          ).rows[0] ?? null,
         ranking: 'advice',
         coverage: records.length ? ['approved_records_only'] : ['no_approved_priorities'],
       };

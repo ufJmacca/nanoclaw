@@ -482,6 +482,55 @@ test('S07-PG01 a real partition cannot acknowledge acceptance, invent empty hist
   }
 });
 
+test('S07-T06/T10 a storm stays within batch/proposal limits and checked briefs reserve one durable digest', async () => {
+  now = new Date();
+  for (let index = 0; index < 3; index++)
+    await approve({
+      kind: 'decision',
+      title: 'Fixture unresolved dependency ' + index,
+      description: 'Owner-recorded decision',
+      reason: 'Fixture owner',
+      state: 'needed',
+      project_id: fixtureProject,
+      due: null,
+      defer_until: null,
+      evidence: [],
+      expected_version: 0,
+    });
+  const p = proactive(),
+    batch = await p.batch(retained, randomUUID());
+  assert.equal(batch.status, 'ok');
+  assert.equal((batch.candidates as ProactiveCandidate[]).length, 3);
+  for (const [index, candidate] of (batch.candidates as ProactiveCandidate[]).entries())
+    assert.equal(
+      (await p.submit(retained, randomUUID(), String(batch.batch_id), draft(candidate, fixtureGoal))).status,
+      index < 2 ? 'ok' : 'denied',
+    );
+  const request = randomUUID(),
+    brief = await store.briefArtifacts!.prepare(retained, request, 'Australia/Sydney');
+  assert.equal(brief.status, 'ok');
+  assert.equal((brief.snapshot as { suggested_work: unknown[] }).suggested_work.length, 1);
+  assert.match(String(brief.text), /Suggested work — awaiting owner disposition/);
+  assert.deepEqual(await store.briefArtifacts!.prepare(retained, request, 'Australia/Sydney'), brief);
+  const next = await store.briefArtifacts!.prepare(retained, randomUUID(), 'Australia/Sydney');
+  assert.equal(next.status, 'ok');
+  assert.deepEqual((next.snapshot as { suggested_work: unknown[] }).suggested_work, []);
+  assert.equal((await pool.query('SELECT * FROM cos.proactive_notifications WHERE scope_id=$1', [scope])).rowCount, 1);
+  const currentPolicy = (await pool.query('SELECT version FROM cos.proactive_policies WHERE scope_id=$1', [scope]))
+    .rows[0].version;
+  await approve({
+    kind: 'proactive_policy',
+    state: 'active',
+    policy: { ...policy, time_zone: 'UTC', quiet_hours: { start: '00:00', end: '23:59' }, notifications_per_day: 3 },
+    expected_version: currentPolicy,
+    reason: 'Fixture quiet hours',
+  });
+  await nextSuggestion();
+  const quiet = await store.briefArtifacts!.prepare(retained, randomUUID(), 'Australia/Sydney');
+  assert.equal(quiet.status, 'ok');
+  assert.deepEqual((quiet.snapshot as { suggested_work: unknown[] }).suggested_work, []);
+  assert.equal((await pool.query('SELECT * FROM cos.proactive_notifications WHERE scope_id=$1', [scope])).rowCount, 1);
+});
 test('S07-T04/T05 precise acceptance queues one existing bounded mission after current delegation checks', async () => {
   const sourceName = randomUUID() + '.md';
   fs.writeFileSync(

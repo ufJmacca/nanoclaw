@@ -9,20 +9,26 @@ import {
   type ProactiveDispositionRequest,
 } from '../contracts/proactive-protocol.js';
 import { validProactivePolicy, type ProactivePolicy } from '../contracts/proactive-policy.js';
-import type { ProactiveDispositionChange } from '../contracts/protocol.js';
+import { COS_MAX_BYTES, type ProactiveDispositionChange } from '../contracts/protocol.js';
 import type { KnowledgeStore, KnowledgeContext } from '../knowledge/store.js';
 import { BoundedDatabase, DatabaseUnavailable } from '../store/client.js';
 import type { BriefCollector } from './brief-collector.js';
-import type { BriefRecord, BriefSnapshot } from './brief-snapshot.js';
+import type { BriefRecord, BriefSnapshot, ProactiveSummary } from './brief-snapshot.js';
 import {
   selectProactiveCandidates,
   semanticProposalKey,
+  planProposalNotification,
   type ProactiveCandidate,
   type ProactiveObservation,
 } from './proactive-policy.js';
 import type { MissionProposalStore } from '../missions/proposal-store.js';
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const iso = (date: Date | string) => (date instanceof Date ? date.toISOString() : date);
+/** Host-owned request IDs keep retry identity distinct from the parent brief RPC. */
+export function proactiveRequestId(purpose: string, seed: string): string {
+  const hash = digest({ purpose, seed });
+  return `${hash.slice(0, 8)}-${hash.slice(8, 12)}-4${hash.slice(13, 16)}-8${hash.slice(17, 20)}-${hash.slice(20, 32)}`;
+}
 type BatchBody = {
   snapshot: BriefSnapshot;
   records: BriefRecord[];
@@ -30,6 +36,13 @@ type BatchBody = {
   candidates: ProactiveCandidate[];
   calendar_digest: string;
   max_proposals: number;
+  open_proposals: Array<{
+    suggestion_id: string;
+    version: number;
+    title: string;
+    purpose: string;
+    opportunity_cost: string;
+  }>;
 };
 type RevisionBody = {
   candidate: ProactiveCandidate;
@@ -122,6 +135,40 @@ export class ProactiveStore {
       )
         return false;
     return true;
+  }
+  private batchReceipt(id: string, body: BatchBody): Result {
+    const candidates = body.candidates.map((c) => ({ ...c, observation_ids: c.observation_ids.slice(0, 20) }));
+    const referenced = new Set(candidates.flatMap((c) => c.observation_ids));
+    const observations = body.observations
+      .filter((o) => referenced.has(o.event_id))
+      .slice(0, 50)
+      .map((o) => ({
+        ...o,
+        provenance: Object.fromEntries(
+          Object.entries(o.provenance).filter(([key]) =>
+            ['table', 'revision_id', 'binding_id', 'calendar_id', 'snapshot_id', 'version', 'reviewed'].includes(key),
+          ),
+        ),
+      }));
+    const approvedGoals = body.records.filter((r) => r.kind === 'goal');
+    const goals = approvedGoals.slice(0, 5).map((r) => ({ ...r, description: r.description.slice(0, 2000) }));
+    const receipt: Result = {
+      status: 'ok',
+      batch_id: id,
+      candidates,
+      observations,
+      goals,
+      open_proposals: body.open_proposals,
+      max_proposals: body.max_proposals,
+      context_truncated:
+        approvedGoals.length > 5 ||
+        approvedGoals.some((g) => g.description.length > 2000) ||
+        body.candidates.some((c) => c.observation_ids.length > 20) ||
+        referenced.size > 50,
+      context_notice:
+        'Bounded evidence view. Missing observations do not prove inactivity. No minimum recommendation quota.',
+    };
+    return Buffer.byteLength(JSON.stringify(receipt)) < COS_MAX_BYTES - 512 ? receipt : { status: 'unavailable' };
   }
   /** Only trusted host collection normalises observations; there is deliberately no observation-write RPC. */
   private async observations(
@@ -341,20 +388,21 @@ export class ProactiveStore {
         await client.query('SELECT * FROM cos.proactive_batches WHERE scope_id=$1 AND id=$2', [context.scopeId, id])
       ).rows[0];
       if (old)
-        return (await this.batchCurrent(client, context, old))
-          ? {
-              status: 'ok',
-              batch_id: id,
-              candidates: old.body.candidates,
-              goals: old.body.records.filter((r: BriefRecord) => r.kind === 'goal'),
-              max_proposals: old.body.max_proposals,
-            }
-          : { status: 'denied' };
-      return { status: 'ok', policy: p };
+        return (await this.batchCurrent(client, context, old)) ? this.batchReceipt(id, old.body) : { status: 'denied' };
+      const scheduled = context.origin
+        ? (
+            await client.query(
+              `SELECT s.policy->>'time_zone' AS time_zone FROM cos.brief_runs r JOIN cos.brief_schedules s ON s.scope_id=r.scope_id AND s.id=r.schedule_id AND s.version=r.schedule_version WHERE r.scope_id=$1 AND r.id=$2 AND r.generation=$3 AND r.state='dispatched' AND r.deadline_at>clock_timestamp()`,
+              [context.scopeId, context.origin.runId, context.origin.generation],
+            )
+          ).rows[0]
+        : null;
+      if (context.origin && !scheduled) return { status: 'denied' };
+      return { status: 'ok', policy: p, collection_time_zone: scheduled?.time_zone ?? p.policy.time_zone };
     });
     if (before.status !== 'ok' || before.batch_id) return before;
     const p = before.policy as { version: number; policy: ProactivePolicy },
-      collected = await this.options.collector.collect(context, p.policy.time_zone);
+      collected = await this.options.collector.collect(context, String(before.collection_time_zone));
     if (collected.status !== 'ok') return collected;
     return this.transaction(context, async (client) => {
       const current = await this.policy(client, context);
@@ -389,7 +437,23 @@ export class ProactiveStore {
         candidates,
         calendar_digest: String(collected.calendar_digest),
         max_proposals: p.policy.max_proposals,
+        open_proposals: [],
       };
+      const open = (
+        await client.query(
+          `SELECT s.id,s.version,r.body,r.digest,b.body AS batch_body FROM cos.proactive_suggestions s JOIN cos.proactive_revisions r ON r.scope_id=s.scope_id AND r.suggestion_id=s.id AND r.version=s.version JOIN cos.proactive_batches b ON b.scope_id=r.scope_id AND b.id=r.batch_id WHERE s.scope_id=$1 AND s.state='open' ORDER BY s.created_at,s.id LIMIT 10`,
+          [context.scopeId],
+        )
+      ).rows;
+      for (const row of open)
+        if (body.open_proposals.length < 3 && (await this.revisionCurrent(client, context, row)))
+          body.open_proposals.push({
+            suggestion_id: row.id,
+            version: row.version,
+            title: row.body.draft.title,
+            purpose: row.body.draft.purpose.slice(0, 300),
+            opportunity_cost: row.body.draft.opportunity_cost.slice(0, 300),
+          });
       const inserted = await client.query(
         `INSERT INTO cos.proactive_batches(scope_id,id,session_id,policy_version,body,digest,context,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,clock_timestamp()+interval '2 minutes') ON CONFLICT DO NOTHING RETURNING id`,
         [
@@ -407,20 +471,80 @@ export class ProactiveStore {
           await client.query('SELECT * FROM cos.proactive_batches WHERE scope_id=$1 AND id=$2', [context.scopeId, id])
         ).rows[0];
         if (!old || !(await this.batchCurrent(client, context, old))) return { status: 'denied' };
-        return {
-          status: 'ok',
-          batch_id: id,
-          candidates: old.body.candidates,
-          goals: old.body.records.filter((r: BriefRecord) => r.kind === 'goal'),
-          max_proposals: old.body.max_proposals,
-        };
+        return this.batchReceipt(id, old.body);
       }
+      return this.batchReceipt(id, body);
+    });
+  }
+  async scheduledBatch(context: KnowledgeContext): Promise<Result> {
+    if (context.origin?.kind !== 'schedule') return { status: 'denied' };
+    const configuration = await this.transaction(context, async (client) => {
+      if (!(await this.options!.knowledge.answers.dependencies.current(client, context))) return { status: 'denied' };
+      return { status: 'ok', configured: !!(await this.policy(client, context)) };
+    });
+    if (configuration.status !== 'ok') return configuration;
+    if (!configuration.configured)
       return {
         status: 'ok',
-        batch_id: id,
-        candidates,
-        goals: records.filter((r) => r.kind === 'goal'),
-        max_proposals: body.max_proposals,
+        state: 'unconfigured_or_paused',
+        candidates: [],
+        goals: [],
+        open_proposals: [],
+        max_proposals: 0,
+      };
+    return this.batch(
+      context,
+      proactiveRequestId('scheduled-proactive', `${context.origin.runId}:${context.origin.generation}`),
+    );
+  }
+  async history(context: KnowledgeContext, offset = 0): Promise<Result> {
+    if (!Number.isSafeInteger(offset) || offset < 0 || offset > 10000) return { status: 'denied' };
+    return this.transaction(context, async (client) => {
+      if (!(await this.options!.knowledge.answers.dependencies.current(client, context))) return { status: 'denied' };
+      const rows = (
+        await client.query(
+          `SELECT s.*,r.body,r.digest,b.body AS batch_body FROM cos.proactive_suggestions s JOIN cos.proactive_revisions r ON r.scope_id=s.scope_id AND r.suggestion_id=s.id AND r.version=s.version JOIN cos.proactive_batches b ON b.scope_id=r.scope_id AND b.id=r.batch_id WHERE s.scope_id=$1 ORDER BY s.created_at DESC,s.id LIMIT 6 OFFSET $2`,
+          [context.scopeId, offset],
+        )
+      ).rows;
+      const items = [];
+      for (const row of rows.slice(0, 5)) {
+        const current = await this.revisionCurrent(client, context, row);
+        items.push({
+          suggestion_id: row.id,
+          version: row.version,
+          state: row.state,
+          prior_id: row.prior_id,
+          review_at: row.review_at ? iso(row.review_at) : null,
+          semantic_key: row.semantic_key,
+          ...(current
+            ? {
+                draft: row.body.draft,
+                evidence: row.body.candidate.evidence,
+                observation_ids: row.body.candidate.observation_ids,
+              }
+            : { withheld: 'stale_or_unavailable_evidence' }),
+        });
+      }
+      const feedback = (
+        await client.query(
+          `SELECT decision,count(*)::int AS count,count(*) FILTER(WHERE usefulness='useful')::int AS useful,count(*) FILTER(WHERE usefulness='not_useful')::int AS not_useful,sum(review_seconds)::int AS review_seconds FROM cos.proactive_feedback WHERE scope_id=$1 GROUP BY decision ORDER BY decision`,
+          [context.scopeId],
+        )
+      ).rows;
+      const repeated = (
+        await client.query(
+          "SELECT count(*)::int AS count FROM cos.operations WHERE scope_id=$1 AND method='cos_proactive_submit' AND result->>'deduplicated'='true'",
+          [context.scopeId],
+        )
+      ).rows[0].count;
+      return {
+        status: 'ok',
+        items,
+        next_offset: rows.length > 5 ? offset + 5 : null,
+        feedback,
+        repeated_equivalent_submissions: repeated,
+        preference_changes: 'require_owner_approval',
       };
     });
   }
@@ -681,6 +805,120 @@ export class ProactiveStore {
       mission_id: change.mission?.mission_id ?? null,
       clarification_required: r.decision === 'accept' && !change.mission,
     };
+  }
+  private summary(
+    id: string,
+    version: number,
+    key: string,
+    body: RevisionBody,
+    route: ProactiveSummary['route'],
+  ): ProactiveSummary {
+    const d = body.draft,
+      c = body.candidate;
+    return {
+      suggestion_id: id,
+      version,
+      semantic_key: key,
+      title: d.title,
+      purpose: d.purpose,
+      goal_id: d.goal_id,
+      project_id: c.project_id,
+      recommendation: d.recommendation,
+      confidence: d.confidence,
+      uncertainty: d.uncertainty,
+      expected_benefit: d.expected_benefit,
+      estimated_effort: d.estimated_effort,
+      opportunity_cost: d.opportunity_cost,
+      evidence: c.evidence,
+      observation_ids: c.observation_ids,
+      review_at: d.review_at,
+      expires_at: d.expires_at,
+      permission_requirements: d.permission_requirements,
+      action_class: d.action_class,
+      route,
+    };
+  }
+  /** Notification intent is durable and conservative: a failed/ambiguous delivery never buys a fresh budget. */
+  async digest(context: KnowledgeContext, requestId: string): Promise<Result> {
+    if (!uuid.test(requestId) || !this.options) return { status: 'denied' };
+    return this.transaction(context, async (client) => {
+      if (!(await this.options!.knowledge.answers.dependencies.current(client, context))) return { status: 'denied' };
+      const p = await this.policy(client, context);
+      if (!p) return { status: 'ok', items: [] };
+      return this.operation(client, context, requestId, 'cos_proactive_digest', {}, async () => {
+        const now = (await client.query('SELECT clock_timestamp() AS now')).rows[0].now.toISOString();
+        const rows = (
+          await client.query(
+            `SELECT s.*,r.body,r.digest,b.body AS batch_body FROM cos.proactive_suggestions s JOIN cos.proactive_revisions r ON r.scope_id=s.scope_id AND r.suggestion_id=s.id AND r.version=s.version JOIN cos.proactive_batches b ON b.scope_id=r.scope_id AND b.id=r.batch_id WHERE s.scope_id=$1 AND s.state='open' AND NOT EXISTS(SELECT 1 FROM cos.proactive_notifications n WHERE n.scope_id=s.scope_id AND n.suggestion_id=s.id) ORDER BY s.created_at,s.id LIMIT 20`,
+            [context.scopeId],
+          )
+        ).rows;
+        const items: ProactiveSummary[] = [];
+        for (const row of rows) {
+          if (items.length >= p.policy.max_proposals) break;
+          if (!(await this.revisionCurrent(client, context, row))) continue;
+          const date = planProposalNotification(row.body.candidate, p.policy, now, 0).local_date;
+          const used = (
+            await client.query(
+              'SELECT count(*)::int n FROM cos.proactive_notifications WHERE scope_id=$1 AND local_date=$2::date',
+              [context.scopeId, date],
+            )
+          ).rows[0].n;
+          const plan = planProposalNotification(row.body.candidate, p.policy, now, used);
+          if (!plan.allowed) continue;
+          await client.query(
+            'INSERT INTO cos.proactive_notifications(scope_id,suggestion_id,version,local_date,route,provenance) VALUES($1,$2,$3,$4,$5,$6)',
+            [
+              context.scopeId,
+              row.id,
+              row.version,
+              plan.local_date,
+              plan.route,
+              JSON.stringify({
+                request_id: requestId,
+                session_id: context.sessionId,
+                context_generation: context.generation,
+                processing_provider: context.provider,
+                origin: context.origin ?? null,
+                state: 'reserved',
+              }),
+            ],
+          );
+          items.push(this.summary(row.id, row.version, row.semantic_key, row.body, plan.route));
+        }
+        return { status: 'ok', items };
+      });
+    });
+  }
+  async validateDigest(
+    client: PoolClient,
+    context: KnowledgeContext,
+    items: ProactiveSummary[],
+    historical = false,
+  ): Promise<boolean> {
+    if (!this.options || !Array.isArray(items) || items.length > 3) return false;
+    const p = await this.policy(client, context);
+    if (!p && items.length) return false;
+    for (const item of items) {
+      const row = (
+        await client.query(
+          `SELECT s.state,s.semantic_key,r.body,r.digest,b.body AS batch_body,n.route,n.local_date::text AS local_date FROM cos.proactive_suggestions s JOIN cos.proactive_revisions r ON r.scope_id=s.scope_id AND r.suggestion_id=s.id JOIN cos.proactive_batches b ON b.scope_id=r.scope_id AND b.id=r.batch_id JOIN cos.proactive_notifications n ON n.scope_id=r.scope_id AND n.suggestion_id=r.suggestion_id AND n.version=r.version WHERE s.scope_id=$1 AND s.id=$2 AND r.version=$3 AND s.version=r.version`,
+          [context.scopeId, item.suggestion_id, item.version],
+        )
+      ).rows[0];
+      if (
+        !row ||
+        (!historical && row.state !== 'open') ||
+        !(await this.revisionCurrent(client, context, row)) ||
+        digest(item) !== digest(this.summary(item.suggestion_id, item.version, row.semantic_key, row.body, row.route))
+      )
+        return false;
+      if (!historical) {
+        const plan = planProposalNotification(row.body.candidate, p!.policy, new Date().toISOString(), 0);
+        if (!plan.allowed || plan.local_date !== row.local_date || plan.route !== row.route) return false;
+      }
+    }
+    return true;
   }
   async validatePolicyChange(client: PoolClient, context: Context, change: ProactivePolicyChange): Promise<boolean> {
     const current = (

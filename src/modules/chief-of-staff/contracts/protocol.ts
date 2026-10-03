@@ -7,6 +7,7 @@ import { validTeamRequest } from './team-protocol.js';
 import {
   validProactivePolicyChange,
   validProactiveDisposition,
+  validProactiveDraft,
   type ProactivePolicyChange,
   type ProactiveDispositionRequest,
 } from './proactive-protocol.js';
@@ -118,6 +119,11 @@ export type CosMethod =
   | 'cos_team_cancel'
   | 'cos_brief_schedule_propose'
   | 'cos_brief_request'
+  | 'cos_proactive_policy_propose'
+  | 'cos_proactive_batch'
+  | 'cos_proactive_submit'
+  | 'cos_proactive_disposition_propose'
+  | 'cos_proactive_history'
   | 'cos_request_status'
   | 'cos_knowledge_search'
   | 'cos_source_get'
@@ -226,6 +232,26 @@ export function validRequest(value: unknown): value is CosRequest {
   if (value.method === 'cos_work_change_propose')
     return keys(value.params, ['change']) && validWorkChange(value.params.change);
   if (value.method === 'cos_work_read') return validWorkRead(value.params);
+  if (value.method === 'cos_proactive_policy_propose')
+    return keys(value.params, ['change']) && validProactivePolicyChange(value.params.change);
+  if (value.method === 'cos_proactive_batch') return Object.keys(value.params).length === 0;
+  if (value.method === 'cos_proactive_submit')
+    return (
+      keys(value.params, ['batch_id', 'draft']) &&
+      typeof value.params.batch_id === 'string' &&
+      /^batch-[a-f0-9]{64}$/.test(value.params.batch_id) &&
+      validProactiveDraft(value.params.draft)
+    );
+  if (value.method === 'cos_proactive_disposition_propose')
+    return keys(value.params, ['request']) && validProactiveDisposition(value.params.request);
+  if (value.method === 'cos_proactive_history')
+    return (
+      keys(value.params, ['offset']) &&
+      (value.params.offset === undefined ||
+        (Number.isSafeInteger(value.params.offset) &&
+          Number(value.params.offset) >= 0 &&
+          Number(value.params.offset) <= 10000))
+    );
   if (value.method === 'cos_mission_request')
     return keys(value.params, ['request']) && validMissionRequest(value.params.request);
   if (value.method === 'cos_team_request')
