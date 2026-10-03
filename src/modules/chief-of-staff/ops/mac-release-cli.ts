@@ -218,7 +218,7 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
           COS_FIXTURE_RUNNER_VOLUME: volume,
         },
         stdio: 'inherit',
-        timeout: plan.slice === 'S06' ? 660000 : 180000,
+        timeout: ['S06', 'S07'].includes(plan.slice) ? 660000 : 180000,
       },
     );
     if (result.status !== 0) throw new Error('local_fixture_failed');

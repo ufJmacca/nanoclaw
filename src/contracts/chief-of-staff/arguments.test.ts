@@ -23,7 +23,7 @@ describe('CoS fixture command selection', () => {
   it.each(
     [
       [],
-      ['--slice', 'S07', '--db-profile', 'test'],
+      ['--slice', 'S08', '--db-profile', 'test'],
       ['--slice', 'S01', '--db-profile', 'runtime'],
       ['--demo', '--slice', 'S01', '--db-profile', 'test'],
       ['--slice', 'S01', '--db-profile', 'test', '--db-profile', 'test'],
@@ -79,5 +79,15 @@ it('registers the S05 owner approval, native specialist and main-context review 
     'mission-sources.integration',
     'mission-run.integration',
     'mission-flow.integration',
+  ]);
+});
+
+it('registers S07 proactive database and native synthetic-week contracts with all predecessors', () => {
+  const args = parseFixtureArguments(['--demo', '--fixture', '--slice', 'S07', '--db-profile', 'test']);
+  expect(fixtureFiles(args)).toEqual(['proactive-flow.integration']);
+  expect(fixtureFiles({ ...args, demo: false })).toEqual([
+    ...fixtureFiles({ slice: 'S06', demo: false }),
+    'proactive.integration',
+    'proactive-flow.integration',
   ]);
 });

@@ -25,7 +25,7 @@ export type RuntimeFixtureRequest = {
   execution: 'source' | 'packaged';
   mode: 'slice' | 'demo';
   /** Absent only in historical S01 requests; never normalize their replay identity. */
-  slice?: 'S01' | 'S02' | 'S03' | 'S04' | 'S05' | 'S06';
+  slice?: 'S01' | 'S02' | 'S03' | 'S04' | 'S05' | 'S06' | 'S07';
   sourceCommit: string;
   sourceTree: string;
   hostImage: string;
@@ -62,7 +62,7 @@ export function validateRuntimeFixtureRequest(value: unknown): RuntimeFixtureReq
     !/^[a-zA-Z0-9_-]{1,100}$/.test(request.owner ?? '') ||
     !['source', 'packaged'].includes(request.execution) ||
     !['slice', 'demo'].includes(request.mode) ||
-    (explicitSlice && !['S01', 'S02', 'S03', 'S04', 'S05', 'S06'].includes(request.slice ?? '')) ||
+    (explicitSlice && !['S01', 'S02', 'S03', 'S04', 'S05', 'S06', 'S07'].includes(request.slice ?? '')) ||
     ![request.sourceCommit, request.sourceTree].every((v) => /^[a-f0-9]{40}$/.test(v ?? '')) ||
     ![request.hostImage, request.workerImage].every((v) => /^sha256:[a-f0-9]{64}$/.test(v ?? '')) ||
     ![request.databaseFingerprint, request.bindingDigest].every((v) => /^[a-f0-9]{64}$/.test(v ?? '')) ||
@@ -211,7 +211,7 @@ export async function runRuntimeFixtureDriver(file: string) {
   const stop = async () => {
     if (heartbeat) clearInterval(heartbeat);
     await child?.stop();
-    if (request.slice === 'S05' || request.slice === 'S06') {
+    if (['S05', 'S06', 'S07'].includes(request.slice ?? '')) {
       const location = source
         ? sourceFixtureEnvironment(request.hostRoot, process.env).COS_FIXTURE_HOST_ROOT!
         : request.hostRoot;
