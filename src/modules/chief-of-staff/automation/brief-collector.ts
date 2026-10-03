@@ -269,7 +269,13 @@ export class BriefCollector {
         : 'denied',
     }));
     return final.status === 'ok'
-      ? { status: 'ok', snapshot, text: renderBrief(snapshot), calendar_digest: before.calendar_digest }
+      ? {
+          status: 'ok',
+          snapshot,
+          records: before.records,
+          text: renderBrief(snapshot),
+          calendar_digest: before.calendar_digest,
+        }
       : final;
   }
 }
