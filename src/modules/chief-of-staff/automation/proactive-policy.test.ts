@@ -242,3 +242,16 @@ describe('S07-T06 notification admission', () => {
     });
   });
 });
+
+it('S07-T01/T05 material approved goal/project changes revise the key; incidental titles and versions do not', () => {
+  const first = select()[0];
+  expect(
+    select({ records: records().map((r) => ({ ...r, title: 'Cosmetic wording', version: 2 })) })[0].semantic_key,
+  ).toBe(first.semantic_key);
+  for (const kind of ['goal', 'project'])
+    expect(
+      select({
+        records: records().map((r) => (r.kind === kind ? { ...r, description: 'Changed approved scope' } : r)),
+      })[0].semantic_key,
+    ).not.toBe(first.semantic_key);
+});

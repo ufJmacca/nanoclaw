@@ -482,6 +482,40 @@ test('S07-PG01 a real partition cannot acknowledge acceptance, invent empty hist
   }
 });
 
+test('S07-T05 changed supporting project requires a revised preview before acceptance or publication', async () => {
+  const { p, result } = await nextSuggestion();
+  const project = (await pool.query('SELECT * FROM cos.records WHERE scope_id=$1 AND id=$2', [scope, fixtureProject]))
+    .rows[0];
+  await approve({
+    kind: 'project',
+    record_id: fixtureProject,
+    expected_version: project.version,
+    title: project.title,
+    description: 'Owner materially changes pilot scope',
+    lifecycle: 'active',
+    reason: 'Owner revised the project',
+  });
+  assert.equal(
+    (
+      await store.requestProactiveDisposition(retained, randomUUID(), {
+        suggestion_id: String(result.suggestion_id),
+        expected_version: 1,
+        decision: 'accept',
+        review_at: null,
+        reason: 'Old preview is stale',
+        usefulness: 'unrated',
+        review_seconds: 2,
+      })
+    ).status,
+    'denied',
+  );
+  const history = await p.history(retained);
+  assert.ok(
+    (history.items as Array<{ suggestion_id: string; withheld?: string }>).find(
+      (r) => r.suggestion_id === result.suggestion_id,
+    )?.withheld,
+  );
+});
 test('S07-T06/T10 a storm stays within batch/proposal limits and checked briefs reserve one durable digest', async () => {
   now = new Date();
   for (let index = 0; index < 3; index++)
@@ -626,6 +660,34 @@ test('S07-T04/T05 precise acceptance queues one existing bounded mission after c
       .n,
     1,
   );
+  const feedbackBefore = (
+    await pool.query('SELECT count(*)::int n FROM cos.proactive_feedback WHERE scope_id=$1', [scope])
+  ).rows[0].n;
+  const policyVersion = (await pool.query('SELECT version FROM cos.proactive_policies WHERE scope_id=$1', [scope]))
+    .rows[0].version;
+  await approve({
+    kind: 'proactive_policy',
+    state: 'paused',
+    policy,
+    expected_version: policyVersion,
+    reason: 'Fixture compatible rollback pauses generation and notifications',
+  });
+  assert.equal((await proactive().batch(retained, randomUUID())).status, 'denied');
+  const pausedBrief = await store.briefArtifacts!.prepare(retained, randomUUID(), 'Australia/Sydney');
+  assert.equal(pausedBrief.status, 'ok');
+  assert.deepEqual((pausedBrief.snapshot as { suggested_work: unknown[] }).suggested_work, []);
+  assert.equal(
+    (await pool.query('SELECT count(*)::int n FROM cos.proactive_feedback WHERE scope_id=$1', [scope])).rows[0].n,
+    feedbackBefore,
+  );
+  assert.equal((await pool.query('SELECT * FROM cos.mission_attempts WHERE scope_id=$1', [scope])).rowCount, 1);
+  await approve({
+    kind: 'proactive_policy',
+    state: 'active',
+    policy,
+    expected_version: policyVersion + 1,
+    reason: 'Fixture owner resumes only the recorded limits',
+  });
   // A new proposal cannot be accepted after supporting source access is revoked.
   const fresh = await nextSuggestion();
   const preview = await store.requestProactiveDisposition(retained, randomUUID(), {

@@ -128,6 +128,13 @@ export function selectProactiveCandidates(input: {
         rule: item.rule,
         target: item.id,
         material: item.material,
+        goals: records
+          .filter((r) => r.kind === 'goal' && r.lifecycle === 'active')
+          .map((r) => ({ id: r.id, description: r.description }))
+          .sort((a, b) => a.id.localeCompare(b.id, 'en')),
+        project: projects
+          .filter((r) => r.id === item.project_id)
+          .map((r) => ({ id: r.id, description: r.description })),
         observations: relevant.map((o) => ({
           kind: o.kind,
           resource_id: o.resource_id,

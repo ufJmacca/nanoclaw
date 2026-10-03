@@ -48,6 +48,7 @@ type RevisionBody = {
   candidate: ProactiveCandidate;
   draft: ProactiveDraft;
   goal_version: number;
+  project_version: number | null;
   policy_version: number;
 };
 /** Used within the host approval transaction; models cannot approve configuration or dispositions. */
@@ -622,6 +623,10 @@ export class ProactiveStore {
             candidate,
             draft,
             goal_version: goal.version,
+            project_version: candidate.project_id
+              ? batch.body.records.find((r: BriefRecord) => r.id === candidate.project_id && r.kind === 'project')!
+                  .version
+              : null,
             policy_version: batch.policy_version,
           };
           if (old)
@@ -685,8 +690,8 @@ export class ProactiveStore {
       target.project_id &&
       !(
         await client.query(
-          "SELECT 1 FROM cos.records WHERE scope_id=$1 AND id=$2 AND kind='project' AND lifecycle='active'",
-          [context.scopeId, target.project_id],
+          "SELECT 1 FROM cos.records WHERE scope_id=$1 AND id=$2 AND version=$3 AND kind='project' AND lifecycle='active'",
+          [context.scopeId, target.project_id, body.project_version],
         )
       ).rowCount
     )

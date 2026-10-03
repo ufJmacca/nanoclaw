@@ -333,12 +333,18 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
           verify: async () => {
             const context = await controller.context(session);
             if (context?.origin?.kind === 'mission_review' && !(await reviewAuthority(context, false))) return null;
-            return context &&
-              d.store &&
-              (await d.store.context(context)).status === 'ok' &&
-              (await knowledgeAllowed(session, context))
-              ? context
-              : null;
+            if (
+              !context ||
+              !d.store ||
+              (await d.store.context(context)).status !== 'ok' ||
+              !(await knowledgeAllowed(session, context))
+            )
+              return null;
+            if (context.origin?.kind === 'schedule') {
+              const retained = resolveKnowledgeContext(session, context, d.db);
+              if (!retained || (await d.store.proactive.scheduledBatch(retained)).status !== 'ok') return null;
+            }
+            return context;
           },
         }),
       );

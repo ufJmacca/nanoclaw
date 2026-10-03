@@ -837,11 +837,17 @@ it('S04 wires shared-context scheduled admission and model budgets while withhol
     contextReady: vi.fn().mockResolvedValue({ status: 'ok' }),
     answers: { authorizePublication: vi.fn().mockResolvedValue({ status: 'ok' }) },
   };
+  const proactive = { scheduledBatch: vi.fn().mockResolvedValue({ status: 'ok' }) };
   let authorize!: TurnAuthorization;
   runtime = createCosRuntime({
     db,
     enabled: true,
-    store: { briefs, knowledge, context: vi.fn().mockResolvedValue({ status: 'ok' }) } as unknown as PriorityStore,
+    store: {
+      briefs,
+      knowledge,
+      proactive,
+      context: vi.fn().mockResolvedValue({ status: 'ok' }),
+    } as unknown as PriorityStore,
     facts: async () => ({
       id: 'private',
       type: 'P',
@@ -864,6 +870,14 @@ it('S04 wires shared-context scheduled admission and model budgets while withhol
   await prepareCosLaunch(session);
   expect(await authorize()).toBe(`brief:${lease.runId}:1`);
   expect(knowledge.contextReady).toHaveBeenCalledWith(expect.objectContaining({ sessionId: 'session', generation }));
+  expect(proactive.scheduledBatch).toHaveBeenCalledWith(
+    expect.objectContaining({ generation, origin: { kind: 'schedule', runId: lease.runId, generation: 1 } }),
+  );
+  proactive.scheduledBatch.mockResolvedValue({ status: 'unavailable' });
+  expect(await authorize()).toBeNull();
+  expect(await authorize.reserve!('outage-before-model')).toBe(false);
+  expect(briefs.reserveCall).not.toHaveBeenCalled();
+  proactive.scheduledBatch.mockResolvedValue({ status: 'ok' });
   expect(await authorize.reserve!('attempt')).toBe(true);
   expect(briefs.reserveCall).toHaveBeenCalledWith(
     expect.objectContaining({ origin: { kind: 'schedule', runId: lease.runId, generation: 1 } }),
