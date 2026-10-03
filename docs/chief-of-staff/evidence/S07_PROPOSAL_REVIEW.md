@@ -5,12 +5,12 @@ fixture. Their purpose is to assess unwanted proposals and repeats; they do not
 measure live model quality. The provider is scripted, all projects and notes are
 synthetic, and no work runs merely because a proposal exists.
 
-| Label | Recorded situation | Recommendation | Operator judgment |
-|---|---|---|---|
-| A | Confirmed pilot milestone approaches; an admitted note records a capacity dependency. | Investigate the documented pilot capacity options. | Pending |
-| B | A recorded pilot dependency decision remains unresolved. | Ask which dependency should be selected. | Pending |
-| C | A was dismissed as already handled; new admitted evidence says fallback capacity has been lost. | Create a new, linked investigation of the remaining option. | Pending |
-| D | B was deferred; the same new project note arrives. | Create a linked proposal asking which dependency to select again. | Pending |
+| Label | Recorded situation                                                                              | Recommendation                                                    | Operator judgment |
+| ----- | ----------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- | ----------------- |
+| A     | Confirmed pilot milestone approaches; an admitted note records a capacity dependency.           | Investigate the documented pilot capacity options.                | Pending           |
+| B     | A recorded pilot dependency decision remains unresolved.                                        | Ask which dependency should be selected.                          | Pending           |
+| C     | A was dismissed as already handled; new admitted evidence says fallback capacity has been lost. | Create a new, linked investigation of the remaining option.       | Pending           |
+| D     | B was deferred; the same new project note arrives.                                              | Create a linked proposal asking which dependency to select again. | Pending           |
 
 All four include medium confidence, uncertainty that connected notes may omit
 completed work, an estimated 30 minutes, and the cost of displacing another pilot
