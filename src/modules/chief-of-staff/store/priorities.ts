@@ -30,6 +30,8 @@ import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { PoolClient } from 'pg';
 import { BoundedDatabase, DatabaseUnavailable } from './client.js';
 import type { CosBinding } from '../../../cos-boundary.js';
+import { validProactivePolicyChange } from '../contracts/proactive-protocol.js';
+import { ProactiveStore } from '../automation/proactive-store.js';
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const equal = (a: string, b: string) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
@@ -59,6 +61,7 @@ async function event(
 export class PriorityStore {
   readonly work: WorkStore;
   readonly schedules = new BriefScheduleStore();
+  readonly proactive = new ProactiveStore();
   readonly briefs: BriefRunStore;
   readonly briefArtifacts?: BriefArtifacts;
   readonly missions: MissionProposalStore;
@@ -99,6 +102,8 @@ export class PriorityStore {
       );
   }
   private async workReceiptCurrent(client: PoolClient, context: Context, result: Result): Promise<boolean> {
+    if (validProactivePolicyChange(result.change))
+      return this.proactive.validatePolicyChange(client, context, result.change);
     if (validTeamChange(result.change)) return this.teams.validateChange(client, context, result.change);
     if (validMissionChange(result.change)) return this.missions.validateChange(client, context, result.change);
     if (!validWorkChange(result.change)) return true;
@@ -291,7 +296,8 @@ export class PriorityStore {
         !change ||
         (validSourceChange(change) &&
           (!this.knowledge || !(await this.knowledge.validateChange(client, context.scopeId, change)))) ||
-        (validWorkChange(change) && !(await this.work.validateChange(client, context, change, retained)))
+        (validWorkChange(change) && !(await this.work.validateChange(client, context, change, retained))) ||
+        (validProactivePolicyChange(change) && !(await this.proactive.validatePolicyChange(client, context, change)))
       ) {
         const receipt: Result = { status: 'denied' };
         await client.query('UPDATE cos.operations SET result=$3 WHERE session_id=$1 AND request_id=$2', [
@@ -423,7 +429,8 @@ export class PriorityStore {
         validWorkChange(change) ||
         validScheduleChange(change) ||
         validMissionChange(change) ||
-        validTeamChange(change)
+        validTeamChange(change) ||
+        validProactivePolicyChange(change)
       ) {
         const context: Context = {
           scopeId,
@@ -433,13 +440,15 @@ export class PriorityStore {
           ingressId: proposal.ingress_id,
         };
         if (proposal.owner_id !== context.ownerId) return { status: 'denied' };
-        const result = validTeamChange(change)
-          ? await this.teams.applyApproved(client, context, proposal, change)
-          : validMissionChange(change)
-            ? await this.missions.applyApproved(client, context, proposal, change)
-            : validScheduleChange(change)
-              ? await this.schedules.applyApproved(client, context, proposal, change)
-              : await this.work.applyApproved(client, context, proposal, change, proposal.work_context ?? undefined);
+        const result = validProactivePolicyChange(change)
+          ? await this.proactive.applyPolicy(client, context, proposal, change)
+          : validTeamChange(change)
+            ? await this.teams.applyApproved(client, context, proposal, change)
+            : validMissionChange(change)
+              ? await this.missions.applyApproved(client, context, proposal, change)
+              : validScheduleChange(change)
+                ? await this.schedules.applyApproved(client, context, proposal, change)
+                : await this.work.applyApproved(client, context, proposal, change, proposal.work_context ?? undefined);
         if (!['ok', 'conflict'].includes(result.status)) return result;
         const changed = result.status === 'ok';
         await client.query(

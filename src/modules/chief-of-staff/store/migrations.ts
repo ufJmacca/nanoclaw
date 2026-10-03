@@ -16,8 +16,9 @@ import { TEAM_SCHEMA, TEAM_CHECKSUM } from './team-schema.js';
 import { TEAM_LINEAGE_SCHEMA, TEAM_LINEAGE_CHECKSUM } from './team-lineage-schema.js';
 import { TEAM_FINAL_REVIEW_SCHEMA, TEAM_FINAL_REVIEW_CHECKSUM } from './team-final-review-schema.js';
 import { TEAM_PARENT_BUDGET_SCHEMA, TEAM_PARENT_BUDGET_CHECKSUM } from './team-parent-budget-schema.js';
+import { PROACTIVE_SCHEMA, PROACTIVE_CHECKSUM } from './proactive-schema.js';
 export { INITIAL_SCHEMA, INITIAL_CHECKSUM } from './schema-definition.js';
-export const SCHEMA_VERSION = 13;
+export const SCHEMA_VERSION = 14;
 export const MIGRATIONS = [
   { version: 1, checksum: INITIAL_CHECKSUM, sql: INITIAL_SCHEMA },
   { version: 2, checksum: KNOWLEDGE_CHECKSUM, sql: KNOWLEDGE_SCHEMA },
@@ -32,6 +33,7 @@ export const MIGRATIONS = [
   { version: 11, checksum: TEAM_LINEAGE_CHECKSUM, sql: TEAM_LINEAGE_SCHEMA },
   { version: 12, checksum: TEAM_FINAL_REVIEW_CHECKSUM, sql: TEAM_FINAL_REVIEW_SCHEMA },
   { version: 13, checksum: TEAM_PARENT_BUDGET_CHECKSUM, sql: TEAM_PARENT_BUDGET_SCHEMA },
+  { version: 14, checksum: PROACTIVE_CHECKSUM, sql: PROACTIVE_SCHEMA },
 ] as const;
 const LOCK_ID = 73101001;
 const identifier = (value: string) => '"' + value.replaceAll('"', '""') + '"';
@@ -67,6 +69,15 @@ export async function migrate(client: pg.Client, runtimeRole: string): Promise<n
         migration.checksum,
       ]);
     }
+    await client.query(
+      `GRANT SELECT,INSERT,UPDATE,DELETE ON cos.proactive_policies,cos.proactive_suggestions TO ${identifier(runtimeRole)}`,
+    );
+    await client.query(
+      `GRANT SELECT,INSERT ON cos.proactive_policy_revisions,cos.proactive_observations,cos.proactive_batches,cos.proactive_revisions,cos.proactive_feedback,cos.proactive_notifications TO ${identifier(runtimeRole)}`,
+    );
+    await client.query(
+      `REVOKE UPDATE,DELETE,TRUNCATE ON cos.proactive_policy_revisions,cos.proactive_observations,cos.proactive_batches,cos.proactive_revisions,cos.proactive_feedback,cos.proactive_notifications FROM ${identifier(runtimeRole)}`,
+    );
     await client.query(`GRANT SELECT ON cos.schema_migrations TO ${identifier(runtimeRole)}`);
     await client.query(
       `GRANT SELECT,INSERT,UPDATE,DELETE ON cos.scopes,cos.records,cos.proposals,cos.operations,cos.events,cos.outbox TO ${identifier(runtimeRole)}`,

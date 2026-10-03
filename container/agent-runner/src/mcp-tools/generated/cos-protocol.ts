@@ -4,6 +4,7 @@ import { validScheduleChange, type ScheduleChange } from './schedule-protocol.js
 import { validMissionRequest } from './mission-protocol.js';
 import { validMissionReview } from './mission-review.js';
 import { validTeamRequest } from './team-protocol.js';
+import { validProactivePolicyChange, type ProactivePolicyChange } from './proactive-protocol.js';
 import { answerDraftSchema, validAnswerDraft, validAnswerCitation, type AnswerCitation } from './answer-protocol.js';
 /** Provider guidance; the wire validator additionally checks real dates and state transitions. */
 export const workChangeSchema = {
@@ -464,13 +465,21 @@ export function validTeamChange(value: unknown): value is TeamChange {
     digest(value.work_order) === value.work_order_digest
   );
 }
-export type ProposalChange = Change | SourceChange | WorkChange | ScheduleChange | MissionChange | TeamChange;
+export type ProposalChange =
+  | Change
+  | SourceChange
+  | WorkChange
+  | ScheduleChange
+  | MissionChange
+  | TeamChange
+  | ProactivePolicyChange;
 export function validProposalChange(value: unknown): value is ProposalChange {
   return (
     validChange(value) ||
     validSourceChange(value) ||
     validWorkChange(value) ||
     validScheduleChange(value) ||
+    validProactivePolicyChange(value) ||
     validMissionChange(value) ||
     validTeamChange(value)
   );
