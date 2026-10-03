@@ -25,6 +25,50 @@ import { targetBinding } from './target-host.js';
 import { writeAtomic } from './target-state.js';
 import { digest } from '../domain/contracts.js';
 import type { DeploymentReceipt } from './deployment.js';
+it('records a concrete process mismatch before rollback without exposing runtime paths', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-health-process-'));
+  const settings = {
+    stateRoot: root + '/state',
+    releaseRoot: root + '/releases',
+    stagingRoot: root + '/staging',
+    sourceRoot: root + '/source',
+    userHome: root,
+    installationRoot: process.cwd(),
+    dataRoot: root + '/data',
+    service: 'nano.service',
+    hostFingerprint: '1'.repeat(64),
+    databaseFingerprint: '2'.repeat(64),
+  } as DeploymentSettings;
+  const manifest = fixtureRelease('S06'),
+    receipt = settings.stateRoot + '/releases/' + manifest.releaseId;
+  fs.mkdirSync(settings.dataRoot, { mode: 0o700 });
+  fs.mkdirSync(receipt, { recursive: true, mode: 0o700 });
+  const db = new Database(settings.dataRoot + '/v2.db');
+  db.exec("CREATE TABLE cos_mission_boundaries(opaque TEXT); INSERT INTO cos_mission_boundaries VALUES('retained')");
+  db.close();
+  calls.observe.mockResolvedValue({ pid: process.pid, cwd: process.cwd(), activeState: 'active', subState: 'running' });
+  calls.database.mockClear();
+  calls.docker.mockClear();
+  try {
+    await expect(createTargetEffects(settings, manifest, digest(manifest)).health()).resolves.toBe(false);
+    const result = JSON.parse(fs.readFileSync(receipt + '/health.json', 'utf8'));
+    expect(result).toMatchObject({
+      releaseId: manifest.releaseId,
+      sourceCommit: manifest.source.commit,
+      status: 'failed',
+      stage: 'process',
+      code: 'target_process_mismatch',
+      completed: ['native_compatibility'],
+    });
+    expect(fs.statSync(receipt + '/health.json').mode & 0o777).toBe(0o600);
+    expect(JSON.stringify(result)).not.toContain(root);
+    expect(calls.database).not.toHaveBeenCalled();
+    expect(calls.docker).not.toHaveBeenCalled();
+  } finally {
+    calls.observe.mockReset();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
 it('S05 target activation and legacy rollback refuse permanent child state even when PostgreSQL matches old code', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-child-downgrade-'));
   const settings = {

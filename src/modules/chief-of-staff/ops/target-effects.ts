@@ -17,6 +17,7 @@ import { assertNativeReleaseCompatibility } from './native-release-compatibility
 import { artifactHash, verifyReleaseBundle, verifyLoadedImages } from './release-artifacts.js';
 import { payloadDigest } from './payload.js';
 import { waitForTargetProcess } from './service-readiness.js';
+import { runTargetHealth } from './target-health.js';
 import { syncPinnedSource } from './source-sync.js';
 import { nativeFixtureSmoke } from './native-smoke.js';
 import {
@@ -418,37 +419,63 @@ export function createTargetEffects(
       await commands.service('restart');
     },
     async health() {
-      if (!nativeCompatible(manifest)) return false;
-      let running = false;
-      for (let attempt = 0; attempt < 40; attempt++) {
-        try {
-          await observeProcess(payload);
-          running = true;
-          break;
-        } catch {
-          await new Promise((resolve) => setTimeout(resolve, 250));
-        }
-      }
-      if (!running) return false;
-      if (!supportsReleaseSchema(manifest, await schema())) return false;
-      verifyInstalledProfiles(settings, manifest);
-      await verifyLoadedImages(manifest, commands.inspect);
-      const image = manifest.images.find(
-        (image) => image.role === 'agent' && image.profile === imageProfile('codex', { apt: [], npm: [] }),
-      );
-      if (!image) throw new Error('coordinator_image_unavailable');
-      const result = await nativeFixtureSmoke({
-        root: path.join(settings.stateRoot, 'smoke'),
-        hostRoot: path.join(settings.stateRoot, 'smoke'),
-        image: image.id,
-      });
-      writeAtomic(receipt, 'native-smoke.json', {
-        ...result,
+      return runTargetHealth({
+        releaseId: manifest.releaseId,
         sourceCommit: manifest.source.commit,
-        imageId: image.id,
-        at: new Date().toISOString(),
+        write: (result) => writeAtomic(receipt, 'health.json', result),
+        checks: [
+          {
+            stage: 'native_compatibility',
+            run: async () => {
+              if (!nativeCompatible(manifest)) throw new Error('specialist_release_required');
+            },
+          },
+          {
+            stage: 'process',
+            run: async () => {
+              await waitForTargetProcess(() => observeProcess(payload));
+            },
+          },
+          {
+            stage: 'schema',
+            run: async () => {
+              if (!supportsReleaseSchema(manifest, await schema())) throw new Error('schema_incompatible');
+            },
+          },
+          {
+            stage: 'profiles',
+            run: async () => {
+              verifyInstalledProfiles(settings, manifest);
+            },
+          },
+          {
+            stage: 'images',
+            run: async () => {
+              await verifyLoadedImages(manifest, commands.inspect);
+            },
+          },
+          {
+            stage: 'fixture',
+            run: async () => {
+              const image = manifest.images.find(
+                (image) => image.role === 'agent' && image.profile === imageProfile('codex', { apt: [], npm: [] }),
+              );
+              if (!image) throw new Error('coordinator_image_unavailable');
+              const result = await nativeFixtureSmoke({
+                root: path.join(settings.stateRoot, 'smoke'),
+                hostRoot: path.join(settings.stateRoot, 'smoke'),
+                image: image.id,
+              });
+              writeAtomic(receipt, 'native-smoke.json', {
+                ...result,
+                sourceCommit: manifest.source.commit,
+                imageId: image.id,
+                at: new Date().toISOString(),
+              });
+            },
+          },
+        ],
       });
-      return true;
     },
     async reconcile(phase) {
       if (phase === 'activate') {

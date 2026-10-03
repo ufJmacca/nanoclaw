@@ -8,7 +8,7 @@ const specialistTables = [
 ] as const;
 /** Candidate manifests are verified by the release path. Never erase identity records to make old code compatible. */
 export function assertNativeReleaseCompatibility(db: Database.Database, candidate: ReleaseManifest | null): void {
-  if (candidate?.slice === 'S05') return;
+  if (candidate && ['S05', 'S06'].includes(candidate.slice)) return;
   for (const name of specialistTables) {
     const entry = db.prepare('SELECT type FROM sqlite_master WHERE name=?').get(name) as { type: string } | undefined;
     if (entry && (entry.type !== 'table' || db.prepare(`SELECT 1 FROM ${name} LIMIT 1`).get()))
