@@ -14,6 +14,7 @@ import { KnowledgeStore } from '../../modules/chief-of-staff/knowledge/store.js'
 import { KnowledgeArtifacts } from '../../modules/chief-of-staff/knowledge/artifacts.js';
 import { ProactiveStore } from '../../modules/chief-of-staff/automation/proactive-store.js';
 import { BriefCollector } from '../../modules/chief-of-staff/automation/brief-collector.js';
+import { BriefRunStore } from '../../modules/chief-of-staff/automation/brief-store.js';
 import type { ProactiveDraft } from '../../modules/chief-of-staff/contracts/proactive-protocol.js';
 import type { ProactiveCandidate } from '../../modules/chief-of-staff/automation/proactive-policy.js';
 import { connectionFault } from './connection-fault.js';
@@ -97,6 +98,11 @@ after(async () => {
       'mission_work_orders',
       'mission_context_manifests',
       'mission_template_versions',
+      'brief_call_reservations',
+      'brief_notifications',
+      'brief_runs',
+      'brief_schedule_revisions',
+      'brief_schedules',
       'work_revisions',
       'work_items',
       'derivation_links',
@@ -343,6 +349,7 @@ async function nextSuggestion(transform: (input: ProactiveDraft) => ProactiveDra
     defer_until: null,
     evidence: [],
   });
+  now = (await pool.query('SELECT clock_timestamp() AS now')).rows[0].now;
   const p = proactive(),
     batch = await p.batch(retained, randomUUID());
   assert.equal(batch.status, 'ok');
@@ -564,6 +571,167 @@ test('S07-T06/T10 a storm stays within batch/proposal limits and checked briefs 
   assert.equal(quiet.status, 'ok');
   assert.deepEqual((quiet.snapshot as { suggested_work: unknown[] }).suggested_work, []);
   assert.equal((await pool.query('SELECT * FROM cos.proactive_notifications WHERE scope_id=$1', [scope])).rowCount, 1);
+});
+test('S07-T10 a five-minute scheduled run keeps its batch after two minutes, but not past its deadline', async (t) => {
+  const policyVersion = (await pool.query('SELECT version FROM cos.proactive_policies WHERE scope_id=$1', [scope]))
+    .rows[0].version;
+  await approve({
+    kind: 'proactive_policy',
+    state: 'active',
+    policy: { ...policy, notifications_per_day: 3 },
+    expected_version: policyVersion,
+    reason: 'Fixture owner restores normal notification hours',
+  });
+  await approve({
+    kind: 'brief_schedule',
+    title: 'Fixture five-minute brief',
+    reason: 'Fixture owner deadline',
+    expected_version: 0,
+    policy: {
+      state: 'active',
+      time_zone: 'UTC',
+      local_time: '09:00',
+      weekdays: [1, 2, 3, 4, 5, 6, 7],
+      quiet_hours: null,
+      snooze_until: null,
+    },
+    limits: { max_turns: 2, max_tool_calls: 12, deadline_seconds: 300, refresh_seconds: 0 },
+  });
+  const clock = new Date(Date.now() + 86400000);
+  clock.setUTCHours(9, 0, 0, 0);
+  const runs = new BriefRunStore(store.database, { clock: () => clock });
+  const reserved = await runs.reserveDue(context);
+  assert.equal(reserved.status, 'ok');
+  const run = reserved.run as { id: string; deadline_at: string };
+  assert.ok(run);
+  const lease = await runs.claim(context, run.id, 'fixture-host');
+  assert.equal(lease.status, 'ok');
+  const scheduled = {
+    ...retained,
+    origin: { kind: 'schedule' as const, runId: run.id, generation: Number(lease.generation) },
+  };
+  const p = proactive();
+  const batch = await p.scheduledBatch(scheduled);
+  assert.equal(batch.status, 'ok');
+  const candidate = (batch.candidates as ProactiveCandidate[])[0];
+  assert.ok(candidate);
+  // Advance only the application clock. The real database run remains leased;
+  // no sleep or modification of the durable batch is needed to exercise expiry.
+  const afterTwoMinutes = Date.now() + 130000;
+  t.mock.method(Date, 'now', () => afterTwoMinutes);
+  assert.deepEqual(await p.scheduledBatch(scheduled), batch);
+  const submitted = await p.submit(scheduled, randomUUID(), String(batch.batch_id), draft(candidate, fixtureGoal));
+  assert.equal(submitted.status, 'ok');
+  t.mock.restoreAll();
+  const dismissed = await store.requestProactiveDisposition(retained, randomUUID(), {
+    suggestion_id: String(submitted.suggestion_id),
+    expected_version: Number(submitted.version),
+    decision: 'dismiss',
+    review_at: null,
+    reason: 'Fixture scheduled proposal is handled',
+    usefulness: 'unrated',
+    review_seconds: 5,
+  });
+  assert.equal(dismissed.status, 'ok');
+  assert.equal(
+    (
+      await store.decide(
+        { ...context, ingressId: randomUUID() },
+        String(dismissed.proposal_id),
+        String(dismissed.confirmation_token),
+        'approve',
+      )
+    ).status,
+    'ok',
+  );
+  assert.equal((await store.apply(scope, String(dismissed.proposal_id))).status, 'ok');
+  const stored = (
+    await pool.query('SELECT expires_at FROM cos.proactive_batches WHERE scope_id=$1 AND id=$2', [
+      scope,
+      batch.batch_id,
+    ])
+  ).rows[0];
+  assert.equal(stored.expires_at.toISOString(), run.deadline_at);
+  await admin.query(
+    "UPDATE cos.brief_runs SET deadline_at=clock_timestamp()-interval '1 second' WHERE scope_id=$1 AND id=$2",
+    [scope, run.id],
+  );
+  assert.equal((await p.scheduledBatch(scheduled)).status, 'denied');
+  assert.equal(
+    (await p.submit(scheduled, randomUUID(), String(batch.batch_id), draft(candidate, fixtureGoal))).status,
+    'denied',
+  );
+  const manual = await p.batch(retained, randomUUID());
+  assert.equal(manual.status, 'ok');
+  const manualRow = (
+    await pool.query(
+      'SELECT EXTRACT(epoch FROM expires_at-created_at)::float8 AS lifetime FROM cos.proactive_batches WHERE scope_id=$1 AND id=$2',
+      [scope, manual.batch_id],
+    )
+  ).rows[0];
+  assert.ok(Math.abs(manualRow.lifetime - 120) < 0.1);
+});
+test('S07-T03/T06 an owner-deferred revision can return in a brief once, within the notification budget', async () => {
+  const { p, input, result } = await nextSuggestion();
+  const first = await store.briefArtifacts!.prepare(retained, randomUUID(), 'Australia/Sydney');
+  assert.equal(first.status, 'ok');
+  assert.ok(
+    (first.snapshot as { suggested_work: Array<{ suggestion_id: string; version: number }> }).suggested_work.some(
+      (item) => item.suggestion_id === result.suggestion_id && item.version === 1,
+    ),
+  );
+  const reviewAt = new Date(Date.now() + 5000).toISOString().replace(/\.\d{3}Z$/, 'Z');
+  const preview = await store.requestProactiveDisposition(retained, randomUUID(), {
+    suggestion_id: String(result.suggestion_id),
+    expected_version: 1,
+    decision: 'defer',
+    review_at: reviewAt,
+    reason: 'Fixture owner requests a later review',
+    usefulness: 'unrated',
+    review_seconds: 5,
+  });
+  assert.equal(preview.status, 'ok');
+  assert.equal(
+    (
+      await store.decide(
+        { ...context, ingressId: randomUUID() },
+        String(preview.proposal_id),
+        String(preview.confirmation_token),
+        'approve',
+      )
+    ).status,
+    'ok',
+  );
+  assert.equal((await store.apply(scope, String(preview.proposal_id))).status, 'ok');
+  await delay(Math.max(0, Date.parse(reviewAt) - Date.now()) + 50);
+  now = (await pool.query('SELECT clock_timestamp() AS now')).rows[0].now;
+  const batch = await p.batch(retained, randomUUID());
+  assert.equal(batch.status, 'ok');
+  const reopened = await p.submit(retained, randomUUID(), String(batch.batch_id), input);
+  assert.equal(reopened.status, 'ok');
+  assert.equal(reopened.suggestion_id, result.suggestion_id);
+  assert.equal(reopened.version, 2);
+  const request = randomUUID();
+  const second = await store.briefArtifacts!.prepare(retained, request, 'Australia/Sydney');
+  assert.equal(second.status, 'ok');
+  assert.ok(
+    (second.snapshot as { suggested_work: Array<{ suggestion_id: string; version: number }> }).suggested_work.some(
+      (item) => item.suggestion_id === result.suggestion_id && item.version === 2,
+    ),
+  );
+  assert.deepEqual(await store.briefArtifacts!.prepare(retained, request, 'Australia/Sydney'), second);
+  const third = await store.briefArtifacts!.prepare(retained, randomUUID(), 'Australia/Sydney');
+  assert.equal(third.status, 'ok');
+  assert.deepEqual((third.snapshot as { suggested_work: unknown[] }).suggested_work, []);
+  assert.deepEqual(
+    (
+      await pool.query(
+        'SELECT version FROM cos.proactive_notifications WHERE scope_id=$1 AND suggestion_id=$2 ORDER BY version',
+        [scope, result.suggestion_id],
+      )
+    ).rows.map((row) => row.version),
+    [1, 2],
+  );
 });
 test('S07-T04/T05 precise acceptance queues one existing bounded mission after current delegation checks', async () => {
   const sourceName = randomUUID() + '.md';

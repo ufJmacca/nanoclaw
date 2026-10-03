@@ -393,13 +393,18 @@ export class ProactiveStore {
       const scheduled = context.origin
         ? (
             await client.query(
-              `SELECT s.policy->>'time_zone' AS time_zone FROM cos.brief_runs r JOIN cos.brief_schedules s ON s.scope_id=r.scope_id AND s.id=r.schedule_id AND s.version=r.schedule_version WHERE r.scope_id=$1 AND r.id=$2 AND r.generation=$3 AND r.state='dispatched' AND r.deadline_at>clock_timestamp()`,
+              `SELECT s.policy->>'time_zone' AS time_zone,r.deadline_at FROM cos.brief_runs r JOIN cos.brief_schedules s ON s.scope_id=r.scope_id AND s.id=r.schedule_id AND s.version=r.schedule_version WHERE r.scope_id=$1 AND r.id=$2 AND r.generation=$3 AND r.state='dispatched' AND r.deadline_at>clock_timestamp()`,
               [context.scopeId, context.origin.runId, context.origin.generation],
             )
           ).rows[0]
         : null;
       if (context.origin && !scheduled) return { status: 'denied' };
-      return { status: 'ok', policy: p, collection_time_zone: scheduled?.time_zone ?? p.policy.time_zone };
+      return {
+        status: 'ok',
+        policy: p,
+        collection_time_zone: scheduled?.time_zone ?? p.policy.time_zone,
+        deadline_at: scheduled?.deadline_at ?? null,
+      };
     });
     if (before.status !== 'ok' || before.batch_id) return before;
     const p = before.policy as { version: number; policy: ProactivePolicy },
@@ -456,7 +461,7 @@ export class ProactiveStore {
             opportunity_cost: row.body.draft.opportunity_cost.slice(0, 300),
           });
       const inserted = await client.query(
-        `INSERT INTO cos.proactive_batches(scope_id,id,session_id,policy_version,body,digest,context,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,clock_timestamp()+interval '2 minutes') ON CONFLICT DO NOTHING RETURNING id`,
+        `INSERT INTO cos.proactive_batches(scope_id,id,session_id,policy_version,body,digest,context,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,COALESCE($8::timestamptz,clock_timestamp()+interval '2 minutes')) ON CONFLICT DO NOTHING RETURNING id`,
         [
           context.scopeId,
           id,
@@ -465,6 +470,7 @@ export class ProactiveStore {
           JSON.stringify(body),
           digest(body),
           JSON.stringify(context),
+          before.deadline_at,
         ],
       );
       if (!inserted.rowCount) {
@@ -854,7 +860,7 @@ export class ProactiveStore {
         const now = (await client.query('SELECT clock_timestamp() AS now')).rows[0].now.toISOString();
         const rows = (
           await client.query(
-            `SELECT s.*,r.body,r.digest,b.body AS batch_body FROM cos.proactive_suggestions s JOIN cos.proactive_revisions r ON r.scope_id=s.scope_id AND r.suggestion_id=s.id AND r.version=s.version JOIN cos.proactive_batches b ON b.scope_id=r.scope_id AND b.id=r.batch_id WHERE s.scope_id=$1 AND s.state='open' AND NOT EXISTS(SELECT 1 FROM cos.proactive_notifications n WHERE n.scope_id=s.scope_id AND n.suggestion_id=s.id) ORDER BY s.created_at,s.id LIMIT 20`,
+            `SELECT s.*,r.body,r.digest,b.body AS batch_body FROM cos.proactive_suggestions s JOIN cos.proactive_revisions r ON r.scope_id=s.scope_id AND r.suggestion_id=s.id AND r.version=s.version JOIN cos.proactive_batches b ON b.scope_id=r.scope_id AND b.id=r.batch_id WHERE s.scope_id=$1 AND s.state='open' AND NOT EXISTS(SELECT 1 FROM cos.proactive_notifications n WHERE n.scope_id=s.scope_id AND n.suggestion_id=s.id AND n.version=s.version) ORDER BY s.created_at,s.id LIMIT 20`,
             [context.scopeId],
           )
         ).rows;
