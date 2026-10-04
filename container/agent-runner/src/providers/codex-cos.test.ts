@@ -6,7 +6,8 @@ import type { ProviderEvent } from './types.js';
 
 function fixture(options: { stale?: boolean; unauthorized?: boolean; forged?: boolean; profile?: 'research' } = {}) {
   const writes: any[] = [],
-    spawns: any[] = [];
+    spawns: any[] = [],
+    configurations: string[] = [];
   let refreshed = 0,
     stopped = 0,
     prepare = 0;
@@ -23,7 +24,16 @@ function fixture(options: { stale?: boolean; unauthorized?: boolean; forged?: bo
           return true;
         },
       }),
-      writeConfig: () => {},
+      writeConfig: (config) => {
+        configurations.push(config);
+      },
+      mandateBridge: async (dispatch) => ({
+        socket: '/run/cos/fixture.sock',
+        configuration: '[mcp_servers.nanoclaw_cos_mandates]\ncommand="/usr/local/bin/bun"\n',
+        beginTurn: (thread, turn) => dispatch.beginTurn(thread, turn),
+        endTurn: () => dispatch.endTurn(),
+        close: async () => dispatch.close(),
+      }),
       attempts: () => ({ begin: async () => {}, end: async () => {} }),
       stop: async () => {
         stopped++;
@@ -108,7 +118,7 @@ function fixture(options: { stale?: boolean; unauthorized?: boolean; forged?: bo
     for await (const event of query.events) events.push(event);
     return events;
   }
-  return { provider, run, writes, spawns, counts: () => ({ refreshed, stopped, prepare }) };
+  return { provider, run, writes, spawns, configurations, counts: () => ({ refreshed, stopped, prepare }) };
 }
 
 test('S05 specialist uses the native Codex transport with only research tools and its own continuation namespace', async () => {
@@ -116,6 +126,7 @@ test('S05 specialist uses the native Codex transport with only research tools an
   const events = await f.run();
   const init = events.find((event) => event.type === 'init') as { continuation: string };
   expect(init.continuation).toBe('cos-mission-codex-subscription-v1:persistent-thread');
+  expect(f.configurations.every((config) => !config.includes('mcp_servers'))).toBe(true);
   expect(f.writes.find((r) => r.method === 'thread/start').params.dynamicTools.map((t: any) => t.name)).toEqual([
     'cos_mission_context_get',
     'cos_result_submit',
@@ -177,6 +188,7 @@ test('CoS keeps one native thread across queued replies and a new provider query
     'cos_mandate_activity',
   ]);
   expect(f.writes.find((r) => r.method === 'thread/resume').params.dynamicTools).toBeUndefined();
+  expect(f.configurations.every((config) => config.includes('[mcp_servers.nanoclaw_cos_mandates]'))).toBe(true);
   expect(f.writes.find((r) => r.id === 999).error.code).toBe(-32601);
   expect(JSON.stringify(events)).not.toContain('foreign-canary');
   expect(events.filter((e) => e.type === 'result').map((e) => e.text)).toEqual(['Fixture answer', 'Fixture answer']);

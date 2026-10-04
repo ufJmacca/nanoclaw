@@ -7,6 +7,7 @@ import { createSubscriptionTurnClient } from './codex-turn-client.js';
 import { stopSubscriptionAppServer, subscriptionProcessEnvironment } from './codex-subscription-check.js';
 import { subscriptionConfig, subscriptionThreadParams } from './codex-subscription-policy.js';
 import { cosDynamicTools, createCosToolDispatch } from './codex-cos-tools.js';
+import { createMandateToolBridge } from './codex-mandate-bridge.js';
 import {
   missionDynamicToolsForSchema,
   createMissionToolDispatch,
@@ -58,6 +59,7 @@ const runtime = {
   credentials: createSubscriptionCredentialClient,
   attempts: createSubscriptionTurnClient,
   writeConfig,
+  mandateBridge: createMandateToolBridge,
 };
 
 export class CosCodexProvider implements AgentProvider {
@@ -103,6 +105,7 @@ export class CosCodexProvider implements AgentProvider {
     const self = this;
     async function* events(): AsyncGenerator<ProviderEvent> {
       let threadId: string | undefined;
+      let bridge: Awaited<ReturnType<typeof createMandateToolBridge>> | undefined;
       const credentials = self.dependencies.credentials({ signal: cancellation.signal });
       const attempts = self.dependencies.attempts({ signal: cancellation.signal });
       try {
@@ -122,6 +125,7 @@ export class CosCodexProvider implements AgentProvider {
           };
           return;
         }
+        if (!self.specialist) bridge = await self.dependencies.mandateBridge(dispatch);
         while (!cancelled()) {
           if (!queue.length) {
             if (ended) return;
@@ -139,7 +143,7 @@ export class CosCodexProvider implements AgentProvider {
             await attempts.begin();
             await credentials.prepare();
             if (cancelled()) return;
-            self.dependencies.writeConfig(self.config);
+            self.dependencies.writeConfig(self.config + (bridge ? '\n' + bridge.configuration : ''));
             const current = self.dependencies.spawn([], { environment: self.environment, diagnostic: () => {} });
             server = current;
             const requestHandler = (request: JsonRpcServerRequest) => {
@@ -194,7 +198,10 @@ export class CosCodexProvider implements AgentProvider {
                 await credentials.refresh();
               },
               cancelled,
-              { started: (thread, turn) => dispatch.beginTurn(thread, turn), finished: () => dispatch.endTurn() },
+              {
+                started: (thread, turn) => (bridge ? bridge.beginTurn(thread, turn) : dispatch.beginTurn(thread, turn)),
+                finished: () => (bridge ? bridge.endTurn() : dispatch.endTurn()),
+              },
             );
           } catch {
             if (cancelled()) return;
@@ -213,7 +220,8 @@ export class CosCodexProvider implements AgentProvider {
                 : 'CoS could not complete this turn. It has not been replayed.',
             };
           } finally {
-            dispatch.endTurn();
+            if (bridge) bridge.endTurn();
+            else dispatch.endTurn();
             try {
               if (server) {
                 const current = server;
@@ -232,6 +240,7 @@ export class CosCodexProvider implements AgentProvider {
           server = undefined;
           await self.dependencies.stop(current);
         }
+        await bridge?.close();
       }
     }
     return {

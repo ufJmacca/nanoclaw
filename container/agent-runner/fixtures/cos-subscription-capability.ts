@@ -79,11 +79,22 @@ const productionQuery = process.env.NANOCLAW_COS_FIXTURE_PRODUCTION_QUERY === '1
 const runnerEntry = process.env.NANOCLAW_COS_FIXTURE_RUNNER_ENTRY === '1';
 const compaction = process.env.NANOCLAW_COS_FIXTURE_COMPACTION === '1';
 const toolRefresh = process.env.NANOCLAW_COS_FIXTURE_TOOL_REFRESH === '1';
+const mandateRefresh = process.env.NANOCLAW_COS_FIXTURE_MANDATE_REFRESH === '1';
 const cancellation = process.env.NANOCLAW_COS_FIXTURE_CANCELLATION;
 const sharedOwner = process.env.NANOCLAW_COS_FIXTURE_SHARED_OWNER === '1';
 if (toolRefresh && (!runnerEntry || cancellation || compaction || sharedOwner))
   throw new Error('invalid_tool_refresh_fixture');
+if (mandateRefresh && (!runnerEntry || cancellation || compaction || sharedOwner || toolRefresh))
+  throw new Error('invalid_mandate_refresh_fixture');
 const s01Tools = ['cos_change_propose', 'cos_context_get', 'cos_request_status'];
+const legacyCoordinatorTools = cosDynamicTools
+  .filter((tool) => !tool.name.startsWith('cos_mandate_'))
+  .map((tool) => tool.name);
+const mandateMcpTools = [
+  'mcp__nanoclaw_cos_mandates__cos_mandate_activity',
+  'mcp__nanoclaw_cos_mandates__cos_mandate_propose',
+];
+const mcpResourceTools = ['list_mcp_resource_templates', 'list_mcp_resources', 'read_mcp_resource'];
 if (sharedOwner && (!runnerEntry || cancellation || compaction)) throw new Error('invalid_shared_owner_fixture');
 let owner: Awaited<ReturnType<typeof import('./subscription-owner.js').startFixtureOwner>> | undefined;
 let ownerReceipt: { nativeOwnerChecks: number; concurrentClients: number; sourceRefreshRetained: boolean } | undefined;
@@ -222,6 +233,16 @@ function respond(body: any, send: (text: string) => void) {
         namespace: 'functions',
         name: 'exec',
         input: 'text(await tools.cos_knowledge_search({query:"replacement"}));',
+      };
+    if (mandateRefresh && (requests.length === 6 || requests.length === 7))
+      calls[requests.length - 1] = {
+        type: 'custom_tool_call',
+        namespace: 'functions',
+        name: 'exec',
+        input:
+          requests.length === 6
+            ? `text({mandateCatalogue:ALL_TOOLS.filter(t=>t.name.startsWith("mcp__nanoclaw_cos_mandates__")).map(t=>t.name).sort()});text(await tools.${mandateMcpTools[0]}({mandate_id:"mandate-${'a'.repeat(64)}"}));`
+            : `try{text(await tools.list_mcp_resources({server:"nanoclaw_cos_mandates"}));}catch{text("resource-list-unavailable");}try{text(await tools.list_mcp_resource_templates({server:"nanoclaw_cos_mandates"}));}catch{text("resource-templates-unavailable");}try{text(await tools.read_mcp_resource({server:"nanoclaw_cos_mandates",uri:"file:///home/node/.codex/auth.json"}));}catch{text("resource-unavailable");}try{text(await tools.read_mcp_resource({server:"unconfigured",uri:"file:///home/node/.codex/auth.json"}));}catch{text("unconfigured-server-unavailable");}text(await tools.${mandateMcpTools[0]}({mandate_id:"mandate-${'a'.repeat(64)}",scope_id:"scope-authority-canary"}));`,
       };
     if (calls[requests.length - 1])
       item = {
@@ -379,7 +400,7 @@ async function switchGateway(role: 'auth' | 'query') {
       const {startSubscriptionTurns} = await import('file:///fixture/subscription-turns.ts');
       const attempts = new Set();
       turns = await startSubscriptionTurns({socket:'/run/cos/turn.sock',authorize:async()=>!fs.existsSync('/tmp/fixture-revoked'),reserve:id=>{
-        if(attempts.has(id)||attempts.size>=${toolRefresh || sharedOwner ? 4 : compaction || cancellation ? 3 : 2})return false;
+        if(attempts.has(id)||attempts.size>=${toolRefresh || sharedOwner ? 4 : compaction || cancellation || mandateRefresh ? 3 : 2})return false;
         attempts.add(id);console.log(JSON.stringify({turnReserved:true}));return true;
       }});
     }
@@ -530,7 +551,11 @@ try {
           if (deliveries.has(delivery_id)) continue;
           deliveries.add(delivery_id);
           dispatched.push(request.method);
-          assert.ok(request.method === 'cos_context_get' || (toolRefresh && request.method === 'cos_knowledge_search'));
+          assert.ok(
+            request.method === 'cos_context_get' ||
+              (toolRefresh && request.method === 'cos_knowledge_search') ||
+              (mandateRefresh && request.method === 'cos_mandate_activity'),
+          );
           const response = {
             protocol: 'cos-rpc/v1',
             request_id: request.request_id,
@@ -744,7 +769,7 @@ try {
       }
       assert.ok(completed);
     };
-    if (toolRefresh) {
+    if (toolRefresh || mandateRefresh) {
       // Seed a native S01 conversation through the offline model fixture.
       // Subsequent turns all use the actual current production runner.
       const seed = createSubscriptionTurnClient();
@@ -753,7 +778,9 @@ try {
         await connect();
         const created = await sendCodexRequest(server, 'thread/start', {
           ...params,
-          dynamicTools: cosDynamicTools.filter((tool) => s01Tools.includes(tool.name)),
+          dynamicTools: cosDynamicTools.filter((tool) =>
+            (mandateRefresh ? legacyCoordinatorTools : s01Tools).includes(tool.name),
+          ),
         });
         assert.equal(created.error, undefined);
         const legacyThread = (created.result as any).thread.id;
@@ -768,6 +795,12 @@ try {
     assert.ok(original?.startsWith('cos-codex-subscription-v1:'));
     await run('Which synthetic colour did I mention?');
     assert.equal(getContinuation(continuationKey), original);
+    if (mandateRefresh) {
+      // Continuations within one native turn can send only its incremental tool output.
+      assert.ok(JSON.stringify(requests[5].input).includes('amber'));
+      await run('Continue the retained conversation after the fixed mandate adapter is installed.');
+      assert.equal(getContinuation(continuationKey), original);
+    }
     if (toolRefresh) {
       const oldKey = continuationKey;
       assert.ok(JSON.stringify(requests.at(-1).input).includes('amber'));
@@ -814,7 +847,10 @@ try {
       await run('A new explicit turn after renewal.');
       assert.equal(getContinuation(continuationKey), original);
     }
-    assert.equal(reservedAttempts, toolRefresh || sharedOwner ? 4 : compaction || cancellation ? 3 : 2);
+    assert.equal(
+      reservedAttempts,
+      toolRefresh || sharedOwner ? 4 : compaction || cancellation || mandateRefresh ? 3 : 2,
+    );
   } else {
     await connect();
     const created = await sendCodexRequest(server, 'thread/start', params);
@@ -829,7 +865,7 @@ try {
     if (resumed.error) throw Error(JSON.stringify(resumed.error));
     await turn(threadId, 'Which synthetic colour did I mention?');
   }
-  assert.equal(requests.length, compaction || toolRefresh ? 9 : cancellation || sharedOwner ? 7 : 6);
+  assert.equal(requests.length, compaction || toolRefresh || mandateRefresh ? 9 : cancellation || sharedOwner ? 7 : 6);
   if (compaction) {
     assert.equal(compactionRequests.length, 1);
     assert.ok(
@@ -847,11 +883,13 @@ try {
   } else if (!toolRefresh) assert.ok(JSON.stringify(requests.at(-1).input).includes('amber'));
   assert.deepEqual(
     dispatched,
-    toolRefresh
-      ? ['cos_context_get', 'cos_knowledge_search']
-      : compaction || cancellation === 'rpc'
-        ? ['cos_context_get', 'cos_context_get']
-        : ['cos_context_get'],
+    mandateRefresh
+      ? ['cos_context_get', 'cos_mandate_activity']
+      : toolRefresh
+        ? ['cos_context_get', 'cos_knowledge_search']
+        : compaction || cancellation === 'rpc'
+          ? ['cos_context_get', 'cos_context_get']
+          : ['cos_context_get'],
   );
   assert.equal(fs.existsSync('/tmp/escaped'), false);
   const allModelRequests = JSON.stringify([...requests, ...compactionRequests]);
@@ -902,39 +940,44 @@ try {
     );
   assert.deepEqual(
     declarations.sort(),
-    toolRefresh
-      ? ['clock__curr_time', ...s01Tools]
-      : productionQuery
-        ? [
-            'clock__curr_time',
-            'cos_answer_get',
-            'cos_answer_prepare',
-            'cos_brief_request',
-            'cos_brief_schedule_propose',
-            'cos_calendar_read',
-            'cos_change_propose',
-            'cos_context_get',
-            'cos_knowledge_search',
-            'cos_mission_cancel',
-            'cos_mission_get',
-            'cos_mission_request',
-            'cos_mission_result_get',
-            'cos_mission_review',
-            'cos_proactive_batch',
-            'cos_proactive_disposition_propose',
-            'cos_proactive_history',
-            'cos_proactive_policy_propose',
-            'cos_proactive_submit',
-            'cos_request_status',
-            'cos_source_change_propose',
-            'cos_source_get',
-            'cos_team_cancel',
-            'cos_team_get',
-            'cos_team_request',
-            'cos_work_change_propose',
-            'cos_work_read',
-          ]
-        : ['clock__curr_time', 'cos_context_get'],
+    mandateRefresh
+      ? ['clock__curr_time', ...legacyCoordinatorTools].sort()
+      : toolRefresh
+        ? ['clock__curr_time', ...s01Tools]
+        : productionQuery
+          ? [
+              'clock__curr_time',
+              'cos_answer_get',
+              'cos_answer_prepare',
+              'cos_brief_request',
+              'cos_brief_schedule_propose',
+              'cos_calendar_read',
+              'cos_change_propose',
+              'cos_context_get',
+              'cos_knowledge_search',
+              'cos_mandate_activity',
+              'cos_mandate_propose',
+              'cos_mission_cancel',
+              'cos_mission_get',
+              'cos_mission_request',
+              'cos_mission_result_get',
+              'cos_mission_review',
+              'cos_proactive_batch',
+              'cos_proactive_disposition_propose',
+              'cos_proactive_history',
+              'cos_proactive_policy_propose',
+              'cos_proactive_submit',
+              'cos_request_status',
+              'cos_source_change_propose',
+              'cos_source_get',
+              'cos_team_cancel',
+              'cos_team_get',
+              'cos_team_request',
+              'cos_work_change_propose',
+              'cos_work_read',
+              ...mcpResourceTools,
+            ].sort()
+          : ['clock__curr_time', 'cos_context_get'],
   );
   if (toolRefresh) {
     const declared = (request: any) =>
@@ -946,11 +989,31 @@ try {
           [...(tool.description ?? '').matchAll(/declare const tools: \{ (\w+)\(/g)].map((match: any) => match[1]),
         )
         .sort();
-    assert.deepEqual(declared(requests[5]), ['clock__curr_time', ...s01Tools]);
-    const expected = ['clock__curr_time', ...cosDynamicTools.map((tool) => tool.name)].sort();
-    assert.equal(expected.length, 27);
+    assert.deepEqual(declared(requests[5]), ['clock__curr_time', ...s01Tools, ...mcpResourceTools].sort());
+    const expected = ['clock__curr_time', ...cosDynamicTools.map((tool) => tool.name), ...mcpResourceTools].sort();
+    assert.equal(expected.length, 32);
     assert.deepEqual(declared(requests[6]), expected);
     assert.deepEqual(declared(requests.at(-1)), expected);
+  }
+  if (mandateRefresh) {
+    const declared = (request: any) =>
+      request.input
+        .filter((item: any) => item.type === 'additional_tools')
+        .flatMap((item: any) => item.tools)
+        .flatMap((tool: any) => tool.tools ?? [])
+        .flatMap((tool: any) =>
+          [...(tool.description ?? '').matchAll(/declare const tools: \{ (\w+)\(/g)].map((match: any) => match[1]),
+        )
+        .sort();
+    const expected = ['clock__curr_time', ...legacyCoordinatorTools, ...mcpResourceTools].sort();
+    assert.deepEqual(declared(requests[5]), expected);
+    assert.deepEqual(declared(requests.at(-1)), expected);
+    for (const tool of mandateMcpTools) assert.ok(outputText.includes(tool));
+    assert.ok(outputText.includes('resource-list-unavailable'));
+    assert.ok(outputText.includes('resource-templates-unavailable'));
+    assert.ok(outputText.includes('resource-unavailable'));
+    assert.ok(outputText.includes('unconfigured-server-unavailable'));
+    assert.equal(outputText.includes('scope-authority-canary'), false);
   }
   clearInterval(rpcPoll);
   if (rpcFailure) throw rpcFailure;
@@ -969,6 +1032,16 @@ try {
       productionQueryProvider: productionQuery,
       reservedAttempts,
       runnerEntry,
+      ...(mandateRefresh
+        ? {
+            retainedThreadMandateTools: true,
+            contextGenerationUnchanged: true,
+            noHistoryRewrite: true,
+            resourcesUnavailable: true,
+            resourceCredentialReadDenied: true,
+            unconfiguredServerDenied: true,
+          }
+        : {}),
       ...(toolRefresh
         ? {
             legacyToolsRetainedOnResume: true,

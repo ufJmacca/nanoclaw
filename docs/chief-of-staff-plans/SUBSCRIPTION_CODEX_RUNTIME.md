@@ -162,5 +162,20 @@ Pi update: that exact release is deployed healthy and passed the expanded native
 
 The compatible contract-22 rollback/replay and normal startup credential binding pass; the prepared context survived fresh roll-forward. Final-release Pi and Mac-independent fixture checks also pass. Bounded live acceptance completed successfully and ended paused. The authorization-polling review correction also passes final-image/Pi verification. Obtain legitimate human review/merge. The retained contract-21 release must not be relabelled as contract-22 compatible. Deploy the actual merged source before S02. This plan itself grants no new real account or model-use authority.
 
-
 S04 implementation note: an admitted scheduled calendar refresh can replace the main CoS native generation before source updates. The existing AgentGroup, session and visual conversation remain the same. A host-owned record binds the replacement to the exact unchanged issued policy, account and original generation; it does not refill usage or extend consent. Old history remains retained and is not imported into the replacement. Restart alone does not replace context. This narrowly recorded transition is distinct from explicit operator recovery of corrupt or revoked state, and cannot undo a pause, account change or revocation. Fixture validation is recorded in [S04 evidence](../chief-of-staff/evidence/S04.md); native/image/Pi acceptance remains pending.
+
+S08 implementation note: Codex 0.158.0 has no `dynamicTools` field on `thread/resume`.
+Its existing dynamic catalog remains intact. A fixed image-owned
+`nanoclaw_cos_mandates` MCP server supplies only the two new mandate tools to the
+same native conversation. Its private socket forwards calls through the existing
+dispatcher, sharing current-turn cancellation, concurrency and call limits;
+trusted host approval and scoped permission checks remain mandatory. Only these
+internal proposal/read RPCs have explicit native tool admission. No arbitrary MCP
+configuration, resource reader or external action is enabled. The native binary
+advertises three MCP resource helpers, but its fixed server supplies no resources
+and denies reads. Offline native fixtures prove tool discovery, one scoped read,
+retained history and denial of credential reads and unconfigured servers.
+Final-image and Pi acceptance are pending in [S08 evidence](../chief-of-staff/evidence/S08.md).
+The supported MCP configuration is documented in the
+[official configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference)
+and [app-server documentation](https://learn.chatgpt.com/docs/app-server).
