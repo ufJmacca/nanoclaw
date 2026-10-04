@@ -1,6 +1,6 @@
 # S08 — Perform useful background work under a standing mandate
 
-**Status:** in progress; Mac source and final-image gates passed; Pi, live and review gates pending
+**Status:** tested candidate deployed; Mac/Pi fixture gates passed; human review and live activation pending
 
 **Repository:** `ufJmacca/nanoclaw`  
 **Branch:** `cos/s08-standing-mandates`  
