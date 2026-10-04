@@ -1045,6 +1045,18 @@ test('S04-T07 collects cited calendar snapshots with visible staleness and denie
     ).status,
     'ok',
   );
+  const fixtureTime = collector.options.clock!();
+  // Snapshot persistence uses database time; this brief uses a fixed fixture
+  // clock. Set only this fixture calendar's refresh age relative to that clock.
+  assert.equal(
+    (
+      await admin.query(
+        'UPDATE cos.calendar_states SET last_success_at=$4 WHERE scope_id=$1 AND binding_id=$2 AND calendar_id=$3',
+        [scope, binding, 'selected', fixtureTime],
+      )
+    ).rowCount,
+    1,
+  );
   const view = new CalendarView({
     store: calendar,
     knowledge,
@@ -1054,6 +1066,13 @@ test('S04-T07 collects cited calendar snapshots with visible staleness and denie
     },
   });
   const briefs = new BriefCollector({ ...collector.options, calendarView: view });
+  const fresh = await briefs.collect({ ...context, generation: randomUUID() }, 'Australia/Sydney');
+  assert.equal(fresh.status, 'ok');
+  assert.equal((fresh.snapshot as BriefSnapshot).coverage.calendar, 'available');
+  await admin.query(
+    'UPDATE cos.calendar_states SET last_success_at=$4 WHERE scope_id=$1 AND binding_id=$2 AND calendar_id=$3',
+    [scope, binding, 'selected', new Date(fixtureTime.getTime() - 2 * 3600000)],
+  );
   const briefArtifacts = new BriefArtifacts(briefs);
   const saved = await briefArtifacts.prepare(
     { ...context, generation: randomUUID() },
