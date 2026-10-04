@@ -24,6 +24,7 @@ import { installReviewOrigin } from './missions/review-origin.js';
 import * as delivery from '../../delivery.js';
 import { installCosMissionBoundary, type CosMissionIdentity } from '../../cos-mission-boundary.js';
 import { isCosMissionStopped } from '../../cos-mission-stop.js';
+import { NativeMandateTasks } from './automation/mandate-native.js';
 
 let runtime: ReturnType<typeof createCosRuntime> | undefined;
 afterEach(() => {
@@ -31,6 +32,76 @@ afterEach(() => {
   closeDb();
   vi.useRealTimers();
   vi.restoreAllMocks();
+});
+it('S08 uses the existing host pump for mandate clocks and keeps the main session paused after an emergency stop', async () => {
+  const db = initTestDb(),
+    inbound = new Database(':memory:');
+  inbound.exec(INBOUND_SCHEMA);
+  const binding: CosBinding = {
+    scopeId: 'scope',
+    agentGroupId: 'group',
+    messagingGroupId: 'mg',
+    sessionId: 'session',
+    provider: 'codex',
+    instanceId: 'fixture',
+    channelId: 'private',
+    ownerId: 'owner',
+    botId: 'bot',
+  };
+  const session = {
+    id: 'session',
+    agent_group_id: 'group',
+    messaging_group_id: 'mg',
+    thread_id: null,
+    status: 'active',
+    agent_provider: 'codex',
+  } as Session;
+  installCosBoundary(binding, db);
+  db.prepare('UPDATE cos_identity_boundaries SET paused=0').run();
+  const order: string[] = [];
+  const mandates = {
+    headsForHost: vi.fn(async () => {
+      order.push('mandates');
+      return { status: 'ok', heads: [], next_after: null };
+    }),
+    bindNative: vi.fn(),
+    evaluate: vi.fn(),
+  };
+  const wake = vi.fn();
+  runtime = createCosRuntime({
+    db,
+    enabled: true,
+    store: {
+      mandates,
+      pendingOutbox: vi.fn(async () => {
+        order.push('outbox');
+        return { status: 'ok', items: [] };
+      }),
+    } as unknown as PriorityStore,
+    facts: async () => ({
+      id: 'private',
+      type: 'P',
+      delete_at: 0,
+      members: ['owner', 'bot'],
+      activeSubscription: true,
+    }),
+    session: () => session,
+    destination: () => undefined,
+    stop: vi.fn(),
+    wake,
+    withMandateTasks: (_session, operation) => operation(new NativeMandateTasks(inbound)),
+  });
+  try {
+    await runtime.pump(binding);
+    expect(order).toEqual(['outbox', 'mandates']);
+    expect(wake).not.toHaveBeenCalled();
+    db.prepare('UPDATE cos_identity_boundaries SET paused=1').run();
+    await runtime.pump(binding);
+    expect(mandates.headsForHost).toHaveBeenCalledTimes(1);
+    expect(db.prepare('SELECT paused FROM cos_identity_boundaries').get()).toEqual({ paused: 1 });
+  } finally {
+    inbound.close();
+  }
 });
 it.each([false, true])('S06-T06 runtime cancels the entire team with never-allocated proof %s', async (unallocated) => {
   const db = initTestDb(),
