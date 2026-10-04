@@ -147,6 +147,9 @@ describe('S01 restricted coordinator launch', () => {
     expect(launch.args).toContain(`type=bind,src=${socket},dst=/run/cos/subscription.sock,readonly`);
     expect(launch.args).toContain(`type=bind,src=${socket},dst=/run/nanoclaw/codex-credentials.sock,readonly`);
     expect(launch.args).toContain(`type=bind,src=${socket},dst=/run/cos/turn.sock,readonly`);
+    expect(launch.args).toContain(
+      `/run/cos:rw,noexec,nosuid,nodev,size=1m,mode=0700,uid=${process.getuid!()},gid=${process.getgid!()}`,
+    );
     expect(() => restrictedLaunch(input())).toThrow('invalid_restricted_config');
     expect(() =>
       restrictedLaunch({ ...input(), subscription: { ...profile, contextGeneration: 'changed' } }),
@@ -169,6 +172,7 @@ describe('S01 restricted coordinator launch', () => {
     expect(launch.args).toContain('nanoclaw.cos-protocol=cos-rpc/v1');
     expect(launch.args).toContain('/app/src/cos-runner.ts');
     expect(launch.args.filter((v) => v.startsWith('type=bind'))).toHaveLength(4);
+    expect(launch.args.some((v) => v.startsWith('/run/cos:'))).toBe(false);
     const text = launch.args.join(' ');
     for (const forbidden of [
       'host.docker.internal',
@@ -215,6 +219,7 @@ describe('S05 specialist launch policy', () => {
         `type=bind,src=${profile.research.contextDirectory}/${name},dst=/run/cos/mission/${name},readonly`,
       );
     expect(launch.args.filter((v) => v.startsWith('type=bind'))).toHaveLength(10);
+    expect(launch.args.some((v) => v.startsWith('/run/cos:'))).toBe(false);
     for (const denied of ['sibling-secret', 'mission-B-canary', '/workspace/global', '/var/run/docker.sock', 'COS_PG'])
       expect(launch.args.join(' ')).not.toContain(denied);
     for (const required of ['--network=none', '--read-only', '--cap-drop=ALL', '--security-opt=no-new-privileges'])
