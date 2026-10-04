@@ -1,6 +1,6 @@
 # S08 — Perform useful background work under a standing mandate
 
-**Status:** in progress; full regression and release gates pending
+**Status:** in progress; Mac source regressions passed; final image, Pi and live gates pending
 
 **Repository:** `ufJmacca/nanoclaw`  
 **Branch:** `cos/s08-standing-mandates`  
