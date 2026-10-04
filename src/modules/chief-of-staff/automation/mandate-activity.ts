@@ -68,18 +68,16 @@ export async function readMandateActivity(
         ? row
         : { id: row.id, state: row.state, generation: row.generation, revision: row.revision, details_withheld: true },
     ),
-    activity: activity
-      .slice(0, 5)
-      .map((row) => ({
-        id: row.id,
-        revision: row.revision,
-        created_at: row.created_at,
-        body: Object.fromEntries(
-          ['kind', 'action', 'reason', 'state', 'decision', 'model_calls', 'notifications', 'decisions_needed']
-            .filter((k) => Object.hasOwn(row.body, k))
-            .map((k) => [k, row.body[k]]),
-        ),
-      })),
+    activity: activity.slice(0, 5).map((row) => ({
+      id: row.id,
+      revision: row.revision,
+      created_at: row.created_at,
+      body: Object.fromEntries(
+        ['kind', 'action', 'reason', 'state', 'decision', 'model_calls', 'notifications', 'decisions_needed']
+          .filter((k) => Object.hasOwn(row.body, k))
+          .map((k) => [k, row.body[k]]),
+      ),
+    })),
     next_offset: activity.length > 5 ? offset + 5 : null,
     context_exposures: exposures.slice(0, 30),
     exposure_truncated: exposures.length > 30,
