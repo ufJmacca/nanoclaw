@@ -1,6 +1,7 @@
 # S08 — Perform useful background work under a standing mandate
 
-**Status:** not started  
+**Status:** tested candidate deployed; Mac/Pi fixture gates passed; human review and live activation pending
+
 **Repository:** `ufJmacca/nanoclaw`  
 **Branch:** `cos/s08-standing-mandates`  
 **Depends on:** S07 merged, with its acceptance receipt available.  
@@ -40,27 +41,27 @@ Enable one template first. A template being shipped does not mean it is active. 
 
 ## Required red tests
 
-| ID | Behaviour that must first fail |
-|---|---|
-| S08-T01 | Unapproved, expired, revoked and out-of-scope mandate revisions cannot admit a mission. |
-| S08-T02 | Duplicate/concurrent triggers reserve budget and create work once. |
-| S08-T03 | Pause/revoke fences running descendants and blocks retrieval/publication at the next boundary. |
-| S08-T04 | A model cannot widen actions/sources/templates or prolong a mandate. |
-| S08-T05 | Budget reservations account for all children/retries; unknown usage is not zero. |
-| S08-T06 | Missed occurrences coalesce; failure storms cause suspension, not runaway spawning. |
-| S08-T07 | Source changes and untrusted event text cannot become executable trigger code. |
-| S08-T08 | Native schedule repair cannot bypass mandate approval or replay cancelled generations. |
-| S08-T09 | No-op triggers avoid model execution and do not spam the owner. |
+| ID      | Behaviour that must first fail                                                                       |
+| ------- | ---------------------------------------------------------------------------------------------------- |
+| S08-T01 | Unapproved, expired, revoked and out-of-scope mandate revisions cannot admit a mission.              |
+| S08-T02 | Duplicate/concurrent triggers reserve budget and create work once.                                   |
+| S08-T03 | Pause/revoke fences running descendants and blocks retrieval/publication at the next boundary.       |
+| S08-T04 | A model cannot widen actions/sources/templates or prolong a mandate.                                 |
+| S08-T05 | Budget reservations account for all children/retries; unknown usage is not zero.                     |
+| S08-T06 | Missed occurrences coalesce; failure storms cause suspension, not runaway spawning.                  |
+| S08-T07 | Source changes and untrusted event text cannot become executable trigger code.                       |
+| S08-T08 | Native schedule repair cannot bypass mandate approval or replay cancelled generations.               |
+| S08-T09 | No-op triggers avoid model execution and do not spam the owner.                                      |
 | S08-T10 | External calendar/email writes are rejected even when a model claims the mandate implies permission. |
 
 ## External PostgreSQL requirements for this slice
 
 Mandate evaluation, trigger deduplication and budget reservation use one remote transaction. No cached mandate or native scheduled row can authorise work while PostgreSQL is unavailable. A trusted host pause remains effective during the partition and is reconciled before reopening admission.
 
-| ID | Additional required red → green behaviour |
-|---|---|
+| ID       | Additional required red → green behaviour                                                                                            |
+| -------- | ------------------------------------------------------------------------------------------------------------------------------------ |
 | S08-PG01 | Database failure at trigger admission or lease renewal causes no new worker, spend reservation reset or stale-authority publication. |
-| S08-PG02 | A host-local emergency pause during a partition remains in force after reconnect until the owner explicitly resumes eligible work. |
+| S08-PG02 | A host-local emergency pause during a partition remains in force after reconnect until the owner explicitly resumes eligible work.   |
 
 ## Acceptance gate
 
@@ -85,7 +86,7 @@ Run `pnpm cos:test --slice S08 --db-profile <selected-profile>` and `pnpm cos:de
 Write a sanitised acceptance receipt at `docs/chief-of-staff/evidence/S08.md`: base/head SHA, scenario and test IDs, real red/green command results, migration version, policy changes, fixture demo evidence, rollback check, live-test status, residual limitations and reviewer decision. Private logs/artifacts stay outside Git. Record missing live credentials as **live validation pending**, not passed. Missing every eligible database target blocks the required integration gate; a missing separate test DB does not block the guarded disposable-runtime option. Include the plan revision, `cos-postgres/external-env-v3` conformance, selected test profile and target identity confirmation (without credentials/endpoints), actual local-test/final-image/transfer/Pi-migration/Pi-smoke receipts, source and image IDs, Pi-owned data lifecycle, actual remote failure tests and any pending operator configuration.
 
 Update the persistent goal ledger and create or update this slice’s PR. If review/merge is pending, checkpoint `awaiting_review` with the exact resume condition; the overall goal remains incomplete. When an authorised human merge is verified, advance automatically to the next eligible slice under [GOAL.md](GOAL.md), without a new slice-specific instruction. Execute this slice's in-scope database migrations and target deployment/restart/rollback automatically under [IMPLEMENTATION_AUTHORITY.md](IMPLEMENTATION_AUTHORITY.md), through the Mac-to-Pi release path, recording actual results without another human approval. Do not auto-merge, enable an unauthorised account, enlarge permissions or implement a dependent slice before its predecessor is merged. Resume unfinished work on its existing branch; never recreate a finished slice or discard an existing ledger.
+
 ## Pinned-source release gate
 
 Apply [GITHUB_SOURCE_SYNC.md](GITHUB_SOURCE_SYNC.md) in this slice. Push the exact tested source commit from the Mac, fetch/verify it in a detached Pi release-source checkout, and require commit/tree agreement with the tested artifact manifest before activation. Record source-push/source-sync status and verified IDs in the acceptance/deployment receipt. Never use an unattended pull, change the active checkout, build on the Pi or mount fetched source over release code. S01 introduces tests S01-REL13–S01-REL18; later slices regress them where affected.
-

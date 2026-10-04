@@ -37,6 +37,8 @@ import {
   type ProactiveDispositionRequest,
 } from '../contracts/proactive-protocol.js';
 import { ProactiveStore } from '../automation/proactive-store.js';
+import { validMandateChange } from '../contracts/mandate-protocol.js';
+import { MandateStore } from '../automation/mandate-store.js';
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const equal = (a: string, b: string) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
@@ -67,6 +69,7 @@ export class PriorityStore {
   readonly work: WorkStore;
   readonly schedules = new BriefScheduleStore();
   readonly proactive: ProactiveStore;
+  readonly mandates: MandateStore;
   readonly briefs: BriefRunStore;
   readonly briefArtifacts?: BriefArtifacts;
   readonly missions: MissionProposalStore;
@@ -86,15 +89,21 @@ export class PriorityStore {
     missionAuthority?: MissionAuthorityResolver,
     teamAuthority?: TeamAuthorityResolver,
   ) {
+    this.mandates = new MandateStore(database, knowledge, missionAuthority, () => this.missions);
     this.teams = new TeamProposalStore(knowledge, teamAuthority);
     this.teamRuns = new TeamRunStore(database, this.teams, knowledge);
-    this.missions = new MissionProposalStore(knowledge, missionAuthority, (...args) =>
-      this.teamRuns.captureChild(...args),
+    this.missions = new MissionProposalStore(
+      knowledge,
+      missionAuthority,
+      (...args) => this.teamRuns.captureChild(...args),
+      (...args) => this.mandates.missionCurrent(...args),
     );
     this.missionRuns = new MissionRunStore(database, this.missions, knowledge?.artifacts);
     if (knowledge) {
       this.missionReviews = new MissionReviews(database, this.missions, knowledge);
-      this.missionNotifications = new MissionNotifications(database, this.missionReviews);
+      this.missionNotifications = new MissionNotifications(database, this.missionReviews, 'single', (...args) =>
+        this.mandates.authorizeNotification(...args),
+      );
       this.missionReviewRuns = new MissionReviewRuns(this.missionReviews);
       this.teamFinalReviews = new TeamFinalReviews(this.teamRuns);
       this.teamNotifications = new MissionNotifications(database, this.teamFinalReviews, 'team');
@@ -118,6 +127,7 @@ export class PriorityStore {
       );
   }
   private async workReceiptCurrent(client: PoolClient, context: Context, result: Result): Promise<boolean> {
+    if (validMandateChange(result.change)) return this.mandates.validateChange(client, context, result.change);
     if (validProactiveDispositionChange(result.change)) {
       const stored = (
         await client.query(
@@ -295,15 +305,17 @@ export class PriorityStore {
         ? 'cos_team_request'
         : mission
           ? 'cos_mission_request'
-          : validProactivePolicyChange(change)
-            ? 'cos_proactive_policy_propose'
-            : validSourceChange(change)
-              ? 'cos_source_change_propose'
-              : validWorkChange(change)
-                ? 'cos_work_change_propose'
-                : validScheduleChange(change)
-                  ? 'cos_brief_schedule_propose'
-                  : 'cos_change_propose';
+          : validMandateChange(change)
+            ? 'cos_mandate_propose'
+            : validProactivePolicyChange(change)
+              ? 'cos_proactive_policy_propose'
+              : validSourceChange(change)
+                ? 'cos_source_change_propose'
+                : validWorkChange(change)
+                  ? 'cos_work_change_propose'
+                  : validScheduleChange(change)
+                    ? 'cos_brief_schedule_propose'
+                    : 'cos_change_propose';
     const hash = digest(
       disposition
         ? { method, request: disposition, retained }
@@ -344,6 +356,7 @@ export class PriorityStore {
             : proposed;
       if (
         !change ||
+        (validMandateChange(change) && !(await this.mandates.validateChange(client, context, change))) ||
         (validSourceChange(change) &&
           (!this.knowledge || !(await this.knowledge.validateChange(client, context.scopeId, change)))) ||
         (validWorkChange(change) && !(await this.work.validateChange(client, context, change, retained))) ||
@@ -424,6 +437,13 @@ export class PriorityStore {
         return { status: 'denied' };
       if (
         decision === 'approve' &&
+        proposal.state === 'pending' &&
+        validMandateChange(proposal.change) &&
+        !(await this.mandates.validateChange(client, { ...context, sessionId: proposal.session_id }, proposal.change))
+      )
+        return { status: 'denied' };
+      if (
+        decision === 'approve' &&
         validTeamChange(proposal.change) &&
         !(await this.teams.validateChange(client, context, proposal.change))
       )
@@ -496,7 +516,8 @@ export class PriorityStore {
         validMissionChange(change) ||
         validTeamChange(change) ||
         validProactivePolicyChange(change) ||
-        validProactiveDispositionChange(change)
+        validProactiveDispositionChange(change) ||
+        validMandateChange(change)
       ) {
         const context: Context = {
           scopeId,
@@ -506,23 +527,31 @@ export class PriorityStore {
           ingressId: proposal.ingress_id,
         };
         if (proposal.owner_id !== context.ownerId) return { status: 'denied' };
-        const result = validProactiveDispositionChange(change)
-          ? await this.proactive.applyDisposition(client, context, proposal, change, proposal.work_context ?? undefined)
-          : validProactivePolicyChange(change)
-            ? await this.proactive.applyPolicy(client, context, proposal, change)
-            : validTeamChange(change)
-              ? await this.teams.applyApproved(client, context, proposal, change)
-              : validMissionChange(change)
-                ? await this.missions.applyApproved(client, context, proposal, change)
-                : validScheduleChange(change)
-                  ? await this.schedules.applyApproved(client, context, proposal, change)
-                  : await this.work.applyApproved(
-                      client,
-                      context,
-                      proposal,
-                      change,
-                      proposal.work_context ?? undefined,
-                    );
+        const result = validMandateChange(change)
+          ? await this.mandates.applyApproved(client, context, proposal, change)
+          : validProactiveDispositionChange(change)
+            ? await this.proactive.applyDisposition(
+                client,
+                context,
+                proposal,
+                change,
+                proposal.work_context ?? undefined,
+              )
+            : validProactivePolicyChange(change)
+              ? await this.proactive.applyPolicy(client, context, proposal, change)
+              : validTeamChange(change)
+                ? await this.teams.applyApproved(client, context, proposal, change)
+                : validMissionChange(change)
+                  ? await this.missions.applyApproved(client, context, proposal, change)
+                  : validScheduleChange(change)
+                    ? await this.schedules.applyApproved(client, context, proposal, change)
+                    : await this.work.applyApproved(
+                        client,
+                        context,
+                        proposal,
+                        change,
+                        proposal.work_context ?? undefined,
+                      );
         if (!['ok', 'conflict'].includes(result.status)) return result;
         const changed = result.status === 'ok';
         await client.query(
@@ -626,6 +655,7 @@ export class PriorityStore {
         work_next_offset: work.next_offset,
         work_truncated: work.truncated,
         brief_schedules: await this.schedules.read(client, context),
+        standing_mandates: await this.mandates.readHeads(client, context),
         proactive_policy:
           (
             await client.query(

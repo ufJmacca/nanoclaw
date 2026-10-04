@@ -1,6 +1,7 @@
 import path from 'node:path';
 import os from 'node:os';
 import fs from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { KnowledgeStore } from '../../modules/chief-of-staff/knowledge/store.js';
 import { KnowledgeArtifacts } from '../../modules/chief-of-staff/knowledge/artifacts.js';
 import pg from 'pg';
@@ -32,6 +33,7 @@ async function start(input: {
   knowledgeRoot?: string;
   calendar?: boolean;
   brief?: { clock: string; events: unknown[] };
+  mandate?: { events: unknown[] };
   mission?: {
     repository: string;
     hostRepository: string;
@@ -115,12 +117,18 @@ async function start(input: {
   if (input.calendar && !input.knowledgeRoot) throw new Error('fixture_calendar_requires_knowledge_root');
   if (input.brief && (!input.calendar || !Number.isFinite(Date.parse(input.brief.clock))))
     throw new Error('fixture_brief_requires_calendar_clock');
+  if (
+    input.mandate &&
+    (!input.calendar || !input.mission || !Array.isArray(input.mandate.events) || input.mandate.events.length > 5)
+  )
+    throw new Error('fixture_mandate_requires_calendar_mission');
+  const calendarFixture = input.brief ?? input.mandate;
   let fixtureClock = input.brief?.clock;
   const calendar = input.calendar
     ? new CalendarStore(
         database,
         {},
-        input.brief
+        calendarFixture
           ? new CalendarEvidence(
               new KnowledgeArtifacts(
                 path.join(input.knowledgeRoot!, 'artifacts'),
@@ -158,7 +166,7 @@ async function start(input: {
         })
       : undefined;
   const connector =
-    input.brief && calendar && fences
+    calendarFixture && calendar && fences
       ? new CalendarConnector({
           store: calendar,
           fences,
@@ -171,7 +179,7 @@ async function start(input: {
                 scopes: binding.scopes,
                 auth: binding.auth,
               },
-              calendars: { selected: input.brief!.events },
+              calendars: { selected: calendarFixture.events },
             }).reader,
         })
       : undefined;
@@ -336,6 +344,23 @@ async function start(input: {
       await runtime.pump(binding);
       return true;
     }
+    if (input.mandate && connector && command === 'mandate-refresh') {
+      const now = await database.run(async (client) =>
+        (await client.query('SELECT clock_timestamp() AS now')).rows[0].now.getTime(),
+      );
+      const refreshed = await connector.refresh(
+        { ...binding, ingressId: 'fixture-calendar-refresh' },
+        value,
+        'selected',
+        randomUUID(),
+        {
+          timeMin: new Date(now - 60000).toISOString(),
+          timeMax: new Date(now + 2 * 86400000).toISOString(),
+          timeZone: 'UTC',
+        },
+      );
+      return refreshed.result.status === 'ok';
+    }
     if (input.brief && command === 'clock') {
       if (typeof value !== 'string' || !Number.isFinite(Date.parse(value))) throw new Error('fixture_clock_invalid');
       fixtureClock = value;
@@ -495,7 +520,14 @@ process.on('message', (message: any) => {
               /^[A-Z_]{1,40}$/.test(String((error as { code: string }).code))
             ? (error as { code: string }).code
             : 'unavailable';
-      process.send!({ id: message.id, error: 'fixture_host_command_failed', reason }, () => {
+      const frame =
+        message.command === 'start' && error instanceof Error
+          ? error.stack
+              ?.match(/\/([a-zA-Z0-9-]+)\.(?:js|ts):(\d+):\d+/)
+              ?.slice(1)
+              .join(':')
+          : undefined;
+      process.send!({ id: message.id, error: 'fixture_host_command_failed', reason, frame }, () => {
         if (message.command === 'start') process.exit(1);
       });
     }

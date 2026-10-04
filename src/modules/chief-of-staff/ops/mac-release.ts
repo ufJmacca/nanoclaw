@@ -12,6 +12,7 @@ type LocalExecution = {
     deployed_source_sha?: string;
     merged_source_delivery_status?: string;
     pi_smoke_status?: string;
+    operator_assessment?: { status: string };
   }>;
 };
 
@@ -20,13 +21,15 @@ export function readLocalExecution(root: string, forRelease = false): LocalExecu
   const ledger = readPrivate<LocalExecution>(path.join(root, 'execution.json'), 1024 * 1024);
   const slice = ledger.slices?.find((item) => item.id === ledger.active_slice);
   if (
-    !['S01', 'S02', 'S03', 'S04', 'S05', 'S06', 'S07'].includes(ledger.active_slice) ||
+    !['S01', 'S02', 'S03', 'S04', 'S05', 'S06', 'S07', 'S08'].includes(ledger.active_slice) ||
     !slice ||
     (forRelease && !['in_progress', 'alignment_in_progress'].includes(slice.implementation_status ?? ''))
   )
     throw new Error('active_slice_required');
   if (ledger.active_slice !== 'S01') {
-    const predecessor = { S02: 'S01', S03: 'S02', S04: 'S03', S05: 'S04', S06: 'S05', S07: 'S06' }[ledger.active_slice];
+    const predecessor = { S02: 'S01', S03: 'S02', S04: 'S03', S05: 'S04', S06: 'S05', S07: 'S06', S08: 'S07' }[
+      ledger.active_slice
+    ];
     const previous = ledger.slices.find((item) => item.id === predecessor);
     if (
       !previous ||
@@ -35,7 +38,8 @@ export function readLocalExecution(root: string, forRelease = false): LocalExecu
       !/^[a-f0-9]{40}$/.test(previous.merged_sha ?? '') ||
       previous.deployed_source_sha !== previous.merged_sha ||
       previous.merged_source_delivery_status !== 'passed' ||
-      previous.pi_smoke_status !== 'passed'
+      previous.pi_smoke_status !== 'passed' ||
+      (ledger.active_slice === 'S08' && previous.operator_assessment?.status !== 'passed')
     )
       throw new Error('predecessor_acceptance_required');
   }
@@ -46,7 +50,7 @@ export function readLocalExecution(root: string, forRelease = false): LocalExecu
 export function checkpointLocalExecution(root: string, patch: Record<string, unknown>): void {
   const ledger = readLocalExecution(root);
   const slice = ledger.slices.find((item) => item.id === ledger.active_slice);
-  if (!['S01', 'S02', 'S03', 'S04', 'S05', 'S06', 'S07'].includes(ledger.active_slice) || !slice)
+  if (!['S01', 'S02', 'S03', 'S04', 'S05', 'S06', 'S07', 'S08'].includes(ledger.active_slice) || !slice)
     throw new Error('active_slice_required');
   Object.assign(slice, patch, { checkpoint_at: new Date().toISOString() });
   writeAtomic(root, 'execution.json', ledger);

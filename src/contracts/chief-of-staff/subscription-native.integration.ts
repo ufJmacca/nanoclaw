@@ -612,6 +612,7 @@ test(
           '/tmp:rw,nosuid,nodev',
           '--tmpfs',
           '/workspace:rw,nosuid,nodev,uid=1000,gid=1000',
+          ...(role === 'cos' ? ['--tmpfs', '/run/cos:rw,noexec,nosuid,nodev,size=1m,mode=0700,uid=1000,gid=1000'] : []),
           ...mounts.flatMap((mount) => ['--mount', 'type=bind,' + mount]),
           '-e',
           'HOME=/home/node',

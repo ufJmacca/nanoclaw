@@ -47,6 +47,11 @@ function outsideQuiet(policy: BriefSchedulePolicy, at: Temporal.Instant): Tempor
     ? earlier
     : endTime.toZonedDateTime(policy.time_zone, { disambiguation: 'later' }).toInstant();
 }
+/** Host notification policies share the same timezone and DST interpretation as native briefs. */
+export function nextBriefAllowedAt(policy: BriefSchedulePolicy, now: string): string {
+  if (!validBriefSchedulePolicy(policy) || !instant(now)) throw new Error('invalid_brief_schedule');
+  return iso(outsideQuiet(policy, Temporal.Instant.from(now)));
+}
 export function planBriefOccurrence(
   policy: BriefSchedulePolicy,
   identity: ScheduleIdentity,

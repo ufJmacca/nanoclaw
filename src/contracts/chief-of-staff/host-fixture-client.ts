@@ -40,7 +40,10 @@ export class HostFixture {
             'fixture_host_command_failed:' +
               (typeof message.reason === 'string' && /^[a-zA-Z0-9_]{1,100}$/.test(message.reason)
                 ? message.reason
-                : 'unavailable'),
+                : 'unavailable') +
+              (typeof message.frame === 'string' && /^[a-zA-Z0-9-]+:\d+$/.test(message.frame)
+                ? ':' + message.frame
+                : ''),
           ),
         );
       else waiter.resolve(message.value);

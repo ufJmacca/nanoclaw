@@ -17,8 +17,9 @@ import { TEAM_LINEAGE_SCHEMA, TEAM_LINEAGE_CHECKSUM } from './team-lineage-schem
 import { TEAM_FINAL_REVIEW_SCHEMA, TEAM_FINAL_REVIEW_CHECKSUM } from './team-final-review-schema.js';
 import { TEAM_PARENT_BUDGET_SCHEMA, TEAM_PARENT_BUDGET_CHECKSUM } from './team-parent-budget-schema.js';
 import { PROACTIVE_SCHEMA, PROACTIVE_CHECKSUM } from './proactive-schema.js';
+import { MANDATE_SCHEMA, MANDATE_CHECKSUM } from './mandate-schema.js';
 export { INITIAL_SCHEMA, INITIAL_CHECKSUM } from './schema-definition.js';
-export const SCHEMA_VERSION = 14;
+export const SCHEMA_VERSION = 15;
 export const MIGRATIONS = [
   { version: 1, checksum: INITIAL_CHECKSUM, sql: INITIAL_SCHEMA },
   { version: 2, checksum: KNOWLEDGE_CHECKSUM, sql: KNOWLEDGE_SCHEMA },
@@ -34,6 +35,7 @@ export const MIGRATIONS = [
   { version: 12, checksum: TEAM_FINAL_REVIEW_CHECKSUM, sql: TEAM_FINAL_REVIEW_SCHEMA },
   { version: 13, checksum: TEAM_PARENT_BUDGET_CHECKSUM, sql: TEAM_PARENT_BUDGET_SCHEMA },
   { version: 14, checksum: PROACTIVE_CHECKSUM, sql: PROACTIVE_SCHEMA },
+  { version: 15, checksum: MANDATE_CHECKSUM, sql: MANDATE_SCHEMA },
 ] as const;
 const LOCK_ID = 73101001;
 const identifier = (value: string) => '"' + value.replaceAll('"', '""') + '"';
@@ -69,6 +71,13 @@ export async function migrate(client: pg.Client, runtimeRole: string): Promise<n
         migration.checksum,
       ]);
     }
+    await client.query(
+      `GRANT SELECT,INSERT,UPDATE,DELETE ON cos.mandates,cos.mandate_reservations,cos.mandate_native_bindings TO ${identifier(runtimeRole)}`,
+    );
+    const immutableMandates =
+      'cos.mandate_revisions,cos.mandate_occurrences,cos.mandate_missions,cos.mandate_activity,cos.mandate_notifications';
+    await client.query(`GRANT SELECT,INSERT ON ${immutableMandates} TO ${identifier(runtimeRole)}`);
+    await client.query(`REVOKE UPDATE,DELETE,TRUNCATE ON ${immutableMandates} FROM ${identifier(runtimeRole)}`);
     await client.query(
       `GRANT SELECT,INSERT,UPDATE,DELETE ON cos.proactive_policies,cos.proactive_suggestions TO ${identifier(runtimeRole)}`,
     );

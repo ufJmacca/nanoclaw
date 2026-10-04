@@ -13,6 +13,7 @@ import { TEAM_LINEAGE_CHECKSUM } from '../../modules/chief-of-staff/store/team-l
 import { TEAM_FINAL_REVIEW_CHECKSUM } from '../../modules/chief-of-staff/store/team-final-review-schema.js';
 import { TEAM_PARENT_BUDGET_CHECKSUM } from '../../modules/chief-of-staff/store/team-parent-budget-schema.js';
 import { PROACTIVE_CHECKSUM } from '../../modules/chief-of-staff/store/proactive-schema.js';
+import { MANDATE_CHECKSUM } from '../../modules/chief-of-staff/store/mandate-schema.js';
 /** Synthetic identities for release-contract tests; never a transferable artifact receipt. */
 export function fixtureRelease(slice: ReleaseManifest['slice'] = 'S01'): ReleaseManifest {
   const commit = 'a'.repeat(40),
@@ -30,7 +31,9 @@ export function fixtureRelease(slice: ReleaseManifest['slice'] = 'S01'): Release
                 ? 9
                 : slice === 'S06'
                   ? 13
-                  : 14;
+                  : slice === 'S07'
+                    ? 14
+                    : 15;
   return {
     contract: 'cos-release/v1',
     releaseId: 'release-fixture',
@@ -53,7 +56,9 @@ export function fixtureRelease(slice: ReleaseManifest['slice'] = 'S01'): Release
                   ? 'refs/heads/cos/s05-isolated-research-missions'
                   : slice === 'S06'
                     ? 'refs/heads/cos/s06-specialist-teams-and-review'
-                    : 'refs/heads/cos/s07-proactive-proposals',
+                    : slice === 'S07'
+                      ? 'refs/heads/cos/s07-proactive-proposals'
+                      : 'refs/heads/cos/s08-standing-mandates',
       syncContract: 'cos-source-sync/github-pinned-v1',
     },
     buildInputDigest: 'e'.repeat(64),
@@ -88,7 +93,8 @@ export function fixtureRelease(slice: ReleaseManifest['slice'] = 'S01'): Release
             { version: 13, checksum: TEAM_PARENT_BUDGET_CHECKSUM },
           ]
         : []),
-      ...(schemaVersion === 14 ? [{ version: 14, checksum: PROACTIVE_CHECKSUM }] : []),
+      ...(schemaVersion >= 14 ? [{ version: 14, checksum: PROACTIVE_CHECKSUM }] : []),
+      ...(schemaVersion >= 15 ? [{ version: 15, checksum: MANDATE_CHECKSUM }] : []),
     ],
     previousReleaseIds: [],
     images: [

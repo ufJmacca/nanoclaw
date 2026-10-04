@@ -28,6 +28,8 @@ import { reviewContext } from './missions/review-origin.js';
 import { CoordinatorReviewRuns } from './missions/coordinator-review-runs.js';
 import { createTeamCancellation } from './missions/team-cancel.js';
 import type { CosMissionIdentity } from '../../cos-mission-boundary.js';
+import { NativeMandateTasks } from './automation/mandate-native.js';
+import { MandatePump } from './automation/mandate-pump.js';
 
 export type RuntimeDependencies = {
   db: Database.Database;
@@ -48,6 +50,7 @@ export type RuntimeDependencies = {
   };
   withBriefTasks?<T>(session: Session, operation: (tasks: NativeBriefTasks) => T): T;
   withReviewTasks?<T>(session: Session, operation: (tasks: NativeMissionReviewTasks) => T): T;
+  withMandateTasks?<T>(session: Session, operation: (tasks: NativeMandateTasks) => T): T;
 };
 export function createCosRuntime(dependencies: RuntimeDependencies) {
   const d = dependencies;
@@ -316,6 +319,35 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
         },
       })
     : null;
+  const mandatePump = d.store?.mandates
+    ? new MandatePump({
+        store: d.store.mandates,
+        current: (binding) => {
+          const session = d.session(binding.sessionId);
+          if (!enabled() || !session) return false;
+          const boundary = cosBoundary(session, d.db);
+          return (
+            boundary.restricted &&
+            !!boundary.binding &&
+            !boundary.paused &&
+            digest(boundary.binding) === digest(binding)
+          );
+        },
+        admitted,
+        withTasks: (binding, operation) => {
+          const session = d.session(binding.sessionId);
+          if (!session || session.agent_group_id !== binding.agentGroupId)
+            throw Error('cos_mandate_session_unavailable');
+          if (d.withMandateTasks) return d.withMandateTasks(session, operation);
+          const inbound = openInboundDb(session.agent_group_id, session.id);
+          try {
+            return operation(new NativeMandateTasks(inbound));
+          } finally {
+            inbound.close();
+          }
+        },
+      })
+    : null;
   const invalidations = d.store?.knowledge
     ? new KnowledgeInvalidation({ db: d.db, store: d.store.knowledge, session: d.session, stop: d.stop })
     : null;
@@ -401,6 +433,7 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
       const recovered = enabled() ? await briefReconciliation?.drain(binding) : undefined;
       if (enabled()) await reviewDispatch?.drain(binding);
       if (enabled()) await outbox?.drain(binding);
+      if (enabled()) await mandatePump?.drain(binding);
       if (enabled() && d.store)
         for (const notifications of [d.store.missionNotifications, d.store.teamNotifications]) {
           if (!notifications || !enabled()) continue;

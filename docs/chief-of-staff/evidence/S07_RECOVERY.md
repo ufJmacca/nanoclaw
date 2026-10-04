@@ -1,4 +1,6 @@
-# S07 calendar fixture correction — local checks passed; final release pending
+# S07 calendar fixture correction — merged-source technical acceptance passed
+
+## Earlier release attempts
 
 PR #62 was merged under the owner's explicit authorisation on 4 October 2026.
 The reviewed head was `f8abac0d0b563c8537bc9254658dc2c16b316667`; the merge
@@ -11,7 +13,7 @@ all 247 source contracts, the synthetic-week demonstration, worker checks,
 native isolation and the first packaged profile's 247 contracts. The second
 packaged profile passed 246 contracts and failed S04-T07's calendar-staleness
 assertion. No bundle was exported or transferred and this source was not
-activated on the Pi. The earlier healthy S07 candidate remains deployed.
+activated on the Pi. The earlier healthy S07 candidate remained deployed at that checkpoint.
 
 The fixture generated its brief at a fixed instant but recorded the calendar
 refresh at the actual database time. Its expected stale classification changed
@@ -37,8 +39,8 @@ and manifest were sealed and verified, but this candidate was not transferred
 or deployed. Later receipt-only commits do not relabel these tested artifacts.
 
 The test-only correction remains within the owner's S07 merge authorisation.
-Its separate merge and actual merged-source release/Pi acceptance are required
-before S08 becomes eligible. The operator's
+At that checkpoint, its separate merge and actual merged-source release/Pi
+acceptance were still outstanding. The operator's
 labelled A–D usefulness/false-positive assessment remains pending; approval to
 merge PR #62 did not supply those ratings.
 
@@ -48,3 +50,7 @@ sessions, credentials and all active S07 and S06 artifacts remain preserved.
 Four obsolete S01/S02 payload caches and the completed S07 transport archive
 were retired only after independent Mac backups and digest verification;
 deployed images, runtime data and unrelated workloads were unchanged.
+
+## Final merged release
+
+The correction merged as `a72be36a42f53f38256d47f9b3b18564e27f3f73`. Its actual merged-source release `release-a72be36a42f5-20261004004600` passed every required local and Pi gate, preservation and compatible recovery checks, and Pi-owned independence. See [S07 merged-source acceptance](S07_MERGED.md). The earlier failed gate remains recorded above. The owner subsequently rated all four labelled proposals useful, with no false positives identified (count 0); [operator assessment](S07_PROPOSAL_REVIEW.md) now completes S07 acceptance.

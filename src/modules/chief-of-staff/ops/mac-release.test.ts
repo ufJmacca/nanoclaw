@@ -119,7 +119,7 @@ it('selects runtime credentials separately without inheriting a test marker or a
   expect(selected.MATTERMOST_BOT_TOKEN).toBeUndefined();
 });
 
-it.each(['S02', 'S03', 'S04', 'S05', 'S06', 'S07'])(
+it.each(['S02', 'S03', 'S04', 'S05', 'S06', 'S07', 'S08'])(
   '%s release checkpoints preserve reviewed predecessor evidence and reject an unfinished predecessor',
   (slice) => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-s02-release-ledger-'));
@@ -136,13 +136,16 @@ it.each(['S02', 'S03', 'S04', 'S05', 'S06', 'S07'])(
                 ? 'S04'
                 : slice === 'S06'
                   ? 'S05'
-                  : 'S06',
+                  : slice === 'S07'
+                    ? 'S06'
+                    : 'S07',
       implementation_status: 'merged',
       review_status: 'human_merged',
       merged_sha: source,
       deployed_source_sha: source,
       merged_source_delivery_status: 'passed',
       pi_smoke_status: 'passed',
+      operator_assessment: { status: 'passed' },
     };
     const ledger = {
       active_slice: slice,
@@ -159,6 +162,10 @@ it.each(['S02', 'S03', 'S04', 'S05', 'S06', 'S07'])(
       expect(updated.slices[0]).toEqual(prior);
       expect(updated.slices[1].release_status).toBe('local_checks_pending');
       expect(updated.unknown).toBe('preserve');
+      if (slice === 'S08') {
+        save({ ...ledger, slices: [{ ...prior, operator_assessment: { status: 'pending' } }, ledger.slices[1]] });
+        expect(() => readLocalExecution(root, true)).toThrow('predecessor_acceptance_required');
+      }
       for (const patch of [
         { review_status: 'awaiting_review' },
         { deployed_source_sha: 'b'.repeat(40) },

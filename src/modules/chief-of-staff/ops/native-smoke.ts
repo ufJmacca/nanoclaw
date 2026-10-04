@@ -140,6 +140,8 @@ export async function nativeFixtureSmoke(options: { root: string; hostRoot: stri
       'cos_change_propose',
       'cos_context_get',
       'cos_knowledge_search',
+      'cos_mandate_activity',
+      'cos_mandate_propose',
       'cos_mission_cancel',
       'cos_mission_get',
       'cos_mission_request',

@@ -161,6 +161,9 @@ export function restrictedLaunch(input: RestrictedLaunchInput): { containerName:
       '/tmp:rw,noexec,nosuid,nodev,size=32m',
       '--tmpfs',
       `/home/node:rw,nosuid,nodev,size=64m,uid=${input.uid},gid=${input.gid}`,
+      ...(input.subscription && input.entry === 'coordinator'
+        ? ['--tmpfs', `/run/cos:rw,noexec,nosuid,nodev,size=1m,mode=0700,uid=${input.uid},gid=${input.gid}`]
+        : []),
       '-e',
       'HOME=/home/node',
       '-e',
