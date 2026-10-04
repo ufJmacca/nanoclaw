@@ -1,4 +1,4 @@
-# S07 calendar fixture correction — release acceptance pending
+# S07 calendar fixture correction — local checks passed; final release pending
 
 PR #62 was merged under the owner's explicit authorisation on 4 October 2026.
 The reviewed head was `f8abac0d0b563c8537bc9254658dc2c16b316667`; the merge
@@ -26,9 +26,19 @@ passing. Green: the corrected brief and proactive suites passed all 22 contracts
 against the separate protected test database using verified TLS. Both S07 review
 regressions also passed in the failed merged-source release.
 
-Full exact-source ARM64 image tests, candidate delivery and Pi acceptance for
-this correction remain pending. The correction requires its own reviewed merge
-and actual merged-source release before S08 becomes eligible. The operator's
+All seven local release gates passed on
+`57c67d59f304311e50e19239ee2f1a3a48e73277`, release
+`release-57c67d59f304-20261004001602`: 2,287 root tests, typecheck, build,
+lint and formatting; 199 runner tests and runner typecheck; 247 source contracts;
+the native synthetic week; 247 packaged-host contracts and 199 runner tests with
+each profile; native isolation and six offline subscription scenarios per
+profile. Both packaged profiles passed the corrected calendar test. The archive
+and manifest were sealed and verified, but this candidate was not transferred
+or deployed. Later receipt-only commits do not relabel these tested artifacts.
+
+The test-only correction remains within the owner's S07 merge authorisation.
+Its separate merge and actual merged-source release/Pi acceptance are required
+before S08 becomes eligible. The operator's
 labelled A–D usefulness/false-positive assessment remains pending; approval to
 merge PR #62 did not supply those ratings.
 
