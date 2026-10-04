@@ -11,6 +11,7 @@ import type { CalendarReadInput, WorkChange, WorkRead } from '../contracts/proto
 import type { ScheduleChange } from '../contracts/schedule-protocol.js';
 import type { MissionRequest } from '../contracts/mission-protocol.js';
 import type { TeamRequest } from '../contracts/team-protocol.js';
+import type { MandateChange } from '../contracts/mandate-protocol.js';
 import type {
   ProactiveDraft,
   ProactiveDispositionRequest,
@@ -146,6 +147,8 @@ export function createRpcHandler(dependencies: {
           };
       } else if (request.method === 'cos_change_propose')
         result = await dependencies.store.propose(context, request.request_id, request.params.change as Change);
+      else if (request.method === 'cos_mandate_propose')
+        result = await dependencies.store.propose(context, request.request_id, request.params.change as MandateChange);
       else if (request.method === 'cos_proactive_policy_propose')
         result = await dependencies.store.propose(
           context,

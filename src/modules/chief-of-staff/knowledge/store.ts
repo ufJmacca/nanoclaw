@@ -481,6 +481,18 @@ export class KnowledgeStore {
     return this.retrievalEnabled();
   }
   /** Trusted mission admission only. Caller owns the transaction; no worker receives this client or artifact root. */
+  async missionCalendarBindingCurrent(
+    client: PoolClient,
+    context: KnowledgeContext,
+    bindingId: string,
+  ): Promise<boolean> {
+    return (
+      this.retrievalEnabled() &&
+      (await this.current(client, context)) &&
+      (await this.openCalendarBindings(client, context)).includes(bindingId)
+    );
+  }
+  /** Trusted mission admission only. Caller owns the transaction; no worker receives this client or artifact root. */
   async captureMissionSources(
     client: PoolClient,
     context: KnowledgeContext,
