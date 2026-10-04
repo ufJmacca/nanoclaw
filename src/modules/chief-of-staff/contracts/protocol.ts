@@ -2,6 +2,7 @@
 import { createHash } from 'node:crypto';
 import { validScheduleChange, type ScheduleChange } from './schedule-protocol.js';
 import { validMissionRequest } from './mission-protocol.js';
+import { validMandateChange } from './mandate-protocol.js';
 import { validMissionReview } from './mission-review.js';
 import { validTeamRequest } from './team-protocol.js';
 import {
@@ -124,6 +125,7 @@ export type CosMethod =
   | 'cos_proactive_submit'
   | 'cos_proactive_disposition_propose'
   | 'cos_proactive_history'
+  | 'cos_mandate_propose'
   | 'cos_request_status'
   | 'cos_knowledge_search'
   | 'cos_source_get'
@@ -232,6 +234,8 @@ export function validRequest(value: unknown): value is CosRequest {
   if (value.method === 'cos_work_change_propose')
     return keys(value.params, ['change']) && validWorkChange(value.params.change);
   if (value.method === 'cos_work_read') return validWorkRead(value.params);
+  if (value.method === 'cos_mandate_propose')
+    return keys(value.params, ['change']) && validMandateChange(value.params.change);
   if (value.method === 'cos_proactive_policy_propose')
     return keys(value.params, ['change']) && validProactivePolicyChange(value.params.change);
   if (value.method === 'cos_proactive_batch') return Object.keys(value.params).length === 0;
