@@ -1,12 +1,19 @@
 # S08 — Perform useful background work under a standing mandate
 
-**Status:** tested candidate deployed; Mac/Pi fixture gates passed; human review and live activation pending
+**Status:** PR #64 human-merged; retired-wake review correction in progress; final merged-release acceptance and live activation pending
 
 **Repository:** `ufJmacca/nanoclaw`  
-**Branch:** `cos/s08-standing-mandates`  
+**Branch:** `codex/s08-retired-wake-recovery` (correction after `cos/s08-standing-mandates`)
+
 **Depends on:** S07 merged, with its acceptance receipt available.  
 **Delivery unit:** one independently reviewable PR; multiple red–green commits are expected.  
 **User-visible outcome:** After you approve a narrow responsibility once, the assistant prepares work autonomously within its scope, budget and notification rules.
+
+The original tested candidate is deployed healthy. PR #64's reviewed merge has
+been verified, and its retired-wake finding is reproduced and corrected in
+targeted tests. See [the correction receipt](../chief-of-staff/evidence/S08_WAKE_RECOVERY.md)
+for remaining release and review gates. S09 remains ineligible until the
+correction's reviewed merge and actual merged-release acceptance.
 
 Read [START HERE](00_START_HERE.md), [architecture/contracts](ARCHITECTURE_AND_CONTRACTS.md), [external PostgreSQL](EXTERNAL_POSTGRES.md), [goal execution](GOAL.md), [Mac-to-Pi delivery](MAC_TO_PI_DELIVERY.md), [Mattermost interaction](INTERACTION_MODEL.md), [implementation authority](IMPLEMENTATION_AUTHORITY.md), and [baseline](REPOSITORY_BASELINE.md) before implementation. This plan inherits their identity, scope, replay, approval, budget and retention rules; none may be postponed to S11.
 

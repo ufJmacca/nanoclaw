@@ -83,6 +83,40 @@ it('S08-PG01 native repair cannot bypass a failed PostgreSQL grant or create mod
   expect(f.store.evaluate).not.toHaveBeenCalled();
   expect(countDueMessages(f.db)).toBe(0);
 });
+it('S08-T08/T09 temporary ineligibility recovers the same clock after restart without duplicate model messages', async () => {
+  const f = fixture();
+  const pump = new MandatePump(f.dependencies);
+  await pump.drain(binding);
+  expect(f.store.evaluate).toHaveBeenCalledTimes(1);
+  const original = f.db.prepare('SELECT * FROM messages_in').all();
+  f.head.eligible = false;
+  await pump.drain(binding);
+  expect(f.tasks.current(binding, f.head.wake)).toBe(false);
+  f.head.eligible = true;
+  const restarted = new MandatePump(f.dependencies);
+  await restarted.drain(binding);
+  expect(f.tasks.current(binding, f.head.wake)).toBe(true);
+  expect(f.db.prepare('SELECT * FROM messages_in').all()).toEqual(original);
+  expect(f.store.evaluate).toHaveBeenCalledTimes(1);
+  f.head.now = '2026-10-04T08:01:00.000Z';
+  await restarted.drain(binding);
+  expect(f.store.evaluate).toHaveBeenCalledTimes(2);
+  expect(countDueMessages(f.db)).toBe(0);
+});
+it('S08-PG01 a restored clock must obtain a fresh PostgreSQL grant before evaluating', async () => {
+  const f = fixture();
+  const pump = new MandatePump(f.dependencies);
+  await pump.drain(binding);
+  f.head.eligible = false;
+  await pump.drain(binding);
+  f.head.eligible = true;
+  f.head.now = '2026-10-04T08:01:00.000Z';
+  f.store.bindNative.mockResolvedValue({ status: 'denied' } as never);
+  await new MandatePump(f.dependencies).drain(binding);
+  expect(f.store.bindNative).toHaveBeenCalledTimes(2);
+  expect(f.store.evaluate).toHaveBeenCalledTimes(1);
+  expect(countDueMessages(f.db)).toBe(0);
+});
 it('S08-PG02 a local emergency pause wins over awaited inventory and persists on reconnect', async () => {
   const f = fixture();
   f.store.headsForHost.mockImplementation(async () => {

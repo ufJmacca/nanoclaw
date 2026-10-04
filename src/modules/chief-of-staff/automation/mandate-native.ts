@@ -91,7 +91,16 @@ export class NativeMandateTasks {
     if (!task) return null;
     return this.db.transaction(() => {
       const existing = this.owned(binding, wake, true);
-      if (existing) return existing.row.status === 'paused' ? task.id : null;
+      if (existing) {
+        // Restore only the verified host clock, never a model task or grant. The pump rechecks PostgreSQL authority.
+        if (
+          existing.row.status === 'completed' &&
+          this.db.prepare("UPDATE messages_in SET status='paused' WHERE id=? AND status='completed'").run(task.id)
+            .changes !== 1
+        )
+          return null;
+        return task.id;
+      }
       if (
         this.db.prepare('SELECT 1 FROM messages_in WHERE id=? OR series_id=?').get(task.id, task.id) ||
         this.db.prepare('SELECT 1 FROM cos_mandate_native_tasks WHERE task_id=?').get(task.id)
