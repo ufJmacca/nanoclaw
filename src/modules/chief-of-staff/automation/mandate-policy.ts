@@ -2,6 +2,7 @@ import { Temporal } from '@js-temporal/polyfill';
 import { digest } from '../domain/contracts.js';
 import { validMandateDefinition, type MandateDefinition } from '../contracts/mandate-protocol.js';
 import type { CalendarEvent } from '../calendar/normalization.js';
+import { validWorkDue } from '../contracts/protocol.js';
 
 export type MandateEvent = { calendar_id: string; source_id: string; revision_id: string; event: CalendarEvent };
 export type MandateWake = { mandateId: string; revision: number; wakeAt: string };
@@ -18,6 +19,12 @@ export type MandateFacts = {
   scheduledOccurrence: string | null;
   events: MandateEvent[];
 };
+export function mandateDueAt(due: unknown): number | null {
+  if (!validWorkDue(due)) return null;
+  return due.kind === 'instant'
+    ? Date.parse(due.at)
+    : Number(Temporal.PlainDate.from(due.date).toZonedDateTime(due.time_zone).epochMilliseconds);
+}
 export function mandateEventStart(event: CalendarEvent, zone: string): number | null {
   if (!event.start) return null;
   return event.start.kind === 'instant'

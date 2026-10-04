@@ -12,6 +12,7 @@ import { validMissionWorkerResult } from '../contracts/mission-worker-protocol.j
 import { checkWorkerResult } from './result-checks.js';
 import { TEAM_TEMPLATES } from '../contracts/team-templates.js';
 import { teamStepUsage } from './team-budget.js';
+import { recordMandateUncertainUsage } from '../automation/mandate-accounting.js';
 import {
   defaultMissionWorkerCapacity,
   missionWorkerCapacity,
@@ -432,6 +433,8 @@ export class MissionRunStore {
         "UPDATE cos.missions SET state='failed',version=version+1,updated_at=clock_timestamp() WHERE scope_id=$1 AND id=$2",
         [identity.scopeId, identity.missionId],
       );
+      if (m.provenance.approval_kind === 'standing_mandate')
+        await recordMandateUncertainUsage(client, identity, reason);
       return { status: 'ok' };
     });
   }

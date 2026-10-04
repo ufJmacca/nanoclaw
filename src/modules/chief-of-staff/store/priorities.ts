@@ -653,6 +653,7 @@ export class PriorityStore {
         work_next_offset: work.next_offset,
         work_truncated: work.truncated,
         brief_schedules: await this.schedules.read(client, context),
+        standing_mandates: await this.mandates.readHeads(client, context),
         proactive_policy:
           (
             await client.query(

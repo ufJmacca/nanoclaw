@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import pg from 'pg';
+import Database from 'better-sqlite3';
 import { setTimeout as delay } from 'node:timers/promises';
 import { connectFixtureDatabase, fixtureDatabaseConfig, fixtureRuntimeUser } from './fixture-database.js';
 import { migrate } from '../../modules/chief-of-staff/store/migrations.js';
@@ -24,6 +25,12 @@ import type { MandateHead } from '../../modules/chief-of-staff/automation/mandat
 import { digest, type ProposalChange, type Result } from '../../modules/chief-of-staff/domain/contracts.js';
 import type { MissionChange } from '../../modules/chief-of-staff/contracts/protocol.js';
 import { installReviewedMissionTemplate } from '../../modules/chief-of-staff/missions/template-admin.js';
+import { connectionFault } from './connection-fault.js';
+import { CosController } from '../../modules/chief-of-staff/bridge/controller.js';
+import { installCosBoundary, cosBoundary } from '../../cos-boundary.js';
+import type { Session } from '../../types.js';
+import type { CosMissionIdentity } from '../../cos-mission-boundary.js';
+import type { MissionDispatchLease } from '../../modules/chief-of-staff/missions/run-store.js';
 
 const scope = 'mandate-' + randomUUID();
 const context = { scopeId: scope, ownerId: 'owner', agentGroupId: scope, sessionId: scope, ingressId: randomUUID() };
@@ -477,6 +484,8 @@ test('S08-T05 unknown usage suspends admission without releasing or resetting he
     scope,
     id,
   ]);
+  const inventory = await store.mandates.headsForHost(context, id.slice(0, -1));
+  assert.equal((inventory.heads as MandateHead[]).find((h) => h.id === id)!.state, 'suspended');
   assert.equal((await store.mandates.evaluate(context, id)).status, 'denied');
   const row = (
     await admin.query('SELECT state,suspension_reason FROM cos.mandates WHERE scope_id=$1 AND id=$2', [scope, id])
@@ -515,6 +524,8 @@ test('S08-T06 a bounded failure storm suspends the mandate instead of admitting 
     [scope, missionId],
   );
   await admin.query("UPDATE cos.missions SET state='failed' WHERE scope_id=$1 AND id=$2", [scope, missionId]);
+  const inventory = await store.mandates.headsForHost(context, id.slice(0, -1));
+  assert.equal((inventory.heads as MandateHead[]).find((h) => h.id === id)!.state, 'suspended');
   assert.equal((await store.mandates.evaluate(context, id)).status, 'denied');
   const row = (
     await admin.query('SELECT state,suspension_reason FROM cos.mandates WHERE scope_id=$1 AND id=$2', [scope, id])
@@ -554,7 +565,17 @@ test('S08-T01/T08 host reconciliation expires approved authority and fences its 
     ).status,
     'ok',
   );
-  await delay(Math.max(0, Date.parse(expiring.definition.review_at) - Date.now()) + 30);
+  // Expiry is governed by the external database clock; the recovered Docker VM clock can differ.
+  let expiredOnDatabase = false;
+  for (let check = 0; check < 250; check++) {
+    const clock = (await admin.query('SELECT clock_timestamp() AS now')).rows[0].now.getTime();
+    if (clock >= Date.parse(expiring.definition.review_at)) {
+      expiredOnDatabase = true;
+      break;
+    }
+    await delay(25);
+  }
+  assert.equal(expiredOnDatabase, true, 'bounded external-clock expiry wait');
   const expired = await store.mandates.headsForHost(context, id.slice(0, -1));
   assert.equal(expired.status, 'ok');
   assert.equal((expired.heads as MandateHead[]).find((h) => h.id === id)!.state, 'expired');
@@ -575,4 +596,212 @@ test('S08-T01/T08 host reconciliation expires approved authority and fences its 
     ).rows[0].state,
     'paused',
   );
+});
+test('S08-PG01/PG02 a real remote partition cannot admit or renew work; an authenticated local pause survives SQLite reopen and reconnect', async () => {
+  const id = String((await approve(await propose())).record_id);
+  const admitted = await store.mandates.evaluate(context, id);
+  assert.equal(admitted.status, 'ok');
+  const missionId = String((admitted.mission_ids as string[])[0]);
+  const attempt = (
+    await admin.query('SELECT id FROM cos.mission_attempts WHERE scope_id=$1 AND mission_id=$2', [scope, missionId])
+  ).rows[0];
+  const claimed = await store.missionRuns.claimDispatch(context, attempt.id, 'partition-fixture-host');
+  assert.equal(claimed.status, 'ok');
+  const identity = claimed.identity as CosMissionIdentity,
+    lease = claimed.lease as MissionDispatchLease;
+  assert.equal((await store.missionRuns.authorizeDispatch(identity, lease)).status, 'ok');
+  const snapshot = async () =>
+    (
+      await admin.query('SELECT budget,state,used FROM cos.mandate_reservations WHERE scope_id=$1 AND mandate_id=$2', [
+        scope,
+        id,
+      ])
+    ).rows;
+  const before = await snapshot();
+  const file = path.join(base, 'partition-pause.sqlite');
+  let local = new Database(file);
+  const session = {
+    id: context.sessionId,
+    agent_group_id: context.agentGroupId,
+    messaging_group_id: binding.messagingGroupId,
+    thread_id: null,
+    status: 'active',
+    agent_provider: 'codex',
+  } as Session;
+  installCosBoundary(binding, local);
+  local.prepare('UPDATE cos_identity_boundaries SET paused=0').run();
+  const current = () => {
+    const boundary = cosBoundary(session, local);
+    return boundary.restricted && !boundary.paused;
+  };
+  const relay = await connectionFault(await fixtureDatabaseConfig());
+  const database = new BoundedDatabase(new pg.Pool(relay.config), 350);
+  const faulty = new PriorityStore(database, knowledge, undefined, undefined, () =>
+    enabled && current() ? authority : null,
+  );
+  let stops = 0,
+    wakes = 0;
+  const controller = new CosController({
+    db: local,
+    enabled: () => true,
+    facts: async () => ({
+      id: binding.channelId,
+      type: 'P',
+      delete_at: 0,
+      members: [binding.ownerId, binding.botId],
+      activeSubscription: true,
+    }),
+    session: () => session,
+    decide: (...args) => faulty.decide(...args),
+    acknowledge: () => {},
+    stop: () => {
+      stops++;
+    },
+    project: () => {
+      throw Error('pause_must_not_become_model_input');
+    },
+    wake: async () => {
+      wakes++;
+    },
+  });
+  try {
+    await database.run((client) => client.query('SELECT 1'));
+    relay.partition();
+    assert.notEqual((await faulty.mandates.evaluate(context, id)).status, 'ok');
+    assert.notEqual((await faulty.missionRuns.renewDispatch(identity, lease)).status, 'ok');
+    assert.notEqual((await faulty.missionRuns.authorizeDispatch(identity, lease)).status, 'ok');
+    assert.deepEqual(await snapshot(), before);
+    await controller.ingress(binding, {
+      channelType: 'mattermost',
+      platformId: `mattermost:${binding.instanceId}:${binding.channelId}`,
+      threadId: null,
+      message: {
+        id: randomUUID(),
+        kind: 'chat',
+        timestamp: new Date().toISOString(),
+        content: JSON.stringify({ senderId: 'mattermost:' + binding.ownerId, text: 'cos pause automation' }),
+      },
+    });
+    assert.equal(stops, 1);
+    assert.equal(wakes, 0);
+    assert.equal(current(), false);
+    local.close();
+    local = new Database(file);
+    assert.equal(current(), false);
+    relay.restore();
+    await delay(1100);
+    assert.equal((await faulty.mandates.evaluate(context, id)).status, 'denied');
+    assert.equal((await faulty.missionRuns.authorizeDispatch(identity, lease)).status, 'denied');
+    assert.equal((await faulty.missionRuns.renewDispatch(identity, lease)).status, 'denied');
+    assert.deepEqual(await snapshot(), before);
+    assert.equal(current(), false);
+    // Only a fixture of an explicit trusted owner resume reopens the local fence.
+    local.prepare('UPDATE cos_identity_boundaries SET paused=0').run();
+    assert.equal((await faulty.missionRuns.authorizeDispatch(identity, lease)).status, 'ok');
+    assert.equal((await faulty.mandates.evaluate(context, id)).status, 'ok');
+    assert.deepEqual(await snapshot(), before);
+    assert.equal(
+      (
+        await admin.query('SELECT count(*)::int AS n FROM cos.mandate_missions WHERE scope_id=$1 AND mandate_id=$2', [
+          scope,
+          id,
+        ])
+      ).rows[0].n,
+      1,
+    );
+  } finally {
+    local.close();
+    await database.pool.end();
+    await relay.close();
+  }
+});
+test('S08-T05 a trusted host failure after a charged subscription turn records uncertainty and suspends the root without freeing reservations', async () => {
+  const id = String((await approve(await propose())).record_id);
+  const admitted = await store.mandates.evaluate(context, id);
+  assert.equal(admitted.status, 'ok');
+  const missionId = String((admitted.mission_ids as string[])[0]);
+  const attempt = (
+    await admin.query('SELECT * FROM cos.mission_attempts WHERE scope_id=$1 AND mission_id=$2', [scope, missionId])
+  ).rows[0];
+  const identity: CosMissionIdentity = {
+    scopeId: scope,
+    missionId,
+    attemptId: attempt.id,
+    generation: attempt.generation,
+    agentGroupId: attempt.agent_group_id,
+    sessionId: attempt.session_id,
+    provider: 'codex',
+  };
+  await admin.query("UPDATE cos.missions SET state='running' WHERE scope_id=$1 AND id=$2", [scope, missionId]);
+  await admin.query("UPDATE cos.mission_attempts SET state='running' WHERE scope_id=$1 AND id=$2", [scope, attempt.id]);
+  assert.equal(
+    (
+      await store.missionRuns.reserve(
+        identity,
+        'model-' + randomUUID(),
+        'model',
+        digest('fixture reserved native subscription turn'),
+      )
+    ).status,
+    'ok',
+  );
+  assert.equal((await store.missionRuns.fail(identity, 'provider_failed')).status, 'ok');
+  const reservation = (
+    await admin.query('SELECT budget,state,used FROM cos.mandate_reservations WHERE scope_id=$1 AND mandate_id=$2', [
+      scope,
+      id,
+    ])
+  ).rows[0];
+  assert.equal(reservation.state, 'unknown');
+  assert.equal(reservation.used.model_turn_reservations, 1);
+  assert.equal(reservation.used.exact_provider_usage, 'unknown');
+  assert.equal(reservation.used.currency_estimate, null);
+  assert.equal(reservation.budget.max_turns, change.definition.limits.max_turns);
+  const inventory = await store.mandates.headsForHost(context, id.slice(0, -1));
+  assert.equal((inventory.heads as MandateHead[]).find((h) => h.id === id)!.state, 'suspended');
+  assert.equal((await store.missionRuns.retry(context, attempt.id)).status, 'denied');
+});
+test('S08-T09 no-op occurrences are recorded once without mission work or notification reservations and are visible in the private activity digest', async () => {
+  const empty = {
+    ...change,
+    definition: { ...change.definition, calendar: { ...change.definition.calendar, event_ids: ['no-matching-event'] } },
+  };
+  const id = String((await approve(await propose(empty))).record_id);
+  for (let tick = 0; tick < 4; tick++) {
+    const result = await store.mandates.evaluate(context, id);
+    assert.equal(result.status, 'ok');
+    assert.deepEqual(result.mission_ids, []);
+  }
+  assert.equal(
+    (
+      await admin.query('SELECT count(*)::int AS n FROM cos.mandate_occurrences WHERE scope_id=$1 AND mandate_id=$2', [
+        scope,
+        id,
+      ])
+    ).rows[0].n,
+    1,
+  );
+  for (const table of ['mandate_missions', 'mandate_reservations', 'mandate_notifications'])
+    assert.equal(
+      (
+        await admin.query(`SELECT count(*)::int AS n FROM cos.${table} WHERE scope_id=$1 AND mandate_id=$2`, [
+          scope,
+          id,
+        ])
+      ).rows[0].n,
+      0,
+    );
+  const digest = await store.mandates.readActivity(context, id);
+  assert.equal(digest.status, 'ok');
+  assert.equal(digest.format, 'cos-mandate-activity/v1');
+  const accounting = digest.accounting as {
+    model_turn_reservations: number;
+    currency_estimate: unknown;
+    reserved_envelopes: number;
+  };
+  assert.equal(accounting.model_turn_reservations, 0);
+  assert.equal(accounting.reserved_envelopes, 0);
+  assert.equal(accounting.currency_estimate, null);
+  assert.ok((digest.activity as Array<{ body: { state?: string } }>).some((a) => a.body.state === 'noop'));
+  assert.equal((await store.mandates.readActivity({ ...context, ownerId: 'foreign' }, id)).status, 'denied');
 });

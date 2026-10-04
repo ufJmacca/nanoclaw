@@ -7,13 +7,14 @@ import type { MissionAuthority, MissionAuthorityResolver, MissionProposalStore }
 import { RESEARCH_TEMPLATE } from '../missions/work-order.js';
 import { hasCalendarReadScope } from '../calendar/reader.js';
 import { BoundedDatabase, DatabaseUnavailable } from '../store/client.js';
-import { evaluateMandate, mandateEventStart, type MandateEvent } from './mandate-policy.js';
+import { evaluateMandate, mandateEventStart, mandateDueAt, type MandateEvent } from './mandate-policy.js';
 import { planBriefOccurrence } from './schedule-policy.js';
 import { queueMissionAttempt } from '../missions/attempt.js';
 import { proactiveRequestId } from './proactive-store.js';
 import { validMissionRequest, type MissionRequest } from '../contracts/mission-protocol.js';
 import type { MissionChange } from '../contracts/protocol.js';
 import type { MandateWake } from './mandate-policy.js';
+import { readMandateActivity } from './mandate-activity.js';
 export type MandateHead = {
   id: string;
   revision: number;
@@ -41,6 +42,7 @@ type MandateRow = {
   proposal_id: string;
   activated_at: Date;
   local_date_text: string | null;
+  suspension_reason: string | null;
 };
 
 /** Only a verified owner proposal grants standing authority. This store never accepts model trigger calls. */
@@ -51,6 +53,35 @@ export class MandateStore {
     readonly authority?: MissionAuthorityResolver,
     readonly missions?: () => MissionProposalStore,
   ) {}
+  async readActivity(context: Context, mandateId: string, offset = 0): Promise<Result> {
+    if (
+      context.origin ||
+      !/^mandate-[a-f0-9]{64}$/.test(mandateId) ||
+      !Number.isSafeInteger(offset) ||
+      offset < 0 ||
+      offset > 10000
+    )
+      return { status: 'denied' };
+    return this.transaction(context, async (client) => {
+      const row = await this.current(client, context, mandateId);
+      if (!row || digest(row.body) !== row.digest) return { status: 'denied' };
+      return readMandateActivity(client, context, row, await this.grantCurrent(client, context, row), offset);
+    });
+  }
+  async readHeads(client: PoolClient, context: Context): Promise<unknown[]> {
+    return (
+      await client.query(
+        'SELECT m.id,m.version,m.state,m.suspension_reason,r.body,r.digest FROM cos.mandates m JOIN cos.mandate_revisions r ON r.scope_id=m.scope_id AND r.mandate_id=m.id AND r.version=m.version WHERE m.scope_id=$1 AND m.owner_id=$2 AND m.session_id=$3 ORDER BY m.updated_at DESC,m.id LIMIT 5',
+        [context.scopeId, context.ownerId, context.sessionId],
+      )
+    ).rows.map((row) => ({
+      id: row.id,
+      version: row.version,
+      state: row.state,
+      suspension_reason: row.suspension_reason,
+      definition: digest(row.body) === row.digest ? row.body.definition : null,
+    }));
+  }
   /** Bounded host inventory; selected source/calendar revisions drive the existing native pump. */
   async headsForHost(context: Context, afterId = ''): Promise<Result> {
     if (context.origin) return { status: 'denied' };
@@ -65,6 +96,7 @@ export class MandateStore {
       const heads: MandateHead[] = [];
       for (const row of rows.slice(0, 5)) {
         if (await this.expire(client, context.scopeId, row, clock.getTime())) row.state = 'expired';
+        else await this.suspendUnsafe(client, context.scopeId, row);
         const definition = row.body.definition as MandateDefinition;
         const sources = (
           await client.query(
@@ -312,7 +344,7 @@ export class MandateStore {
       );
     return !!inserted.rowCount;
   }
-  /** Trusted native/source wake only. No caller supplies an occurrence, permission grant, mission or budget. */
+  /** Reconcile closure even when no new event or clock can authorize an evaluation. */
   private async expire(client: PoolClient, scopeId: string, row: MandateRow, now: number): Promise<boolean> {
     if (
       row.state !== 'active' ||
@@ -326,6 +358,54 @@ export class MandateStore {
     await this.fenceWork(client, scopeId, row.id, 'review_or_expiry_due');
     return true;
   }
+  private async suspendUnsafe(client: PoolClient, scopeId: string, row: MandateRow): Promise<string | null> {
+    if (row.state !== 'active') return null;
+    const failures = (
+      await client.query(
+        `SELECT count(*)::int AS n FROM cos.mission_attempts a JOIN cos.mandate_missions l ON l.scope_id=a.scope_id AND l.mission_id=a.mission_id WHERE l.scope_id=$1 AND l.mandate_id=$2 AND a.created_at >= $3 AND a.provenance->>'failure_reason' IS NOT NULL`,
+        [scopeId, row.id, row.activated_at],
+      )
+    ).rows[0].n;
+    const reason =
+      failures >= row.body.definition.failure_policy.max_failures
+        ? 'failure_threshold'
+        : (
+              await client.query(
+                "SELECT 1 FROM cos.mandate_reservations WHERE scope_id=$1 AND mandate_id=$2 AND state='unknown' LIMIT 1",
+                [scopeId, row.id],
+              )
+            ).rowCount
+          ? 'unknown_usage'
+          : null;
+    if (!reason) return null;
+    await client.query(
+      "UPDATE cos.mandates SET state='suspended',suspension_reason=$3,updated_at=clock_timestamp() WHERE scope_id=$1 AND id=$2",
+      [scopeId, row.id, reason],
+    );
+    await this.fenceWork(client, scopeId, row.id, reason);
+    await client.query(
+      'INSERT INTO cos.mandate_activity(scope_id,id,mandate_id,revision,body) VALUES($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING',
+      [
+        scopeId,
+        `suspension-${reason}-${row.id}-${row.version}`,
+        row.id,
+        row.version,
+        JSON.stringify({
+          kind: 'suspension',
+          reason,
+          failures,
+          decisions_needed: [
+            reason === 'unknown_usage'
+              ? 'trusted_usage_reconciliation_and_owner_review'
+              : 'owner_review_and_resume_or_revoke',
+          ],
+        }),
+      ],
+    );
+    row.state = 'suspended';
+    return reason;
+  }
+  /** Trusted native/source wake only. No caller supplies an occurrence, permission grant, mission or budget. */
   async evaluate(context: Context, mandateId: string): Promise<Result> {
     if (context.origin || !/^mandate-[a-f0-9]{64}$/.test(mandateId)) return { status: 'denied' };
     return this.transaction(context, async (client) => {
@@ -336,51 +416,9 @@ export class MandateStore {
       if (await this.expire(client, context.scopeId, row, boundaryClock)) {
         return { status: 'denied', reason: 'review_or_expiry_due' };
       }
-      const failures = (
-        await client.query(
-          `SELECT count(*)::int AS n FROM cos.mission_attempts a JOIN cos.mandate_missions l ON l.scope_id=a.scope_id AND l.mission_id=a.mission_id WHERE l.scope_id=$1 AND l.mandate_id=$2 AND a.created_at >= $3 AND a.provenance->>'failure_reason' IS NOT NULL`,
-          [context.scopeId, row.id, row.activated_at],
-        )
-      ).rows[0].n;
-      if (failures >= definition.failure_policy.max_failures) {
-        await client.query(
-          "UPDATE cos.mandates SET state='suspended',suspension_reason='failure_threshold',updated_at=clock_timestamp() WHERE scope_id=$1 AND id=$2",
-          [context.scopeId, row.id],
-        );
-        await this.fenceWork(client, context.scopeId, row.id, 'failure_threshold');
-        await client.query(
-          'INSERT INTO cos.mandate_activity(scope_id,id,mandate_id,revision,body) VALUES($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING',
-          [
-            context.scopeId,
-            `failure-threshold-${row.id}-${row.version}`,
-            row.id,
-            row.version,
-            JSON.stringify({
-              kind: 'suspension',
-              reason: 'failure_threshold',
-              failures,
-              decisions_needed: ['owner_review_and_resume_or_revoke'],
-            }),
-          ],
-        );
-        return { status: 'denied', reason: 'failure_threshold' };
-      }
+      const suspension = await this.suspendUnsafe(client, context.scopeId, row);
+      if (suspension) return { status: 'denied', reason: suspension };
       if (!(await this.grantCurrent(client, context, row))) return { status: 'denied' };
-      if (
-        (
-          await client.query(
-            "SELECT 1 FROM cos.mandate_reservations WHERE scope_id=$1 AND mandate_id=$2 AND state='unknown' LIMIT 1",
-            [context.scopeId, row.id],
-          )
-        ).rowCount
-      ) {
-        await client.query(
-          "UPDATE cos.mandates SET state='suspended',suspension_reason='unknown_usage',updated_at=clock_timestamp() WHERE scope_id=$1 AND id=$2",
-          [context.scopeId, row.id],
-        );
-        await this.fenceWork(client, context.scopeId, row.id, 'unknown_usage');
-        return { status: 'denied', reason: 'unknown_usage' };
-      }
       const clock = (await client.query('SELECT clock_timestamp() AS now')).rows[0].now as Date;
       const now = clock.toISOString(),
         end = new Date(clock.getTime() + definition.trigger.look_ahead_minutes * 60000).toISOString();
@@ -446,12 +484,10 @@ export class MandateStore {
         ).rows;
         // Due-date interpretation shares Temporal's local-day semantics; executable text is never evaluated.
         dueCommitments = work
-          .filter(
-            (w) =>
-              w.due &&
-              (w.due.kind === 'instant' ? Date.parse(w.due.at) : Date.parse(w.due.date + 'T00:00:00Z')) <=
-                Date.parse(end),
-          )
+          .filter((w) => {
+            const due = mandateDueAt(w.due);
+            return due !== null && due <= Date.parse(end);
+          })
           .map((w) => digest({ id: w.id, version: w.version, due: w.due }));
       }
       const policy = evaluateMandate(definition, {
@@ -718,7 +754,7 @@ export class MandateStore {
     }
     if (definition.trigger.kind === 'commitment_due') {
       const selected = await client.query(
-        "SELECT id FROM cos.work_items WHERE scope_id=$1 AND id=ANY($2) AND kind='commitment'",
+        "SELECT id FROM cos.work_items WHERE scope_id=$1 AND id::text=ANY($2) AND kind='commitment'",
         [context.scopeId, definition.trigger.commitment_ids],
       );
       if (selected.rowCount !== definition.trigger.commitment_ids.length) return false;
