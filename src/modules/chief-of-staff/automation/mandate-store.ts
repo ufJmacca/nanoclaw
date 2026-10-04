@@ -239,6 +239,12 @@ export class MandateStore {
                 )
               ).rows
             : [];
+        const roots = (
+          await client.query(
+            `SELECT m.id,m.state,m.generation,a.generation AS attempt_generation,a.state AS attempt_state,a.allocation->>'stop_confirmed' AS stop_confirmed FROM cos.mandate_missions l JOIN cos.missions m ON m.scope_id=l.scope_id AND m.id=l.mission_id JOIN cos.mission_attempts a ON a.scope_id=m.scope_id AND a.mission_id=m.id WHERE l.scope_id=$1 AND l.mandate_id=$2 ORDER BY m.id,a.generation`,
+            [context.scopeId, row.id],
+          )
+        ).rows;
         const plan = planBriefOccurrence(
           definition.schedule,
           {
@@ -276,7 +282,7 @@ export class MandateStore {
           revision: row.version,
           state: row.state,
           eligible: await this.grantCurrent(client, context, row),
-          sourceDigest: digest({ version: row.version, state: row.state, sources, calendars, records, work }),
+          sourceDigest: digest({ version: row.version, state: row.state, sources, calendars, records, work, roots }),
           now: clock.toISOString(),
           wake: at === null ? null : { mandateId: row.id, revision: row.version, wakeAt: new Date(at).toISOString() },
         });
@@ -616,6 +622,12 @@ export class MandateStore {
         dueCommitments,
         scheduledOccurrence: planned.due?.key ?? null,
         events,
+        previouslyAdmitted: (
+          await client.query(
+            "SELECT body->>'trigger_key' AS trigger_key FROM cos.mandate_occurrences WHERE scope_id=$1 AND mandate_id=$2 AND state='admitted'",
+            [context.scopeId, row.id],
+          )
+        ).rows.map((row) => row.trigger_key),
       });
       const missionIds: string[] = [];
       if (!policy.matches.length) {

@@ -18,6 +18,7 @@ export type MandateFacts = {
   dueCommitments: string[];
   scheduledOccurrence: string | null;
   events: MandateEvent[];
+  previouslyAdmitted?: string[];
 };
 export function mandateDueAt(due: unknown): number | null {
   if (!validWorkDue(due)) return null;
@@ -78,9 +79,9 @@ export function evaluateMandate(
           mandateEventStart(b.event, definition.schedule.time_zone)! ||
         a.event.providerEventId.localeCompare(b.event.providerEventId, 'en'),
     );
-  return {
-    decision: selected.length ? 'matching_trigger' : 'no_matching_meeting',
-    matches: selected.slice(0, definition.trigger.max_matches).map((event) => ({
+  const handled = new Set(facts.previouslyAdmitted ?? []);
+  const eligible = selected
+    .map((event) => ({
       event,
       triggerKey: digest({
         triggerKey,
@@ -89,6 +90,10 @@ export function evaluateMandate(
         event: event.event.providerEventId,
         start: event.event.start,
       }),
-    })),
+    }))
+    .filter((match) => !handled.has(match.triggerKey));
+  return {
+    decision: eligible.length ? 'matching_trigger' : selected.length ? 'already_handled' : 'no_matching_meeting',
+    matches: eligible.slice(0, definition.trigger.max_matches),
   };
 }
