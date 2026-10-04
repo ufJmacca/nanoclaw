@@ -126,6 +126,7 @@ export type CosMethod =
   | 'cos_proactive_disposition_propose'
   | 'cos_proactive_history'
   | 'cos_mandate_propose'
+  | 'cos_mandate_activity'
   | 'cos_request_status'
   | 'cos_knowledge_search'
   | 'cos_source_get'
@@ -236,6 +237,16 @@ export function validRequest(value: unknown): value is CosRequest {
   if (value.method === 'cos_work_read') return validWorkRead(value.params);
   if (value.method === 'cos_mandate_propose')
     return keys(value.params, ['change']) && validMandateChange(value.params.change);
+  if (value.method === 'cos_mandate_activity')
+    return (
+      Object.keys(value.params).every((k) => ['mandate_id', 'offset'].includes(k)) &&
+      typeof value.params.mandate_id === 'string' &&
+      /^mandate-[a-f0-9]{64}$/.test(value.params.mandate_id) &&
+      (value.params.offset === undefined ||
+        (Number.isSafeInteger(value.params.offset) &&
+          Number(value.params.offset) >= 0 &&
+          Number(value.params.offset) <= 10000))
+    );
   if (value.method === 'cos_proactive_policy_propose')
     return keys(value.params, ['change']) && validProactivePolicyChange(value.params.change);
   if (value.method === 'cos_proactive_batch') return Object.keys(value.params).length === 0;

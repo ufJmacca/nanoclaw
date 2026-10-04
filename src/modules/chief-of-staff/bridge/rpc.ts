@@ -149,6 +149,12 @@ export function createRpcHandler(dependencies: {
         result = await dependencies.store.propose(context, request.request_id, request.params.change as Change);
       else if (request.method === 'cos_mandate_propose')
         result = await dependencies.store.propose(context, request.request_id, request.params.change as MandateChange);
+      else if (request.method === 'cos_mandate_activity')
+        result = await dependencies.store.mandates.readActivity(
+          context,
+          String(request.params.mandate_id),
+          Number(request.params.offset ?? 0),
+        );
       else if (request.method === 'cos_proactive_policy_propose')
         result = await dependencies.store.propose(
           context,

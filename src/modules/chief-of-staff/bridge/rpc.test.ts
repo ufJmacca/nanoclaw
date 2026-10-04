@@ -42,11 +42,35 @@ function fixture(allowed = true) {
       confirmation_token: 'PRIVATE_TEAM_APPROVAL',
     }),
     teamRuns: { inspect: vi.fn().mockResolvedValue({ status: 'ok', team: { state: 'running' } }) },
+    mandates: {
+      readActivity: vi.fn().mockResolvedValue({ status: 'ok', format: 'cos-mandate-activity/v1', activity: [] }),
+    },
   };
   const resolveContext = vi.fn().mockResolvedValue(allowed ? context : null);
   const handler = createRpcHandler({ resolveContext, store: store as unknown as PriorityStore });
   return { db, handler, store, resolveContext };
 }
+it('S08 activity RPC binds the private owner context and refuses caller-supplied scope', async () => {
+  const f = fixture(),
+    mandate_id = 'mandate-' + 'a'.repeat(64);
+  const content = {
+    action: 'cos_rpc',
+    delivery_id: '22222222-2222-4222-8222-222222222222',
+    request: { ...request, method: 'cos_mandate_activity', params: { mandate_id, offset: 5 } },
+  };
+  await f.handler(content, {} as Session, f.db);
+  expect(f.store.mandates.readActivity).toHaveBeenCalledExactlyOnceWith(
+    expect.objectContaining({ scopeId: 'fixture', ownerId: 'owner', sessionId: 'session' }),
+    mandate_id,
+    5,
+  );
+  await f.handler(
+    { ...content, request: { ...content.request, params: { ...content.request.params, scope_id: 'foreign' } } },
+    {} as Session,
+    f.db,
+  );
+  expect(f.store.mandates.readActivity).toHaveBeenCalledTimes(1);
+});
 it('S06-T01/T06 coordinator team tools preserve owner scope and hide approval and native identities', async () => {
   const f = fixture(),
     team_id = 'team-' + 'a'.repeat(64);

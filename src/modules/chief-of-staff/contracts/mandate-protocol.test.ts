@@ -96,4 +96,20 @@ describe('S08 typed mandate proposal boundary', () => {
     for (const method of ['cos_mandate_trigger', 'cos_mandate_execute', 'cos_mandate_approve'])
       expect(validRequest({ ...request, method })).toBe(false);
   });
+  it('S08 exposes only a bounded private activity reader with host-bound owner and scope', () => {
+    const activity = {
+      ...request,
+      method: 'cos_mandate_activity',
+      params: { mandate_id: 'mandate-' + 'a'.repeat(64), offset: 0 },
+    };
+    expect(validRequest(activity)).toBe(true);
+    for (const patch of [
+      { scope_id: 'foreign' },
+      { owner_id: 'foreign' },
+      { offset: 10001 },
+      { offset: -1 },
+      { mandate_id: '../../secrets' },
+    ])
+      expect(validRequest({ ...activity, params: { ...activity.params, ...patch } })).toBe(false);
+  });
 });
