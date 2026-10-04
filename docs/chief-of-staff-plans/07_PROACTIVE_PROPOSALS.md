@@ -1,6 +1,6 @@
 # S07 — Notice useful work without creating a task avalanche
 
-**Status:** implemented and merged; exact merged-source technical/Pi acceptance passed; operator proposal assessment pending.
+**Status:** implemented and merged; exact merged-source technical/Pi and operator acceptance passed.
 
 **Repository:** `ufJmacca/nanoclaw`  
 **Branch:** `cos/s07-proactive-proposals`  

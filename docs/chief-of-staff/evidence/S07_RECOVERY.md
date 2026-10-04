@@ -53,4 +53,4 @@ deployed images, runtime data and unrelated workloads were unchanged.
 
 ## Final merged release
 
-The correction merged as `a72be36a42f53f38256d47f9b3b18564e27f3f73`. Its actual merged-source release `release-a72be36a42f5-20261004004600` passed every required local and Pi gate, preservation and compatible recovery checks, and Pi-owned independence. See [S07 merged-source acceptance](S07_MERGED.md). The earlier failed gate remains recorded above. Operator proposal assessment is still pending.
+The correction merged as `a72be36a42f53f38256d47f9b3b18564e27f3f73`. Its actual merged-source release `release-a72be36a42f5-20261004004600` passed every required local and Pi gate, preservation and compatible recovery checks, and Pi-owned independence. See [S07 merged-source acceptance](S07_MERGED.md). The earlier failed gate remains recorded above. The owner subsequently rated all four labelled proposals useful, with no false positives identified (count 0); [operator assessment](S07_PROPOSAL_REVIEW.md) now completes S07 acceptance.

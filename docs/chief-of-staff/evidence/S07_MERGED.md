@@ -1,6 +1,6 @@
-# S07 merged-source acceptance — operator assessment pending
+# S07 merged-source acceptance — technical and operator gates passed
 
-The owner authorised the S07 merge. PR [#62](https://github.com/ufJmacca/nanoclaw/pull/62) merged as `903f5dba9afbc3053eb37dfa634632ebde61daf8`; the test-only calendar correction [#63](https://github.com/ufJmacca/nanoclaw/pull/63) merged under that same S07 authorisation as `a72be36a42f53f38256d47f9b3b18564e27f3f73`. Both reviewed trees match their merge trees. The final source is healthy on the Pi. S07's technical gates pass; its required operator usefulness/false-positive assessment remains pending, so S08 is not yet eligible. The programme remains incomplete.
+The owner authorised the S07 merge. PR [#62](https://github.com/ufJmacca/nanoclaw/pull/62) merged as `903f5dba9afbc3053eb37dfa634632ebde61daf8`; the test-only calendar correction [#63](https://github.com/ufJmacca/nanoclaw/pull/63) merged under that same S07 authorisation as `a72be36a42f53f38256d47f9b3b18564e27f3f73`. Both reviewed trees match their merge trees. The final source is healthy on the Pi. S07's technical and operator gates pass. The owner rated all four labelled proposals useful, with no false positives identified (count 0), so S08 is eligible. The programme remains incomplete.
 
 - Final source: `a72be36a42f53f38256d47f9b3b18564e27f3f73`; tree: `28569a1e2dd03d0fc68d72cd3c4ba57c59464553`.
 - Pi release: `release-a72be36a42f5-20261004004600`; source push/fetch, detached checkout and artifact identities verified.
@@ -26,4 +26,4 @@ All 694 original messages in 18 session databases, three approved records, full 
 
 CoS remains paused. Proactive policy, mission/team admission, knowledge and calendar flags remain unconfigured or disabled. No live model allowance, real account action or real message was enabled. The preserved native conversation's expanded tools have not been tested with live inference; offline guarded tool-refresh recovery passed. Subscription live consent remains expired, with ten of twelve attempts already charged.
 
-The labelled [A–D proposal set](S07_PROPOSAL_REVIEW.md) still needs the operator's ratings and false-positive count. Technical test success and S07 merge approval are not usefulness ratings. Record that assessment before continuing to S08. Later receipt-only commits do not change the tested/deployed source identity above.
+The owner's assessment of the labelled [A–D proposal set](S07_PROPOSAL_REVIEW.md) is recorded separately from technical test success and merge approval. A, B, C and D were all rated useful; no false positives were identified (count 0). This clears S07's fixture assessment gate without claiming live-model quality. Later receipt-only commits do not change the tested/deployed source identity above.
