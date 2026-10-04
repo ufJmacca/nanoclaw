@@ -247,7 +247,7 @@ it('S07 pins fourteen migrations and cannot promise S06 schema rollback compatib
     slice: 'S07',
     postgres: { minimum: 14, maximum: 14 },
     sqlite: { minimum: 22, maximum: 22 },
-    migrations: MIGRATIONS.map(({ version, checksum }) => ({ version, checksum })),
+    migrations: MIGRATIONS.slice(0, 14).map(({ version, checksum }) => ({ version, checksum })),
   };
   expect(validateReleaseManifest(current)).toEqual(current);
   for (const patch of [
@@ -256,6 +256,23 @@ it('S07 pins fourteen migrations and cannot promise S06 schema rollback compatib
     { postgres: { minimum: 13, maximum: 14 } },
     { migrations: current.migrations.slice(0, 13) },
     { migrations: current.migrations.map((m) => (m.version === 14 ? { ...m, checksum: '0'.repeat(64) } : m)) },
+  ])
+    expect(() => validateReleaseManifest({ ...current, ...patch })).toThrow('release_not_transferable');
+});
+it('S08 pins fifteen migrations and rejects older rollback schemas or missing mandate accounting', () => {
+  const current = {
+    ...manifest(),
+    slice: 'S08',
+    postgres: { minimum: 15, maximum: 15 },
+    sqlite: { minimum: 22, maximum: 22 },
+    migrations: MIGRATIONS.map(({ version, checksum }) => ({ version, checksum })),
+  };
+  expect(validateReleaseManifest(current)).toEqual(current);
+  for (const patch of [
+    { slice: 'S07' },
+    { postgres: { minimum: 14, maximum: 15 } },
+    { migrations: current.migrations.slice(0, 14) },
+    { migrations: current.migrations.map((m) => (m.version === 15 ? { ...m, checksum: '0'.repeat(64) } : m)) },
   ])
     expect(() => validateReleaseManifest({ ...current, ...patch })).toThrow('release_not_transferable');
 });

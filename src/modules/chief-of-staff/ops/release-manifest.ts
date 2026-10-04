@@ -12,6 +12,7 @@ import { TEAM_LINEAGE_CHECKSUM } from '../store/team-lineage-schema.js';
 import { TEAM_FINAL_REVIEW_CHECKSUM } from '../store/team-final-review-schema.js';
 import { TEAM_PARENT_BUDGET_CHECKSUM } from '../store/team-parent-budget-schema.js';
 import { PROACTIVE_CHECKSUM } from '../store/proactive-schema.js';
+import { MANDATE_CHECKSUM } from '../store/mandate-schema.js';
 export const REQUIRED_RELEASE_CHECKS = [
   'root',
   'runner',
@@ -24,7 +25,7 @@ export const REQUIRED_RELEASE_CHECKS = [
 export type ReleaseManifest = {
   contract: 'cos-release/v1';
   releaseId: string;
-  slice: 'S01' | 'S02' | 'S03' | 'S04' | 'S05' | 'S06' | 'S07';
+  slice: 'S01' | 'S02' | 'S03' | 'S04' | 'S05' | 'S06' | 'S07' | 'S08';
   platform: 'linux/arm64';
   source: {
     repository: 'ufJmacca/nanoclaw';
@@ -57,7 +58,7 @@ export function validateReleaseManifest(value: unknown): ReleaseManifest {
     !object(value) ||
     value.contract !== 'cos-release/v1' ||
     typeof value.slice !== 'string' ||
-    !['S01', 'S02', 'S03', 'S04', 'S05', 'S06', 'S07'].includes(value.slice) ||
+    !['S01', 'S02', 'S03', 'S04', 'S05', 'S06', 'S07', 'S08'].includes(value.slice) ||
     value.platform !== 'linux/arm64' ||
     value.rpc !== 'cos-rpc/v1' ||
     !matches(value.releaseId, /^release-[a-zA-Z0-9_-]{1,120}$/) ||
@@ -91,7 +92,9 @@ export function validateReleaseManifest(value: unknown): ReleaseManifest {
                 ? 9
                 : value.slice === 'S06'
                   ? 13
-                  : 14;
+                  : value.slice === 'S07'
+                    ? 14
+                    : 15;
   const checksums = [
     INITIAL_CHECKSUM,
     KNOWLEDGE_CHECKSUM,
@@ -107,6 +110,7 @@ export function validateReleaseManifest(value: unknown): ReleaseManifest {
     TEAM_FINAL_REVIEW_CHECKSUM,
     TEAM_PARENT_BUDGET_CHECKSUM,
     PROACTIVE_CHECKSUM,
+    MANDATE_CHECKSUM,
   ];
   if (
     !object(postgres) ||
