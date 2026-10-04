@@ -1,6 +1,7 @@
 # S08 — Perform useful background work under a standing mandate
 
-**Status:** not started  
+**Status:** in progress; local Docker recovery pending
+
 **Repository:** `ufJmacca/nanoclaw`  
 **Branch:** `cos/s08-standing-mandates`  
 **Depends on:** S07 merged, with its acceptance receipt available.  
@@ -88,4 +89,3 @@ Update the persistent goal ledger and create or update this slice’s PR. If rev
 ## Pinned-source release gate
 
 Apply [GITHUB_SOURCE_SYNC.md](GITHUB_SOURCE_SYNC.md) in this slice. Push the exact tested source commit from the Mac, fetch/verify it in a detached Pi release-source checkout, and require commit/tree agreement with the tested artifact manifest before activation. Record source-push/source-sync status and verified IDs in the acceptance/deployment receipt. Never use an unattended pull, change the active checkout, build on the Pi or mount fetched source over release code. S01 introduces tests S01-REL13–S01-REL18; later slices regress them where affected.
-
