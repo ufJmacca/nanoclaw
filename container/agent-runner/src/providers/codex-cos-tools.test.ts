@@ -9,6 +9,88 @@ const call = (extra: Record<string, unknown> = {}) => ({
   method: 'item/tool/call',
   params: { threadId: 'thread', turnId: 'turn', callId: 'call', tool: 'cos_context_get', arguments: {}, ...extra },
 });
+test('S08 native subscription dispatch reaches scoped mandate activity and rejects forged scope', async () => {
+  const f = fixture(),
+    mandate_id = 'mandate-' + 'a'.repeat(64);
+  expect(
+    (await f.dispatch.handle(call({ tool: 'cos_mandate_activity', arguments: { mandate_id, offset: 5 } }))).success,
+  ).toBe(true);
+  expect(f.calls[0]).toMatchObject({ method: 'cos_mandate_activity', params: { mandate_id, offset: 5 } });
+  expect(
+    (
+      await f.dispatch.handle(
+        call({ callId: 'forged', tool: 'cos_mandate_activity', arguments: { mandate_id, scope_id: 'foreign' } }),
+      )
+    ).success,
+  ).toBe(false);
+  expect(f.calls).toHaveLength(1);
+  f.dispatch.close();
+});
+test('S08 native subscription dispatch preserves the exact bounded mandate proposal and its stable identity', async () => {
+  const f = fixture(),
+    request_id = '11111111-1111-4111-8111-111111111111';
+  const change = {
+    kind: 'standing_mandate',
+    mandate_id: null,
+    expected_version: 0,
+    action: 'activate',
+    reason: 'Prepare selected private meetings.',
+    definition: {
+      title: 'Pilot Alpha preparation',
+      purpose: 'Prepare a private briefing from selected calendar and notes.',
+      goal_id: null,
+      project_id: null,
+      source_ids: ['note'],
+      calendar: {
+        binding_id: '22222222-2222-4222-8222-222222222222',
+        calendar_ids: ['selected'],
+        event_ids: ['meeting'],
+      },
+      template: 'meeting_preparation_v1',
+      operation: 'prepare_private_briefing',
+      trigger: { kind: 'event_approaching', look_ahead_minutes: 60, max_matches: 1 },
+      schedule: {
+        state: 'active',
+        time_zone: 'UTC',
+        local_time: '08:00',
+        weekdays: [1, 2, 3, 4, 5],
+        quiet_hours: null,
+        snooze_until: null,
+      },
+      output: 'originating_owner',
+      notifications_per_day: 1,
+      escalation_rule: null,
+      limits: { ...MISSION_DEFAULT_LIMITS },
+      budget: {
+        max_missions: 2,
+        max_attempts: 4,
+        max_turns: 8,
+        max_tool_calls: 48,
+        max_concurrent_workers: 1,
+        wall_seconds: 1200,
+      },
+      starts_at: '2026-10-04T00:00:00Z',
+      review_at: '2026-10-06T00:00:00Z',
+      expires_at: '2026-10-07T00:00:00Z',
+      failure_policy: { max_failures: 2, unknown_usage: 'suspend', missed_occurrences: 'coalesce_latest' },
+    },
+  };
+  expect(
+    (await f.dispatch.handle(call({ tool: 'cos_mandate_propose', arguments: { request_id, change } }))).success,
+  ).toBe(true);
+  expect(f.calls[0]).toMatchObject({ request_id, method: 'cos_mandate_propose', params: { change } });
+  for (const [i, args] of [
+    { change },
+    { request_id, change, approved: true },
+    { request_id, change: { ...change, definition: { ...change.definition, operation: 'email_attendees' } } },
+  ].entries())
+    expect(
+      (await f.dispatch.handle(call({ callId: 'bad-mandate-' + i, tool: 'cos_mandate_propose', arguments: args })))
+        .success,
+    ).toBe(false);
+  expect(f.calls).toHaveLength(1);
+  f.dispatch.close();
+});
 test('S06 team tools propose exact bounded graphs and reject worker/model-supplied authority', async () => {
   const f = fixture(),
     request_id = '11111111-1111-4111-8111-111111111111';
