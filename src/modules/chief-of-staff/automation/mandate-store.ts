@@ -15,6 +15,8 @@ import { validMissionRequest, type MissionRequest } from '../contracts/mission-p
 import type { MissionChange } from '../contracts/protocol.js';
 import type { MandateWake } from './mandate-policy.js';
 import { readMandateActivity } from './mandate-activity.js';
+import { planMandateNotification } from './mandate-notification-policy.js';
+import type { MissionNotificationPolicyRequest } from '../missions/notifications.js';
 export type MandateHead = {
   id: string;
   revision: number;
@@ -53,6 +55,118 @@ export class MandateStore {
     readonly authority?: MissionAuthorityResolver,
     readonly missions?: () => MissionProposalStore,
   ) {}
+  /** Trusted review delivery only, inside the caller's scope-first transaction. No RPC can reserve a send. */
+  async authorizeNotification(
+    client: PoolClient,
+    context: Context,
+    request: MissionNotificationPolicyRequest,
+  ): Promise<Result> {
+    if (context.origin || !/^mission-review-[a-f0-9-]{36}$/.test(request.notificationId)) return { status: 'denied' };
+    const link = (
+      await client.query('SELECT * FROM cos.mandate_missions WHERE scope_id=$1 AND mission_id=$2', [
+        context.scopeId,
+        request.missionId,
+      ])
+    ).rows[0];
+    const row = link && (await this.current(client, context, link.mandate_id));
+    if (!row || row.version !== link.revision || !(await this.grantCurrent(client, context, row)))
+      return { status: 'denied' };
+    if (
+      (
+        await client.query(
+          "SELECT 1 FROM cos.mandate_reservations WHERE scope_id=$1 AND mandate_id=$2 AND state='unknown' LIMIT 1",
+          [context.scopeId, row.id],
+        )
+      ).rowCount
+    )
+      return { status: 'denied' };
+    const occurrence = (
+      await client.query(
+        'SELECT body FROM cos.mandate_occurrences WHERE scope_id=$1 AND occurrence_key=$2 AND mandate_id=$3 AND revision=$4',
+        [context.scopeId, link.occurrence_key, row.id, row.version],
+      )
+    ).rows[0];
+    const event =
+      occurrence &&
+      (
+        await client.query(
+          "SELECT o.event FROM cos.calendar_observations o JOIN cos.sources s ON s.scope_id=o.scope_id AND s.id=o.source_id WHERE o.scope_id=$1 AND o.source_id=$2 AND o.binding_id=$3 AND o.lifecycle='current' AND s.status='current' AND NOT EXISTS(SELECT 1 FROM cos.revocation_tombstones t WHERE t.scope_id=s.scope_id AND t.source_id=s.id)",
+          [context.scopeId, occurrence.body.event_source_id, row.body.definition.calendar.binding_id],
+        )
+      ).rows[0];
+    if (!event || event.event.status === 'cancelled') return { status: 'denied' };
+    const existing = (
+      await client.query(
+        'SELECT *,local_date::text AS local_date_text FROM cos.mandate_notifications WHERE scope_id=$1 AND mission_id=$2',
+        [context.scopeId, request.missionId],
+      )
+    ).rows[0];
+    if (existing && (existing.revision !== row.version || existing.body.notification_id !== request.notificationId))
+      return { status: 'denied' };
+    if (!request.reserve && !existing) return { status: 'denied' };
+    const clock = (await client.query('SELECT clock_timestamp() AS now')).rows[0].now as Date;
+    const definition = row.body.definition;
+    const base = {
+      scopeId: context.scopeId,
+      mandateId: row.id,
+      revision: row.version,
+      createdAt: request.createdAt,
+      now: clock.toISOString(),
+      eventStart: mandateEventStart(event.event, definition.schedule.time_zone),
+    };
+    const localDate = planMandateNotification(definition, {
+      ...base,
+      eventStart: base.eventStart === null ? null : new Date(base.eventStart).toISOString(),
+      used: 0,
+    }).localDate;
+    const used = (
+      await client.query(
+        'SELECT count(*)::int AS n FROM cos.mandate_notifications WHERE scope_id=$1 AND mandate_id=$2 AND local_date=$3',
+        [context.scopeId, row.id, localDate],
+      )
+    ).rows[0].n;
+    const plan = planMandateNotification(definition, {
+      ...base,
+      eventStart: base.eventStart === null ? null : new Date(base.eventStart).toISOString(),
+      used: used - (existing?.local_date_text === localDate ? 1 : 0),
+    });
+    if (!plan.mode) return { status: 'pending', reason: 'mandate_notification_policy', next_wake_at: plan.nextWakeAt };
+    if (existing && (existing.local_date_text !== plan.localDate || existing.body.mode !== plan.mode))
+      return { status: 'denied' };
+    if (!existing)
+      await client.query(
+        'INSERT INTO cos.mandate_notifications(scope_id,mission_id,mandate_id,revision,local_date,body) VALUES($1,$2,$3,$4,$5,$6)',
+        [
+          context.scopeId,
+          request.missionId,
+          row.id,
+          row.version,
+          plan.localDate,
+          JSON.stringify({
+            format: 'cos-mandate-notification/v1',
+            notification_id: request.notificationId,
+            mode: plan.mode,
+          }),
+        ],
+      );
+    const activity = await readMandateActivity(client, context, row, true, 0);
+    const accounting = activity.accounting as {
+      model_turn_reservations: number;
+      tool_call_reservations: number;
+      reserved_envelopes: number;
+      uncertain_envelopes: number;
+    };
+    return {
+      status: 'ok',
+      activity_digest: [
+        `Standing mandate: ${row.id}, revision ${row.version}.`,
+        `Trigger: ${definition.trigger.kind}. Delivery: approved ${plan.mode}.`,
+        `Work: ${request.missionId}. Admitted sources: ${(occurrence.body.source_ids as string[]).join(', ')}.`,
+        `Reserved roots: ${accounting.reserved_envelopes}/${definition.budget.max_missions}; model turns: ${accounting.model_turn_reservations}/${definition.budget.max_turns}; tool calls: ${accounting.tool_call_reservations}/${definition.budget.max_tool_calls}.`,
+        'Subscription cost: unavailable; structural limits apply. Decisions needed: none under the current grant.',
+      ].join('\n'),
+    };
+  }
   async readActivity(context: Context, mandateId: string, offset = 0): Promise<Result> {
     if (
       context.origin ||

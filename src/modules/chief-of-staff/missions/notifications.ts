@@ -12,6 +12,17 @@ export type MissionDeliveryReceipt =
   | { state: 'delivered'; platform_receipt: string }
   | { state: 'uncertain' }
   | { state: 'failed'; reason: 'admission_denied' };
+export type MissionNotificationPolicyRequest = {
+  missionId: string;
+  notificationId: string;
+  createdAt: string;
+  reserve: boolean;
+};
+export type MissionNotificationPolicy = (
+  client: PoolClient,
+  context: KnowledgeContext,
+  request: MissionNotificationPolicyRequest,
+) => Promise<Result>;
 
 /** Host-only, single-send consumption of the atomic review notification intent.
  * A delivering/uncertain command is never automatically retried, including after a restart. */
@@ -20,6 +31,7 @@ export class MissionNotifications {
     readonly database: BoundedDatabase,
     readonly reviews: Pick<MissionReviews, 'read'>,
     readonly route: 'single' | 'team' = 'single',
+    readonly mandatePolicy?: MissionNotificationPolicy,
   ) {}
   private get kind() {
     return this.route === 'team' ? 'team_review_notification' : 'mission_review_notification';
@@ -46,7 +58,7 @@ export class MissionNotifications {
   private async command(client: PoolClient, context: KnowledgeContext, reviewId: string, active = true) {
     if (context.origin || context.provider !== 'codex' || !uuid(context.generation) || !uuid(reviewId)) return null;
     const scope = (
-      await client.query('SELECT status FROM cos.scopes WHERE id=$1 AND owner_id=$2 AND agent_group_id=$3 FOR SHARE', [
+      await client.query('SELECT status FROM cos.scopes WHERE id=$1 AND owner_id=$2 AND agent_group_id=$3 FOR UPDATE', [
         context.scopeId,
         context.ownerId,
         context.agentGroupId,
@@ -58,8 +70,9 @@ export class MissionNotifications {
       this.route === 'team' ? 'r.team_id AS mission_id,r.submission_id AS result_id' : 'r.mission_id,r.result_id';
     const row = (
       await client.query(
-        `SELECT o.*,${columns},r.provenance
+        `SELECT o.*,${columns},r.provenance,${this.route === 'single' ? 'm.provenance' : 'NULL::jsonb'} AS mission_provenance
       FROM cos.outbox o JOIN ${table} r ON r.scope_id=o.scope_id AND r.id=$2
+      ${this.route === 'single' ? 'JOIN cos.missions m ON m.scope_id=r.scope_id AND m.id=r.mission_id' : ''}
       WHERE o.scope_id=$1 AND o.id=$3 AND o.kind=$4 FOR UPDATE OF o`,
         [context.scopeId, reviewId, this.prefix + reviewId, this.kind],
       )
@@ -100,6 +113,15 @@ export class MissionNotifications {
     return this.transaction(async (client) => {
       const row = await this.command(client, context, reviewId);
       if (!row || row.delivered_at || row.attempts !== 0 || row.payload.delivery) return { status: 'denied' };
+      if (row.mission_provenance?.approval_kind === 'standing_mandate') {
+        const policy = await this.mandatePolicy?.(client, context, {
+          missionId: row.mission_id,
+          notificationId: row.id,
+          createdAt: row.created_at.toISOString(),
+          reserve: true,
+        });
+        if (!policy || policy.status !== 'ok') return policy ?? { status: 'denied' };
+      }
       await client.query(
         `UPDATE cos.outbox SET attempts=attempts+1,payload=payload || jsonb_build_object('delivery',
         jsonb_build_object('state','delivering','attempt_id',$3::text,'started_at',clock_timestamp())) WHERE scope_id=$1 AND id=$2`,
@@ -113,12 +135,23 @@ export class MissionNotifications {
     if (!uuid(attemptId)) return { status: 'denied' };
     const command = await this.transaction(async (client) => {
       const row = await this.command(client, context, reviewId);
+      let activityDigest: unknown;
+      if (row?.mission_provenance?.approval_kind === 'standing_mandate') {
+        const policy = await this.mandatePolicy?.(client, context, {
+          missionId: row.mission_id,
+          notificationId: row.id,
+          createdAt: row.created_at.toISOString(),
+          reserve: false,
+        });
+        if (!policy || policy.status !== 'ok') return policy ?? { status: 'denied' };
+        activityDigest = policy.activity_digest;
+      }
       return row &&
         row.attempts === 1 &&
         !row.delivered_at &&
         row.payload.delivery?.state === 'delivering' &&
         row.payload.delivery.attempt_id === attemptId
-        ? { status: 'ok', reference: row.payload }
+        ? { status: 'ok', reference: row.payload, activity_digest: activityDigest }
         : { status: 'denied' };
     });
     if (command.status !== 'ok') return command;
@@ -143,9 +176,11 @@ export class MissionNotifications {
       return validTeamBrief(result.result)
         ? { status: 'ok', text: renderTeamNotification(rootId, mission.state, result.result) }
         : { status: 'denied' };
-    return validMissionResult(result.result)
-      ? { status: 'ok', text: renderMissionNotification(rootId, mission.state, result.result) }
-      : { status: 'denied' };
+    if (!validMissionResult(result.result)) return { status: 'denied' };
+    const text = [command.activity_digest, renderMissionNotification(rootId, mission.state, result.result)]
+      .filter((v) => typeof v === 'string')
+      .join('\n\n');
+    return [...text].length <= 16383 ? { status: 'ok', text } : { status: 'denied' };
   }
   /** Record an already-performed transport effect even after pause/revocation; this never grants a new send. */
   async finish(

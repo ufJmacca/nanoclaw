@@ -805,3 +805,244 @@ test('S08-T09 no-op occurrences are recorded once without mission work or notifi
   assert.ok((digest.activity as Array<{ body: { state?: string } }>).some((a) => a.body.state === 'noop'));
   assert.equal((await store.mandates.readActivity({ ...context, ownerId: 'foreign' }, id)).status, 'denied');
 });
+test('S08-T09 pending digest does not consume delivery authority; approved escalation reserves once and is rechecked after pause', async () => {
+  const now = (await admin.query('SELECT clock_timestamp() AS now')).rows[0].now as Date;
+  const late = new Date(now.getTime() + 60000).toISOString().slice(11, 16);
+  const selected: MandateChange = {
+    ...change,
+    definition: {
+      ...change.definition,
+      schedule: { ...change.definition.schedule, time_zone: 'UTC', local_time: late, quiet_hours: null },
+      escalation_rule: 'event_due_30m',
+    },
+  };
+  const id = String((await approve(await propose(selected))).record_id);
+  const admitted = await store.mandates.evaluate(context, id);
+  const missionId = String((admitted.mission_ids as string[])[0]);
+  assert.ok(missionId.startsWith('mission-'));
+  const request = {
+    missionId,
+    notificationId: 'mission-review-' + randomUUID(),
+    createdAt: now.toISOString(),
+    reserve: true,
+  };
+  const check = () =>
+    store.database.run(async (client) => {
+      await client.query('BEGIN');
+      await client.query('SELECT 1 FROM cos.scopes WHERE id=$1 FOR UPDATE', [scope]);
+      const result = await store.mandates.authorizeNotification(client, context, request);
+      await client.query('COMMIT');
+      return result;
+    }, true);
+  assert.equal((await check()).status, 'pending');
+  assert.equal(
+    (
+      await admin.query(
+        'SELECT count(*)::int AS n FROM cos.mandate_notifications WHERE scope_id=$1 AND mandate_id=$2',
+        [scope, id],
+      )
+    ).rows[0].n,
+    0,
+  );
+  // Controlled provider fixture update only: move the exact selected current event into the approved escalation window.
+  await admin.query(
+    "UPDATE cos.calendar_observations SET event=jsonb_set(event,'{start,instant}',to_jsonb($3::text)) WHERE scope_id=$1 AND binding_id=$2 AND provider_event_id='pilot-review'",
+    [scope, change.definition.calendar.binding_id, new Date(now.getTime() + 1200000).toISOString()],
+  );
+  const reservations = await Promise.all([check(), check()]);
+  assert.ok(
+    reservations.every((r) => r.status === 'ok'),
+    JSON.stringify(reservations),
+  );
+  assert.equal(
+    (
+      await admin.query(
+        'SELECT count(*)::int AS n FROM cos.mandate_notifications WHERE scope_id=$1 AND mandate_id=$2',
+        [scope, id],
+      )
+    ).rows[0].n,
+    1,
+  );
+  assert.equal(
+    (
+      await store.database.run((client) =>
+        store.mandates.authorizeNotification(client, context, {
+          ...request,
+          notificationId: 'mission-review-' + randomUUID(),
+        }),
+      )
+    ).status,
+    'denied',
+  );
+  const read = await store.database.run((client) =>
+    store.mandates.authorizeNotification(client, context, { ...request, reserve: false }),
+  );
+  assert.equal(read.status, 'ok');
+  assert.match(String(read.activity_digest), /Subscription cost: unavailable/);
+  assert.equal(
+    (await approve(await propose({ ...selected, mandate_id: id, expected_version: 1, action: 'pause' }))).status,
+    'ok',
+  );
+  assert.equal(
+    (
+      await store.database.run((client) =>
+        store.mandates.authorizeNotification(client, context, { ...request, reserve: false }),
+      )
+    ).status,
+    'denied',
+  );
+});
+async function publishMeetings(ids: string[]) {
+  const clock = (await admin.query('SELECT clock_timestamp() AS now')).rows[0].now.getTime();
+  const window = {
+    timeMin: new Date(clock - 60000).toISOString(),
+    timeMax: new Date(clock + 2 * 86400000).toISOString(),
+    timeZone: 'UTC',
+  };
+  const fixture = fixtureCalendarReader({
+    access: {
+      generation: change.definition.calendar.binding_id + ':1',
+      calendarIds: ['selected'],
+      auth: 'ready',
+      scopes: [GOOGLE_EVENT_READ_SCOPE],
+    },
+    calendars: {
+      selected: ids.map((id, index) => ({
+        id,
+        etag: 'bounded-fixture-v1',
+        summary: 'Pilot Alpha private preparation',
+        start: { dateTime: new Date(clock + (index + 1) * 600000).toISOString() },
+        end: { dateTime: new Date(clock + (index + 2) * 600000).toISOString() },
+      })),
+    },
+  });
+  const attempt = randomUUID();
+  assert.equal(
+    (await calendar.start(context, change.definition.calendar.binding_id, 'selected', attempt, window)).status,
+    'ok',
+  );
+  assert.equal(
+    (
+      await calendar.publish(
+        context,
+        change.definition.calendar.binding_id,
+        attempt,
+        await collectCalendarSnapshot(fixture.reader, 'selected', window),
+      )
+    ).status,
+    'ok',
+  );
+}
+async function pauseAndResumeNeverAllocated(selected: MandateChange, id: string, missionId: string) {
+  const a = (
+    await admin.query('SELECT * FROM cos.mission_attempts WHERE scope_id=$1 AND mission_id=$2', [scope, missionId])
+  ).rows[0];
+  const identity: CosMissionIdentity = {
+    scopeId: scope,
+    missionId,
+    attemptId: a.id,
+    generation: a.generation,
+    agentGroupId: a.agent_group_id,
+    sessionId: a.session_id,
+    provider: 'codex',
+  };
+  assert.deepEqual(a.allocation, {});
+  const pause = { ...selected, mandate_id: id, expected_version: 1, action: 'pause' as const };
+  assert.equal((await approve(await propose(pause))).status, 'ok');
+  assert.equal((await store.missionRuns.confirmUnallocatedCancellation(context, identity)).status, 'ok');
+  assert.equal((await approve(await propose({ ...pause, expected_version: 2, action: 'resume' }))).status, 'ok');
+}
+test('S08-T05 lifetime root reservations survive approved resume and suspend at the budget instead of admitting a second meeting', async () => {
+  await publishMeetings(['budget-first', 'budget-second']);
+  const selected: MandateChange = {
+    ...change,
+    definition: {
+      ...change.definition,
+      calendar: { ...change.definition.calendar, event_ids: ['budget-first', 'budget-second'] },
+      trigger: { ...change.definition.trigger, max_matches: 2 },
+      budget: { ...change.definition.budget, max_missions: 1 },
+    },
+  };
+  const id = String((await approve(await propose(selected))).record_id);
+  const first = await store.mandates.evaluate(context, id);
+  const missionId = String((first.mission_ids as string[])[0]);
+  assert.ok(missionId.startsWith('mission-'));
+  await pauseAndResumeNeverAllocated(selected, id, missionId);
+  assert.deepEqual((await store.mandates.evaluate(context, id)).mission_ids, []);
+  const head = (
+    await admin.query('SELECT state,suspension_reason FROM cos.mandates WHERE scope_id=$1 AND id=$2', [scope, id])
+  ).rows[0];
+  assert.deepEqual(head, { state: 'suspended', suspension_reason: 'budget_exhausted' });
+  assert.equal(
+    (
+      await admin.query('SELECT count(*)::int AS n FROM cos.mandate_reservations WHERE scope_id=$1 AND mandate_id=$2', [
+        scope,
+        id,
+      ])
+    ).rows[0].n,
+    1,
+  );
+  assert.equal(
+    (
+      await admin.query('SELECT count(*)::int AS n FROM cos.mandate_missions WHERE scope_id=$1 AND mandate_id=$2', [
+        scope,
+        id,
+      ])
+    ).rows[0].n,
+    1,
+  );
+});
+test('S08-T09 daily notification allowance spans revisions and cannot be reset by pause and resume', async () => {
+  await publishMeetings(['notice-first', 'notice-second']);
+  const selected: MandateChange = {
+    ...change,
+    definition: {
+      ...change.definition,
+      calendar: { ...change.definition.calendar, event_ids: ['notice-first', 'notice-second'] },
+      trigger: { ...change.definition.trigger, max_matches: 2 },
+      schedule: { ...change.definition.schedule, quiet_hours: null },
+      escalation_rule: 'event_due_30m',
+    },
+  };
+  const id = String((await approve(await propose(selected))).record_id);
+  const first = await store.mandates.evaluate(context, id),
+    missionId = String((first.mission_ids as string[])[0]);
+  const reserve = (mission: string) =>
+    store.database.run(async (client) => {
+      await client.query('BEGIN');
+      await client.query('SELECT 1 FROM cos.scopes WHERE id=$1 FOR UPDATE', [scope]);
+      const result = await store.mandates.authorizeNotification(client, context, {
+        missionId: mission,
+        notificationId: 'mission-review-' + randomUUID(),
+        createdAt: new Date().toISOString(),
+        reserve: true,
+      });
+      await client.query('COMMIT');
+      return result;
+    }, true);
+  assert.equal((await reserve(missionId)).status, 'ok');
+  await pauseAndResumeNeverAllocated(selected, id, missionId);
+  const second = await store.mandates.evaluate(context, id),
+    secondId = String((second.mission_ids as string[])[0]);
+  assert.ok(secondId.startsWith('mission-'));
+  assert.notEqual(secondId, missionId);
+  assert.equal((await reserve(secondId)).status, 'pending');
+  assert.equal(
+    (
+      await admin.query(
+        'SELECT count(*)::int AS n FROM cos.mandate_notifications WHERE scope_id=$1 AND mandate_id=$2',
+        [scope, id],
+      )
+    ).rows[0].n,
+    1,
+  );
+  assert.equal(
+    (
+      await admin.query('SELECT count(*)::int AS n FROM cos.mandate_reservations WHERE scope_id=$1 AND mandate_id=$2', [
+        scope,
+        id,
+      ])
+    ).rows[0].n,
+    2,
+  );
+});

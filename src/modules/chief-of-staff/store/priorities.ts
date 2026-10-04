@@ -101,7 +101,9 @@ export class PriorityStore {
     this.missionRuns = new MissionRunStore(database, this.missions, knowledge?.artifacts);
     if (knowledge) {
       this.missionReviews = new MissionReviews(database, this.missions, knowledge);
-      this.missionNotifications = new MissionNotifications(database, this.missionReviews);
+      this.missionNotifications = new MissionNotifications(database, this.missionReviews, 'single', (...args) =>
+        this.mandates.authorizeNotification(...args),
+      );
       this.missionReviewRuns = new MissionReviewRuns(this.missionReviews);
       this.teamFinalReviews = new TeamFinalReviews(this.teamRuns);
       this.teamNotifications = new MissionNotifications(database, this.teamFinalReviews, 'team');
