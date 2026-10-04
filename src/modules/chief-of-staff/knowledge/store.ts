@@ -452,10 +452,17 @@ export class KnowledgeStore {
     JOIN cos.artifacts a ON a.scope_id=r.scope_id AND a.id=r.artifact_id
     WHERE s.scope_id=$1 AND s.id=$2 AND r.id=$3 AND s.status IN ('current','stale')
       AND $4=ANY(s.processing_providers) AND a.lifecycle='published' AND a.kind='source' AND a.digest=r.digest
-      AND s.provenance->>'origin'='selected_staging_file' AND s.access_policy='{"scope_owner_only":true}'::jsonb
+      AND ((s.provenance->>'origin'='selected_staging_file' AND s.access_policy='{"scope_owner_only":true}'::jsonb)
+        OR (s.provenance->>'origin'='calendar_observation' AND s.access_policy->>'scope_owner_only'='true' AND ${calendarSourceAccess('$5')}))
       AND NOT EXISTS(SELECT 1 FROM cos.revocation_tombstones t WHERE t.scope_id=s.scope_id AND t.source_id=s.id)
     FOR SHARE OF s,r,a`,
-        [context.scopeId, selection.source_id, selection.revision_id, context.provider],
+        [
+          context.scopeId,
+          selection.source_id,
+          selection.revision_id,
+          context.provider,
+          await this.openCalendarBindings(client, context),
+        ],
       )
     ).rows[0];
   }

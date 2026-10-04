@@ -26,6 +26,7 @@ export class MissionProposalStore {
       change: MissionChange,
       execution: boolean,
     ) => Promise<ResearchWorkOrder | null>,
+    readonly mandateCurrent?: (client: PoolClient, context: Context, change: MissionChange) => Promise<boolean>,
   ) {}
 
   private async seal(
@@ -192,6 +193,24 @@ export class MissionProposalStore {
     )
       return null;
     const body = row.body as ResearchWorkOrder['body'];
+    const linkedMandate = (
+      await client.query('SELECT mandate_id FROM cos.mandate_missions WHERE scope_id=$1 AND mission_id=$2', [
+        context.scopeId,
+        change.mission_id,
+      ])
+    ).rows[0];
+    const declaredMandate =
+      (
+        await client.query('SELECT provenance FROM cos.missions WHERE scope_id=$1 AND id=$2', [
+          context.scopeId,
+          change.mission_id,
+        ])
+      ).rows[0]?.provenance?.approval_kind === 'standing_mandate';
+    if (
+      (linkedMandate || declaredMandate) &&
+      (!linkedMandate || !this.mandateCurrent || !(await this.mandateCurrent(client, context, change)))
+    )
+      return null;
     if (body.format === 'cos-team-child-work-order/v1')
       return this.teamChildCapture?.(client, context, change, execution) ?? null;
     if (

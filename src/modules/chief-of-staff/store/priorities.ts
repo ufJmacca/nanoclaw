@@ -89,11 +89,14 @@ export class PriorityStore {
     missionAuthority?: MissionAuthorityResolver,
     teamAuthority?: TeamAuthorityResolver,
   ) {
-    this.mandates = new MandateStore(knowledge, missionAuthority);
+    this.mandates = new MandateStore(database, knowledge, missionAuthority, () => this.missions);
     this.teams = new TeamProposalStore(knowledge, teamAuthority);
     this.teamRuns = new TeamRunStore(database, this.teams, knowledge);
-    this.missions = new MissionProposalStore(knowledge, missionAuthority, (...args) =>
-      this.teamRuns.captureChild(...args),
+    this.missions = new MissionProposalStore(
+      knowledge,
+      missionAuthority,
+      (...args) => this.teamRuns.captureChild(...args),
+      (...args) => this.mandates.missionCurrent(...args),
     );
     this.missionRuns = new MissionRunStore(database, this.missions, knowledge?.artifacts);
     if (knowledge) {
