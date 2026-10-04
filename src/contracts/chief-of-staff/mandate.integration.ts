@@ -1013,10 +1013,12 @@ test('S08-T09 daily notification allowance spans revisions and cannot be reset b
     store.database.run(async (client) => {
       await client.query('BEGIN');
       await client.query('SELECT 1 FROM cos.scopes WHERE id=$1 FOR UPDATE', [scope]);
+      // Production outbox timestamps come from PostgreSQL, not the Docker VM clock.
+      const createdAt = (await client.query('SELECT clock_timestamp() AS now')).rows[0].now.toISOString();
       const result = await store.mandates.authorizeNotification(client, context, {
         missionId: mission,
         notificationId: 'mission-review-' + randomUUID(),
-        createdAt: new Date().toISOString(),
+        createdAt,
         reserve: true,
       });
       await client.query('COMMIT');

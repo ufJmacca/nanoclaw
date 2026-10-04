@@ -47,6 +47,7 @@ it('S08-T09 quiet hours and daily limits also constrain approved escalation', ()
     }).mode,
   ).toBe(null);
   expect(planMandateNotification(escalation, { ...input, used: 1 }).mode).toBe(null);
+  expect(planMandateNotification(escalation, { ...input, createdAt: '2026-10-04T20:45:00.001Z' }).mode).toBe(null);
   expect(planMandateNotification({ ...escalation, notifications_per_day: 0 }, input).mode).toBe(null);
   expect(planMandateNotification(escalation, { ...input, eventStart: '2026-10-04T20:44:00Z' }).mode).toBe(null);
 });
