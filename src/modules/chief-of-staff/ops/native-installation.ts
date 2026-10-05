@@ -52,8 +52,11 @@ export async function backupNativeDatabase(source: string, destination: string):
   } finally {
     live.close();
   }
-  const copy = new Database(temporary, { readonly: true, fileMustExist: true });
+  // Normalize only the newly owned snapshot. A writable inspection connection clears its own
+  // temporary WAL/SHM files; the live source and its journal mode are never changed.
+  const copy = new Database(temporary, { fileMustExist: true });
   try {
+    if (copy.pragma('journal_mode=DELETE', { simple: true }) !== 'delete') throw new Error('native_backup_invalid');
     if (copy.pragma('quick_check', { simple: true }) !== 'ok') throw new Error('native_backup_invalid');
   } finally {
     copy.close();

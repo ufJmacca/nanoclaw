@@ -23,6 +23,11 @@ import {
 } from '../../modules/chief-of-staff/actions/writer.js';
 import { ActionWitness, initializeActionWitness } from '../../modules/chief-of-staff/actions/witness.js';
 import type { ActionIntent } from '../../modules/chief-of-staff/actions/intent.js';
+import Database from 'better-sqlite3';
+import { KnowledgeArtifacts } from '../../modules/chief-of-staff/knowledge/artifacts.js';
+import * as coordinatedBackup from '../../modules/chief-of-staff/ops/coordinated-backup.js';
+const { backupCoordinatedState } = coordinatedBackup;
+import { databaseFingerprint } from '../../modules/chief-of-staff/ops/target-identity.js';
 
 const scope = 'action-' + randomUUID(),
   writerId = randomUUID();
@@ -798,5 +803,181 @@ test('S09 renewed main-context authority may reconcile an original effect but ca
   } finally {
     authority.provider.policyDigest = policy;
     authority.contextGeneration = generation;
+  }
+});
+async function restoreOnlyOwnedFixtureScope(
+  snapshot: import('../../modules/chief-of-staff/ops/coordinated-backup.js').ScopeCheckpoint,
+) {
+  assert.equal(snapshot.scopeId, scope);
+  assert.match(scope, /^action-[a-f0-9-]{36}$/);
+  assert.equal(enabled, false);
+  assert.equal(store.database.pool.idleCount, store.database.pool.totalCount);
+  const tables = coordinatedBackup.CHECKPOINT_TABLES.filter((table) => table !== 'scopes');
+  await admin.query('BEGIN');
+  try {
+    await admin.query('SET CONSTRAINTS ALL DEFERRED');
+    for (const mode of ['delete', 'insert']) {
+      let remaining = [...tables];
+      while (remaining.length) {
+        const retry: string[] = [];
+        for (const table of remaining) {
+          await admin.query('SAVEPOINT fixture_restore_table');
+          try {
+            if (mode === 'delete') await admin.query(`DELETE FROM cos."${table}" WHERE scope_id=$1`, [scope]);
+            else if (snapshot.rows[table].length) {
+              const fields = snapshot.columns[table].map((name) => '"' + name + '"').join(',');
+              await admin.query(
+                `INSERT INTO cos."${table}"(${fields}) SELECT ${fields} FROM jsonb_populate_recordset(NULL::cos."${table}",$1::jsonb)`,
+                [JSON.stringify(snapshot.rows[table])],
+              );
+            }
+            await admin.query('RELEASE SAVEPOINT fixture_restore_table');
+          } catch (error) {
+            await admin.query('ROLLBACK TO SAVEPOINT fixture_restore_table');
+            await admin.query('RELEASE SAVEPOINT fixture_restore_table');
+            if ((error as { code?: string }).code !== '23503') {
+              // eslint-disable-next-line preserve-caught-error -- Private database diagnostics must not escape the fixture restore boundary.
+              throw new Error('fixture_scope_restore_failed');
+            }
+            retry.push(table);
+          }
+        }
+        if (retry.length === remaining.length) throw new Error('fixture_scope_restore_dependency_failed');
+        remaining = retry;
+      }
+    }
+    await admin.query('COMMIT');
+  } catch (error) {
+    await admin.query('ROLLBACK');
+    throw error;
+  }
+}
+test('S09-T10 coordinated sandbox restore reconciles a fixture event created after the actual remote/local backup', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-coordinated-backup-'));
+  try {
+    fs.chmodSync(root, 0o700);
+    const receiptRoot = path.join(root, 'receipt'),
+      artifactsRoot = path.join(root, 'artifacts'),
+      stagingRoot = path.join(root, 'staging');
+    for (const dir of [receiptRoot, artifactsRoot, stagingRoot]) fs.mkdirSync(dir, { mode: 0o700 });
+    const sqlite = path.join(root, 'native.sqlite'),
+      db = new Database(sqlite);
+    db.pragma('journal_mode=WAL');
+    db.exec(
+      "CREATE TABLE fixture_history(id TEXT PRIMARY KEY,body TEXT); INSERT INTO fixture_history VALUES('before','preserved native owner message')",
+    );
+    fs.chmodSync(sqlite, 0o600);
+    const artifacts = new KnowledgeArtifacts(artifactsRoot, stagingRoot);
+    const beforeArtifact = await artifacts.exclusive(async (lease) =>
+      artifacts.publishText(scope, 'preserved pre-backup artifact', lease),
+    );
+    const restriction = path.join(root, 'binding.json');
+    fs.writeFileSync(
+      restriction,
+      JSON.stringify({ scopeId: scope, bindingDigest: authority.bindingDigest, paused: true }),
+      { mode: 0o600 },
+    );
+    const options = {
+      client: admin,
+      context,
+      databaseFingerprint: await databaseFingerprint(admin, await fixtureDatabaseConfig(process.env, 'migration')),
+      operationId: randomUUID(),
+      receiptRoot,
+      nativeDatabases: [sqlite],
+      artifacts,
+      restrictionFiles: [restriction],
+      witness,
+      quiescent: async () => {
+        assert.equal(enabled, false);
+        assert.equal(store.database.pool.idleCount, store.database.pool.totalCount);
+        return {
+          generation: 1,
+          activeWorkers: 0 as const,
+          activeOperations: 0 as const,
+          nativeWriters: 0 as const,
+          effectsEnabled: false as const,
+        };
+      },
+    };
+    enabled = false;
+    let checkpoint;
+    try {
+      checkpoint = await backupCoordinatedState(options);
+    } finally {
+      enabled = true;
+    }
+    assert.equal(checkpoint.format, 'cos-coordinated-backup/v1');
+    assert.equal(checkpoint.schemaVersion, 16);
+    assert.equal(checkpoint.admissionRestored, false);
+    const native = new Database(path.join(receiptRoot, 'coordinated', 'sqlite', '0', 'native.sqlite'), {
+      readonly: true,
+    });
+    try {
+      assert.equal((native.prepare('SELECT count(*) AS n FROM fixture_history').get() as { n: number }).n, 1);
+    } finally {
+      native.close();
+      db.close();
+    }
+    const remote = JSON.parse(fs.readFileSync(path.join(receiptRoot, 'coordinated', 'remote.json'), 'utf8'));
+    assert.equal(remote.scopeId, scope);
+    assert.equal(remote.rows.scopes[0].owner_id, 'owner');
+    assert.ok(remote.rows.action_request_starts.length > 0);
+    assert.equal(
+      fs.existsSync(path.join(receiptRoot, 'coordinated', 'witness')),
+      false,
+      'deny journal remains independently target-owned',
+    );
+    const action = await queued(43),
+      beforeWrites = writes;
+    assert.equal((await store.actions.executor.run(context, action.id, nativeAdmission)).state, 'verified');
+    const original = witness.find(action.id)!;
+    const liveNative = new Database(sqlite);
+    liveNative.exec("INSERT INTO fixture_history VALUES('after','later native message')");
+    liveNative.close();
+    const afterArtifact = await artifacts.exclusive(async (lease) =>
+      artifacts.publishText(scope, 'later artifact', lease),
+    );
+    assert.equal(typeof coordinatedBackup.restoreCoordinatedSandbox, 'function');
+    enabled = false;
+    try {
+      const destination = path.join(root, 'sandbox');
+      const restored = await coordinatedBackup.restoreCoordinatedSandbox(options, destination);
+      assert.equal(restored.admissionRestored, false);
+      assert.equal(restored.eventJournalRestored, false);
+      const isolated = new Database(path.join(destination, 'sqlite', '0', 'native.sqlite'), { readonly: true });
+      try {
+        assert.equal((isolated.prepare('SELECT count(*) AS n FROM fixture_history').get() as { n: number }).n, 1);
+      } finally {
+        isolated.close();
+      }
+      assert.equal(
+        fs.readFileSync(path.join(destination, 'artifacts', beforeArtifact.id + '.blob'), 'utf8'),
+        'preserved pre-backup artifact',
+      );
+      assert.equal(fs.existsSync(path.join(destination, 'artifacts', afterArtifact.id + '.blob')), false);
+      const stillLive = new Database(sqlite, { readonly: true });
+      try {
+        assert.equal((stillLive.prepare('SELECT count(*) AS n FROM fixture_history').get() as { n: number }).n, 2);
+      } finally {
+        stillLive.close();
+      }
+      await restoreOnlyOwnedFixtureScope(remote);
+      assert.equal(
+        (await admin.query('SELECT 1 FROM cos.action_intents WHERE scope_id=$1 AND id=$2', [scope, action.id]))
+          .rowCount,
+        0,
+      );
+      assert.equal(witness.find(action.id)?.intent.eventId, original.intent.eventId);
+    } finally {
+      enabled = true;
+    }
+    assert.equal((await store.actions.runs.recoverWitnesses(context)).status, 'ok');
+    const recovered = await store.actions.executor.run(context, action.id, nativeAdmission);
+    assert.equal(recovered.state, 'verified');
+    assert.equal((recovered.result as { event_id: string }).event_id, original.intent.eventId);
+    assert.equal(writes, beforeWrites + 1, 'backup restoration never admits a second provider POST');
+  } finally {
+    enabled = true;
+    fs.rmSync(root, { recursive: true, force: true });
   }
 });

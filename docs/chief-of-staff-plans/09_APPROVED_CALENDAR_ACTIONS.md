@@ -11,10 +11,15 @@
 **User-visible outcome:** The assistant proposes a specific focus-work block, obtains your approval and creates and verifies the exact event without inviting anyone.
 
 S08's actual reviewed merge is accepted; see [its merged-release receipt](../chief-of-staff/evidence/S08_MERGED.md).
-S09 began from `462daabef958b9ba1874168719737ad7b39ef8e8`. The first test-first
-increment defines only the narrow proposal/inspection/cancellation wire contract.
-Approval storage, provider binding, execution, reconciliation and the complete
-fixture demonstration are still required. No real account or writer is activated.
+S09 began from `462daabef958b9ba1874168719737ad7b39ef8e8`. The fixture implementation
+now includes the narrow tools, immutable intent and owner approval, a separate
+calendar writer adapter, leased execution, readback and recovery by the original
+event ID. A coordinated backup and isolated restore drill passes against the
+separate PostgreSQL test database, local SQLite and artifacts. The independent
+target journal preserves effects created after that backup without restoring
+write permission. Runtime scheduling and result delivery, operator configuration,
+the complete native fixture demonstration and release/deployment gates remain.
+No real account or writer is activated.
 
 Read [START HERE](00_START_HERE.md), [architecture/contracts](ARCHITECTURE_AND_CONTRACTS.md), [external PostgreSQL](EXTERNAL_POSTGRES.md), [goal execution](GOAL.md), [Mac-to-Pi delivery](MAC_TO_PI_DELIVERY.md), [Mattermost interaction](INTERACTION_MODEL.md), [implementation authority](IMPLEMENTATION_AUTHORITY.md), and [baseline](REPOSITORY_BASELINE.md) before implementation. This plan inherits their identity, scope, replay, approval, budget and retention rules; none may be postponed to S11.
 
