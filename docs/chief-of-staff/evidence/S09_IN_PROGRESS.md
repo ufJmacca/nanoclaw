@@ -87,8 +87,18 @@ import checks passed with the 22 backup checks. The real test database also
 passed an import of synthetic foreign-source rows, dependent writer revisions,
 retry readback and refusal from a different operation. All 30 PostgreSQL action
 tests passed. No production recovery proof was issued from that synthetic source.
-Types and zero-warning lint passed; the operator proof-recording command remains
-to be connected.
+Types and zero-warning lint passed at that checkpoint.
+
+The owner backup and restore-proof commands are now connected through the
+existing paused private-channel and native host-lease controls. Fresh backup
+checks the exact bound settings and existing independent journal. Restore selects
+only the protected test database profile, verifies isolated local bytes before
+import, matches the actual imported database to the verified proof and publishes
+no host writer permission. The changed-database proof test first failed because
+the mismatched proof was accepted, then passed with the identity check added.
+The complete repository run passed 2,548 tests in 249 files; all 30 PostgreSQL
+action tests, root types and zero-warning lint also passed. No production restore
+proof, writer profile or live account activation was created.
 
 Recorded development-container gates include:
 
@@ -112,8 +122,8 @@ separate test database is at schema 16. The Pi remains on the accepted S08 relea
 and schema 15. No real OAuth request, calendar write, model invocation or message
 was made in this continuation.
 
-Remaining S09 work includes production configuration and operator setup,
-verified target backup proof before writer admission, the complete native fixture
+Remaining S09 work includes verified target backup proof before live writer
+admission, the complete native fixture
 demonstration, cumulative release registration, exact Linux/ARM64 image tests,
 source synchronization, Pi migration/deployment/preservation checks and one
 reviewable PR. Live calendar consent and validation remain pending. S10 is not

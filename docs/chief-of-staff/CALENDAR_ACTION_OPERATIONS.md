@@ -77,5 +77,30 @@ it neither deletes events nor revokes the calendar reader. All owner and
 maintenance checks still apply. The service must reopen the checked configuration
 through its existing restart/resume procedure.
 
-The restore-proof production workflow is still being implemented. Do not activate
-a writer by hand-editing its configuration or treating fixture checks as proof.
+## Capture and verify recovery evidence
+
+Keep the service stopped and CoS paused under the existing deployment maintenance
+lease. After linking, run `pnpm cos:admin action-backup --scope <scope> --request-id
+<new-uuid> --settings <absolute-private-target-settings-file>`. The command checks
+the bound target and exact native admin lease, then captures PostgreSQL, every
+existing native session database, artifacts, conversations, specialist state and
+protected calendar credentials. It returns a backup operation ID and digest.
+
+Supply only the separate `COS_TEST_PG*` migration profile and protected test marker
+to `pnpm cos:admin action-restore-check --scope <scope> --request-id <new-uuid>
+--backup-release <backup-operation-id>`. Resolve its TLS certificate path for the
+trusted execution environment. The command verifies all backup families, copies
+local bytes into an isolated private directory and imports the captured scope
+only if that scope is fresh in the separately identified protected test database.
+It checks every restored row and local byte before publishing a private proof.
+Retry uses the same request ID and verifies the existing import; it never replaces
+an unrelated test scope. An existing scope without that operation's start record
+is refused. The production database, independent effect journal and live
+conversation admission are never restored by this command.
+
+Use the returned backup digest and proof digest in the exact owner grant for
+`action-configure`. Both recovery commands leave the service paused and writer
+admission disabled. These commands have fixture and guarded test-database
+coverage; a real target backup and separate restore must still pass before live
+writer admission. Do not hand-edit configuration or treat fixture proof as live
+account consent.

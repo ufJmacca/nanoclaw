@@ -30,6 +30,11 @@ vi.mock('./action-admin.js', async () => ({
   runActionAdmin: vi.fn(),
 }));
 import { runActionAdmin } from './action-admin.js';
+vi.mock('./action-recovery-admin.js', async () => ({
+  ...(await vi.importActual('./action-recovery-admin.js')),
+  runActionRecoveryAdmin: vi.fn(),
+}));
+import { runActionRecoveryAdmin } from './action-recovery-admin.js';
 vi.mock('./mission-admin.js', async () => ({
   ...(await vi.importActual('./mission-admin.js')),
   runMissionAdmin: vi.fn(),
@@ -491,6 +496,45 @@ it.each(['action-setup', 'action-link', 'action-configure', 'action-disable'] as
       activeSubscription: true,
     });
     await expect(contextAdminCommand(args, env, dependencies)).rejects.toThrow('private_owner_membership_required');
+  },
+);
+it.each(['action-backup', 'action-restore-check'] as const)(
+  'S09 %s retains the paused private owner and exact native lease controls',
+  async (command) => {
+    fs.rmSync(state + '/codex-auth', { recursive: true });
+    const args = {
+      command,
+      scopeId: 'fixture',
+      requestId: randomUUID(),
+      settingsFile: state + '/settings.json',
+      backupOperationId: 'release-fixture-actions',
+    };
+    const run = vi.mocked(runActionRecoveryAdmin);
+    run.mockClear();
+    run.mockImplementation(async (options) => {
+      await options.check();
+      options.assertAuthority();
+      expect(options.binding).toMatchObject({ scopeId: 'fixture', ownerId: 'owner', provider: 'codex' });
+      expect(options.native.name).toBe(central);
+      expect(options.hostLease.pid).toBe(process.pid);
+      return { status: 'verified_paused', writer_enabled: false, live_model: 'not_invoked' };
+    });
+    expect(await contextAdminCommand(args, env, dependencies)).toMatchObject({ status: 'verified_paused' });
+    expect(() => run.mock.calls.at(-1)![0].assertAuthority()).toThrow();
+    expect(fs.existsSync(state + '/model-activation.json')).toBe(false);
+    expect(fs.existsSync(state + '/conversations')).toBe(false);
+    run.mockClear();
+    quiescent.mockResolvedValueOnce(false);
+    await expect(contextAdminCommand(args, env, dependencies)).rejects.toThrow('target_not_quiescent');
+    facts.mockResolvedValueOnce({
+      id: 'private',
+      type: 'P',
+      delete_at: 0,
+      members: ['bot', 'owner', 'outsider'],
+      activeSubscription: true,
+    });
+    await expect(contextAdminCommand(args, env, dependencies)).rejects.toThrow('private_owner_membership_required');
+    expect(run).not.toHaveBeenCalled();
   },
 );
 it('source setup requires quiescence and private owner membership, and closes the pool on import failure', async () => {

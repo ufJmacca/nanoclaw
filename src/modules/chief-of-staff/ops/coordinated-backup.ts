@@ -162,7 +162,10 @@ function secretFree(value: unknown, depth = 0): boolean {
       ) && secretFree(item, depth + 1),
   );
 }
-async function barrier(options: CoordinatedBackupOptions, expected?: string) {
+async function barrier(
+  options: CoordinatedBackupIdentity & Pick<CoordinatedBackupOptions, 'quiescent'>,
+  expected?: string,
+) {
   const value = await options.quiescent();
   if (
     !value ||
@@ -398,7 +401,10 @@ export async function verifyCoordinatedBackup(options: CoordinatedBackupIdentity
 /** Restore local bytes only into a new isolated root. PostgreSQL restore is separately guarded.
  * Historical restriction files are forensic evidence, never live admission authority.
  */
-export async function restoreCoordinatedSandbox(options: CoordinatedBackupOptions, destination: string) {
+export async function restoreCoordinatedSandbox(
+  options: CoordinatedBackupIdentity & Pick<CoordinatedBackupOptions, 'quiescent'>,
+  destination: string,
+) {
   try {
     const root = parameters(options),
       epoch = await barrier(options),
@@ -710,12 +716,35 @@ async function verifySandboxCopy(checkpoint: CoordinatedBackupReceipt, destinati
     }
   }
 }
+/** Verify copied bytes before any database import, without a login or archived authority. */
+export async function verifyCoordinatedLocalSandbox(options: CoordinatedBackupIdentity, destination: string) {
+  try {
+    const receipt = await verify(options);
+    if (
+      [
+        parameters(options),
+        options.witness.root,
+        options.artifacts.root,
+        ...options.nativeDatabases,
+        ...options.restrictionFiles,
+      ].some((root) => root === destination || root.startsWith(destination + '/') || destination.startsWith(root + '/'))
+    )
+      throw Error('unsafe_coordinated_restore');
+    await verifySandboxCopy(receipt, destination);
+    if (digest(await verify(options)) !== digest(receipt)) throw Error('coordinated_restore_conflict');
+    journalCurrent(options);
+    return { checkpointDigest: digest(receipt), admissionRestored: false, eventJournalRestored: false };
+  } catch {
+    // eslint-disable-next-line preserve-caught-error -- Copied bytes and backup paths are never returned as diagnostics.
+    throw Error('coordinated_restore_verification_unavailable');
+  }
+}
 /** Verify an actual protected test-database restore and the isolated local copy. No mutation is issued.
  * Same-database fixture drills remain useful evidence but cannot admit a production writer.
  * A copied remote.json alone is never proof that the remote database was restored.
  */
 export async function verifyCoordinatedSandbox(
-  options: CoordinatedBackupOptions,
+  options: CoordinatedBackupIdentity,
   destination: string,
   sandbox: { client: pg.Client; config: PoolConfig; testTargetId: string },
 ): Promise<CoordinatedRestoreProof> {

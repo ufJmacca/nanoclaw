@@ -41,8 +41,14 @@ import {
 } from './calendar-account-admin.js';
 import { isActionAccountCommand, runActionAccountAdmin, type ActionAccountArguments } from './action-account-admin.js';
 import { isActionAdminCommand, runActionAdmin, type ActionAdminArguments } from './action-admin.js';
+import {
+  isActionRecoveryCommand,
+  runActionRecoveryAdmin,
+  type ActionRecoveryArguments,
+} from './action-recovery-admin.js';
 
 export type ContextAdminArguments =
+  | ActionRecoveryArguments
   | ActionAdminArguments
   | ActionAccountArguments
   | MissionAdminArguments
@@ -248,6 +254,22 @@ export async function contextAdminCommand(
         assertAuthority();
       };
       await check();
+      if (isActionRecoveryCommand(args)) {
+        return runActionRecoveryAdmin({
+          args,
+          env,
+          roots: {
+            targetRoot: root,
+            installationRoot: target.binding.installationRoot,
+            dataRoot: target.binding.dataRoot,
+          },
+          binding,
+          native,
+          hostLease: lease,
+          check,
+          assertAuthority,
+        });
+      }
       if (isActionAdminCommand(args)) {
         return runActionAdmin({
           args,

@@ -9,6 +9,7 @@ import {
   backupCoordinatedState,
   restoreCoordinatedSandbox,
   verifyCoordinatedSandbox,
+  verifyCoordinatedLocalSandbox,
   verifyCoordinatedBackup,
   restoreCoordinatedTestScope,
   type CoordinatedBackupOptions,
@@ -103,6 +104,24 @@ const sandboxConfig = {
   database: 'fixture',
   ssl: { rejectUnauthorized: true, ca: 'FIXTURE_CA' },
 };
+it('S09 verifies an isolated local restore without a database connection and rejects changed SQLite bytes', async () => {
+  const f = fixture(),
+    checkpoint = await backupCoordinatedState(f.options),
+    destination = path.join(f.root, 'sandbox');
+  await restoreCoordinatedSandbox(f.options, destination);
+  f.query.mockClear();
+  expect(await verifyCoordinatedLocalSandbox(f.options, destination)).toEqual({
+    checkpointDigest: digest(checkpoint),
+    admissionRestored: false,
+    eventJournalRestored: false,
+  });
+  expect(f.query).not.toHaveBeenCalled();
+  fs.appendFileSync(path.join(destination, 'sqlite/0/native.sqlite'), 'changed');
+  await expect(verifyCoordinatedLocalSandbox(f.options, destination)).rejects.toThrow(
+    'coordinated_restore_verification_unavailable',
+  );
+  expect(f.query).not.toHaveBeenCalled();
+});
 it('S09 imports a checked scope only into a separate protected test database, without updating or deleting rows', async () => {
   const f = fixture();
   await backupCoordinatedState(f.options);

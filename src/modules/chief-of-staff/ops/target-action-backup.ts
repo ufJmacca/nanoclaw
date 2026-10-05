@@ -6,10 +6,11 @@ import { digest } from '../domain/contracts.js';
 import { deploymentSettings, type DeploymentSettings } from './deployment-settings.js';
 import { localTarget } from './target-identity.js';
 import { targetBinding, targetCommands, checkedTargetDatabase } from './target-host.js';
-import { maintenanceLeaseForOwner, assertMaintenanceLease } from './maintenance.js';
+import { maintenanceLeaseForOwner, assertMaintenanceLease, type MaintenanceLease } from './maintenance.js';
 import { readPrivate, writeAtomic } from './target-state.js';
 import { privateConversationDirectory } from './conversation-ownership.js';
-import { initializeTargetActionWitness } from '../actions/host-ownership.js';
+import { initializeTargetActionWitness, openTargetActionWitness } from '../actions/host-ownership.js';
+import { assertHostExecutionLease, type HostExecutionLease } from '../../../db/host-execution-lease.js';
 import { openKnowledgeArtifacts } from '../knowledge/config.js';
 import { backupCoordinatedState, type CoordinatedBackupOptions } from './coordinated-backup.js';
 import { backupConversations, verifyConversationBackup } from './conversation-backup.js';
@@ -99,7 +100,17 @@ function nativeWritersStopped(central: string) {
 /** Concrete target operation after migration. All code/tooling is prebuilt on the Mac.
  * This private paired backup does not activate a writer, restore a journal or grant model/account permission.
  */
-export async function backupTargetActionState(input: DeploymentSettings, operationId: string) {
+export type ActionBackupAdminLease = {
+  native: Database.Database;
+  hostLease: HostExecutionLease;
+  maintenance: MaintenanceLease;
+  check(): Promise<void>;
+};
+export async function backupTargetActionState(
+  input: DeploymentSettings,
+  operationId: string,
+  admin?: ActionBackupAdminLease,
+) {
   try {
     const settings = deploymentSettings(input),
       binding = targetBinding(settings),
@@ -107,9 +118,23 @@ export async function backupTargetActionState(input: DeploymentSettings, operati
       commands = targetCommands(settings);
     if (digest(target.binding) !== digest(binding) || !/^release-[a-zA-Z0-9_-]{1,120}$/.test(operationId))
       throw new Error('action_backup_identity_required');
-    const lease = maintenanceLeaseForOwner(settings.stateRoot, binding, operationId),
+    const lease = admin?.maintenance ?? maintenanceLeaseForOwner(settings.stateRoot, binding, operationId),
       central = path.join(settings.dataRoot, 'v2.db');
+    const adminCurrent = () => {
+      if (!admin) return;
+      if (
+        admin.native.name !== central ||
+        admin.maintenance.purpose !== 'deployment' ||
+        !/^release-action-[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(operationId)
+      )
+        throw Error('action_backup_admin_identity_required');
+      assertHostExecutionLease(admin.native, admin.hostLease);
+      assertMaintenanceLease(settings.stateRoot, binding, lease);
+    };
     const quiescent = async () => {
+      adminCurrent();
+      await admin?.check();
+      adminCurrent();
       assertMaintenanceLease(settings.stateRoot, binding, lease);
       const observed = await commands.observe();
       if (
@@ -119,7 +144,8 @@ export async function backupTargetActionState(input: DeploymentSettings, operati
         (await commands.ownedContainers()).length
       )
         throw new Error('target_not_quiescent');
-      nativeWritersStopped(central);
+      if (admin) adminCurrent();
+      else nativeWritersStopped(central);
       assertMaintenanceLease(settings.stateRoot, binding, lease);
       return {
         generation: lease.generation,
@@ -137,8 +163,10 @@ export async function backupTargetActionState(input: DeploymentSettings, operati
     if (!fs.lstatSync(receiptRoot, { throwIfNoEntry: false })) fs.mkdirSync(receiptRoot, { mode: 0o700 });
     privateConversationDirectory(receiptRoot);
     // Initialization belongs to this trusted maintenance operation, never to runtime reconstruction.
-    const witness = initializeTargetActionWitness(settings.stateRoot, digest(binding)),
-      artifacts = openKnowledgeArtifacts(settings.stateRoot, [settings.installationRoot, settings.dataRoot]);
+    const witness = admin
+      ? openTargetActionWitness(settings.stateRoot, digest(binding))
+      : initializeTargetActionWitness(settings.stateRoot, digest(binding));
+    const artifacts = openKnowledgeArtifacts(settings.stateRoot, [settings.installationRoot, settings.dataRoot]);
     const restrictionFiles = ['state.json', 'maintenance.json', 'model-activation.json']
       .map((name) => path.join(settings.stateRoot, name))
       .filter((file) => !!fs.lstatSync(file, { throwIfNoEntry: false }));

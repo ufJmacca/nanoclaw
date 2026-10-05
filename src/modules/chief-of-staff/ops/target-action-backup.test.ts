@@ -33,6 +33,9 @@ import { beginMaintenance, confirmQuiescence } from './maintenance.js';
 import { targetBinding } from './target-host.js';
 import type { DeploymentSettings } from './deployment-settings.js';
 import { digest } from '../domain/contracts.js';
+import { acquireHostExecutionLease } from '../../../db/host-execution-lease.js';
+import { randomUUID } from 'node:crypto';
+import { initializeTargetActionWitness } from '../actions/host-ownership.js';
 import type { CoordinatedBackupOptions } from './coordinated-backup.js';
 const roots: string[] = [];
 afterEach(() => {
@@ -111,6 +114,54 @@ async function fixture() {
   });
   return { root, settings, operationId, lease, binding, sessionFile };
 }
+it('S09 owner backup excludes only its exact paused admin lease while retaining the native inventory', async () => {
+  const s = await fixture(),
+    central = path.join(s.settings.dataRoot, 'v2.db'),
+    native = new Database(central);
+  try {
+    native.exec(
+      'CREATE UNIQUE INDEX fixture_host_lease ON host_execution_lease(singleton_id); ALTER TABLE host_execution_lease ADD COLUMN owner_id TEXT; ALTER TABLE host_execution_lease ADD COLUMN acquired_at TEXT',
+    );
+    const hostLease = acquireHostExecutionLease(native),
+      operationId = 'release-action-' + randomUUID();
+    initializeTargetActionWitness(s.settings.stateRoot, digest(targetBinding(s.settings)));
+    fs.mkdirSync(path.join(s.settings.stateRoot, 'releases', operationId), { mode: 0o700 });
+    await expect(backupTargetActionState(s.settings, operationId)).rejects.toThrow('target_action_backup_unavailable');
+    const result = await backupTargetActionState(s.settings, operationId, {
+      native,
+      hostLease,
+      maintenance: s.lease,
+      check: async () => {},
+    });
+    expect(result.operationId).toBe(operationId);
+    expect(result.nativeDatabases).toBe(2);
+    expect(result.writerActivated).toBe(false);
+  } finally {
+    native.close();
+  }
+});
+it.each(['foreign-host-lease', 'late-host-lease'])('S09 a %s cannot authorize an owner backup', async (kind) => {
+  const s = await fixture(),
+    native = new Database(path.join(s.settings.dataRoot, 'v2.db'));
+  try {
+    native.exec(
+      'CREATE UNIQUE INDEX fixture_host_lease ON host_execution_lease(singleton_id); ALTER TABLE host_execution_lease ADD COLUMN owner_id TEXT; ALTER TABLE host_execution_lease ADD COLUMN acquired_at TEXT',
+    );
+    const hostLease = acquireHostExecutionLease(native),
+      operationId = 'release-action-' + randomUUID();
+    fs.mkdirSync(path.join(s.settings.stateRoot, 'releases', operationId), { mode: 0o700 });
+    if (kind === 'foreign-host-lease') hostLease.ownerId = randomUUID();
+    const check = async () => {
+      if (kind === 'late-host-lease') native.prepare('UPDATE host_execution_lease SET owner_id=?').run(randomUUID());
+    };
+    await expect(
+      backupTargetActionState(s.settings, operationId, { native, hostLease, maintenance: s.lease, check }),
+    ).rejects.toThrow('target_action_backup_unavailable');
+    expect(f.paired).not.toHaveBeenCalled();
+  } finally {
+    native.close();
+  }
+});
 it('S09 target backup pairs every existing native store with the exact main binding under the current maintenance lease', async () => {
   const s = await fixture(),
     result = await backupTargetActionState(s.settings, s.operationId),
