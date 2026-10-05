@@ -10,7 +10,7 @@ import {
 } from '../contracts/action-protocol.js';
 import { BoundedDatabase, DatabaseUnavailable } from '../store/client.js';
 import type { KnowledgeStore } from '../knowledge/store.js';
-import type { MissionAuthority, MissionAuthorityResolver } from '../missions/proposal-store.js';
+import type { ActionAuthority, ActionAuthorityResolver } from './authority.js';
 import { createActionIntent, validActionIntent, type ActionIntent, type ActionResourceObservation } from './intent.js';
 import { validWriterBinding, writerAccessMatches, type ActionWriterBinding } from './binding.js';
 import { CalendarWriteError, type CalendarActionWriter, type CalendarWriterInspection } from './writer.js';
@@ -20,15 +20,15 @@ import { ActionExecutor } from './executor.js';
 
 export type ActionDependencies = {
   witness?: EffectWitness;
-  authority: MissionAuthorityResolver;
+  authority: ActionAuthorityResolver;
   writer(context: Context, id: string, binding: ActionWriterBinding): CalendarActionWriter | null;
 };
 type BindingRow = { id: string; version: number; body: ActionWriterBinding; digest: string };
-export type PreparedAction = { binding: BindingRow; inspection: CalendarWriterInspection; authority: MissionAuthority };
+export type PreparedAction = { binding: BindingRow; inspection: CalendarWriterInspection; authority: ActionAuthority };
 export type StoredAction = {
   body: ActionIntent;
   digest: string;
-  authority: MissionAuthority;
+  authority: ActionAuthority;
   proposal_id: string;
   state: string;
 };
@@ -136,7 +136,7 @@ export class ActionStore {
     client: PoolClient,
     context: Context,
     request: CalendarActionRequest,
-    authority: MissionAuthority,
+    authority: ActionAuthority,
     observedAt: string,
   ): Promise<ActionResourceObservation[] | null> {
     const resources: ActionResourceObservation[] = [];
@@ -184,7 +184,8 @@ export class ActionStore {
         origin.agentGroupId !== context.agentGroupId ||
         origin.bindingDigest !== authority.bindingDigest ||
         origin.contextGeneration !== authority.contextGeneration ||
-        digest(row.body.provider) !== digest(authority.provider) ||
+        row.body.provider.model !== authority.provider.model ||
+        row.body.provider.policyDigest !== authority.provider.policyDigest ||
         !this.knowledge
       )
         return null;

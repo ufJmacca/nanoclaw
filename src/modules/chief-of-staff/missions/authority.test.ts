@@ -31,7 +31,8 @@ import { configureDelegation } from './delegation.js';
 import { RESEARCH_TEMPLATE } from './work-order.js';
 import { digest } from '../domain/contracts.js';
 import { writeAtomic } from '../ops/target-state.js';
-import { createMissionAuthorityResolver } from './authority.js';
+import * as nativeAuthority from './authority.js';
+const { createMissionAuthorityResolver } = nativeAuthority;
 import { createTeamAuthorityResolver } from './team-authority.js';
 import { configureTeamAdmission, TEAM_ADMISSION_POLICY } from './team-admission.js';
 import { TEAM_TEMPLATES } from '../contracts/team-templates.js';
@@ -132,6 +133,30 @@ function fixture() {
     teamChange,
   };
 }
+it('S09 calendar authority uses the retained main coordinator without specialist delegation or new model usage', () => {
+  const t = fixture();
+  fs.unlinkSync(path.join(t.root, 'mission-delegation-' + digest(t.binding.scopeId) + '.json'));
+  const resolver = nativeAuthority.createActionAuthorityResolver({
+    targetRoot: t.root,
+    db: t.db,
+    admitted: t.admitted,
+    assertHostAuthority: t.assertHostAuthority,
+  });
+  const before = t.db.serialize(),
+    files = fs.readdirSync(t.root, { recursive: true });
+  expect(resolver(t.context)).toMatchObject({
+    bindingDigest: digest(t.binding),
+    contextGeneration: t.retained.generation,
+    provider: { profile: 'codex-subscription/coordinator-v1', model: t.policy.model, policyDigest: digest(t.policy) },
+  });
+  expect(resolver(t.context)).not.toHaveProperty('delegationDigest');
+  expect(t.resolver(t.context)).toBeNull();
+  expect(t.db.serialize()).toEqual(before);
+  expect(fs.readdirSync(t.root, { recursive: true })).toEqual(files);
+  expect(t.owner.prepare).not.toHaveBeenCalled();
+  t.db.exec('UPDATE cos_identity_boundaries SET paused=1');
+  expect(resolver(t.context)).toBeNull();
+});
 it('S05-T03 derives only current host-owned mission pins without preparing context or reserving model use', () => {
   const t = fixture();
   const before = t.db.serialize(),
@@ -209,6 +234,14 @@ it.each([
     files = fs.readdirSync(t.root, { recursive: true });
   expect(t.resolver(t.context)).toBeNull();
   expect(t.teamResolver(t.context)).toBeNull();
+  const actionResolver = nativeAuthority.createActionAuthorityResolver({
+    targetRoot: t.root,
+    db: t.db,
+    admitted: t.admitted,
+    assertHostAuthority: t.assertHostAuthority,
+  });
+  if (['no-delegation', 'disabled'].includes(kind)) expect(actionResolver(t.context)).not.toBeNull();
+  else expect(actionResolver(t.context)).toBeNull();
   expect(t.db.serialize()).toEqual(before);
   expect(fs.readdirSync(t.root, { recursive: true })).toEqual(files);
 });

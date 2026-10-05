@@ -29,10 +29,10 @@ const scope = 'action-' + randomUUID(),
 const context = { scopeId: scope, ownerId: 'owner', agentGroupId: scope, sessionId: scope, ingressId: randomUUID() };
 const authority = {
   bindingDigest: digest('fixture private owner binding'),
-  delegationDigest: digest('fixture delegation'),
+  actionProfileDigest: digest('cos-calendar-action/v1'),
   contextGeneration: randomUUID(),
   provider: {
-    profile: 'codex_subscription_cos_research_v1' as const,
+    profile: 'codex-subscription/coordinator-v1',
     model: 'fixture-codex',
     policyDigest: digest('fixture subscription policy'),
   },
