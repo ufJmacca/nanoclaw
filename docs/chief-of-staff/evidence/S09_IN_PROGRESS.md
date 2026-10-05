@@ -39,6 +39,15 @@ checkpoint and is explicitly ineligible for production writer admission. A copie
 remote export with an unrestored database is rejected. Target recovery proof
 recording and production writer admission remain pending.
 
+The target deployment path now takes a second paired action backup after the
+schema-16 migration and before recording migration acceptance. It checks the
+current maintenance owner, stopped service/containers and absent native writer;
+captures the central database and every existing session database; and verifies
+retained conversation, specialist and protected calendar backups. Fourteen target
+backup checks and the affected migration/journal/history checks passed together
+as 85 tests in seven files. This is local fixture coverage of the concrete target
+path; no S09 operation has run on the Pi yet.
+
 Recorded development-container gates include:
 
 - 29 external PostgreSQL action tests, including actual connection and commit-acknowledgement failures with a simulated provider;

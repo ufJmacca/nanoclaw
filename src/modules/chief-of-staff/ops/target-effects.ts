@@ -20,6 +20,7 @@ import { waitForTargetProcess } from './service-readiness.js';
 import { runTargetHealth } from './target-health.js';
 import { syncPinnedSource } from './source-sync.js';
 import { nativeFixtureSmoke } from './native-smoke.js';
+import { backupTargetActionState } from './target-action-backup.js';
 import {
   targetBinding,
   targetCommands,
@@ -389,12 +390,6 @@ export function createTargetEffects(
       } finally {
         db.close();
       }
-      writeAtomic(receipt, 'migration.json', {
-        ...result,
-        sourceCommit: manifest.source.commit,
-        migrations: manifest.migrations,
-        native: 'cos-subscription-context',
-      });
       if (coordinatorBinding) {
         writeAtomic(receipt, 'binding-setup.json', coordinatorBinding);
         const keys = ['MATTERMOST_URL', 'MATTERMOST_BOT_TOKEN', 'MATTERMOST_INSTANCE'];
@@ -408,6 +403,15 @@ export function createTargetEffects(
         });
         writeAtomic(receipt, 'binding.json', result);
       }
+      const actionBackup =
+        manifest.slice === 'S09' ? await backupTargetActionState(settings, manifest.releaseId) : null;
+      writeAtomic(receipt, 'migration.json', {
+        ...result,
+        sourceCommit: manifest.source.commit,
+        migrations: manifest.migrations,
+        native: 'cos-subscription-context',
+        ...(actionBackup ? { actionBackupDigest: digest(actionBackup) } : {}),
+      });
     },
     async activate() {
       lease();
@@ -483,6 +487,7 @@ export function createTargetEffects(
           if (!nativeCompatible(manifest)) return 'retry_safe';
           await observeProcess(payload);
           return 'done';
+          // eslint-disable-next-line no-catch-all/no-catch-all -- An unconfirmed activation is retried only through the full artifact, schema and maintenance checks.
         } catch {
           return 'retry_safe';
         }

@@ -69,6 +69,8 @@ function publish(root: string, name: string, value: unknown): void {
 }
 function owner(root: string, installationDigest: string, generation?: string): WitnessOwner {
   privateConversationDirectory(root);
+  const stat = fs.lstatSync(path.join(root, 'owner.json'));
+  if (!stat.isFile() || stat.nlink !== 1) throw new Error('action_witness_owner_changed');
   const value = readPrivate<WitnessOwner>(path.join(root, 'owner.json'));
   if (
     !value ||
@@ -101,6 +103,7 @@ export class ActionWitness implements EffectWitness {
     readonly installationDigest: string,
     readonly generation: string,
   ) {
+    if (!uuid(generation)) throw new Error('action_witness_owner_changed');
     owner(root, installationDigest, generation);
   }
   private assertOwner() {
