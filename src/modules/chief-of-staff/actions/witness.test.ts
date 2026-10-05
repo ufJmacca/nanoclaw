@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -61,6 +61,25 @@ function fixture() {
   return { parent, root, owner, witness, start, installation };
 }
 describe('S09 target-owned deny-only effect witness', () => {
+  it('bounds each recovery inventory page before reading witness contents', () => {
+    const f = fixture();
+    for (let index = 0; index < 205; index++)
+      fs.writeFileSync(
+        path.join(f.root, 'action-' + index.toString(16).padStart(64, '0') + '.json'),
+        'fixture page entry',
+        { mode: 0o600 },
+      );
+    const find = vi.spyOn(f.witness, 'find').mockReturnValue(f.start);
+    expect(f.witness.list('scope')).toHaveLength(100);
+    expect(find).toHaveBeenCalledTimes(100);
+    find.mockClear();
+    expect(f.witness.page('scope', 100).nextOffset).toBe(200);
+    expect(find).toHaveBeenCalledTimes(100);
+    find.mockClear();
+    expect(f.witness.page('scope', 200)).toEqual({ entries: Array(5).fill(f.start), nextOffset: null });
+    expect(find).toHaveBeenCalledTimes(5);
+    find.mockRestore();
+  });
   it('S09-T10 retains the complete original identity across restarts independently of PostgreSQL', () => {
     const f = fixture();
     expect(f.witness.find(f.start.intent.actionId)).toBeNull();

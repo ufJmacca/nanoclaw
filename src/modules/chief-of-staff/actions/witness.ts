@@ -23,6 +23,7 @@ export interface EffectWitness {
   cancel(intent: ActionIntent, approvedDigest: string): void;
   cancelled(actionId: string): boolean;
   list(scopeId: string, offset?: number): StartedActionWitness[];
+  page(scopeId: string, offset?: number): { entries: StartedActionWitness[]; nextOffset: number | null };
 }
 const hash = (value: unknown): value is string => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 const uuid = (value: unknown): value is string =>
@@ -165,16 +166,20 @@ export class ActionWitness implements EffectWitness {
     return true;
   }
   list(scopeId: string, offset = 0): StartedActionWitness[] {
+    return this.page(scopeId, offset).entries;
+  }
+  page(scopeId: string, offset = 0): { entries: StartedActionWitness[]; nextOffset: number | null } {
     this.assertOwner();
-    if (!Number.isSafeInteger(offset) || offset < 0 || offset > 10000) throw new Error('unsafe_action_witness');
+    if (!Number.isSafeInteger(offset) || offset < 0 || offset > 100000) throw new Error('unsafe_action_witness');
     const names = fs
       .readdirSync(this.root)
       .filter((name) => /^action-[a-f0-9]{64}\.json$/.test(name))
       .sort();
     if (names.length > 100000) throw new Error('action_witness_inventory_limit');
-    return names
+    const entries = names
+      .slice(offset, offset + 100)
       .map((name) => this.find(name.slice(0, -5))!)
-      .filter((value) => value.intent.context.scopeId === scopeId)
-      .slice(offset, offset + 100);
+      .filter((value) => value.intent.context.scopeId === scopeId);
+    return { entries, nextOffset: offset + 100 < names.length ? offset + 100 : null };
   }
 }

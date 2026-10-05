@@ -333,6 +333,30 @@ export class ActionStore {
       digest(this.dependencies?.authority(context) ?? null) === digest(authority)
     );
   }
+  /** Fresh read-only recovery admission does not renew the historical model/resource write grant. */
+  async reconciliationCurrent(client: PoolClient, context: Context, row: StoredAction): Promise<boolean> {
+    const authority = this.dependencies?.authority(context),
+      binding = await this.binding(client, context, row.body.request.binding_id);
+    if (
+      !authority ||
+      !binding ||
+      row.body.resources.find((r) => r.kind === 'writer_binding')?.version !== binding.version ||
+      binding.body.calendarId !== row.body.request.calendar_id ||
+      binding.body.instanceId !== row.body.destination.instanceId ||
+      binding.body.channelId !== row.body.destination.channelId
+    )
+      return false;
+    if (
+      this.knowledge &&
+      !(await this.knowledge.actionContextCurrent(client, {
+        ...context,
+        provider: 'codex',
+        generation: authority.contextGeneration,
+      }))
+    )
+      return false;
+    return digest(this.dependencies?.authority(context) ?? null) === digest(authority);
+  }
   async validateChange(client: PoolClient, context: Context, change: CalendarActionChange): Promise<boolean> {
     if (!validCalendarActionChange(change)) return false;
     const row = await this.row(client, context, change.action_id);

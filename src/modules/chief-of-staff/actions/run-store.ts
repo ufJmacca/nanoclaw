@@ -79,6 +79,126 @@ export class ActionRunStore {
       head.lease_expires_at.toISOString() === lease.expiresAt
     );
   }
+  /** Repair lost projections from the independent target journal. Every imported action is GET-only.
+   * A historical approval is recorded as expired, never replayed as current authority.
+   */
+  async recoverWitnesses(context: Context, offset = 0): Promise<Result> {
+    const witness = this.store.dependencies?.witness;
+    if (!witness || context.origin || !Number.isSafeInteger(offset) || offset < 0 || offset > 100000)
+      return { status: 'denied' };
+    const { entries, nextOffset } = witness.page(context.scopeId, offset);
+    return this.store.transaction(async (client) => {
+      if (!(await this.scopeLock(client, context))) return { status: 'denied' };
+      const authority = this.store.dependencies?.authority(context);
+      if (!authority) return { status: 'denied' };
+      const recovered: string[] = [];
+      for (const entry of entries) {
+        const { intent, approvedDigest, proposalId } = entry;
+        if (
+          intent.context.ownerId !== context.ownerId ||
+          intent.context.sessionId !== context.sessionId ||
+          intent.context.agentGroupId !== context.agentGroupId
+        )
+          return { status: 'denied' };
+        const original = (
+          await client.query(
+            'SELECT body,digest,proposal_id,authority FROM cos.action_intents WHERE scope_id=$1 AND id=$2',
+            [context.scopeId, intent.actionId],
+          )
+        ).rows[0];
+        if (
+          original &&
+          (original.digest !== approvedDigest ||
+            digest(original.body) !== approvedDigest ||
+            original.proposal_id !== proposalId)
+        )
+          return { status: 'denied', reason: 'effect_identity_conflict' };
+        if (await this.head(client, context, intent.actionId)) continue;
+        const row: StoredAction = {
+          body: intent,
+          digest: approvedDigest,
+          authority: original?.authority ?? authority,
+          proposal_id: proposalId,
+          state: 'outcome_uncertain',
+        };
+        if (!(await this.store.reconciliationCurrent(client, context, row)))
+          return { status: 'denied', reason: 'action_authority_changed' };
+        const preview = actionPreview(intent, approvedDigest),
+          hash = digest(preview);
+        const proposal = (
+          await client.query('SELECT scope_id,session_id,owner_id,payload_hash,change FROM cos.proposals WHERE id=$1', [
+            proposalId,
+          ])
+        ).rows[0];
+        if (
+          proposal &&
+          (proposal.scope_id !== context.scopeId ||
+            proposal.owner_id !== context.ownerId ||
+            proposal.session_id !== context.sessionId ||
+            proposal.payload_hash !== hash ||
+            digest(proposal.change) !== hash)
+        )
+          return { status: 'denied', reason: 'effect_identity_conflict' };
+        if (!proposal)
+          await client.query(
+            `INSERT INTO cos.proposals(id,scope_id,session_id,ingress_id,owner_id,change,payload_hash,challenge_hash,state,expires_at,decision_ingress_id)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8,'expired',$9,$10)`,
+            [
+              proposalId,
+              context.scopeId,
+              context.sessionId,
+              intent.context.ingressId,
+              context.ownerId,
+              JSON.stringify(preview),
+              hash,
+              digest({ kind: 'recovery_denial', intent: approvedDigest }),
+              intent.expiresAt,
+              entry.decisionIngressId,
+            ],
+          );
+        if (!original)
+          await client.query(
+            `INSERT INTO cos.action_intents(scope_id,id,body,digest,authority,proposal_id,binding_id,calendar_id,event_id,expires_at)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+            [
+              context.scopeId,
+              intent.actionId,
+              JSON.stringify(intent),
+              approvedDigest,
+              JSON.stringify(authority),
+              proposalId,
+              intent.request.binding_id,
+              intent.request.calendar_id,
+              intent.eventId,
+              intent.expiresAt,
+            ],
+          );
+        await client.query(
+          `INSERT INTO cos.actions(scope_id,id,state,cancel_requested,reason) VALUES($1,$2,'outcome_uncertain',$3,'effect_restored_from_target_witness')`,
+          [context.scopeId, intent.actionId, witness.cancelled(intent.actionId)],
+        );
+        await client.query(
+          `INSERT INTO cos.action_request_starts(scope_id,action_id,intent_digest,lease_owner,fence,started_at) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING`,
+          [context.scopeId, intent.actionId, approvedDigest, entry.leaseOwner, entry.fence, entry.recordedAt],
+        );
+        await client.query(
+          `INSERT INTO cos.action_receipts(scope_id,id,action_id,kind,body) VALUES($1,$2,$3,'uncertain',$4)`,
+          [
+            context.scopeId,
+            randomUUID(),
+            intent.actionId,
+            JSON.stringify({
+              reason: 'effect_restored_from_target_witness',
+              intentDigest: approvedDigest,
+              eventId: intent.eventId,
+            }),
+          ],
+        );
+        recovered.push(intent.actionId);
+      }
+      return { status: 'ok', recovered, next_offset: nextOffset };
+    }, true);
+  }
   async claim(context: Context, id: string, owner: string): Promise<Result> {
     if (!validActionId(id) || !uuid(owner) || context.origin) return { status: 'denied' };
     return this.store.transaction(async (client) => {
@@ -115,7 +235,11 @@ export class ActionRunStore {
       const mode = started || witness || head.state !== 'queued' ? 'reconcile' : 'create';
       if (mode === 'create' && (head.cancel_requested || this.store.dependencies?.witness?.cancelled(id)))
         return { status: 'denied', reason: 'action_cancelled' };
-      if (!(await this.store.current(client, context, row)))
+      if (
+        !(await (mode === 'create'
+          ? this.store.current(client, context, row)
+          : this.store.reconciliationCurrent(client, context, row)))
+      )
         return { status: 'denied', reason: 'action_authority_changed' };
       const proposal = await this.proposal(client, context, row);
       if (mode === 'create' && (!proposal || Date.parse(row.body.expiresAt) <= now.getTime()))

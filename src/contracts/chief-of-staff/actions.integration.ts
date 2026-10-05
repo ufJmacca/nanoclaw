@@ -744,3 +744,59 @@ test('S09 authority callback failures cannot expose private diagnostics or conta
     assert.equal(writes, beforeWrites);
   }
 });
+test('S09-T10 an event whose entire PostgreSQL intent was lost is recovered only through its target-owned original witness', async () => {
+  const action = await queued(39),
+    beforeWrites = writes;
+  assert.equal((await store.actions.executor.run(context, action.id, nativeAdmission)).state, 'verified');
+  const original = witness.find(action.id)!;
+  await admin.query('BEGIN');
+  try {
+    for (const table of ['action_receipts', 'action_request_starts', 'actions', 'action_intents'])
+      await admin.query(
+        'DELETE FROM cos.' +
+          table +
+          ' WHERE scope_id=$1 AND ' +
+          (table === 'action_receipts' || table === 'action_request_starts' ? 'action_id' : 'id') +
+          '=$2',
+        [scope, action.id],
+      );
+    await admin.query("DELETE FROM cos.outbox WHERE scope_id=$1 AND payload->>'proposal_id'=$2", [
+      scope,
+      original.proposalId,
+    ]);
+    await admin.query('DELETE FROM cos.proposals WHERE scope_id=$1 AND id=$2', [scope, original.proposalId]);
+    await admin.query('COMMIT');
+  } catch (error) {
+    await admin.query('ROLLBACK');
+    throw error;
+  }
+  assert.equal((await store.actions.runs.claim(context, action.id, randomUUID())).status, 'denied');
+  assert.equal(typeof store.actions.runs.recoverWitnesses, 'function');
+  const recovered = await store.actions.runs.recoverWitnesses(context);
+  assert.equal(recovered.status, 'ok');
+  const proposal = (await admin.query('SELECT state FROM cos.proposals WHERE id=$1', [original.proposalId])).rows[0];
+  assert.equal(proposal.state, 'expired', 'recovery cannot restore a pending or applied owner permission');
+  assert.equal((await store.actions.executor.run(context, action.id, nativeAdmission)).state, 'verified');
+  assert.equal(writes, beforeWrites + 1);
+  assert.equal(witness.find(action.id)?.intent.eventId, original.intent.eventId);
+});
+test('S09 renewed main-context authority may reconcile an original effect but cannot renew its write permission', async () => {
+  const action = await queued(41),
+    beforeWrites = writes;
+  assert.equal((await store.actions.executor.run(context, action.id, nativeAdmission)).state, 'verified');
+  const policy = authority.provider.policyDigest,
+    generation = authority.contextGeneration;
+  await admin.query("UPDATE cos.actions SET state='outcome_uncertain',result=NULL WHERE scope_id=$1 AND id=$2", [
+    scope,
+    action.id,
+  ]);
+  authority.provider.policyDigest = digest('freshly granted fixture model policy');
+  authority.contextGeneration = randomUUID();
+  try {
+    assert.equal((await store.actions.executor.run(context, action.id, nativeAdmission)).state, 'verified');
+    assert.equal(writes, beforeWrites + 1);
+  } finally {
+    authority.provider.policyDigest = policy;
+    authority.contextGeneration = generation;
+  }
+});
