@@ -132,6 +132,9 @@ export async function nativeFixtureSmoke(options: { root: string; hostRoot: stri
     await client.start();
     const tools = await client.request('tools/list', {});
     assert.deepEqual(tools.tools.map((tool: { name: string }) => tool.name).sort(), [
+      'cos_action_cancel',
+      'cos_action_get',
+      'cos_action_propose',
       'cos_answer_get',
       'cos_answer_prepare',
       'cos_brief_request',
@@ -142,9 +145,6 @@ export async function nativeFixtureSmoke(options: { root: string; hostRoot: stri
       'cos_knowledge_search',
       'cos_mandate_activity',
       'cos_mandate_propose',
-      'cos_action_propose',
-      'cos_action_get',
-      'cos_action_cancel',
       'cos_mission_cancel',
       'cos_mission_get',
       'cos_mission_request',
