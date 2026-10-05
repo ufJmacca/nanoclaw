@@ -1,12 +1,14 @@
-# S09 implementation checkpoint
+# S09 development checkpoints — historical
 
-**Status:** incomplete; fixture evidence only. No S09 release, Pi deployment or review gate has passed.
+**Status:** historical evidence from before the complete release. Current tests,
+deployment, preservation, recovery and review status are in [S09.md](S09.md).
+Statements below about pending work describe their checkpoint time.
 
 The reviewed predecessor is S08 merge `462daabef958b9ba1874168719737ad7b39ef8e8`
 ([PR #65](https://github.com/ufJmacca/nanoclaw/pull/65)). The implementation branch is
 `codex/s09-approved-calendar-actions`; this checkpoint covers source through
-the separately committed increments described below. The final release source
-has not been selected. Private logs and configuration remain outside Git.
+the separately committed increments described below. These snapshots preceded
+selection of the final release source. Private logs and configuration remain outside Git.
 
 The fixture implementation now proposes and records an exact owner-approved
 calendar block, leases its execution, records request start before contacting the
@@ -149,8 +151,10 @@ Already-started effects retain their original reconciliation path. All 34 action
 and resource PostgreSQL checks pass after that correction, with types and
 zero-warning lint.
 
-Remaining S09 work includes verified target backup proof before live writer
+At the last development checkpoint, remaining S09 work included verified target backup proof before live writer
 admission, cumulative release registration, exact Linux/ARM64 image tests,
 source synchronization, Pi migration/deployment/preservation checks and one
 reviewable PR. Live calendar consent and validation remain pending. S10 is not
 eligible until S09 has a legitimate reviewed merge and accepted merged deployment.
+The later complete fixture release and its still-pending live account gates are
+recorded in [the current acceptance receipt](S09.md).

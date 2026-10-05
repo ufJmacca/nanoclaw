@@ -1,6 +1,6 @@
 # S09 — Execute one precisely approved external action
 
-**Status:** in progress; fixture implementation only, live writer admission disabled
+**Status:** fixture release deployed; awaiting human review/merge and live validation
 
 **Repository:** `ufJmacca/nanoclaw`
 
@@ -11,26 +11,25 @@
 **User-visible outcome:** The assistant proposes a specific focus-work block, obtains your approval and creates and verifies the exact event without inviting anyone.
 
 S08's actual reviewed merge is accepted; see [its merged-release receipt](../chief-of-staff/evidence/S08_MERGED.md).
-S09 began from `462daabef958b9ba1874168719737ad7b39ef8e8`. The fixture implementation
-now includes the narrow tools, immutable intent and owner approval, a separate
-calendar writer adapter, leased execution, readback and recovery by the original
-event ID. A coordinated backup and isolated restore drill passes against the
-separate PostgreSQL test database, local SQLite and artifacts. The independent
-target journal preserves effects created after that backup without restoring
-write permission. The existing host pump now schedules approved actions and
-delivers private result notices in the retained main conversation, without a model
-wake-up. A separate writer consent flow and credential owner pass fixture tests;
-writer IDs and selected calendars are exposed through the existing context tool.
-The target deployment path now captures a paired action backup after migration;
-restore verification compares actual remote rows and isolated local bytes. Its
-same-database fixture proof cannot enable a production writer. The existing
-bootstrap now opens checked action configuration after database identity/schema
-validation and preserves readback while new writes are disabled. Operator setup
-and proof recording now pass guarded local tests: fresh backup retains the paused
-native owner lease, and restore imports only a fresh scope into the protected
-separate test database before recording proof. The complete native fixture
-demonstration now passes through routing, isolated MCP, approval, host execution,
-private result and recovery. Release/deployment gates remain. No real account or writer is activated.
+S09 began from `462daabef958b9ba1874168719737ad7b39ef8e8`. Its exact tested
+application source `9a1b25b88419a56d07a74e457bbd399c4b3407a7` is deployed on the
+Pi with schema 16; see [the candidate acceptance receipt](../chief-of-staff/evidence/S09.md).
+All seven local release gates, both final Linux/ARM64 profiles, Pi health,
+native fixtures, preservation, recovery checks and Pi-owned independence passed.
+
+The implementation includes narrow proposal/status/cancel tools, immutable exact
+owner approval, a separate calendar writer, leased execution, original-ID
+readback, an independent effect journal and passive private result notices in
+the retained main conversation. Writer consent and protected storage are
+separate from the reader. Admission requires a paired backup and an actual
+restore into a separately identified protected test database; fixture proof
+cannot enable a production writer. Owner setup, link, configuration, disable,
+backup and restore-proof commands use the prebuilt host release.
+
+CoS remains paused and writer admission disabled. Live account consent, protected
+writer storage, production recovery proof and a separately approved calendar
+test remain pending. Human review/merge and acceptance of the actual merged
+deployment are required before S10. No real account or writer is activated.
 
 Read [START HERE](00_START_HERE.md), [architecture/contracts](ARCHITECTURE_AND_CONTRACTS.md), [external PostgreSQL](EXTERNAL_POSTGRES.md), [goal execution](GOAL.md), [Mac-to-Pi delivery](MAC_TO_PI_DELIVERY.md), [Mattermost interaction](INTERACTION_MODEL.md), [implementation authority](IMPLEMENTATION_AUTHORITY.md), and [baseline](REPOSITORY_BASELINE.md) before implementation. This plan inherits their identity, scope, replay, approval, budget and retention rules; none may be postponed to S11.
 
