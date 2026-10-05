@@ -27,13 +27,11 @@ function fixture(allowed = true) {
   const store = {
     context: vi.fn().mockResolvedValue({ status: 'ok', records: [{ id: 'approved-record' }] }),
     propose: vi.fn(),
-    requestAction: vi
-      .fn()
-      .mockResolvedValue({
-        status: 'ok',
-        action_id: 'action-' + 'b'.repeat(64),
-        confirmation_token: 'PRIVATE_ACTION_APPROVAL',
-      }),
+    requestAction: vi.fn().mockResolvedValue({
+      status: 'ok',
+      action_id: 'action-' + 'b'.repeat(64),
+      confirmation_token: 'PRIVATE_ACTION_APPROVAL',
+    }),
     actions: {
       inspect: vi.fn().mockResolvedValue({ status: 'ok', state: 'waiting_approval' }),
       cancel: vi.fn().mockResolvedValue({ status: 'ok', state: 'cancelled', deleted: false }),
