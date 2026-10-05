@@ -1,12 +1,7 @@
 import http from 'node:http';
 import { CalendarReadError } from './reader.js';
-import {
-  checkedClient,
-  GoogleCalendarAuthorization,
-  type GoogleOAuthClient,
-  type GoogleCalendarTokens,
-  type OAuthTransport,
-} from './oauth.js';
+import { checkedClient, type GoogleOAuthClient, type GoogleCalendarTokens, type OAuthTransport } from './oauth.js';
+import { CalendarAuthorization, type OAuthScopeProfile } from './oauth-core.js';
 export type CalendarAuthorizationListener = {
   authorizationUrl: string;
   result: Promise<GoogleCalendarTokens>;
@@ -17,6 +12,20 @@ export type CalendarAuthorizationListener = {
 export async function startCalendarAuthorization(
   client: GoogleOAuthClient,
   options: OAuthTransport & { timeoutMs?: number } = {},
+): Promise<CalendarAuthorizationListener> {
+  return startAuthorization(client, options, 'reader');
+}
+/** Separate explicit operator writer consent, using the same loopback/PKCE protections as the reader. */
+export async function startCalendarWriterAuthorization(
+  client: GoogleOAuthClient,
+  options: OAuthTransport & { timeoutMs?: number } = {},
+): Promise<CalendarAuthorizationListener> {
+  return startAuthorization(client, options, 'owned_event_writer');
+}
+async function startAuthorization(
+  client: GoogleOAuthClient,
+  options: OAuthTransport & { timeoutMs?: number },
+  profile: OAuthScopeProfile,
 ): Promise<CalendarAuthorizationListener> {
   const checked = checkedClient(client),
     timeoutMs = options.timeoutMs ?? 600000;
@@ -29,7 +38,7 @@ export async function startCalendarAuthorization(
   });
   // The operator may take time to open the browser. Attach a handler immediately without changing the returned promise.
   void result.catch(() => {});
-  let flow: GoogleCalendarAuthorization,
+  let flow: CalendarAuthorization,
     expectedHost = '',
     settled = false,
     processing = false;
@@ -92,6 +101,7 @@ export async function startCalendarAuthorization(
         const tokens = await flow.exchange('http://' + expectedHost + request.url);
         settle(tokens);
         send(response, 200, 'Calendar authorization received. You can close this window.', true);
+        // eslint-disable-next-line no-catch-all/no-catch-all -- An unknown exchange outcome is fenced as uncertain and never retried.
       } catch (error) {
         const classified =
           error instanceof CalendarReadError ? error : new CalendarReadError('calendar_oauth_exchange_uncertain');
@@ -119,7 +129,7 @@ export async function startCalendarAuthorization(
     const address = server.address();
     if (!address || typeof address === 'string') throw new Error('listener_unavailable');
     expectedHost = '127.0.0.1:' + address.port;
-    flow = new GoogleCalendarAuthorization(checked, 'http://' + expectedHost + '/', {
+    flow = new CalendarAuthorization(checked, 'http://' + expectedHost + '/', profile, {
       now: options.now,
       fetch: (url, init) =>
         (options.fetch ?? globalThis.fetch)(url, {

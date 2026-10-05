@@ -3,6 +3,7 @@ import { isKnowledgeCommand, parseKnowledgeArguments } from './knowledge-admin.j
 import { isCalendarCommand, parseCalendarArguments } from './calendar-admin.js';
 import { isCalendarAccountCommand, parseCalendarAccountArguments } from './calendar-account-admin.js';
 import { isMissionCommand, parseMissionArguments } from './mission-admin.js';
+import { isActionAccountCommand, parseActionAccountArguments } from './action-account-admin.js';
 import { pathToFileURL } from 'node:url';
 import { DatabaseConfigurationError, parseDatabaseConfig, externalDatabaseConfig } from '../store/config.js';
 import { connectChecked, DatabasePreflightError } from '../store/preflight.js';
@@ -17,6 +18,7 @@ import { contextAdminCommand, type ContextAdminArguments } from './context-admin
 
 type AdminArguments = { command: 'status' } | { command: 'bind'; binding: BindingRequest } | ContextAdminArguments;
 export function parseAdminArguments(args: string[]): AdminArguments {
+  if (isActionAccountCommand({ command: args[0] })) return parseActionAccountArguments(args);
   if (isMissionCommand({ command: args[0] })) return parseMissionArguments(args);
   if (isKnowledgeCommand({ command: args[0] })) return parseKnowledgeArguments(args);
   if (isCalendarCommand({ command: args[0] })) return parseCalendarArguments(args);
@@ -141,6 +143,11 @@ export function safeAdminError(error: unknown): string {
         'team_template_conflict',
         'invalid_source_manifest',
         'invalid_calendar_manifest',
+        'invalid_action_manifest',
+        'action_setup_required',
+        'action_setup_conflict',
+        'action_link_uncertain',
+        'action_configuration_unavailable',
         'calendar_disabled',
         'calendar_operation_conflict',
         'unsafe_calendar_admin_state',
@@ -254,6 +261,7 @@ export async function adminStatus(
       schema_version: version,
       lifecycle: target.lifecycle,
     };
+    // eslint-disable-next-line no-catch-all/no-catch-all -- Status exposes fixed dependency categories, never private driver diagnostics.
   } catch (error) {
     return { ...base, status: safeDependencyStatus(error) };
   }

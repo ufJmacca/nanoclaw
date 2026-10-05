@@ -61,8 +61,14 @@ host after confirming the database identity and schema. Writer discovery omits
 disabled grants; an existing grant can still read back its original event when
 new writes are disabled. Owner, session, binding, pause, storage and recovery
 changes close provider admission, including changes during an awaited token.
-Operator proof recording remains unfinished; no production profile or live writer
-has been created.
+Owner setup and link commands now verify protected storage, initialize only fresh
+writer directories, take real fixture backups and use the existing loopback/PKCE
+listener with exactly the writer scopes. Linking creates a separate consent
+record and leaves writes disabled. Uncertain exchanges are never repeated and
+corrupt setup history is preserved. The affected reader/owner/admin run passed
+52 tests in five files, with types and zero-warning lint. Operator configuration
+and proof recording remain unfinished; no production profile or live writer has
+been created. See the [partial operator runbook](../CALENDAR_ACTION_OPERATIONS.md).
 
 Recorded development-container gates include:
 
