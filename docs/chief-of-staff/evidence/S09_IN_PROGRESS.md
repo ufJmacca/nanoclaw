@@ -141,6 +141,14 @@ existing approval; foreign mission/session identities are denied; and a retained
 main context exposed to revoked text cannot bypass policy by omitting a mission.
 The transport is synthetic and cannot activate Google credentials.
 
+The resource checks exposed a status defect: execution was denied after source or
+project changes, but the action still displayed `queued`. The required blocked
+state first failed, then passed after the host began recording a blocked receipt
+for a never-started action whose approval or resources are no longer current.
+Already-started effects retain their original reconciliation path. All 34 action
+and resource PostgreSQL checks pass after that correction, with types and
+zero-warning lint.
+
 Remaining S09 work includes verified target backup proof before live writer
 admission, cumulative release registration, exact Linux/ARM64 image tests,
 source synchronization, Pi migration/deployment/preservation checks and one

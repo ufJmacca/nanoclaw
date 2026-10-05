@@ -260,15 +260,34 @@ export class ActionRunStore {
       const mode = started || witness || head.state !== 'queued' ? 'reconcile' : 'create';
       if (mode === 'create' && (head.cancel_requested || this.store.dependencies?.witness?.cancelled(id)))
         return { status: 'denied', reason: 'action_cancelled' };
+      const denyCreate = async (reason: string): Promise<Result> => {
+        // Only a never-started queued action can become terminal here. Unknown effects retain readback.
+        if (mode === 'create') {
+          await client.query(
+            "UPDATE cos.actions SET state='blocked',reason=$3,lease_owner=NULL,lease_expires_at=NULL,next_reconcile_at=NULL,updated_at=clock_timestamp() WHERE scope_id=$1 AND id=$2",
+            [context.scopeId, id, reason],
+          );
+          await client.query(
+            "INSERT INTO cos.action_receipts(scope_id,id,action_id,kind,body) VALUES($1,$2,$3,'blocked',$4)",
+            [
+              context.scopeId,
+              randomUUID(),
+              id,
+              JSON.stringify({ reason, fence: head.fence, intentDigest: row.digest, eventId: row.body.eventId }),
+            ],
+          );
+        }
+        return { status: 'denied', reason };
+      };
       if (
         !(await (mode === 'create'
           ? this.store.current(client, context, row)
           : this.store.reconciliationCurrent(client, context, row)))
       )
-        return { status: 'denied', reason: 'action_authority_changed' };
+        return denyCreate('action_authority_changed');
       const proposal = await this.proposal(client, context, row);
       if (mode === 'create' && (!proposal || Date.parse(row.body.expiresAt) <= now.getTime()))
-        return { status: 'denied', reason: 'action_approval_not_current' };
+        return denyCreate('action_approval_not_current');
       if (mode === 'create') {
         // Serialize overlapping host actions even when the provider's check-and-insert is not atomic.
         const competing = await client.query(

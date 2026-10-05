@@ -291,6 +291,11 @@ test('S09-T02/T07 source revision, processing permission and revocation changes 
       ]);
     assert.equal((await store.actions.executor.run(context, id, native)).status, 'denied');
     assert.equal(writes, before);
+    assert.equal(
+      (await store.actions.inspect(context, id)).state,
+      'blocked',
+      'changed resources must show a terminal blocked action, requiring a new proposal',
+    );
     if (kind !== 'revision')
       assert.equal(
         (await store.requestAction(context, randomUUID(), await request({ mission_id: m.id }))).status,
@@ -321,6 +326,7 @@ test('S09-T02 project-version changes and foreign mission/context identities can
   await admin.query('UPDATE cos.records SET version=version+1 WHERE scope_id=$1 AND id=$2', [scope, projectId]);
   assert.equal((await store.actions.executor.run(context, id, native)).status, 'denied');
   assert.equal(writes, before);
+  assert.equal((await store.actions.inspect(context, id)).state, 'blocked');
   assert.equal(
     (await store.requestAction({ ...context, sessionId: 'foreign' }, randomUUID(), await request({ mission_id: m.id })))
       .status,
