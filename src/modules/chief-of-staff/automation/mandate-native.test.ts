@@ -57,7 +57,7 @@ it('S08-T08/T09 a retired owned clock can be staged after restart while retainin
   const sourceDigest = 'b'.repeat(64);
   expect(tasks.recordEvaluation(binding, wake, sourceDigest)).toBe(true);
   const original = db.prepare('SELECT * FROM messages_in WHERE id=?').get(id);
-  expect(tasks.retire(binding, wake)).toBe(true);
+  expect(tasks.retire(binding, wake, 'ineligible')).toBe(true);
   expect(tasks.due(binding, wake, '2026-10-06T08:00:00Z')).toBe(false);
   expect(tasks.stage({ ...binding, ownerId: 'foreign' }, wake)).toBeNull();
   const restarted = new NativeMandateTasks(db);
@@ -71,9 +71,29 @@ it('S08-T08/T09 a retired owned clock can be staged after restart while retainin
 it('S08-T08 a retired clock with altered content cannot be re-staged', () => {
   const { db, tasks } = fixture();
   const id = tasks.stage(binding, wake);
-  expect(tasks.retire(binding, wake)).toBe(true);
+  expect(tasks.retire(binding, wake, 'ineligible')).toBe(true);
   db.prepare("UPDATE messages_in SET content='forged executable prompt' WHERE id=?").run(id);
   expect(tasks.stage(binding, wake)).toBeNull();
   expect(tasks.current(binding, wake)).toBe(false);
+  expect(countDueMessages(db)).toBe(0);
+});
+it('S08-T08/T09 successful or superseded clocks cannot reopen or become transient after retirement', () => {
+  for (const reason of ['evaluated', 'superseded'] as const) {
+    const { db, tasks } = fixture();
+    const id = tasks.stage(binding, wake);
+    expect(tasks.recordEvaluation(binding, wake, 'b'.repeat(64))).toBe(true);
+    expect(tasks.retire(binding, wake, reason)).toBe(true);
+    const original = db.prepare('SELECT * FROM messages_in WHERE id=?').get(id);
+    expect(tasks.retire(binding, wake, 'ineligible')).toBe(true);
+    expect(new NativeMandateTasks(db).stage(binding, wake)).toBeNull();
+    expect(db.prepare('SELECT * FROM messages_in WHERE id=?').get(id)).toEqual(original);
+    expect(countDueMessages(db)).toBe(0);
+  }
+});
+it('S08-T08 legacy completed clocks without a retirement reason remain closed', () => {
+  const { db, tasks } = fixture();
+  const id = tasks.stage(binding, wake);
+  db.prepare("UPDATE messages_in SET status='completed' WHERE id=?").run(id);
+  expect(new NativeMandateTasks(db).stage(binding, wake)).toBeNull();
   expect(countDueMessages(db)).toBe(0);
 });

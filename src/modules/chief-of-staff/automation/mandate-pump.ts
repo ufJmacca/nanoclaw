@@ -34,13 +34,15 @@ export class MandatePump {
       for (const head of inventory.heads as MandateHead[]) {
         if (!d.current(binding)) return { status: 'denied' };
         if (head.state !== 'active' || !head.eligible || !head.wake) {
-          d.withTasks(binding, (tasks) => tasks.retireAll(binding, head.id));
+          d.withTasks(binding, (tasks) =>
+            tasks.retireAll(binding, head.id, undefined, head.state === 'active' ? 'ineligible' : 'superseded'),
+          );
           continue;
         }
         const wake = head.wake;
         const staged = d.withTasks(binding, (tasks) => {
-          tasks.retireAll(binding, head.id, wake);
           const id = tasks.stage(binding, wake);
+          if (id) tasks.retireAll(binding, head.id, wake);
           return id
             ? {
                 id,
@@ -59,7 +61,7 @@ export class MandatePump {
         if (evaluated.status !== 'ok') continue;
         d.withTasks(binding, (tasks) => tasks.recordEvaluation(binding, wake, head.sourceDigest));
         if (staged.due) {
-          d.withTasks(binding, (tasks) => tasks.retire(binding, wake));
+          d.withTasks(binding, (tasks) => tasks.retire(binding, wake, 'evaluated'));
           if (
             typeof evaluated.next_wake_at === 'string' &&
             Number.isFinite(Date.parse(evaluated.next_wake_at)) &&

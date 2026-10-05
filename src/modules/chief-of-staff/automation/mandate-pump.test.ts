@@ -117,6 +117,47 @@ it('S08-PG01 a restored clock must obtain a fresh PostgreSQL grant before evalua
   expect(f.store.evaluate).toHaveBeenCalledTimes(1);
   expect(countDueMessages(f.db)).toBe(0);
 });
+it('S08-T08/T09 a completed due wake stays quiet across repeated drains and restart without retiring its future clock', async () => {
+  const f = fixture();
+  f.head.now = '2026-10-04T08:01:00.000Z';
+  const next = { ...f.head.wake, wakeAt: '2026-10-04T09:00:00.000Z' };
+  f.store.evaluate.mockResolvedValue({
+    status: 'ok',
+    decision: 'already_handled',
+    mission_ids: [],
+    next_wake_at: next.wakeAt,
+  });
+  const pump = new MandatePump(f.dependencies);
+  await pump.drain(binding);
+  const original = f.db.prepare('SELECT * FROM messages_in ORDER BY id').all();
+  const futureId = f.tasks.stage(binding, next);
+  expect(futureId).toBeTruthy();
+  for (let i = 0; i < 8; i++) await new MandatePump(f.dependencies).drain(binding);
+  expect(f.store.evaluate).toHaveBeenCalledTimes(1);
+  expect(f.store.bindNative).toHaveBeenCalledTimes(2);
+  expect(f.tasks.current(binding, next)).toBe(true);
+  expect(f.tasks.current(binding, f.head.wake)).toBe(false);
+  expect(f.db.prepare('SELECT * FROM messages_in ORDER BY id').all()).toEqual(original);
+  f.head.wake = next;
+  f.head.now = '2026-10-04T09:01:00.000Z';
+  await new MandatePump(f.dependencies).drain(binding);
+  expect(f.store.evaluate).toHaveBeenCalledTimes(2);
+  expect(countDueMessages(f.db)).toBe(0);
+});
+it('S08-T08/T09 temporary ineligibility cannot reopen an already evaluated due clock', async () => {
+  const f = fixture();
+  f.head.now = '2026-10-04T08:01:00.000Z';
+  const pump = new MandatePump(f.dependencies);
+  await pump.drain(binding);
+  f.head.eligible = false;
+  await pump.drain(binding);
+  f.head.eligible = true;
+  await new MandatePump(f.dependencies).drain(binding);
+  expect(f.store.evaluate).toHaveBeenCalledTimes(1);
+  expect(f.store.bindNative).toHaveBeenCalledTimes(1);
+  expect(f.tasks.current(binding, f.head.wake)).toBe(false);
+  expect(countDueMessages(f.db)).toBe(0);
+});
 it('S08-PG02 a local emergency pause wins over awaited inventory and persists on reconnect', async () => {
   const f = fixture();
   f.store.headsForHost.mockImplementation(async () => {

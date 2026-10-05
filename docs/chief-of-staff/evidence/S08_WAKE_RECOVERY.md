@@ -1,4 +1,4 @@
-# S08 review correction — deployed candidate; human review pending
+# S08 review correction — follow-up validation in progress
 
 PR [#64](https://github.com/ufJmacca/nanoclaw/pull/64) was merged by the repository
 owner on 5 October 2026. Its actual merged source is
@@ -11,13 +11,40 @@ native wake. Previously, restoring eligibility with the same revision and wake
 time could not stage that clock again. The retained completed row and ownership
 marker prevented recovery, including after a host restart.
 
-The correction restores an exactly verified completed host clock to `paused`
+The initial correction restored an exactly verified completed host clock to `paused`
 inside the existing SQLite transaction. It preserves the task identity, content,
 source-evaluation digest and ownership marker. It creates no pending model
 message. The pump must still obtain a fresh PostgreSQL grant before evaluation;
 clock repair cannot authorize a mission or revive an obsolete mandate revision.
 Altered rows and foreign bindings remain rejected. No migration is added or
 modified.
+
+## Follow-up review correction — 5 October 2026
+
+PR #65's [P2 review finding](https://github.com/ufJmacca/nanoclaw/pull/65#discussion_r4179883188)
+identified repeated recovery of already-evaluated due clocks. Four new regression
+tests failed against the unchanged deployed production code; nine existing tests
+passed. Eight repeated drains caused nine evaluations instead of one.
+
+The follow-up records a verified retirement reason in additive host-only SQLite
+metadata, within the same transaction as retirement. Only a clock retired for
+temporary ineligibility can reopen. Evaluated, superseded and legacy completed
+clocks with unknown reasons remain closed; a later eligibility loss cannot make
+them recoverable. The original native row, evaluation history and binding checks
+remain intact. Fresh PostgreSQL authority is still required before evaluation.
+The pump stages a usable clock before retiring other clocks, preserving a future
+clock when inventory repeats an already-completed wake.
+
+All 13 targeted native/pump tests pass, including repeated drains and restart,
+preserved future clocks and their eventual evaluation, transient recovery,
+fresh-grant denial and zero due model messages. No PostgreSQL or registered
+NanoClaw migration is added or edited; SQLite compatibility remains 22.
+
+PR #65 has returned to draft. Full release/image gates and exact-artifact Pi
+delivery/native/preservation/independence verification must pass for this new
+source before it is ready again. The deployed candidate below remains historical
+evidence; it does not prove the follow-up passed. CoS stays paused, and no live
+model call or real message was made.
 
 ## Red → green evidence
 

@@ -1,6 +1,6 @@
 # S08 — Perform useful background work under a standing mandate
 
-**Status:** PR #64 human-merged; tested correction deployed healthy; correction review, final merged-release acceptance and live activation pending
+**Status:** PR #64 human-merged; PR #65 follow-up review correction in validation; final merged-release acceptance and live activation pending
 
 **Repository:** `ufJmacca/nanoclaw`  
 **Branch:** `codex/s08-retired-wake-recovery` (correction after `cos/s08-standing-mandates`)
@@ -9,9 +9,11 @@
 **Delivery unit:** one independently reviewable PR; multiple red–green commits are expected.  
 **User-visible outcome:** After you approve a narrow responsibility once, the assistant prepares work autonomously within its scope, budget and notification rules.
 
-PR #64's reviewed merge has been verified, and its retired-wake finding is
-reproduced, corrected and deployed in a tested candidate under PR #65. Local and
-Pi native/preservation gates pass. See [the correction receipt](../chief-of-staff/evidence/S08_WAKE_RECOVERY.md)
+PR #64's reviewed merge has been verified, and its retired-wake finding was
+corrected and deployed in a tested candidate under PR #65. A subsequent finding
+about repeated completed-clock recovery is reproduced and fixed in targeted
+tests; full release and Pi validation remain pending for that follow-up.
+See [the correction receipt](../chief-of-staff/evidence/S08_WAKE_RECOVERY.md)
 for remaining review and final merged-release gates. S09 remains ineligible until the
 correction's reviewed merge and actual merged-release acceptance.
 

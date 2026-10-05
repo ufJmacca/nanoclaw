@@ -4,12 +4,17 @@ import { insertTask, pauseTask, cancelTask } from '../../scheduling/db.js';
 import { digest } from '../domain/contracts.js';
 import type { MandateWake } from './mandate-policy.js';
 export type { MandateWake } from './mandate-policy.js';
+type RetirementReason = 'ineligible' | 'evaluated' | 'superseded';
 /** Native schedule metadata is a host-only clock signal, never a coordinator/model task. */
 export class NativeMandateTasks {
   constructor(readonly db: Database.Database) {
     db.exec(`CREATE TABLE IF NOT EXISTS cos_mandate_native_tasks (
       task_id TEXT PRIMARY KEY,scope_id TEXT NOT NULL,mandate_id TEXT NOT NULL,revision INTEGER NOT NULL,
       wake_at TEXT NOT NULL,binding_digest TEXT NOT NULL,payload_digest TEXT NOT NULL,last_source_digest TEXT
+    );
+    CREATE TABLE IF NOT EXISTS cos_mandate_native_retirements (
+      task_id TEXT PRIMARY KEY,reason TEXT NOT NULL CHECK(reason IN ('ineligible','evaluated','superseded')),
+      retirement_digest TEXT NOT NULL
     )`);
   }
   private definition(binding: CosBinding, wake: MandateWake) {
@@ -92,13 +97,20 @@ export class NativeMandateTasks {
     return this.db.transaction(() => {
       const existing = this.owned(binding, wake, true);
       if (existing) {
-        // Restore only the verified host clock, never a model task or grant. The pump rechecks PostgreSQL authority.
-        if (
-          existing.row.status === 'completed' &&
-          this.db.prepare("UPDATE messages_in SET status='paused' WHERE id=? AND status='completed'").run(task.id)
-            .changes !== 1
-        )
-          return null;
+        const retirement = this.db
+          .prepare('SELECT reason,retirement_digest FROM cos_mandate_native_retirements WHERE task_id=?')
+          .get(task.id) as { reason: RetirementReason; retirement_digest: string } | undefined;
+        if (existing.row.status === 'completed') {
+          // Only a verified transient retirement can recover; completed evaluations and legacy unknowns stay closed.
+          if (
+            retirement?.reason !== 'ineligible' ||
+            retirement.retirement_digest !== digest({ task, binding, reason: 'ineligible' }) ||
+            this.db.prepare("UPDATE messages_in SET status='paused' WHERE id=? AND status='completed'").run(task.id)
+              .changes !== 1
+          )
+            return null;
+          this.db.prepare('DELETE FROM cos_mandate_native_retirements WHERE task_id=?').run(task.id);
+        } else if (retirement) return null;
         return task.id;
       }
       if (
@@ -125,11 +137,19 @@ export class NativeMandateTasks {
       !!this.owned(binding, wake) && Number.isFinite(Date.parse(now)) && Date.parse(wake.wakeAt) <= Date.parse(now)
     );
   }
-  retire(binding: CosBinding, wake: MandateWake): boolean {
+  retire(binding: CosBinding, wake: MandateWake, reason: RetirementReason = 'superseded'): boolean {
     return this.db.transaction(() => {
       const owned = this.owned(binding, wake, true);
       if (!owned) return false;
-      if (owned.row.status === 'paused') cancelTask(this.db, owned.task.id);
+      // Repeated eligibility loss must not downgrade a completed evaluation into a recoverable clock.
+      if (owned.row.status === 'paused' || reason !== 'ineligible') {
+        this.db
+          .prepare(
+            'INSERT INTO cos_mandate_native_retirements(task_id,reason,retirement_digest) VALUES(?,?,?) ON CONFLICT(task_id) DO UPDATE SET reason=excluded.reason,retirement_digest=excluded.retirement_digest',
+          )
+          .run(owned.task.id, reason, digest({ task: owned.task, binding, reason }));
+        if (owned.row.status === 'paused') cancelTask(this.db, owned.task.id);
+      }
       return true;
     })();
   }
@@ -145,13 +165,18 @@ export class NativeMandateTasks {
       .run(sourceDigest, owned.task.id);
     return true;
   }
-  retireAll(binding: CosBinding, mandateId: string, except?: MandateWake): void {
+  retireAll(
+    binding: CosBinding,
+    mandateId: string,
+    except?: MandateWake,
+    reason: RetirementReason = 'superseded',
+  ): void {
     const rows = this.db
       .prepare('SELECT revision,wake_at FROM cos_mandate_native_tasks WHERE scope_id=? AND mandate_id=?')
       .all(binding.scopeId, mandateId) as Array<{ revision: number; wake_at: string }>;
     for (const row of rows) {
       const wake = { mandateId, revision: row.revision, wakeAt: row.wake_at };
-      if (!except || digest(wake) !== digest(except)) this.retire(binding, wake);
+      if (!except || digest(wake) !== digest(except)) this.retire(binding, wake, reason);
     }
   }
 }
