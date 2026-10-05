@@ -102,6 +102,45 @@ export class ActionStore {
       ? row
       : null;
   }
+  /** Minimal discovery through the existing main context; credentials and consent proofs stay host-only. */
+  async bindings(
+    client: PoolClient,
+    context: Context,
+  ): Promise<
+    Array<{
+      binding_id: string;
+      calendar_id: string;
+      state: 'enabled';
+      action_profile: 'private_calendar_block_no_guests';
+    }>
+  > {
+    const authority = this.dependencies?.authority(context);
+    if (context.origin || !this.dependencies?.witness || !authority || !(await this.scopeCurrent(client, context)))
+      return [];
+    const candidates = (
+      await client.query(
+        "SELECT id FROM cos.action_writer_bindings WHERE scope_id=$1 AND owner_id=$2 AND session_id=$3 AND state='enabled' ORDER BY id LIMIT 20",
+        [context.scopeId, context.ownerId, context.sessionId],
+      )
+    ).rows;
+    const result: Array<{
+      binding_id: string;
+      calendar_id: string;
+      state: 'enabled';
+      action_profile: 'private_calendar_block_no_guests';
+    }> = [];
+    for (const candidate of candidates) {
+      const binding = await this.binding(client, context, candidate.id);
+      if (binding)
+        result.push({
+          binding_id: binding.id,
+          calendar_id: binding.body.calendarId,
+          state: 'enabled',
+          action_profile: 'private_calendar_block_no_guests',
+        });
+    }
+    return digest(this.dependencies?.authority(context) ?? null) === digest(authority) ? result : [];
+  }
   /** The returned observation is private host data, never a model-supplied authority field. */
   async observe(context: Context, request: CalendarActionRequest): Promise<Result> {
     if (!this.dependencies) return { status: 'unavailable', reason: 'writer_not_configured' };

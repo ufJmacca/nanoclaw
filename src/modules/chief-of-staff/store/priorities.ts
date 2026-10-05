@@ -702,6 +702,7 @@ export class PriorityStore {
         work_truncated: work.truncated,
         brief_schedules: await this.schedules.read(client, context),
         standing_mandates: await this.mandates.readHeads(client, context),
+        action_writer_bindings: await this.actions.bindings(client, context),
         proactive_policy:
           (
             await client.query(

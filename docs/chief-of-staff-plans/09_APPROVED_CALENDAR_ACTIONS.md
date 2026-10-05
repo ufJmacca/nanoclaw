@@ -17,9 +17,12 @@ calendar writer adapter, leased execution, readback and recovery by the original
 event ID. A coordinated backup and isolated restore drill passes against the
 separate PostgreSQL test database, local SQLite and artifacts. The independent
 target journal preserves effects created after that backup without restoring
-write permission. Runtime scheduling and result delivery, operator configuration,
-the complete native fixture demonstration and release/deployment gates remain.
-No real account or writer is activated.
+write permission. The existing host pump now schedules approved actions and
+delivers private result notices in the retained main conversation, without a model
+wake-up. A separate writer consent flow and credential owner pass fixture tests;
+writer IDs and selected calendars are exposed through the existing context tool.
+Production configuration and restore-proof admission, the complete native fixture
+demonstration and release/deployment gates remain. No real account or writer is activated.
 
 Read [START HERE](00_START_HERE.md), [architecture/contracts](ARCHITECTURE_AND_CONTRACTS.md), [external PostgreSQL](EXTERNAL_POSTGRES.md), [goal execution](GOAL.md), [Mac-to-Pi delivery](MAC_TO_PI_DELIVERY.md), [Mattermost interaction](INTERACTION_MODEL.md), [implementation authority](IMPLEMENTATION_AUTHORITY.md), and [baseline](REPOSITORY_BASELINE.md) before implementation. This plan inherits their identity, scope, replay, approval, budget and retention rules; none may be postponed to S11.
 

@@ -1076,3 +1076,26 @@ test('S09 result notices verify immutable receipts, use exact private destinatio
   ]);
   assert.equal(writes, beforeWrites + 1);
 });
+test('S09 main context advertises only its separately enabled writer ID and exact calendar', async () => {
+  const result = await store.context(context);
+  assert.equal(result.status, 'ok');
+  assert.deepEqual(result.action_writer_bindings, [
+    {
+      binding_id: writerId,
+      calendar_id: writerBinding.calendarId,
+      state: 'enabled',
+      action_profile: 'private_calendar_block_no_guests',
+    },
+  ]);
+  assert.deepEqual((await store.context({ ...context, sessionId: 'other' })).action_writer_bindings, []);
+  enabled = false;
+  try {
+    assert.deepEqual((await store.context(context)).action_writer_bindings, []);
+  } finally {
+    enabled = true;
+  }
+  const json = JSON.stringify(result.action_writer_bindings);
+  assert.equal(json.includes(writerBinding.accountFingerprint), false);
+  assert.equal(json.includes(writerBinding.credentialGeneration), false);
+  assert.equal(json.includes(writerBinding.restoreProofDigest), false);
+});

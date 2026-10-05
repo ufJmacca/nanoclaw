@@ -49,6 +49,42 @@ function fixture() {
   f.open.mockReturnValue(f.artifacts);
   f.configure.mockResolvedValue({});
 }
+it('S09 passes separate trusted action dependencies through host admission without requiring specialist delegation', async () => {
+  fixture();
+  const context = { scopeId: 'scope', ownerId: 'owner', agentGroupId: 'main', sessionId: 'main', ingressId: 'owner' },
+    authority = {
+      bindingDigest: 'a'.repeat(64),
+      contextGeneration: 'retained',
+      actionProfileDigest: 'b'.repeat(64),
+      provider: { profile: 'codex-subscription/coordinator-v1', model: 'fixture', policyDigest: 'c'.repeat(64) },
+    },
+    admitted = vi.fn(() => true),
+    resolve = vi.fn(() => authority),
+    writer = vi.fn(() => null),
+    witness = {} as import('./actions/witness.js').EffectWitness;
+  const store = await connectCosHostStore(
+    {},
+    { targetRoot: '/state', installationRoot: '/install', dataRoot: '/install/data' },
+    admitted,
+    {},
+    undefined,
+    undefined,
+    { authority: resolve, writer, witness },
+  );
+  expect(store.actions.dependencies?.authority(context)).toEqual(authority);
+  expect(store.actions.dependencies?.witness).toBe(witness);
+  expect(
+    store.actions.dependencies?.writer(context, 'fixture', {} as import('./actions/binding.js').ActionWriterBinding),
+  ).toBeNull();
+  expect(store.missions.authority).toBeUndefined();
+  admitted.mockReturnValue(false);
+  expect(store.actions.dependencies?.authority(context)).toBeNull();
+  expect(
+    store.actions.dependencies?.writer(context, 'fixture', {} as import('./actions/binding.js').ActionWriterBinding),
+  ).toBeNull();
+  expect(writer).toHaveBeenCalledTimes(1);
+  expect(resolve).toHaveBeenCalledTimes(1);
+});
 it('connects the current schema with knowledge guards present even when retrieval is disabled', async () => {
   fixture();
   const store = await connectCosHostStore(
