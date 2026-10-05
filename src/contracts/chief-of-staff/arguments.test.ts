@@ -23,7 +23,7 @@ describe('CoS fixture command selection', () => {
   it.each(
     [
       [],
-      ['--slice', 'S10', '--db-profile', 'test'],
+      ['--slice', 'S11', '--db-profile', 'test'],
       ['--slice', 'S01', '--db-profile', 'runtime'],
       ['--demo', '--slice', 'S01', '--db-profile', 'test'],
       ['--slice', 'S01', '--db-profile', 'test', '--db-profile', 'test'],
@@ -110,5 +110,16 @@ it('registers the complete S09 action, resource and native approval/recovery con
     'actions.integration',
     'actions-sources.integration',
     'actions-flow.integration',
+  ]);
+});
+
+it('registers S10 strategic review and owner-decision flows with every predecessor regression', () => {
+  const args = parseFixtureArguments(['--demo', '--fixture', '--slice', 'S10', '--db-profile', 'test']);
+  expect(args).toEqual({ slice: 'S10', demo: true, profile: 'test' });
+  expect(fixtureFiles(args)).toEqual(['strategy-flow.integration']);
+  expect(fixtureFiles({ ...args, demo: false })).toEqual([
+    ...fixtureFiles({ slice: 'S09', demo: false }),
+    'strategy.integration',
+    'strategy-flow.integration',
   ]);
 });
