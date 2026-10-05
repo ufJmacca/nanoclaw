@@ -25,6 +25,20 @@ and calendar-list metadata. The existing reader's requested scope and stored
 credential identity remain unchanged. The main context exposes only writer ID,
 selected calendar, enabled state and the narrow action profile.
 
+The writer vault now opens through a separate, explicitly enabled host
+configuration. It verifies protected credential and backup storage and pins the
+writer client, vault and denial journal; it never falls back to reader credentials.
+The affected configuration/calendar run passed 182 tests in 16 files, including
+15 writer configuration checks.
+
+Restore verification now compares every remote scoped row and the isolated local
+SQLite/artifact bytes, checks the protected test marker and repeats local checks
+after database waits. Its backup/native preservation run passed 46 tests in four
+files. The actual test-database restore uses the same database as its fixture
+checkpoint and is explicitly ineligible for production writer admission. A copied
+remote export with an unrestored database is rejected. Target recovery proof
+recording and production writer admission remain pending.
+
 Recorded development-container gates include:
 
 - 29 external PostgreSQL action tests, including actual connection and commit-acknowledgement failures with a simulated provider;

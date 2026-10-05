@@ -7,7 +7,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { connectionFault } from './connection-fault.js';
-import { connectFixtureDatabase, fixtureDatabaseConfig, fixtureRuntimeUser } from './fixture-database.js';
+import {
+  connectFixtureDatabase,
+  fixtureDatabaseConfig,
+  fixtureRuntimeUser,
+  fixtureProfile,
+} from './fixture-database.js';
 import { migrate } from '../../modules/chief-of-staff/store/migrations.js';
 import { BoundedDatabase } from '../../modules/chief-of-staff/store/client.js';
 import { PriorityStore } from '../../modules/chief-of-staff/store/priorities.js';
@@ -1014,7 +1019,31 @@ test('S09-T10 coordinated sandbox restore reconciles a fixture event created aft
       } finally {
         stillLive.close();
       }
+      const sandboxDatabase = {
+        client: admin,
+        config: await fixtureDatabaseConfig(process.env, 'migration'),
+        testTargetId: process.env.COS_TEST_TARGET_ID ?? '',
+      };
+      await assert.rejects(
+        coordinatedBackup.verifyCoordinatedSandbox(options, destination, sandboxDatabase),
+        { message: 'coordinated_restore_verification_unavailable' },
+        'a local copy with an unrestored remote database cannot issue a restore proof',
+      );
       await restoreOnlyOwnedFixtureScope(remote);
+      if (fixtureProfile() === 'test') {
+        const proof = await coordinatedBackup.verifyCoordinatedSandbox(options, destination, sandboxDatabase);
+        assert.equal(proof.checkpointDigest, digest(checkpoint));
+        assert.equal(proof.admissionRestored, false);
+        assert.equal(proof.eventJournalRestored, false);
+        assert.equal(proof.sandboxSeparated, false, 'this scoped fixture drill cannot enable a real writer');
+        assert.equal(proof.journal.generation, witness.generation);
+      } else {
+        await assert.rejects(
+          coordinatedBackup.verifyCoordinatedSandbox(options, destination, sandboxDatabase),
+          { message: 'coordinated_restore_verification_unavailable' },
+          'runtime-disposable is not a separately protected restore sandbox',
+        );
+      }
       assert.equal(
         (await admin.query('SELECT 1 FROM cos.action_intents WHERE scope_id=$1 AND id=$2', [scope, action.id]))
           .rowCount,

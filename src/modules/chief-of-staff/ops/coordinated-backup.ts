@@ -1,4 +1,6 @@
 import type pg from 'pg';
+import type { PoolConfig } from 'pg';
+import Database from 'better-sqlite3';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
@@ -9,6 +11,8 @@ import { MIGRATIONS, SCHEMA_VERSION, migrationStatus } from '../store/migrations
 import { backupNativeDatabase } from './native-installation.js';
 import { readPrivate, writeAtomic } from './target-state.js';
 import { artifactHash } from './release-artifacts.js';
+import { assertTestTarget } from '../store/preflight.js';
+import { databaseFingerprint } from './target-identity.js';
 export type QuiescentCheckpoint = {
   generation: number;
   activeWorkers: 0;
@@ -54,6 +58,24 @@ export type CoordinatedBackupReceipt = {
   sqlite: FileReceipt[];
   artifacts: FileReceipt[];
   restrictions: FileReceipt[];
+};
+/** A verified restore is evidence only. It cannot restore approvals, admission or the effect journal. */
+export type CoordinatedRestoreProof = {
+  format: 'cos-coordinated-restore-proof/v1';
+  checkpointDigest: string;
+  scopeIdentityDigest: string;
+  databaseFingerprint: string;
+  sandboxDatabaseFingerprint: string;
+  sandboxSeparated: boolean;
+  testMarkerDigest: string;
+  schemaVersion: number;
+  schemaDigest: string;
+  restoredStateDigest: string;
+  sqliteCount: number;
+  journal: CoordinatedBackupReceipt['journal'];
+  admissionRestored: false;
+  eventJournalRestored: false;
+  verifiedAt: string;
 };
 const schemaDigest = digest(MIGRATIONS.map(({ version, checksum }) => ({ version, checksum })));
 /** Only application tables created by the reviewed migration history. No cos_admin or foreign schemas. */
@@ -431,6 +453,125 @@ export async function restoreCoordinatedSandbox(options: CoordinatedBackupOption
   } catch {
     // eslint-disable-next-line preserve-caught-error -- Isolated restoration never exposes source content or private path diagnostics.
     throw new Error('coordinated_restore_unavailable');
+  }
+}
+const checkpointState = (snapshot: ScopeCheckpoint) => ({
+  columns: snapshot.columns,
+  rows: Object.fromEntries(
+    CHECKPOINT_TABLES.map((table) => [table, snapshot.rows[table].map((row) => digest(row)).sort()]),
+  ),
+});
+async function verifySandboxCopy(checkpoint: CoordinatedBackupReceipt, destination: string) {
+  directory(destination);
+  const expected = {
+    format: 'cos-coordinated-sandbox/v1',
+    manifestDigest: digest(checkpoint),
+    schemaVersion: SCHEMA_VERSION,
+    admissionRestored: false,
+    eventJournalRestored: false,
+  };
+  if (
+    digest(JSON.parse(privateBytes(path.join(destination, 'sandbox.json'), 16384).toString('utf8'))) !==
+    digest(expected)
+  )
+    throw new Error('coordinated_restore_conflict');
+  const files = [checkpoint.remote, ...checkpoint.sqlite, ...checkpoint.artifacts, ...checkpoint.restrictions],
+    names = new Set(['sandbox.json', ...files.map((f) => f.file)]),
+    dirs = new Set(['sqlite', 'artifacts', 'restrictions']);
+  for (const file of files) {
+    const parts = file.file.split('/');
+    for (let i = 1; i < parts.length; i++) dirs.add(parts.slice(0, i).join('/'));
+    const target = path.join(destination, file.file),
+      stat = fs.lstatSync(target);
+    directory(path.dirname(target));
+    if (
+      !stat.isFile() ||
+      stat.nlink !== 1 ||
+      stat.uid !== process.getuid?.() ||
+      (stat.mode & 0o777) !== 0o600 ||
+      stat.size !== file.bytes ||
+      (await artifactHash(target, 4 * 1024 * 1024 * 1024)) !== file.sha256
+    )
+      throw new Error('coordinated_restore_conflict');
+  }
+  const visit = (relative: string, depth: number) => {
+    if (depth > 4) throw new Error('coordinated_restore_conflict');
+    directory(path.join(destination, relative));
+    for (const name of fs.readdirSync(path.join(destination, relative))) {
+      const child = relative ? relative + '/' + name : name,
+        stat = fs.lstatSync(path.join(destination, child));
+      if (stat.isDirectory() && dirs.has(child)) visit(child, depth + 1);
+      else if (!stat.isFile() || !names.has(child)) throw new Error('coordinated_restore_conflict');
+    }
+  };
+  visit('', 0);
+  for (const file of checkpoint.sqlite) {
+    const db = new Database(path.join(destination, file.file), { readonly: true, fileMustExist: true });
+    try {
+      if (digest(db.pragma('quick_check')) !== digest([{ quick_check: 'ok' }]))
+        throw new Error('coordinated_restore_conflict');
+    } finally {
+      db.close();
+    }
+  }
+}
+/** Verify an actual protected test-database restore and the isolated local copy. No mutation is issued.
+ * Same-database fixture drills remain useful evidence but cannot admit a production writer.
+ * A copied remote.json alone is never proof that the remote database was restored.
+ */
+export async function verifyCoordinatedSandbox(
+  options: CoordinatedBackupOptions,
+  destination: string,
+  sandbox: { client: pg.Client; config: PoolConfig; testTargetId: string },
+): Promise<CoordinatedRestoreProof> {
+  try {
+    const checkpoint = await verify(options),
+      root = parameters(options);
+    if (
+      [
+        root,
+        options.witness.root,
+        options.artifacts.root,
+        ...options.nativeDatabases,
+        ...options.restrictionFiles,
+      ].some(
+        (source) =>
+          source === destination || source.startsWith(destination + '/') || destination.startsWith(source + '/'),
+      )
+    )
+      throw new Error('unsafe_coordinated_restore');
+    await verifySandboxCopy(checkpoint, destination);
+    // The protected marker and actual server identity are checked before inspecting restored scope data.
+    await assertTestTarget(sandbox.client, sandbox.testTargetId);
+    const fingerprint = await databaseFingerprint(sandbox.client, sandbox.config),
+      restored = await remoteSnapshot({ ...options, client: sandbox.client, databaseFingerprint: fingerprint }),
+      original = JSON.parse(fs.readFileSync(path.join(root, 'remote.json'), 'utf8')) as ScopeCheckpoint;
+    if (digest(checkpointState(restored)) !== digest(checkpointState(original)))
+      throw new Error('coordinated_restore_conflict');
+    if (digest(await verify(options)) !== digest(checkpoint)) throw new Error('coordinated_restore_conflict');
+    await verifySandboxCopy(checkpoint, destination);
+    journalCurrent(options);
+    const { scopeId, ownerId, agentGroupId, sessionId } = options.context;
+    return {
+      format: 'cos-coordinated-restore-proof/v1',
+      checkpointDigest: digest(checkpoint),
+      scopeIdentityDigest: digest({ scopeId, ownerId, agentGroupId, sessionId }),
+      databaseFingerprint: options.databaseFingerprint,
+      sandboxDatabaseFingerprint: fingerprint,
+      sandboxSeparated: fingerprint !== options.databaseFingerprint,
+      testMarkerDigest: digest(sandbox.testTargetId),
+      schemaVersion: SCHEMA_VERSION,
+      schemaDigest,
+      restoredStateDigest: digest(checkpointState(restored)),
+      sqliteCount: checkpoint.sqlite.length,
+      journal: checkpoint.journal,
+      admissionRestored: false,
+      eventJournalRestored: false,
+      verifiedAt: new Date().toISOString(),
+    };
+  } catch {
+    // eslint-disable-next-line preserve-caught-error -- Restored content, account data, host paths and database diagnostics remain private.
+    throw new Error('coordinated_restore_verification_unavailable');
   }
 }
 /** A private application logical export supplements the DBA's backups; it is not server backup/PITR.
