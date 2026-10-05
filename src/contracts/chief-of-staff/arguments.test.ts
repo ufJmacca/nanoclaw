@@ -106,6 +106,7 @@ it('registers the complete S09 action, resource and native approval/recovery con
   expect(fixtureFiles(args)).toEqual(['actions-flow.integration']);
   expect(fixtureFiles({ ...args, demo: false })).toEqual([
     ...fixtureFiles({ slice: 'S08', demo: false }),
+    'action-schema.integration',
     'actions.integration',
     'actions-sources.integration',
     'actions-flow.integration',

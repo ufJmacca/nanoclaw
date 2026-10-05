@@ -34,6 +34,7 @@ export function fixtureFiles(args: Pick<FixtureArguments, 'slice' | 'demo'>): st
       ? ['actions-flow.integration']
       : [
           ...fixtureFiles({ slice: 'S08', demo: false }),
+          'action-schema.integration',
           'actions.integration',
           'actions-sources.integration',
           'actions-flow.integration',
