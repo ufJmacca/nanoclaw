@@ -12,10 +12,13 @@
 
 S08's actual reviewed merge is accepted; see [its merged-release receipt](../chief-of-staff/evidence/S08_MERGED.md).
 S09 began from `462daabef958b9ba1874168719737ad7b39ef8e8`. Its exact tested
-application source `9a1b25b88419a56d07a74e457bbd399c4b3407a7` is deployed on the
-Pi with schema 16; see [the candidate acceptance receipt](../chief-of-staff/evidence/S09.md).
+application source `27f1c7abe0f8863b68334e184e0a167774848168` is deployed on the
+Pi with schema 16; see [the corrected candidate receipt](../chief-of-staff/evidence/S09_REVIEW_CORRECTION.md)
+and [the initial candidate history](../chief-of-staff/evidence/S09.md).
 All seven local release gates, both final Linux/ARM64 profiles, Pi health,
 native fixtures, preservation, recovery checks and Pi-owned independence passed.
+The review correction settles a verified overlapping approval as a terminal
+conflict while preserving in-flight uncertainty and original-effect readback.
 
 The implementation includes narrow proposal/status/cancel tools, immutable exact
 owner approval, a separate calendar writer, leased execution, original-ID
