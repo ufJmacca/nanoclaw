@@ -291,11 +291,13 @@ export class ActionRunStore {
       if (mode === 'create') {
         // Serialize overlapping host actions even when the provider's check-and-insert is not atomic.
         const competing = await client.query(
-          `SELECT a.id FROM cos.actions a JOIN cos.action_intents i ON i.scope_id=a.scope_id AND i.id=a.id
+          `SELECT a.state FROM cos.actions a JOIN cos.action_intents i ON i.scope_id=a.scope_id AND i.id=a.id
           WHERE a.scope_id=$1 AND a.id<>$2 AND i.calendar_id=$3 AND a.state IN ('executing','outcome_uncertain','verified')
-          AND (i.body->'request'->>'start')::timestamptz<$5::timestamptz AND (i.body->'request'->>'end')::timestamptz>$4::timestamptz LIMIT 1`,
+          AND (i.body->'request'->>'start')::timestamptz<$5::timestamptz AND (i.body->'request'->>'end')::timestamptz>$4::timestamptz
+          ORDER BY CASE WHEN a.state='verified' THEN 0 ELSE 1 END,a.id LIMIT 1`,
           [context.scopeId, id, row.body.request.calendar_id, row.body.request.start, row.body.request.end],
         );
+        if (competing.rows[0]?.state === 'verified') return denyCreate('calendar_action_conflict');
         if (competing.rowCount) return { status: 'pending', reason: 'calendar_action_in_flight' };
       }
       if (witness && !started)

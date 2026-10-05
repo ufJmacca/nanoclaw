@@ -1289,3 +1289,89 @@ test('S09 main context advertises only its separately enabled writer ID and exac
     writerDiscovery = true;
   }
 });
+
+test('S09-T07 a verified overlapping approval blocks the queued action once and publishes its terminal notice', async () => {
+  const first = await queued(72),
+    overlapping = await queued(72.5),
+    adjacent = await queued(73),
+    beforeWrites = writes;
+  assert.equal((await store.actions.executor.run(context, first.id, nativeAdmission)).state, 'verified');
+  assert.equal(writes, beforeWrites + 1);
+  const blocked = await store.actions.executor.run(context, overlapping.id, nativeAdmission);
+  assert.equal(blocked.status, 'denied');
+  assert.equal(blocked.reason, 'calendar_action_conflict');
+  assert.equal((await store.actions.inspect(context, overlapping.id)).state, 'blocked');
+  assert.equal((await store.actions.executor.run(context, overlapping.id, nativeAdmission)).state, 'blocked');
+  assert.equal(writes, beforeWrites + 1, 'the overlapping approval never sends a create request');
+  assert.equal(witness.find(overlapping.id), null);
+  assert.equal(
+    (
+      await admin.query('SELECT count(*)::int AS n FROM cos.action_request_starts WHERE scope_id=$1 AND action_id=$2', [
+        scope,
+        overlapping.id,
+      ])
+    ).rows[0].n,
+    0,
+  );
+  const receipts = (
+    await admin.query("SELECT body FROM cos.action_receipts WHERE scope_id=$1 AND action_id=$2 AND kind='blocked'", [
+      scope,
+      overlapping.id,
+    ])
+  ).rows;
+  assert.equal(receipts.length, 1);
+  assert.equal(receipts[0].body.reason, 'calendar_action_conflict');
+  let after: string | null = null;
+  do {
+    const page = await store.actions.runs.pending(context, after);
+    assert.equal(page.status, 'ok');
+    assert.equal((page.action_ids as string[]).includes(overlapping.id), false);
+    after = page.next_after as string | null;
+  } while (after);
+  const notice = await store.actions.notifications.read(context, overlapping.id);
+  assert.equal(notice.status, 'ok');
+  assert.equal((notice.notice as { state: string; channelId: string }).state, 'blocked');
+  assert.equal((notice.notice as { channelId: string }).channelId, scope);
+  assert.match(String(notice.text), /Calendar action blocked/);
+  assert.equal((await store.actions.executor.run(context, adjacent.id, nativeAdmission)).state, 'verified');
+  assert.equal(writes, beforeWrites + 2, 'touching endpoints are not an overlap');
+});
+
+test('S09-T04/T06 executing and uncertain overlaps stay pending while the original effect retains readback', async () => {
+  const first = await queued(76),
+    overlapping = await queued(76.5),
+    beforeWrites = writes,
+    beforeReads = reads,
+    claimed = await store.actions.runs.claim(context, first.id, randomUUID());
+  assert.equal(claimed.status, 'ok');
+  const lease = claimed.lease as import('../../modules/chief-of-staff/actions/run-store.js').ActionLease;
+  for (const state of ['executing', 'outcome_uncertain']) {
+    if (state === 'outcome_uncertain') {
+      assert.equal((await store.actions.runs.start(context, lease, await writer.inspect(first.input))).status, 'ok');
+      assert.equal(
+        (await store.actions.runs.settle(context, lease, 'uncertain', 'fixture_unknown_effect')).status,
+        'ok',
+      );
+    }
+    const competing = await store.actions.runs.claim(context, overlapping.id, randomUUID());
+    assert.equal(competing.status, 'pending');
+    assert.equal(competing.reason, 'calendar_action_in_flight');
+    assert.equal((await store.actions.inspect(context, overlapping.id)).state, 'queued');
+  }
+  await admin.query(
+    "UPDATE cos.actions SET next_reconcile_at=clock_timestamp()-interval '1 second' WHERE scope_id=$1 AND id=$2",
+    [scope, first.id],
+  );
+  assert.equal((await store.actions.executor.run(context, first.id, nativeAdmission)).state, 'outcome_uncertain');
+  assert.equal(reads, beforeReads + 1, 'the original started effect is still reconciled');
+  assert.equal(writes, beforeWrites);
+  assert.equal(
+    (
+      await admin.query(
+        "SELECT count(*)::int AS n FROM cos.action_receipts WHERE scope_id=$1 AND action_id=$2 AND kind='blocked'",
+        [scope, overlapping.id],
+      )
+    ).rows[0].n,
+    0,
+  );
+});
