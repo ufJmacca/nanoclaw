@@ -30,6 +30,7 @@ import { createTeamCancellation } from './missions/team-cancel.js';
 import type { CosMissionIdentity } from '../../cos-mission-boundary.js';
 import { NativeMandateTasks } from './automation/mandate-native.js';
 import { MandatePump } from './automation/mandate-pump.js';
+import { ActionPump } from './actions/pump.js';
 
 export type RuntimeDependencies = {
   db: Database.Database;
@@ -154,6 +155,40 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
     const current = cosBoundary(session, d.db);
     return current.restricted && !!current.binding && !current.paused && digest(current.binding) === digest(binding);
   };
+  const actionPump = d.store?.actions?.dependencies?.witness
+    ? new ActionPump({
+        current: (binding) => {
+          if (!enabled()) return null;
+          const session = d.session(binding.sessionId),
+            boundary = session && cosBoundary(session, d.db);
+          if (
+            !session ||
+            !boundary?.restricted ||
+            !boundary.binding ||
+            boundary.paused ||
+            !boundary.ingressId ||
+            digest(boundary.binding) !== digest(binding)
+          )
+            return null;
+          // Exact approval and the executor's lease govern effects. This lookup grants no model invocation.
+          return resolveKnowledgeContext(
+            session,
+            {
+              scopeId: binding.scopeId,
+              ownerId: binding.ownerId,
+              sessionId: binding.sessionId,
+              agentGroupId: binding.agentGroupId,
+              ingressId: boundary.ingressId,
+            },
+            d.db,
+          );
+        },
+        admitted,
+        recover: (context, offset) => d.store!.actions.runs.recoverWitnesses(context, offset),
+        pending: (context, after) => d.store!.actions.runs.pending(context, after),
+        execute: (context, id, permit) => d.store!.actions.executor.run(context, id, permit),
+      })
+    : undefined;
   const withTasks = <T>(binding: CosBinding, operation: (tasks: NativeBriefTasks) => T): T => {
     const session = d.session(binding.sessionId);
     if (!session || session.agent_group_id !== binding.agentGroupId) throw Error('cos_brief_session_unavailable');
@@ -433,6 +468,7 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
       const recovered = enabled() ? await briefReconciliation?.drain(binding) : undefined;
       if (enabled()) await reviewDispatch?.drain(binding);
       if (enabled()) await outbox?.drain(binding);
+      if (enabled()) await actionPump?.drain(binding);
       if (enabled()) await mandatePump?.drain(binding);
       if (enabled() && d.store)
         for (const notifications of [d.store.missionNotifications, d.store.teamNotifications]) {
@@ -510,6 +546,7 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
     },
     dispose: () => {
       disposed = true;
+      actionPump?.close();
       setCosBoundaryHooks(null);
     },
   };

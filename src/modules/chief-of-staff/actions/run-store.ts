@@ -31,6 +31,31 @@ const uuid = (value: string) =>
   /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(value);
 export class ActionRunStore {
   constructor(readonly store: ActionStore) {}
+  /** Bounded host discovery. Neither an old owner trigger nor a queue row grants a new send. */
+  async pending(context: Context, after: string | null = null): Promise<Result> {
+    if (context.origin || (after !== null && !validActionId(after))) return { status: 'denied' };
+    return this.store.transaction(async (client) => {
+      if (!(await this.store.scopeCurrent(client, context)) || !this.store.dependencies?.authority(context))
+        return { status: 'denied' };
+      const rows = (
+        await client.query(
+          `SELECT a.id FROM cos.actions a JOIN cos.action_intents i ON i.scope_id=a.scope_id AND i.id=a.id
+        WHERE a.scope_id=$1 AND i.body->'context'->>'sessionId'=$2
+        AND i.body->'context'->>'ownerId'=$3 AND i.body->'context'->>'agentGroupId'=$4
+        AND ($5::text IS NULL OR a.id>$5) AND a.state IN ('queued','executing','outcome_uncertain')
+        AND (a.lease_expires_at IS NULL OR a.lease_expires_at<=clock_timestamp())
+        AND (a.next_reconcile_at IS NULL OR a.next_reconcile_at<=clock_timestamp()) AND a.reconcile_count<12
+        ORDER BY a.id LIMIT 20`,
+          [context.scopeId, context.sessionId, context.ownerId, context.agentGroupId, after],
+        )
+      ).rows;
+      return {
+        status: 'ok',
+        action_ids: rows.map((row) => row.id),
+        next_after: rows.length === 20 ? rows.at(-1)!.id : null,
+      };
+    });
+  }
   private async scopeLock(client: PoolClient, context: Context) {
     return (
       !context.origin &&

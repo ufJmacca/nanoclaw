@@ -504,6 +504,59 @@ test('S09-PG02 loss of a real request-start COMMIT acknowledgement returns pendi
     await pool.end();
   }
 });
+
+test('S09 host queue discovery is paged and excludes active leases and exhausted reconciliation', async () => {
+  const created: string[] = [];
+  for (let offset = 48; offset < 69; offset++) created.push((await queued(offset)).id);
+  const beforeWrites = writes,
+    seen: string[] = [];
+  let after: string | null = null;
+  do {
+    const page = await store.actions.runs.pending(context, after);
+    assert.equal(page.status, 'ok');
+    const ids = page.action_ids as string[];
+    assert.ok(ids.length <= 20);
+    assert.deepEqual(ids, [...ids].sort());
+    seen.push(...ids);
+    after = page.next_after as string | null;
+  } while (after !== null);
+  for (const id of created) assert.ok(seen.includes(id));
+  assert.equal(new Set(seen).size, seen.length);
+  const id = created[0],
+    lease = await store.actions.runs.claim(context, id, randomUUID());
+  assert.equal(lease.status, 'ok');
+  const all = async () => {
+    const result: string[] = [];
+    let cursor: string | null = null;
+    do {
+      const page = await store.actions.runs.pending(context, cursor);
+      assert.equal(page.status, 'ok');
+      result.push(...(page.action_ids as string[]));
+      cursor = page.next_after as string | null;
+    } while (cursor !== null);
+    return result;
+  };
+  assert.equal((await all()).includes(id), false);
+  await admin.query(
+    "UPDATE cos.actions SET lease_owner=NULL,lease_expires_at=NULL,state='outcome_uncertain',reconcile_count=12 WHERE scope_id=$1 AND id=$2",
+    [scope, id],
+  );
+  assert.equal((await all()).includes(id), false);
+  assert.equal((await store.actions.runs.pending({ ...context, ownerId: 'intruder' })).status, 'denied');
+  assert.equal(
+    (await store.actions.runs.pending({ ...context, sessionId: 'other-session' })).action_ids instanceof Array,
+    true,
+  );
+  assert.deepEqual((await store.actions.runs.pending({ ...context, sessionId: 'other-session' })).action_ids, []);
+  assert.equal((await store.actions.runs.pending(context, 'arbitrary')).status, 'denied');
+  enabled = false;
+  try {
+    assert.equal((await store.actions.runs.pending(context)).status, 'denied');
+  } finally {
+    enabled = true;
+  }
+  assert.equal(writes, beforeWrites);
+});
 test('S09-T10 a retained witness routes a restored pre-approval projection to reconciliation without granting a new write', async () => {
   const action = await queued(17),
     row = (

@@ -33,6 +33,87 @@ afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
 });
+it('S09 pumps approved actions in the retained main context after the owner trigger expires without waking a model', async () => {
+  const db = initTestDb();
+  const binding: CosBinding = {
+    scopeId: 'scope',
+    agentGroupId: 'group',
+    messagingGroupId: 'mg',
+    sessionId: 'session',
+    provider: 'codex',
+    instanceId: 'fixture',
+    channelId: 'private',
+    ownerId: 'owner',
+    botId: 'bot',
+  };
+  const session = {
+    id: 'session',
+    agent_group_id: 'group',
+    messaging_group_id: 'mg',
+    thread_id: null,
+    status: 'active',
+    agent_provider: 'codex',
+  } as Session;
+  installCosBoundary(binding, db);
+  db.prepare('UPDATE cos_identity_boundaries SET paused=0,ingress_id=?,ingress_at=?').run(
+    'expired-owner-trigger',
+    new Date(Date.now() - 360000).toISOString(),
+  );
+  ensureConversationSchema(db);
+  const generation = randomUUID();
+  db.prepare(
+    "INSERT INTO cos_conversation_states(scope_id,binding_digest,account_fingerprint,generation,status,updated_at) VALUES(?,?,?,?,'active',?)",
+  ).run(binding.scopeId, digest(binding), 'a'.repeat(64), generation, new Date().toISOString());
+  const actionId = 'action-' + 'c'.repeat(64),
+    wake = vi.fn();
+  const actions = {
+    dependencies: { witness: {} },
+    runs: {
+      recoverWitnesses: vi.fn(async () => ({ status: 'ok', recovered: [], next_offset: null })),
+      pending: vi.fn(async () => ({ status: 'ok', action_ids: [actionId], next_after: null })),
+    },
+    executor: { run: vi.fn(async () => ({ status: 'ok', state: 'verified' })) },
+  };
+  runtime = createCosRuntime({
+    db,
+    enabled: true,
+    store: { actions, pendingOutbox: vi.fn(async () => ({ status: 'ok', items: [] })) } as unknown as PriorityStore,
+    facts: async () => ({
+      id: 'private',
+      type: 'P',
+      delete_at: 0,
+      members: ['owner', 'bot'],
+      activeSubscription: true,
+    }),
+    session: () => session,
+    destination: () => undefined,
+    stop: vi.fn(),
+    wake,
+  });
+  await runtime.pump(binding);
+  expect(actions.executor.run).toHaveBeenCalledTimes(1);
+  const [context, , permit] = actions.executor.run.mock.calls[0] as unknown as [
+    Record<string, unknown>,
+    string,
+    { local(): boolean; admitted(): Promise<boolean>; signal: AbortSignal },
+  ];
+  expect(context).toMatchObject({
+    scopeId: 'scope',
+    sessionId: 'session',
+    generation,
+    ingressId: 'expired-owner-trigger',
+  });
+  expect(context.origin).toBeUndefined();
+  expect(wake).not.toHaveBeenCalled();
+  expect(permit.local()).toBe(true);
+  db.prepare('UPDATE cos_identity_boundaries SET paused=1').run();
+  expect(permit.local()).toBe(false);
+  expect(await permit.admitted()).toBe(false);
+  await runtime.pump(binding);
+  expect(actions.executor.run).toHaveBeenCalledTimes(1);
+  runtime.dispose();
+  expect(permit.signal.aborted).toBe(true);
+});
 it('S08 uses the existing host pump for mandate clocks and keeps the main session paused after an emergency stop', async () => {
   const db = initTestDb(),
     inbound = new Database(':memory:');
