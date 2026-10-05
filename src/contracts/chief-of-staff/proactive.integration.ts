@@ -703,8 +703,22 @@ test('S07-T03/T06 an owner-deferred revision can return in a brief once, within 
     'ok',
   );
   assert.equal((await store.apply(scope, String(preview.proposal_id))).status, 'ok');
+  const beforeReview = await p.batch(retained, randomUUID());
+  assert.equal(beforeReview.status, 'ok');
+  assert.ok(
+    !(beforeReview.candidates as ProactiveCandidate[]).some((item) => item.semantic_key === input.candidate_key),
+  );
   await delay(Math.max(0, Date.parse(reviewAt) - Date.now()) + 50);
-  now = (await pool.query('SELECT clock_timestamp() AS now')).rows[0].now;
+  // The collector uses the database clock; disposition validation uses the host clock.
+  // Cross-host clock skew must not make the positive fixture run before its approved deadline.
+  const reviewInstant = Date.parse(reviewAt),
+    clockDeadline = Date.now() + 10000;
+  for (;;) {
+    now = (await pool.query('SELECT clock_timestamp() AS now')).rows[0].now;
+    if (now.getTime() >= reviewInstant && Date.now() >= reviewInstant) break;
+    assert.ok(Date.now() < clockDeadline, 'fixture clocks did not reach the approved review instant');
+    await delay(50);
+  }
   const batch = await p.batch(retained, randomUUID());
   assert.equal(batch.status, 'ok');
   const reopened = await p.submit(retained, randomUUID(), String(batch.batch_id), input);

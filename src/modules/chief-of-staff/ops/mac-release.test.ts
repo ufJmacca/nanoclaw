@@ -11,6 +11,19 @@ import os from 'node:os';
 import path from 'node:path';
 import { readPrivate } from './target-state.js';
 import { fixtureRelease } from '../../../contracts/chief-of-staff/release-fixture.js';
+import { macReleaseCommand } from './mac-release-cli.js';
+it('S09 creates new releases only for the currently implemented slice and its exact schema', async () => {
+  const argumentsFor = (slice: string) => [
+    'init',
+    'release-' + '1'.repeat(12) + '-20261005000000',
+    'invalid-commit',
+    'refs/heads/codex/fixture',
+    slice,
+  ];
+  await expect(macReleaseCommand(argumentsFor('S09'))).rejects.toThrow('invalid_candidate_source');
+  for (const slice of ['S08', 'S10'])
+    await expect(macReleaseCommand(argumentsFor(slice))).rejects.toThrow('current_release_slice_required');
+});
 
 it('preserves a large programme ledger while accepting an active S01 alignment correction', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-release-ledger-'));
@@ -119,7 +132,7 @@ it('selects runtime credentials separately without inheriting a test marker or a
   expect(selected.MATTERMOST_BOT_TOKEN).toBeUndefined();
 });
 
-it.each(['S02', 'S03', 'S04', 'S05', 'S06', 'S07', 'S08'])(
+it.each(['S02', 'S03', 'S04', 'S05', 'S06', 'S07', 'S08', 'S09'])(
   '%s release checkpoints preserve reviewed predecessor evidence and reject an unfinished predecessor',
   (slice) => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-s02-release-ledger-'));
@@ -138,7 +151,9 @@ it.each(['S02', 'S03', 'S04', 'S05', 'S06', 'S07', 'S08'])(
                   ? 'S05'
                   : slice === 'S07'
                     ? 'S06'
-                    : 'S07',
+                    : slice === 'S08'
+                      ? 'S07'
+                      : 'S08',
       implementation_status: 'merged',
       review_status: 'human_merged',
       merged_sha: source,

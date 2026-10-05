@@ -1,0 +1,327 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { randomUUID } from 'node:crypto';
+import Database from 'better-sqlite3';
+import type pg from 'pg';
+import { afterEach, expect, it, vi } from 'vitest';
+import {
+  backupCoordinatedState,
+  restoreCoordinatedSandbox,
+  verifyCoordinatedSandbox,
+  verifyCoordinatedLocalSandbox,
+  verifyCoordinatedBackup,
+  restoreCoordinatedTestScope,
+  type CoordinatedBackupOptions,
+  type QuiescentCheckpoint,
+} from './coordinated-backup.js';
+import { databaseFingerprint } from './target-identity.js';
+import { KnowledgeArtifacts } from '../knowledge/artifacts.js';
+import { ActionWitness, initializeActionWitness } from '../actions/witness.js';
+import { MIGRATIONS } from '../store/migrations.js';
+import { digest } from '../domain/contracts.js';
+const roots: string[] = [];
+afterEach(() => {
+  for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
+});
+function fixture() {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-backup-guard-'));
+  roots.push(root);
+  fs.chmodSync(root, 0o700);
+  for (const name of ['receipt', 'artifacts', 'staging']) fs.mkdirSync(path.join(root, name), { mode: 0o700 });
+  const source = path.join(root, 'native.sqlite'),
+    db = new Database(source);
+  db.exec("CREATE TABLE messages(id,body);INSERT INTO messages VALUES(1,'preserved')");
+  db.close();
+  fs.chmodSync(source, 0o600);
+  const artifacts = new KnowledgeArtifacts(path.join(root, 'artifacts'), path.join(root, 'staging'));
+  const installation = digest('fixture installation'),
+    journalRoot = path.join(root, 'effects'),
+    owner = initializeActionWitness(journalRoot, installation);
+  const witness = new ActionWitness(journalRoot, installation, owner.generation),
+    restriction = path.join(root, 'binding.json');
+  fs.writeFileSync(restriction, JSON.stringify({ scopeId: 'scope', paused: true }), { mode: 0o600 });
+  const query = vi.fn(async (sql: string, parameters?: string[]): Promise<{ rows: Record<string, unknown>[] }> => {
+    if (sql.includes('pg_try_advisory_lock')) return { rows: [{ locked: true }] };
+    if (sql.includes('to_regclass')) return { rows: [{ ledger: 'cos.schema_migrations' }] };
+    if (sql.includes('FROM cos.schema_migrations'))
+      return { rows: MIGRATIONS.map(({ version, checksum }) => ({ version, checksum })) };
+    if (sql.includes('SELECT owner_id,agent_group_id'))
+      return { rows: [{ owner_id: 'owner', agent_group_id: 'group' }] };
+    if (sql.includes('FROM pg_attribute'))
+      return {
+        rows: (parameters?.[0] === 'cos.scopes' ? ['id', 'owner_id', 'agent_group_id'] : ['scope_id']).map(
+          (attname) => ({ attname }),
+        ),
+      };
+    if (sql.includes('to_jsonb(t)'))
+      return {
+        rows: sql.includes('cos."scopes"')
+          ? [{ body: { id: 'scope', owner_id: 'owner', agent_group_id: 'group' } }]
+          : [],
+      };
+    if (sql.includes('clock_timestamp')) return { rows: [{ now: new Date() }] };
+    if (sql.includes('current_database()'))
+      return { rows: [{ database: 'fixture', database_oid: '123', server_address: '10.0.0.2', server_port: 5432 }] };
+    if (sql.includes('FROM cos_admin.target_identity'))
+      return {
+        rows: [
+          {
+            target_id: 'fixture-protected-test',
+            purpose: 'test',
+            writable: false,
+            schema_writable: false,
+            owner_member: false,
+          },
+        ],
+      };
+    return { rows: [] };
+  });
+  const quiescent = vi.fn(async () => ({
+    generation: 1,
+    activeWorkers: 0 as const,
+    activeOperations: 0 as const,
+    nativeWriters: 0 as const,
+    effectsEnabled: false as const,
+  }));
+  const options: CoordinatedBackupOptions = {
+    client: { query } as unknown as pg.Client,
+    context: { scopeId: 'scope', ownerId: 'owner', sessionId: 'session', agentGroupId: 'group', ingressId: 'ingress' },
+    databaseFingerprint: digest('fixture database'),
+    operationId: randomUUID(),
+    receiptRoot: path.join(root, 'receipt'),
+    nativeDatabases: [source],
+    artifacts,
+    restrictionFiles: [restriction],
+    witness,
+    quiescent,
+  };
+  return { root, source, restriction, query, options, quiescent, archive: path.join(root, 'receipt', 'coordinated') };
+}
+const sandboxConfig = {
+  host: '10.0.0.2',
+  port: 5432,
+  database: 'fixture',
+  ssl: { rejectUnauthorized: true, ca: 'FIXTURE_CA' },
+};
+it('S09 verifies an isolated local restore without a database connection and rejects changed SQLite bytes', async () => {
+  const f = fixture(),
+    checkpoint = await backupCoordinatedState(f.options),
+    destination = path.join(f.root, 'sandbox');
+  await restoreCoordinatedSandbox(f.options, destination);
+  f.query.mockClear();
+  expect(await verifyCoordinatedLocalSandbox(f.options, destination)).toEqual({
+    checkpointDigest: digest(checkpoint),
+    admissionRestored: false,
+    eventJournalRestored: false,
+  });
+  expect(f.query).not.toHaveBeenCalled();
+  fs.appendFileSync(path.join(destination, 'sqlite/0/native.sqlite'), 'changed');
+  await expect(verifyCoordinatedLocalSandbox(f.options, destination)).rejects.toThrow(
+    'coordinated_restore_verification_unavailable',
+  );
+  expect(f.query).not.toHaveBeenCalled();
+});
+it('S09 imports a checked scope only into a separate protected test database, without updating or deleting rows', async () => {
+  const f = fixture();
+  await backupCoordinatedState(f.options);
+  const operationRoot = path.join(f.root, 'restore-operation');
+  fs.mkdirSync(operationRoot, { mode: 0o700 });
+  const sandbox = { client: f.options.client, config: sandboxConfig, testTargetId: 'fixture-protected-test' };
+  const result = await restoreCoordinatedTestScope(f.options, operationRoot, sandbox, async () => {});
+  expect(result).toMatchObject({ inserted: true, admissionRestored: false, eventJournalRestored: false });
+  expect(f.query.mock.calls.filter(([sql]) => sql.startsWith('INSERT INTO cos.'))).toHaveLength(1);
+  expect(f.query.mock.calls.filter(([sql]) => /^(UPDATE|DELETE|TRUNCATE|DROP|ALTER|CREATE)/.test(sql))).toEqual([]);
+});
+it.each(['same-database', 'foreign-scope', 'marker', 'columns', 'late-authority'])(
+  'S09 refuses %s sandbox import before any INSERT',
+  async (kind) => {
+    const f = fixture();
+    if (kind === 'same-database')
+      f.options.databaseFingerprint = await databaseFingerprint(f.options.client, sandboxConfig);
+    await backupCoordinatedState(f.options);
+    const operationRoot = path.join(f.root, 'restore-operation');
+    fs.mkdirSync(operationRoot, { mode: 0o700 });
+    const original = f.query.getMockImplementation()!;
+    f.query.mockImplementation(async (sql, values) => {
+      if (kind === 'foreign-scope' && sql.startsWith('SELECT id FROM cos.scopes')) return { rows: [{ id: 'scope' }] };
+      if (kind === 'marker' && sql.includes('FROM cos_admin.target_identity')) return { rows: [] };
+      if (kind === 'columns' && sql.includes('FROM pg_attribute')) return { rows: [{ attname: 'unexpected' }] };
+      return original(sql, values);
+    });
+    let checks = 0;
+    const check = vi.fn(async () => {
+      if (kind === 'late-authority' && ++checks >= 2) throw Error('PRIVATE_AUTHORITY_CANARY');
+    });
+    await expect(
+      restoreCoordinatedTestScope(
+        f.options,
+        operationRoot,
+        { client: f.options.client, config: sandboxConfig, testTargetId: 'fixture-protected-test' },
+        check,
+      ),
+    ).rejects.toThrow('coordinated_test_restore_unavailable');
+    expect(
+      f.query.mock.calls.filter(([sql]) => /^(INSERT|UPDATE|DELETE|TRUNCATE|DROP|ALTER|CREATE)/.test(sql)),
+    ).toEqual([]);
+  },
+);
+it('S09 unknown sandbox commit is reconciled by complete readback without another scope insert', async () => {
+  const f = fixture();
+  await backupCoordinatedState(f.options);
+  const operationRoot = path.join(f.root, 'restore-operation');
+  fs.mkdirSync(operationRoot, { mode: 0o700 });
+  const original = f.query.getMockImplementation()!;
+  let installed = false,
+    loseAck = true;
+  f.query.mockImplementation(async (sql, values) => {
+    if (sql.startsWith('SELECT id FROM cos.scopes')) return { rows: installed ? [{ id: 'scope' }] : [] };
+    if (sql.startsWith('INSERT INTO cos.')) installed = true;
+    if (sql === 'COMMIT' && loseAck) {
+      loseAck = false;
+      throw Error('PRIVATE_COMMIT_CANARY');
+    }
+    return original(sql, values);
+  });
+  const sandbox = { client: f.options.client, config: sandboxConfig, testTargetId: 'fixture-protected-test' };
+  await expect(restoreCoordinatedTestScope(f.options, operationRoot, sandbox, async () => {})).rejects.toThrow(
+    'coordinated_test_restore_unavailable',
+  );
+  expect(await restoreCoordinatedTestScope(f.options, operationRoot, sandbox, async () => {})).toMatchObject({
+    inserted: false,
+  });
+  expect(f.query.mock.calls.filter(([sql]) => sql.startsWith('INSERT INTO cos.'))).toHaveLength(1);
+});
+it('S09 verifies restored local bytes and every remote scoped row before issuing a recovery proof', async () => {
+  const f = fixture(),
+    checkpoint = await backupCoordinatedState(f.options),
+    destination = path.join(f.root, 'sandbox');
+  await restoreCoordinatedSandbox(f.options, destination);
+  const proof = await verifyCoordinatedSandbox(f.options, destination, {
+    client: f.options.client,
+    config: sandboxConfig,
+    testTargetId: 'fixture-protected-test',
+  });
+  expect(proof.checkpointDigest).toBe(digest(checkpoint));
+  expect(proof.sandboxSeparated).toBe(true);
+  expect(proof.admissionRestored).toBe(false);
+  expect(proof.eventJournalRestored).toBe(false);
+  expect(proof.journal).toEqual(checkpoint.journal);
+  expect(f.query.mock.calls.filter(([sql]) => /^(INSERT|UPDATE|DELETE|TRUNCATE|ALTER|DROP|CREATE)/.test(sql))).toEqual(
+    [],
+  );
+});
+it.each(['remote-row', 'local-bytes', 'extra-file', 'marker', 'commit-ack', 'changed-during-read'])(
+  'S09 denies a %s restore without a proof',
+  async (kind) => {
+    const f = fixture(),
+      destination = path.join(f.root, 'sandbox');
+    await backupCoordinatedState(f.options);
+    await restoreCoordinatedSandbox(f.options, destination);
+    if (kind === 'local-bytes') fs.appendFileSync(path.join(destination, 'sqlite/0/native.sqlite'), 'changed');
+    if (kind === 'extra-file') fs.writeFileSync(path.join(destination, 'auth.json'), '{}', { mode: 0o600 });
+    const original = f.query.getMockImplementation()!;
+    f.query.mockImplementation(async (sql, params) => {
+      if (kind === 'remote-row' && sql.includes('to_jsonb(t)') && sql.includes('cos."records"'))
+        return { rows: [{ body: { scope_id: 'scope' } }] };
+      if (kind === 'marker' && sql.includes('FROM cos_admin.target_identity')) return { rows: [] };
+      if (kind === 'commit-ack' && sql === 'COMMIT') throw Error('PRIVATE_DATABASE_CANARY');
+      if (kind === 'changed-during-read' && sql === 'COMMIT')
+        fs.appendFileSync(path.join(destination, 'sqlite/0/native.sqlite'), 'changed');
+      return original(sql, params);
+    });
+    await expect(
+      verifyCoordinatedSandbox(f.options, destination, {
+        client: f.options.client,
+        config: sandboxConfig,
+        testTargetId: 'fixture-protected-test',
+      }),
+    ).rejects.toThrow('coordinated_restore_verification_unavailable');
+  },
+);
+it('S09 first-write backup verification rejects a replaced independent target journal generation', async () => {
+  const f = fixture();
+  await backupCoordinatedState(f.options);
+  fs.writeFileSync(
+    path.join(f.options.witness.root, 'owner.json'),
+    JSON.stringify({
+      format: 'cos-action-witness-owner/v1',
+      installationDigest: f.options.witness.installationDigest,
+      generation: randomUUID(),
+    }),
+    { mode: 0o600 },
+  );
+  await expect(verifyCoordinatedBackup(f.options)).rejects.toThrow('coordinated_backup_unavailable');
+});
+it('keeps the paired baseline on retry and refuses a different local input set', async () => {
+  const f = fixture(),
+    first = await backupCoordinatedState(f.options);
+  await expect(backupCoordinatedState(f.options)).resolves.toEqual(first);
+  await expect(
+    verifyCoordinatedBackup({ ...f.options, restrictionFiles: [path.join(f.root, 'different.json')] }),
+  ).rejects.toThrow('coordinated_backup_unavailable');
+});
+it.each(['workers', 'operations', 'native', 'effects', 'generation', 'callback'])(
+  'does not publish a checkpoint after %s barrier failure',
+  async (kind) => {
+    const f = fixture();
+    let calls = 0;
+    f.quiescent.mockImplementation(async () => {
+      if (kind === 'callback') throw new Error('PRIVATE_ACCOUNT_ENDPOINT');
+      const value = {
+        generation: 1,
+        activeWorkers: 0,
+        activeOperations: 0,
+        nativeWriters: 0,
+        effectsEnabled: false,
+      };
+      if (kind === 'generation' && ++calls > 2) value.generation = 2;
+      if (kind === 'workers') value.activeWorkers = 1;
+      if (kind === 'operations') value.activeOperations = 1;
+      if (kind === 'native') value.nativeWriters = 1;
+      if (kind === 'effects') value.effectsEnabled = true;
+      return value as QuiescentCheckpoint;
+    });
+    await expect(backupCoordinatedState(f.options)).rejects.toThrow('coordinated_backup_unavailable');
+    expect(fs.existsSync(f.archive)).toBe(false);
+  },
+);
+it('never includes separately configured account secrets in restriction exports', async () => {
+  const f = fixture();
+  fs.writeFileSync(f.restriction, JSON.stringify({ client_secret: 'FIXTURE_SECRET' }));
+  await expect(backupCoordinatedState(f.options)).rejects.toThrow('coordinated_backup_unavailable');
+  expect(fs.existsSync(f.archive)).toBe(false);
+});
+it.each(['corruption', 'extra-file', 'symlink', 'hardlink', 'permissions'])(
+  'refuses %s in a checkpoint before restoring any local bytes',
+  async (kind) => {
+    const f = fixture();
+    await backupCoordinatedState(f.options);
+    const file = path.join(f.archive, 'remote.json');
+    if (kind === 'corruption') fs.appendFileSync(file, 'corrupt');
+    if (kind === 'extra-file') fs.writeFileSync(path.join(f.archive, 'unexpected.json'), '{}', { mode: 0o600 });
+    if (kind === 'symlink') {
+      fs.unlinkSync(file);
+      fs.symlinkSync(f.restriction, file);
+    }
+    if (kind === 'hardlink') fs.linkSync(file, path.join(f.root, 'alias'));
+    if (kind === 'permissions') fs.chmodSync(file, 0o644);
+    const destination = path.join(f.root, 'sandbox');
+    await expect(restoreCoordinatedSandbox(f.options, destination)).rejects.toThrow('coordinated_restore_unavailable');
+    expect(fs.existsSync(destination)).toBe(false);
+  },
+);
+it('restores only into a new isolated root and refuses the original data or journal paths', async () => {
+  const f = fixture();
+  const receipt = await backupCoordinatedState(f.options);
+  for (const destination of [f.root, f.source, f.options.witness.root, f.options.artifacts.root])
+    await expect(restoreCoordinatedSandbox(f.options, destination)).rejects.toThrow('coordinated_restore_unavailable');
+  const destination = path.join(f.root, 'sandbox');
+  await expect(restoreCoordinatedSandbox(f.options, destination)).resolves.toMatchObject({
+    manifestDigest: digest(receipt),
+    admissionRestored: false,
+    eventJournalRestored: false,
+  });
+  await expect(restoreCoordinatedSandbox(f.options, destination)).rejects.toThrow('coordinated_restore_unavailable');
+  expect(fs.existsSync(path.join(destination, 'effects'))).toBe(false);
+});

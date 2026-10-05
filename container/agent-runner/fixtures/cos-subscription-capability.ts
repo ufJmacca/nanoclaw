@@ -88,11 +88,14 @@ if (mandateRefresh && (!runnerEntry || cancellation || compaction || sharedOwner
   throw new Error('invalid_mandate_refresh_fixture');
 const s01Tools = ['cos_change_propose', 'cos_context_get', 'cos_request_status'];
 const legacyCoordinatorTools = cosDynamicTools
-  .filter((tool) => !tool.name.startsWith('cos_mandate_'))
+  .filter((tool) => !tool.name.startsWith('cos_mandate_') && !tool.name.startsWith('cos_action_'))
   .map((tool) => tool.name);
 const mandateMcpTools = [
   'mcp__nanoclaw_cos_mandates__cos_mandate_activity',
   'mcp__nanoclaw_cos_mandates__cos_mandate_propose',
+  'mcp__nanoclaw_cos_mandates__cos_action_propose',
+  'mcp__nanoclaw_cos_mandates__cos_action_get',
+  'mcp__nanoclaw_cos_mandates__cos_action_cancel',
 ];
 const mcpResourceTools = ['list_mcp_resource_templates', 'list_mcp_resources', 'read_mcp_resource'];
 if (sharedOwner && (!runnerEntry || cancellation || compaction)) throw new Error('invalid_shared_owner_fixture');
@@ -947,6 +950,9 @@ try {
         : productionQuery
           ? [
               'clock__curr_time',
+              'cos_action_cancel',
+              'cos_action_get',
+              'cos_action_propose',
               'cos_answer_get',
               'cos_answer_prepare',
               'cos_brief_request',
@@ -991,7 +997,7 @@ try {
         .sort();
     assert.deepEqual(declared(requests[5]), ['clock__curr_time', ...s01Tools, ...mcpResourceTools].sort());
     const expected = ['clock__curr_time', ...cosDynamicTools.map((tool) => tool.name), ...mcpResourceTools].sort();
-    assert.equal(expected.length, 32);
+    assert.equal(expected.length, 35);
     assert.deepEqual(declared(requests[6]), expected);
     assert.deepEqual(declared(requests.at(-1)), expected);
   }

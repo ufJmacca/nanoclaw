@@ -20,7 +20,7 @@ import { createCoordinatorLauncher } from './bridge/coordinator-launcher.js';
 import { RestrictedExecutionProbe } from './bridge/native-execution.js';
 import { getInstallSlug } from '../../install-slug.js';
 import { sessionDir } from '../../session-manager.js';
-import { createMissionAuthorityResolver } from './missions/authority.js';
+import { createActionAuthorityResolver, createMissionAuthorityResolver } from './missions/authority.js';
 import { createTeamAuthorityResolver } from './missions/team-authority.js';
 import { MissionHost } from './missions/host.js';
 import { createMissionExecution } from './missions/execution.js';
@@ -32,6 +32,7 @@ export function startCosHostModule(assertHostAuthority: () => void): { service: 
     'COS_ENABLED',
     'COS_KNOWLEDGE_ENABLED',
     'COS_CALENDAR_ENABLED',
+    'COS_ACTIONS_ENABLED',
     'COS_KNOWLEDGE_RETENTION_DAYS',
     'COS_TARGET_STATE_DIR',
     'CODEX_MODEL',
@@ -117,6 +118,7 @@ export function startCosHostModule(assertHostAuthority: () => void): { service: 
     try {
       const target = localTarget(targetRoot, process.cwd(), DATA_DIR);
       return admittedGeneration(targetRoot, target.binding) !== null;
+      // eslint-disable-next-line no-catch-all/no-catch-all -- Missing/corrupt target maintenance history closes CoS admission without stopping unrelated startup.
     } catch {
       return false;
     }
@@ -136,6 +138,7 @@ export function startCosHostModule(assertHostAuthority: () => void): { service: 
       assertHostAuthority();
       const session = getSession(id);
       return !session || hasContainerExecution(id) || executionProbe.present(sessionDir(session.agent_group_id, id));
+      // eslint-disable-next-line no-catch-all/no-catch-all -- An unconfirmed execution is conservatively treated as running, preventing another launch.
     } catch {
       return true;
     }
@@ -153,12 +156,14 @@ export function startCosHostModule(assertHostAuthority: () => void): { service: 
       if (hasCosMissionBoundary(session?.agent_group_id ?? '', id, getDb())) return;
       killContainer(id, 'CoS execution fenced');
       if (session) executionProbe.stop(sessionDir(session.agent_group_id, id));
+      // eslint-disable-next-line no-catch-all/no-catch-all -- Stop failures require reconciliation; native/credential diagnostics remain private.
     } catch {
       log.warn('CoS execution stop requires reconciliation');
     }
   };
   const launcher = createCoordinatorLauncher({ targetRoot, db: getDb(), running });
   const missionAuthority = createMissionAuthorityResolver({ targetRoot, db: getDb(), admitted, assertHostAuthority });
+  const actionAuthority = createActionAuthorityResolver({ targetRoot, db: getDb(), admitted, assertHostAuthority });
   const teamAuthority = createTeamAuthorityResolver({ targetRoot, db: getDb(), missionAuthority });
   const facts = guardConversationAccess({
     active: activeBinding,
@@ -206,6 +211,8 @@ export function startCosHostModule(assertHostAuthority: () => void): { service: 
         {},
         missionAuthority,
         teamAuthority,
+        undefined,
+        actionAuthority,
       ),
   });
   // PostgreSQL availability never holds up unrelated channel startup.

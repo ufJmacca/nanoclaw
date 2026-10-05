@@ -3,6 +3,22 @@ import { describe, expect, it, vi } from 'vitest';
 import { migrate, migrationStatus, SCHEMA_VERSION } from './migrations.js';
 
 describe('S01-PG07 explicit checksummed migrations', () => {
+  it('S09 adds immutable action identities and request-start receipts without enabling a writer', async () => {
+    const query = vi
+      .fn()
+      .mockImplementation(async (sql: string) =>
+        sql.includes('pg_try_advisory_lock') ? { rows: [{ locked: true }] } : { rows: [] },
+      );
+    expect(await migrate({ query } as unknown as pg.Client, 'fixture_runtime')).toBe(16);
+    const statements = query.mock.calls.map(([sql]) => sql).join('\n');
+    expect(statements).toContain('CREATE TABLE cos.action_intents');
+    expect(statements).toContain('CREATE TABLE cos.action_request_starts');
+    expect(statements).toContain(
+      'REVOKE UPDATE,DELETE,TRUNCATE ON cos.action_intents,cos.action_request_starts,cos.action_receipts',
+    );
+    expect(statements).toContain('GRANT SELECT ON cos.action_writer_bindings,cos.action_writer_revisions');
+    expect(statements).not.toMatch(/INSERT INTO cos.action_writer_bindings/);
+  });
   it('serialises migrations under a bounded advisory lock and commits one version', async () => {
     const query = vi.fn().mockResolvedValue({ rows: [] });
     query.mockImplementation(async (sql: string) => {

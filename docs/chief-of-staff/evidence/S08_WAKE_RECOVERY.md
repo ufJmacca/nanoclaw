@@ -1,4 +1,9 @@
-# S08 review correction — deployed follow-up; human review pending
+# S08 review correction — historical candidate evidence
+
+PR #65 is now human-merged, and its actual merged release passed fresh Mac and
+Pi acceptance. See [the current S08 merged receipt](S08_MERGED.md). The sections
+below preserve their state when the candidates were tested; their pending merge
+and S09 dependency gates have since cleared. Live activation remains pending.
 
 PR [#64](https://github.com/ufJmacca/nanoclaw/pull/64) was merged by the repository
 owner on 5 October 2026. Its actual merged source is

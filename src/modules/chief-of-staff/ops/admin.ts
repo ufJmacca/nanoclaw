@@ -3,6 +3,9 @@ import { isKnowledgeCommand, parseKnowledgeArguments } from './knowledge-admin.j
 import { isCalendarCommand, parseCalendarArguments } from './calendar-admin.js';
 import { isCalendarAccountCommand, parseCalendarAccountArguments } from './calendar-account-admin.js';
 import { isMissionCommand, parseMissionArguments } from './mission-admin.js';
+import { isActionAccountCommand, parseActionAccountArguments } from './action-account-admin.js';
+import { isActionAdminCommand, parseActionAdminArguments } from './action-admin.js';
+import { isActionRecoveryCommand, parseActionRecoveryArguments } from './action-recovery-admin.js';
 import { pathToFileURL } from 'node:url';
 import { DatabaseConfigurationError, parseDatabaseConfig, externalDatabaseConfig } from '../store/config.js';
 import { connectChecked, DatabasePreflightError } from '../store/preflight.js';
@@ -17,6 +20,9 @@ import { contextAdminCommand, type ContextAdminArguments } from './context-admin
 
 type AdminArguments = { command: 'status' } | { command: 'bind'; binding: BindingRequest } | ContextAdminArguments;
 export function parseAdminArguments(args: string[]): AdminArguments {
+  if (isActionRecoveryCommand({ command: args[0] })) return parseActionRecoveryArguments(args);
+  if (isActionAdminCommand({ command: args[0] })) return parseActionAdminArguments(args);
+  if (isActionAccountCommand({ command: args[0] })) return parseActionAccountArguments(args);
   if (isMissionCommand({ command: args[0] })) return parseMissionArguments(args);
   if (isKnowledgeCommand({ command: args[0] })) return parseKnowledgeArguments(args);
   if (isCalendarCommand({ command: args[0] })) return parseCalendarArguments(args);
@@ -141,6 +147,19 @@ export function safeAdminError(error: unknown): string {
         'team_template_conflict',
         'invalid_source_manifest',
         'invalid_calendar_manifest',
+        'invalid_action_manifest',
+        'action_setup_required',
+        'action_setup_conflict',
+        'action_link_uncertain',
+        'action_configuration_unavailable',
+        'action_configuration_conflict',
+        'action_profile_unavailable',
+        'action_recovery_proof_unavailable',
+        'action_database_mismatch',
+        'action_schema_incompatible',
+        'action_configuration_busy',
+        'action_recovery_unavailable',
+        'target_action_backup_unavailable',
         'calendar_disabled',
         'calendar_operation_conflict',
         'unsafe_calendar_admin_state',
@@ -254,6 +273,7 @@ export async function adminStatus(
       schema_version: version,
       lifecycle: target.lifecycle,
     };
+    // eslint-disable-next-line no-catch-all/no-catch-all -- Status exposes fixed dependency categories, never private driver diagnostics.
   } catch (error) {
     return { ...base, status: safeDependencyStatus(error) };
   }
@@ -323,6 +343,7 @@ export async function bindCommand(request: BindingRequest, env: NodeJS.ProcessEn
   }
 }
 function adminEnvironment(command: AdminArguments['command']): NodeJS.ProcessEnv {
+  const recovery = command === 'action-restore-check';
   const keys = [
     'COS_ENABLED',
     'COS_TARGET_STATE_DIR',
@@ -332,7 +353,10 @@ function adminEnvironment(command: AdminArguments['command']): NodeJS.ProcessEnv
     'MATTERMOST_URL',
     'MATTERMOST_BOT_TOKEN',
     'MATTERMOST_INSTANCE',
-    ...(isMissionCommand({ command }) ? ['COS_PG_MIGRATION_USER', 'COS_PG_MIGRATION_PASSWORD'] : []),
+    ...(isMissionCommand({ command }) || command === 'action-configure'
+      ? ['COS_PG_MIGRATION_USER', 'COS_PG_MIGRATION_PASSWORD']
+      : []),
+    ...(recovery ? ['COS_TEST_TARGET_ID'] : []),
     ...[
       'HOST',
       'PORT',
@@ -350,7 +374,8 @@ function adminEnvironment(command: AdminArguments['command']): NodeJS.ProcessEnv
       '_IDLE_TIMEOUT_MS',
       '_IDLE_TX_TIMEOUT_MS',
       '_APPLICATION_NAME',
-    ].map((key) => 'COS_PG' + key),
+      ...(recovery ? ['_MIGRATION_USER', '_MIGRATION_PASSWORD'] : []),
+    ].map((key) => (recovery ? 'COS_TEST_PG' : 'COS_PG') + key),
   ];
   const file = readEnvFile(keys);
   return Object.fromEntries(keys.map((key) => [key, process.env[key] ?? file[key]]));

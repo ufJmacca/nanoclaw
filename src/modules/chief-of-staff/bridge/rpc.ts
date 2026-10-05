@@ -12,6 +12,7 @@ import type { ScheduleChange } from '../contracts/schedule-protocol.js';
 import type { MissionRequest } from '../contracts/mission-protocol.js';
 import type { TeamRequest } from '../contracts/team-protocol.js';
 import type { MandateChange } from '../contracts/mandate-protocol.js';
+import type { CalendarActionRequest } from '../contracts/action-protocol.js';
 import type {
   ProactiveDraft,
   ProactiveDispositionRequest,
@@ -73,6 +74,7 @@ export function createRpcHandler(dependencies: {
       else if (dependencies.knowledge && !knowledgeContext) result = { status: 'denied' };
       else if (access && access.status !== 'ok') result = { status: access.status };
       else if (reservation && reservation.status !== 'ok') result = { status: reservation.status };
+      else if (request.method.startsWith('cos_action_') && context.origin) result = { status: 'denied' };
       else if (
         context.origin?.kind === 'mission_review' &&
         !['cos_mission_result_get', 'cos_mission_review'].includes(request.method)
@@ -83,6 +85,16 @@ export function createRpcHandler(dependencies: {
         context.origin?.kind === 'schedule'
       )
         result = { status: 'denied' };
+      else if (request.method === 'cos_action_propose')
+        result = await dependencies.store.requestAction(
+          context,
+          request.request_id,
+          request.params.request as CalendarActionRequest,
+        );
+      else if (request.method === 'cos_action_get')
+        result = await dependencies.store.actions.inspect(context, String(request.params.action_id));
+      else if (request.method === 'cos_action_cancel')
+        result = await dependencies.store.actions.cancel(context, String(request.params.action_id));
       else if (request.method === 'cos_team_request')
         result = await dependencies.store.requestTeam(
           context,
@@ -261,6 +273,7 @@ export function createRpcHandler(dependencies: {
           }
         }
       }
+      // eslint-disable-next-line no-catch-all/no-catch-all -- Private authority/provider diagnostics never enter model responses.
     } catch {
       result = { status: 'unavailable' };
     }

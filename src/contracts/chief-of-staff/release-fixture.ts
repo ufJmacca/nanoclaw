@@ -14,6 +14,7 @@ import { TEAM_FINAL_REVIEW_CHECKSUM } from '../../modules/chief-of-staff/store/t
 import { TEAM_PARENT_BUDGET_CHECKSUM } from '../../modules/chief-of-staff/store/team-parent-budget-schema.js';
 import { PROACTIVE_CHECKSUM } from '../../modules/chief-of-staff/store/proactive-schema.js';
 import { MANDATE_CHECKSUM } from '../../modules/chief-of-staff/store/mandate-schema.js';
+import { ACTION_CHECKSUM } from '../../modules/chief-of-staff/store/action-schema.js';
 /** Synthetic identities for release-contract tests; never a transferable artifact receipt. */
 export function fixtureRelease(slice: ReleaseManifest['slice'] = 'S01'): ReleaseManifest {
   const commit = 'a'.repeat(40),
@@ -33,7 +34,9 @@ export function fixtureRelease(slice: ReleaseManifest['slice'] = 'S01'): Release
                   ? 13
                   : slice === 'S07'
                     ? 14
-                    : 15;
+                    : slice === 'S08'
+                      ? 15
+                      : 16;
   return {
     contract: 'cos-release/v1',
     releaseId: 'release-fixture',
@@ -58,7 +61,9 @@ export function fixtureRelease(slice: ReleaseManifest['slice'] = 'S01'): Release
                     ? 'refs/heads/cos/s06-specialist-teams-and-review'
                     : slice === 'S07'
                       ? 'refs/heads/cos/s07-proactive-proposals'
-                      : 'refs/heads/cos/s08-standing-mandates',
+                      : slice === 'S08'
+                        ? 'refs/heads/cos/s08-standing-mandates'
+                        : 'refs/heads/codex/s09-approved-calendar-actions',
       syncContract: 'cos-source-sync/github-pinned-v1',
     },
     buildInputDigest: 'e'.repeat(64),
@@ -95,6 +100,7 @@ export function fixtureRelease(slice: ReleaseManifest['slice'] = 'S01'): Release
         : []),
       ...(schemaVersion >= 14 ? [{ version: 14, checksum: PROACTIVE_CHECKSUM }] : []),
       ...(schemaVersion >= 15 ? [{ version: 15, checksum: MANDATE_CHECKSUM }] : []),
+      ...(schemaVersion >= 16 ? [{ version: 16, checksum: ACTION_CHECKSUM }] : []),
     ],
     previousReleaseIds: [],
     images: [

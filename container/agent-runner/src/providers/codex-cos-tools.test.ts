@@ -185,6 +185,9 @@ test('native CoS exposes only its fixed approved tools and dispatches validated 
     'cos_proactive_history',
     'cos_mandate_propose',
     'cos_mandate_activity',
+    'cos_action_propose',
+    'cos_action_get',
+    'cos_action_cancel',
   ]);
   expect((await dispatch.handle(call())).success).toBe(true);
   expect(calls).toHaveLength(1);

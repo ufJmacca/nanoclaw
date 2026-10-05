@@ -18,8 +18,9 @@ import { TEAM_FINAL_REVIEW_SCHEMA, TEAM_FINAL_REVIEW_CHECKSUM } from './team-fin
 import { TEAM_PARENT_BUDGET_SCHEMA, TEAM_PARENT_BUDGET_CHECKSUM } from './team-parent-budget-schema.js';
 import { PROACTIVE_SCHEMA, PROACTIVE_CHECKSUM } from './proactive-schema.js';
 import { MANDATE_SCHEMA, MANDATE_CHECKSUM } from './mandate-schema.js';
+import { ACTION_SCHEMA, ACTION_CHECKSUM } from './action-schema.js';
 export { INITIAL_SCHEMA, INITIAL_CHECKSUM } from './schema-definition.js';
-export const SCHEMA_VERSION = 15;
+export const SCHEMA_VERSION = 16;
 export const MIGRATIONS = [
   { version: 1, checksum: INITIAL_CHECKSUM, sql: INITIAL_SCHEMA },
   { version: 2, checksum: KNOWLEDGE_CHECKSUM, sql: KNOWLEDGE_SCHEMA },
@@ -36,6 +37,7 @@ export const MIGRATIONS = [
   { version: 13, checksum: TEAM_PARENT_BUDGET_CHECKSUM, sql: TEAM_PARENT_BUDGET_SCHEMA },
   { version: 14, checksum: PROACTIVE_CHECKSUM, sql: PROACTIVE_SCHEMA },
   { version: 15, checksum: MANDATE_CHECKSUM, sql: MANDATE_SCHEMA },
+  { version: 16, checksum: ACTION_CHECKSUM, sql: ACTION_SCHEMA },
 ] as const;
 const LOCK_ID = 73101001;
 const identifier = (value: string) => '"' + value.replaceAll('"', '""') + '"';
@@ -71,6 +73,16 @@ export async function migrate(client: pg.Client, runtimeRole: string): Promise<n
         migration.checksum,
       ]);
     }
+    await client.query(
+      `GRANT SELECT ON cos.action_writer_bindings,cos.action_writer_revisions TO ${identifier(runtimeRole)}`,
+    );
+    await client.query(
+      `REVOKE INSERT,UPDATE,DELETE,TRUNCATE ON cos.action_writer_bindings,cos.action_writer_revisions FROM ${identifier(runtimeRole)}`,
+    );
+    await client.query(`GRANT SELECT,INSERT,UPDATE,DELETE ON cos.actions TO ${identifier(runtimeRole)}`);
+    const immutableActions = 'cos.action_intents,cos.action_request_starts,cos.action_receipts';
+    await client.query(`GRANT SELECT,INSERT ON ${immutableActions} TO ${identifier(runtimeRole)}`);
+    await client.query(`REVOKE UPDATE,DELETE,TRUNCATE ON ${immutableActions} FROM ${identifier(runtimeRole)}`);
     await client.query(
       `GRANT SELECT,INSERT,UPDATE,DELETE ON cos.mandates,cos.mandate_reservations,cos.mandate_native_bindings TO ${identifier(runtimeRole)}`,
     );

@@ -25,18 +25,23 @@ it.each([
   }
 });
 
-it('S08 preserves permanent specialist identities when its verified release is selected', () => {
-  const db = new Database(':memory:');
-  try {
-    db.exec("CREATE TABLE cos_mission_boundaries(opaque TEXT); INSERT INTO cos_mission_boundaries VALUES('retained')");
-    const before = db.serialize();
-    const candidate = validateReleaseManifest(fixtureRelease('S08'));
-    expect(() => assertNativeReleaseCompatibility(db, candidate)).not.toThrow();
-    expect(db.serialize()).toEqual(before);
-  } finally {
-    db.close();
-  }
-});
+it.each(['S08', 'S09'] as const)(
+  '%s preserves permanent specialist identities when its verified release is selected',
+  (slice) => {
+    const db = new Database(':memory:');
+    try {
+      db.exec(
+        "CREATE TABLE cos_mission_boundaries(opaque TEXT); INSERT INTO cos_mission_boundaries VALUES('retained')",
+      );
+      const before = db.serialize();
+      const candidate = validateReleaseManifest(fixtureRelease(slice));
+      expect(() => assertNativeReleaseCompatibility(db, candidate)).not.toThrow();
+      expect(db.serialize()).toEqual(before);
+    } finally {
+      db.close();
+    }
+  },
+);
 it.each(['S05', 'S06'] as const)(
   '%s compatible code preserves specialist state while malformed catalog objects deny old code',
   (slice) => {

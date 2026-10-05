@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { REQUIRED_RELEASE_CHECKS, validateReleaseManifest, type ReleaseManifest } from './release-manifest.js';
+import {
+  REQUIRED_RELEASE_CHECKS,
+  validateReleaseManifest,
+  supportsReleaseSchema,
+  type ReleaseManifest,
+} from './release-manifest.js';
 import { INITIAL_CHECKSUM, MIGRATIONS } from '../store/migrations.js';
 const sha = 'a'.repeat(40),
   tree = 'b'.repeat(40),
@@ -265,7 +270,7 @@ it('S08 pins fifteen migrations and rejects older rollback schemas or missing ma
     slice: 'S08',
     postgres: { minimum: 15, maximum: 15 },
     sqlite: { minimum: 22, maximum: 22 },
-    migrations: MIGRATIONS.map(({ version, checksum }) => ({ version, checksum })),
+    migrations: MIGRATIONS.slice(0, 15).map(({ version, checksum }) => ({ version, checksum })),
   };
   expect(validateReleaseManifest(current)).toEqual(current);
   for (const patch of [
@@ -273,6 +278,35 @@ it('S08 pins fifteen migrations and rejects older rollback schemas or missing ma
     { postgres: { minimum: 14, maximum: 15 } },
     { migrations: current.migrations.slice(0, 14) },
     { migrations: current.migrations.map((m) => (m.version === 15 ? { ...m, checksum: '0'.repeat(64) } : m)) },
+  ])
+    expect(() => validateReleaseManifest({ ...current, ...patch })).toThrow('release_not_transferable');
+});
+it('S09 pins sixteen migrations and never widens S08 recovery compatibility', () => {
+  const current = {
+    ...manifest(),
+    slice: 'S09',
+    postgres: { minimum: 16, maximum: 16 },
+    sqlite: { minimum: 22, maximum: 22 },
+    migrations: MIGRATIONS.slice(0, 16).map(({ version, checksum }) => ({ version, checksum })),
+  };
+  const accepted = validateReleaseManifest(current);
+  expect(supportsReleaseSchema(accepted, 16, 22)).toBe(true);
+  expect(supportsReleaseSchema(accepted, 15, 22)).toBe(false);
+  expect(supportsReleaseSchema(accepted, 17, 22)).toBe(false);
+  const prior = validateReleaseManifest({
+    ...current,
+    slice: 'S08',
+    postgres: { minimum: 15, maximum: 15 },
+    migrations: current.migrations.slice(0, 15),
+  });
+  expect(supportsReleaseSchema(prior, 16, 22)).toBe(false);
+  for (const patch of [
+    { slice: 'S08' },
+    { slice: 'S10' },
+    { postgres: { minimum: 15, maximum: 16 } },
+    { postgres: { minimum: 16, maximum: 17 } },
+    { migrations: current.migrations.slice(0, 15) },
+    { migrations: current.migrations.map((m) => (m.version === 16 ? { ...m, checksum: '0'.repeat(64) } : m)) },
   ])
     expect(() => validateReleaseManifest({ ...current, ...patch })).toThrow('release_not_transferable');
 });

@@ -39,8 +39,18 @@ import {
   runCalendarAccountAdmin,
   type CalendarAccountArguments,
 } from './calendar-account-admin.js';
+import { isActionAccountCommand, runActionAccountAdmin, type ActionAccountArguments } from './action-account-admin.js';
+import { isActionAdminCommand, runActionAdmin, type ActionAdminArguments } from './action-admin.js';
+import {
+  isActionRecoveryCommand,
+  runActionRecoveryAdmin,
+  type ActionRecoveryArguments,
+} from './action-recovery-admin.js';
 
 export type ContextAdminArguments =
+  | ActionRecoveryArguments
+  | ActionAdminArguments
+  | ActionAccountArguments
   | MissionAdminArguments
   | KnowledgeAdminArguments
   | CalendarAdminArguments
@@ -124,6 +134,7 @@ function localStatus(db: Database.Database, root: string, binding: CosBinding) {
       if (!/^[a-f0-9-]{36}$/.test(row.generation)) throw new Error('invalid_generation');
       privateDirectory(path.join(root, 'conversations'));
       privateDirectory(path.join(root, 'conversations', row.generation));
+      // eslint-disable-next-line no-catch-all/no-catch-all -- Unconfirmed retained context storage requires recovery before admission.
     } catch {
       context = 'recovery_required';
     }
@@ -243,6 +254,51 @@ export async function contextAdminCommand(
         assertAuthority();
       };
       await check();
+      if (isActionRecoveryCommand(args)) {
+        return runActionRecoveryAdmin({
+          args,
+          env,
+          roots: {
+            targetRoot: root,
+            installationRoot: target.binding.installationRoot,
+            dataRoot: target.binding.dataRoot,
+          },
+          binding,
+          native,
+          hostLease: lease,
+          check,
+          assertAuthority,
+        });
+      }
+      if (isActionAdminCommand(args)) {
+        return runActionAdmin({
+          args,
+          env,
+          roots: {
+            targetRoot: root,
+            installationRoot: target.binding.installationRoot,
+            dataRoot: target.binding.dataRoot,
+          },
+          binding,
+          databaseFingerprint: target.binding.databaseFingerprint,
+          check,
+          assertAuthority,
+        });
+      }
+      if (isActionAccountCommand(args)) {
+        return runActionAccountAdmin({
+          args,
+          env,
+          roots: {
+            targetRoot: root,
+            installationRoot: target.binding.installationRoot,
+            dataRoot: target.binding.dataRoot,
+          },
+          binding,
+          check,
+          assertAuthority,
+        });
+      }
       if (isMissionCommand(args)) {
         return runMissionAdmin({
           args,
@@ -363,6 +419,7 @@ export async function contextAdminCommand(
       });
       return { ...recovered, activation };
     })();
+    // eslint-disable-next-line no-catch-all/no-catch-all -- Preserve the original failure until all native/target leases are released below.
   } catch (error) {
     failure = error;
   } finally {

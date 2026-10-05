@@ -3,8 +3,10 @@ import { createHash } from 'node:crypto';
 import { validScheduleChange, type ScheduleChange } from './schedule-protocol.js';
 import { validMissionRequest } from './mission-protocol.js';
 import { validMandateChange, type MandateChange } from './mandate-protocol.js';
+import { validCalendarActionChange, type CalendarActionChange } from './action-protocol.js';
 import { validMissionReview } from './mission-review.js';
 import { validTeamRequest } from './team-protocol.js';
+import { validCalendarActionRequest, validActionId } from './action-protocol.js';
 import {
   validProactivePolicyChange,
   validProactiveDisposition,
@@ -127,6 +129,9 @@ export type CosMethod =
   | 'cos_proactive_history'
   | 'cos_mandate_propose'
   | 'cos_mandate_activity'
+  | 'cos_action_propose'
+  | 'cos_action_get'
+  | 'cos_action_cancel'
   | 'cos_request_status'
   | 'cos_knowledge_search'
   | 'cos_source_get'
@@ -237,6 +242,14 @@ export function validRequest(value: unknown): value is CosRequest {
   if (value.method === 'cos_work_read') return validWorkRead(value.params);
   if (value.method === 'cos_mandate_propose')
     return keys(value.params, ['change']) && validMandateChange(value.params.change);
+  if (value.method === 'cos_action_propose')
+    return keys(value.params, ['request']) && validCalendarActionRequest(value.params.request);
+  if (value.method === 'cos_action_get' || value.method === 'cos_action_cancel')
+    return (
+      keys(value.params, ['action_id']) &&
+      Object.keys(value.params).length === 1 &&
+      validActionId(value.params.action_id)
+    );
   if (value.method === 'cos_mandate_activity')
     return (
       Object.keys(value.params).every((k) => ['mandate_id', 'offset'].includes(k)) &&
@@ -535,7 +548,8 @@ export type ProposalChange =
   | TeamChange
   | ProactivePolicyChange
   | ProactiveDispositionChange
-  | MandateChange;
+  | MandateChange
+  | CalendarActionChange;
 export function validProposalChange(value: unknown): value is ProposalChange {
   return (
     validChange(value) ||
@@ -545,6 +559,7 @@ export function validProposalChange(value: unknown): value is ProposalChange {
     validProactivePolicyChange(value) ||
     validProactiveDispositionChange(value) ||
     validMandateChange(value) ||
+    validCalendarActionChange(value) ||
     validMissionChange(value) ||
     validTeamChange(value)
   );

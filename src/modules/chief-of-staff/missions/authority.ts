@@ -7,7 +7,7 @@ import { cosBoundary } from '../../../cos-boundary.js';
 import { validateMattermostSessionForExecution } from '../../../channels/mattermost-subscription.js';
 import { currentRelease, releaseMode } from '../../../release-runtime.js';
 import { subscriptionCoordinator } from '../../../providers/codex-subscription-coordinator.js';
-import { digest } from '../domain/contracts.js';
+import { digest, type Context } from '../domain/contracts.js';
 import { subscriptionActivation } from '../bridge/model-policy.js';
 import { policyAllowsBriefContext } from '../bridge/brief-context-renewal.js';
 import {
@@ -19,17 +19,27 @@ import { readPrivate } from '../ops/target-state.js';
 import { readDelegation } from './delegation.js';
 import { RESEARCH_TEMPLATE } from './work-order.js';
 import type { MissionAuthorityResolver } from './proposal-store.js';
+import type { ActionAuthorityResolver } from '../actions/authority.js';
 
-/** Read-only local authority. Callers must separately verify current remote private membership,
- * source access and (for new requests) owner ingress. Historical ingress never renews model consent.
- */
-export function createMissionAuthorityResolver(options: {
+type AuthorityOptions = {
   targetRoot: string;
   db: Database.Database;
   admitted(): boolean;
   assertHostAuthority(): void;
-}): MissionAuthorityResolver {
-  return (context) => {
+};
+export function createMissionAuthorityResolver(options: AuthorityOptions): MissionAuthorityResolver {
+  return createNativeAuthorityResolver(options, 'mission') as MissionAuthorityResolver;
+}
+/** Main coordinator authority grants no specialist delegation, model invocation or provider write. */
+export function createActionAuthorityResolver(options: AuthorityOptions): ActionAuthorityResolver {
+  return createNativeAuthorityResolver(options, 'calendar_action') as ActionAuthorityResolver;
+}
+
+/** Read-only local authority. Callers must separately verify current remote private membership,
+ * source access and (for new requests) owner ingress. Historical ingress never renews model consent.
+ */
+function createNativeAuthorityResolver(options: AuthorityOptions, profile: 'mission' | 'calendar_action') {
+  return (context: Context) => {
     try {
       options.assertHostAuthority();
       if (!options.admitted() || options.db !== getDb() || context.origin || !releaseMode() || !currentRelease())
@@ -49,8 +59,8 @@ export function createMissionAuthorityResolver(options: {
         native.value.messagingGroup.platform_id !== `mattermost:${binding.instanceId}:${binding.channelId}`
       )
         return null;
-      const delegation = readDelegation(options.targetRoot, binding);
-      if (!delegation?.enabled) return null;
+      const delegation = profile === 'mission' ? readDelegation(options.targetRoot, binding) : null;
+      if (profile === 'mission' && !delegation?.enabled) return null;
       const owner = subscriptionCoordinator();
       if (!owner) return null;
       const account = JSON.parse(owner.cached().authJson)?.tokens?.account_id;
@@ -93,12 +103,19 @@ export function createMissionAuthorityResolver(options: {
       // after it consumes the final allowance. This resolver never reserves or replenishes usage.
       options.assertHostAuthority();
       if (!options.admitted() || subscriptionCoordinator() !== owner) return null;
-      return {
+      const common = {
         bindingDigest: digest(binding),
-        delegationDigest: digest(delegation),
         contextGeneration: row.generation,
-        provider: { profile: RESEARCH_TEMPLATE.providerProfile, model: policy.model, policyDigest: digest(policy) },
+        provider: {
+          profile: profile === 'mission' ? RESEARCH_TEMPLATE.providerProfile : 'codex-subscription/coordinator-v1',
+          model: policy.model,
+          policyDigest: digest(policy),
+        },
       };
+      return profile === 'mission'
+        ? { ...common, delegationDigest: digest(delegation) }
+        : { ...common, actionProfileDigest: digest('cos-calendar-action/v1') };
+      // eslint-disable-next-line no-catch-all/no-catch-all -- Native and credential diagnostics cannot cross the private authority boundary.
     } catch {
       // Missing/corrupt native, private or credential state denies authority without repair or secret output.
       return null;

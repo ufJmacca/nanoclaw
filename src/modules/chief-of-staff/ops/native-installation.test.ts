@@ -24,6 +24,7 @@ it('backs up committed WAL contents consistently without changing the live datab
   live.pragma('wal_autocheckpoint=0');
   live.exec("CREATE TABLE messages(id INTEGER PRIMARY KEY, body TEXT); INSERT INTO messages VALUES(1,'preserved');");
   try {
+    const wal = fs.readFileSync(source + '-wal');
     const result = await backupNativeDatabase(source, destination);
     const copy = new Database(result.file, { readonly: true });
     try {
@@ -31,6 +32,9 @@ it('backs up committed WAL contents consistently without changing the live datab
     } finally {
       copy.close();
     }
+    expect(fs.readdirSync(destination).sort()).toEqual(['native-backup.json', 'native.sqlite']);
+    expect(live.pragma('journal_mode', { simple: true })).toBe('wal');
+    expect(fs.readFileSync(source + '-wal')).toEqual(wal);
     live.exec("INSERT INTO messages VALUES(2,'new arrival')");
     expect(live.prepare('SELECT count(*) AS n FROM messages').get()).toEqual({ n: 2 });
     expect(fs.statSync(result.file).mode & 0o777).toBe(0o600);

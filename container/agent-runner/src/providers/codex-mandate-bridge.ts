@@ -9,7 +9,13 @@ import type { createCosToolDispatch } from './codex-cos-tools.js';
 
 type McpResult = { content: { type: 'text'; text: string }[]; isError: boolean };
 const unavailable = (): McpResult => ({ content: [{ type: 'text', text: 'CoS tool unavailable.' }], isError: true });
-const tools = new Set(['cos_mandate_activity', 'cos_mandate_propose']);
+const tools = new Set([
+  'cos_mandate_activity',
+  'cos_mandate_propose',
+  'cos_action_propose',
+  'cos_action_get',
+  'cos_action_cancel',
+]);
 
 export async function createMandateToolBridge(
   dispatch: ReturnType<typeof createCosToolDispatch>,
@@ -107,16 +113,14 @@ export async function createMandateToolBridge(
     'args = ["/app/src/mcp-tools/native-mandate-server.ts"]',
     'required = true',
     'env_vars = []',
-    'enabled_tools = ["cos_mandate_activity", "cos_mandate_propose"]',
+    `enabled_tools = ${JSON.stringify([...tools])}`,
     'default_tools_approval_mode = "prompt"',
     '[mcp_servers.nanoclaw_cos_mandates.env]',
     `NANOCLAW_COS_TOOL_SOCKET = ${tomlBasicString(socket)}`,
-    // These internal RPCs cannot approve a mandate or perform an external action.
+    // Keep the existing server key so retained native threads gain tools without a new context.
+    // These internal RPCs cannot grant owner approval or perform an external action.
     // The dispatcher and trusted host still enforce all actual authority checks.
-    '[mcp_servers.nanoclaw_cos_mandates.tools.cos_mandate_activity]',
-    'approval_mode = "approve"',
-    '[mcp_servers.nanoclaw_cos_mandates.tools.cos_mandate_propose]',
-    'approval_mode = "approve"',
+    ...[...tools].flatMap((tool) => [`[mcp_servers.nanoclaw_cos_mandates.tools.${tool}]`, 'approval_mode = "approve"']),
     '',
   ].join('\n');
   return {
@@ -142,7 +146,7 @@ export async function createMandateToolBridge(
   };
 }
 
-/** Used only by the image's fixed mandate MCP entry point. No URL or command input. */
+/** Used only by the image's fixed coordinator MCP entry point. No URL or command input. */
 export async function callNativeMandateTool(socket: string, tool: string, args: unknown): Promise<McpResult> {
   try {
     const stat = fs.lstatSync(socket);

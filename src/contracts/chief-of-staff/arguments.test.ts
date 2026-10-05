@@ -23,7 +23,7 @@ describe('CoS fixture command selection', () => {
   it.each(
     [
       [],
-      ['--slice', 'S09', '--db-profile', 'test'],
+      ['--slice', 'S10', '--db-profile', 'test'],
       ['--slice', 'S01', '--db-profile', 'runtime'],
       ['--demo', '--slice', 'S01', '--db-profile', 'test'],
       ['--slice', 'S01', '--db-profile', 'test', '--db-profile', 'test'],
@@ -99,5 +99,16 @@ it('registers S08 mandate admission, partition and native preparation contracts 
     ...fixtureFiles({ slice: 'S07', demo: false }),
     'mandate.integration',
     'mandate-flow.integration',
+  ]);
+});
+it('registers the complete S09 action, resource and native approval/recovery contracts with all predecessors', () => {
+  const args = parseFixtureArguments(['--demo', '--fixture', '--slice', 'S09', '--db-profile', 'test']);
+  expect(fixtureFiles(args)).toEqual(['actions-flow.integration']);
+  expect(fixtureFiles({ ...args, demo: false })).toEqual([
+    ...fixtureFiles({ slice: 'S08', demo: false }),
+    'action-schema.integration',
+    'actions.integration',
+    'actions-sources.integration',
+    'actions-flow.integration',
   ]);
 });

@@ -25,6 +25,71 @@ import { targetBinding } from './target-host.js';
 import { writeAtomic } from './target-state.js';
 import { digest } from '../domain/contracts.js';
 import type { DeploymentReceipt } from './deployment.js';
+import * as targetActionBackup from './target-action-backup.js';
+import * as conversations from './conversation-backup.js';
+import * as missions from './mission-backup.js';
+import * as calendars from '../calendar/backup.js';
+import * as databaseCli from './db-cli.js';
+import * as targetHost from './target-host.js';
+it('S09 records migration acceptance only after the target paired action backup succeeds', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-action-migration-'));
+  const settings = {
+    stateRoot: root + '/state',
+    releaseRoot: root + '/releases',
+    stagingRoot: root + '/staging',
+    sourceRoot: root + '/source',
+    userHome: root,
+    installationRoot: root + '/app',
+    dataRoot: root + '/app/data',
+    service: 'nano.service',
+    hostFingerprint: '1'.repeat(64),
+    databaseFingerprint: '2'.repeat(64),
+  } as DeploymentSettings;
+  const manifest = fixtureRelease('S09'),
+    receipt = path.join(settings.stateRoot, 'releases', manifest.releaseId);
+  fs.mkdirSync(settings.dataRoot, { recursive: true, mode: 0o700 });
+  fs.mkdirSync(receipt, { recursive: true, mode: 0o700 });
+  const db = new Database(path.join(settings.dataRoot, 'v2.db'));
+  db.close();
+  vi.spyOn(maintenance, 'maintenanceLeaseForOwner').mockReturnValue({} as maintenance.MaintenanceLease);
+  vi.spyOn(maintenance, 'assertMaintenanceLease').mockReturnValue({} as import('./target-state.js').TargetState);
+  vi.spyOn(nativeInstallation, 'backupNativeDatabase').mockResolvedValue(
+    {} as Awaited<ReturnType<typeof nativeInstallation.backupNativeDatabase>>,
+  );
+  vi.spyOn(conversations, 'verifyConversationBackup').mockResolvedValue(
+    {} as Awaited<ReturnType<typeof conversations.verifyConversationBackup>>,
+  );
+  vi.spyOn(missions, 'verifyMissionBackup').mockResolvedValue(
+    {} as Awaited<ReturnType<typeof missions.verifyMissionBackup>>,
+  );
+  vi.spyOn(calendars, 'verifyCalendarBackup').mockResolvedValue(
+    {} as Awaited<ReturnType<typeof calendars.verifyCalendarBackup>>,
+  );
+  vi.spyOn(targetHost, 'readTargetDatabaseEnvironment').mockReturnValue({ COS_PGDATABASE: 'fixture' });
+  const migrate = vi.spyOn(databaseCli, 'databaseCommand').mockResolvedValue({ status: 'ok', schema_version: 16 });
+  const paired = vi
+    .spyOn(targetActionBackup, 'backupTargetActionState')
+    .mockResolvedValue({} as Awaited<ReturnType<typeof targetActionBackup.backupTargetActionState>>);
+  calls.observe.mockResolvedValue({ pid: 0, cwd: settings.installationRoot, activeState: 'inactive' });
+  calls.ownedContainers.mockResolvedValue([]);
+  try {
+    await createTargetEffects(settings, manifest, digest(manifest)).migrate();
+    expect(paired).toHaveBeenCalledWith(settings, manifest.releaseId);
+    expect(paired.mock.invocationCallOrder[0]).toBeGreaterThan(migrate.mock.invocationCallOrder[0]);
+    expect(JSON.parse(fs.readFileSync(path.join(receipt, 'migration.json'), 'utf8')).schema_version).toBe(16);
+    fs.unlinkSync(path.join(receipt, 'migration.json'));
+    paired.mockRejectedValueOnce(Error('target_action_backup_unavailable'));
+    await expect(createTargetEffects(settings, manifest, digest(manifest)).migrate()).rejects.toThrow(
+      'target_action_backup_unavailable',
+    );
+    expect(fs.existsSync(path.join(receipt, 'migration.json'))).toBe(false);
+  } finally {
+    vi.restoreAllMocks();
+    calls.observe.mockReset();
+    calls.ownedContainers.mockReset();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
 it('records a concrete process mismatch before rollback without exposing runtime paths', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-health-process-'));
   const settings = {
@@ -89,8 +154,8 @@ it('S05 target activation and legacy rollback refuse permanent child state even 
     "CREATE TABLE cos_mission_boundaries(opaque TEXT); INSERT INTO cos_mission_boundaries VALUES('retained'); CREATE TABLE messages(body TEXT); INSERT INTO messages VALUES('KEEP'); CREATE TABLE host_execution_lease(singleton_id INTEGER,pid INTEGER)",
   );
   db.close();
-  vi.spyOn(maintenance, 'maintenanceLeaseForOwner').mockReturnValue({} as any);
-  vi.spyOn(maintenance, 'assertMaintenanceLease').mockReturnValue({} as any);
+  vi.spyOn(maintenance, 'maintenanceLeaseForOwner').mockReturnValue({} as maintenance.MaintenanceLease);
+  vi.spyOn(maintenance, 'assertMaintenanceLease').mockReturnValue({} as import('./target-state.js').TargetState);
   vi.spyOn(migrations, 'migrationStatus').mockResolvedValue(6);
   const install = vi
     .spyOn(nativeInstallation, 'installServiceOverride')

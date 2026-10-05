@@ -26,3 +26,8 @@ COS_PI_REPOSITORY_DIR=__VERIFIED_EXISTING_PI_REPOSITORY_DIRECTORY__
 COS_PI_RELEASE_SOURCE_DIR=__VERIFIED_DETACHED_RELEASE_SOURCE_ROOT__
 # source_commit/source_tree/source_fetch_ref come from the tested release manifest.
 # Use existing read-only GitHub access on Pi; never a secret-bearing remote URL.
+
+# Trusted Pi host only. Separate owner consent, writer credentials, an owned
+# calendar and a verified sandbox restore are required before enabling writes.
+# Disabling new writes preserves admitted readback of previously started events.
+COS_ACTIONS_ENABLED=false

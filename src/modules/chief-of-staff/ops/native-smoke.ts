@@ -132,6 +132,9 @@ export async function nativeFixtureSmoke(options: { root: string; hostRoot: stri
     await client.start();
     const tools = await client.request('tools/list', {});
     assert.deepEqual(tools.tools.map((tool: { name: string }) => tool.name).sort(), [
+      'cos_action_cancel',
+      'cos_action_get',
+      'cos_action_propose',
       'cos_answer_get',
       'cos_answer_prepare',
       'cos_brief_request',
