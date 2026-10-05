@@ -16,6 +16,7 @@ import { PROACTIVE_CHECKSUM } from '../../modules/chief-of-staff/store/proactive
 import { MANDATE_CHECKSUM } from '../../modules/chief-of-staff/store/mandate-schema.js';
 import { ACTION_CHECKSUM } from '../../modules/chief-of-staff/store/action-schema.js';
 import { STRATEGY_CHECKSUM } from '../../modules/chief-of-staff/store/strategy-schema.js';
+import { STRATEGY_CHAIN_CHECKSUM } from '../../modules/chief-of-staff/store/strategy-chain-schema.js';
 /** Synthetic identities for release-contract tests; never a transferable artifact receipt. */
 export function fixtureRelease(slice: ReleaseManifest['slice'] = 'S01'): ReleaseManifest {
   const commit = 'a'.repeat(40),
@@ -39,7 +40,7 @@ export function fixtureRelease(slice: ReleaseManifest['slice'] = 'S01'): Release
                       ? 15
                       : slice === 'S09'
                         ? 16
-                        : 17;
+                        : 18;
   return {
     contract: 'cos-release/v1',
     releaseId: 'release-fixture',
@@ -107,6 +108,7 @@ export function fixtureRelease(slice: ReleaseManifest['slice'] = 'S01'): Release
       ...(schemaVersion >= 15 ? [{ version: 15, checksum: MANDATE_CHECKSUM }] : []),
       ...(schemaVersion >= 16 ? [{ version: 16, checksum: ACTION_CHECKSUM }] : []),
       ...(schemaVersion >= 17 ? [{ version: 17, checksum: STRATEGY_CHECKSUM }] : []),
+      ...(schemaVersion >= 18 ? [{ version: 18, checksum: STRATEGY_CHAIN_CHECKSUM }] : []),
     ],
     previousReleaseIds: [],
     images: [

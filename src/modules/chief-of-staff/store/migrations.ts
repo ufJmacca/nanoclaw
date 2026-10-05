@@ -20,8 +20,9 @@ import { PROACTIVE_SCHEMA, PROACTIVE_CHECKSUM } from './proactive-schema.js';
 import { MANDATE_SCHEMA, MANDATE_CHECKSUM } from './mandate-schema.js';
 import { ACTION_SCHEMA, ACTION_CHECKSUM } from './action-schema.js';
 import { STRATEGY_SCHEMA, STRATEGY_CHECKSUM } from './strategy-schema.js';
+import { STRATEGY_CHAIN_SCHEMA, STRATEGY_CHAIN_CHECKSUM } from './strategy-chain-schema.js';
 export { INITIAL_SCHEMA, INITIAL_CHECKSUM } from './schema-definition.js';
-export const SCHEMA_VERSION = 17;
+export const SCHEMA_VERSION = 18;
 export const MIGRATIONS = [
   { version: 1, checksum: INITIAL_CHECKSUM, sql: INITIAL_SCHEMA },
   { version: 2, checksum: KNOWLEDGE_CHECKSUM, sql: KNOWLEDGE_SCHEMA },
@@ -40,6 +41,7 @@ export const MIGRATIONS = [
   { version: 15, checksum: MANDATE_CHECKSUM, sql: MANDATE_SCHEMA },
   { version: 16, checksum: ACTION_CHECKSUM, sql: ACTION_SCHEMA },
   { version: 17, checksum: STRATEGY_CHECKSUM, sql: STRATEGY_SCHEMA },
+  { version: 18, checksum: STRATEGY_CHAIN_CHECKSUM, sql: STRATEGY_CHAIN_SCHEMA },
 ] as const;
 const LOCK_ID = 73101001;
 const identifier = (value: string) => '"' + value.replaceAll('"', '""') + '"';

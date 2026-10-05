@@ -15,6 +15,7 @@ import { PROACTIVE_CHECKSUM } from '../store/proactive-schema.js';
 import { MANDATE_CHECKSUM } from '../store/mandate-schema.js';
 import { ACTION_CHECKSUM } from '../store/action-schema.js';
 import { STRATEGY_CHECKSUM } from '../store/strategy-schema.js';
+import { STRATEGY_CHAIN_CHECKSUM } from '../store/strategy-chain-schema.js';
 export const REQUIRED_RELEASE_CHECKS = [
   'root',
   'runner',
@@ -100,7 +101,7 @@ export function validateReleaseManifest(value: unknown): ReleaseManifest {
                       ? 15
                       : value.slice === 'S09'
                         ? 16
-                        : 17;
+                        : 18;
   const checksums = [
     INITIAL_CHECKSUM,
     KNOWLEDGE_CHECKSUM,
@@ -119,6 +120,7 @@ export function validateReleaseManifest(value: unknown): ReleaseManifest {
     MANDATE_CHECKSUM,
     ACTION_CHECKSUM,
     STRATEGY_CHECKSUM,
+    STRATEGY_CHAIN_CHECKSUM,
   ];
   if (
     !object(postgres) ||
