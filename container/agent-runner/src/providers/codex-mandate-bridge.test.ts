@@ -6,6 +6,29 @@ import { createCosToolDispatch } from './codex-cos-tools.js';
 import { createMandateToolBridge, callNativeMandateTool } from './codex-mandate-bridge.js';
 
 const mandate_id = 'mandate-' + 'a'.repeat(64);
+test('S09 retained coordinator context gains action controls through the same fenced MCP bridge', async () => {
+  const f = await fixture();
+  const action_id = 'action-' + 'a'.repeat(64);
+  try {
+    expect((await callNativeMandateTool(f.bridge.socket, 'cos_action_get', { action_id })).isError).toBe(true);
+    f.bridge.beginTurn('existing-retained-thread', 'owner-turn');
+    expect((await callNativeMandateTool(f.bridge.socket, 'cos_action_get', { action_id })).isError).toBe(false);
+    expect((await callNativeMandateTool(f.bridge.socket, 'cos_action_cancel', { action_id })).isError).toBe(false);
+    for (const tool of ['cos_action_approve', 'cos_action_execute', 'cos_action_delete', 'cos_action_retry'])
+      expect((await callNativeMandateTool(f.bridge.socket, tool, { action_id })).isError).toBe(true);
+    expect(
+      (await callNativeMandateTool(f.bridge.socket, 'cos_action_get', { action_id, scope_id: 'foreign' })).isError,
+    ).toBe(true);
+    const config = Bun.TOML.parse(f.bridge.configuration) as any;
+    expect(config.mcp_servers.nanoclaw_cos_mandates.enabled_tools).toContain('cos_action_propose');
+    expect(config.mcp_servers.nanoclaw_cos_mandates.tools.cos_action_propose.approval_mode).toBe('approve');
+    f.bridge.endTurn();
+    expect((await callNativeMandateTool(f.bridge.socket, 'cos_action_get', { action_id })).isError).toBe(true);
+    expect(f.calls).toEqual(['cos_action_get', 'cos_action_cancel']);
+  } finally {
+    await f.close();
+  }
+});
 async function fixture(execute?: Parameters<typeof createCosToolDispatch>[0]) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-mandate-bridge-'));
   fs.chmodSync(directory, 0o700);
@@ -28,7 +51,7 @@ async function fixture(execute?: Parameters<typeof createCosToolDispatch>[0]) {
     },
   };
 }
-test('S08 retained-thread mandate MCP shares the current native turn fence and exposes no other tools', async () => {
+test('S08/S09 retained-thread coordinator MCP shares the current native turn fence and exposes only fixed tools', async () => {
   const f = await fixture();
   try {
     expect((await callNativeMandateTool(f.bridge.socket, 'cos_mandate_activity', { mandate_id })).isError).toBe(true);
@@ -52,11 +75,17 @@ test('S08 retained-thread mandate MCP shares the current native turn fence and e
     expect(config.mcp_servers.nanoclaw_cos_mandates.enabled_tools).toEqual([
       'cos_mandate_activity',
       'cos_mandate_propose',
+      'cos_action_propose',
+      'cos_action_get',
+      'cos_action_cancel',
     ]);
     expect(config.mcp_servers.nanoclaw_cos_mandates.default_tools_approval_mode).toBe('prompt');
     expect(Object.keys(config.mcp_servers.nanoclaw_cos_mandates.tools)).toEqual([
       'cos_mandate_activity',
       'cos_mandate_propose',
+      'cos_action_propose',
+      'cos_action_get',
+      'cos_action_cancel',
     ]);
   } finally {
     await f.close();

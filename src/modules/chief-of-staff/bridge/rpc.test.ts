@@ -27,6 +27,17 @@ function fixture(allowed = true) {
   const store = {
     context: vi.fn().mockResolvedValue({ status: 'ok', records: [{ id: 'approved-record' }] }),
     propose: vi.fn(),
+    requestAction: vi
+      .fn()
+      .mockResolvedValue({
+        status: 'ok',
+        action_id: 'action-' + 'b'.repeat(64),
+        confirmation_token: 'PRIVATE_ACTION_APPROVAL',
+      }),
+    actions: {
+      inspect: vi.fn().mockResolvedValue({ status: 'ok', state: 'waiting_approval' }),
+      cancel: vi.fn().mockResolvedValue({ status: 'ok', state: 'cancelled', deleted: false }),
+    },
     readWork: vi.fn(),
     status: vi.fn(),
     requestMission: vi.fn().mockResolvedValue({
@@ -50,6 +61,89 @@ function fixture(allowed = true) {
   const handler = createRpcHandler({ resolveContext, store: store as unknown as PriorityStore });
   return { db, handler, store, resolveContext };
 }
+const calendarAction = {
+  kind: 'calendar_block',
+  binding_id: '33333333-3333-4333-8333-333333333333',
+  calendar_id: 'selected-calendar',
+  start: '2026-10-06T09:00:00Z',
+  end: '2026-10-06T10:00:00Z',
+  time_zone: 'UTC',
+  title: 'Pilot Alpha',
+  description: '',
+  project_id: null,
+  mission_id: null,
+  attendees: [],
+};
+it('S09 routes only owner calendar proposals, status and cancellation without exposing approval tokens', async () => {
+  const f = fixture(),
+    action_id = 'action-' + 'b'.repeat(64);
+  for (const [method, params] of [
+    ['cos_action_propose', { request: calendarAction }],
+    ['cos_action_get', { action_id }],
+    ['cos_action_cancel', { action_id }],
+  ])
+    await f.handler(
+      {
+        action: 'cos_rpc',
+        delivery_id: '22222222-2222-4222-8222-222222222222',
+        request: { ...request, method, params },
+      },
+      {} as Session,
+      f.db,
+    );
+  expect(f.store.requestAction).toHaveBeenCalledExactlyOnceWith(
+    expect.objectContaining({ ownerId: 'owner', scopeId: 'fixture' }),
+    request.request_id,
+    calendarAction,
+  );
+  expect(f.store.actions.inspect).toHaveBeenCalledExactlyOnceWith(
+    expect.objectContaining({ sessionId: 'session' }),
+    action_id,
+  );
+  expect(f.store.actions.cancel).toHaveBeenCalledExactlyOnceWith(
+    expect.objectContaining({ ownerId: 'owner' }),
+    action_id,
+  );
+  expect(JSON.stringify(f.db.prepare('SELECT response FROM cos_rpc_responses').all())).not.toContain(
+    'PRIVATE_ACTION_APPROVAL',
+  );
+});
+it.each(['schedule', 'mission_review'] as const)(
+  'S09 automatic %s context cannot use owner action controls',
+  async (kind) => {
+    const f = fixture();
+    f.resolveContext.mockResolvedValue({
+      scopeId: 'fixture',
+      ownerId: 'owner',
+      sessionId: 'session',
+      agentGroupId: 'group',
+      ingressId: 'automatic',
+      origin: { kind, runId: 'run', generation: 1 },
+    });
+    const handler = createRpcHandler({
+      resolveContext: f.resolveContext,
+      store: f.store as unknown as PriorityStore,
+      reserveTool: async () => ({ status: 'ok' }),
+    });
+    for (const [method, params] of [
+      ['cos_action_propose', { request: calendarAction }],
+      ['cos_action_get', { action_id: 'action-' + 'b'.repeat(64) }],
+      ['cos_action_cancel', { action_id: 'action-' + 'b'.repeat(64) }],
+    ])
+      await handler(
+        {
+          action: 'cos_rpc',
+          delivery_id: '22222222-2222-4222-8222-222222222222',
+          request: { ...request, method, params },
+        },
+        {} as Session,
+        f.db,
+      );
+    expect(f.store.requestAction).not.toHaveBeenCalled();
+    expect(f.store.actions.inspect).not.toHaveBeenCalled();
+    expect(f.store.actions.cancel).not.toHaveBeenCalled();
+  },
+);
 it('S08 activity RPC binds the private owner context and refuses caller-supplied scope', async () => {
   const f = fixture(),
     mandate_id = 'mandate-' + 'a'.repeat(64);
