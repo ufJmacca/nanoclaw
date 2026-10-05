@@ -4,6 +4,7 @@ const f = vi.hoisted(() => ({
   mission: vi.fn(),
   connect: vi.fn(),
   authority: vi.fn(),
+  actionAuthority: vi.fn(),
   tick: vi.fn(async () => {}),
   stop: vi.fn(async () => {}),
   close: vi.fn(async () => {}),
@@ -24,7 +25,10 @@ vi.mock('../../container-runner.js', () => ({
   hasContainerExecution: vi.fn(() => false),
 }));
 vi.mock('./host-store.js', () => ({ connectCosHostStore: f.connect }));
-vi.mock('./missions/authority.js', () => ({ createMissionAuthorityResolver: () => f.authority }));
+vi.mock('./missions/authority.js', () => ({
+  createMissionAuthorityResolver: () => f.authority,
+  createActionAuthorityResolver: () => f.actionAuthority,
+}));
 vi.mock('./bridge/coordinator-launcher.js', () => ({ createCoordinatorLauncher: () => ({ close: f.close }) }));
 vi.mock('./service.js', () => ({
   CosService: class {
@@ -89,5 +93,7 @@ it('S05 production bootstrap creates specialists from the checked service store 
     {},
     f.authority,
     expect.any(Function),
+    undefined,
+    f.actionAuthority,
   );
 });

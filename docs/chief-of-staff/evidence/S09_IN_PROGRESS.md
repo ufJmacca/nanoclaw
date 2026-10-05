@@ -56,8 +56,13 @@ a separately identified protected restore database. The calendar backup must
 contain the exact writer vault/reference with its narrow scopes; archived tokens
 are never returned or restored. These gates passed 246 affected tests in 19 files,
 including 22 profile checks and six writer backup checks, with type checks and
-zero-warning lint. Runtime/bootstrap wiring and operator proof recording remain
-unfinished; no production profile or live writer has been created.
+zero-warning lint. The existing NanoClaw bootstrap now opens the separate action
+host after confirming the database identity and schema. Writer discovery omits
+disabled grants; an existing grant can still read back its original event when
+new writes are disabled. Owner, session, binding, pause, storage and recovery
+changes close provider admission, including changes during an awaited token.
+Operator proof recording remains unfinished; no production profile or live writer
+has been created.
 
 Recorded development-container gates include:
 
@@ -68,11 +73,12 @@ Recorded development-container gates include:
 - 178 OAuth/calendar checks and 171 vault/calendar checks;
 - root type checks and zero-warning lint for the increments above.
 
-The complete repository regression run passed 2,425 tests in 242 files after
-adding S09's schema-16 release checks. The preceding run exposed an S08 test
+The complete repository regression run passed 2,506 tests in 246 files after
+connecting the action host. The earlier release-contract run exposed an S08 test
 fixture that incorrectly included every new migration. Its corrected fixture
 pins the historical S08 schema at 15; S09 requires exactly schema 16. The release
-and native compatibility checks passed 46 tests in three files. These checks do
+and native compatibility checks passed 46 tests in three files. Root types and
+zero-warning lint passed for the runtime increment. These checks do
 not constitute an S09 image build or deployment acceptance.
 
 These are separate, overlapping runs, not an additive test total. The selected

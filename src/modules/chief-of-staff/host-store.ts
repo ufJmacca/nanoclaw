@@ -15,6 +15,9 @@ import { CalendarView } from './calendar/view.js';
 import type { MissionAuthorityResolver } from './missions/proposal-store.js';
 import type { TeamAuthorityResolver } from './missions/team-proposal-store.js';
 import type { ActionDependencies } from './actions/store.js';
+import type { ActionAuthorityResolver } from './actions/authority.js';
+import { actionSettings } from './actions/config.js';
+import { openActionHost } from './actions/host.js';
 
 /** Runtime credentials only. Startup validates the schema; it never migrates or opens source access implicitly. */
 export async function connectCosHostStore(
@@ -25,9 +28,12 @@ export async function connectCosHostStore(
   missionAuthority?: MissionAuthorityResolver,
   teamAuthority?: TeamAuthorityResolver,
   actionDependencies?: ActionDependencies,
+  actionAuthority?: ActionAuthorityResolver,
 ): Promise<PriorityStore> {
   const settings = knowledgeSettings(env);
   const calendarConfig = calendarSettings(env);
+  const actionConfig = actionSettings(env);
+  if (actionConfig.enabled && !actionAuthority && !actionDependencies) throw new Error('action_authority_required');
   const check = await connectChecked(env, 'runtime');
   try {
     const target = localTarget(roots.targetRoot, roots.installationRoot, roots.dataRoot);
@@ -37,6 +43,8 @@ export async function connectCosHostStore(
   } finally {
     await check.end();
   }
+  const actions =
+    actionDependencies ?? (actionAuthority ? await openActionHost(env, roots, admitted, actionAuthority) : undefined);
   const artifacts = openKnowledgeArtifacts(roots.targetRoot, [roots.installationRoot, roots.dataRoot]);
   const calendarOwner = calendarConfig.enabled ? openCalendarCredentials(roots) : undefined;
   const database = BoundedDatabase.fromConfig(await externalDatabaseConfig(env, 'runtime'), admitted);
@@ -73,11 +81,13 @@ export async function connectCosHostStore(
       : undefined,
     missionAuthority ? (context) => (admitted() ? missionAuthority(context) : null) : undefined,
     teamAuthority ? (context) => (admitted() ? teamAuthority(context) : null) : undefined,
-    actionDependencies
+    actions
       ? {
-          ...actionDependencies,
-          authority: (context) => (admitted() ? actionDependencies.authority(context) : null),
-          writer: (context, id, binding) => (admitted() ? actionDependencies.writer(context, id, binding) : null),
+          ...actions,
+          authority: (context) => (admitted() ? actions.authority(context) : null),
+          writer: (context, id, binding) => (admitted() ? actions.writer(context, id, binding) : null),
+          writerEnabled: (context, id, binding) =>
+            admitted() && (actions.writerEnabled?.(context, id, binding) ?? true),
         }
       : undefined,
   );

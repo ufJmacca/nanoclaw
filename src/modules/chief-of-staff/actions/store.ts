@@ -23,6 +23,8 @@ export type ActionDependencies = {
   witness?: EffectWitness;
   authority: ActionAuthorityResolver;
   writer(context: Context, id: string, binding: ActionWriterBinding): CalendarActionWriter | null;
+  /** Local metadata only: discovery never contacts OAuth or a provider to learn whether new writes are enabled. */
+  writerEnabled?(context: Context, id: string, binding: ActionWriterBinding): boolean;
 };
 type BindingRow = { id: string; version: number; body: ActionWriterBinding; digest: string };
 export type PreparedAction = { binding: BindingRow; inspection: CalendarWriterInspection; authority: ActionAuthority };
@@ -131,7 +133,7 @@ export class ActionStore {
     }> = [];
     for (const candidate of candidates) {
       const binding = await this.binding(client, context, candidate.id);
-      if (binding)
+      if (binding && this.dependencies?.writerEnabled?.(context, binding.id, binding.body) !== false)
         result.push({
           binding_id: binding.id,
           calendar_id: binding.body.calendarId,

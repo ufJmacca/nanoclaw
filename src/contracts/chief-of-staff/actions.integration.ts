@@ -64,6 +64,7 @@ let admin: pg.Client, store: PriorityStore, request: CalendarActionRequest;
 let witness: ActionWitness, witnessParent: string;
 let enabled = true,
   busy = false;
+let writerDiscovery = true;
 let access: CalendarWriterAccess = {
   generation: writerBinding.credentialGeneration,
   calendarId: writerBinding.calendarId,
@@ -160,7 +161,12 @@ before(async () => {
     undefined,
     undefined,
     undefined,
-    { authority: () => (enabled ? authority : null), writer: () => writer, witness },
+    {
+      authority: () => (enabled ? authority : null),
+      writer: () => writer,
+      witness,
+      writerEnabled: () => writerDiscovery,
+    },
   );
   const now = (await admin.query('SELECT clock_timestamp() AS now')).rows[0].now.getTime();
   const instant = (offset: number) =>
@@ -1127,4 +1133,14 @@ test('S09 main context advertises only its separately enabled writer ID and exac
   assert.equal(json.includes(writerBinding.accountFingerprint), false);
   assert.equal(json.includes(writerBinding.credentialGeneration), false);
   assert.equal(json.includes(writerBinding.restoreProofDigest), false);
+  writerDiscovery = false;
+  try {
+    assert.deepEqual(
+      (await store.context(context)).action_writer_bindings,
+      [],
+      'a locally disabled writer is not advertised as enabled',
+    );
+  } finally {
+    writerDiscovery = true;
+  }
 });
