@@ -61,6 +61,34 @@ function fixture() {
   return { parent, root, owner, witness, start, installation };
 }
 describe('S09 target-owned deny-only effect witness', () => {
+  it('S09 consumes a result notification once across restarts independently of restored stores', () => {
+    const f = fixture(),
+      notice = {
+        format: 'cos-action-notification/v1' as const,
+        scopeId: 'scope',
+        ownerId: 'owner',
+        sessionId: 'session',
+        agentGroupId: 'group',
+        instanceId: 'fixture',
+        channelId: 'private',
+        actionId: f.start.intent.actionId,
+        intentDigest: f.start.approvedDigest,
+        state: 'verified' as const,
+        textDigest: digest('verified exact event'),
+      };
+    expect(f.witness.consumeNotification(notice)).toBe(true);
+    const restarted = new ActionWitness(f.root, f.installation, f.owner.generation);
+    expect(restarted.consumeNotification(notice)).toBe(false);
+    expect(() => restarted.consumeNotification({ ...notice, channelId: 'different' })).toThrow(
+      'action_notification_conflict',
+    );
+    expect(restarted.page('scope')).toEqual({ entries: [], nextOffset: null });
+    fs.writeFileSync(
+      path.join(f.root, 'owner.json'),
+      JSON.stringify({ ...f.owner, generation: '22222222-2222-4222-8222-222222222222' }),
+    );
+    expect(() => restarted.consumeNotification(notice)).toThrow('action_witness_owner_changed');
+  });
   it('bounds each recovery inventory page before reading witness contents', () => {
     const f = fixture();
     for (let index = 0; index < 205; index++)

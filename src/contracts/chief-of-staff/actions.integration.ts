@@ -1034,3 +1034,45 @@ test('S09-T10 coordinated sandbox restore reconciles a fixture event created aft
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+test('S09 result notices verify immutable receipts, use exact private destinations and survive restored delivery state', async () => {
+  const action = await queued(70),
+    beforeWrites = writes;
+  assert.equal((await store.actions.executor.run(context, action.id, nativeAdmission)).state, 'verified');
+  const notices = store.actions.notifications;
+  const notice = await notices.read(context, action.id);
+  assert.equal(notice.status, 'ok');
+  const envelope = notice.notice as { channelId: string; state: string };
+  assert.equal(envelope.channelId, scope);
+  assert.equal(envelope.state, 'verified');
+  assert.match(String(notice.text), /Calendar block verified/);
+  assert.match(String(notice.text), /No guests/);
+  assert.equal((await notices.read({ ...context, ownerId: 'other' }, action.id)).status, 'denied');
+  assert.equal((await notices.read({ ...context, sessionId: 'other' }, action.id)).status, 'denied');
+  assert.equal(
+    witness.consumeNotification(
+      notice.notice as import('../../modules/chief-of-staff/actions/notification-protocol.js').ActionNotification,
+    ),
+    true,
+  );
+  // A database rollback/reprojection cannot erase the independent target's consumed send.
+  assert.equal(
+    witness.consumeNotification(
+      (await notices.read(context, action.id))
+        .notice as import('../../modules/chief-of-staff/actions/notification-protocol.js').ActionNotification,
+    ),
+    false,
+  );
+  const result = (await store.actions.inspect(context, action.id)).result;
+  await admin.query('UPDATE cos.actions SET result=$3 WHERE scope_id=$1 AND id=$2', [
+    scope,
+    action.id,
+    JSON.stringify({ ...(result as object), event_id: 'f'.repeat(64) }),
+  ]);
+  assert.equal((await notices.read(context, action.id)).status, 'denied');
+  await admin.query('UPDATE cos.actions SET result=$3 WHERE scope_id=$1 AND id=$2', [
+    scope,
+    action.id,
+    JSON.stringify(result),
+  ]);
+  assert.equal(writes, beforeWrites + 1);
+});

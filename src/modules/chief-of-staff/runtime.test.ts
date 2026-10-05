@@ -65,14 +65,37 @@ it('S09 pumps approved actions in the retained main context after the owner trig
     "INSERT INTO cos_conversation_states(scope_id,binding_digest,account_fingerprint,generation,status,updated_at) VALUES(?,?,?,?,'active',?)",
   ).run(binding.scopeId, digest(binding), 'a'.repeat(64), generation, new Date().toISOString());
   const actionId = 'action-' + 'c'.repeat(64),
-    wake = vi.fn();
+    wake = vi.fn(),
+    send = vi.fn(async () => 'fixture-result-receipt'),
+    projectActionNotice = vi.fn();
+  vi.spyOn(delivery, 'getDeliveryAdapter').mockReturnValue({ deliver: send } as unknown as ReturnType<
+    typeof getDeliveryAdapter
+  >);
+  const text = 'Calendar block verified. No guests.',
+    notice = {
+      format: 'cos-action-notification/v1',
+      scopeId: 'scope',
+      ownerId: 'owner',
+      sessionId: 'session',
+      agentGroupId: 'group',
+      instanceId: 'fixture',
+      channelId: 'private',
+      actionId,
+      intentDigest: 'a'.repeat(64),
+      state: 'verified',
+      textDigest: digest(text),
+    };
   const actions = {
-    dependencies: { witness: {} },
+    dependencies: { witness: { consumeNotification: vi.fn(() => true) } },
     runs: {
       recoverWitnesses: vi.fn(async () => ({ status: 'ok', recovered: [], next_offset: null })),
       pending: vi.fn(async () => ({ status: 'ok', action_ids: [actionId], next_after: null })),
     },
     executor: { run: vi.fn(async () => ({ status: 'ok', state: 'verified' })) },
+    notifications: {
+      pending: vi.fn(async () => ({ status: 'ok', action_ids: [actionId], next_after: null })),
+      read: vi.fn(async () => ({ status: 'ok', notice, text })),
+    },
   };
   runtime = createCosRuntime({
     db,
@@ -89,6 +112,7 @@ it('S09 pumps approved actions in the retained main context after the owner trig
     destination: () => undefined,
     stop: vi.fn(),
     wake,
+    projectActionNotice,
   });
   await runtime.pump(binding);
   expect(actions.executor.run).toHaveBeenCalledTimes(1);
@@ -105,6 +129,17 @@ it('S09 pumps approved actions in the retained main context after the owner trig
   });
   expect(context.origin).toBeUndefined();
   expect(wake).not.toHaveBeenCalled();
+  expect(send).toHaveBeenCalledTimes(1);
+  expect(send).toHaveBeenCalledWith(
+    'mattermost',
+    'mattermost:fixture:private',
+    null,
+    'chat',
+    JSON.stringify({ text }),
+    undefined,
+    expect.stringMatching(/^cos-action-[a-f0-9]{64}$/),
+  );
+  expect(projectActionNotice).toHaveBeenCalledTimes(1);
   expect(permit.local()).toBe(true);
   db.prepare('UPDATE cos_identity_boundaries SET paused=1').run();
   expect(permit.local()).toBe(false);

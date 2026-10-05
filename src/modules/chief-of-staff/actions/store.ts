@@ -17,6 +17,7 @@ import { CalendarWriteError, type CalendarActionWriter, type CalendarWriterInspe
 import type { EffectWitness } from './witness.js';
 import { ActionRunStore } from './run-store.js';
 import { ActionExecutor } from './executor.js';
+import { ActionNotifications } from './notifications.js';
 
 export type ActionDependencies = {
   witness?: EffectWitness;
@@ -50,6 +51,7 @@ export function actionPreview(intent: ActionIntent, hash: string): CalendarActio
 export class ActionStore {
   readonly runs = new ActionRunStore(this);
   readonly executor = new ActionExecutor(this);
+  readonly notifications = new ActionNotifications(this);
   constructor(
     readonly database: BoundedDatabase,
     readonly knowledge?: KnowledgeStore,

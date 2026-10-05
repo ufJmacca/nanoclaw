@@ -5,6 +5,8 @@ import { validActionId, validActionInstant } from '../contracts/action-protocol.
 import { validActionIntent, type ActionIntent } from './intent.js';
 import { readPrivate } from '../ops/target-state.js';
 import { privateConversationDirectory, syncConversationDirectory } from '../ops/conversation-ownership.js';
+import { digest } from '../domain/contracts.js';
+import { actionNotificationId, validActionNotification, type ActionNotification } from './notification-protocol.js';
 
 type WitnessOwner = { format: 'cos-action-witness-owner/v1'; installationDigest: string; generation: string };
 export type StartedActionWitness = {
@@ -24,6 +26,7 @@ export interface EffectWitness {
   cancelled(actionId: string): boolean;
   list(scopeId: string, offset?: number): StartedActionWitness[];
   page(scopeId: string, offset?: number): { entries: StartedActionWitness[]; nextOffset: number | null };
+  consumeNotification(value: ActionNotification): boolean;
 }
 const hash = (value: unknown): value is string => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 const uuid = (value: unknown): value is string =>
@@ -102,6 +105,27 @@ export class ActionWitness implements EffectWitness {
   }
   private assertOwner() {
     owner(this.root, this.installationDigest, this.generation);
+  }
+  /** Record send consumption before touching a transport. Restoring PostgreSQL cannot reopen it. */
+  consumeNotification(value: ActionNotification): boolean {
+    this.assertOwner();
+    if (!validActionNotification(value)) throw new Error('unsafe_action_notification');
+    const name = actionNotificationId(value) + '.notification.json',
+      file = path.join(this.root, name);
+    if (fs.lstatSync(file, { throwIfNoEntry: false })) {
+      const existing = readPrivate<{ generation: string; notice: ActionNotification }>(file);
+      if (
+        !existing ||
+        Object.keys(existing).length !== 2 ||
+        existing.generation !== this.generation ||
+        !validActionNotification(existing.notice) ||
+        digest(existing.notice) !== digest(value)
+      )
+        throw new Error('action_notification_conflict');
+      return false;
+    }
+    publish(this.root, name, { generation: this.generation, notice: structuredClone(value) });
+    return true;
   }
   find(actionId: string): StartedActionWitness | null {
     this.assertOwner();

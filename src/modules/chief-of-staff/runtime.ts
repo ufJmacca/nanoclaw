@@ -31,6 +31,8 @@ import type { CosMissionIdentity } from '../../cos-mission-boundary.js';
 import { NativeMandateTasks } from './automation/mandate-native.js';
 import { MandatePump } from './automation/mandate-pump.js';
 import { ActionPump } from './actions/pump.js';
+import { ActionNotificationDelivery } from './actions/notification-delivery.js';
+import type { KnowledgeContext } from './knowledge/store.js';
 
 export type RuntimeDependencies = {
   db: Database.Database;
@@ -52,6 +54,7 @@ export type RuntimeDependencies = {
   withBriefTasks?<T>(session: Session, operation: (tasks: NativeBriefTasks) => T): T;
   withReviewTasks?<T>(session: Session, operation: (tasks: NativeMissionReviewTasks) => T): T;
   withMandateTasks?<T>(session: Session, operation: (tasks: NativeMandateTasks) => T): T;
+  projectActionNotice?(context: KnowledgeContext, text: string, id: string): void;
 };
 export function createCosRuntime(dependencies: RuntimeDependencies) {
   const d = dependencies;
@@ -155,40 +158,86 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
     const current = cosBoundary(session, d.db);
     return current.restricted && !!current.binding && !current.paused && digest(current.binding) === digest(binding);
   };
+  const localActionContext = (binding: CosBinding): KnowledgeContext | null => {
+    if (!enabled()) return null;
+    const session = d.session(binding.sessionId),
+      boundary = session && cosBoundary(session, d.db);
+    if (
+      !session ||
+      !boundary?.restricted ||
+      !boundary.binding ||
+      boundary.paused ||
+      !boundary.ingressId ||
+      digest(boundary.binding) !== digest(binding)
+    )
+      return null;
+    // Exact approval and the executor's lease govern effects. This lookup grants no model invocation.
+    return resolveKnowledgeContext(
+      session,
+      {
+        scopeId: binding.scopeId,
+        ownerId: binding.ownerId,
+        sessionId: binding.sessionId,
+        agentGroupId: binding.agentGroupId,
+        ingressId: boundary.ingressId,
+      },
+      d.db,
+    );
+  };
   const actionPump = d.store?.actions?.dependencies?.witness
     ? new ActionPump({
-        current: (binding) => {
-          if (!enabled()) return null;
-          const session = d.session(binding.sessionId),
-            boundary = session && cosBoundary(session, d.db);
-          if (
-            !session ||
-            !boundary?.restricted ||
-            !boundary.binding ||
-            boundary.paused ||
-            !boundary.ingressId ||
-            digest(boundary.binding) !== digest(binding)
-          )
-            return null;
-          // Exact approval and the executor's lease govern effects. This lookup grants no model invocation.
-          return resolveKnowledgeContext(
-            session,
-            {
-              scopeId: binding.scopeId,
-              ownerId: binding.ownerId,
-              sessionId: binding.sessionId,
-              agentGroupId: binding.agentGroupId,
-              ingressId: boundary.ingressId,
-            },
-            d.db,
-          );
-        },
+        current: localActionContext,
         admitted,
         recover: (context, offset) => d.store!.actions.runs.recoverWitnesses(context, offset),
         pending: (context, after) => d.store!.actions.runs.pending(context, after),
         execute: (context, id, permit) => d.store!.actions.executor.run(context, id, permit),
       })
     : undefined;
+  const actionNotices =
+    d.store?.actions?.notifications && d.store.actions.dependencies?.witness
+      ? new ActionNotificationDelivery({
+          notices: d.store.actions.notifications,
+          witness: d.store.actions.dependencies.witness,
+          current: localActionContext,
+          admitted: async (binding) => {
+            const adapter = getDeliveryAdapter();
+            return !!adapter && adapter.isAvailable?.('mattermost') !== false && (await admitted(binding));
+          },
+          project: (context, text, id) => {
+            if (d.projectActionNotice) return d.projectActionNotice(context, text, id);
+            const session = d.session(context.sessionId);
+            if (!session) throw new Error('action_result_session_unavailable');
+            writeSessionMessage(session.agent_group_id, session.id, {
+              id: id + ':' + session.agent_group_id,
+              kind: 'chat',
+              timestamp: new Date().toISOString(),
+              platformId: null,
+              channelType: 'mattermost',
+              threadId: null,
+              content: JSON.stringify({ role: 'assistant', content: text }),
+              trigger: 0,
+              idempotent: true,
+            });
+          },
+          send: (context, text, id) => {
+            const adapter = getDeliveryAdapter(),
+              session = d.session(context.sessionId),
+              boundary = session && cosBoundary(session, d.db),
+              binding = boundary?.restricted ? boundary.binding : null;
+            if (!binding || !adapter || !localActionContext(binding))
+              throw new Error('action_result_destination_unavailable');
+            return adapter.deliver(
+              'mattermost',
+              `mattermost:${binding.instanceId}:${binding.channelId}`,
+              null,
+              'chat',
+              JSON.stringify({ text }),
+              undefined,
+              id,
+            );
+          },
+        })
+      : undefined;
   const withTasks = <T>(binding: CosBinding, operation: (tasks: NativeBriefTasks) => T): T => {
     const session = d.session(binding.sessionId);
     if (!session || session.agent_group_id !== binding.agentGroupId) throw Error('cos_brief_session_unavailable');
@@ -469,6 +518,7 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
       if (enabled()) await reviewDispatch?.drain(binding);
       if (enabled()) await outbox?.drain(binding);
       if (enabled()) await actionPump?.drain(binding);
+      if (enabled()) await actionNotices?.drain(binding);
       if (enabled()) await mandatePump?.drain(binding);
       if (enabled() && d.store)
         for (const notifications of [d.store.missionNotifications, d.store.teamNotifications]) {
@@ -547,6 +597,7 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
     dispose: () => {
       disposed = true;
       actionPump?.close();
+      actionNotices?.close();
       setCosBoundaryHooks(null);
     },
   };
