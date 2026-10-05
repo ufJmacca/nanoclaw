@@ -10,9 +10,11 @@ import {
   restoreCoordinatedSandbox,
   verifyCoordinatedSandbox,
   verifyCoordinatedBackup,
+  restoreCoordinatedTestScope,
   type CoordinatedBackupOptions,
   type QuiescentCheckpoint,
 } from './coordinated-backup.js';
+import { databaseFingerprint } from './target-identity.js';
 import { KnowledgeArtifacts } from '../knowledge/artifacts.js';
 import { ActionWitness, initializeActionWitness } from '../actions/witness.js';
 import { MIGRATIONS } from '../store/migrations.js';
@@ -101,6 +103,76 @@ const sandboxConfig = {
   database: 'fixture',
   ssl: { rejectUnauthorized: true, ca: 'FIXTURE_CA' },
 };
+it('S09 imports a checked scope only into a separate protected test database, without updating or deleting rows', async () => {
+  const f = fixture();
+  await backupCoordinatedState(f.options);
+  const operationRoot = path.join(f.root, 'restore-operation');
+  fs.mkdirSync(operationRoot, { mode: 0o700 });
+  const sandbox = { client: f.options.client, config: sandboxConfig, testTargetId: 'fixture-protected-test' };
+  const result = await restoreCoordinatedTestScope(f.options, operationRoot, sandbox, async () => {});
+  expect(result).toMatchObject({ inserted: true, admissionRestored: false, eventJournalRestored: false });
+  expect(f.query.mock.calls.filter(([sql]) => sql.startsWith('INSERT INTO cos.'))).toHaveLength(1);
+  expect(f.query.mock.calls.filter(([sql]) => /^(UPDATE|DELETE|TRUNCATE|DROP|ALTER|CREATE)/.test(sql))).toEqual([]);
+});
+it.each(['same-database', 'foreign-scope', 'marker', 'columns', 'late-authority'])(
+  'S09 refuses %s sandbox import before any INSERT',
+  async (kind) => {
+    const f = fixture();
+    if (kind === 'same-database')
+      f.options.databaseFingerprint = await databaseFingerprint(f.options.client, sandboxConfig);
+    await backupCoordinatedState(f.options);
+    const operationRoot = path.join(f.root, 'restore-operation');
+    fs.mkdirSync(operationRoot, { mode: 0o700 });
+    const original = f.query.getMockImplementation()!;
+    f.query.mockImplementation(async (sql, values) => {
+      if (kind === 'foreign-scope' && sql.startsWith('SELECT id FROM cos.scopes')) return { rows: [{ id: 'scope' }] };
+      if (kind === 'marker' && sql.includes('FROM cos_admin.target_identity')) return { rows: [] };
+      if (kind === 'columns' && sql.includes('FROM pg_attribute')) return { rows: [{ attname: 'unexpected' }] };
+      return original(sql, values);
+    });
+    let checks = 0;
+    const check = vi.fn(async () => {
+      if (kind === 'late-authority' && ++checks >= 2) throw Error('PRIVATE_AUTHORITY_CANARY');
+    });
+    await expect(
+      restoreCoordinatedTestScope(
+        f.options,
+        operationRoot,
+        { client: f.options.client, config: sandboxConfig, testTargetId: 'fixture-protected-test' },
+        check,
+      ),
+    ).rejects.toThrow('coordinated_test_restore_unavailable');
+    expect(
+      f.query.mock.calls.filter(([sql]) => /^(INSERT|UPDATE|DELETE|TRUNCATE|DROP|ALTER|CREATE)/.test(sql)),
+    ).toEqual([]);
+  },
+);
+it('S09 unknown sandbox commit is reconciled by complete readback without another scope insert', async () => {
+  const f = fixture();
+  await backupCoordinatedState(f.options);
+  const operationRoot = path.join(f.root, 'restore-operation');
+  fs.mkdirSync(operationRoot, { mode: 0o700 });
+  const original = f.query.getMockImplementation()!;
+  let installed = false,
+    loseAck = true;
+  f.query.mockImplementation(async (sql, values) => {
+    if (sql.startsWith('SELECT id FROM cos.scopes')) return { rows: installed ? [{ id: 'scope' }] : [] };
+    if (sql.startsWith('INSERT INTO cos.')) installed = true;
+    if (sql === 'COMMIT' && loseAck) {
+      loseAck = false;
+      throw Error('PRIVATE_COMMIT_CANARY');
+    }
+    return original(sql, values);
+  });
+  const sandbox = { client: f.options.client, config: sandboxConfig, testTargetId: 'fixture-protected-test' };
+  await expect(restoreCoordinatedTestScope(f.options, operationRoot, sandbox, async () => {})).rejects.toThrow(
+    'coordinated_test_restore_unavailable',
+  );
+  expect(await restoreCoordinatedTestScope(f.options, operationRoot, sandbox, async () => {})).toMatchObject({
+    inserted: false,
+  });
+  expect(f.query.mock.calls.filter(([sql]) => sql.startsWith('INSERT INTO cos.'))).toHaveLength(1);
+});
 it('S09 verifies restored local bytes and every remote scoped row before issuing a recovery proof', async () => {
   const f = fixture(),
     checkpoint = await backupCoordinatedState(f.options),

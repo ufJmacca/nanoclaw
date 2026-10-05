@@ -78,6 +78,18 @@ types and zero-warning lint. No production profile or live writer has been
 created. Proof recording remains pending; see the
 [operator runbook](../CALENDAR_ACTION_OPERATIONS.md).
 
+The sandbox importer now admits only a fresh scope in a separately identified
+protected test database. It checks the captured columns, scope identity, schema
+and marker, inserts dependency-ordered rows and verifies the complete result.
+It never updates or deletes existing rows. A durable start record permits an
+unknown commit to be reconciled by readback without another insert. Seven new
+import checks passed with the 22 backup checks. The real test database also
+passed an import of synthetic foreign-source rows, dependent writer revisions,
+retry readback and refusal from a different operation. All 30 PostgreSQL action
+tests passed. No production recovery proof was issued from that synthetic source.
+Types and zero-warning lint passed; the operator proof-recording command remains
+to be connected.
+
 Recorded development-container gates include:
 
 - 29 external PostgreSQL action tests, including actual connection and commit-acknowledgement failures with a simulated provider;

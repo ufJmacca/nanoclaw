@@ -916,6 +916,151 @@ async function restoreOnlyOwnedFixtureScope(
     throw error;
   }
 }
+test('S09 the sandbox importer restores actual test-database rows from a synthetic foreign-source fixture, without issuing production admission proof', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-test-import-')),
+    restoredScope = 'action-restore-' + randomUUID(),
+    restoredWriter = randomUUID();
+  let inserted = false;
+  try {
+    for (const name of ['receipt', 'artifacts', 'staging', 'operation'])
+      fs.mkdirSync(path.join(root, name), { mode: 0o700 });
+    const sqlite = path.join(root, 'native.sqlite'),
+      native = new Database(sqlite);
+    native.exec('CREATE TABLE messages(id,body)');
+    native.close();
+    fs.chmodSync(sqlite, 0o600);
+    const artifacts = new KnowledgeArtifacts(path.join(root, 'artifacts'), path.join(root, 'staging')),
+      owner = initializeActionWitness(path.join(root, 'effects'), digest('synthetic fixture installation')),
+      independent = new ActionWitness(path.join(root, 'effects'), owner.installationDigest, owner.generation),
+      rows: Record<string, Record<string, unknown>[]> = Object.fromEntries(
+        coordinatedBackup.CHECKPOINT_TABLES.map((table) => [table, []]),
+      );
+    await admin.query("SET TIME ZONE 'UTC'");
+    const originalScope = (await admin.query('SELECT to_jsonb(t) AS body FROM cos.scopes t WHERE id=$1', [scope]))
+      .rows[0].body;
+    rows.scopes = [{ ...originalScope, id: restoredScope, agent_group_id: restoredScope, channel_id: restoredScope }];
+    const originalBinding = (
+      await admin.query('SELECT to_jsonb(t) AS body FROM cos.action_writer_bindings t WHERE scope_id=$1 AND id=$2', [
+        scope,
+        writerId,
+      ])
+    ).rows[0].body;
+    rows.action_writer_bindings = [
+      { ...originalBinding, scope_id: restoredScope, id: restoredWriter, session_id: restoredScope },
+    ];
+    const originalRevision = (
+        await admin.query(
+          'SELECT to_jsonb(t) AS body FROM cos.action_writer_revisions t WHERE scope_id=$1 AND binding_id=$2 AND version=1',
+          [scope, writerId],
+        )
+      ).rows[0].body,
+      fixtureBinding = { ...writerBinding, channelId: restoredScope };
+    rows.action_writer_revisions = [
+      {
+        ...originalRevision,
+        scope_id: restoredScope,
+        binding_id: restoredWriter,
+        body: fixtureBinding,
+        digest: digest(fixtureBinding),
+      },
+    ];
+    // Code-only synthetic source transport supplies rows. Only the selected real test DB receives restore SQL.
+    // This source identity is explicitly a fixture, never a verified production backup or admission proof.
+    const source = {
+      query: async (sql: string, values?: unknown[]): Promise<{ rows: Record<string, unknown>[] }> => {
+        if (sql.includes('SELECT owner_id,agent_group_id'))
+          return { rows: [{ owner_id: context.ownerId, agent_group_id: restoredScope }] };
+        if (sql.includes('to_jsonb(t)')) {
+          const table = /FROM cos\."([a-z_]+)"/.exec(sql)?.[1];
+          assert.ok(table && coordinatedBackup.CHECKPOINT_TABLES.includes(table));
+          return { rows: rows[table].map((body) => ({ body })) };
+        }
+        return admin.query(sql, values);
+      },
+    } as unknown as pg.Client;
+    const options: coordinatedBackup.CoordinatedBackupOptions = {
+      client: source,
+      context: { ...context, scopeId: restoredScope, agentGroupId: restoredScope, sessionId: restoredScope },
+      databaseFingerprint: digest('synthetic foreign-source fixture only'),
+      operationId: 'fixture-' + randomUUID(),
+      receiptRoot: path.join(root, 'receipt'),
+      nativeDatabases: [sqlite],
+      restrictionFiles: [],
+      artifacts,
+      witness: independent,
+      quiescent: async () => ({
+        generation: 1,
+        activeWorkers: 0,
+        activeOperations: 0,
+        nativeWriters: 0,
+        effectsEnabled: false,
+      }),
+    };
+    await coordinatedBackup.backupCoordinatedState(options);
+    const sandbox = {
+        client: admin,
+        config: await fixtureDatabaseConfig(process.env, 'migration'),
+        testTargetId: process.env.COS_TEST_TARGET_ID ?? '',
+      },
+      operationRoot = path.join(root, 'operation');
+    if (fixtureProfile() !== 'test') {
+      await assert.rejects(
+        coordinatedBackup.restoreCoordinatedTestScope(options, operationRoot, sandbox, async () => {}),
+        /coordinated_test_restore_unavailable/,
+      );
+      assert.equal((await admin.query('SELECT id FROM cos.scopes WHERE id=$1', [restoredScope])).rows.length, 0);
+      return;
+    }
+    const restored = await coordinatedBackup.restoreCoordinatedTestScope(
+      options,
+      operationRoot,
+      sandbox,
+      async () => {},
+    );
+    inserted = true;
+    assert.equal(restored.inserted, true);
+    assert.equal(restored.admissionRestored, false);
+    assert.equal(restored.eventJournalRestored, false);
+    assert.equal(
+      (await admin.query('SELECT id FROM cos.action_writer_bindings WHERE scope_id=$1', [restoredScope])).rows[0].id,
+      restoredWriter,
+    );
+    assert.equal(
+      (await coordinatedBackup.restoreCoordinatedTestScope(options, operationRoot, sandbox, async () => {})).inserted,
+      false,
+    );
+    fs.mkdirSync(path.join(root, 'foreign-operation'), { mode: 0o700 });
+    await assert.rejects(
+      coordinatedBackup.restoreCoordinatedTestScope(
+        options,
+        path.join(root, 'foreign-operation'),
+        sandbox,
+        async () => {},
+      ),
+      /coordinated_test_restore_unavailable/,
+    );
+    assert.equal(
+      (
+        await admin.query('SELECT count(*)::int AS n FROM cos.action_writer_revisions WHERE scope_id=$1', [
+          restoredScope,
+        ])
+      ).rows[0].n,
+      1,
+    );
+    assert.equal(fs.existsSync(path.join(root, 'actions', 'writer-profile.json')), false);
+  } finally {
+    if (inserted) {
+      assert.match(restoredScope, /^action-restore-[a-f0-9-]{36}$/);
+      for (const table of ['action_writer_revisions', 'action_writer_bindings'])
+        await admin.query('DELETE FROM cos.' + table + ' WHERE scope_id=$1', [restoredScope]);
+      await admin.query('DELETE FROM cos.scopes WHERE id=$1 AND owner_id=$2 AND agent_group_id=$1', [
+        restoredScope,
+        context.ownerId,
+      ]);
+    }
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
 test('S09-T10 coordinated sandbox restore reconciles a fixture event created after the actual remote/local backup', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-coordinated-backup-'));
   try {

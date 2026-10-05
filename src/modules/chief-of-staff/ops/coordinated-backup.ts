@@ -230,7 +230,9 @@ function parameters(options: CoordinatedBackupIdentity) {
     throw new Error('unsafe_coordinated_backup');
   return root;
 }
-async function remoteSnapshot(options: CoordinatedBackupOptions): Promise<ScopeCheckpoint> {
+async function remoteSnapshot(
+  options: Pick<CoordinatedBackupOptions, 'client' | 'context' | 'databaseFingerprint'>,
+): Promise<ScopeCheckpoint> {
   const client = options.client;
   await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
   try {
@@ -465,6 +467,195 @@ const checkpointState = (snapshot: ScopeCheckpoint) => ({
     CHECKPOINT_TABLES.map((table) => [table, snapshot.rows[table].map((row) => digest(row)).sort()]),
   ),
 });
+function scopedCheckpoint(options: CoordinatedBackupIdentity, receipt: CoordinatedBackupReceipt): ScopeCheckpoint {
+  if (receipt.remote.file !== 'remote.json') throw Error('coordinated_restore_conflict');
+  const value = JSON.parse(
+    privateBytes(path.join(parameters(options), 'remote.json'), maximumRemoteBytes).toString('utf8'),
+  ) as ScopeCheckpoint;
+  const record = (x: unknown): x is Record<string, unknown> => !!x && typeof x === 'object' && !Array.isArray(x);
+  if (
+    !record(value) ||
+    Object.keys(value).sort().join(',') !==
+      'at,columns,databaseFingerprint,format,rows,schemaDigest,schemaVersion,scopeId' ||
+    value.format !== 'cos-scoped-checkpoint/v1' ||
+    value.scopeId !== options.context.scopeId ||
+    value.databaseFingerprint !== options.databaseFingerprint ||
+    value.schemaVersion !== SCHEMA_VERSION ||
+    value.schemaDigest !== schemaDigest ||
+    !Number.isFinite(Date.parse(value.at)) ||
+    !record(value.columns) ||
+    !record(value.rows) ||
+    Object.keys(value.columns).sort().join(',') !== CHECKPOINT_TABLES.join(',') ||
+    Object.keys(value.rows).sort().join(',') !== CHECKPOINT_TABLES.join(',')
+  )
+    throw Error('coordinated_restore_conflict');
+  for (const table of CHECKPOINT_TABLES) {
+    const columns = value.columns[table],
+      rows = value.rows[table],
+      scopeColumn = table === 'scopes' ? 'id' : 'scope_id';
+    if (
+      !Array.isArray(columns) ||
+      !columns.length ||
+      columns.length > 200 ||
+      new Set(columns).size !== columns.length ||
+      !columns.includes(scopeColumn) ||
+      columns.some((column) => typeof column !== 'string' || !/^[a-z_][a-z0-9_]{0,62}$/.test(column)) ||
+      !Array.isArray(rows) ||
+      rows.length > 10000 ||
+      rows.some(
+        (row) =>
+          !record(row) ||
+          Object.keys(row).sort().join(',') !== [...columns].sort().join(',') ||
+          row[scopeColumn] !== value.scopeId,
+      )
+    )
+      throw Error('coordinated_restore_conflict');
+  }
+  if (
+    value.rows.scopes.length !== 1 ||
+    value.rows.scopes[0].owner_id !== options.context.ownerId ||
+    value.rows.scopes[0].agent_group_id !== options.context.agentGroupId
+  )
+    throw Error('coordinated_restore_conflict');
+  return value;
+}
+/** Import only a fresh owned scope into an independently admitted test database. Never update, clear or replace
+ * an existing scope. A durable start reservation permits read-only reconciliation of an unknown commit.
+ * This restores data for a drill; it grants no account, model, effect or notification admission.
+ */
+export async function restoreCoordinatedTestScope(
+  options: CoordinatedBackupIdentity,
+  operationRoot: string,
+  sandbox: { client: pg.Client; config: PoolConfig; testTargetId: string },
+  check: () => Promise<void>,
+) {
+  try {
+    return await restoreTestScope(options, operationRoot, sandbox, check);
+  } catch {
+    // eslint-disable-next-line preserve-caught-error -- Restore and cleanup failures withhold acknowledgement without exposing rows, endpoints or paths.
+    throw Error('coordinated_test_restore_unavailable');
+  }
+}
+async function restoreTestScope(
+  options: CoordinatedBackupIdentity,
+  operationRoot: string,
+  sandbox: { client: pg.Client; config: PoolConfig; testTargetId: string },
+  check: () => Promise<void>,
+) {
+  let locked = false,
+    transaction = false;
+  const client = sandbox.client;
+  try {
+    directory(operationRoot);
+    if (
+      [
+        parameters(options),
+        options.witness.root,
+        options.artifacts.root,
+        ...options.nativeDatabases,
+        ...options.restrictionFiles,
+      ].some(
+        (root) =>
+          root === operationRoot || operationRoot.startsWith(root + '/') || root.startsWith(operationRoot + '/'),
+      )
+    )
+      throw Error('unsafe_coordinated_restore');
+    await check();
+    const receipt = await verify(options),
+      original = scopedCheckpoint(options, receipt);
+    await assertTestTarget(client, sandbox.testTargetId);
+    const fingerprint = await databaseFingerprint(client, sandbox.config);
+    if (fingerprint === options.databaseFingerprint || (await migrationStatus(client)) !== SCHEMA_VERSION)
+      throw Error('unsafe_coordinated_restore');
+    if (!(await client.query('SELECT pg_try_advisory_lock(73101003) AS locked')).rows[0]?.locked)
+      throw Error('coordinated_restore_busy');
+    locked = true;
+    for (const table of CHECKPOINT_TABLES) {
+      const columns = (
+        await client.query(
+          "SELECT attname FROM pg_attribute WHERE attrelid=$1::regclass AND attnum>0 AND NOT attisdropped AND attgenerated='' ORDER BY attnum",
+          ['cos.' + table],
+        )
+      ).rows.map((row) => row.attname);
+      if (digest(columns) !== digest(original.columns[table])) throw Error('coordinated_restore_conflict');
+    }
+    const reservation = {
+        format: 'cos-sandbox-restore-start/v1',
+        checkpointDigest: digest(receipt),
+        sandboxDatabaseFingerprint: fingerprint,
+        testMarkerDigest: digest(sandbox.testTargetId),
+        scopeId: original.scopeId,
+        journal: receipt.journal,
+      },
+      file = path.join(operationRoot, 'restore-start.json');
+    const started = !!fs.lstatSync(file, { throwIfNoEntry: false });
+    if (started && digest(JSON.parse(privateBytes(file, 16384).toString('utf8'))) !== digest(reservation))
+      throw Error('coordinated_restore_conflict');
+    await check();
+    if (digest(await verify(options)) !== digest(receipt)) throw Error('coordinated_restore_conflict');
+    await client.query('BEGIN');
+    transaction = true;
+    await client.query('SET CONSTRAINTS ALL DEFERRED');
+    const exists =
+      (await client.query('SELECT id FROM cos.scopes WHERE id=$1 FOR UPDATE', [original.scopeId])).rows.length > 0;
+    if (exists && !started) throw Error('coordinated_restore_scope_exists');
+    if (!exists) {
+      await check();
+      if (!started) writeAtomic(operationRoot, 'restore-start.json', reservation);
+      let remaining = CHECKPOINT_TABLES.filter((table) => original.rows[table].length > 0);
+      while (remaining.length) {
+        const retry: string[] = [];
+        for (const table of remaining) {
+          await check();
+          await client.query('SAVEPOINT cos_sandbox_restore');
+          try {
+            const columns = original.columns[table].map((name) => '"' + name + '"').join(',');
+            await client.query(
+              `INSERT INTO cos."${table}"(${columns}) SELECT ${columns} FROM jsonb_populate_recordset(NULL::cos."${table}",$1::jsonb)`,
+              [JSON.stringify(original.rows[table])],
+            );
+            await client.query('RELEASE SAVEPOINT cos_sandbox_restore');
+          } catch (error) {
+            await client.query('ROLLBACK TO SAVEPOINT cos_sandbox_restore');
+            await client.query('RELEASE SAVEPOINT cos_sandbox_restore');
+            if ((error as { code?: string }).code !== '23503') throw error;
+            retry.push(table);
+          }
+        }
+        if (retry.length === remaining.length) throw Error('coordinated_restore_dependency_conflict');
+        remaining = retry;
+      }
+    }
+    await check();
+    await client.query('COMMIT');
+    transaction = false;
+    await check();
+    const restored = await remoteSnapshot({ context: options.context, databaseFingerprint: fingerprint, client });
+    if (
+      digest(checkpointState(restored)) !== digest(checkpointState(original)) ||
+      digest(await verify(options)) !== digest(receipt) ||
+      digest(JSON.parse(privateBytes(file, 16384).toString('utf8'))) !== digest(reservation)
+    )
+      throw Error('coordinated_restore_conflict');
+    await check();
+    journalCurrent(options);
+    return {
+      format: 'cos-sandbox-scope-restore/v1',
+      checkpointDigest: digest(receipt),
+      sandboxDatabaseFingerprint: fingerprint,
+      restoredStateDigest: digest(checkpointState(restored)),
+      inserted: !exists,
+      admissionRestored: false,
+      eventJournalRestored: false,
+    };
+  } finally {
+    try {
+      if (transaction) await client.query('ROLLBACK');
+    } finally {
+      if (locked) await client.query('SELECT pg_advisory_unlock(73101003)');
+    }
+  }
+}
 async function verifySandboxCopy(checkpoint: CoordinatedBackupReceipt, destination: string) {
   directory(destination);
   const expected = {
