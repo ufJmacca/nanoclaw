@@ -6,7 +6,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 import type { CosBinding } from '../../../cos-boundary.js';
 import { parseAdminArguments } from './admin.js';
 import { writeAtomic } from './target-state.js';
-import { runActionAccountAdmin, parseActionSelection } from './action-account-admin.js';
+import { runActionAccountAdmin, parseActionSelection, readActionAccountConsent } from './action-account-admin.js';
 import { openWriterCredentials } from '../actions/config.js';
 import { GOOGLE_OWNED_EVENT_WRITE_SCOPE, GOOGLE_CALENDAR_METADATA_SCOPE } from '../actions/writer.js';
 import type { StorageInspection } from '../calendar/storage-protection.js';
@@ -199,6 +199,11 @@ it('S09 links narrow fixture credentials once, backs them up, and cannot enable 
     s.link.bindingId,
   );
   expect(credential.auth).toBe('ready');
+  expect(readActionAccountConsent(s.roots, s.options.binding, s.link.bindingId, inspect)).toMatchObject({
+    selection: s.selection,
+    bindingId: s.link.bindingId,
+    credentialReference: s.link.bindingId,
+  });
   await runActionAccountAdmin({ ...s.options, args: s.link }, s.dependencies);
   expect(s.fetch).toHaveBeenCalledOnce();
   writeAtomic(s.roots.targetRoot, 'selection.json', { ...s.selection, calendarId: 'other@example.test' });
@@ -206,6 +211,21 @@ it('S09 links narrow fixture credentials once, backs them up, and cannot enable 
     'calendar_operation_conflict',
   );
   expect(s.fetch).toHaveBeenCalledOnce();
+});
+it('S09 consent cannot transfer to a different native owner or a replaced writer client', async () => {
+  const s = fixture();
+  await runActionAccountAdmin({ ...s.options, args: s.setup }, s.dependencies);
+  await runActionAccountAdmin({ ...s.options, args: s.link }, s.dependencies);
+  expect(() =>
+    readActionAccountConsent(s.roots, { ...s.options.binding, ownerId: 'foreign' }, s.link.bindingId, inspect),
+  ).toThrow('action_configuration_conflict');
+  writeAtomic(s.roots.targetRoot + '/calendar', 'writer-oauth-client.json', {
+    ...s.client,
+    clientSecret: 'REPLACED_CLIENT_CANARY',
+  });
+  expect(() => readActionAccountConsent(s.roots, s.options.binding, s.link.bindingId, inspect)).toThrow(
+    'action_setup_conflict',
+  );
 });
 it('S09 does not link with absent setup, wrong owner binding or lost maintenance checks', async () => {
   const s = fixture();

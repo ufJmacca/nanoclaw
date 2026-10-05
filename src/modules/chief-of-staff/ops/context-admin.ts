@@ -40,8 +40,10 @@ import {
   type CalendarAccountArguments,
 } from './calendar-account-admin.js';
 import { isActionAccountCommand, runActionAccountAdmin, type ActionAccountArguments } from './action-account-admin.js';
+import { isActionAdminCommand, runActionAdmin, type ActionAdminArguments } from './action-admin.js';
 
 export type ContextAdminArguments =
+  | ActionAdminArguments
   | ActionAccountArguments
   | MissionAdminArguments
   | KnowledgeAdminArguments
@@ -246,6 +248,21 @@ export async function contextAdminCommand(
         assertAuthority();
       };
       await check();
+      if (isActionAdminCommand(args)) {
+        return runActionAdmin({
+          args,
+          env,
+          roots: {
+            targetRoot: root,
+            installationRoot: target.binding.installationRoot,
+            dataRoot: target.binding.dataRoot,
+          },
+          binding,
+          databaseFingerprint: target.binding.databaseFingerprint,
+          check,
+          assertAuthority,
+        });
+      }
       if (isActionAccountCommand(args)) {
         return runActionAccountAdmin({
           args,

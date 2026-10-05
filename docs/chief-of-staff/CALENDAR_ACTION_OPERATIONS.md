@@ -47,5 +47,35 @@ can finish only with already committed ready credentials.
 Linking returns `credentials_ready_writes_disabled`. It does not install a writer
 binding, enable writes, resume the CoS or activate a model. Keep
 `COS_ACTIONS_ENABLED=false` while recovery proof and final owner configuration
-are pending. The configuration and restore-proof commands are still being
-implemented; hand-editing their records is not an activation procedure.
+are pending.
+
+## Configure or disable the writer
+
+The guarded configuration command is `pnpm cos:admin action-configure --scope
+<scope> --request-id <new-uuid> --manifest <absolute-private-grant-file>`. The
+manifest follows `ActionHostGrant` in `actions/profile.ts`: current scope, owner,
+main group/session, consent binding ID and credential reference, target backup
+operation/digest, write-enabled boolean and the exact `cos-calendar-writer/v1`
+binding. The binding pins the selected calendar, account fingerprint, native
+private channel, two narrow scopes and restore-proof digest. Reconnection uses a
+new consent ID; existing IDs cannot change their calendar or credential identity.
+
+Configuration verifies the original completed consent, protected credentials and
+all paired backup families. It requires schema 16 and proof of an actual restore
+in a separately identified protected test database. A copied export or the
+same-database fixture proof cannot enable it. Only the checked migration login
+can install consent metadata; the runtime login can only read it. Permission is
+published in the separate host profile after a confirmed commit. An uncertain
+commit leaves new permission closed; retry checks the exact existing revision.
+The command leaves the CoS paused and does not activate a model.
+
+Run `pnpm cos:admin action-disable --scope <scope> --request-id <new-uuid>
+--binding <consent-binding-uuid>` to disable a configured writer. This closes new
+writes locally even if PostgreSQL or recovery verification is unavailable. It
+preserves the event, consent and credential identities for admitted readback;
+it neither deletes events nor revokes the calendar reader. All owner and
+maintenance checks still apply. The service must reopen the checked configuration
+through its existing restart/resume procedure.
+
+The restore-proof production workflow is still being implemented. Do not activate
+a writer by hand-editing its configuration or treating fixture checks as proof.

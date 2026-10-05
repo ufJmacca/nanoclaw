@@ -77,6 +77,11 @@ function validGrant(value: unknown): value is ActionHostGrant {
     value.binding.credentialGeneration === value.credentialReference
   );
 }
+/** Owner manifest only; no broader fields, fixture transport or token data can enter runtime configuration. */
+export function parseActionHostGrant(value: unknown): ActionHostGrant {
+  if (!validGrant(value)) throw Error('invalid_action_manifest');
+  return structuredClone(value);
+}
 /** No tokens or mutable provider endpoints are allowed in this private consent profile. */
 export function readActionHostProfile(
   targetRoot: string,

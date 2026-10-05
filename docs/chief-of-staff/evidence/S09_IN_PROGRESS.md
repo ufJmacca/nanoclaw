@@ -67,8 +67,16 @@ listener with exactly the writer scopes. Linking creates a separate consent
 record and leaves writes disabled. Uncertain exchanges are never repeated and
 corrupt setup history is preserved. The affected reader/owner/admin run passed
 52 tests in five files, with types and zero-warning lint. Operator configuration
-and proof recording remain unfinished; no production profile or live writer has
-been created. See the [partial operator runbook](../CALENDAR_ACTION_OPERATIONS.md).
+and proof recording remained at that checkpoint. The configuration command now
+requires exact existing consent, ready protected credentials and the verified
+separate-database recovery baseline before a confirmed admin commit can publish
+host permission. The disable command changes only new-write admission and needs
+no database or recovery connection. Its binding identity remains available for
+admitted readback. Ten configuration checks and four native authority routes
+passed together with the affected host/profile/owner tests: 90 tests in six files,
+types and zero-warning lint. No production profile or live writer has been
+created. Proof recording remains pending; see the
+[operator runbook](../CALENDAR_ACTION_OPERATIONS.md).
 
 Recorded development-container gates include:
 

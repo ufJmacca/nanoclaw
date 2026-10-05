@@ -20,6 +20,16 @@ vi.mock('./calendar-account-admin.js', async () => ({
   runCalendarAccountAdmin: vi.fn(),
 }));
 import { runCalendarAccountAdmin } from './calendar-account-admin.js';
+vi.mock('./action-account-admin.js', async () => ({
+  ...(await vi.importActual('./action-account-admin.js')),
+  runActionAccountAdmin: vi.fn(),
+}));
+import { runActionAccountAdmin } from './action-account-admin.js';
+vi.mock('./action-admin.js', async () => ({
+  ...(await vi.importActual('./action-admin.js')),
+  runActionAdmin: vi.fn(),
+}));
+import { runActionAdmin } from './action-admin.js';
 vi.mock('./mission-admin.js', async () => ({
   ...(await vi.importActual('./mission-admin.js')),
   runMissionAdmin: vi.fn(),
@@ -441,6 +451,48 @@ it('account linking uses the same paused native authority and cannot run after i
   expect(() => run.mock.calls.at(-1)![0].assertAuthority()).toThrow();
   expect(fs.existsSync(state + '/model-activation.json')).toBe(false);
 });
+it.each(['action-setup', 'action-link', 'action-configure', 'action-disable'] as const)(
+  'S09 %s requires paused private native authority and cannot use a released lease',
+  async (command) => {
+    fs.rmSync(state + '/codex-auth', { recursive: true });
+    const args = {
+      command,
+      scopeId: 'fixture',
+      requestId: randomUUID(),
+      bindingId: randomUUID(),
+      manifestFile: state + '/action.json',
+      backupRoot: state + '/backup',
+    };
+    const assertOptions = async (
+      options: Parameters<typeof runActionAccountAdmin>[0] | Parameters<typeof runActionAdmin>[0],
+    ) => {
+      await options.check();
+      options.assertAuthority();
+      expect(options.binding).toMatchObject({ scopeId: 'fixture', ownerId: 'owner', provider: 'codex' });
+      return { status: 'configured_paused', live_model: 'not_invoked' };
+    };
+    vi.mocked(runActionAccountAdmin).mockImplementation(assertOptions);
+    vi.mocked(runActionAdmin).mockImplementation(assertOptions);
+    expect(await contextAdminCommand(args, env, dependencies)).toMatchObject({ status: 'configured_paused' });
+    const options =
+      command === 'action-setup' || command === 'action-link'
+        ? vi.mocked(runActionAccountAdmin).mock.calls.at(-1)![0]
+        : vi.mocked(runActionAdmin).mock.calls.at(-1)![0];
+    expect(() => options.assertAuthority()).toThrow();
+    expect(fs.existsSync(state + '/model-activation.json')).toBe(false);
+    expect(fs.existsSync(state + '/conversations')).toBe(false);
+    quiescent.mockResolvedValueOnce(false);
+    await expect(contextAdminCommand(args, env, dependencies)).rejects.toThrow('target_not_quiescent');
+    facts.mockResolvedValueOnce({
+      id: 'private',
+      type: 'P',
+      delete_at: 0,
+      members: ['owner', 'bot', 'outsider'],
+      activeSubscription: true,
+    });
+    await expect(contextAdminCommand(args, env, dependencies)).rejects.toThrow('private_owner_membership_required');
+  },
+);
 it('source setup requires quiescence and private owner membership, and closes the pool on import failure', async () => {
   const connect = vi.mocked(connectCosHostStore);
   connect.mockClear();

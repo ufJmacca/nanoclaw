@@ -4,6 +4,7 @@ import { isCalendarCommand, parseCalendarArguments } from './calendar-admin.js';
 import { isCalendarAccountCommand, parseCalendarAccountArguments } from './calendar-account-admin.js';
 import { isMissionCommand, parseMissionArguments } from './mission-admin.js';
 import { isActionAccountCommand, parseActionAccountArguments } from './action-account-admin.js';
+import { isActionAdminCommand, parseActionAdminArguments } from './action-admin.js';
 import { pathToFileURL } from 'node:url';
 import { DatabaseConfigurationError, parseDatabaseConfig, externalDatabaseConfig } from '../store/config.js';
 import { connectChecked, DatabasePreflightError } from '../store/preflight.js';
@@ -18,6 +19,7 @@ import { contextAdminCommand, type ContextAdminArguments } from './context-admin
 
 type AdminArguments = { command: 'status' } | { command: 'bind'; binding: BindingRequest } | ContextAdminArguments;
 export function parseAdminArguments(args: string[]): AdminArguments {
+  if (isActionAdminCommand({ command: args[0] })) return parseActionAdminArguments(args);
   if (isActionAccountCommand({ command: args[0] })) return parseActionAccountArguments(args);
   if (isMissionCommand({ command: args[0] })) return parseMissionArguments(args);
   if (isKnowledgeCommand({ command: args[0] })) return parseKnowledgeArguments(args);
@@ -148,6 +150,12 @@ export function safeAdminError(error: unknown): string {
         'action_setup_conflict',
         'action_link_uncertain',
         'action_configuration_unavailable',
+        'action_configuration_conflict',
+        'action_profile_unavailable',
+        'action_recovery_proof_unavailable',
+        'action_database_mismatch',
+        'action_schema_incompatible',
+        'action_configuration_busy',
         'calendar_disabled',
         'calendar_operation_conflict',
         'unsafe_calendar_admin_state',
@@ -340,7 +348,9 @@ function adminEnvironment(command: AdminArguments['command']): NodeJS.ProcessEnv
     'MATTERMOST_URL',
     'MATTERMOST_BOT_TOKEN',
     'MATTERMOST_INSTANCE',
-    ...(isMissionCommand({ command }) ? ['COS_PG_MIGRATION_USER', 'COS_PG_MIGRATION_PASSWORD'] : []),
+    ...(isMissionCommand({ command }) || command === 'action-configure'
+      ? ['COS_PG_MIGRATION_USER', 'COS_PG_MIGRATION_PASSWORD']
+      : []),
     ...[
       'HOST',
       'PORT',

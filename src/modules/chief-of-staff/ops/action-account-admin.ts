@@ -116,6 +116,31 @@ function setupState(roots: CalendarStorageRoots, inspect?: StorageInspection) {
     throw Error('action_setup_conflict');
   return { client, expected, existing };
 }
+/** Read an already completed exact consent. No authorization, initialization or token refresh is performed. */
+export function readActionAccountConsent(
+  roots: CalendarStorageRoots,
+  binding: CosBinding,
+  bindingId: string,
+  inspect?: StorageInspection,
+) {
+  const setup = setupState(roots, inspect);
+  if (!object(setup.existing) || setup.existing.phase !== 'ready') throw Error('action_setup_required');
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(bindingId))
+    throw Error('invalid_action_manifest');
+  const value = readJson(path.join(roots.targetRoot, 'calendar-admin', bindingId, 'consent.json'));
+  if (!object(value)) throw Error('action_configuration_conflict');
+  const selection = parseActionSelection(value.selection),
+    expected = {
+      format: 'cos-action-account-consent/v1',
+      nativeBindingDigest: digest(binding),
+      bindingId,
+      credentialReference: bindingId,
+      selection,
+      setupDigest: digest(setup.expected),
+    };
+  if (digest(value) !== digest(expected)) throw Error('action_configuration_conflict');
+  return expected;
+}
 export async function runActionAccountAdmin(o: Options, d: Dependencies = {}): Promise<Record<string, unknown>> {
   const { args, binding, roots } = o;
   if (args.scopeId !== binding.scopeId || binding.provider !== 'codex') throw Error('context_binding_changed');
