@@ -232,15 +232,16 @@ export function buildReviewSnapshot(input: ReviewInput): ReviewSnapshot {
         !validStrategyObservationChange(observationBody(row)) ||
         row.charter_version > input.charter.version ||
         !before(row.observed_at, input.as_of) ||
-        (row.target.kind === 'outcome'
-          ? !definition.measures.some(
-              (measure) => measure.id === row.target.id && measure.initiative_id === row.initiative_id,
-            )
-          : row.target.kind === 'assumption'
-            ? !definition.assumptions.some(
-                (assumption) => assumption.id === row.target.id && assumption.initiative_id === row.initiative_id,
+        (row.charter_version === input.charter.version &&
+          (row.target.kind === 'outcome'
+            ? !definition.measures.some(
+                (measure) => measure.id === row.target.id && measure.initiative_id === row.initiative_id,
               )
-            : row.target.id !== row.initiative_id),
+            : row.target.kind === 'assumption'
+              ? !definition.assumptions.some(
+                  (assumption) => assumption.id === row.target.id && assumption.initiative_id === row.initiative_id,
+                )
+              : row.target.id !== row.initiative_id)),
     ) ||
     missions.some(
       (row) =>
@@ -386,7 +387,11 @@ function validPrevious(previous: ReviewPrevious, input: ReviewInput): boolean {
 export function outcomeStatus(snapshot: ReviewSnapshot, initiative: string, measure: string): OutcomeStatus {
   return status(
     snapshot.observations.filter(
-      (row) => row.initiative_id === initiative && row.target.kind === 'outcome' && row.target.id === measure,
+      (row) =>
+        row.charter_version === snapshot.charter.version &&
+        row.initiative_id === initiative &&
+        row.target.kind === 'outcome' &&
+        row.target.id === measure,
     ),
   );
 }
@@ -424,6 +429,7 @@ export function assembleReview(snapshot: ReviewSnapshot, proposed: unknown): Rev
       if (
         !observations.some(
           (row) =>
+            row.charter_version === snapshot.charter.version &&
             row.target.kind === finding.domain &&
             row.basis === (finding.kind === 'fact' ? 'evidence_backed' : 'self_reported'),
         )
@@ -485,6 +491,7 @@ export function summarizeReview(review: ReviewArtifact): ReviewPrevious {
       status: status(
         snapshot.observations.filter(
           (row) =>
+            row.charter_version === snapshot.charter.version &&
             row.initiative_id === assumption.initiative_id &&
             row.target.kind === 'assumption' &&
             row.target.id === assumption.id,
@@ -516,8 +523,8 @@ const findingLabel = {
   assumption: 'Assumption',
   recommendation: 'Recommendation',
 };
-function observationLine(row: ReviewObservation) {
-  return `- ${basisLabel[row.basis]} [${row.id}]: ${row.target.kind} ${row.target.id}, ${row.signal}. ${label(row.statement)}${
+function observationLine(row: ReviewObservation, charterVersion: number) {
+  return `- ${row.charter_version === charterVersion ? basisLabel[row.basis] : 'Historical observation from charter v' + row.charter_version + ' — ' + basisLabel[row.basis]} [${row.id}]: ${row.target.kind} ${row.target.id}, ${row.signal}. ${label(row.statement)}${
     row.evidence.length ? ' [' + row.evidence.map(referenceLabel).join('; ') + ']' : ' [No independent evidence]'
   } Observed ${row.observed_at}.`;
 }
@@ -554,12 +561,15 @@ export function renderReview(review: ReviewArtifact): string {
         .map(
           (work) => `- Recorded ${work.kind}: ${label(work.title)} (${work.state}) [work ${work.id} v${work.version}].`,
         ),
-      ...snapshot.observations.filter((row) => row.initiative_id === initiative.id).map(observationLine),
+      ...snapshot.observations
+        .filter((row) => row.initiative_id === initiative.id)
+        .map((row) => observationLine(row, snapshot.charter.version)),
       ...definition.assumptions
         .filter((assumption) => assumption.initiative_id === initiative.id)
         .map((assumption) => {
           const observations = snapshot.observations.filter(
               (row) =>
+                row.charter_version === snapshot.charter.version &&
                 row.initiative_id === initiative.id &&
                 row.target.kind === 'assumption' &&
                 row.target.id === assumption.id,
@@ -623,6 +633,7 @@ export function renderReview(review: ReviewArtifact): string {
                 ? status(
                     snapshot.observations.filter(
                       (row) =>
+                        row.charter_version === snapshot.charter.version &&
                         row.initiative_id === current.initiative_id &&
                         row.target.kind === 'assumption' &&
                         row.target.id === current.id,

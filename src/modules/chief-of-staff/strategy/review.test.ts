@@ -456,3 +456,16 @@ it('S10 historical comparisons require the exact prior revision in the same priv
   source.previous_review = null;
   expect(() => buildReviewSnapshot(source)).toThrow('review_previous_unavailable');
 });
+it('S10 replacing a review charter preserves old observations without carrying their outcome status into the new charter', () => {
+  const source = input();
+  source.charter.version = 2;
+  source.charter.definition.measures[1].id = 'replacement-result';
+  source.charter.definition.measures[1].outcome = 'A different useful result';
+  const snapshot = buildReviewSnapshot(source);
+  expect(snapshot.observations).toHaveLength(1);
+  expect(outcomeStatus(snapshot, 'useful', 'replacement-result')).toBe('unknown');
+  const value = draft();
+  expect(() => assembleReview(snapshot, value)).toThrow('review_evidence_domain');
+  value.findings[1].kind = 'assumption';
+  expect(renderReview(assembleReview(snapshot, value))).toContain('Historical observation from charter v1');
+});
