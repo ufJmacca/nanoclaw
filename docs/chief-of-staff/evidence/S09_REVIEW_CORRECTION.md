@@ -1,6 +1,7 @@
 # S09 — settle calendar actions blocked by a verified overlap
 
-**Status:** corrected fixture release tested and deployed; awaiting human review/merge.
+**Status:** historical corrected candidate evidence; PR #66 is now human-merged.
+The [merged-release receipt](S09_MERGED.md) records the accepted actual merge.
 Live writer admission and validation remain pending. The S01–S11 programme is incomplete.
 
 When two overlapping calendar blocks were approved before execution, completing
