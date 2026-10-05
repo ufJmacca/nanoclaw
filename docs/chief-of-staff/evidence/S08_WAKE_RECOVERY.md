@@ -1,4 +1,4 @@
-# S08 review correction — follow-up validation in progress
+# S08 review correction — deployed follow-up; human review pending
 
 PR [#64](https://github.com/ufJmacca/nanoclaw/pull/64) was merged by the repository
 owner on 5 October 2026. Its actual merged source is
@@ -40,13 +40,12 @@ preserved future clocks and their eventual evaluation, transient recovery,
 fresh-grant denial and zero due model messages. No PostgreSQL or registered
 NanoClaw migration is added or edited; SQLite compatibility remains 22.
 
-PR #65 has returned to draft. Full release/image gates and exact-artifact Pi
-delivery/native/preservation/independence verification must pass for this new
-source before it is ready again. The deployed candidate below remains historical
-evidence; it does not prove the follow-up passed. CoS stays paused, and no live
-model call or real message was made.
+All required release/image and Pi delivery/native/preservation/independence
+checks have now passed for this follow-up. Its exact identities and receipts are
+recorded in the latest checkpoint below. Earlier candidate evidence is retained
+as history. CoS stays paused, and no live model call or real message was made.
 
-## Red → green evidence
+## Initial red → green evidence
 
 The repository development container ran the two mandate native/pump test files
 against unchanged merged production code. Three tests failed and six passed:
@@ -59,7 +58,7 @@ evaluation history, quiet future clocks, overdue evaluation, fresh grant denial,
 rejection of altered/foreign rows, no duplicate native row, no due model message,
 and the existing emergency-pause behavior.
 
-## Verified candidate — 5 October 2026
+## Historical initial correction — 5 October 2026
 
 All seven mandatory local gates passed on the Mac using the repository
 development container and separate protected external test target with
@@ -160,3 +159,93 @@ After that merge, build/test and deploy the actual final merged source before
 starting S09. S08 live activation remains separately pending: CoS stays paused,
 no mandate is active, and this correction makes no live model call or real
 message. The programme is incomplete.
+
+## Verified follow-up — 5 October 2026
+
+All seven mandatory Mac gates passed for the follow-up source using the
+repository development container and the separate marked external test database
+with authenticated, verified TLS. Root checks passed 2,316 tests in 232 files,
+plus typecheck, build, formatting and lint. The runner passed 206 tests in 27
+files and typechecking. All 268 source contracts and the complete native
+owner-approval/preparation/review/digest demonstration passed. Each final
+Linux/ARM64 packaged host/profile pair passed 268 contracts with zero failures or
+skips. Both workers passed their 206 runner tests, seven baked native/RPC cases,
+seven subscription scenarios, provider startup and document-library checks.
+
+The enhanced compiled-clock probe failed on the preceding immutable image with
+nine evaluations instead of one, then passed on the exact new Mac and Pi host
+image. Repeated drains and host restart keep evaluated clocks closed and preserve
+the future clock; that clock evaluates when its current wake becomes due.
+Transient recovery retains the original row and source-evaluation history,
+requires a fresh grant, and creates no duplicate rows or due model messages.
+
+- Release: `release-0606b51d1165-20261005002115`, a tested **unreviewed follow-up candidate**.
+- Source: `0606b51d1165b339570b7fda7cad2a09fca1d832`.
+- Tree: `eb9c4e2583c7e486ac7e851400a0eeaaedfb8b1a`.
+- Source ref: `refs/heads/codex/s08-retired-wake-recovery`.
+- Manifest SHA-256: `901c0a7afa28788242c9677bf450bb4cbd34d86747fe8b2979545bb6234b2011`.
+- Archive SHA-256: `55eeb86bd56e37687004e76905980867d36a23f73f24285e660be30420c7c890`;
+  1,148,682,522 bytes.
+- Host payload SHA-256: `600e94827118cacee5881a84f7e66fb24be88cd8f29480f517d4c165d4362d76`.
+- PostgreSQL schema: 15, with unchanged migration 15 checksum
+  `afda148ed0b6efc324f91390d2e715e982072b9a0e571e28bb531ccd7bcc6517`.
+- Native SQLite compatibility: 22; all 20 required named migrations verified,
+  with applied-order maximum 20. Retirement-reason metadata is additive and
+  host-only; no registered migration was added or edited.
+
+| Artifact        | Tested image identity                                                     | Configuration digest                                                      |
+| --------------- | ------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| Host            | `sha256:95e61b1e0f20e1941dfdc5b3d15c5a661fca8cfc5d382638f56f997a3e517174` | `sha256:766a6398156f078000c45b3bb26d8ad52cd778cf3ab3cc7920cbcca450d8b7c9` |
+| Standard worker | `sha256:43e4980de12a66c2fa2c17ce4b0ce74840f241a94f03978546479e064c0d82f5` | `sha256:28a9aaee2c3a5ba8ea52a304b16405b20fcfa46c164b21587a3ccbcc4b324664` |
+| Document worker | `sha256:7fd44c10d5d428fa0421fe8acfe4e965a71afcd65d7909eaeeaacd5343ee6686` | `sha256:3bce005eb0cf5f8361643cfd49138594563158dc2c40a5e2eb24ee9fb4d9627a` |
+
+The Pi fetched the matching clean detached source, verified the exact archive and
+image identities, and deployed the prebuilt payload. All seven deployment phases
+and six health stages passed at `2026-10-05T01:01:01.674Z`. No Pi build,
+dependency installation or source repair occurred. Both actual Pi profiles passed
+their runner/native/subscription checks, specialist context isolation and exact
+child stop preserving the sibling. The compiled retirement-clock probe passed.
+
+The Pi-owned independence probe passed from `2026-10-05T01:08:54.004Z` to
+`2026-10-05T01:11:08.643Z`, after its scheduling SSH session disconnected and
+while the Mac development container was stopped. Both exact worker profiles and
+the new compiled-clock regression passed; the Pi service remained active. The
+Mac container was restored. Physical Mac power-off is not tested.
+
+The unchanged capacity guard required additional staging room. Only generated
+payload caches for four schema-incompatible historical releases were retired:
+`release-163b9184b83f-20260930150414`,
+`release-54edbf47102c-20260930103436`,
+`release-fdc52a635f6b-20260930223217` and
+`release-9e1717d62af1-20261003070449`. The first three had no remaining full Mac
+transport archive, so their exact code-only payloads were backed up to the Mac,
+extracted and verified against their original payload digests before retirement.
+The fourth's complete Mac image archive was stream-verified. Historical accepted
+source and acceptance receipts remain preserved; these caches cannot run at
+schema 15. The preceding candidate's duplicate Pi transport archive was also
+retired after verifying its complete Mac copy. All images, containers, volumes,
+pinned source worktrees, manifests, receipts, protected backups, data, sessions
+and credentials were retained. No service mutation occurred during retirement.
+Free space rose from 3,205,730,304 to 5,478,174,720 bytes, exceeding the unchanged
+5,131,601,000-byte requirement before transfer.
+
+All 694 original messages and all 696 fresh-backup messages across 18 session
+databases were preserved, with none missing or changed. Three approved records,
+complete proposal rows, main conversation/continuation, ten prior replies,
+model policy and ten charged attempts were unchanged. Primary Codex login and
+service-environment seals matched the fresh before-deployment snapshots.
+
+The preceding `release-d8f91982647b-20261004230039` remains a verified,
+manifest-admitted schema-15 recovery predecessor, with its three images, payload
+and clean source retained. Its known completed-clock issue requires automation
+to stay paused during recovery. The earlier compatible S08 release, current
+follow-up and their complete Mac archives are also retained. Legacy S07 remains
+ineligible at schema 15. No actual code rollback, old live SQLite restoration or
+schema reset occurred. Immutable mandate privileges passed; all eight live
+mandate-table counts remain zero.
+
+PR #65 still requires legitimate human review/merge, then Mac build/test and Pi
+delivery/acceptance of the actual final merged source before S09. CoS remains
+paused; knowledge/calendar linking and fresh finite live model/channel authority
+remain separately pending. This follow-up made zero live model calls and sent
+zero real messages. The programme is incomplete.
