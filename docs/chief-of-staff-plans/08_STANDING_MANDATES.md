@@ -1,21 +1,21 @@
 # S08 — Perform useful background work under a standing mandate
 
-**Status:** PR #64 human-merged; PR #65 follow-up tested and deployed healthy; human review, final merged-release acceptance and live activation pending
+**Status:** PR #64 and #65 human-merged; actual merged release tested, deployed and accepted; live activation pending
 
 **Repository:** `ufJmacca/nanoclaw`  
-**Branch:** `codex/s08-retired-wake-recovery` (correction after `cos/s08-standing-mandates`)
+**Branch:** `codex/s08-merged-clock-recovery` (accepted merge after `codex/s08-retired-wake-recovery` and `cos/s08-standing-mandates`)
 
 **Depends on:** S07 merged, with its acceptance receipt available.  
 **Delivery unit:** one independently reviewable PR; multiple red–green commits are expected.  
 **User-visible outcome:** After you approve a narrow responsibility once, the assistant prepares work autonomously within its scope, budget and notification rules.
 
-PR #64's reviewed merge has been verified, and its retired-wake finding was
-corrected and deployed in a tested candidate under PR #65. A subsequent finding
-about repeated completed-clock recovery is reproduced and fixed. All release,
-actual Pi native, preservation and independence gates pass for the follow-up.
-See [the correction receipt](../chief-of-staff/evidence/S08_WAKE_RECOVERY.md)
-for remaining review and final merged-release gates. S09 remains ineligible until the
-correction's reviewed merge and actual merged-release acceptance.
+PR #64 and correction PR #65 were merged by the repository owner. Both clock
+findings are fixed. Actual merge `462daabef958b9ba1874168719737ad7b39ef8e8`
+passed a fresh Mac build, all mandatory gates, exact Pi delivery, native checks,
+protected-state preservation, recovery and Pi-owned independence checks.
+See [the merged receipt](../chief-of-staff/evidence/S08_MERGED.md) for exact
+identities and receipts. S09 fixture implementation is eligible; live mandate
+and account/model activation remain separately pending.
 
 Read [START HERE](00_START_HERE.md), [architecture/contracts](ARCHITECTURE_AND_CONTRACTS.md), [external PostgreSQL](EXTERNAL_POSTGRES.md), [goal execution](GOAL.md), [Mac-to-Pi delivery](MAC_TO_PI_DELIVERY.md), [Mattermost interaction](INTERACTION_MODEL.md), [implementation authority](IMPLEMENTATION_AUTHORITY.md), and [baseline](REPOSITORY_BASELINE.md) before implementation. This plan inherits their identity, scope, replay, approval, budget and retention rules; none may be postponed to S11.
 
