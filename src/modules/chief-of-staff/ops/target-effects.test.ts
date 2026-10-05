@@ -31,7 +31,7 @@ import * as missions from './mission-backup.js';
 import * as calendars from '../calendar/backup.js';
 import * as databaseCli from './db-cli.js';
 import * as targetHost from './target-host.js';
-it('S09 records migration acceptance only after the target paired action backup succeeds', async () => {
+it('S10 preserves S09 paired action backup before recording current-schema migration acceptance', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-action-migration-'));
   const settings = {
     stateRoot: root + '/state',
@@ -45,7 +45,7 @@ it('S09 records migration acceptance only after the target paired action backup 
     hostFingerprint: '1'.repeat(64),
     databaseFingerprint: '2'.repeat(64),
   } as DeploymentSettings;
-  const manifest = fixtureRelease('S09'),
+  const manifest = fixtureRelease('S10'),
     receipt = path.join(settings.stateRoot, 'releases', manifest.releaseId);
   fs.mkdirSync(settings.dataRoot, { recursive: true, mode: 0o700 });
   fs.mkdirSync(receipt, { recursive: true, mode: 0o700 });
@@ -66,7 +66,9 @@ it('S09 records migration acceptance only after the target paired action backup 
     {} as Awaited<ReturnType<typeof calendars.verifyCalendarBackup>>,
   );
   vi.spyOn(targetHost, 'readTargetDatabaseEnvironment').mockReturnValue({ COS_PGDATABASE: 'fixture' });
-  const migrate = vi.spyOn(databaseCli, 'databaseCommand').mockResolvedValue({ status: 'ok', schema_version: 16 });
+  const migrate = vi
+    .spyOn(databaseCli, 'databaseCommand')
+    .mockResolvedValue({ status: 'ok', schema_version: migrations.SCHEMA_VERSION });
   const paired = vi
     .spyOn(targetActionBackup, 'backupTargetActionState')
     .mockResolvedValue({} as Awaited<ReturnType<typeof targetActionBackup.backupTargetActionState>>);
@@ -76,7 +78,9 @@ it('S09 records migration acceptance only after the target paired action backup 
     await createTargetEffects(settings, manifest, digest(manifest)).migrate();
     expect(paired).toHaveBeenCalledWith(settings, manifest.releaseId);
     expect(paired.mock.invocationCallOrder[0]).toBeGreaterThan(migrate.mock.invocationCallOrder[0]);
-    expect(JSON.parse(fs.readFileSync(path.join(receipt, 'migration.json'), 'utf8')).schema_version).toBe(16);
+    expect(JSON.parse(fs.readFileSync(path.join(receipt, 'migration.json'), 'utf8')).schema_version).toBe(
+      migrations.SCHEMA_VERSION,
+    );
     fs.unlinkSync(path.join(receipt, 'migration.json'));
     paired.mockRejectedValueOnce(Error('target_action_backup_unavailable'));
     await expect(createTargetEffects(settings, manifest, digest(manifest)).migrate()).rejects.toThrow(

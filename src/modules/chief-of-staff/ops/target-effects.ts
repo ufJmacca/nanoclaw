@@ -404,7 +404,7 @@ export function createTargetEffects(
         writeAtomic(receipt, 'binding.json', result);
       }
       const actionBackup =
-        manifest.slice === 'S09' ? await backupTargetActionState(settings, manifest.releaseId) : null;
+        manifest.postgres.maximum >= 16 ? await backupTargetActionState(settings, manifest.releaseId) : null;
       writeAtomic(receipt, 'migration.json', {
         ...result,
         sourceCommit: manifest.source.commit,

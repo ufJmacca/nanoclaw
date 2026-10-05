@@ -12,7 +12,7 @@ import path from 'node:path';
 import { readPrivate } from './target-state.js';
 import { fixtureRelease } from '../../../contracts/chief-of-staff/release-fixture.js';
 import { macReleaseCommand } from './mac-release-cli.js';
-it('S09 creates new releases only for the currently implemented slice and its exact schema', async () => {
+it('S10 schema preparation keeps release creation closed until its execution path is implemented', async () => {
   const argumentsFor = (slice: string) => [
     'init',
     'release-' + '1'.repeat(12) + '-20261005000000',
@@ -20,8 +20,7 @@ it('S09 creates new releases only for the currently implemented slice and its ex
     'refs/heads/codex/fixture',
     slice,
   ];
-  await expect(macReleaseCommand(argumentsFor('S09'))).rejects.toThrow('invalid_candidate_source');
-  for (const slice of ['S08', 'S10'])
+  for (const slice of ['S08', 'S09', 'S10'])
     await expect(macReleaseCommand(argumentsFor(slice))).rejects.toThrow('current_release_slice_required');
 });
 

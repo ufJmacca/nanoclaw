@@ -15,6 +15,7 @@ import { TEAM_PARENT_BUDGET_CHECKSUM } from '../../modules/chief-of-staff/store/
 import { PROACTIVE_CHECKSUM } from '../../modules/chief-of-staff/store/proactive-schema.js';
 import { MANDATE_CHECKSUM } from '../../modules/chief-of-staff/store/mandate-schema.js';
 import { ACTION_CHECKSUM } from '../../modules/chief-of-staff/store/action-schema.js';
+import { STRATEGY_CHECKSUM } from '../../modules/chief-of-staff/store/strategy-schema.js';
 /** Synthetic identities for release-contract tests; never a transferable artifact receipt. */
 export function fixtureRelease(slice: ReleaseManifest['slice'] = 'S01'): ReleaseManifest {
   const commit = 'a'.repeat(40),
@@ -36,7 +37,9 @@ export function fixtureRelease(slice: ReleaseManifest['slice'] = 'S01'): Release
                     ? 14
                     : slice === 'S08'
                       ? 15
-                      : 16;
+                      : slice === 'S09'
+                        ? 16
+                        : 17;
   return {
     contract: 'cos-release/v1',
     releaseId: 'release-fixture',
@@ -63,7 +66,9 @@ export function fixtureRelease(slice: ReleaseManifest['slice'] = 'S01'): Release
                       ? 'refs/heads/cos/s07-proactive-proposals'
                       : slice === 'S08'
                         ? 'refs/heads/cos/s08-standing-mandates'
-                        : 'refs/heads/codex/s09-approved-calendar-actions',
+                        : slice === 'S09'
+                          ? 'refs/heads/codex/s09-approved-calendar-actions'
+                          : 'refs/heads/codex/s10-strategic-reviews',
       syncContract: 'cos-source-sync/github-pinned-v1',
     },
     buildInputDigest: 'e'.repeat(64),
@@ -101,6 +106,7 @@ export function fixtureRelease(slice: ReleaseManifest['slice'] = 'S01'): Release
       ...(schemaVersion >= 14 ? [{ version: 14, checksum: PROACTIVE_CHECKSUM }] : []),
       ...(schemaVersion >= 15 ? [{ version: 15, checksum: MANDATE_CHECKSUM }] : []),
       ...(schemaVersion >= 16 ? [{ version: 16, checksum: ACTION_CHECKSUM }] : []),
+      ...(schemaVersion >= 17 ? [{ version: 17, checksum: STRATEGY_CHECKSUM }] : []),
     ],
     previousReleaseIds: [],
     images: [

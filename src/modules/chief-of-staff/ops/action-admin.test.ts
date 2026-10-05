@@ -44,6 +44,7 @@ vi.mock('../actions/config.js', async (original) => ({
   openWriterCredentials: f.credentials,
 }));
 import { runActionAdmin } from './action-admin.js';
+import { SCHEMA_VERSION } from '../store/migrations.js';
 import { parseAdminArguments } from './admin.js';
 import { initializeTarget, writeAtomic } from './target-state.js';
 import { machineFingerprint } from './target-identity.js';
@@ -169,7 +170,7 @@ function fixture() {
     };
   f.connect.mockResolvedValue(client as unknown as pg.Client);
   f.fingerprint.mockResolvedValue(targetBinding.databaseFingerprint);
-  f.schema.mockResolvedValue(16);
+  f.schema.mockResolvedValue(SCHEMA_VERSION);
   f.recovery.mockResolvedValue({});
   f.pin.mockReturnValue(true);
   f.consent.mockReturnValue(consent);

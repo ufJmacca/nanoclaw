@@ -3,13 +3,13 @@ import { randomUUID } from 'node:crypto';
 import { before, after, test } from 'node:test';
 import pg from 'pg';
 import { connectFixtureDatabase, fixtureDatabaseConfig, fixtureRuntimeUser } from './fixture-database.js';
-import { migrate, MIGRATIONS } from '../../modules/chief-of-staff/store/migrations.js';
+import { migrate, MIGRATIONS, SCHEMA_VERSION } from '../../modules/chief-of-staff/store/migrations.js';
 
 let admin: pg.Client, runtime: pg.Client;
 before(async () => {
   admin = await connectFixtureDatabase(process.env, 'migration');
   assert.equal((await admin.query('SELECT pg_try_advisory_lock(73101002) AS locked')).rows[0].locked, true);
-  assert.equal(await migrate(admin, fixtureRuntimeUser()), 16);
+  assert.equal(await migrate(admin, fixtureRuntimeUser()), SCHEMA_VERSION);
   runtime = new pg.Client(await fixtureDatabaseConfig());
   await runtime.connect();
 });
