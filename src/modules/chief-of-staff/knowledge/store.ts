@@ -443,6 +443,10 @@ export class KnowledgeStore {
   async contextReady(context: KnowledgeContext): Promise<Result> {
     return this.transaction(async (client) => ({ status: (await this.current(client, context)) ? 'ok' : 'denied' }));
   }
+  /** Trusted action authority uses the caller's transaction, without holding another client or reading source bytes. */
+  async actionContextCurrent(client: PoolClient, context: KnowledgeContext): Promise<boolean> {
+    return this.current(client, context);
+  }
   private async missionSourceMetadata(client: PoolClient, context: KnowledgeContext, selection: MissionSource) {
     return (
       await client.query(

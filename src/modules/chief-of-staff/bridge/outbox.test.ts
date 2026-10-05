@@ -32,6 +32,47 @@ function fixture() {
   return { store, admitted, preview, outbox: new CosOutbox({ store, admitted, preview }) };
 }
 describe('S01 native approval outbox reconciliation', () => {
+  it('S09 identifies the exact external calendar effect and explicitly states its narrow notification scope', async () => {
+    const f = fixture();
+    const action = {
+      kind: 'calendar_action',
+      action_id: 'action-' + 'a'.repeat(64),
+      intent_digest: 'b'.repeat(64),
+      event_id: 'c'.repeat(64),
+      expires_at: item.expires_at.slice(0, 19) + 'Z',
+      request: {
+        kind: 'calendar_block',
+        binding_id: item.payload.proposal_id,
+        calendar_id: 'selected@example.test',
+        start: '2026-10-06T22:00:00Z',
+        end: '2026-10-06T23:00:00Z',
+        time_zone: 'Australia/Sydney',
+        title: 'Focus work',
+        description: '',
+        project_id: null,
+        mission_id: null,
+        attendees: [],
+      },
+    };
+    f.store.pendingOutbox.mockResolvedValue({
+      status: 'ok',
+      items: [{ ...item, payload: { ...item.payload, change: action } }],
+    });
+    await f.outbox.drain(binding);
+    const text = f.preview.mock.calls[0][1].text as string;
+    expect(text).toContain('Proposed calendar block');
+    expect(text).toContain('No guests, invitations or event reminders');
+    for (const value of [
+      action.request.calendar_id,
+      action.request.start,
+      action.request.end,
+      action.request.time_zone,
+      action.intent_digest,
+    ])
+      expect(text).toContain(value);
+    expect(text).toContain('cos approve ' + item.payload.proposal_id + ' ' + item.payload.confirmation_token);
+    expect(f.store.apply).not.toHaveBeenCalled();
+  });
   it('renders all exact proposal fields and controls before acknowledging delivery', async () => {
     const f = fixture();
     await f.outbox.drain(binding);

@@ -2,6 +2,7 @@ import type { CosBinding } from '../../../cos-boundary.js';
 import type { PriorityStore } from '../store/priorities.js';
 import type { ProposalChange } from '../domain/contracts.js';
 import { validProposalChange, digest } from '../domain/contracts.js';
+import { validCalendarActionChange } from '../contracts/action-protocol.js';
 export type Preview = {
   id: string;
   proposalId: string;
@@ -49,7 +50,10 @@ export class CosOutbox {
         const json = JSON.stringify(change, null, 2);
         // User-supplied markdown cannot terminate the exact-value block.
         const fence = '`'.repeat(Math.max(3, ...[...json.matchAll(/`+/g)].map((match) => match[0].length + 1)));
-        const text = `Proposed internal change — awaiting your approval.\n\n${fence}json\n${json}\n${fence}\n\nProposal: ${proposalId}\nChange digest: ${digest(change)}\nExpires: ${expiresAt}\n\nTo approve, send exactly:\ncos approve ${proposalId} ${token}\n\nTo reject, send exactly:\ncos reject ${proposalId} ${token}`;
+        const heading = validCalendarActionChange(change)
+          ? 'Proposed calendar block — awaiting your approval.\nCreates one private ordinary event on the exact selected calendar below. No guests, invitations or event reminders. Existing account sharing still applies.'
+          : 'Proposed internal change — awaiting your approval.';
+        const text = `${heading}\n\n${fence}json\n${json}\n${fence}\n\nProposal: ${proposalId}\nChange digest: ${digest(change)}\nExpires: ${expiresAt}\n\nTo approve, send exactly:\ncos approve ${proposalId} ${token}\n\nTo reject, send exactly:\ncos reject ${proposalId} ${token}`;
         if (
           await d.preview(binding, {
             id: 'cos-' + proposalId,

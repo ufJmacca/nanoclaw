@@ -39,7 +39,12 @@ import {
 import { ProactiveStore } from '../automation/proactive-store.js';
 import { validMandateChange } from '../contracts/mandate-protocol.js';
 import { MandateStore } from '../automation/mandate-store.js';
-import { validCalendarActionChange } from '../contracts/action-protocol.js';
+import {
+  validCalendarActionChange,
+  validCalendarActionRequest,
+  type CalendarActionRequest,
+} from '../contracts/action-protocol.js';
+import { ActionStore, type ActionDependencies, type PreparedAction } from '../actions/store.js';
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const equal = (a: string, b: string) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
@@ -67,6 +72,7 @@ async function event(
 }
 
 export class PriorityStore {
+  readonly actions: ActionStore;
   readonly work: WorkStore;
   readonly schedules = new BriefScheduleStore();
   readonly proactive: ProactiveStore;
@@ -89,7 +95,9 @@ export class PriorityStore {
     readonly calendarView?: CalendarView,
     missionAuthority?: MissionAuthorityResolver,
     teamAuthority?: TeamAuthorityResolver,
+    actionDependencies?: ActionDependencies,
   ) {
+    this.actions = new ActionStore(database, knowledge, actionDependencies);
     this.mandates = new MandateStore(database, knowledge, missionAuthority, () => this.missions);
     this.teams = new TeamProposalStore(knowledge, teamAuthority);
     this.teamRuns = new TeamRunStore(database, this.teams, knowledge);
@@ -128,6 +136,7 @@ export class PriorityStore {
       );
   }
   private async workReceiptCurrent(client: PoolClient, context: Context, result: Result): Promise<boolean> {
+    if (validCalendarActionChange(result.change)) return this.actions.validateChange(client, context, result.change);
     if (validMandateChange(result.change)) return this.mandates.validateChange(client, context, result.change);
     if (validProactiveDispositionChange(result.change)) {
       const stored = (
@@ -278,6 +287,16 @@ export class PriorityStore {
     if (!uuid.test(requestId) || !validMissionRequest(request) || context.origin) return { status: 'denied' };
     return this.proposal(context, requestId, undefined, undefined, request);
   }
+  async requestAction(context: Context, requestId: string, request: CalendarActionRequest): Promise<Result> {
+    if (!uuid.test(requestId) || !validCalendarActionRequest(request) || context.origin) return { status: 'denied' };
+    const pinned = structuredClone(request),
+      prepared = await this.actions.observe(context, pinned);
+    if (prepared.status !== 'ok') return prepared;
+    return this.proposal(context, requestId, undefined, undefined, undefined, undefined, undefined, {
+      request: pinned,
+      prepared: prepared.prepared as PreparedAction,
+    });
+  }
   async requestTeam(context: Context, requestId: string, request: TeamRequest): Promise<Result> {
     if (!uuid.test(requestId) || !validTeamRequest(request) || context.origin) return { status: 'denied' };
     return this.proposal(context, requestId, undefined, undefined, undefined, request);
@@ -299,35 +318,40 @@ export class PriorityStore {
     mission?: MissionRequest,
     team?: TeamRequest,
     disposition?: ProactiveDispositionRequest,
+    action?: { request: CalendarActionRequest; prepared: PreparedAction },
   ): Promise<Result> {
     const change = proposed;
-    const method = disposition
-      ? 'cos_proactive_disposition_propose'
-      : team
-        ? 'cos_team_request'
-        : mission
-          ? 'cos_mission_request'
-          : validMandateChange(change)
-            ? 'cos_mandate_propose'
-            : validProactivePolicyChange(change)
-              ? 'cos_proactive_policy_propose'
-              : validSourceChange(change)
-                ? 'cos_source_change_propose'
-                : validWorkChange(change)
-                  ? 'cos_work_change_propose'
-                  : validScheduleChange(change)
-                    ? 'cos_brief_schedule_propose'
-                    : 'cos_change_propose';
-    const hash = digest(
-      disposition
-        ? { method, request: disposition, retained }
+    const method = action
+      ? 'cos_action_propose'
+      : disposition
+        ? 'cos_proactive_disposition_propose'
         : team
-          ? { method, request: team }
+          ? 'cos_team_request'
           : mission
-            ? { method, request: mission }
-            : validWorkChange(change)
-              ? { method, change, retained: retained ?? null }
-              : { method, change },
+            ? 'cos_mission_request'
+            : validMandateChange(change)
+              ? 'cos_mandate_propose'
+              : validProactivePolicyChange(change)
+                ? 'cos_proactive_policy_propose'
+                : validSourceChange(change)
+                  ? 'cos_source_change_propose'
+                  : validWorkChange(change)
+                    ? 'cos_work_change_propose'
+                    : validScheduleChange(change)
+                      ? 'cos_brief_schedule_propose'
+                      : 'cos_change_propose';
+    const hash = digest(
+      action
+        ? { method, request: action.request }
+        : disposition
+          ? { method, request: disposition, retained }
+          : team
+            ? { method, request: team }
+            : mission
+              ? { method, request: mission }
+              : validWorkChange(change)
+                ? { method, change, retained: retained ?? null }
+                : { method, change },
     );
     const result = await this.transaction(async (client) => {
       if (!(await authorised(client, context))) return { status: 'denied' };
@@ -349,15 +373,19 @@ export class PriorityStore {
           return { status: 'denied' };
         return existing.result ?? { status: 'pending', request_id: requestId };
       }
-      const change = disposition
-        ? await this.proactive.prepareDisposition(client, context, requestId, disposition, retained)
-        : team
-          ? await this.teams.prepare(client, context, requestId, team)
-          : mission
-            ? await this.missions.prepare(client, context, requestId, mission)
-            : proposed;
+      const id = randomUUID();
+      const change = action
+        ? await this.actions.prepare(client, context, requestId, action.request, action.prepared, id)
+        : disposition
+          ? await this.proactive.prepareDisposition(client, context, requestId, disposition, retained)
+          : team
+            ? await this.teams.prepare(client, context, requestId, team)
+            : mission
+              ? await this.missions.prepare(client, context, requestId, mission)
+              : proposed;
       if (
         !change ||
+        (validCalendarActionChange(change) && !(await this.actions.validateChange(client, context, change))) ||
         (validMandateChange(change) && !(await this.mandates.validateChange(client, context, change))) ||
         (validSourceChange(change) &&
           (!this.knowledge || !(await this.knowledge.validateChange(client, context.scopeId, change)))) ||
@@ -372,11 +400,10 @@ export class PriorityStore {
         ]);
         return receipt;
       }
-      const id = randomUUID();
       const token = randomBytes(24).toString('base64url');
       await client.query(
         `INSERT INTO cos.proposals(id,scope_id,session_id,ingress_id,owner_id,change,payload_hash,challenge_hash,state,expires_at,work_context)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,'pending',clock_timestamp()+interval '15 minutes',$9)`,
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,'pending',COALESCE($10::timestamptz,clock_timestamp()+interval '15 minutes'),$9)`,
         [
           id,
           context.scopeId,
@@ -389,6 +416,7 @@ export class PriorityStore {
           (validWorkChange(change) || validProactiveDispositionChange(change)) && retained
             ? JSON.stringify(retained)
             : null,
+          validCalendarActionChange(change) ? change.expires_at : null,
         ],
       );
       if (validMissionChange(change)) await this.missions.linkProposal(client, context, change, id);
@@ -436,6 +464,14 @@ export class PriorityStore {
         )
       ).rows[0];
       if (!proposal || proposal.owner_id !== context.ownerId || !equal(proposal.challenge_hash, digest(token)))
+        return { status: 'denied' };
+      if (
+        proposal.state === 'pending' &&
+        decision === 'approve' &&
+        validCalendarActionChange(proposal.change) &&
+        (digest(proposal.change) !== proposal.payload_hash ||
+          !(await this.actions.validateChange(client, { ...context, sessionId: proposal.session_id }, proposal.change)))
+      )
         return { status: 'denied' };
       if (
         decision === 'approve' &&
@@ -487,6 +523,11 @@ export class PriorityStore {
         ingress_id: context.ingressId,
         payload_hash: proposal.payload_hash,
       });
+      if (decision === 'reject' && validCalendarActionChange(proposal.change))
+        await client.query(
+          "UPDATE cos.actions SET state='cancelled',cancel_requested=true,updated_at=clock_timestamp() WHERE scope_id=$1 AND id=$2 AND state='waiting_approval'",
+          [context.scopeId, proposal.change.action_id],
+        );
       if (decision === 'approve')
         await client.query(
           `INSERT INTO cos.outbox(id,scope_id,kind,payload) VALUES($1,$2,'proposal_apply',$3) ON CONFLICT DO NOTHING`,
@@ -512,8 +553,6 @@ export class PriorityStore {
       if (proposal.state === 'conflict') return { status: 'conflict' };
       const change = proposal.change as ProposalChange;
       if (!validProposalChange(change) || digest(change) !== proposal.payload_hash) return { status: 'denied' };
-      // Only the dedicated host action queue may interpret this exact-effect envelope.
-      if (validCalendarActionChange(change)) return { status: 'denied' };
       if (
         validWorkChange(change) ||
         validScheduleChange(change) ||
@@ -521,7 +560,8 @@ export class PriorityStore {
         validTeamChange(change) ||
         validProactivePolicyChange(change) ||
         validProactiveDispositionChange(change) ||
-        validMandateChange(change)
+        validMandateChange(change) ||
+        validCalendarActionChange(change)
       ) {
         const context: Context = {
           scopeId,
@@ -531,31 +571,33 @@ export class PriorityStore {
           ingressId: proposal.ingress_id,
         };
         if (proposal.owner_id !== context.ownerId) return { status: 'denied' };
-        const result = validMandateChange(change)
-          ? await this.mandates.applyApproved(client, context, proposal, change)
-          : validProactiveDispositionChange(change)
-            ? await this.proactive.applyDisposition(
-                client,
-                context,
-                proposal,
-                change,
-                proposal.work_context ?? undefined,
-              )
-            : validProactivePolicyChange(change)
-              ? await this.proactive.applyPolicy(client, context, proposal, change)
-              : validTeamChange(change)
-                ? await this.teams.applyApproved(client, context, proposal, change)
-                : validMissionChange(change)
-                  ? await this.missions.applyApproved(client, context, proposal, change)
-                  : validScheduleChange(change)
-                    ? await this.schedules.applyApproved(client, context, proposal, change)
-                    : await this.work.applyApproved(
-                        client,
-                        context,
-                        proposal,
-                        change,
-                        proposal.work_context ?? undefined,
-                      );
+        const result = validCalendarActionChange(change)
+          ? await this.actions.applyApproved(client, context, proposal, change)
+          : validMandateChange(change)
+            ? await this.mandates.applyApproved(client, context, proposal, change)
+            : validProactiveDispositionChange(change)
+              ? await this.proactive.applyDisposition(
+                  client,
+                  context,
+                  proposal,
+                  change,
+                  proposal.work_context ?? undefined,
+                )
+              : validProactivePolicyChange(change)
+                ? await this.proactive.applyPolicy(client, context, proposal, change)
+                : validTeamChange(change)
+                  ? await this.teams.applyApproved(client, context, proposal, change)
+                  : validMissionChange(change)
+                    ? await this.missions.applyApproved(client, context, proposal, change)
+                    : validScheduleChange(change)
+                      ? await this.schedules.applyApproved(client, context, proposal, change)
+                      : await this.work.applyApproved(
+                          client,
+                          context,
+                          proposal,
+                          change,
+                          proposal.work_context ?? undefined,
+                        );
         if (!['ok', 'conflict'].includes(result.status)) return result;
         const changed = result.status === 'ok';
         await client.query(
