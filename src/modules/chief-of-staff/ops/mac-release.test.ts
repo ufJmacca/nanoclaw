@@ -119,7 +119,7 @@ it('selects runtime credentials separately without inheriting a test marker or a
   expect(selected.MATTERMOST_BOT_TOKEN).toBeUndefined();
 });
 
-it.each(['S02', 'S03', 'S04', 'S05', 'S06', 'S07', 'S08'])(
+it.each(['S02', 'S03', 'S04', 'S05', 'S06', 'S07', 'S08', 'S09'])(
   '%s release checkpoints preserve reviewed predecessor evidence and reject an unfinished predecessor',
   (slice) => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-s02-release-ledger-'));
@@ -138,7 +138,9 @@ it.each(['S02', 'S03', 'S04', 'S05', 'S06', 'S07', 'S08'])(
                   ? 'S05'
                   : slice === 'S07'
                     ? 'S06'
-                    : 'S07',
+                    : slice === 'S08'
+                      ? 'S07'
+                      : 'S08',
       implementation_status: 'merged',
       review_status: 'human_merged',
       merged_sha: source,
