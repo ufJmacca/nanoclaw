@@ -122,9 +122,27 @@ separate test database is at schema 16. The Pi remains on the accepted S08 relea
 and schema 15. No real OAuth request, calendar write, model invocation or message
 was made in this continuation.
 
+The complete native demonstration now passes ten checks through actual fixture
+Mattermost routing, the isolated MCP runner, exact owner preview/decision,
+outbox, existing action pump and private passive result projection. It verifies
+one simulated event per intent, a wrong-owner denial, changed-request conflict,
+fresh conflict/revocation, cancellation, subscription removal, mismatch refusal,
+original-ID reconciliation after a lost response and host restart, and recovery
+after a durable-decision crash. The shared main context generation and unconsumed
+model allowance remain unchanged. Ordinary ingress remains available and its
+session has no CoS RPC context. Initial missing-fixture-writer failure and later
+fixture corrections are retained in the private logs; final result: 10 passed,
+zero failed, in 19.1 seconds.
+
+Four additional PostgreSQL resource checks pass: a completed fixture mission can
+propose a minimal block without publishing source text or launching further work;
+source version/permission/revocation and project-version changes invalidate an
+existing approval; foreign mission/session identities are denied; and a retained
+main context exposed to revoked text cannot bypass policy by omitting a mission.
+The transport is synthetic and cannot activate Google credentials.
+
 Remaining S09 work includes verified target backup proof before live writer
-admission, the complete native fixture
-demonstration, cumulative release registration, exact Linux/ARM64 image tests,
+admission, cumulative release registration, exact Linux/ARM64 image tests,
 source synchronization, Pi migration/deployment/preservation checks and one
 reviewable PR. Live calendar consent and validation remain pending. S10 is not
 eligible until S09 has a legitimate reviewed merge and accepted merged deployment.

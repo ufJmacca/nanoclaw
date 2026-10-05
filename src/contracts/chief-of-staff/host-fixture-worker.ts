@@ -23,8 +23,10 @@ import {
 } from '../../modules/chief-of-staff/bridge/model-policy.js';
 import { readPrivate } from '../../modules/chief-of-staff/ops/target-state.js';
 import type { MissionAuthority } from '../../modules/chief-of-staff/missions/proposal-store.js';
+import { createActionFixtureHost, type ActionFixtureConfiguration } from './action-fixture-host.js';
 
 if (process.env.COS_FIXTURE_HOST_PROCESS !== 'S01' || !process.send) throw new Error('fixture_only');
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- Fixture-only command payloads differ per scenario and never enter production routing.
 let handle: ((command: string, value: any) => Promise<unknown>) | undefined;
 async function start(input: {
   root: string;
@@ -34,6 +36,7 @@ async function start(input: {
   calendar?: boolean;
   brief?: { clock: string; events: unknown[] };
   mandate?: { events: unknown[] };
+  actions?: ActionFixtureConfiguration;
   mission?: {
     repository: string;
     hostRepository: string;
@@ -199,7 +202,21 @@ async function start(input: {
           return single ? { ...single, ...input.mission!.team! } : null;
         }
       : undefined;
-  const store = new PriorityStore(database, knowledge, connector, view, authority, teamAuthority);
+  const db = initDb(path.join(input.root, 'central.db'));
+  runMigrations(db);
+  if (input.actions && !input.knowledgeRoot) throw Error('fixture_actions_require_knowledge_root');
+  const actions = input.actions
+    ? createActionFixtureHost(input.knowledgeRoot!, db, database, input.binding, input.actions)
+    : undefined;
+  const store = new PriorityStore(
+    database,
+    knowledge,
+    connector,
+    view,
+    authority,
+    teamAuthority,
+    actions?.dependencies,
+  );
   if (input.brief) {
     store.briefs.options.clock = () => new Date(fixtureClock!);
     store.briefArtifacts!.collector.options.clock = () => new Date(fixtureClock!);
@@ -215,18 +232,17 @@ async function start(input: {
     }
     return result;
   };
-  const db = initDb(path.join(input.root, 'central.db'));
-  runMigrations(db);
   const binding = input.binding,
     session = getSession(binding.sessionId)!,
     ordinary = getSession(input.ordinarySessionId)!;
   if (!session || !ordinary) throw new Error('fixture_session_missing');
+  let fixtureSubscription = true;
   const facts = async () => ({
     id: binding.channelId,
     type: 'P',
     delete_at: 0,
     members: [binding.ownerId, binding.botId],
-    activeSubscription: true,
+    activeSubscription: fixtureSubscription,
   });
   const specialists =
     input.mission && authority
@@ -325,7 +341,10 @@ async function start(input: {
           id: value.id,
           kind: 'chat',
           timestamp: new Date().toISOString(),
-          content: JSON.stringify({ senderId: 'mattermost:' + binding.ownerId, text: value.text }),
+          content: JSON.stringify({
+            senderId: 'mattermost:' + (input.actions ? (value.senderId ?? binding.ownerId) : binding.ownerId),
+            text: value.text,
+          }),
         },
       });
       if (command === 'ordinary-ingress') {
@@ -366,7 +385,7 @@ async function start(input: {
       fixtureClock = value;
       return true;
     }
-    if ((input.brief || input.mission) && command === 'sync-acks') {
+    if ((input.brief || input.mission || input.actions) && command === 'sync-acks') {
       const directory = sessionDir(session.agent_group_id, session.id),
         inbound = openInboundDb(path.join(directory, 'inbound.db')),
         outbound = openOutboundDb(path.join(directory, 'outbound.db'));
@@ -400,6 +419,13 @@ async function start(input: {
           generation: string;
         }
       )?.generation;
+    if (actions && command === 'action-fixture-state') return actions.state();
+    if (actions && command === 'action-fixture-mode') return actions.mode(value);
+    if (actions && command === 'action-fixture-subscription') {
+      if (typeof value !== 'boolean') throw Error('invalid_fixture_subscription');
+      fixtureSubscription = value;
+      return true;
+    }
     if (input.mission && command === 'mission-states') return specialists!.states();
     if (input.mission && command === 'mission-stale-submit')
       return store.missionRuns.submitResult(value.identity, value.lease, value.requestId, value.callId, value.result);
@@ -502,6 +528,7 @@ async function start(input: {
   return { pid: process.pid };
 }
 let queue = Promise.resolve();
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- The private fixture IPC envelope carries each scenario's explicit start/control payload.
 process.on('message', (message: any) => {
   queue = queue.then(async () => {
     try {
@@ -512,6 +539,7 @@ process.on('message', (message: any) => {
       process.send!({ id: message.id, value }, () => {
         if (message.command === 'shutdown') process.disconnect();
       });
+      // eslint-disable-next-line no-catch-all/no-catch-all -- Fixture IPC returns only bounded redacted diagnostics to its parent test process.
     } catch (error) {
       const reason =
         error instanceof Error && /^[a-z_]{1,80}$/.test(error.message)

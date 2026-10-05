@@ -29,7 +29,8 @@ validation and preserves readback while new writes are disabled. Operator setup
 and proof recording now pass guarded local tests: fresh backup retains the paused
 native owner lease, and restore imports only a fresh scope into the protected
 separate test database before recording proof. The complete native fixture
-demonstration and release/deployment gates remain. No real account or writer is activated.
+demonstration now passes through routing, isolated MCP, approval, host execution,
+private result and recovery. Release/deployment gates remain. No real account or writer is activated.
 
 Read [START HERE](00_START_HERE.md), [architecture/contracts](ARCHITECTURE_AND_CONTRACTS.md), [external PostgreSQL](EXTERNAL_POSTGRES.md), [goal execution](GOAL.md), [Mac-to-Pi delivery](MAC_TO_PI_DELIVERY.md), [Mattermost interaction](INTERACTION_MODEL.md), [implementation authority](IMPLEMENTATION_AUTHORITY.md), and [baseline](REPOSITORY_BASELINE.md) before implementation. This plan inherits their identity, scope, replay, approval, budget and retention rules; none may be postponed to S11.
 
