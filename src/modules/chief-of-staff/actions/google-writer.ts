@@ -87,8 +87,8 @@ export function googleCalendarWriter(options: Options): CalendarActionWriter {
     let a: CalendarWriterAccess;
     try {
       a = await options.access();
+      // eslint-disable-next-line no-catch-all/no-catch-all -- Host credential diagnostics may contain secrets.
     } catch (_error) {
-      // eslint-disable-line no-catch-all/no-catch-all -- Host credential diagnostics may contain secrets.
       return fail('writer_credentials_unavailable', outcome);
     }
     if (
@@ -113,8 +113,8 @@ export function googleCalendarWriter(options: Options): CalendarActionWriter {
     let token: string;
     try {
       token = await options.token();
+      // eslint-disable-next-line no-catch-all/no-catch-all -- Token failures must expose only a fixed category.
     } catch (_error) {
-      // eslint-disable-line no-catch-all/no-catch-all -- Token failures must expose only a fixed category.
       return fail('writer_credentials_unavailable', outcome);
     }
     if (typeof token !== 'string' || !/^[\x21-\x7e]{1,8192}$/.test(token))
@@ -162,8 +162,8 @@ export function googleCalendarWriter(options: Options): CalendarActionWriter {
         signal,
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       });
+      // eslint-disable-next-line no-catch-all/no-catch-all -- Fetch diagnostics can include credentials and account data.
     } catch (_error) {
-      // eslint-disable-line no-catch-all/no-catch-all -- Fetch diagnostics can include credentials and account data.
       // Never expose fetch diagnostics or attach a secret-bearing cause.
       return fail('writer_request_unavailable', outcome);
     }
@@ -209,8 +209,8 @@ export function googleCalendarWriter(options: Options): CalendarActionWriter {
     let calendarTimeZone: string;
     try {
       calendarTimeZone = calendarZone(selected.timeZone);
+      // eslint-disable-next-line no-catch-all/no-catch-all -- Untrusted provider metadata is categorised without its contents.
     } catch (_error) {
-      // eslint-disable-line no-catch-all/no-catch-all -- Untrusted provider metadata is categorised without its contents.
       return fail('writer_calendar_timezone_unknown', outcome);
     }
     return { selected, calendarTimeZone };
@@ -244,8 +244,8 @@ export function googleCalendarWriter(options: Options): CalendarActionWriter {
     let snapshot: Awaited<ReturnType<typeof collectCalendarSnapshot>>;
     try {
       snapshot = await collectCalendarSnapshot(reader, a.calendarId, window, signal);
+      // eslint-disable-next-line no-catch-all/no-catch-all -- Reader diagnostics must not reveal account content.
     } catch (_error) {
-      // eslint-disable-line no-catch-all/no-catch-all -- Reader diagnostics must not reveal account content.
       return fail('writer_availability_unavailable', 'not_sent');
     }
     if (

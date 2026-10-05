@@ -2,6 +2,9 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { before, after, test } from 'node:test';
 import pg from 'pg';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { connectFixtureDatabase, fixtureDatabaseConfig, fixtureRuntimeUser } from './fixture-database.js';
 import { migrate } from '../../modules/chief-of-staff/store/migrations.js';
 import { BoundedDatabase } from '../../modules/chief-of-staff/store/client.js';
@@ -15,6 +18,8 @@ import {
   type CalendarWriterAccess,
   type CalendarWriterInspection,
 } from '../../modules/chief-of-staff/actions/writer.js';
+import { ActionWitness, initializeActionWitness } from '../../modules/chief-of-staff/actions/witness.js';
+import type { ActionIntent } from '../../modules/chief-of-staff/actions/intent.js';
 
 const scope = 'action-' + randomUUID(),
   writerId = randomUUID();
@@ -43,6 +48,7 @@ const writerBinding = {
   scopes: [GOOGLE_OWNED_EVENT_WRITE_SCOPE, GOOGLE_CALENDAR_METADATA_SCOPE],
 };
 let admin: pg.Client, store: PriorityStore, request: CalendarActionRequest;
+let witness: ActionWitness, witnessParent: string;
 let enabled = true,
   busy = false;
 let access: CalendarWriterAccess = {
@@ -98,6 +104,11 @@ before(async () => {
     'INSERT INTO cos.action_writer_revisions(scope_id,binding_id,version,body,digest,consent_ref) VALUES($1,$2,1,$3,$4,$5)',
     [scope, writerId, JSON.stringify(writerBinding), digest(writerBinding), 'fixture-only-explicit-consent'],
   );
+  witnessParent = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-action-effects-'));
+  const root = path.join(witnessParent, 'effects'),
+    installation = digest('fixture installation'),
+    owner = initializeActionWitness(root, installation);
+  witness = new ActionWitness(root, installation, owner.generation);
   store = new PriorityStore(
     BoundedDatabase.fromConfig(await fixtureDatabaseConfig()),
     undefined,
@@ -105,7 +116,7 @@ before(async () => {
     undefined,
     undefined,
     undefined,
-    { authority: () => (enabled ? authority : null), writer: () => writer },
+    { authority: () => (enabled ? authority : null), writer: () => writer, witness },
   );
   const now = (await admin.query('SELECT clock_timestamp() AS now')).rows[0].now.getTime();
   const instant = (offset: number) =>
@@ -144,6 +155,7 @@ after(async () => {
   }
   await store?.database.pool.end();
   await admin?.end();
+  if (witnessParent) fs.rmSync(witnessParent, { recursive: true, force: true });
 });
 async function propose(input = request, id = randomUUID()) {
   return store.requestAction(context, id, input);
@@ -270,5 +282,216 @@ test('S09-T09 cancel before approval prevents the decision and returns no deleti
   assert.equal((await decide(proposal)).status, 'denied');
   assert.equal((await store.actions.cancel({ ...context, ownerId: 'other-owner' }, id)).status, 'denied');
   assert.equal((await store.actions.inspect({ ...context, sessionId: 'other-session' }, id)).status, 'denied');
+  assert.equal(writes, 0);
+});
+async function queued(offsetHours: number) {
+  const input = {
+    ...request,
+    start: new Date(Date.parse(request.start) + offsetHours * 3600000).toISOString().replace('.000Z', 'Z'),
+    end: new Date(Date.parse(request.end) + offsetHours * 3600000).toISOString().replace('.000Z', 'Z'),
+  };
+  const proposal = await propose(input);
+  assert.equal(proposal.status, 'ok');
+  assert.equal((await decide(proposal)).status, 'ok');
+  const applied = await store.apply(scope, String(proposal.proposal_id));
+  assert.equal(applied.status, 'ok');
+  return { id: String(applied.record_id), input };
+}
+test('S09-T04 the durable queue grants one active executor lease across independent contenders', async () => {
+  assert.equal(typeof store.actions.runs?.claim, 'function');
+  const action = await queued(3),
+    results = await Promise.all(
+      Array.from({ length: 5 }, () => store.actions.runs.claim(context, action.id, randomUUID())),
+    );
+  assert.equal(results.filter((result) => result.status === 'ok').length, 1);
+  assert.equal(results.filter((result) => result.status === 'pending').length, 4);
+  assert.equal(writes, 0);
+});
+test('S09-PG02 an expired lease cannot record request-start or admit a provider call', async () => {
+  const action = await queued(5),
+    claim = await store.actions.runs.claim(context, action.id, randomUUID());
+  assert.equal(claim.status, 'ok');
+  await admin.query(
+    "UPDATE cos.actions SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE scope_id=$1 AND id=$2",
+    [scope, action.id],
+  );
+  const started = await store.actions.runs.start(
+    context,
+    claim.lease as import('../../modules/chief-of-staff/actions/run-store.js').ActionLease,
+    await writer.inspect(action.input),
+  );
+  assert.equal(started.status, 'denied');
+  assert.equal(
+    (
+      await admin.query('SELECT count(*)::int AS n FROM cos.action_request_starts WHERE scope_id=$1 AND action_id=$2', [
+        scope,
+        action.id,
+      ])
+    ).rows[0].n,
+    0,
+  );
+  assert.equal(writes, 0);
+});
+test('S09-T09/T10 a retained started-effect witness prevents cancellation from claiming an unwritten effect after receipt loss', async () => {
+  const action = await queued(7),
+    row = (
+      await admin.query('SELECT body,digest,proposal_id FROM cos.action_intents WHERE scope_id=$1 AND id=$2', [
+        scope,
+        action.id,
+      ])
+    ).rows[0];
+  const decision = (await admin.query('SELECT decision_ingress_id FROM cos.proposals WHERE id=$1', [row.proposal_id]))
+    .rows[0].decision_ingress_id;
+  witness.begin({
+    format: 'cos-action-start-witness/v1',
+    intent: row.body as ActionIntent,
+    approvedDigest: row.digest,
+    proposalId: row.proposal_id,
+    decisionIngressId: decision,
+    leaseOwner: randomUUID(),
+    fence: 1,
+    recordedAt: new Date(Math.floor(Date.now() / 1000) * 1000).toISOString().replace('.000Z', 'Z'),
+  });
+  const result = await store.actions.cancel(context, action.id);
+  assert.equal(result.state, 'outcome_uncertain');
+  assert.equal(result.deleted, false);
+  assert.equal(writes, 0);
+});
+test('S09-T08 trusted matching read-back requires confirmed request-start and records one verified receipt', async () => {
+  const action = await queued(9),
+    claimed = await store.actions.runs.claim(context, action.id, randomUUID());
+  assert.equal(claimed.status, 'ok');
+  const lease = claimed.lease as import('../../modules/chief-of-staff/actions/run-store.js').ActionLease;
+  const raw = { ...lease.intent.payload, etag: '"fixture-readback-1"', status: 'confirmed' };
+  assert.equal((await store.actions.runs.complete(context, lease, raw)).status, 'pending');
+  assert.equal((await store.actions.runs.start(context, lease, await writer.inspect(action.input))).status, 'ok');
+  const result = await store.actions.runs.complete(context, lease, raw);
+  assert.equal(result.state, 'verified');
+  assert.equal((result.result as { event_id: string }).event_id, lease.intent.eventId);
+  assert.equal((await store.actions.runs.complete(context, lease, raw)).status, 'pending');
+  assert.equal(
+    (
+      await admin.query(
+        "SELECT count(*)::int AS n FROM cos.action_receipts WHERE scope_id=$1 AND action_id=$2 AND kind='verified'",
+        [scope, action.id],
+      )
+    ).rows[0].n,
+    1,
+  );
+  assert.equal(writes, 0);
+});
+test('S09-T06 mismatch and unresolved absence never become verified or queued for a new write', async () => {
+  for (const [offset, rawKind] of [
+    [11, 'mismatch'],
+    [13, 'missing'],
+  ] as const) {
+    const action = await queued(offset),
+      claimed = await store.actions.runs.claim(context, action.id, randomUUID());
+    assert.equal(claimed.status, 'ok');
+    const lease = claimed.lease as import('../../modules/chief-of-staff/actions/run-store.js').ActionLease;
+    assert.equal((await store.actions.runs.start(context, lease, await writer.inspect(action.input))).status, 'ok');
+    const result = await store.actions.runs.complete(
+      context,
+      lease,
+      rawKind === 'missing'
+        ? null
+        : { ...lease.intent.payload, summary: 'Unexpected title', etag: '"fixture-version"' },
+    );
+    assert.equal(result.state, rawKind === 'missing' ? 'outcome_uncertain' : 'blocked');
+    assert.equal((await store.actions.inspect(context, action.id)).event_id, lease.intent.eventId);
+  }
+  assert.equal(writes, 0);
+});
+test('S09-PG02 loss of a real request-start COMMIT acknowledgement returns pending and permits only same-ID reconciliation', async () => {
+  const action = await queued(15),
+    claimed = await store.actions.runs.claim(context, action.id, randomUUID());
+  assert.equal(claimed.status, 'ok');
+  const lease = claimed.lease as import('../../modules/chief-of-staff/actions/run-store.js').ActionLease;
+  const pool = new pg.Pool(await fixtureDatabaseConfig()),
+    connection = await pool.connect(),
+    original = connection.query.bind(connection);
+  let inserted = false,
+    dropped = false;
+  connection.query = (async (...args: unknown[]) => {
+    const result = await (original as (...params: unknown[]) => Promise<unknown>)(...args);
+    if (typeof args[0] === 'string' && args[0].startsWith('INSERT INTO cos.action_request_starts')) inserted = true;
+    if (args[0] === 'COMMIT' && inserted && !dropped) {
+      dropped = true;
+      throw new Error('fixture request-start acknowledgement lost');
+    }
+    return result;
+  }) as typeof connection.query;
+  connection.release();
+  const faulted = new PriorityStore(
+    new BoundedDatabase(pool),
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    store.actions.dependencies,
+  );
+  try {
+    assert.equal(
+      (await faulted.actions.runs.start(context, lease, await writer.inspect(action.input))).status,
+      'pending',
+    );
+    assert.equal(dropped, true);
+    assert.equal(
+      (
+        await admin.query(
+          'SELECT count(*)::int AS n FROM cos.action_request_starts WHERE scope_id=$1 AND action_id=$2',
+          [scope, action.id],
+        )
+      ).rows[0].n,
+      1,
+    );
+    assert.equal(writes, 0);
+    await admin.query(
+      "UPDATE cos.actions SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE scope_id=$1 AND id=$2",
+      [scope, action.id],
+    );
+    const recovered = await store.actions.runs.claim(context, action.id, randomUUID());
+    assert.equal(recovered.status, 'ok');
+    const recoveredLease = recovered.lease as typeof lease;
+    assert.equal(recoveredLease.mode, 'reconcile');
+    assert.equal(recoveredLease.intent.eventId, lease.intent.eventId);
+    assert.equal(
+      (await store.actions.runs.start(context, recoveredLease, await writer.inspect(action.input))).status,
+      'denied',
+    );
+    assert.equal(writes, 0);
+  } finally {
+    await pool.end();
+  }
+});
+test('S09-T10 a retained witness routes a restored pre-approval projection to reconciliation without granting a new write', async () => {
+  const action = await queued(17),
+    row = (
+      await admin.query('SELECT body,digest,proposal_id FROM cos.action_intents WHERE scope_id=$1 AND id=$2', [
+        scope,
+        action.id,
+      ])
+    ).rows[0];
+  const decision = (await admin.query('SELECT decision_ingress_id FROM cos.proposals WHERE id=$1', [row.proposal_id]))
+    .rows[0].decision_ingress_id;
+  witness.begin({
+    format: 'cos-action-start-witness/v1',
+    intent: row.body as ActionIntent,
+    approvedDigest: row.digest,
+    proposalId: row.proposal_id,
+    decisionIngressId: decision,
+    leaseOwner: randomUUID(),
+    fence: 1,
+    recordedAt: new Date(Math.floor(Date.now() / 1000) * 1000).toISOString().replace('.000Z', 'Z'),
+  });
+  await admin.query("UPDATE cos.actions SET state='waiting_approval' WHERE scope_id=$1 AND id=$2", [scope, action.id]);
+  await admin.query("UPDATE cos.proposals SET state='pending',decision_ingress_id=NULL WHERE id=$1", [row.proposal_id]);
+  const recovered = await store.actions.runs.claim(context, action.id, randomUUID());
+  assert.equal(recovered.status, 'ok');
+  const lease = recovered.lease as import('../../modules/chief-of-staff/actions/run-store.js').ActionLease;
+  assert.equal(lease.mode, 'reconcile');
+  assert.equal(lease.intent.eventId, row.body.eventId);
+  assert.equal((await store.actions.runs.start(context, lease, await writer.inspect(action.input))).status, 'denied');
   assert.equal(writes, 0);
 });

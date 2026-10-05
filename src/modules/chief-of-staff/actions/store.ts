@@ -14,8 +14,11 @@ import type { MissionAuthority, MissionAuthorityResolver } from '../missions/pro
 import { createActionIntent, validActionIntent, type ActionIntent, type ActionResourceObservation } from './intent.js';
 import { validWriterBinding, writerAccessMatches, type ActionWriterBinding } from './binding.js';
 import { CalendarWriteError, type CalendarActionWriter, type CalendarWriterInspection } from './writer.js';
+import type { EffectWitness } from './witness.js';
+import { ActionRunStore } from './run-store.js';
 
 export type ActionDependencies = {
+  witness?: EffectWitness;
   authority: MissionAuthorityResolver;
   writer(context: Context, id: string, binding: ActionWriterBinding): CalendarActionWriter | null;
 };
@@ -44,6 +47,7 @@ export function actionPreview(intent: ActionIntent, hash: string): CalendarActio
 
 /** Host-only intent/approval queue. Provider inspection happens after releasing the PostgreSQL client. */
 export class ActionStore {
+  readonly runs = new ActionRunStore(this);
   constructor(
     readonly database: BoundedDatabase,
     readonly knowledge?: KnowledgeStore,
@@ -383,8 +387,9 @@ export class ActionStore {
   async cancel(context: Context, id: string): Promise<Result> {
     if (!validActionId(id) || context.origin) return { status: 'denied' };
     return this.transaction(async (client) => {
-      if (!(await this.scopeCurrent(client, context)) || !(await this.row(client, context, id)))
-        return { status: 'denied' };
+      if (!(await this.scopeCurrent(client, context))) return { status: 'denied' };
+      const row = await this.row(client, context, id);
+      if (!row) return { status: 'denied' };
       const head = (
         await client.query('SELECT state FROM cos.actions WHERE scope_id=$1 AND id=$2 FOR UPDATE', [
           context.scopeId,
@@ -393,13 +398,14 @@ export class ActionStore {
       ).rows[0];
       if (['verified', 'blocked', 'failed', 'cancelled'].includes(head.state))
         return { status: 'ok', action_id: id, state: head.state, deleted: false };
+      this.dependencies?.witness?.cancel(row.body, row.digest);
       const started =
         (
           await client.query('SELECT 1 FROM cos.action_request_starts WHERE scope_id=$1 AND action_id=$2', [
             context.scopeId,
             id,
           ])
-        ).rowCount === 1;
+        ).rowCount === 1 || !!this.dependencies?.witness?.find(id);
       await client.query(
         'UPDATE cos.actions SET cancel_requested=true,state=$3,lease_owner=NULL,lease_expires_at=NULL,updated_at=clock_timestamp() WHERE scope_id=$1 AND id=$2',
         [context.scopeId, id, started ? 'outcome_uncertain' : 'cancelled'],
