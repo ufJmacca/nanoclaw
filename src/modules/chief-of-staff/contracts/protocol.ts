@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { validScheduleChange, type ScheduleChange } from './schedule-protocol.js';
 import { validMissionRequest } from './mission-protocol.js';
 import { validMandateChange, type MandateChange } from './mandate-protocol.js';
+import { validCalendarActionChange, type CalendarActionChange } from './action-protocol.js';
 import { validMissionReview } from './mission-review.js';
 import { validTeamRequest } from './team-protocol.js';
 import { validCalendarActionRequest, validActionId } from './action-protocol.js';
@@ -547,7 +548,8 @@ export type ProposalChange =
   | TeamChange
   | ProactivePolicyChange
   | ProactiveDispositionChange
-  | MandateChange;
+  | MandateChange
+  | CalendarActionChange;
 export function validProposalChange(value: unknown): value is ProposalChange {
   return (
     validChange(value) ||
@@ -557,6 +559,7 @@ export function validProposalChange(value: unknown): value is ProposalChange {
     validProactivePolicyChange(value) ||
     validProactiveDispositionChange(value) ||
     validMandateChange(value) ||
+    validCalendarActionChange(value) ||
     validMissionChange(value) ||
     validTeamChange(value)
   );

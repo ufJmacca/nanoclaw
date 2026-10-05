@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import fs from 'node:fs';
-import { validRequest } from './protocol.js';
+import { validRequest, validProposalChange } from './protocol.js';
 
 const id = '11111111-1111-4111-8111-111111111111';
 const request = {
@@ -19,6 +19,19 @@ const request = {
 const rpc = { protocol: 'cos-rpc/v1', request_id: id, method: 'cos_action_propose', params: { request } };
 
 describe('S09 exact calendar action wire boundary', () => {
+  it('recognises the host-sealed exact action preview for the existing owner approval adapter', () => {
+    const change = {
+      kind: 'calendar_action',
+      action_id: 'action-' + 'a'.repeat(64),
+      intent_digest: 'b'.repeat(64),
+      request,
+      event_id: 'c'.repeat(64),
+      expires_at: '2026-10-05T21:15:00Z',
+    };
+    expect(validProposalChange(change)).toBe(true);
+    expect(validProposalChange({ ...change, request: { ...request, attendees: ['guest@example.test'] } })).toBe(false);
+    expect(validRequest({ ...rpc, method: 'cos_change_propose', params: { change } })).toBe(false);
+  });
   it('packages the identical narrow action contract into the runner', () => {
     expect(fs.readFileSync('container/agent-runner/src/mcp-tools/generated/action-protocol.ts', 'utf8')).toBe(
       fs.readFileSync('src/modules/chief-of-staff/contracts/action-protocol.ts', 'utf8'),

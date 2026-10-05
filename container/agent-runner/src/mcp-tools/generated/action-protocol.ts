@@ -82,6 +82,31 @@ export function validCalendarActionRequest(value: unknown): value is CalendarAct
   }
 }
 
+/** Host-sealed preview only. Models submit CalendarActionRequest and cannot mint this approval envelope. */
+export type CalendarActionChange = {
+  kind: 'calendar_action';
+  action_id: string;
+  intent_digest: string;
+  request: CalendarActionRequest;
+  event_id: string;
+  expires_at: string;
+};
+export function validCalendarActionChange(value: unknown): value is CalendarActionChange {
+  return (
+    object(value) &&
+    exact(value, ['kind', 'action_id', 'intent_digest', 'request', 'event_id', 'expires_at']) &&
+    value.kind === 'calendar_action' &&
+    validActionId(value.action_id) &&
+    typeof value.intent_digest === 'string' &&
+    /^[a-f0-9]{64}$/.test(value.intent_digest) &&
+    validCalendarActionRequest(value.request) &&
+    typeof value.event_id === 'string' &&
+    /^[a-f0-9]{64}$/.test(value.event_id) &&
+    validActionInstant(value.expires_at) &&
+    Date.parse(value.expires_at) <= Date.parse(value.request.start)
+  );
+}
+
 const nullable = (schema: Record<string, unknown>) => ({ anyOf: [{ type: 'null' }, schema] });
 const string = (maximum: number) => ({ type: 'string', minLength: 1, maxLength: maximum });
 const moment = { type: 'string', pattern: '^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$' };

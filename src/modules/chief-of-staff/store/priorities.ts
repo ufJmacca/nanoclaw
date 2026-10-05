@@ -39,6 +39,7 @@ import {
 import { ProactiveStore } from '../automation/proactive-store.js';
 import { validMandateChange } from '../contracts/mandate-protocol.js';
 import { MandateStore } from '../automation/mandate-store.js';
+import { validCalendarActionChange } from '../contracts/action-protocol.js';
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const equal = (a: string, b: string) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
@@ -266,6 +267,7 @@ export class PriorityStore {
       !validProposalChange(change) ||
       validMissionChange(change) ||
       validTeamChange(change) ||
+      validCalendarActionChange(change) ||
       validProactiveDispositionChange(change)
     )
       return { status: 'denied' };
@@ -510,6 +512,8 @@ export class PriorityStore {
       if (proposal.state === 'conflict') return { status: 'conflict' };
       const change = proposal.change as ProposalChange;
       if (!validProposalChange(change) || digest(change) !== proposal.payload_hash) return { status: 'denied' };
+      // Only the dedicated host action queue may interpret this exact-effect envelope.
+      if (validCalendarActionChange(change)) return { status: 'denied' };
       if (
         validWorkChange(change) ||
         validScheduleChange(change) ||
