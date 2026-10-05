@@ -204,6 +204,11 @@ export async function backupTargetActionState(input: DeploymentSettings, operati
         nativeDatabases: native.databases.length,
         maintenanceGeneration: lease.generation,
         writerActivated: false,
+        inputs: {
+          context: options.context,
+          nativeDatabases: options.nativeDatabases,
+          restrictionFiles: options.restrictionFiles,
+        },
       };
       const file = path.join(receiptRoot, 'action-backup.json');
       if (fs.lstatSync(file, { throwIfNoEntry: false }) && digest(readPrivate(file)) !== digest(result))

@@ -5,7 +5,8 @@
 The reviewed predecessor is S08 merge `462daabef958b9ba1874168719737ad7b39ef8e8`
 ([PR #65](https://github.com/ufJmacca/nanoclaw/pull/65)). The implementation branch is
 `codex/s09-approved-calendar-actions`; this checkpoint covers source through
-`6da15fc54c684acd016ce62fa5913f05f54db0b3`. Private logs and configuration remain outside Git.
+the separately committed increments described below. The final release source
+has not been selected. Private logs and configuration remain outside Git.
 
 The fixture implementation now proposes and records an exact owner-approved
 calendar block, leases its execution, records request start before contacting the
@@ -47,6 +48,16 @@ retained conversation, specialist and protected calendar backups. Fourteen targe
 backup checks and the affected migration/journal/history checks passed together
 as 85 tests in seven files. This is local fixture coverage of the concrete target
 path; no S09 operation has run on the Pi yet.
+
+The host consent profile now rejects broader scopes, foreign identities, changed
+grant references and malformed private records. Recovery admission validates the
+exact target backup, all backup families, schema 16, the independent journal and
+a separately identified protected restore database. The calendar backup must
+contain the exact writer vault/reference with its narrow scopes; archived tokens
+are never returned or restored. These gates passed 246 affected tests in 19 files,
+including 22 profile checks and six writer backup checks, with type checks and
+zero-warning lint. Runtime/bootstrap wiring and operator proof recording remain
+unfinished; no production profile or live writer has been created.
 
 Recorded development-container gates include:
 

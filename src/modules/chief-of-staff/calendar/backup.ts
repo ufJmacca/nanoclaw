@@ -5,6 +5,8 @@ import { digest } from '../domain/contracts.js';
 import { readPrivate, writeAtomic } from '../ops/target-state.js';
 import { verifyCalendarStorage, type CalendarStorageRoots, type CalendarStoragePolicy } from './storage-policy.js';
 import type { StorageInspection } from './storage-protection.js';
+import { checkedClient, validCalendarTokens } from './oauth-core.js';
+import { object } from './normalization.js';
 export type CalendarBackupOptions = {
   roots: CalendarStorageRoots;
   operationId: string;
@@ -46,10 +48,10 @@ function sync(file: string) {
     fs.closeSync(fd);
   }
 }
-function read(file: string): unknown {
+function read(file: string, maximum = 16384): unknown {
   const stat = fs.lstatSync(file);
   if (!stat.isFile() || stat.nlink !== 1) throw new Error('unsafe_backup_receipt');
-  return readPrivate(file, 16384);
+  return readPrivate(file, maximum);
 }
 function parameters(o: CalendarBackupOptions) {
   if (
@@ -246,6 +248,64 @@ export async function verifyCalendarBackup(options: CalendarBackupOptions): Prom
   } catch {
     // eslint-disable-next-line preserve-caught-error -- Never expose credential contents, host paths or underlying command diagnostics.
     throw new Error('calendar_backup_unavailable');
+  }
+}
+/** Read-only evidence of the separately granted writer's protected backup. Historical tokens are never
+ * returned, installed, refreshed or used for admission. The independent current denial journals still govern.
+ */
+export async function verifyCalendarWriterBackup(
+  options: CalendarBackupOptions,
+  grant: { scopeId: string; bindingId: string; reference: string },
+): Promise<CalendarBackupReceipt> {
+  try {
+    if (
+      !/^[a-zA-Z0-9_-]{1,128}$/.test(grant.scopeId) ||
+      [grant.bindingId, grant.reference].some(
+        (id) => !/^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(id),
+      )
+    )
+      throw new Error('writer_backup_invalid');
+    const receipt = await verify(options);
+    if (!receipt.present) throw new Error('writer_backup_missing');
+    return await protectedStorage(options, async ({ policy, backups, assertPinned }) => {
+      if (digest(checkedSnapshot(options, policy, backups)) !== digest(receipt))
+        throw new Error('writer_backup_changed');
+      const stateRoot = path.join(backups, snapshotName(options), 'state'),
+        marker = read(path.join(stateRoot, 'writer-credentials', '.cos-calendar-writer-credentials')),
+        state = read(path.join(stateRoot, 'writer-credentials', grant.reference + '.json'), 65536),
+        client = checkedClient(
+          read(path.join(stateRoot, 'writer-oauth-client.json')) as Parameters<typeof checkedClient>[0],
+        );
+      if (
+        !object(marker) ||
+        Object.keys(marker).length !== 1 ||
+        marker.contract !== 'cos-calendar-writer-credentials/v1' ||
+        !object(state) ||
+        Object.keys(state).sort().join(',') !== 'clientId,contract,generation,identity,phase,tokens' ||
+        state.contract !== 'cos-calendar-writer-credentials/v1' ||
+        state.clientId !== client.clientId ||
+        state.phase !== 'ready' ||
+        state.identity !==
+          digest({
+            scope: grant.scopeId,
+            binding: grant.bindingId,
+            reference: grant.reference,
+            profile: 'owned_event_writer',
+          }) ||
+        !Number.isSafeInteger(state.generation) ||
+        Number(state.generation) < 1 ||
+        !validCalendarTokens(state.tokens, 'owned_event_writer')
+      )
+        throw new Error('writer_backup_invalid');
+      await options.check();
+      assertPinned();
+      if (digest(checkedSnapshot(options, policy, backups)) !== digest(receipt))
+        throw new Error('writer_backup_changed');
+      return receipt;
+    });
+  } catch {
+    // eslint-disable-next-line preserve-caught-error -- Archived tokens, OAuth clients and protected paths cannot enter diagnostics or a nested cause.
+    throw new Error('calendar_writer_backup_unavailable');
   }
 }
 /** Caller holds target/maintenance/host authority and has quiesced all credential and journal writers. */

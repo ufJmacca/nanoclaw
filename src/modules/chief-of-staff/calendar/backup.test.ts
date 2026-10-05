@@ -2,7 +2,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
-import { backupCalendarState, verifyCalendarBackup } from './backup.js';
+import { backupCalendarState, verifyCalendarBackup, verifyCalendarWriterBackup } from './backup.js';
+import { randomUUID } from 'node:crypto';
+import { digest } from '../domain/contracts.js';
+import { GOOGLE_CALENDAR_METADATA_SCOPE, GOOGLE_OWNED_EVENT_WRITE_SCOPE } from '../actions/writer.js';
 import { configureCalendarStorage } from './storage-policy.js';
 import type { StorageInspection } from './storage-protection.js';
 const bases: string[] = [];
@@ -51,6 +54,62 @@ afterEach(() => {
   vi.restoreAllMocks();
   for (const base of bases.splice(0)) fs.rmSync(base, { recursive: true, force: true });
 });
+it.each(['ready', 'missing-vault', 'reader-vault', 'foreign-binding', 'broad-scope', 'uncertain'])(
+  'S09 verifies the exact backed-up writer grant: %s',
+  async (kind) => {
+    const f = setup(),
+      reference = randomUUID(),
+      bindingId = randomUUID(),
+      scopeId = 'scope',
+      vault = path.join(f.source, 'writer-credentials');
+    fs.mkdirSync(vault, { mode: 0o700 });
+    fs.writeFileSync(
+      path.join(vault, '.cos-calendar-writer-credentials'),
+      JSON.stringify({ contract: 'cos-calendar-writer-credentials/v1' }),
+      { mode: 0o600 },
+    );
+    fs.writeFileSync(
+      path.join(f.source, 'writer-oauth-client.json'),
+      JSON.stringify({ clientId: 'fixture.apps.googleusercontent.com' }),
+      { mode: 0o600 },
+    );
+    const record = {
+      contract: kind === 'reader-vault' ? 'cos-calendar-credentials/v1' : 'cos-calendar-writer-credentials/v1',
+      identity: digest({
+        scope: scopeId,
+        binding: kind === 'foreign-binding' ? randomUUID() : bindingId,
+        reference,
+        profile: 'owned_event_writer',
+      }),
+      clientId: 'fixture.apps.googleusercontent.com',
+      generation: 1,
+      phase: kind === 'uncertain' ? 'uncertain' : 'ready',
+      tokens: {
+        accessToken: 'FIXTURE_ACCESS_CANARY',
+        refreshToken: 'FIXTURE_REFRESH_CANARY',
+        expiresAt: Date.now() + 3600000,
+        refreshExpiresAt: null,
+        scopes: [
+          GOOGLE_OWNED_EVENT_WRITE_SCOPE,
+          GOOGLE_CALENDAR_METADATA_SCOPE,
+          ...(kind === 'broad-scope' ? ['https://www.googleapis.com/auth/calendar'] : []),
+        ],
+      },
+    };
+    if (kind !== 'missing-vault')
+      fs.writeFileSync(path.join(vault, reference + '.json'), JSON.stringify(record), { mode: 0o600 });
+    const receipt = await backupCalendarState(f.options);
+    if (kind === 'ready') {
+      const before = fs.readFileSync(path.join(vault, reference + '.json'), 'utf8');
+      await expect(verifyCalendarWriterBackup(f.options, { scopeId, bindingId, reference })).resolves.toEqual(receipt);
+      expect(fs.readFileSync(path.join(vault, reference + '.json'), 'utf8')).toBe(before);
+      expect(JSON.stringify(receipt)).not.toMatch(/CANARY/);
+    } else
+      await expect(verifyCalendarWriterBackup(f.options, { scopeId, bindingId, reference })).rejects.toThrow(
+        'calendar_writer_backup_unavailable',
+      );
+  },
+);
 it('records absent calendar state without creating configuration or needing encrypted storage', async () => {
   const f = setup(false);
   const receipt = await backupCalendarState(f.options);

@@ -32,6 +32,10 @@ export type CoordinatedBackupOptions = {
   witness: ActionWitness;
   quiescent(): Promise<QuiescentCheckpoint>;
 };
+/** Read-only verification needs no database login, writer callback or artifact initialization. */
+export type CoordinatedBackupIdentity = Omit<CoordinatedBackupOptions, 'client' | 'quiescent' | 'artifacts'> & {
+  artifacts: Pick<KnowledgeArtifacts, 'root'>;
+};
 export type ScopeCheckpoint = {
   format: 'cos-scoped-checkpoint/v1';
   scopeId: string;
@@ -85,7 +89,7 @@ export const CHECKPOINT_TABLES = [
   ),
 ].sort();
 const maximumRemoteBytes = 64 * 1024 * 1024;
-const inputsDigest = (options: CoordinatedBackupOptions) =>
+const inputsDigest = (options: CoordinatedBackupIdentity) =>
   digest({
     nativeDatabases: options.nativeDatabases,
     artifactsRoot: options.artifacts.root,
@@ -175,7 +179,7 @@ async function barrier(options: CoordinatedBackupOptions, expected?: string) {
   journalCurrent(options);
   return digest(value);
 }
-function journalCurrent(options: CoordinatedBackupOptions) {
+function journalCurrent(options: CoordinatedBackupIdentity) {
   // Validate the live independent journal. A backup never replaces or initializes it.
   directory(options.witness.root);
   const journal = readPrivate(path.join(options.witness.root, 'owner.json'));
@@ -189,7 +193,7 @@ function journalCurrent(options: CoordinatedBackupOptions) {
   )
     throw new Error('coordinated_backup_journal_changed');
 }
-function parameters(options: CoordinatedBackupOptions) {
+function parameters(options: CoordinatedBackupIdentity) {
   directory(options.receiptRoot);
   if (
     !/^[a-zA-Z0-9_-]{1,200}$/.test(options.context.scopeId) ||
@@ -304,7 +308,7 @@ function copyArtifacts(options: CoordinatedBackupOptions, temporary: string) {
   sync(path.join(temporary, 'artifacts'));
   return result;
 }
-async function verify(options: CoordinatedBackupOptions): Promise<CoordinatedBackupReceipt> {
+async function verify(options: CoordinatedBackupIdentity): Promise<CoordinatedBackupReceipt> {
   const root = parameters(options);
   journalCurrent(options);
   directory(root);
@@ -381,7 +385,7 @@ async function verify(options: CoordinatedBackupOptions): Promise<CoordinatedBac
   return value;
 }
 /** Read-only verification; no archived permission, context or deny journal is admitted. */
-export async function verifyCoordinatedBackup(options: CoordinatedBackupOptions): Promise<CoordinatedBackupReceipt> {
+export async function verifyCoordinatedBackup(options: CoordinatedBackupIdentity): Promise<CoordinatedBackupReceipt> {
   try {
     return await verify(options);
   } catch {
