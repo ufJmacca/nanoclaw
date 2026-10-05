@@ -1,11 +1,20 @@
 # S09 — Execute one precisely approved external action
 
-**Status:** not started  
-**Repository:** `ufJmacca/nanoclaw`  
-**Branch:** `cos/s09-approved-calendar-actions`  
+**Status:** in progress; fixture implementation only, live writer admission disabled
+
+**Repository:** `ufJmacca/nanoclaw`
+
+**Branch:** `codex/s09-approved-calendar-actions`
+
 **Depends on:** S08 merged, with its acceptance receipt available.  
 **Delivery unit:** one independently reviewable PR; multiple red–green commits are expected.  
 **User-visible outcome:** The assistant proposes a specific focus-work block, obtains your approval and creates and verifies the exact event without inviting anyone.
+
+S08's actual reviewed merge is accepted; see [its merged-release receipt](../chief-of-staff/evidence/S08_MERGED.md).
+S09 began from `462daabef958b9ba1874168719737ad7b39ef8e8`. The first test-first
+increment defines only the narrow proposal/inspection/cancellation wire contract.
+Approval storage, provider binding, execution, reconciliation and the complete
+fixture demonstration are still required. No real account or writer is activated.
 
 Read [START HERE](00_START_HERE.md), [architecture/contracts](ARCHITECTURE_AND_CONTRACTS.md), [external PostgreSQL](EXTERNAL_POSTGRES.md), [goal execution](GOAL.md), [Mac-to-Pi delivery](MAC_TO_PI_DELIVERY.md), [Mattermost interaction](INTERACTION_MODEL.md), [implementation authority](IMPLEMENTATION_AUTHORITY.md), and [baseline](REPOSITORY_BASELINE.md) before implementation. This plan inherits their identity, scope, replay, approval, budget and retention rules; none may be postponed to S11.
 
@@ -39,28 +48,28 @@ Before live writes, take a CoS/NanoClaw backup and demonstrate a restore of the 
 
 ## Required red tests
 
-| ID | Behaviour that must first fail |
-|---|---|
-| S09-T01 | No provider write occurs before exact, current owner approval. |
-| S09-T02 | Payload, time, calendar or resource-version changes invalidate approval. |
-| S09-T03 | Guests, attachments, conferencing, recurring changes and arbitrary API calls are rejected. |
-| S09-T04 | Simultaneous duplicate approvals/claims produce one action identity and one active executor lease. |
-| S09-T05 | Timeout after remote creation reconciles the original event without a new-ID create. |
-| S09-T06 | Remote mismatch or unresolved outcome stays blocked/uncertain, not successfully retried. |
+| ID      | Behaviour that must first fail                                                                          |
+| ------- | ------------------------------------------------------------------------------------------------------- |
+| S09-T01 | No provider write occurs before exact, current owner approval.                                          |
+| S09-T02 | Payload, time, calendar or resource-version changes invalidate approval.                                |
+| S09-T03 | Guests, attachments, conferencing, recurring changes and arbitrary API calls are rejected.              |
+| S09-T04 | Simultaneous duplicate approvals/claims produce one action identity and one active executor lease.      |
+| S09-T05 | Timeout after remote creation reconciles the original event without a new-ID create.                    |
+| S09-T06 | Remote mismatch or unresolved outcome stays blocked/uncertain, not successfully retried.                |
 | S09-T07 | Fresh conflict, revoked credentials or removed subscription blocks an approved-but-not-executed action. |
-| S09-T08 | Lost UI/DB acknowledgement can be repaired without losing the decision or rerunning a verified effect. |
-| S09-T09 | Cancel before send prevents execution; cancel after send does not silently delete. |
-| S09-T10 | Restore preserves effect identity and reconciles external events created after the backup. |
-| S09-T11 | Ordinary existing NanoClaw approval handlers retain their established behaviour. |
+| S09-T08 | Lost UI/DB acknowledgement can be repaired without losing the decision or rerunning a verified effect.  |
+| S09-T09 | Cancel before send prevents execution; cancel after send does not silently delete.                      |
+| S09-T10 | Restore preserves effect identity and reconciles external events created after the backup.              |
+| S09-T11 | Ordinary existing NanoClaw approval handlers retain their established behaviour.                        |
 
 ## External PostgreSQL requirements for this slice
 
 Before live calendar writes, validate the coordinated backup/restore gate for remote CoS state plus local NanoClaw/artifacts. Commit intent/request-start before calling Google, release the database client during HTTP, and record/read back afterwards. A database loss after calendar creation leaves the original action uncertain; never issue another event ID or repeat a send because the receipt could not be saved.
 
-| ID | Additional required red → green behaviour |
-|---|---|
+| ID       | Additional required red → green behaviour                                                                                                                   |
+| -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | S09-PG01 | Calendar creation succeeds while PostgreSQL becomes unreachable before receipt persistence: reconnect reconciles the original event ID without a duplicate. |
-| S09-PG02 | Unknown authority/request-start commit, expired lease or active local pause prevents a provider request; no transaction remains open across that request. |
+| S09-PG02 | Unknown authority/request-start commit, expired lease or active local pause prevents a provider request; no transaction remains open across that request.   |
 
 ## Acceptance gate
 
@@ -85,7 +94,7 @@ Run `pnpm cos:test --slice S09 --db-profile <selected-profile>` and `pnpm cos:de
 Write a sanitised acceptance receipt at `docs/chief-of-staff/evidence/S09.md`: base/head SHA, scenario and test IDs, real red/green command results, migration version, policy changes, fixture demo evidence, rollback check, live-test status, residual limitations and reviewer decision. Private logs/artifacts stay outside Git. Record missing live credentials as **live validation pending**, not passed. Missing every eligible database target blocks the required integration gate; a missing separate test DB does not block the guarded disposable-runtime option. Include the plan revision, `cos-postgres/external-env-v3` conformance, selected test profile and target identity confirmation (without credentials/endpoints), actual local-test/final-image/transfer/Pi-migration/Pi-smoke receipts, source and image IDs, Pi-owned data lifecycle, actual remote failure tests and any pending operator configuration.
 
 Update the persistent goal ledger and create or update this slice’s PR. If review/merge is pending, checkpoint `awaiting_review` with the exact resume condition; the overall goal remains incomplete. When an authorised human merge is verified, advance automatically to the next eligible slice under [GOAL.md](GOAL.md), without a new slice-specific instruction. Execute this slice's in-scope database migrations and target deployment/restart/rollback automatically under [IMPLEMENTATION_AUTHORITY.md](IMPLEMENTATION_AUTHORITY.md), through the Mac-to-Pi release path, recording actual results without another human approval. Do not auto-merge, enable an unauthorised account, enlarge permissions or implement a dependent slice before its predecessor is merged. Resume unfinished work on its existing branch; never recreate a finished slice or discard an existing ledger.
+
 ## Pinned-source release gate
 
 Apply [GITHUB_SOURCE_SYNC.md](GITHUB_SOURCE_SYNC.md) in this slice. Push the exact tested source commit from the Mac, fetch/verify it in a detached Pi release-source checkout, and require commit/tree agreement with the tested artifact manifest before activation. Record source-push/source-sync status and verified IDs in the acceptance/deployment receipt. Never use an unattended pull, change the active checkout, build on the Pi or mount fetched source over release code. S01 introduces tests S01-REL13–S01-REL18; later slices regress them where affected.
-
