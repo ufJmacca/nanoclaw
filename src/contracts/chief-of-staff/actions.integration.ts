@@ -5,6 +5,8 @@ import pg from 'pg';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
+import { connectionFault } from './connection-fault.js';
 import { connectFixtureDatabase, fixtureDatabaseConfig, fixtureRuntimeUser } from './fixture-database.js';
 import { migrate } from '../../modules/chief-of-staff/store/migrations.js';
 import { BoundedDatabase } from '../../modules/chief-of-staff/store/client.js';
@@ -14,6 +16,7 @@ import type { CalendarActionRequest } from '../../modules/chief-of-staff/contrac
 import {
   GOOGLE_CALENDAR_METADATA_SCOPE,
   GOOGLE_OWNED_EVENT_WRITE_SCOPE,
+  CalendarWriteError,
   type CalendarActionWriter,
   type CalendarWriterAccess,
   type CalendarWriterInspection,
@@ -60,6 +63,9 @@ let access: CalendarWriterAccess = {
   writeEnabled: true,
 };
 let writes = 0;
+let providerMode = 'success';
+const remoteEvents = new Map<string, unknown>();
+let reads = 0;
 const writer: CalendarActionWriter = {
   access: async () => structuredClone(access),
   inspect: async (requested) =>
@@ -82,11 +88,39 @@ const writer: CalendarActionWriter = {
         : [],
       observedAt: new Date(Math.floor(Date.now() / 1000) * 1000).toISOString().replace('.000Z', 'Z'),
     }) as CalendarWriterInspection,
-  create: async () => {
+  create: async (intent, _approved, permit) => {
+    assert.equal(permit.valid(), true);
+    assert.equal(
+      store.database.pool.idleCount,
+      store.database.pool.totalCount,
+      'provider has no PostgreSQL client checked out',
+    );
+    assert.equal(
+      (
+        await admin.query(
+          'SELECT count(*)::int AS n FROM cos.action_request_starts WHERE scope_id=$1 AND action_id=$2',
+          [scope, intent.actionId],
+        )
+      ).rows[0].n,
+      1,
+    );
+    assert.equal(witness.find(intent.actionId)?.intent.eventId, intent.eventId);
     writes++;
-    throw new Error('fixture execution not yet requested');
+    if (providerMode === 'timeout_without_creation')
+      throw new CalendarWriteError('writer_request_unavailable', 'uncertain');
+    const event = { ...intent.payload, etag: '"fixture-created-1"', status: 'confirmed' };
+    remoteEvents.set(intent.eventId, event);
+    if (providerMode === 'timeout_after_creation')
+      throw new CalendarWriteError('writer_request_unavailable', 'uncertain');
+    return structuredClone(event);
   },
-  get: async () => null,
+  get: async (intent) => {
+    reads++;
+    const raw = remoteEvents.get(intent.eventId) ?? null;
+    return providerMode === 'mismatch' && raw
+      ? { ...(raw as object), summary: 'Unexpected title' }
+      : structuredClone(raw);
+  },
 };
 before(async () => {
   admin = await connectFixtureDatabase(process.env, 'migration');
@@ -494,4 +528,219 @@ test('S09-T10 a retained witness routes a restored pre-approval projection to re
   assert.equal(lease.intent.eventId, row.body.eventId);
   assert.equal((await store.actions.runs.start(context, lease, await writer.inspect(action.input))).status, 'denied');
   assert.equal(writes, 0);
+});
+const nativeAdmission = { admitted: async () => enabled, local: () => enabled };
+test('S09-T01 the executor cannot perform a provider request for an unapproved action', async () => {
+  assert.equal(typeof store.actions.executor?.run, 'function');
+  const proposal = await propose({
+    ...request,
+    start: new Date(Date.parse(request.start) + 19 * 3600000).toISOString().replace('.000Z', 'Z'),
+    end: new Date(Date.parse(request.end) + 19 * 3600000).toISOString().replace('.000Z', 'Z'),
+  });
+  assert.equal(proposal.status, 'ok');
+  assert.equal(
+    (await store.actions.executor.run(context, (proposal.change as { action_id: string }).action_id, nativeAdmission))
+      .status,
+    'denied',
+  );
+  assert.equal(writes, 0);
+});
+test('S09 full fixture executor commits start, releases PostgreSQL, sends once and verifies the original event', async () => {
+  const action = await queued(21),
+    beforeWrites = writes,
+    beforeReads = reads;
+  const result = await store.actions.executor.run(context, action.id, nativeAdmission);
+  assert.equal(result.state, 'verified');
+  const original = witness.find(action.id)!;
+  assert.equal((result.result as { event_id: string }).event_id, original.intent.eventId);
+  assert.equal(writes, beforeWrites + 1);
+  assert.equal(reads, beforeReads + 1);
+  assert.equal((await store.actions.executor.run(context, action.id, nativeAdmission)).state, 'verified');
+  assert.equal(writes, beforeWrites + 1);
+});
+test('S09-T05 timeout after fixture creation reads back the same ID without another POST', async () => {
+  const action = await queued(23),
+    beforeWrites = writes;
+  providerMode = 'timeout_after_creation';
+  try {
+    const result = await store.actions.executor.run(context, action.id, nativeAdmission);
+    assert.equal(result.state, 'verified');
+    assert.equal(remoteEvents.has(witness.find(action.id)!.intent.eventId), true);
+    assert.equal(writes, beforeWrites + 1);
+  } finally {
+    providerMode = 'success';
+  }
+});
+test('S09-T06 unresolved fixture absence remains uncertain through same-ID reconciliation', async () => {
+  const action = await queued(25),
+    beforeWrites = writes;
+  providerMode = 'timeout_without_creation';
+  try {
+    assert.equal((await store.actions.executor.run(context, action.id, nativeAdmission)).state, 'outcome_uncertain');
+    assert.equal(writes, beforeWrites + 1);
+    const original = witness.find(action.id)!.intent.eventId;
+    await admin.query(
+      "UPDATE cos.actions SET next_reconcile_at=clock_timestamp()-interval '1 second' WHERE scope_id=$1 AND id=$2",
+      [scope, action.id],
+    );
+    assert.equal((await store.actions.executor.run(context, action.id, nativeAdmission)).state, 'outcome_uncertain');
+    assert.equal(writes, beforeWrites + 1);
+    assert.equal(witness.find(action.id)!.intent.eventId, original);
+  } finally {
+    providerMode = 'success';
+  }
+});
+test('S09-T06 a mismatched fixture event is blocked without modification or deletion', async () => {
+  const action = await queued(27),
+    beforeWrites = writes;
+  providerMode = 'mismatch';
+  try {
+    assert.equal((await store.actions.executor.run(context, action.id, nativeAdmission)).state, 'blocked');
+    assert.equal(writes, beforeWrites + 1);
+    assert.equal((await store.actions.executor.run(context, action.id, nativeAdmission)).state, 'blocked');
+    assert.equal(writes, beforeWrites + 1);
+  } finally {
+    providerMode = 'success';
+  }
+});
+test('S09-T07 fresh conflicts and loss of native/model admission prevent approved execution', async () => {
+  const action = await queued(29),
+    beforeWrites = writes;
+  busy = true;
+  try {
+    assert.equal((await store.actions.executor.run(context, action.id, nativeAdmission)).state, 'blocked');
+    assert.equal(writes, beforeWrites);
+  } finally {
+    busy = false;
+  }
+  const other = await queued(31);
+  enabled = false;
+  try {
+    assert.equal((await store.actions.executor.run(context, other.id, nativeAdmission)).status, 'denied');
+    assert.equal(writes, beforeWrites);
+  } finally {
+    enabled = true;
+  }
+});
+test('S09-PG02 executor loses the real request-start COMMIT acknowledgement without contacting the provider', async () => {
+  const action = await queued(33),
+    beforeWrites = writes,
+    beforeReads = reads;
+  const pool = new pg.Pool(await fixtureDatabaseConfig()),
+    connection = await pool.connect(),
+    original = connection.query.bind(connection);
+  let inserted = false,
+    dropped = false;
+  connection.query = (async (...args: unknown[]) => {
+    const result = await (original as (...params: unknown[]) => Promise<unknown>)(...args);
+    if (typeof args[0] === 'string' && args[0].startsWith('INSERT INTO cos.action_request_starts')) inserted = true;
+    if (args[0] === 'COMMIT' && inserted && !dropped) {
+      dropped = true;
+      throw new Error('fixture executor acknowledgement lost');
+    }
+    return result;
+  }) as typeof connection.query;
+  connection.release();
+  const faulted = new PriorityStore(
+    new BoundedDatabase(pool),
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    store.actions.dependencies,
+  );
+  try {
+    assert.equal((await faulted.actions.executor.run(context, action.id, nativeAdmission)).status, 'pending');
+    assert.equal(dropped, true);
+    assert.equal(writes, beforeWrites);
+    assert.equal(reads, beforeReads);
+    assert.equal(witness.find(action.id), null);
+    await admin.query(
+      "UPDATE cos.actions SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE scope_id=$1 AND id=$2",
+      [scope, action.id],
+    );
+    assert.equal((await store.actions.executor.run(context, action.id, nativeAdmission)).state, 'outcome_uncertain');
+    assert.equal(writes, beforeWrites);
+    assert.equal(reads, beforeReads + 1);
+  } finally {
+    await pool.end();
+  }
+});
+test('S09-PG01 actual PostgreSQL loss after fixture creation reconciles the original ID after reconnect without another POST', async () => {
+  const action = await queued(35),
+    beforeWrites = writes;
+  const relay = await connectionFault(await fixtureDatabaseConfig()),
+    pool = new pg.Pool(relay.config);
+  const partitioningWriter: CalendarActionWriter = {
+    ...writer,
+    create: async (...args) => {
+      assert.equal(pool.idleCount, pool.totalCount, 'no test PostgreSQL client is held across provider execution');
+      const raw = await writer.create(...args);
+      relay.partition();
+      return raw;
+    },
+  };
+  const faulted = new PriorityStore(
+    new BoundedDatabase(pool, 1000, 25),
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    { ...store.actions.dependencies!, writer: () => partitioningWriter },
+  );
+  try {
+    const result = await faulted.actions.executor.run(context, action.id, nativeAdmission);
+    assert.equal(result.status, 'pending');
+    const original = witness.find(action.id)!;
+    assert.equal(remoteEvents.has(original.intent.eventId), true);
+    assert.equal(writes, beforeWrites + 1);
+    assert.equal(
+      (
+        await admin.query(
+          'SELECT count(*)::int AS n FROM cos.action_request_starts WHERE scope_id=$1 AND action_id=$2',
+          [scope, action.id],
+        )
+      ).rows[0].n,
+      1,
+    );
+    relay.restore();
+    await delay(1100);
+    await admin.query(
+      "UPDATE cos.actions SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE scope_id=$1 AND id=$2",
+      [scope, action.id],
+    );
+    const recovered = await store.actions.executor.run(context, action.id, nativeAdmission);
+    assert.equal(recovered.state, 'verified');
+    assert.equal((recovered.result as { event_id: string }).event_id, original.intent.eventId);
+    assert.equal(writes, beforeWrites + 1);
+  } finally {
+    relay.restore();
+    await pool.end();
+    await relay.close();
+  }
+});
+test('S09 authority callback failures cannot expose private diagnostics or contact the provider', async () => {
+  const action = await queued(37),
+    beforeWrites = writes;
+  for (const failing of ['authority', 'native_local']) {
+    const faulted = new PriorityStore(store.database, undefined, undefined, undefined, undefined, undefined, {
+      ...store.actions.dependencies!,
+      authority: () => {
+        if (failing === 'authority') throw new Error('private fixture account diagnostic');
+        return authority;
+      },
+    });
+    const result = await faulted.actions.executor.run(context, action.id, {
+      admitted: async () => true,
+      local: () => {
+        if (failing === 'native_local') throw new Error('private fixture native diagnostic');
+        return true;
+      },
+    });
+    assert.equal(result.status, 'unavailable');
+    assert.equal(JSON.stringify(result).includes('private fixture'), false);
+    assert.equal(writes, beforeWrites);
+  }
 });

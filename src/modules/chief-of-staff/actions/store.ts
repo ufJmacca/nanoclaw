@@ -16,6 +16,7 @@ import { validWriterBinding, writerAccessMatches, type ActionWriterBinding } fro
 import { CalendarWriteError, type CalendarActionWriter, type CalendarWriterInspection } from './writer.js';
 import type { EffectWitness } from './witness.js';
 import { ActionRunStore } from './run-store.js';
+import { ActionExecutor } from './executor.js';
 
 export type ActionDependencies = {
   witness?: EffectWitness;
@@ -48,6 +49,7 @@ export function actionPreview(intent: ActionIntent, hash: string): CalendarActio
 /** Host-only intent/approval queue. Provider inspection happens after releasing the PostgreSQL client. */
 export class ActionStore {
   readonly runs = new ActionRunStore(this);
+  readonly executor = new ActionExecutor(this);
   constructor(
     readonly database: BoundedDatabase,
     readonly knowledge?: KnowledgeStore,
