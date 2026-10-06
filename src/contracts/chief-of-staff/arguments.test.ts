@@ -121,6 +121,7 @@ it('registers S10 strategic review and owner-decision flows with every predecess
     ...fixtureFiles({ slice: 'S09', demo: false }),
     'strategy.integration',
     'strategy-approval.integration',
+    'strategy-collection.integration',
     'strategy-flow.integration',
   ]);
 });
