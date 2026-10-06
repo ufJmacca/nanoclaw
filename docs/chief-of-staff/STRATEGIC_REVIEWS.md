@@ -29,8 +29,11 @@ S10.
    including continuing unchanged.” The host captures current authorised record
    versions and source coverage before analysis. Missing or interrupted evidence
    is reported rather than filled in from unchecked cached text.
-4. Read the checked review. It distinguishes facts, self-reports, assumptions and
-   recommendations; includes trade-offs, opportunity costs, uncertainty and a
+4. Read the checked review. The recommendation, reason and proposed next action
+   come first. Alternatives, outcomes/evidence and findings have separate
+   sections; later reviews bring the prior advice and owner choices forward.
+   It distinguishes facts, self-reports, assumptions and recommendations;
+   includes trade-offs, opportunity costs, uncertainty and a
    forecast horizon; and states what evidence could change its recommendation.
    Calendar allocation remains separate from actual effort and outcomes.
 5. Reject a recommendation or select a different exact option. Rejection records
@@ -44,6 +47,9 @@ S10.
    forecasts and owner choices with later evidence. Approval is a decision, not
    a success label. Superseded direction versions and unsuccessful advice remain
    in history.
+
+Saved reviews retain the rendering version used when published. A layout change
+does not rewrite the original advice; new reviews use the clearer structure.
 
 Historical redisplay still requires current source and native-context permission.
 If access is withdrawn, CoS must not reconstruct withheld review text from the

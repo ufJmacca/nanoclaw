@@ -53,7 +53,10 @@ restore old live SQLite or reset the remote schema.
 
 Deployment does not approve a review charter, admit automatic reviews, renew
 model consent, resume CoS or enable a calendar writer. See [strategic reviews](STRATEGIC_REVIEWS.md)
-and [S10 evidence](evidence/S10.md) for the actual candidate and remaining gates.
+and [the original S10 evidence](evidence/S10.md) for implementation history.
+The [tested owner-feedback correction](evidence/S10_STRUCTURE.md) records the
+current schema-18 candidate and its retained compatible S10 predecessor.
+Human review/merge and actual merged-source acceptance remain required.
 
 ## S04 brief and commitment delivery
 
