@@ -286,6 +286,53 @@ it('S05 shutdown closes specialist admission while a pump is in flight, then wai
   expect(worker.close).toHaveBeenCalledOnce();
   expect(f.end).toHaveBeenCalledOnce();
 });
+it('S11-PG03 concurrent shutdown callers cannot claim old credential connections are closed before the pool settles', async () => {
+  const f = fixture(true);
+  await f.service.tick();
+  let release!: () => void;
+  f.end.mockImplementationOnce(
+    () =>
+      new Promise<void>((resolve) => {
+        release = resolve;
+      }),
+  );
+  const first = f.service.stop();
+  await vi.waitFor(() => expect(f.end).toHaveBeenCalledOnce());
+  let secondSettled = false;
+  const second = f.service.stop().then(() => {
+    secondSettled = true;
+  });
+  try {
+    await new Promise<void>((done) => setImmediate(done));
+    expect(secondSettled).toBe(false);
+    expect(f.service.healthStatus().admission).toBe('closed');
+    await f.service.tick();
+    expect(f.connect).toHaveBeenCalledOnce();
+  } finally {
+    release();
+    await first;
+    await second;
+  }
+  expect(f.end).toHaveBeenCalledOnce();
+});
+it('S11-PG03 an uncertain pool retirement is retained and cannot silently admit replacement credentials', async () => {
+  const f = fixture(true);
+  await f.service.tick();
+  f.end
+    .mockRejectedValueOnce(new Error('fixture close uncertainty'))
+    .mockRejectedValueOnce(new Error('fixture close uncertainty'));
+  try {
+    f.admission.mockReturnValue(false);
+    await f.service.tick();
+    f.admission.mockReturnValue(true);
+    await f.service.tick();
+    expect(f.connect).toHaveBeenCalledOnce();
+    expect(f.end).toHaveBeenCalledTimes(2);
+    expect(f.service.healthStatus().admission).toBe('closed');
+  } finally {
+    f.end.mockReset().mockResolvedValue(undefined);
+  }
+});
 describe('S01-T01 host startup and dependency service', () => {
   it('disabled operation starts and ticks without connecting to PostgreSQL', async () => {
     const f = fixture(false);

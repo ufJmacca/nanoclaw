@@ -25,6 +25,8 @@ export class CosService {
   status = 'disabled';
   private store: PriorityStore | undefined;
   private inFlight: Promise<void> | undefined;
+  private stopInFlight: Promise<void> | undefined;
+  private retiringStore: PriorityStore | undefined;
   private stopped = false;
   private closed = false;
   private specialists?: SpecialistLifecycle;
@@ -60,6 +62,15 @@ export class CosService {
       this.specialists = undefined;
       this.specialistsFenced = false;
     }
+  }
+  private async retireStore(): Promise<void> {
+    const old = this.retiringStore ?? this.store;
+    if (!old) return;
+    // Retain uncertainty until the old connections actually close. Never connect a replacement over it.
+    this.retiringStore = old;
+    await old.database.pool.end();
+    if (this.store === old) this.store = undefined;
+    if (this.retiringStore === old) this.retiringStore = undefined;
   }
   private fenceExecutions(): void {
     const d = this.dependencies;
@@ -98,6 +109,10 @@ export class CosService {
     if (this.stopped || !this.dependencies.enabled || this.inFlight) return;
     const run = async () => {
       try {
+        if (this.retiringStore) {
+          this.status = 'reconciling';
+          await this.retireStore();
+        }
         // Retain an uncertain cleanup owner. Never install replacement hooks over it.
         if (this.specialistsFenced) await this.closeSpecialists();
         if (this.dependencies.admission && !this.dependencies.admission()) {
@@ -107,11 +122,7 @@ export class CosService {
           this.fenceSpecialists();
           this.fenceExecutions();
           await this.closeSpecialists();
-          if (this.store) {
-            const old = this.store;
-            this.store = undefined;
-            await old.database.pool.end();
-          }
+          await this.retireStore();
           return;
         }
         if (!this.store) {
@@ -180,15 +191,21 @@ export class CosService {
   }
   async stop(): Promise<void> {
     if (this.closed) return;
-    this.stopped = true;
-    this.runtime.dispose();
-    this.fenceSpecialists();
-    this.fenceExecutions();
-    await this.inFlight;
-    await this.closeSpecialists();
-    if (!this.closed) {
+    if (this.stopInFlight) return this.stopInFlight;
+    this.stopInFlight = (async () => {
+      this.stopped = true;
+      this.runtime.dispose();
+      this.fenceSpecialists();
+      this.fenceExecutions();
+      await this.inFlight;
+      await this.closeSpecialists();
+      await this.retireStore();
       this.closed = true;
-      await this.store?.database.pool.end();
+    })();
+    try {
+      await this.stopInFlight;
+    } finally {
+      this.stopInFlight = undefined;
     }
   }
 }
