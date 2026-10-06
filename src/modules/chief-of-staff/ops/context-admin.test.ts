@@ -35,6 +35,11 @@ vi.mock('./action-recovery-admin.js', async () => ({
   runActionRecoveryAdmin: vi.fn(),
 }));
 import { runActionRecoveryAdmin } from './action-recovery-admin.js';
+vi.mock('./owner-export-admin.js', async () => ({
+  ...(await vi.importActual('./owner-export-admin.js')),
+  runOwnerExportAdmin: vi.fn(),
+}));
+import { runOwnerExportAdmin } from './owner-export-admin.js';
 vi.mock('./mission-admin.js', async () => ({
   ...(await vi.importActual('./mission-admin.js')),
   runMissionAdmin: vi.fn(),
@@ -71,6 +76,33 @@ const facts = vi.fn(async () => ({
 const quiescent = vi.fn(async () => true);
 const dependencies = { target: () => readTarget(state, targetBinding), quiescent, facts };
 const env = { COS_ENABLED: 'true', COS_TARGET_STATE_DIR: state };
+it('S11-T06 owner export retains paused private/native authority and never needs model credentials', async () => {
+  fs.rmSync(state + '/codex-auth', { recursive: true });
+  const args = {
+    command: 'owner-export' as const,
+    scopeId: 'fixture',
+    requestId: '11111111-1111-4111-8111-111111111111',
+  };
+  vi.mocked(runOwnerExportAdmin).mockImplementation(async (options) => {
+    await options.check();
+    options.assertAuthority();
+    expect(options.binding.ownerId).toBe('owner');
+    expect(options.databaseFingerprint).toBe(targetBinding.databaseFingerprint);
+    return { status: 'ok', delivery: 'owner_local_only', live_model: 'not_invoked' };
+  });
+  expect(await contextAdminCommand(args, { ...env, COS_ENABLED: 'false' }, dependencies)).toMatchObject({
+    status: 'ok',
+    delivery: 'owner_local_only',
+  });
+  facts.mockResolvedValueOnce({
+    id: 'private',
+    type: 'P',
+    delete_at: 0,
+    members: ['bot', 'foreign'],
+    activeSubscription: true,
+  });
+  await expect(contextAdminCommand(args, env, dependencies)).rejects.toThrow('private_owner_membership_required');
+});
 beforeEach(async () => {
   fs.mkdirSync(root, { mode: 0o700 });
   fs.mkdirSync(root + '/data', { mode: 0o700 });

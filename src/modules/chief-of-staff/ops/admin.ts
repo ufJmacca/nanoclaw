@@ -20,9 +20,11 @@ import type { BindingRequest } from './bind.js';
 import { readEnvFile } from '../../../env.js';
 import { contextAdminCommand, type ContextAdminArguments } from './context-admin.js';
 import { parseOwnerControl } from './owner-controls.js';
+import { isOwnerExportCommand, parseOwnerExportArguments } from './owner-export-admin.js';
 
 type AdminArguments = { command: 'status' } | { command: 'bind'; binding: BindingRequest } | ContextAdminArguments;
 export function parseAdminArguments(args: string[]): AdminArguments {
+  if (isOwnerExportCommand({ command: args[0] })) return parseOwnerExportArguments(args);
   if (args[0] === 'operator-control') {
     const values: Record<string, string> = {};
     if (args.length !== 7) throw Error('invalid_admin_arguments');

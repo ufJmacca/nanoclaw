@@ -24,6 +24,8 @@ import { ownerDenialsPermitResume } from '../../modules/chief-of-staff/ops/owner
 import { CalendarStore } from '../../modules/chief-of-staff/calendar/store.js';
 import { CalendarConnector } from '../../modules/chief-of-staff/calendar/connector.js';
 import { CalendarReadError, GOOGLE_EVENT_READ_SCOPE } from '../../modules/chief-of-staff/calendar/reader.js';
+import { exportOwnerRecords, purgeOwnerExports } from '../../modules/chief-of-staff/ops/owner-export.js';
+import { digest } from '../../modules/chief-of-staff/domain/contracts.js';
 let admin: pg.Client, store: PriorityStore;
 let knowledge: KnowledgeStore, artifactRoot: string;
 const scope = 'operations-' + randomUUID(),
@@ -122,6 +124,8 @@ after(async () => {
   try {
     if (admin)
       for (const id of [scope, foreign]) {
+        await admin.query('BEGIN');
+        await admin.query('UPDATE cos.sources SET current_revision_id=NULL WHERE scope_id=$1', [id]);
         for (const table of [
           'action_receipts',
           'action_request_starts',
@@ -130,19 +134,27 @@ after(async () => {
           'action_writer_revisions',
           'action_writer_bindings',
           'outbox',
+          'events',
           'revocation_tombstones',
+          'derivation_links',
+          'evidence_refs',
+          'chunks',
+          'source_revisions',
           'sources',
+          'artifacts',
           'calendar_states',
           'calendar_bindings',
           'missions',
           'mission_work_orders',
           'mission_context_manifests',
           'mission_template_versions',
+          'operations',
           'proposals',
           'records',
         ])
           await admin.query('DELETE FROM cos.' + table + ' WHERE scope_id=$1', [id]);
         await admin.query('DELETE FROM cos.scopes WHERE id=$1', [id]);
+        await admin.query('COMMIT');
       }
   } finally {
     await admin?.end();
@@ -583,4 +595,202 @@ test('S11-T01/UI01 exact uncertain-action inspection is read-only, scope-bound a
     ).rows,
     before,
   );
+});
+
+test('S11-T06 owner-local export excludes revoked/foreign sources and credentials, audits once, and retires its own revoked copy', async () => {
+  const root = path.join(artifactRoot, 'exports');
+  fs.mkdirSync(root, { mode: 0o700 });
+  const texts = ['PRIVATE_ALLOWED_EXPORT', 'PRIVATE_REVOKED_EXPORT'];
+  const ids: string[] = [];
+  for (const [index, text] of texts.entries()) {
+    const filename = 'export-' + index + '.md';
+    fs.writeFileSync(path.join(artifactRoot, 'staging', filename), text, { mode: 0o600 });
+    const imported = await knowledge.importSource(context, randomUUID(), {
+      sourceKey: 'export-' + index,
+      filename,
+      title: filename,
+      processingProviders: ['codex'],
+      expectedVersion: 0,
+    });
+    assert.equal(imported.status, 'ok');
+    ids.push(imported.source_id as string);
+  }
+  assert.equal((await knowledge.revokeOwned(context, ids[1])).status, 'ok');
+  const requestId = randomUUID(),
+    options = {
+      database: store.database,
+      context,
+      provider: 'codex',
+      artifacts: knowledge.artifacts,
+      root,
+      requestId,
+      check: async () => {},
+    };
+  const exported = await exportOwnerRecords(options);
+  assert.equal(exported.status, 'ok');
+  assert.equal(exported.delivery, 'owner_local_only');
+  const file = exported.file as string,
+    bytes = fs.readFileSync(file, 'utf8'),
+    value = JSON.parse(bytes);
+  assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+  assert.ok(bytes.includes(texts[0]));
+  assert.ok(!bytes.includes(texts[1]));
+  assert.ok(!bytes.includes('foreign-goal-'));
+  assert.ok(!bytes.includes('challenge_hash'));
+  assert.ok(!bytes.includes('calendar_bindings'));
+  assert.equal(value.records.length, 25);
+  assert.equal(value.sources.length, 1);
+  assert.equal(exported.sha256, digest(value));
+  assert.equal((await exportOwnerRecords(options)).status, 'ok');
+  fs.chmodSync(file, 0o644);
+  assert.notEqual(
+    (await exportOwnerRecords({ ...options, database: new BoundedDatabase(store.database.pool) })).status,
+    'ok',
+  );
+  fs.chmodSync(file, 0o600);
+  assert.equal(
+    (
+      await admin.query(
+        "SELECT count(*)::int AS n FROM cos.events WHERE scope_id=$1 AND kind='owner_export' AND resource_id=$2",
+        [scope, requestId],
+      )
+    ).rows[0].n,
+    1,
+  );
+  const unrelated = path.join(root, 'ordinary-owner-file.txt');
+  fs.writeFileSync(unrelated, 'preserve', { mode: 0o600 });
+  assert.equal((await knowledge.revokeOwned(context, ids[0])).status, 'ok');
+  assert.notEqual((await exportOwnerRecords(options)).status, 'ok');
+  const purged = await purgeOwnerExports({ ...options, retentionMs: 7 * 24 * 60 * 60 * 1000 });
+  assert.equal(purged.status, 'ok');
+  assert.equal(purged.removed, 1);
+  assert.ok(!fs.existsSync(file));
+  assert.equal(fs.readFileSync(unrelated, 'utf8'), 'preserve');
+});
+test('S11-T06 export fails closed on lost native/current database authority without publishing an unaudited file', async () => {
+  const root = path.join(artifactRoot, 'withheld-exports');
+  fs.mkdirSync(root, { mode: 0o700 });
+  let checks = 0;
+  const options = {
+    database: new BoundedDatabase(store.database.pool),
+    context,
+    provider: 'codex',
+    artifacts: knowledge.artifacts,
+    root,
+    requestId: randomUUID(),
+    check: async () => {
+      if (++checks >= 3) throw Error('PRIVATE_OWNER_LOST');
+    },
+  };
+  const foreignResult = await exportOwnerRecords({
+    ...options,
+    check: async () => {},
+    requestId: randomUUID(),
+    context: { ...context, ownerId: 'foreign-owner' },
+  });
+  assert.equal(foreignResult.status, 'denied');
+  assert.equal(fs.readdirSync(root).filter((n) => n.endsWith('.export.json')).length, 0);
+  const result = await exportOwnerRecords(options);
+  assert.notEqual(result.status, 'ok');
+  assert.ok(!JSON.stringify(result).includes('PRIVATE_OWNER_LOST'));
+  assert.equal(fs.readdirSync(root).filter((n) => n.endsWith('.export.json')).length, 0);
+});
+
+test('S11-T06 revocation during the export audit commit prevents subsequent local disclosure', async () => {
+  const filename = 'export-race.md';
+  fs.writeFileSync(path.join(artifactRoot, 'staging', filename), 'PRIVATE_RACE_EXPORT', { mode: 0o600 });
+  const imported = await knowledge.importSource(context, randomUUID(), {
+    sourceKey: 'export-race',
+    filename,
+    title: filename,
+    processingProviders: ['codex'],
+    expectedVersion: 0,
+  });
+  assert.equal(imported.status, 'ok');
+  const root = path.join(artifactRoot, 'race-exports');
+  fs.mkdirSync(root, { mode: 0o700 });
+  const requestId = randomUUID();
+  let revoked = false;
+  const result = await exportOwnerRecords({
+    database: store.database,
+    context,
+    provider: 'codex',
+    artifacts: knowledge.artifacts,
+    root,
+    requestId,
+    check: async () => {
+      if (
+        !revoked &&
+        (
+          await admin.query("SELECT 1 FROM cos.events WHERE scope_id=$1 AND kind='owner_export' AND resource_id=$2", [
+            scope,
+            requestId,
+          ])
+        ).rowCount === 1
+      ) {
+        revoked = true;
+        assert.equal((await knowledge.revokeOwned(context, imported.source_id as string)).status, 'ok');
+      }
+    },
+  });
+  assert.equal(revoked, true);
+  assert.notEqual(result.status, 'ok');
+  assert.equal(fs.readdirSync(root).filter((n) => n.endsWith('.export.json')).length, 0);
+});
+test('S11-T06 a late authority callback cannot publish after the bounded database operation has expired', async () => {
+  const root = path.join(artifactRoot, 'expired-exports');
+  fs.mkdirSync(root, { mode: 0o700 });
+  let release!: () => void,
+    reached = false,
+    checks = 0;
+  const database = new BoundedDatabase(store.database.pool, 50);
+  const operation = exportOwnerRecords({
+    database,
+    context,
+    provider: 'codex',
+    artifacts: knowledge.artifacts,
+    root,
+    requestId: randomUUID(),
+    check: async () => {
+      if (++checks === 2) {
+        reached = true;
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+      }
+    },
+  });
+  const result = await operation;
+  assert.equal(reached, true);
+  assert.notEqual(result.status, 'ok');
+  release();
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(fs.readdirSync(root).filter((n) => n.endsWith('.export.json')).length, 0);
+});
+
+test('S11-T06 denied retention releases its transaction and leaves the bounded pool reusable', async () => {
+  const root = path.join(artifactRoot, 'denied-retention');
+  fs.mkdirSync(root, { mode: 0o700 });
+  const pool = new pg.Pool({ ...(await fixtureDatabaseConfig(process.env)), max: 1 }),
+    database = new BoundedDatabase(pool);
+  try {
+    const result = await purgeOwnerExports({
+      database,
+      context: { ...context, ownerId: 'foreign' },
+      provider: 'codex',
+      artifacts: knowledge.artifacts,
+      root,
+      requestId: randomUUID(),
+      retentionMs: 0,
+      check: async () => {},
+    });
+    assert.equal(result.status, 'denied');
+    const state = await database.run(
+      async (client) => (await client.query('SHOW transaction_isolation')).rows[0].transaction_isolation,
+    );
+    assert.equal(state, 'read committed');
+  } finally {
+    await pool.end();
+  }
 });

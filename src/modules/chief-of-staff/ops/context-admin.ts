@@ -46,6 +46,7 @@ import { issueActivation, resumeContext, rebindRecoveredActivation } from './mod
 import { isKnowledgeCommand, runKnowledgeAdmin, type KnowledgeAdminArguments } from './knowledge-admin.js';
 import { isCalendarCommand, runCalendarAdmin, type CalendarAdminArguments } from './calendar-admin.js';
 import { isMissionCommand, runMissionAdmin, type MissionAdminArguments } from './mission-admin.js';
+import { isOwnerExportCommand, runOwnerExportAdmin, type OwnerExportArguments } from './owner-export-admin.js';
 import {
   isCalendarAccountCommand,
   runCalendarAccountAdmin,
@@ -60,6 +61,7 @@ import {
 } from './action-recovery-admin.js';
 
 export type ContextAdminArguments =
+  | OwnerExportArguments
   | ActionRecoveryArguments
   | ActionAdminArguments
   | ActionAccountArguments
@@ -190,7 +192,10 @@ export async function contextAdminCommand(
   env: NodeJS.ProcessEnv,
   dependencies?: Dependencies,
 ): Promise<Record<string, unknown>> {
-  if (env.COS_ENABLED !== 'true' && !['operator-status', 'operator-control'].includes(args.command))
+  if (
+    env.COS_ENABLED !== 'true' &&
+    !['operator-status', 'operator-control', 'owner-export', 'export-purge'].includes(args.command)
+  )
     return { status: 'disabled', live_model: 'not_verified' };
   if (!/^[a-zA-Z0-9_-]{1,128}$/.test(args.scopeId)) throw new Error('invalid_admin_arguments');
   const root = env.COS_TARGET_STATE_DIR ?? '';
@@ -357,6 +362,21 @@ export async function contextAdminCommand(
         assertAuthority();
       };
       await check();
+      if (isOwnerExportCommand(args)) {
+        return runOwnerExportAdmin({
+          args,
+          env,
+          roots: {
+            targetRoot: root,
+            installationRoot: target.binding.installationRoot,
+            dataRoot: target.binding.dataRoot,
+          },
+          binding,
+          databaseFingerprint: target.binding.databaseFingerprint,
+          check,
+          assertAuthority,
+        });
+      }
       if (isActionRecoveryCommand(args)) {
         return runActionRecoveryAdmin({
           args,

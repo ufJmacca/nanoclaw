@@ -19,6 +19,29 @@ it.each([
 import { SCHEMA_VERSION } from '../store/migrations.js';
 import { DatabasePreflightError } from '../store/preflight.js';
 import { DatabaseConfigurationError } from '../store/config.js';
+it('S11-T06 owner export CLI fixes private target delivery and cannot select another owner, file destination or model tool', () => {
+  const id = '11111111-1111-4111-8111-111111111111';
+  expect(parseAdminArguments(['owner-export', '--scope', 'fixture', '--request-id', id])).toEqual({
+    command: 'owner-export',
+    scopeId: 'fixture',
+    requestId: id,
+  });
+  expect(
+    parseAdminArguments(['export-purge', '--scope', 'fixture', '--request-id', id, '--retention-days', '7']),
+  ).toEqual({ command: 'export-purge', scopeId: 'fixture', requestId: id, retentionDays: 7 });
+  for (const extra of [
+    ['--owner', 'foreign'],
+    ['--file', '/public/export'],
+    ['--provider', 'other'],
+    ['--thread', 'public'],
+  ])
+    expect(() => parseAdminArguments(['owner-export', '--scope', 'fixture', '--request-id', id, ...extra])).toThrow(
+      'invalid_admin_arguments',
+    );
+  expect(() =>
+    parseAdminArguments(['export-purge', '--scope', 'fixture', '--request-id', id, '--retention-days', '366']),
+  ).toThrow('invalid_admin_arguments');
+});
 it('S11 owner CLI accepts only a precisely scoped deterministic denial and stable request identity', () => {
   const args = [
     'operator-control',
