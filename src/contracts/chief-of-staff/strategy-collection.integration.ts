@@ -552,8 +552,8 @@ test('S10-T09 a later review preserves the original forecast and recommendation 
   assert.equal((await reviews.authorizePublication(context, String(old.text))).status, 'ok');
   const rows = (
     await admin.query(
-      'SELECT revision,previous_revision FROM cos.strategy_review_snapshots WHERE scope_id=$1 ORDER BY revision',
-      [scope],
+      'SELECT revision,previous_revision FROM cos.strategy_review_snapshots WHERE scope_id=$1 AND id=$2 ORDER BY revision',
+      [scope, reviewId],
     )
   ).rows;
   assert.deepEqual(rows, [
@@ -579,7 +579,7 @@ test('S10 withdrawn source authority closes review capture and retained snapshot
   const lifecycles = (
     await admin.query("SELECT lifecycle FROM cos.artifacts WHERE scope_id=$1 AND kind='summary'", [scope])
   ).rows;
-  assert.equal(lifecycles.length, 4);
+  assert.equal(lifecycles.length, 8); // Two main revisions plus the separate legacy/unknown-renderer fixtures.
   assert.equal(
     lifecycles.every((r) => r.lifecycle === 'quarantined'),
     true,
@@ -613,12 +613,12 @@ test('S10 due source retention removes private review bytes while preserving imm
   assert.equal(
     (await admin.query('SELECT count(*)::int AS n FROM cos.strategy_review_snapshots WHERE scope_id=$1', [scope]))
       .rows[0].n,
-    2,
+    4,
   );
   assert.equal(
     (await admin.query('SELECT count(*)::int AS n FROM cos.strategy_review_results WHERE scope_id=$1', [scope])).rows[0]
       .n,
-    2,
+    4,
   );
   assert.equal((await reviews.get(context, reviewId, 1)).status, 'denied');
 });
