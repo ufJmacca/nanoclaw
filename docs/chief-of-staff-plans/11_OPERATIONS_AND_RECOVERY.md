@@ -1,6 +1,6 @@
 # S11 — Inspect, pause and recover the whole assistant
 
-**Status:** tested unreviewed candidate accepted on the Pi; all seven local gates, native checks, installed backup/isolated restore, independent operation and preservation passed. S11 human review/merge, merged-source acceptance and protected-data closure remain pending.
+**Status:** corrected tested unreviewed candidate accepted on the Pi; all seven local gates, native/refusal checks, fresh independent operation, compatibility and preservation passed. Earlier accepted backup/isolated restore evidence retains its original source identity. S11 human review/merge, merged-source acceptance and protected-data closure remain pending.
 
 **Repository:** `ufJmacca/nanoclaw`  
 **Branch:** `codex/s11-operations-and-recovery`

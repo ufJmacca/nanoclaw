@@ -1,8 +1,9 @@
 # Chief-of-Staff operations and recovery
 
-These procedures use the installed, tested S11 candidate. Its Pi deployment,
-maintenance, backup and isolated restore passed; human review/merge and
-merged-source acceptance remain pending. Check [the acceptance receipt](evidence/S11.md)
+These procedures use the installed corrected S11 candidate. Its fresh deployment,
+backup, native checks, compatibility and preservation passed. Accepted earlier
+maintenance and isolated restore evidence retains its original source identity.
+Human review/merge and merged-source acceptance remain pending. Check [the acceptance receipt](evidence/S11.md)
 for the exact installed identity. Keep CoS paused and the calendar writer disabled
 until the separate live activation checks pass.
 
@@ -235,6 +236,20 @@ documented in [delivery](DELIVERY.md). No additional approval is required to
 tighten protection. A stale/lost Mac ledger or code change cannot reopen disposal;
 missing or contradictory closure history fails closed. Protected runtime cleanup
 and in-place restore are refused. Continue tests on the separate admitted target.
+
+If the exact final S11 release is already current when closure succeeds, the
+Mac delivery command completes that release through its recorded maintenance
+operation. It verifies the Pi-owned completion proof, exact payload/images and
+retained clean source before releasing the service barrier. The operation has one
+stable identity across retries. It refuses active workers and another operation’s
+lease, and requires the bound native service and database health before restoring
+admission. Database protection and the existing CoS pause remain in place.
+
+If health is unverified during completion, retain the closed barrier and retry the
+same tested release. Completion does not repeat migrations or restore data, grant
+live account/model authority, or replace the original deployment receipt. A new
+release or an interrupted deployment using an older retained helper continues
+through the existing verified delivery and repair path.
 
 The programme is complete only after the final reviewed source/images match the
 healthy Pi release, recovery and independent-operation checks pass, and the actual
