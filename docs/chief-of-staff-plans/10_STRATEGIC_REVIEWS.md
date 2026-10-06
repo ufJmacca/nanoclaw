@@ -1,6 +1,6 @@
 # S10 — Connect everyday work to long-term strategy
 
-**Status:** implementation started after actual merged S09 release acceptance
+**Status:** tested candidate deployed; owner usefulness assessment and human review/merge pending
 
 **Repository:** `ufJmacca/nanoclaw`
 
@@ -17,6 +17,13 @@ exact Pi deployment, native checks, preservation, recovery and Pi-owned
 independence. See [the accepted predecessor receipt](../chief-of-staff/evidence/S09_MERGED.md).
 S10 starts from that merge. CoS remains paused; S09 live writer admission and
 fresh finite model/channel authority are separate pending gates.
+
+The S10 candidate passed all seven Mac release gates, exact Pi delivery, both
+native profiles, preservation, recovery verification and Pi-owned independence.
+See [the S10 evidence](../chief-of-staff/evidence/S10.md) and
+[operator runbook](../chief-of-staff/STRATEGIC_REVIEWS.md). The actual owner
+usefulness assessment and legitimate human review/merge remain pending;
+S11 is not yet eligible.
 
 Read [START HERE](00_START_HERE.md), [architecture/contracts](ARCHITECTURE_AND_CONTRACTS.md), [external PostgreSQL](EXTERNAL_POSTGRES.md), [goal execution](GOAL.md), [Mac-to-Pi delivery](MAC_TO_PI_DELIVERY.md), [Mattermost interaction](INTERACTION_MODEL.md), [implementation authority](IMPLEMENTATION_AUTHORITY.md), and [baseline](REPOSITORY_BASELINE.md) before implementation. This plan inherits their identity, scope, replay, approval, budget and retention rules; none may be postponed to S11.
 
