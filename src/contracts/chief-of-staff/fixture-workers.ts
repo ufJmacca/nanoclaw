@@ -24,7 +24,7 @@ export async function stopFixtureWorkers(
   )
     throw Error('invalid_fixture_worker_root');
   const prefix = hostRoot + '/.cos-plan-state/fixtures/';
-  const inventory = () => {
+  const listed = () => {
     const ids = run([
       'ps',
       '-a',
@@ -39,13 +39,30 @@ export async function stopFixtureWorkers(
       .filter(Boolean);
     if (ids.length > 256 || new Set(ids).size !== ids.length || ids.some((id) => !/^[a-f0-9]{64}$/.test(id)))
       throw Error('fixture_worker_inventory_unknown');
-    if (!ids.length) return [];
-    const rows = run([
-      'inspect',
-      '--format',
-      '{"Id":{{json .Id}},"Image":{{json .Image}},"State":{{json .State.Status}},"Mounts":{{json .Mounts}}}',
-      ...ids,
-    ])
+    return ids;
+  };
+  const inventory = () => {
+    let ids = listed(),
+      inspected: string | undefined;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (!ids.length) return [];
+      try {
+        inspected = run([
+          'inspect',
+          '--format',
+          '{"Id":{{json .Id}},"Image":{{json .Image}},"State":{{json .State.Status}},"Mounts":{{json .Mounts}}}',
+          ...ids,
+        ]);
+        break;
+      } catch (error) {
+        // Auto-remove can race inspection. Only a successful fresh inventory can prove disappearance.
+        const current = listed();
+        if (!ids.some((id) => !current.includes(id)) || attempt === 2) throw error;
+        ids = current;
+      }
+    }
+    if (inspected === undefined) throw Error('fixture_worker_inventory_unknown');
+    const rows = inspected
       .trim()
       .split('\n')
       .map(
@@ -82,7 +99,13 @@ export async function stopFixtureWorkers(
       })
       .map((row) => row.Id);
   };
-  for (const id of inventory()) run(['stop', '-t', '1', id]);
+  for (const id of inventory()) {
+    try {
+      run(['stop', '-t', '1', id]);
+    } catch (error) {
+      if (listed().includes(id)) throw error;
+    }
+  }
   for (let attempt = 0; attempt < 20; attempt++) {
     if (!inventory().length) return;
     await new Promise((resolve) => setTimeout(resolve, 100));

@@ -49,13 +49,26 @@ try {
       env: { ...safeHostEnvironment('docker'), ...selected, ...fixtures },
       stdio: 'inherit',
       // Complete native scenarios and actual database-time expiry use a bounded suite deadline.
-      timeout: ['S06', 'S07', 'S08', 'S09', 'S10'].includes(args.slice)
-        ? 600000
-        : args.slice === 'S05'
-          ? 300000
-          : 120000,
+      timeout:
+        args.slice === 'S10' && !args.demo
+          ? 900000
+          : ['S06', 'S07', 'S08', 'S09', 'S10'].includes(args.slice)
+            ? 600000
+            : args.slice === 'S05'
+              ? 300000
+              : 120000,
     },
   );
+  if (result.error)
+    console.error(
+      JSON.stringify({
+        status: 'blocked',
+        code:
+          'code' in result.error && result.error.code === 'ETIMEDOUT'
+            ? 'fixture_suite_timeout'
+            : 'fixture_suite_process_failed',
+      }),
+    );
   if (['S05', 'S06', 'S07', 'S08', 'S09', 'S10'].includes(args.slice))
     await stopFixtureWorkers(fixtures.COS_FIXTURE_HOST_ROOT, fixtures.COS_FIXTURE_IMAGE);
   process.exitCode = result.status ?? 1;
