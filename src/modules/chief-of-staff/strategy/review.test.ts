@@ -1,4 +1,6 @@
 import { expect, it } from 'vitest';
+import type { MissionResult } from '../contracts/mission-result.js';
+import { digest } from '../domain/contracts.js';
 import {
   validReviewCharterChange,
   validStrategyObservationChange,
@@ -261,6 +263,13 @@ it('S10-T06 all review perspectives exclude foreign scope and unselected initiat
     state: 'completed',
     conclusion: 'Secret specialist result',
     evidence: [],
+    result: {
+      format: 'cos-research-result/v1',
+      outcome: 'blocked',
+      claims: [],
+      criteria: [{ id: 'hidden', claim_ids: [] }],
+      limitations: ['Secret specialist result'],
+    },
   });
   source.decisions.push({
     scope_id: 'foreign',
@@ -400,6 +409,60 @@ it('S10 rendered source text cannot trigger mentions or inject Markdown instruct
   expect(text).not.toContain('**do this**');
   expect(text).not.toContain('<script>');
   expect(text).toContain('＠channel');
+});
+it('S10 preserves submitted research claims and limitations without inferring an outcome', () => {
+  const value = input();
+  const result: MissionResult = {
+    format: 'cos-research-result/v1',
+    outcome: 'partial',
+    claims: [
+      {
+        id: 'counter',
+        kind: 'inference',
+        text: 'More tasks may reduce useful exploration.',
+        citations: [
+          { source_id: 'selected', revision_id: 'selected-revision', ordinal: 0, start_line: 1, end_line: 1 },
+        ],
+      },
+    ],
+    criteria: [{ id: 'tradeoff', claim_ids: ['counter'] }],
+    limitations: ['Outside progress is not observed.'],
+  };
+  value.missions.push({
+    scope_id: value.scope_id,
+    mission_id: 'mission-' + 'b'.repeat(64),
+    submission_id: observed,
+    digest: digest(result),
+    goal_id: null,
+    project_id: 'busy',
+    source_ids: ['selected'],
+    state: 'partial',
+    conclusion: 'Submitted research; advisory claims require outcome evidence.',
+    evidence: [],
+    result,
+  });
+  const snapshot = buildReviewSnapshot(value);
+  expect(snapshot.missions[0].result).toEqual(result);
+  expect(outcomeStatus(snapshot, 'busy', 'busy-result')).toBe('unknown');
+  const text = renderReview(assembleReview(snapshot, draft()));
+  expect(text).toContain('More tasks may reduce useful exploration');
+  expect(text).toContain('Outside progress is not observed');
+});
+it('S10 missing mission results explicitly limit coverage', () => {
+  const value = input();
+  value.mission_coverage = [
+    {
+      scope_id: value.scope_id,
+      mission_id: 'mission-' + 'b'.repeat(64),
+      goal_id: null,
+      project_id: 'busy',
+      state: 'running',
+      coverage: 'missing',
+    },
+  ];
+  const snapshot = buildReviewSnapshot(value);
+  expect(snapshot.coverage).toBe('limited');
+  expect(renderReview(assembleReview(snapshot, draft()))).toContain('missing');
 });
 it('S10 saved snapshots cannot gain authority from forged coverage or extra fields', () => {
   const source = input();

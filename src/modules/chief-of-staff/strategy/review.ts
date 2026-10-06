@@ -21,6 +21,8 @@ import {
   validStrategyObservationChange,
 } from '../contracts/strategy-protocol.js';
 import { digest } from '../domain/contracts.js';
+import { validMissionResult, type MissionResult } from '../contracts/mission-result.js';
+import { validTeamBrief, type TeamBrief } from '../contracts/team-brief.js';
 
 export type ReviewRecord = {
   scope_id: string;
@@ -49,9 +51,18 @@ export type ReviewMission = {
   goal_id: string | null;
   project_id: string | null;
   source_ids: string[];
-  state: 'completed' | 'failed';
+  state: 'awaiting_review' | 'completed' | 'partial' | 'blocked';
   conclusion: string;
   evidence: ReviewSourceReference[];
+  result: MissionResult | TeamBrief;
+};
+export type ReviewMissionCoverage = {
+  scope_id: string;
+  mission_id: string;
+  goal_id: string | null;
+  project_id: string | null;
+  state: string;
+  coverage: 'available' | 'partial' | 'missing' | 'withheld';
 };
 export type ReviewSourceCoverage = {
   scope_id: string;
@@ -92,6 +103,7 @@ export type ReviewInput = {
   work: ReviewWork[];
   observations: ReviewObservation[];
   missions: ReviewMission[];
+  mission_coverage?: ReviewMissionCoverage[];
   source_coverage: ReviewSourceCoverage[];
   source_evidence: Array<{ scope_id: string; source_id: string; evidence_id: string }>;
   calendar_allocations: Array<{ scope_id: string; source_id: string; evidence_id: string; scheduled_minutes: number }>;
@@ -99,10 +111,11 @@ export type ReviewInput = {
   previous_review: ReviewPrevious | null;
   truncated: boolean;
 };
-export type ReviewSnapshot = Omit<ReviewInput, 'records'> & {
+export type ReviewSnapshot = Omit<ReviewInput, 'records' | 'mission_coverage'> & {
   format: 'cos-strategy-snapshot/v1';
   initiatives: ReviewRecord[];
   coverage: 'limited' | 'no_sources' | 'available';
+  mission_coverage: ReviewMissionCoverage[];
 };
 export type ReviewArtifact = {
   format: 'cos-strategy-review/v1';
@@ -144,6 +157,7 @@ export function buildReviewSnapshot(input: ReviewInput): ReviewSnapshot {
     !bounded(input.work, 100) ||
     !bounded(input.observations, 100) ||
     !bounded(input.missions, 20) ||
+    !bounded(input.mission_coverage ?? [], 20) ||
     !bounded(input.source_coverage, 20) ||
     !bounded(input.source_evidence, 100) ||
     !bounded(input.calendar_allocations, 25) ||
@@ -190,6 +204,15 @@ export function buildReviewSnapshot(input: ReviewInput): ReviewSnapshot {
           row.source_ids.every(sourceSelected),
       )
       .sort((a, b) => a.submission_id.localeCompare(b.submission_id, 'en')),
+    missionCoverage = (input.mission_coverage ?? [])
+      .filter(
+        (row) =>
+          scoped(row) &&
+          (selected(row.project_id) || selected(row.goal_id)) &&
+          (row.project_id === null || selected(row.project_id)) &&
+          (row.goal_id === null || selected(row.goal_id)),
+      )
+      .sort((a, b) => a.mission_id.localeCompare(b.mission_id, 'en')),
     sourceCoverage = input.source_coverage
       .filter((row) => scoped(row) && sourceSelected(row.source_id))
       .sort((a, b) => a.source_id.localeCompare(b.source_id, 'en')),
@@ -204,6 +227,26 @@ export function buildReviewSnapshot(input: ReviewInput): ReviewSnapshot {
     !unique(sourceEvidence, (row) => row.evidence_id) ||
     !unique(observations, (row) => row.id) ||
     !unique(missions, (row) => row.submission_id) ||
+    !unique(missionCoverage, (row) => row.mission_id) ||
+    missionCoverage.some(
+      (row) =>
+        !fields(row, ['scope_id', 'mission_id', 'goal_id', 'project_id', 'state', 'coverage']) ||
+        !/^(mission|team)-[a-f0-9]{64}$/.test(row.mission_id) ||
+        ![
+          'proposed',
+          'authorised',
+          'queued',
+          'running',
+          'awaiting_review',
+          'completed',
+          'partial',
+          'blocked',
+          'failed',
+          'cancelling',
+          'cancelled',
+        ].includes(row.state) ||
+        !['available', 'partial', 'missing', 'withheld'].includes(row.coverage),
+    ) ||
     !unique(sourceCoverage, (row) => row.source_id) ||
     !unique(allocations, (row) => row.evidence_id) ||
     work.some(
@@ -259,14 +302,18 @@ export function buildReviewSnapshot(input: ReviewInput): ReviewSnapshot {
           'state',
           'conclusion',
           'evidence',
+          'result',
         ]) ||
-        !/^mission-[a-f0-9]{64}$/.test(row.mission_id) ||
+        !/^(mission|team)-[a-f0-9]{64}$/.test(row.mission_id) ||
         !reviewUuid(row.submission_id) ||
         !reviewDigest(row.digest) ||
         !bounded(row.source_ids, 6) ||
-        !['completed', 'failed'].includes(row.state) ||
+        !['awaiting_review', 'completed', 'partial', 'blocked'].includes(row.state) ||
         !reviewText(row.conclusion, 1000) ||
-        !bounded(row.evidence, 6),
+        !bounded(row.evidence, 100) ||
+        !(validMissionResult(row.result) || validTeamBrief(row.result)) ||
+        digest(row.result) !== row.digest ||
+        (row.result.format === 'cos-team-brief/v1' && row.result.team_id !== row.mission_id),
     ) ||
     allocations.some(
       (row) =>
@@ -316,6 +363,7 @@ export function buildReviewSnapshot(input: ReviewInput): ReviewSnapshot {
     work,
     observations,
     missions,
+    mission_coverage: missionCoverage,
     source_coverage: sourceCoverage,
     source_evidence: sourceEvidence,
     calendar_allocations: allocations,
@@ -324,6 +372,18 @@ export function buildReviewSnapshot(input: ReviewInput): ReviewSnapshot {
     truncated: input.truncated,
     coverage:
       input.truncated ||
+      missionCoverage.some((row) => row.coverage !== 'available') ||
+      missions.some((row) =>
+        row.result.format === 'cos-research-result/v1'
+          ? row.result.outcome !== 'answer' || row.result.limitations.length > 0
+          : row.result.limitations.length > 0 ||
+            row.result.outputs.some(
+              (o) =>
+                o.state === 'failed' ||
+                (o.result.format === 'cos-research-result/v1' &&
+                  (o.result.outcome !== 'answer' || o.result.limitations.length > 0)),
+            ),
+      ) ||
       definition.source_ids.some(
         (id) => !sourceCoverage.some((row) => row.source_id === id && row.state === 'available'),
       )
@@ -535,6 +595,42 @@ function observationLine(row: ReviewObservation, charterVersion: number) {
   } Observed ${row.observed_at}.`;
 }
 /** Host rendering retains every captured contradiction and past decision regardless of model synthesis. */
+function missionResultLines(result: MissionResult | TeamBrief): string[] {
+  if (result.format === 'cos-research-result/v1')
+    return [
+      ...result.claims.map((claim) => `- Specialist ${claim.kind} [${claim.id}]: ${label(claim.text)}.`),
+      ...result.limitations.map((limitation) => `- Specialist limitation: ${label(limitation)}.`),
+    ];
+  const outputs = [
+    ...result.outputs.map((output) => ({ output, prior: false })),
+    ...result.superseded_outputs.map((output) => ({ output, prior: true })),
+  ];
+  return [
+    ...result.limitations.map((limitation) => `- Team limitation: ${label(limitation)}.`),
+    ...outputs.flatMap(({ output, prior }) => {
+      const role = `${prior ? 'Superseded' : 'Current'} perspective ${label(output.step_id)}`;
+      if (output.state === 'failed') return [`- ${role}: missing (${label(output.reason)}).`];
+      if (output.result.format === 'cos-research-result/v1')
+        return [`- ${role}: advisory research.`, ...missionResultLines(output.result)];
+      const opinion = output.result;
+      return [
+        `- ${role}: advisory challenge (${opinion.confidence} confidence).`,
+        ...opinion.evidence_validity.map(
+          (v) => `- ${label(v.step_id)}/${label(v.claim_id)} ${v.verdict}: ${label(v.reason)}.`,
+        ),
+        ...opinion.factual_gaps.map((s) => `- Factual gap: ${label(s)}.`),
+        ...opinion.contradictions.map(
+          (c) => `- Contradiction between ${c.step_ids.map(label).join(', ')}: ${label(c.description)}.`,
+        ),
+        ...opinion.unmet_criteria.map((s) => `- Unmet criterion: ${label(s)}.`),
+        ...opinion.recommended_revisions.map(
+          (r) =>
+            `- Advisory revision ${label(r.step_id)} (${r.criterion_ids.map(label).join(', ')}): ${label(r.instructions)}.`,
+        ),
+      ];
+    }),
+  ];
+}
 export function renderReview(review: ReviewArtifact): string {
   if (review.format !== 'cos-strategy-review/v1' || review.owner_disposition !== 'awaiting_decision')
     throw Error('review_artifact_invalid');
@@ -601,6 +697,13 @@ export function renderReview(review: ReviewArtifact): string {
       (row) =>
         `- ${row.state} mission ${row.mission_id}; submission ${row.submission_id}, digest ${row.digest}: ${label(row.conclusion)}`,
     ),
+    ...snapshot.missions.flatMap((row) => missionResultLines(row.result)),
+    ...snapshot.mission_coverage
+      .filter((row) => row.coverage !== 'available')
+      .map(
+        (row) =>
+          `- Mission coverage ${row.coverage}: ${row.mission_id} (${row.state}). This does not establish an outcome.`,
+      ),
     'Review findings:',
     ...draft.findings.map(
       (finding) =>
