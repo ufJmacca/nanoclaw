@@ -12,7 +12,7 @@ import path from 'node:path';
 import { readPrivate } from './target-state.js';
 import { fixtureRelease } from '../../../contracts/chief-of-staff/release-fixture.js';
 import { macReleaseCommand } from './mac-release-cli.js';
-it('S10 schema preparation keeps release creation closed until its execution path is implemented', async () => {
+it('S10 execution admits only its current schema18 candidate while historical and future creation stay closed', async () => {
   const argumentsFor = (slice: string) => [
     'init',
     'release-' + '1'.repeat(12) + '-20261005000000',
@@ -20,8 +20,9 @@ it('S10 schema preparation keeps release creation closed until its execution pat
     'refs/heads/codex/fixture',
     slice,
   ];
-  for (const slice of ['S08', 'S09', 'S10'])
+  for (const slice of ['S08', 'S09', 'S11'])
     await expect(macReleaseCommand(argumentsFor(slice))).rejects.toThrow('current_release_slice_required');
+  await expect(macReleaseCommand(argumentsFor('S10'))).rejects.toThrow('invalid_candidate_source');
 });
 
 it('preserves a large programme ledger while accepting an active S01 alignment correction', () => {
@@ -131,7 +132,7 @@ it('selects runtime credentials separately without inheriting a test marker or a
   expect(selected.MATTERMOST_BOT_TOKEN).toBeUndefined();
 });
 
-it.each(['S02', 'S03', 'S04', 'S05', 'S06', 'S07', 'S08', 'S09'])(
+it.each(['S02', 'S03', 'S04', 'S05', 'S06', 'S07', 'S08', 'S09', 'S10'])(
   '%s release checkpoints preserve reviewed predecessor evidence and reject an unfinished predecessor',
   (slice) => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-s02-release-ledger-'));
@@ -152,7 +153,9 @@ it.each(['S02', 'S03', 'S04', 'S05', 'S06', 'S07', 'S08', 'S09'])(
                     ? 'S06'
                     : slice === 'S08'
                       ? 'S07'
-                      : 'S08',
+                      : slice === 'S09'
+                        ? 'S08'
+                        : 'S09',
       implementation_status: 'merged',
       review_status: 'human_merged',
       merged_sha: source,
