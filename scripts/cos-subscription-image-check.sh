@@ -16,8 +16,14 @@ docker cp "$carrier:/release/container/agent-runner/fixtures/cos-subscription-ca
 for module in subscription-egress subscription-turns conversation-access identity mattermost-facts; do
   docker cp "$carrier:/release/src/modules/chief-of-staff/bridge/$module.ts" "$directory/$module.ts"
 done
+# The flattened bridge fixture retains its relative runtime-contract import.
+# Extract that dependency from the same carrier; no checkout source is supplied.
+mkdir "$directory/contracts"
+docker cp "$carrier:/release/src/modules/chief-of-staff/contracts/operations-protocol.ts" "$directory/contracts/operations-protocol.ts"
 chmod 755 "$directory"
 chmod 644 "$directory/"*.ts
+chmod 755 "$directory/contracts"
+chmod 644 "$directory/contracts/"*.ts
 for scenario in restart compaction shutdown membership rpc tool-refresh mandate-refresh; do
   extra=()
   case "$scenario" in
@@ -39,6 +45,7 @@ for scenario in restart compaction shutdown membership rpc tool-refresh mandate-
     -e NANOCLAW_COS_FIXTURE_EGRESS_MODULE=file:///fixture/subscription-egress.ts \
     ${extra[@]+"${extra[@]}"} \
     --mount "type=bind,src=$directory,dst=/fixture,readonly" \
+    --mount "type=bind,src=$directory/contracts,dst=/contracts,readonly" \
     --mount "type=bind,src=$directory/cos-subscription-capability.ts,dst=/app/fixtures/cos-subscription-capability.ts,readonly" \
     --workdir /workspace --entrypoint bun "$worker_image" /app/fixtures/cos-subscription-capability.ts
 done
