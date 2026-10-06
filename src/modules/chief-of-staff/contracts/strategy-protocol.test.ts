@@ -32,6 +32,35 @@ const observation = {
   evidence: [],
   reason: 'Preserve uncertainty',
 };
+const reviewDraft = {
+  findings: [
+    {
+      kind: 'assumption',
+      domain: 'outcome',
+      initiative_id: 'project-one',
+      statement: 'Progress is unknown',
+      evidence: [],
+      uncertainty: 'Only connected sources were reviewed',
+    },
+  ],
+  options: [
+    {
+      id: 'continue',
+      initiative_id: 'project-one',
+      direction: 'continue',
+      title: 'Continue unchanged',
+      trade_off: 'Observe the outcome',
+      opportunity_cost: 'Limited attention',
+      next_action: 'Check an outcome observation',
+    },
+  ],
+  recommended_option_id: 'continue',
+  rationale: 'Preserve uncertainty',
+  confidence: 'low',
+  uncertainty: 'No outcome is established',
+  evidence_would_change: 'A confirmed outcome observation',
+  forecast_until: '2026-10-20T00:00:00Z',
+};
 const request = (method: string, change: unknown) => ({
   protocol: 'cos-rpc/v1',
   request_id: '11111111-1111-4111-8111-111111111111',
@@ -39,6 +68,21 @@ const request = (method: string, change: unknown) => ({
   params: { change },
 });
 describe('S10 canonical owner review proposal contracts', () => {
+  it.each([
+    ['cos_review_request', { request: { charter_version: 1, previous_review_id: null } }],
+    ['cos_review_submit', { review_id: 'review-' + 'a'.repeat(64), revision: 1, draft: reviewDraft }],
+    ['cos_review_get', { review_id: 'review-' + 'a'.repeat(64), revision: 1 }],
+  ])('admits bounded %s inputs while refusing caller identity and private version fences', (method, params) => {
+    const value = { ...request(String(method), null), params };
+    expect(validRequest(value)).toBe(true);
+    for (const field of ['scope_id', 'generation', 'provider', 'version_refs', 'approval', 'snapshot', 'origin'])
+      expect(validRequest({ ...value, params: { ...params, [field]: 'forged' } })).toBe(false);
+    if (method === 'cos_review_submit')
+      expect(
+        validRequest({ ...value, params: { ...params, draft: { ...reviewDraft, confidence: 'agent_agreement' } } }),
+      ).toBe(false);
+    if (method === 'cos_review_get') expect(validRequest({ ...value, params: { ...params, revision: 0 } })).toBe(false);
+  });
   it('packages the same bounded review validator in the runner', () => {
     expect(fs.readFileSync('container/agent-runner/src/mcp-tools/generated/strategy-protocol.ts', 'utf8')).toBe(
       fs.readFileSync('src/modules/chief-of-staff/contracts/strategy-protocol.ts', 'utf8'),

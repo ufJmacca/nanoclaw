@@ -46,6 +46,8 @@ import {
 } from '../contracts/action-protocol.js';
 import { ActionStore, type ActionDependencies, type PreparedAction } from '../actions/store.js';
 import { StrategyApprovalStore, validStrategyChange } from '../strategy/approval-store.js';
+import { ReviewCollector } from '../strategy/collector.js';
+import { ReviewArtifacts } from '../strategy/artifacts.js';
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const equal = (a: string, b: string) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
@@ -74,6 +76,7 @@ async function event(
 
 export class PriorityStore {
   readonly strategy: StrategyApprovalStore;
+  readonly reviewArtifacts?: ReviewArtifacts;
   readonly actions: ActionStore;
   readonly work: WorkStore;
   readonly schedules = new BriefScheduleStore();
@@ -121,6 +124,8 @@ export class PriorityStore {
       this.teamNotifications = new MissionNotifications(database, this.teamFinalReviews, 'team');
     }
     this.work = new WorkStore(knowledge);
+    if (knowledge)
+      this.reviewArtifacts = new ReviewArtifacts(new ReviewCollector({ database, knowledge, work: this.work }));
     this.proactive = new ProactiveStore(
       knowledge
         ? {

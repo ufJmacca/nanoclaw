@@ -102,6 +102,112 @@ const reviewCharter = {
     assumptions: [],
   },
 };
+it.each(['cos_review_request', 'cos_review_submit', 'cos_review_get'])(
+  'S10 %s stays in the retained main context and withholds private results after authority changes',
+  async (method) => {
+    const f = fixture(),
+      context = {
+        scopeId: 'fixture',
+        ownerId: 'owner',
+        sessionId: 'session',
+        agentGroupId: 'group',
+        ingressId: 'verified',
+      },
+      retained = { ...context, provider: 'codex', generation: '33333333-3333-4333-8333-333333333333' },
+      resolveKnowledgeContext = vi.fn().mockResolvedValue(retained),
+      reviewArtifacts = { request: vi.fn(), submit: vi.fn(), get: vi.fn() };
+    const draft = {
+        findings: [
+          {
+            kind: 'assumption',
+            domain: 'outcome',
+            initiative_id: 'project-one',
+            statement: 'Progress is unknown',
+            evidence: [],
+            uncertainty: 'Limited observation',
+          },
+        ],
+        options: [
+          {
+            id: 'continue',
+            initiative_id: 'project-one',
+            direction: 'continue',
+            title: 'Continue unchanged',
+            trade_off: 'Observe a result',
+            opportunity_cost: 'Limited attention',
+            next_action: 'Review new evidence',
+          },
+        ],
+        recommended_option_id: 'continue',
+        rationale: 'Preserve uncertainty',
+        confidence: 'low',
+        uncertainty: 'Unobserved outcomes',
+        evidence_would_change: 'A confirmed useful result',
+        forecast_until: '2026-10-20T00:00:00Z',
+      },
+      review_id = 'review-' + 'a'.repeat(64),
+      input = { charter_version: 1, previous_review_id: null },
+      params =
+        method === 'cos_review_request'
+          ? { request: input }
+          : method === 'cos_review_submit'
+            ? { review_id, revision: 1, draft }
+            : { review_id, revision: 1 },
+      target =
+        method === 'cos_review_request'
+          ? reviewArtifacts.request
+          : method === 'cos_review_submit'
+            ? reviewArtifacts.submit
+            : reviewArtifacts.get;
+    target.mockResolvedValue({ status: 'ok', text: 'CheckedStrategyPrivateCanary' });
+    const handler = createRpcHandler({
+      resolveContext: f.resolveContext,
+      store: { ...f.store, reviewArtifacts } as unknown as PriorityStore,
+      knowledge: { contextReady: vi.fn().mockResolvedValue({ status: 'ok' }) } as unknown as KnowledgeStore,
+      resolveKnowledgeContext,
+      reserveTool: async () => ({ status: 'ok' }),
+    });
+    const call = async () => {
+      await handler(
+        {
+          action: 'cos_rpc',
+          delivery_id: '22222222-2222-4222-8222-222222222222',
+          request: { ...request, method, params },
+        },
+        {} as Session,
+        f.db,
+      );
+      return JSON.parse(
+        (
+          f.db.prepare('SELECT response FROM cos_rpc_responses ORDER BY rowid DESC LIMIT 1').get() as {
+            response: string;
+          }
+        ).response,
+      );
+    };
+    expect((await call()).status).toBe('ok');
+    expect(target).toHaveBeenCalledExactlyOnceWith(
+      ...(method === 'cos_review_request'
+        ? [retained, request.request_id, input]
+        : method === 'cos_review_submit'
+          ? [retained, request.request_id, review_id, 1, draft]
+          : [retained, review_id, 1]),
+    );
+    target.mockImplementationOnce(async () => {
+      resolveKnowledgeContext.mockResolvedValue({ ...retained, generation: '44444444-4444-4444-8444-444444444444' });
+      return { status: 'ok', text: 'MustNotDiscloseStrategyCanary' };
+    });
+    const changed = await call();
+    expect(changed.status).toBe('denied');
+    expect(JSON.stringify(changed)).not.toContain('MustNotDiscloseStrategyCanary');
+    resolveKnowledgeContext.mockResolvedValue(retained);
+    for (const kind of ['schedule', 'mission_review']) {
+      f.resolveContext.mockResolvedValue({ ...context, origin: { kind, runId: 'run', generation: 1 } });
+      expect((await call()).status).toBe('denied');
+    }
+    expect(target).toHaveBeenCalledTimes(2);
+  },
+);
 it.each([
   ['cos_review_charter_propose', reviewCharter],
   ['cos_strategy_observation_propose', strategyObservation],
