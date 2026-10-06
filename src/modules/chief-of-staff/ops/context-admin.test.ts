@@ -76,6 +76,49 @@ const facts = vi.fn(async () => ({
 const quiescent = vi.fn(async () => true);
 const dependencies = { target: () => readTarget(state, targetBinding), quiescent, facts };
 const env = { COS_ENABLED: 'true', COS_TARGET_STATE_DIR: state };
+it.each(['operations-backup', 'operations-restore-check'] as const)(
+  'S11-PG02 %s remains owner-accessible while model execution is disabled',
+  async (command) => {
+    fs.rmSync(state + '/codex-auth', { recursive: true });
+    const args = {
+      command,
+      scopeId: 'fixture',
+      requestId: '11111111-1111-4111-8111-111111111111',
+      settingsFile: state + '/settings.json',
+      ...(command === 'operations-restore-check' ? { backupOperationId: 'release-fixture' } : {}),
+    };
+    vi.mocked(runActionRecoveryAdmin).mockImplementation(async (options) => {
+      await options.check();
+      options.assertAuthority();
+      expect(options.binding.ownerId).toBe('owner');
+      return { status: 'verified_paused', live_model: 'not_invoked', writer_enabled: false };
+    });
+    expect(
+      await contextAdminCommand(
+        args as Parameters<typeof contextAdminCommand>[0],
+        { ...env, COS_ENABLED: 'false' },
+        dependencies,
+      ),
+    ).toMatchObject({
+      status: 'verified_paused',
+      writer_enabled: false,
+    });
+    facts.mockResolvedValueOnce({
+      id: 'private',
+      type: 'P',
+      delete_at: 0,
+      members: ['bot', 'foreign'],
+      activeSubscription: true,
+    });
+    await expect(
+      contextAdminCommand(
+        args as Parameters<typeof contextAdminCommand>[0],
+        { ...env, COS_ENABLED: 'false' },
+        dependencies,
+      ),
+    ).rejects.toThrow('private_owner_membership_required');
+  },
+);
 it('S11-T06 owner export retains paused private/native authority and never needs model credentials', async () => {
   fs.rmSync(state + '/codex-auth', { recursive: true });
   const args = {

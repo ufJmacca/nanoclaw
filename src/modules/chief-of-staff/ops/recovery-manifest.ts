@@ -16,6 +16,7 @@ import {
 import { withDeploymentLock } from './deployment-lock.js';
 import { artifactHash } from './release-artifacts.js';
 import { readPrivate, writeAtomic } from './target-state.js';
+import { validateReleaseManifest } from './release-manifest.js';
 
 export type RecoverySoftware = {
   sourceCommit: string;
@@ -24,6 +25,28 @@ export type RecoverySoftware = {
   schemaVersion: number;
   nativeSchemaVersion: number;
 };
+export type RecoveryRelease = { releaseId: string; manifestDigest: string; software: RecoverySoftware };
+/** Project only tested release identity. Neither paths nor arbitrary manifest fields enter portable recovery metadata. */
+export function recoveryReleaseForManifest(value: unknown): RecoveryRelease {
+  const manifest = validateReleaseManifest(value);
+  if (
+    manifest.postgres.minimum !== SCHEMA_VERSION ||
+    manifest.postgres.maximum !== SCHEMA_VERSION ||
+    manifest.sqlite.minimum !== manifest.sqlite.maximum
+  )
+    throw Error('operations_backup_schema_incompatible');
+  return {
+    releaseId: manifest.releaseId,
+    manifestDigest: digest(manifest),
+    software: {
+      sourceCommit: manifest.source.commit,
+      sourceTree: manifest.source.tree,
+      hostPayloadSha256: manifest.hostPayloadDigest,
+      schemaVersion: manifest.postgres.maximum,
+      nativeSchemaVersion: manifest.sqlite.maximum,
+    },
+  };
+}
 type ExternalCheckpoint = { kind: 'application_scope_logical'; referenceDigest: string };
 type NativeDenial = {
   ingressId: string;

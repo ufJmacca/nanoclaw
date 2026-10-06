@@ -397,7 +397,7 @@ export async function bindCommand(request: BindingRequest, env: NodeJS.ProcessEn
   }
 }
 function adminEnvironment(command: AdminArguments['command']): NodeJS.ProcessEnv {
-  const recovery = command === 'action-restore-check';
+  const recovery = ['action-restore-check', 'operations-restore-check'].includes(command);
   const keys = [
     'COS_ENABLED',
     'COS_TARGET_STATE_DIR',

@@ -16,6 +16,7 @@ import { backupCoordinatedState, type CoordinatedBackupOptions } from './coordin
 import { backupConversations, verifyConversationBackup } from './conversation-backup.js';
 import { backupMissionState, verifyMissionBackup } from './mission-backup.js';
 import { backupCalendarState, verifyCalendarBackup } from '../calendar/backup.js';
+import { backupOperationsState, type RecoveryRelease } from './recovery-manifest.js';
 
 function inventory(dataRoot: string) {
   const central = path.join(dataRoot, 'v2.db'),
@@ -110,6 +111,7 @@ export async function backupTargetActionState(
   input: DeploymentSettings,
   operationId: string,
   admin?: ActionBackupAdminLease,
+  recovery?: RecoveryRelease,
 ) {
   try {
     const settings = deploymentSettings(input),
@@ -217,6 +219,34 @@ export async function backupTargetActionState(
         conversations = await verifyConversationBackup(path.join(settings.stateRoot, 'conversations'), receiptRoot),
         missions = await verifyMissionBackup(settings.stateRoot, receiptRoot),
         calendarReceipt = await verifyCalendarBackup(calendar);
+      let operations;
+      if (recovery) {
+        if (
+          !/^release-[a-zA-Z0-9_-]{1,120}$/.test(recovery.releaseId) ||
+          !/^[a-f0-9]{64}$/.test(recovery.manifestDigest)
+        )
+          throw Error('operations_backup_release_required');
+        const manifest = await backupOperationsState({
+          base: options,
+          software: recovery.software,
+          externalCheckpoint: { kind: 'application_scope_logical', referenceDigest: checkpoint.remote.sha256 },
+        });
+        if (
+          manifest.coordinatedDigest !== digest(checkpoint) ||
+          manifest.backupGeneration !== lease.generation ||
+          manifest.admissionRestored !== false ||
+          manifest.effectsEnabled !== false
+        )
+          throw Error('operations_backup_conflict');
+        operations = {
+          release: {
+            releaseId: recovery.releaseId,
+            manifestDigest: recovery.manifestDigest,
+            software: manifest.software,
+          },
+          manifestDigest: digest(manifest),
+        };
+      }
       await quiescent();
       if (digest(inventory(settings.dataRoot)) !== digest(native)) throw new Error('action_backup_native_changed');
       const result = {
@@ -232,6 +262,7 @@ export async function backupTargetActionState(
         nativeDatabases: native.databases.length,
         maintenanceGeneration: lease.generation,
         writerActivated: false,
+        ...(operations ? { operations } : {}),
         inputs: {
           context: options.context,
           nativeDatabases: options.nativeDatabases,

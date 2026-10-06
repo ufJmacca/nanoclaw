@@ -194,7 +194,14 @@ export async function contextAdminCommand(
 ): Promise<Record<string, unknown>> {
   if (
     env.COS_ENABLED !== 'true' &&
-    !['operator-status', 'operator-control', 'owner-export', 'export-purge'].includes(args.command)
+    ![
+      'operator-status',
+      'operator-control',
+      'owner-export',
+      'export-purge',
+      'operations-backup',
+      'operations-restore-check',
+    ].includes(args.command)
   )
     return { status: 'disabled', live_model: 'not_verified' };
   if (!/^[a-zA-Z0-9_-]{1,128}$/.test(args.scopeId)) throw new Error('invalid_admin_arguments');

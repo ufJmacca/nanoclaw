@@ -8,6 +8,7 @@ const f = vi.hoisted(() => ({
   containers: vi.fn(),
   client: { end: vi.fn(), query: vi.fn() },
   paired: vi.fn(),
+  operations: vi.fn(),
 }));
 vi.mock('./target-host.js', async (original) => ({
   ...(await original<typeof import('./target-host.js')>()),
@@ -27,6 +28,10 @@ vi.mock('./coordinated-backup.js', async (original) => ({
   ...(await original<typeof import('./coordinated-backup.js')>()),
   backupCoordinatedState: f.paired,
 }));
+vi.mock('./recovery-manifest.js', async (original) => ({
+  ...(await original<typeof import('./recovery-manifest.js')>()),
+  backupOperationsState: f.operations,
+}));
 import { backupTargetActionState } from './target-action-backup.js';
 import { initializeTarget, readPrivate, type TargetState } from './target-state.js';
 import { beginMaintenance, confirmQuiescence } from './maintenance.js';
@@ -37,6 +42,8 @@ import { acquireHostExecutionLease } from '../../../db/host-execution-lease.js';
 import { randomUUID } from 'node:crypto';
 import { initializeTargetActionWitness } from '../actions/host-ownership.js';
 import type { CoordinatedBackupOptions } from './coordinated-backup.js';
+import { recoveryReleaseForManifest } from './recovery-manifest.js';
+import { fixtureRelease } from '../../../contracts/chief-of-staff/release-fixture.js';
 const roots: string[] = [];
 afterEach(() => {
   vi.clearAllMocks();
@@ -109,6 +116,7 @@ async function fixture() {
       format: 'cos-coordinated-backup/v1',
       operationId,
       schemaVersion: 16,
+      remote: { file: 'remote.json', sha256: 'c'.repeat(64), bytes: 1 },
       journal: { installationDigest: options.witness.installationDigest, generation: options.witness.generation },
     };
   });
@@ -259,5 +267,49 @@ it.each(['null-generation', 'wrong-generation', 'owner-hardlink', 'journal-hardl
       'target_action_backup_unavailable',
     );
     expect(f.paired).not.toHaveBeenCalled();
+  },
+);
+
+it.each(['valid', 'changed-generation'])(
+  'S11-T03 coordinated target backup binds %s software recovery metadata without activating a writer',
+  async (kind) => {
+    const s = await fixture(),
+      release = recoveryReleaseForManifest(fixtureRelease('S10'));
+    const original = f.paired.getMockImplementation()!;
+    f.paired.mockImplementation(async (options) => ({ ...(await original(options)), schemaVersion: 18 }));
+    f.operations.mockImplementation(async (options) => {
+      const barrier = await options.base.quiescent(),
+        checkpoint = await f.paired.mock.results.at(-1)!.value;
+      return {
+        format: 'cos-operations-backup/v1',
+        software: options.software,
+        coordinatedDigest: digest(checkpoint),
+        backupGeneration: barrier.generation + (kind === 'changed-generation' ? 1 : 0),
+        admissionRestored: false,
+        effectsEnabled: false,
+      };
+    });
+    if (kind === 'changed-generation')
+      await expect(backupTargetActionState(s.settings, s.operationId, undefined, release)).rejects.toThrow(
+        'target_action_backup_unavailable',
+      );
+    else {
+      const result = await backupTargetActionState(s.settings, s.operationId, undefined, release);
+      expect(result.operations?.release).toEqual(release);
+      expect(result.operations?.manifestDigest).toMatch(/^[a-f0-9]{64}$/);
+      expect(result.writerActivated).toBe(false);
+      expect(f.operations).toHaveBeenCalledWith(
+        expect.objectContaining({
+          software: release.software,
+          externalCheckpoint: { kind: 'application_scope_logical', referenceDigest: 'c'.repeat(64) },
+        }),
+      );
+    }
+    const ordinary = new Database(s.sessionFile, { readonly: true, fileMustExist: true });
+    try {
+      expect(ordinary.prepare('SELECT body FROM messages').get()).toEqual({ body: 'ordinary history' });
+    } finally {
+      ordinary.close();
+    }
   },
 );
