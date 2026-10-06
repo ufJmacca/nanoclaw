@@ -41,7 +41,7 @@ export class HostOwnerControls {
     const boundary = cosBoundary(session, this.dependencies.db);
     return boundary.restricted && !!boundary.binding && digest(boundary.binding) === digest(binding);
   }
-  /** Caller supplies freshly verified private-channel ingress; verify its owner and exact command again here. */
+  /** Caller authenticates the private-channel or trusted local host owner; verify the scope owner and exact command again here. */
   record(binding: CosBinding, ingress: VerifiedIngress, control: OwnerControl): Result {
     const parsed = parseOwnerControl(ingress.text);
     if (
@@ -62,7 +62,8 @@ export class HostOwnerControls {
     const children = cosMissionIdentities(db).filter(
       (i) => i.scopeId === binding.scopeId && (control.kind !== 'cancel_mission' || i.missionId === control.target),
     );
-    const payload = digest(ingress),
+    // Receipt identity is the exact owner command. A trusted local retry has a new observation time, never new authority.
+    const payload = digest({ id: ingress.id, ownerId: ingress.ownerId, text: ingress.text }),
       bindingDigest = digest(binding);
     const recorded = db.transaction(() => {
       const existing = db
@@ -121,6 +122,11 @@ export class HostOwnerControls {
         uncertain = true;
       }
     }
+    const ledger = (
+      db
+        .prepare('SELECT state FROM cos_operator_denials WHERE scope_id=? AND ingress_id=?')
+        .get(binding.scopeId, ingress.id) as { state: string }
+    ).state;
     return {
       status: uncertain ? 'pending' : 'ok',
       state:
@@ -131,7 +137,7 @@ export class HostOwnerControls {
             : control.kind === 'disable_connector'
               ? 'connector_disable_recorded'
               : 'admission_paused',
-      ledger: 'target' in control ? 'pending' : 'host_deny_recorded',
+      ledger: 'target' in control ? (ledger === 'recorded' ? 'pending' : ledger) : 'host_deny_recorded',
       effects: 'requires_reconciliation',
       native: 'stop_requested',
     };

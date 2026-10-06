@@ -16,6 +16,12 @@ export function initReadOnlyDb(dbPath: string): Database.Database {
   _db = new Database(dbPath, { readonly: true, fileMustExist: true });
   return _db;
 }
+/** Owner deny controls open only an existing native database and run no ordinary migrations or journal changes. */
+export function initOwnerControlDb(dbPath: string): Database.Database {
+  if (_db) throw new Error('native_database_already_open');
+  _db = new Database(dbPath, { fileMustExist: true });
+  return _db;
+}
 
 export function initDb(dbPath: string): Database.Database {
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });

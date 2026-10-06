@@ -6,7 +6,7 @@ import os from 'node:os';
 import { createHash } from 'node:crypto';
 import Database from 'better-sqlite3';
 import { cosBoundary, type CosBinding } from '../../../cos-boundary.js';
-import { initDb, initReadOnlyDb, closeDb } from '../../../db/connection.js';
+import { initDb, initReadOnlyDb, initOwnerControlDb, closeDb } from '../../../db/connection.js';
 import { getSession } from '../../../db/sessions.js';
 import {
   acquireHostExecutionLease,
@@ -36,6 +36,10 @@ import { targetCommands } from './target-host.js';
 import { backupNativeDatabase } from './native-installation.js';
 import { backupConversations } from './conversation-backup.js';
 import { recoverConversation } from './conversation-recovery.js';
+import { HostOwnerControls, parseOwnerControl } from './owner-controls.js';
+import { RestrictedExecutionProbe } from '../bridge/native-execution.js';
+import { getInstallSlug } from '../../../install-slug.js';
+import type { Session } from '../../../types.js';
 import { hasOwnerAccessDenials, ownerDenialsPermitResume, ownerDenialCheckpoint } from './owner-denial-resume.js';
 import { issueActivation, resumeContext, rebindRecoveredActivation } from './model-activation.js';
 
@@ -65,6 +69,7 @@ export type ContextAdminArguments =
   | CalendarAccountArguments
   | { command: 'context-status'; scopeId: string }
   | { command: 'operator-status'; scopeId: string; input: StatusInput }
+  | { command: 'operator-control'; scopeId: string; requestId: string; text: string }
   | { command: 'context-prepare'; scopeId: string }
   | { command: 'model-activate'; scopeId: string; policyFile: string }
   | { command: 'context-resume'; scopeId: string; activationId: string; resumeId: string }
@@ -73,6 +78,7 @@ type Dependencies = {
   target(root: string): TargetState;
   quiescent(target: TargetState): Promise<boolean>;
   facts(binding: CosBinding): Promise<ChannelFacts>;
+  stop?(session: Session): void;
 };
 function privateDirectory(directory: string) {
   const stat = fs.lstatSync(directory);
@@ -184,10 +190,11 @@ export async function contextAdminCommand(
   env: NodeJS.ProcessEnv,
   dependencies?: Dependencies,
 ): Promise<Record<string, unknown>> {
-  if (env.COS_ENABLED !== 'true') return { status: 'disabled', live_model: 'not_verified' };
+  if (env.COS_ENABLED !== 'true' && !['operator-status', 'operator-control'].includes(args.command))
+    return { status: 'disabled', live_model: 'not_verified' };
   if (!/^[a-zA-Z0-9_-]{1,128}$/.test(args.scopeId)) throw new Error('invalid_admin_arguments');
   const root = env.COS_TARGET_STATE_DIR ?? '';
-  const d = dependencies ?? {
+  const d: Dependencies = dependencies ?? {
     target: (root: string) => localTarget(root, process.cwd(), path.join(process.cwd(), 'data')),
     quiescent: async (target: TargetState) => {
       const commands = targetCommands({
@@ -225,6 +232,47 @@ export async function contextAdminCommand(
     stat.mode & 0o022
   )
     throw new Error('unsafe_context_admin_state');
+  if (args.command === 'operator-control') {
+    const control = parseOwnerControl(args.text);
+    if (!control || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(args.requestId))
+      throw Error('invalid_admin_arguments');
+    const native = initOwnerControlDb(central);
+    try {
+      const binding = bindingFor(native, args.scopeId);
+      if (!nativeBinding(binding)) return { status: 'denied', live_model: 'not_invoked' };
+      const probe = new RestrictedExecutionProbe(getInstallSlug(target.binding.installationRoot));
+      const controls = new HostOwnerControls({
+        db: native,
+        session: getSession,
+        stop: (id) => {
+          const session = getSession(id);
+          if (
+            !session ||
+            !/^[a-zA-Z0-9_-]{1,128}$/.test(session.id) ||
+            !/^[a-zA-Z0-9_-]{1,128}$/.test(session.agent_group_id)
+          )
+            throw Error('cos_execution_identity_unknown');
+          if (d.stop) d.stop(session);
+          else
+            probe.stop(path.join(target.binding.dataRoot, 'v2-sessions', session.agent_group_id, session.id, 'cos-v1'));
+        },
+      });
+      // A local owner authenticated by private target/native ownership may only reduce authority, without channel/network/model access.
+      const result = controls.record(
+        binding,
+        {
+          id: 'owner-local-' + args.requestId,
+          ownerId: binding.ownerId,
+          text: args.text,
+          timestamp: new Date().toISOString(),
+        },
+        control,
+      );
+      return { ...result, scope_id: binding.scopeId, live_model: 'not_invoked', delivery: 'owner_local_only' };
+    } finally {
+      closeDb();
+    }
+  }
   if (args.command === 'context-status') {
     const db = new Database(central, { readonly: true, fileMustExist: true });
     try {

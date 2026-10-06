@@ -19,9 +19,31 @@ import { activeMaintenanceLease, assertMaintenanceLease, admittedGeneration } fr
 import type { BindingRequest } from './bind.js';
 import { readEnvFile } from '../../../env.js';
 import { contextAdminCommand, type ContextAdminArguments } from './context-admin.js';
+import { parseOwnerControl } from './owner-controls.js';
 
 type AdminArguments = { command: 'status' } | { command: 'bind'; binding: BindingRequest } | ContextAdminArguments;
 export function parseAdminArguments(args: string[]): AdminArguments {
+  if (args[0] === 'operator-control') {
+    const values: Record<string, string> = {};
+    if (args.length !== 7) throw Error('invalid_admin_arguments');
+    for (let i = 1; i < args.length; i += 2) {
+      if (!['--scope', '--request-id', '--text'].includes(args[i]) || values[args[i]] !== undefined || !args[i + 1])
+        throw Error('invalid_admin_arguments');
+      values[args[i]] = args[i + 1];
+    }
+    if (
+      !/^[a-zA-Z0-9_-]{1,128}$/.test(values['--scope'] ?? '') ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(values['--request-id'] ?? '') ||
+      !parseOwnerControl(values['--text'] ?? '')
+    )
+      throw Error('invalid_admin_arguments');
+    return {
+      command: 'operator-control',
+      scopeId: values['--scope'],
+      requestId: values['--request-id'],
+      text: values['--text'],
+    };
+  }
   if (args[0] === 'operator-status') {
     const values: Record<string, string> = {};
     for (let i = 1; i < args.length; i += 2) {

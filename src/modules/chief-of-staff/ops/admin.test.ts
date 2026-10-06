@@ -19,6 +19,27 @@ it.each([
 import { SCHEMA_VERSION } from '../store/migrations.js';
 import { DatabasePreflightError } from '../store/preflight.js';
 import { DatabaseConfigurationError } from '../store/config.js';
+it('S11 owner CLI accepts only a precisely scoped deterministic denial and stable request identity', () => {
+  const args = [
+    'operator-control',
+    '--scope',
+    'fixture',
+    '--request-id',
+    '11111111-1111-4111-8111-111111111111',
+    '--text',
+    'cos pause admission',
+  ];
+  expect(parseAdminArguments(args)).toEqual({
+    command: 'operator-control',
+    scopeId: 'fixture',
+    requestId: args[4],
+    text: 'cos pause admission',
+  });
+  for (const text of ['cos resume', 'cos cancel mission ../../ordinary', '> cos stop', 'cos disable everything'])
+    expect(() => parseAdminArguments([...args.slice(0, -1), text])).toThrow('invalid_admin_arguments');
+  expect(() => parseAdminArguments(args.slice(0, 5))).toThrow('invalid_admin_arguments');
+  expect(() => parseAdminArguments([...args, '--owner', 'foreign'])).toThrow('invalid_admin_arguments');
+});
 describe('S01 owner administration', () => {
   it.each(['mission-configure', 'team-configure'])('routes exact %s through owner administration', (command) => {
     const requestId = '11111111-1111-4111-8111-111111111111';

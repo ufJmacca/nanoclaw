@@ -105,6 +105,49 @@ beforeEach(async () => {
   facts.mockClear();
   quiescent.mockClear();
 });
+it('S11-T02/T09 trusted owner-local pause works with service active and Mattermost/database/model unavailable, preserving ordinary state', async () => {
+  const db = initDb(central);
+  db.exec(
+    "CREATE TABLE ordinary_canary(id TEXT,body TEXT);INSERT INTO ordinary_canary VALUES('message','protected ordinary content');UPDATE cos_identity_boundaries SET paused=0",
+  );
+  const binding = JSON.parse(
+    (db.prepare('SELECT binding FROM cos_identity_boundaries WHERE scope_id=?').get('fixture') as { binding: string })
+      .binding,
+  );
+  closeDb();
+  facts.mockRejectedValue(Error('Mattermost unavailable'));
+  quiescent.mockResolvedValue(false);
+  const stop = vi.fn();
+  const request = {
+    command: 'operator-control' as const,
+    scopeId: 'fixture',
+    requestId: '11111111-1111-4111-8111-111111111111',
+    text: 'cos pause admission',
+  };
+  expect(await contextAdminCommand(request, { ...env, COS_ENABLED: 'false' }, { ...dependencies, stop })).toMatchObject(
+    { status: 'ok', state: 'admission_paused', effects: 'requires_reconciliation', live_model: 'not_invoked' },
+  );
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  expect(await contextAdminCommand(request, { ...env, COS_ENABLED: 'false' }, { ...dependencies, stop })).toMatchObject(
+    { status: 'ok', state: 'admission_paused' },
+  );
+  expect(stop).toHaveBeenCalledWith(
+    expect.objectContaining({ id: binding.sessionId, agent_group_id: binding.agentGroupId }),
+  );
+  expect(facts).not.toHaveBeenCalled();
+  expect(quiescent).not.toHaveBeenCalled();
+  expect(connectCosHostStore).not.toHaveBeenCalled();
+  const native = new Database(central, { readonly: true });
+  try {
+    expect(native.prepare('SELECT count(*) AS n FROM cos_operator_denials').get()).toEqual({ n: 1 });
+    expect(native.prepare('SELECT * FROM ordinary_canary').all()).toEqual([
+      { id: 'message', body: 'protected ordinary content' },
+    ]);
+    expect(native.prepare('SELECT paused FROM cos_identity_boundaries').get()).toEqual({ paused: 1 });
+  } finally {
+    native.close();
+  }
+});
 afterEach(() => {
   closeDb();
   fs.rmSync(root, { recursive: true, force: true });
