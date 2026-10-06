@@ -47,7 +47,8 @@ if [[ "$1" == compose ]]; then echo fixture; exit 0; fi
 operation=$9; shift 9
 case "$operation" in
  alias) echo fixture-pi ;;
- verify|target-check|checkpoint) exit 0 ;;
+ verify|target-check|checkpoint|protected-release-check) exit 0 ;;
+ protected-release-command) [[ "$COS_TEST_FAIL" != 4 ]] || echo finish-protected-release ;;
  preflight-command) echo inspect ;;
  stage-command) echo stage ;;
  seal-command) echo seal ;;
@@ -110,6 +111,12 @@ it('runs ordinary delivery with no recovery argument', () => {
   expect(args).toBe('1:' + id);
   expect(remote.at(-1)).toBe('activate ' + id);
   expect(remote[0]).toBe('protection');
+});
+it('finishes the verified protected current release without replaying normal deployment or archive preparation', () => {
+  const { result, args, remote } = invoke(false, 4);
+  expect(result.status, result.stderr).toBe(0);
+  expect(args).toBe('');
+  expect(remote).toEqual(['protection', 'inspect', 'finish-protected-release']);
 });
 it('protects before target/deployment repair and refuses delivery if required protection is unconfirmed', () => {
   const { result, args, remote } = invoke(false, 3);

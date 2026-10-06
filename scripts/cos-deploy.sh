@@ -64,6 +64,14 @@ cli verify "$id"
 bash scripts/cos-protect-programme.sh --release-manifest "$manifest"
 remote "$(cli preflight-command)" > "$directory/target-observation.json"
 cli target-check "$id"
+command=$(cli protected-release-command "$id")
+if [[ -n "$command" ]]; then
+  printf 'Verifying and completing the protected current release %s.\n' "$id"
+  remote "$command" > "$directory/protected-release-result.json"
+  cli protected-release-check "$id"
+  cat "$directory/protected-release-result.json"
+  exit 0
+fi
 origin=$(git remote get-url origin)
 [[ "$origin" == https://github.com/ufJmacca/nanoclaw.git || "$origin" == https://github.com/ufJmacca/nanoclaw || "$origin" == git@github.com:ufJmacca/nanoclaw.git ]] || {
   echo 'The Git remote does not identify the bound fork.' >&2; exit 1;

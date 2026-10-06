@@ -1,5 +1,33 @@
 import { expect, it } from 'vitest';
 import { parseTargetArguments } from './target-helper.js';
+it('requires the exact manifest hash and rejects repair, binding and account flags for protected release completion', () => {
+  const args = [
+    'protected-release',
+    '--settings',
+    '/home/pi/settings.json',
+    '--release-id',
+    'release-final',
+    '--manifest-sha256',
+    'a'.repeat(64),
+  ];
+  expect(parseTargetArguments(args)).toEqual({
+    command: 'protected-release',
+    settings: '/home/pi/settings.json',
+    releaseId: 'release-final',
+    manifestHash: 'a'.repeat(64),
+  });
+  for (const extra of [
+    ['--recover-from', 'release-failed'],
+    ['--binding', '/home/pi/binding.json'],
+    ['--owner', 'fixture'],
+    ['--completion', '/home/pi/proof.json'],
+    ['--phase', 'release'],
+    ['--manifest-sha256', 'b'.repeat(64)],
+  ])
+    expect(() => parseTargetArguments([...args, ...extra])).toThrow('invalid_target_arguments');
+  expect(() => parseTargetArguments([...args.slice(0, -1), 'latest'])).toThrow('invalid_target_arguments');
+  expect(() => parseTargetArguments(args.slice(0, -2))).toThrow('invalid_target_arguments');
+});
 it('accepts only fixed target operations, canonical private settings, and exact release identities', () => {
   expect(
     parseTargetArguments([

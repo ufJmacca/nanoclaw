@@ -9,6 +9,7 @@ import type { BindingRequest } from './bind.js';
 type TargetArguments =
   | { command: 'status'; settings: string }
   | { command: 'programme-protect'; settings: string; completion: string }
+  | { command: 'protected-release'; settings: string; releaseId: string; manifestHash: string }
   | { command: 'operations-maintenance'; settings: string; requestId: string; phase: 'hold' | 'release' }
   | { command: 'runtime-test'; settings: string; owner: string }
   | { command: 'rollback'; settings: string; releaseId: string; fromReleaseId: string }
@@ -26,9 +27,15 @@ export function parseTargetArguments(args: string[]): TargetArguments {
   };
   const [command, ...rest] = args;
   if (
-    !['status', 'deploy', 'rollback', 'runtime-test', 'programme-protect', 'operations-maintenance'].includes(
-      command,
-    ) ||
+    ![
+      'status',
+      'deploy',
+      'rollback',
+      'runtime-test',
+      'programme-protect',
+      'protected-release',
+      'operations-maintenance',
+    ].includes(command) ||
     rest.length % 2 !== 0
   )
     return reject();
@@ -94,6 +101,20 @@ export function parseTargetArguments(args: string[]): TargetArguments {
     };
   }
   if (values['--from-release-id'] || values['--owner']) return reject();
+  if (command === 'protected-release') {
+    if (
+      Object.keys(values).length !== 3 ||
+      !/^release-[a-zA-Z0-9_-]{1,120}$/.test(values['--release-id'] ?? '') ||
+      !/^[a-f0-9]{64}$/.test(values['--manifest-sha256'] ?? '')
+    )
+      return reject();
+    return {
+      command,
+      settings: values['--settings'],
+      releaseId: values['--release-id'],
+      manifestHash: values['--manifest-sha256'],
+    };
+  }
   if (
     values['--recover-from'] !== undefined &&
     (!/^release-[a-zA-Z0-9_-]{1,120}$/.test(values['--recover-from']) ||
@@ -158,18 +179,53 @@ export async function targetCommand(args: string[]): Promise<Record<string, unkn
         await import('./programme-protection.js');
       const { digest } = await import('../domain/contracts.js');
       const proof = validateProgrammeProtection(readPrivate(request.completion));
-      await verifyProtectionHelper(settings, binding, fileURLToPath(import.meta.url));
+      const helper = await verifyProtectionHelper(settings, binding, fileURLToPath(import.meta.url));
       const state = protectCompletedProgramme(settings.stateRoot, binding, proof);
       return {
         status: 'protected',
         lifecycle: state.lifecycle,
         maintenance: state.maintenance,
+        testedHelperReleaseId: helper.releaseId,
+        targetReleaseId: state.releaseId,
         bindingDigest: digest(binding),
         completionDigest: digest(proof),
         sourceCommit: proof.releaseManifest.source.commit,
         sourceTree: proof.releaseManifest.source.tree,
         accountActivation: 'not_granted_by_protection',
       };
+    }
+    if (request.command === 'protected-release') {
+      const { artifactHash, verifyLoadedImages } = await import('./release-artifacts.js');
+      const { digest } = await import('../domain/contracts.js');
+      const { verifyProtectionHelper } = await import('./programme-protection.js');
+      const { validateReleaseManifest } = await import('./release-manifest.js');
+      const { completeProtectedRelease } = await import('./protected-release.js');
+      const { createOperationsMaintenanceEffects } = await import('./operations-maintenance-effects.js');
+      const { syncPinnedSource } = await import('./source-sync.js');
+      const file = path.join(settings.releaseRoot, request.releaseId, 'release.json');
+      const manifest = validateReleaseManifest(readPrivate(file));
+      const helper = await verifyProtectionHelper(settings, binding, fileURLToPath(import.meta.url));
+      if (
+        manifest.releaseId !== request.releaseId ||
+        digest(helper) !== digest(manifest) ||
+        (await artifactHash(file)) !== request.manifestHash
+      )
+        throw new Error('protected_release_unverified');
+      const checkout = path.join(settings.sourceRoot, request.releaseId);
+      if (fs.realpathSync(checkout) !== checkout) throw new Error('source_checkout_conflict');
+      await syncPinnedSource({
+        repository: settings.installationRoot,
+        sourceRoot: settings.sourceRoot,
+        releaseId: manifest.releaseId,
+        source: manifest.source,
+      });
+      await verifyLoadedImages(manifest, targetCommands(settings).inspect);
+      return completeProtectedRelease({
+        root: settings.stateRoot,
+        binding,
+        manifest,
+        effects: createOperationsMaintenanceEffects(settings, fileURLToPath(import.meta.url)),
+      });
     }
     if (request.command === 'runtime-test') {
       const { serveRuntimeTestSession } = await import('./runtime-test-session.js');
