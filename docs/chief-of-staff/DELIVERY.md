@@ -55,7 +55,11 @@ Deployment does not approve a review charter, admit automatic reviews, renew
 model consent, resume CoS or enable a calendar writer. See [strategic reviews](STRATEGIC_REVIEWS.md)
 and [the original S10 evidence](evidence/S10.md) for implementation history.
 The [tested owner-feedback correction](evidence/S10_STRUCTURE.md) records the
-current schema-18 candidate and its retained compatible S10 predecessor.
+its schema-18 candidate and retained compatible S10 predecessor.
+The owner subsequently merged PR #67. The required
+[source-evolution correction](evidence/S10_SOURCE_EVOLUTION.md) records the
+latest fully verified candidate and its complete compatible recovery release;
+that correction's human merge and fresh merged-source acceptance remain pending.
 Human review/merge and actual merged-source acceptance remain required.
 
 ## S04 brief and commitment delivery
