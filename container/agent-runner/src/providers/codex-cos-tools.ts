@@ -44,25 +44,27 @@ function requestFor(tool: unknown, args: unknown): CosRequest | null {
     brief = tool === 'cos_brief_request';
   const allowed = brief
     ? ['request_id', 'time_zone', 'artifact_id']
-    : tool === 'cos_context_get'
-      ? ['view', 'calendar_offset']
-      : proposal
-        ? ['request_id', 'change']
-        : tool === 'cos_request_status'
-          ? ['request_id']
-          : tool === 'cos_knowledge_search'
-            ? ['query', 'limit', 'offset', 'source_id', 'project_id']
-            : tool === 'cos_source_get'
-              ? ['source_id', 'revision_id', 'ordinal']
-              : prepare
-                ? ['request_id', 'draft']
-                : tool === 'cos_answer_get'
-                  ? ['artifact_id']
-                  : tool === 'cos_calendar_read'
-                    ? ['binding_id', 'calendar_id', 'time_min', 'time_max', 'limit', 'offset']
-                    : tool === 'cos_work_read'
-                      ? ['view', 'offset', 'record_id', 'version']
-                      : null;
+    : tool === 'cos_status'
+      ? ['category', 'limit', 'offset']
+      : tool === 'cos_context_get'
+        ? ['view', 'calendar_offset']
+        : proposal
+          ? ['request_id', 'change']
+          : tool === 'cos_request_status'
+            ? ['request_id']
+            : tool === 'cos_knowledge_search'
+              ? ['query', 'limit', 'offset', 'source_id', 'project_id']
+              : tool === 'cos_source_get'
+                ? ['source_id', 'revision_id', 'ordinal']
+                : prepare
+                  ? ['request_id', 'draft']
+                  : tool === 'cos_answer_get'
+                    ? ['artifact_id']
+                    : tool === 'cos_calendar_read'
+                      ? ['binding_id', 'calendar_id', 'time_min', 'time_max', 'limit', 'offset']
+                      : tool === 'cos_work_read'
+                        ? ['view', 'offset', 'record_id', 'version']
+                        : null;
   if (!allowed || Object.keys(values).some((key) => !allowed.includes(key))) return null;
   const request = {
     protocol: COS_PROTOCOL,

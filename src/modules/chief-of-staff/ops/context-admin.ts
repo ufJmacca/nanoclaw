@@ -6,7 +6,7 @@ import os from 'node:os';
 import { createHash } from 'node:crypto';
 import Database from 'better-sqlite3';
 import { cosBoundary, type CosBinding } from '../../../cos-boundary.js';
-import { initDb, closeDb } from '../../../db/connection.js';
+import { initDb, initReadOnlyDb, closeDb } from '../../../db/connection.js';
 import { getSession } from '../../../db/sessions.js';
 import {
   acquireHostExecutionLease,
@@ -22,6 +22,13 @@ import { validPrivateChannel, type ChannelFacts } from '../bridge/identity.js';
 import { createConversationState } from '../bridge/conversation-state.js';
 import { subscriptionActivation } from '../bridge/model-policy.js';
 import { digest } from '../domain/contracts.js';
+import { validStatusInput, type StatusInput } from '../contracts/operations-protocol.js';
+import { connectChecked } from '../store/preflight.js';
+import { parseDatabaseConfig, externalDatabaseConfig } from '../store/config.js';
+import { migrationStatus, SCHEMA_VERSION } from '../store/migrations.js';
+import { BoundedDatabase } from '../store/client.js';
+import { PriorityStore } from '../store/priorities.js';
+import { databaseFingerprint } from './target-identity.js';
 import { localTarget } from './target-identity.js';
 import { acquireTargetLock, readPrivate, type TargetState } from './target-state.js';
 import { activeMaintenanceLease, assertMaintenanceLease } from './maintenance.js';
@@ -56,6 +63,7 @@ export type ContextAdminArguments =
   | CalendarAdminArguments
   | CalendarAccountArguments
   | { command: 'context-status'; scopeId: string }
+  | { command: 'operator-status'; scopeId: string; input: StatusInput }
   | { command: 'context-prepare'; scopeId: string }
   | { command: 'model-activate'; scopeId: string; policyFile: string }
   | { command: 'context-resume'; scopeId: string; activationId: string; resumeId: string }
@@ -222,6 +230,52 @@ export async function contextAdminCommand(
       return localStatus(db, root, bindingFor(db, args.scopeId));
     } finally {
       db.close();
+    }
+  }
+  if (args.command === 'operator-status') {
+    if (!validStatusInput(args.input)) throw new Error('invalid_admin_arguments');
+    const native = initReadOnlyDb(central);
+    let store: PriorityStore | undefined;
+    try {
+      const binding = bindingFor(native, args.scopeId),
+        session = getSession(binding.sessionId);
+      const current = async () => {
+        if (!session || !nativeBinding(binding) || !validPrivateChannel(binding, await d.facts(binding))) return false;
+        return nativeBinding(binding) && digest(d.target(root).binding) === digest(target.binding);
+      };
+      if (!(await current())) return { status: 'denied' };
+      const check = await connectChecked(env, 'runtime');
+      try {
+        if (
+          (await databaseFingerprint(check, parseDatabaseConfig(env, 'runtime'))) !==
+            target.binding.databaseFingerprint ||
+          (await migrationStatus(check)) !== SCHEMA_VERSION
+        )
+          return { status: 'unavailable' };
+      } finally {
+        await check.end();
+      }
+      store = new PriorityStore(BoundedDatabase.fromConfig(await externalDatabaseConfig(env, 'runtime')));
+      const result = await store.operatorStatus({ ...binding, ingressId: 'owner-local-inspection' }, args.input);
+      if (result.status === 'ok') {
+        const fresh = await store.operatorStatus({ ...binding, ingressId: 'owner-local-inspection' }, {});
+        if (fresh.status !== 'ok') return { status: fresh.status };
+      }
+      const boundary = cosBoundary(session!, native);
+      return (await current())
+        ? {
+            ...result,
+            scope_id: binding.scopeId,
+            paused: boundary.restricted && boundary.paused,
+            live_model: 'not_invoked',
+          }
+        : { status: 'denied' };
+    } finally {
+      try {
+        await store?.database.pool.end();
+      } finally {
+        closeDb();
+      }
     }
   }
   const unlock = acquireTargetLock(root);

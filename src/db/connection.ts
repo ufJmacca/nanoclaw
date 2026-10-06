@@ -10,6 +10,12 @@ export function getDb(): Database.Database {
   if (!_db) throw new Error('Database not initialized. Call initDb() first.');
   return _db;
 }
+/** Standalone owner inspection uses the normal identity validators without writing native state. */
+export function initReadOnlyDb(dbPath: string): Database.Database {
+  if (_db) throw new Error('native_database_already_open');
+  _db = new Database(dbPath, { readonly: true, fileMustExist: true });
+  return _db;
+}
 
 export function initDb(dbPath: string): Database.Database {
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });

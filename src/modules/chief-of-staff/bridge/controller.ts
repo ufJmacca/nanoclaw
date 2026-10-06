@@ -7,7 +7,8 @@ import type { InboundEvent } from '../../../channels/adapter.js';
 import type { CosBinding } from '../../../cos-boundary.js';
 import { cosBoundary } from '../../../cos-boundary.js';
 import type { ChannelFacts } from './identity.js';
-import { parseControl, verifyIngress, validPrivateChannel } from './identity.js';
+import { parseControl, parseStatusControl, verifyIngress, validPrivateChannel } from './identity.js';
+import type { StatusInput } from '../contracts/operations-protocol.js';
 import { digest, type Context, type Result } from '../domain/contracts.js';
 export type ControllerDependencies = {
   db: Database.Database;
@@ -23,6 +24,13 @@ export type ControllerDependencies = {
   now?(): number;
   verifyScheduled?(context: Context): Promise<boolean>;
   verifyReview?(context: Context): Promise<boolean>;
+  inspect?(context: Context, input: StatusInput): Promise<Result>;
+  replyStatus?(
+    binding: CosBinding,
+    ingressId: string,
+    result: Result,
+    current: () => Promise<boolean>,
+  ): Promise<boolean>;
 };
 export class CosController {
   constructor(readonly dependencies: ControllerDependencies) {}
@@ -34,7 +42,55 @@ export class CosController {
     const session = d.session(binding.sessionId);
     if (!session) return true;
     const boundary = cosBoundary(session, d.db);
-    if (!boundary.restricted || !boundary.binding || boundary.binding.scopeId !== binding.scopeId) return true;
+    if (!boundary.restricted || !boundary.binding || digest(boundary.binding) !== digest(binding)) return true;
+    const inspection = parseStatusControl(verified.text);
+    if (inspection) {
+      d.db.exec(`CREATE TABLE IF NOT EXISTS cos_operator_requests(
+        scope_id TEXT NOT NULL,ingress_id TEXT NOT NULL,payload_digest TEXT NOT NULL,
+        state TEXT NOT NULL CHECK(state IN ('claimed','delivered','withheld','delivery_uncertain')),
+        PRIMARY KEY(scope_id,ingress_id))`);
+      const payload = digest(verified);
+      const claim = d.db
+        .prepare(
+          "INSERT OR IGNORE INTO cos_operator_requests(scope_id,ingress_id,payload_digest,state) VALUES(?,?,?,'claimed')",
+        )
+        .run(binding.scopeId, verified.id, payload);
+      if (claim.changes !== 1) return true;
+      const current = async () => {
+        if (!validPrivateChannel(binding, await d.facts(binding))) return false;
+        const fresh = cosBoundary(session, d.db);
+        return fresh.restricted && !!fresh.binding && digest(fresh.binding) === digest(binding);
+      };
+      let result: Result = { status: 'unavailable' };
+      try {
+        result =
+          (await d.inspect?.(
+            {
+              scopeId: binding.scopeId,
+              ownerId: binding.ownerId,
+              sessionId: binding.sessionId,
+              agentGroupId: binding.agentGroupId,
+              ingressId: verified.id,
+            },
+            inspection,
+          )) ?? result;
+        // eslint-disable-next-line no-catch-all/no-catch-all -- Offline diagnostics must not disclose database/transport details.
+      } catch {
+        result = { status: 'unavailable' };
+      }
+      let state = 'withheld';
+      try {
+        if ((await current()) && d.replyStatus)
+          state = (await d.replyStatus(binding, verified.id, result, current)) ? 'delivered' : 'withheld';
+        // eslint-disable-next-line no-catch-all/no-catch-all -- A timed-out send is uncertain, never an automatic retry.
+      } catch {
+        state = 'delivery_uncertain';
+      }
+      d.db
+        .prepare('UPDATE cos_operator_requests SET state=? WHERE scope_id=? AND ingress_id=? AND payload_digest=?')
+        .run(state, binding.scopeId, verified.id, payload);
+      return true;
+    }
     const control = parseControl(verified.text);
     if (control?.kind === 'pause') {
       d.db.prepare('UPDATE cos_identity_boundaries SET paused=1 WHERE scope_id=?').run(binding.scopeId);
@@ -62,7 +118,7 @@ export class CosController {
       return true;
     }
     // Keep malformed/quoted controls out of model history; they never become commands.
-    if (/\bcos\s+(approve|reject|pause)\b/i.test(verified.text)) return true;
+    if (/\bcos\s+(approve|reject|pause|status)\b/i.test(verified.text)) return true;
     const payloadDigest = digest(verified);
     const pending = d.db.transaction(() => {
       d.db

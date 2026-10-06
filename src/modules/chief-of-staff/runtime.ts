@@ -33,6 +33,7 @@ import { MandatePump } from './automation/mandate-pump.js';
 import { ActionPump } from './actions/pump.js';
 import { ActionNotificationDelivery } from './actions/notification-delivery.js';
 import type { KnowledgeContext } from './knowledge/store.js';
+import { renderOperatorStatus } from './ops/operator-status-render.js';
 
 export type RuntimeDependencies = {
   db: Database.Database;
@@ -135,6 +136,36 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
       (await d.store.briefs.authorize(context, context.origin.runId, context.origin.generation)).status === 'ok',
     verifyReview: (context) => reviewAuthority(context, true),
     decide: (...args) => (d.store ? d.store.decide(...args) : Promise.resolve({ status: 'unavailable' })),
+    inspect: (context, input) =>
+      !disposed && d.store ? d.store.operatorStatus(context, input) : Promise.resolve({ status: 'unavailable' }),
+    replyStatus: async (binding, ingressId, result, current) => {
+      const adapter = getDeliveryAdapter(),
+        session = d.session(binding.sessionId);
+      if (disposed || !adapter || !session || adapter.isAvailable?.('mattermost') === false || !(await current()))
+        return false;
+      const context = {
+        scopeId: binding.scopeId,
+        ownerId: binding.ownerId,
+        agentGroupId: binding.agentGroupId,
+        sessionId: binding.sessionId,
+        ingressId,
+      };
+      const fresh = result.status === 'ok' ? await d.store?.operatorStatus(context, {}) : undefined;
+      const checked = result.status === 'ok' && fresh?.status !== 'ok' ? { status: 'unavailable' as const } : result;
+      if (disposed || !(await current())) return false;
+      const boundary = cosBoundary(session, d.db);
+      const admission = boundary.restricted && boundary.paused ? 'paused' : enabled() ? 'open' : 'closed';
+      const receipt = await adapter.deliver(
+        'mattermost',
+        `mattermost:${binding.instanceId}:${binding.channelId}`,
+        null,
+        'chat',
+        JSON.stringify({ text: renderOperatorStatus(checked, admission) }),
+        undefined,
+        'cos-status-' + digest({ scope: binding.scopeId, ingressId }),
+      );
+      return !!receipt;
+    },
     acknowledge: (proposal) => deletePendingApproval('cos-' + proposal),
     stop: d.stop,
     wake: async (session) => {

@@ -1,4 +1,6 @@
 import type { Context, ProposalChange, Result } from '../domain/contracts.js';
+import { operatorStatus } from '../ops/operator-status.js';
+import type { StatusInput } from '../contracts/operations-protocol.js';
 import { digest, validProposalChange, validSourceChange } from '../domain/contracts.js';
 import type { KnowledgeContext, KnowledgeStore } from '../knowledge/store.js';
 import {
@@ -81,6 +83,9 @@ async function event(
 }
 
 export class PriorityStore {
+  operatorStatus(context: Context, input: StatusInput): Promise<Result> {
+    return operatorStatus(this.database, context, input);
+  }
   readonly strategy: StrategyApprovalStore;
   readonly directions?: DirectionStore;
   readonly reviewArtifacts?: ReviewArtifacts;

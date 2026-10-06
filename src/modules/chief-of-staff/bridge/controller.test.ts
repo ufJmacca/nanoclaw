@@ -81,6 +81,56 @@ const event = (text: string, id = 'ingress'): InboundEvent => ({
   },
 });
 const command = 'cos approve 11111111-1111-4111-8111-111111111111 abcdefghijklmnopqrstuvwxyz123456';
+it('S11-UI01 owner status works while paused/model unavailable, without a model wake or changing admission', async () => {
+  const f = fixture();
+  f.enabled.mockReturnValue(false);
+  f.db.exec('UPDATE cos_identity_boundaries SET paused=1');
+  const inspect = vi.fn().mockResolvedValue({ status: 'ok', format: 'cos-operator-status/v1' }),
+    reply = vi.fn().mockResolvedValue(true);
+  const controller = new CosController({ ...f.controller.dependencies, inspect, replyStatus: reply });
+  await controller.ingress(binding, event('cos status missions', 'status-event'));
+  expect(inspect).toHaveBeenCalledWith(expect.objectContaining({ ownerId: 'owner', scopeId: 'scope' }), {
+    category: 'missions',
+  });
+  expect(reply).toHaveBeenCalledOnce();
+  expect(f.project).not.toHaveBeenCalled();
+  expect(f.wake).not.toHaveBeenCalled();
+  expect(f.db.prepare('SELECT paused FROM cos_identity_boundaries').get()).toEqual({ paused: 1 });
+  await controller.ingress(binding, event('cos status missions', 'status-event'));
+  expect(reply).toHaveBeenCalledOnce();
+});
+it('S11-UI01 database loss gives only unavailable metadata, and changed private membership prevents delivery', async () => {
+  const f = fixture(),
+    reply = vi.fn().mockResolvedValue(true),
+    inspect = vi.fn().mockRejectedValue(new Error('PRIVATE_DATABASE_ERROR'));
+  const controller = new CosController({ ...f.controller.dependencies, inspect, replyStatus: reply });
+  await controller.ingress(binding, event('cos status', 'status-outage'));
+  expect(reply.mock.calls[0][2]).toEqual({ status: 'unavailable' });
+  f.facts.mockResolvedValue({
+    id: 'private',
+    type: 'O',
+    delete_at: 0,
+    members: ['owner', 'bot'],
+    activeSubscription: true,
+  });
+  await controller.ingress(binding, event('cos status', 'status-public'));
+  expect(reply).toHaveBeenCalledOnce();
+});
+it('S11-UI01 ambiguous delivery stays explicit and replay cannot send again or grant admission', async () => {
+  const f = fixture(),
+    reply = vi.fn().mockRejectedValue(new Error('PRIVATE_TRANSPORT_ERROR'));
+  const controller = new CosController({
+    ...f.controller.dependencies,
+    inspect: vi.fn().mockResolvedValue({ status: 'ok' }),
+    replyStatus: reply,
+  });
+  await controller.ingress(binding, event('cos status', 'status-uncertain'));
+  await controller.ingress(binding, event('cos status', 'status-uncertain'));
+  expect(reply).toHaveBeenCalledOnce();
+  expect(f.db.prepare('SELECT state FROM cos_operator_requests WHERE ingress_id=?').get('status-uncertain')).toEqual({
+    state: 'delivery_uncertain',
+  });
+});
 describe('S01 deterministic host control and replay authority', () => {
   it('S01-UI08 persists emergency pause without model or PostgreSQL, even disabled', async () => {
     const f = fixture();

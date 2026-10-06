@@ -158,6 +158,7 @@ test('CoS keeps one native thread across queued replies and a new provider query
     else expect(r.params.modelProvider).toBe('openai');
   }
   expect(f.writes.find((r) => r.method === 'thread/start').params.dynamicTools.map((t: any) => t.name)).toEqual([
+    'cos_status',
     'cos_context_get',
     'cos_change_propose',
     'cos_request_status',

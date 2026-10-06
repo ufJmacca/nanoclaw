@@ -11,6 +11,7 @@ import { missionCoordinatorTools } from './mission-coordinator-tools.js';
 import { mandateCoordinatorTools } from './mandate-coordinator-tools.js';
 import { actionCoordinatorTools } from './action-coordinator-tools.js';
 import { strategyCoordinatorTools } from './strategy-coordinator-tools.js';
+import { STATUS_CATEGORIES } from './generated/operations-protocol.js';
 
 export async function executeCosRequest(
   request: CosRequest,
@@ -309,6 +310,31 @@ const briefTool: McpToolDefinition = {
   },
 };
 export const cosTools: McpToolDefinition[] = [
+  {
+    tool: {
+      name: 'cos_status',
+      description:
+        'Inspect scoped progress, pending decisions, uncertainty, source coverage and structural reservations. Returns safe purpose, authority and evidence references, with bounded category pages. Inspection grants no execution or account authority; missing monetary usage remains unavailable.',
+      inputSchema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          category: { type: 'string', enum: [...STATUS_CATEGORIES] },
+          offset: { type: 'integer', minimum: 0, maximum: 10000 },
+          limit: { type: 'integer', minimum: 1, maximum: 20 },
+        },
+      },
+    },
+    async handler(args) {
+      const value = await executeCosRequest({
+        protocol: COS_PROTOCOL,
+        request_id: randomUUID(),
+        method: 'cos_status',
+        params: args,
+      });
+      return { content: [{ type: 'text' as const, text: JSON.stringify(value) }] };
+    },
+  },
   ...priorityTools,
   ...knowledgeTools,
   ...answerTools,

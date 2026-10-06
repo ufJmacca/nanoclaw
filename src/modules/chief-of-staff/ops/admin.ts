@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { validStatusInput, type StatusInput } from '../contracts/operations-protocol.js';
 import { isKnowledgeCommand, parseKnowledgeArguments } from './knowledge-admin.js';
 import { isCalendarCommand, parseCalendarArguments } from './calendar-admin.js';
 import { isCalendarAccountCommand, parseCalendarAccountArguments } from './calendar-account-admin.js';
@@ -20,6 +21,29 @@ import { contextAdminCommand, type ContextAdminArguments } from './context-admin
 
 type AdminArguments = { command: 'status' } | { command: 'bind'; binding: BindingRequest } | ContextAdminArguments;
 export function parseAdminArguments(args: string[]): AdminArguments {
+  if (args[0] === 'operator-status') {
+    const values: Record<string, string> = {};
+    for (let i = 1; i < args.length; i += 2) {
+      if (
+        !['--scope', '--category', '--offset', '--limit'].includes(args[i]) ||
+        values[args[i]] !== undefined ||
+        !args[i + 1]
+      )
+        throw Error('invalid_admin_arguments');
+      values[args[i]] = args[i + 1];
+    }
+    if (!/^[a-zA-Z0-9_-]{1,128}$/.test(values['--scope'] ?? '')) throw Error('invalid_admin_arguments');
+    for (const key of ['--offset', '--limit'])
+      if (values[key] !== undefined && !/^(0|[1-9][0-9]{0,4})$/.test(values[key]))
+        throw Error('invalid_admin_arguments');
+    const input = {
+      ...(values['--category'] !== undefined ? { category: values['--category'] } : {}),
+      ...(values['--offset'] !== undefined ? { offset: Number(values['--offset']) } : {}),
+      ...(values['--limit'] !== undefined ? { limit: Number(values['--limit']) } : {}),
+    };
+    if (!validStatusInput(input)) throw Error('invalid_admin_arguments');
+    return { command: 'operator-status', scopeId: values['--scope'], input: input as StatusInput };
+  }
   if (isActionRecoveryCommand({ command: args[0] })) return parseActionRecoveryArguments(args);
   if (isActionAdminCommand({ command: args[0] })) return parseActionAdminArguments(args);
   if (isActionAccountCommand({ command: args[0] })) return parseActionAccountArguments(args);
