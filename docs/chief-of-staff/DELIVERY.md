@@ -68,8 +68,9 @@ helper. Missing or changed closure evidence fails closed.
 
 Protection grants no account, action, channel or model consent. A successful seal
 does not itself complete the programme: final merged-source delivery, Pi health,
-recovery and independent operation must still pass. See [S11 evidence](evidence/S11.md)
-for actual status.
+recovery and independent operation must still pass. [Final S11 acceptance](evidence/S11_MERGED.md)
+now records those verified gates and the protected Pi lifecycle. [Earlier S11
+evidence](evidence/S11.md) retains candidate and isolated recovery history.
 
 Use the [operator runbook](OPERATIONS_AND_RECOVERY.md) for the installed S11
 maintenance, credential restart, private export and coordinated restore entry
@@ -101,8 +102,10 @@ The owner subsequently merged PR #67. The required
 The [collection-limit correction](evidence/S10_OBSERVATION_CAP.md) records the
 latest fully verified candidate and its complete compatible recovery release;
 The owner merged PR #68, and [actual merged-source acceptance](evidence/S10_MERGED.md)
-passed with fresh Mac-built artifacts and Pi verification. S11 and its final
-review/acceptance and protected-data transition remain required.
+passed with fresh Mac-built artifacts and Pi verification. [S11 final
+acceptance](evidence/S11_MERGED.md) now verifies its human merge, exact final
+release and Pi-owned protected-data transition. The implementation programme is
+complete; live account/model activation remains separately gated.
 
 ## S04 brief and commitment delivery
 

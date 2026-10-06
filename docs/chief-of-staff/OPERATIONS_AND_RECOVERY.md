@@ -1,11 +1,11 @@
 # Chief-of-Staff operations and recovery
 
-These procedures use the installed corrected S11 candidate. Its fresh deployment,
-backup, native checks, compatibility and preservation passed. Accepted earlier
-maintenance and isolated restore evidence retains its original source identity.
-Human review/merge and merged-source acceptance remain pending. Check [the acceptance receipt](evidence/S11.md)
-for the exact installed identity. Keep CoS paused and the calendar writer disabled
-until the separate live activation checks pass.
+These procedures use the reviewed final S11 release. Its exact merged-source
+deployment, native checks, protection, compatibility and preservation passed.
+Earlier maintenance and isolated restore evidence retains its original identity.
+Check [final acceptance](evidence/S11_MERGED.md) for the installed artifacts and
+protected lifecycle. CoS remains paused and the calendar writer disabled until
+their separate live activation checks pass.
 
 ## Prerequisites and responsibilities
 

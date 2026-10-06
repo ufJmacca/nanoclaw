@@ -2,7 +2,7 @@
 
 **Target:** `ufJmacca/nanoclaw`, v2 fork.  
 **Baseline:** `1a432912c00d96abf6c39cd19b1a312631d78a9c` (`package.json` 2.0.25).  
-**Status:** planning package only; no code changes, tests or deployments have been performed.  
+**Status:** planning specification retained; [S01–S11 implementation and final protected Pi acceptance](../chief-of-staff/evidence/S11_MERGED.md) are verified. Live account/model activation remains separately gated.\
 **Date:** 29 September 2026.  
 **Plan revision:** 5 — GitHub-pinned source sync, Mac-tested images delivered to the Pi, external PostgreSQL, and Mattermost-first interaction.
 
