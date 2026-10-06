@@ -449,3 +449,18 @@ test('S10 replacing an unexposed selected source invalidates its charter preview
   assert.equal((await store.propose(context, id, change, fresh)).status, 'denied');
   assert.equal((await decide(pending)).status, 'denied');
 });
+test('S10 disabled knowledge retrieval cannot admit selected source authority through an unexposed charter', async () => {
+  const source = (await admin.query("SELECT id FROM cos.sources WHERE scope_id=$1 AND status='current'", [scope]))
+    .rows[0].id;
+  const fresh = { ...retained, generation: randomUUID() },
+    disabledKnowledge = new KnowledgeStore(store.database, knowledge.artifacts, {}, { retrievalEnabled: () => false });
+  assert.equal((await disabledKnowledge.contextReady(fresh)).status, 'ok');
+  const disabled = new PriorityStore(store.database, disabledKnowledge);
+  const result = await disabled.propose(
+    context,
+    randomUUID(),
+    { ...charter, expected_version: 4, definition: { ...charter.definition, source_ids: [source] } },
+    fresh,
+  );
+  assert.equal(result.status, 'denied');
+});

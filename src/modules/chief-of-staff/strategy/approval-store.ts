@@ -128,6 +128,7 @@ export class StrategyApprovalStore {
     );
     if (records.rowCount !== definition.initiative_ids.length) return false;
     if (!definition.source_ids.length) return true;
+    if (!this.knowledge!.retrievalEnabled()) return false;
     const sources = await client.query(
       `SELECT s.id FROM cos.sources s WHERE s.scope_id=$1 AND s.id=ANY($2::text[])
       AND s.status IN ('current','stale') AND s.current_revision_id IS NOT NULL AND $3=ANY(s.processing_providers)
