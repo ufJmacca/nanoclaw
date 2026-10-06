@@ -71,6 +71,10 @@ does not itself complete the programme: final merged-source delivery, Pi health,
 recovery and independent operation must still pass. See [S11 evidence](evidence/S11.md)
 for actual status.
 
+Use the [operator runbook](OPERATIONS_AND_RECOVERY.md) for the installed S11
+maintenance, credential restart, private export and coordinated restore entry
+points. These use the recorded prebuilt payload and selected database profile.
+
 ## S10 strategic-review delivery
 
 Historical S10 release construction selected PostgreSQL schema 18 and SQLite
