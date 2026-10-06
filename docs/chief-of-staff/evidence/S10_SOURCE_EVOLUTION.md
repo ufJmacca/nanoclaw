@@ -1,6 +1,6 @@
 # S10 correction: reviews after source changes
 
-**Status:** historical first P1 candidate, technically verified. The [final collection-limit correction](S10_OBSERVATION_CAP.md) supersedes this candidate; PR #68 human review/merge remains pending.
+**Status:** historical first P1 candidate, technically verified. The [collection-limit correction](S10_OBSERVATION_CAP.md) superseded this candidate; [actual reviewed merged-source acceptance](S10_MERGED.md) is now complete.
 
 The identities and retention statements below describe this earlier deployment.
 Later scoped image-cache retirement is recorded in the final correction receipt.
