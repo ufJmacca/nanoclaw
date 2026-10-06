@@ -12,10 +12,13 @@ import {
   validStrategyObservationChange,
   validReviewRequest,
   validReviewDraft,
+  validDirectionRequest,
+  validStrategyDirectionChange,
   reviewId,
   reviewInteger,
   type ReviewCharterChange,
   type StrategyObservationChange,
+  type StrategyDirectionChange,
 } from './strategy-protocol.js';
 import {
   validProactivePolicyChange,
@@ -144,6 +147,7 @@ export type CosMethod =
   | 'cos_action_cancel'
   | 'cos_review_charter_propose'
   | 'cos_strategy_observation_propose'
+  | 'cos_strategy_direction_propose'
   | 'cos_review_request'
   | 'cos_review_submit'
   | 'cos_review_get'
@@ -256,6 +260,8 @@ export function validRequest(value: unknown): value is CosRequest {
     return keys(value.params, ['change']) && validReviewCharterChange(value.params.change);
   if (value.method === 'cos_strategy_observation_propose')
     return keys(value.params, ['change']) && validStrategyObservationChange(value.params.change);
+  if (value.method === 'cos_strategy_direction_propose')
+    return keys(value.params, ['request']) && validDirectionRequest(value.params.request);
   if (value.method === 'cos_review_request')
     return keys(value.params, ['request']) && validReviewRequest(value.params.request);
   if (value.method === 'cos_review_submit')
@@ -586,7 +592,8 @@ export type ProposalChange =
   | MandateChange
   | CalendarActionChange
   | ReviewCharterChange
-  | StrategyObservationChange;
+  | StrategyObservationChange
+  | StrategyDirectionChange;
 export function validProposalChange(value: unknown): value is ProposalChange {
   return (
     validChange(value) ||
@@ -599,6 +606,7 @@ export function validProposalChange(value: unknown): value is ProposalChange {
     validCalendarActionChange(value) ||
     validReviewCharterChange(value) ||
     validStrategyObservationChange(value) ||
+    validStrategyDirectionChange(value) ||
     validMissionChange(value) ||
     validTeamChange(value)
   );

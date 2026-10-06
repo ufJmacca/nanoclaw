@@ -45,6 +45,25 @@ export type StrategyObservationChange = {
   reason: string;
 };
 export type ReviewRequest = { charter_version: number; previous_review_id: string | null };
+export type DirectionRequest = {
+  review_id: string;
+  revision: number;
+  option_id: string;
+  expected_record_version: number;
+  expected_direction_version: number;
+  reason: string;
+};
+/** Host-derived from a verified private review. The agent wire accepts only DirectionRequest. */
+export type StrategyDirectionChange = {
+  kind: 'strategy_direction';
+  request: DirectionRequest;
+  option: ReviewOption;
+  charter_version: number;
+  snapshot_digest: string;
+  draft_digest: string;
+  result_artifact_id: string;
+  result_artifact_digest: string;
+};
 export type ReviewFinding = {
   kind: 'fact' | 'self_report' | 'assumption' | 'recommendation';
   domain: 'activity' | 'outcome' | 'calendar_allocation' | 'actual_effort' | 'attention_cost' | 'other';
@@ -77,6 +96,50 @@ const object = (value: unknown): value is Record<string, unknown> =>
   !!value && typeof value === 'object' && !Array.isArray(value);
 const exact = (value: Record<string, unknown>, fields: string[]) =>
   Object.keys(value).length === fields.length && fields.every((field) => Object.hasOwn(value, field));
+export function validDirectionRequest(value: unknown): value is DirectionRequest {
+  return (
+    object(value) &&
+    exact(value, [
+      'review_id',
+      'revision',
+      'option_id',
+      'expected_record_version',
+      'expected_direction_version',
+      'reason',
+    ]) &&
+    reviewId(value.review_id) &&
+    reviewInteger(value.revision) &&
+    reviewIdentifier(value.option_id) &&
+    reviewInteger(value.expected_record_version) &&
+    reviewInteger(value.expected_direction_version, 0) &&
+    reviewText(value.reason, 500)
+  );
+}
+export function validStrategyDirectionChange(value: unknown): value is StrategyDirectionChange {
+  return (
+    object(value) &&
+    exact(value, [
+      'kind',
+      'request',
+      'option',
+      'charter_version',
+      'snapshot_digest',
+      'draft_digest',
+      'result_artifact_id',
+      'result_artifact_digest',
+    ]) &&
+    value.kind === 'strategy_direction' &&
+    validDirectionRequest(value.request) &&
+    validReviewOption(value.option) &&
+    value.option.id === value.request.option_id &&
+    reviewInteger(value.charter_version) &&
+    reviewDigest(value.snapshot_digest) &&
+    reviewDigest(value.draft_digest) &&
+    typeof value.result_artifact_id === 'string' &&
+    /^[a-f0-9]{64}-[a-f0-9]{64}$/.test(value.result_artifact_id) &&
+    reviewDigest(value.result_artifact_digest)
+  );
+}
 export const reviewInteger = (value: unknown, minimum = 1, maximum = 2147483646): value is number =>
   Number.isSafeInteger(value) && Number(value) >= minimum && Number(value) <= maximum;
 export const reviewText = (value: unknown, maximum: number, empty = false): value is string =>

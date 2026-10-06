@@ -10,11 +10,14 @@ import {
   type ReviewCharterChange,
   type ReviewCharterDefinition,
   type StrategyObservationChange,
+  validStrategyDirectionChange,
+  type StrategyDirectionChange,
 } from '../contracts/strategy-protocol.js';
+import type { DirectionStore } from './direction-store.js';
 
-export type StrategyChange = ReviewCharterChange | StrategyObservationChange;
+export type StrategyChange = ReviewCharterChange | StrategyObservationChange | StrategyDirectionChange;
 export const validStrategyChange = (value: unknown): value is StrategyChange =>
-  validReviewCharterChange(value) || validStrategyObservationChange(value);
+  validReviewCharterChange(value) || validStrategyObservationChange(value) || validStrategyDirectionChange(value);
 type ReviewDependencies = {
   records: Array<{ id: string; version: number }>;
   sources: Array<{ id: string; version: number; revision_id: string; digest: string }>;
@@ -23,7 +26,10 @@ export type StrategyProposalContext = KnowledgeContext & { review_dependencies: 
 
 /** Runs inside the existing proposal transaction. Approval grants no execution or cadence. */
 export class StrategyApprovalStore {
-  constructor(readonly knowledge?: KnowledgeStore) {}
+  constructor(
+    readonly knowledge?: KnowledgeStore,
+    readonly directions?: () => DirectionStore | undefined,
+  ) {}
 
   /** Pin selected versions on the host, never accept a model-supplied dependency snapshot. */
   async prepareContext(
@@ -33,6 +39,10 @@ export class StrategyApprovalStore {
     retained?: KnowledgeContext,
   ): Promise<StrategyProposalContext | undefined> {
     if (!(await this.authority(client, context, retained))) return undefined;
+    if (validStrategyDirectionChange(change))
+      return (await this.directionAccess(client, context, change, retained))
+        ? (retained as StrategyProposalContext)
+        : undefined;
     const definition = validReviewCharterChange(change)
       ? change.definition
       : await this.charter(client, context, change.charter_version, false);
@@ -174,6 +184,26 @@ export class StrategyApprovalStore {
     return row.body.change.definition;
   }
 
+  /** Rejection may retain a stale choice; source/native privacy is always current. Version conflicts are distinct. */
+  async directionAccess(
+    client: PoolClient,
+    context: Context,
+    change: StrategyDirectionChange,
+    retained?: KnowledgeContext,
+    historical = false,
+  ): Promise<boolean> {
+    const directions = this.directions?.();
+    if (!directions || !(await this.authority(client, context, retained))) return false;
+    const definition = await this.charter(client, context, change.charter_version, historical);
+    return (
+      !!definition &&
+      definition.initiative_ids.includes(change.option.initiative_id) &&
+      (await this.selected(client, retained!, definition)) &&
+      (await this.versionsCurrent(client, retained!, definition, true)) &&
+      (await directions.validateAccess(client, context, change, retained, historical))
+    );
+  }
+
   async validateChange(
     client: PoolClient,
     context: Context,
@@ -183,6 +213,14 @@ export class StrategyApprovalStore {
   ): Promise<boolean> {
     if (!validStrategyChange(change) || !(await this.authority(client, context, retained))) return false;
     const historical = !!appliedProposal;
+    if (validStrategyDirectionChange(change)) {
+      if (!(await this.directionAccess(client, context, change, retained, historical))) return false;
+      const definition = await this.charter(client, context, change.charter_version, historical);
+      if (!definition || !(await this.versionsCurrent(client, retained!, definition, historical))) return false;
+      return historical
+        ? this.directions!()!.appliedCurrent(client, context, change, appliedProposal!)
+        : this.directions!()!.versionsCurrent(client, context, change);
+    }
     if (validReviewCharterChange(change)) {
       if (!validReviewCharterDefinition(change.definition)) return false;
       if (historical) {
@@ -264,6 +302,8 @@ export class StrategyApprovalStore {
     retained?: KnowledgeContext,
   ): Promise<Result> {
     if (!(await this.validateChange(client, context, change, retained))) return { status: 'conflict' };
+    if (validStrategyDirectionChange(change))
+      return this.directions!()!.applyApproved(client, context, proposal, change);
     const provenance = {
       proposal_id: proposal.id,
       owner_id: context.ownerId,

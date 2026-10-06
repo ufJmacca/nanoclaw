@@ -274,6 +274,64 @@ it.each([
     expect(f.store.propose).toHaveBeenCalledTimes(2);
   },
 );
+it('S10 direction proposals use the retained main context, hide tokens and reject automatic or changed context', async () => {
+  const f = fixture();
+  const context = {
+    scopeId: 'fixture',
+    ownerId: 'owner',
+    sessionId: 'session',
+    agentGroupId: 'group',
+    ingressId: 'verified',
+  };
+  const retained = { ...context, provider: 'codex', generation: '33333333-3333-4333-8333-333333333333' };
+  const resolveKnowledgeContext = vi.fn().mockResolvedValue(retained);
+  const requestDirection = vi
+    .fn()
+    .mockResolvedValue({ status: 'ok', proposal_id: 'proposal', confirmation_token: 'PRIVATE_DIRECTION_APPROVAL' });
+  const input = {
+    review_id: 'review-' + 'a'.repeat(64),
+    revision: 1,
+    option_id: 'pause',
+    expected_record_version: 1,
+    expected_direction_version: 0,
+    reason: 'Measure useful results before expansion',
+  };
+  const handler = createRpcHandler({
+    resolveContext: f.resolveContext,
+    store: { ...f.store, requestDirection } as unknown as PriorityStore,
+    knowledge: { contextReady: vi.fn().mockResolvedValue({ status: 'ok' }) } as unknown as KnowledgeStore,
+    resolveKnowledgeContext,
+    reserveTool: async () => ({ status: 'ok' }),
+  });
+  const call = async () => {
+    await handler(
+      {
+        action: 'cos_rpc',
+        delivery_id: '22222222-2222-4222-8222-222222222222',
+        request: { ...request, method: 'cos_strategy_direction_propose', params: { request: input } },
+      },
+      {} as Session,
+      f.db,
+    );
+    return JSON.parse((f.db.prepare('SELECT response FROM cos_rpc_responses').get() as { response: string }).response);
+  };
+  {
+    const result = await call();
+    expect(result.status).toBe('ok');
+    expect(requestDirection).toHaveBeenCalledExactlyOnceWith(retained, request.request_id, input);
+    expect(JSON.stringify(result)).not.toContain('PRIVATE_DIRECTION_APPROVAL');
+  }
+  for (const kind of ['schedule', 'mission_review']) {
+    f.resolveContext.mockResolvedValue({ ...context, origin: { kind, runId: 'run', generation: 1 } });
+    expect((await call()).status).toBe('denied');
+  }
+  f.resolveContext.mockResolvedValue(context);
+  requestDirection.mockImplementationOnce(async () => {
+    resolveKnowledgeContext.mockResolvedValue({ ...retained, generation: '44444444-4444-4444-8444-444444444444' });
+    return { status: 'ok', confirmation_token: 'PRIVATE_DIRECTION_APPROVAL' };
+  });
+  expect((await call()).status).toBe('denied');
+});
 it('S09 routes only owner calendar proposals, status and cancellation without exposing approval tokens', async () => {
   const f = fixture(),
     action_id = 'action-' + 'b'.repeat(64);

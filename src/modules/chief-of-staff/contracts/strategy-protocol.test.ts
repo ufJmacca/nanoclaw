@@ -68,6 +68,34 @@ const request = (method: string, change: unknown) => ({
   params: { change },
 });
 describe('S10 canonical owner review proposal contracts', () => {
+  it('admits an exact direction request but refuses caller-selected actions, approval and effects', () => {
+    const direction = {
+      review_id: 'review-' + 'a'.repeat(64),
+      revision: 1,
+      option_id: 'continue',
+      expected_record_version: 1,
+      expected_direction_version: 0,
+      reason: 'Keep the approved investment while measuring outcomes',
+    };
+    const value = { ...request('cos_strategy_direction_propose', null), params: { request: direction } };
+    expect(validRequest(value)).toBe(true);
+    for (const field of [
+      'initiative_id',
+      'direction',
+      'option',
+      'review_digest',
+      'generation',
+      'scope_id',
+      'approved',
+      'cancel_missions',
+      'cancel_commitments',
+    ])
+      expect(validRequest({ ...value, params: { request: { ...direction, [field]: 'forged' } } })).toBe(false);
+    expect(validRequest({ ...value, params: { request: { ...direction, expected_record_version: 0 } } })).toBe(false);
+    expect(validRequest({ ...value, params: { request: { ...direction, expected_direction_version: -1 } } })).toBe(
+      false,
+    );
+  });
   it.each([
     ['cos_review_request', { request: { charter_version: 1, previous_review_id: null } }],
     ['cos_review_submit', { review_id: 'review-' + 'a'.repeat(64), revision: 1, draft: reviewDraft }],

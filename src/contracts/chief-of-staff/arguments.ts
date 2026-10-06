@@ -39,6 +39,7 @@ export function fixtureFiles(args: Pick<FixtureArguments, 'slice' | 'demo'>): st
           'strategy-collection.integration',
           'strategy-calendar.integration',
           'strategy-missions.integration',
+          'strategy-directions.integration',
           'strategy-flow.integration',
         ];
   if (args.slice === 'S09')

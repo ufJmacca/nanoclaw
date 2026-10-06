@@ -124,6 +124,7 @@ it('registers S10 strategic review and owner-decision flows with every predecess
     'strategy-collection.integration',
     'strategy-calendar.integration',
     'strategy-missions.integration',
+    'strategy-directions.integration',
     'strategy-flow.integration',
   ]);
 });
