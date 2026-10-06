@@ -18,6 +18,7 @@ import {
   validReviewCharterChange,
   validStrategyObservationChange,
   validReviewRequest,
+  validStrategyDirectionChange,
   reviewId,
   reviewInteger,
   type ReviewRequest,
@@ -31,6 +32,8 @@ import {
   type ReviewRecord,
   type ReviewWork,
   type ReviewObservation,
+  type ReviewDecision,
+  type ReviewDirection,
 } from './review.js';
 export type ReviewCollectionIdentity = { review_id: string; revision: number; previous: ReviewPrevious | null };
 type SourceVersion = { id: string; version: number; revision_id: string; digest: string; status: string };
@@ -42,6 +45,7 @@ export type ReviewVersionRefs = {
   work_digest: string;
   observation_digest: string;
   decision_digest: string;
+  direction_digest: string;
   sources: SourceVersion[];
   calendar_digest: string;
   calendar_projection_digest: string;
@@ -174,11 +178,115 @@ export class ReviewCollector {
   private async decisions(client: PoolClient, context: KnowledgeContext, definition: ReviewCharterDefinition) {
     return (
       await client.query(
-        `SELECT scope_id,review_id,review_revision,initiative_id,decision,direction,rationale,created_at AS decided_at
-      FROM cos.strategy_decisions WHERE scope_id=$1 AND initiative_id=ANY($2::text[]) ORDER BY created_at,proposal_id LIMIT 21`,
+        `SELECT d.scope_id,d.proposal_id,d.option_id,d.review_id,d.review_revision,d.initiative_id,d.decision,d.direction,d.rationale,d.created_at AS decided_at,
+        r.version AS direction_version, CASE WHEN r.version IS NULL THEN 'not_applied' WHEN h.version=r.version THEN 'applied' ELSE 'superseded' END AS application
+      FROM cos.strategy_decisions d LEFT JOIN cos.strategy_direction_revisions r ON r.scope_id=d.scope_id AND r.proposal_id=d.proposal_id
+      LEFT JOIN cos.strategy_directions h ON h.scope_id=d.scope_id AND h.initiative_id=d.initiative_id
+      WHERE d.scope_id=$1 AND d.initiative_id=ANY($2::text[]) ORDER BY d.created_at,d.proposal_id LIMIT 21`,
         [context.scopeId, definition.initiative_ids],
       )
-    ).rows.map((r) => ({ ...r, decided_at: (r.decided_at as Date).toISOString() }));
+    ).rows.map((r) => ({ ...r, decided_at: (r.decided_at as Date).toISOString() })) as ReviewDecision[];
+  }
+  private async directions(client: PoolClient, context: KnowledgeContext, definition: ReviewCharterDefinition) {
+    return (
+      await client.query(
+        `SELECT h.scope_id,h.initiative_id,h.version,h.direction,h.rationale,r.expected_record_version,r.proposal_id,
+      d.review_id,d.review_revision,d.option_id,r.created_at AS applied_at,r.body->'superseded_version' AS superseded_version
+      FROM cos.strategy_directions h JOIN cos.strategy_direction_revisions r ON r.scope_id=h.scope_id AND r.initiative_id=h.initiative_id AND r.version=h.version
+      JOIN cos.strategy_decisions d ON d.scope_id=r.scope_id AND d.proposal_id=r.proposal_id
+      WHERE h.scope_id=$1 AND h.initiative_id=ANY($2::text[]) ORDER BY h.initiative_id LIMIT 11`,
+        [context.scopeId, definition.initiative_ids],
+      )
+    ).rows.map((r) => ({ ...r, applied_at: (r.applied_at as Date).toISOString() })) as ReviewDirection[];
+  }
+  /** Historical rationale inherits every source that influenced its original review. Approval cannot widen disclosure. */
+  private async decisionAccess(
+    client: PoolClient,
+    context: KnowledgeContext,
+    definition: ReviewCharterDefinition,
+    sources: SourceVersion[],
+    proposalId: string,
+  ): Promise<boolean> {
+    const row = (
+      await client.query(
+        `SELECT p.change,p.payload_hash,p.work_context,d.provenance,d.review_id,d.review_revision,d.option_id,d.initiative_id,d.direction,d.rationale,
+      s.version_refs,s.artifact_id AS snapshot_artifact,r.artifact_id AS result_artifact
+      FROM cos.strategy_decisions d JOIN cos.proposals p ON p.scope_id=d.scope_id AND p.id=d.proposal_id
+      JOIN cos.strategy_review_snapshots s ON s.scope_id=d.scope_id AND s.id=d.review_id AND s.revision=d.review_revision
+      JOIN cos.strategy_review_results r ON r.scope_id=s.scope_id AND r.review_id=s.id AND r.revision=s.revision
+      JOIN cos.artifacts a ON a.scope_id=s.scope_id AND a.id=s.artifact_id AND a.lifecycle='published'
+      JOIN cos.artifacts b ON b.scope_id=r.scope_id AND b.id=r.artifact_id AND b.lifecycle='published'
+      WHERE d.scope_id=$1 AND d.proposal_id=$2 AND p.owner_id=$3 AND p.session_id=$4 AND s.owner_id=$3 AND s.session_id=$4
+      AND s.processing_provider=$5 AND s.context->>'agentGroupId'=$6`,
+        [context.scopeId, proposalId, context.ownerId, context.sessionId, context.provider, context.agentGroupId],
+      )
+    ).rows[0];
+    if (
+      !row ||
+      !validStrategyDirectionChange(row.change) ||
+      digest(row.change) !== row.payload_hash ||
+      row.provenance?.change_digest !== row.payload_hash ||
+      row.provenance?.owner_id !== context.ownerId ||
+      row.change.request.review_id !== row.review_id ||
+      row.change.request.revision !== row.review_revision ||
+      row.change.option.id !== row.option_id ||
+      row.change.option.initiative_id !== row.initiative_id ||
+      row.change.option.direction !== row.direction ||
+      row.change.request.reason !== row.rationale
+    )
+      return false;
+    const refs = row.version_refs as ReviewVersionRefs;
+    if (
+      !Array.isArray(refs?.sources) ||
+      refs.sources.length > 6 ||
+      !refs.sources.every(
+        (pin) =>
+          definition.source_ids.includes(pin.id) &&
+          sources.some(
+            (current) =>
+              current.id === pin.id &&
+              current.version === pin.version &&
+              current.revision_id === pin.revision_id &&
+              current.digest === pin.digest,
+          ),
+      )
+    )
+      return false;
+    const kinds = row.work_context?.direction_dependencies?.mission_kinds;
+    if (
+      !Array.isArray(kinds) ||
+      kinds.length > 2 ||
+      !kinds.every((kind: unknown) => kind === 'single' || kind === 'team')
+    )
+      return false;
+    for (const kind of kinds as Array<'single' | 'team'>) {
+      const current =
+        kind === 'single'
+          ? this.options.missionReviews?.reviewAuthorityDigest(context)
+          : this.options.teamFinalReviews?.reviewAuthorityDigest(context);
+      if (!current || refs.mission_authorities?.[kind] !== current) return false;
+    }
+    const calendar = await this.options.knowledge.answers.dependencies.calendarContext(client, context, true);
+    if (calendar.status !== 'ok' || digest(calendar.notice) !== refs.calendar_digest) return false;
+    const links = (
+      await client.query(
+        `SELECT l.evidence_id,e.source_id FROM cos.derivation_links l LEFT JOIN cos.evidence_refs e ON e.scope_id=l.scope_id AND e.id=l.evidence_id
+      WHERE l.scope_id=$1 AND l.artifact_id=ANY($2::text[]) ORDER BY l.evidence_id LIMIT 1001`,
+        [context.scopeId, [row.snapshot_artifact, row.result_artifact]],
+      )
+    ).rows;
+    if (links.length > 1000 || links.some((link) => !definition.source_ids.includes(link.source_id))) return false;
+    for (let n = 0; n < links.length; n += 10)
+      if (
+        !(await this.options.knowledge.answers.validateWorkEvidence(
+          client,
+          context,
+          links.slice(n, n + 10).map((link) => ({ kind: 'source' as const, evidence_id: link.evidence_id })),
+          true,
+        ))
+      )
+        return false;
+    return true;
   }
   private async missions(context: KnowledgeContext, captured: Result): Promise<Result> {
     if (captured.status !== 'ok') return captured;
@@ -399,10 +507,26 @@ export class ReviewCollector {
     await this.options.hooks?.afterRecords?.();
     const rawWork = await this.work(client, context, definition),
       rawObservations = await this.observations(client, context, definition, request.charter_version),
-      rawDecisions = await this.decisions(client, context, definition);
+      rawDecisions = await this.decisions(client, context, definition),
+      rawDirections = await this.directions(client, context, definition);
     const missionVersions = await missionProjection(client, context, definition);
     const calendarLocations = await this.calendarProjection(client, context, definition);
     let truncated = rawWork.length > 20 || rawObservations.length > 20 || rawDecisions.length > 20;
+    const decisions: ReviewDecision[] = [],
+      directions: ReviewDirection[] = [];
+    const admission = new Map<string, boolean>();
+    const admitted = async (id: string) => {
+      if (!admission.has(id)) admission.set(id, await this.decisionAccess(client, context, definition, sources, id));
+      return admission.get(id)!;
+    };
+    for (const row of rawDecisions.slice(0, 20)) {
+      if (await admitted(row.proposal_id)) decisions.push(row);
+      else truncated = true;
+    }
+    for (const row of rawDirections) {
+      if (await admitted(row.proposal_id)) directions.push(row);
+      else truncated = true;
+    }
     const work: ReviewWork[] = [],
       observations: ReviewObservation[] = [];
     for (const row of rawWork.slice(0, 20)) {
@@ -481,6 +605,7 @@ export class ReviewCollector {
       work_digest: digest(rawWork),
       observation_digest: digest(rawObservations),
       decision_digest: digest(rawDecisions),
+      direction_digest: digest(rawDirections),
       sources,
       calendar_digest: digest(calendar.notice),
       calendar_projection_digest: digest(calendarLocations),
@@ -506,7 +631,8 @@ export class ReviewCollector {
         records,
         work,
         observations,
-        decisions: rawDecisions.slice(0, 20),
+        decisions,
+        directions,
         source_coverage: sources.map((s) => ({
           scope_id: context.scopeId,
           source_id: s.id,
@@ -559,6 +685,8 @@ export class ReviewCollector {
       return false;
     const sources = await this.sources(client, context, definition);
     if (!sources || digest(sources) !== digest(refs.sources)) return false;
+    for (const row of [...snapshot.decisions, ...snapshot.directions])
+      if (!(await this.decisionAccess(client, context, definition, sources, row.proposal_id))) return false;
     for (const mission of snapshot.missions) {
       const kind = mission.mission_id.startsWith('team-') ? 'team' : 'single';
       const current =
@@ -584,6 +712,7 @@ export class ReviewCollector {
       digest(work) !== refs.work_digest ||
       digest(observations) !== refs.observation_digest ||
       digest(decisions) !== refs.decision_digest ||
+      digest(await this.directions(client, context, definition)) !== refs.direction_digest ||
       digest(await missionProjection(client, context, definition)) !== refs.mission_projection_digest
     )
       return false;

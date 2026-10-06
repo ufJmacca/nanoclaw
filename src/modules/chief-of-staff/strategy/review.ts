@@ -72,6 +72,8 @@ export type ReviewSourceCoverage = {
 };
 export type ReviewDecision = {
   scope_id: string;
+  proposal_id: string;
+  option_id: string;
   review_id: string;
   review_revision: number;
   initiative_id: string;
@@ -79,6 +81,22 @@ export type ReviewDecision = {
   direction: 'continue' | 'change' | 'pause' | 'stop';
   rationale: string;
   decided_at: string;
+  application: 'not_applied' | 'applied' | 'superseded';
+  direction_version: number | null;
+};
+export type ReviewDirection = {
+  scope_id: string;
+  initiative_id: string;
+  version: number;
+  direction: ReviewDecision['direction'];
+  rationale: string;
+  expected_record_version: number;
+  proposal_id: string;
+  review_id: string;
+  review_revision: number;
+  option_id: string;
+  applied_at: string;
+  superseded_version: number | null;
 };
 export type ReviewPrevious = {
   scope_id: string;
@@ -108,14 +126,16 @@ export type ReviewInput = {
   source_evidence: Array<{ scope_id: string; source_id: string; evidence_id: string }>;
   calendar_allocations: Array<{ scope_id: string; source_id: string; evidence_id: string; scheduled_minutes: number }>;
   decisions: ReviewDecision[];
+  directions?: ReviewDirection[];
   previous_review: ReviewPrevious | null;
   truncated: boolean;
 };
-export type ReviewSnapshot = Omit<ReviewInput, 'records' | 'mission_coverage'> & {
+export type ReviewSnapshot = Omit<ReviewInput, 'records' | 'mission_coverage' | 'directions'> & {
   format: 'cos-strategy-snapshot/v1';
   initiatives: ReviewRecord[];
   coverage: 'limited' | 'no_sources' | 'available';
   mission_coverage: ReviewMissionCoverage[];
+  directions: ReviewDirection[];
 };
 export type ReviewArtifact = {
   format: 'cos-strategy-review/v1';
@@ -161,7 +181,8 @@ export function buildReviewSnapshot(input: ReviewInput): ReviewSnapshot {
     !bounded(input.source_coverage, 20) ||
     !bounded(input.source_evidence, 100) ||
     !bounded(input.calendar_allocations, 25) ||
-    !bounded(input.decisions, 100)
+    !bounded(input.decisions, 100) ||
+    !bounded(input.directions ?? [], 10)
   )
     throw Error('review_snapshot_invalid');
   const definition = input.charter.definition,
@@ -221,7 +242,12 @@ export function buildReviewSnapshot(input: ReviewInput): ReviewSnapshot {
       .sort((a, b) => a.evidence_id.localeCompare(b.evidence_id, 'en')),
     decisions = input.decisions
       .filter((row) => scoped(row) && selected(row.initiative_id))
-      .sort((a, b) => a.decided_at.localeCompare(b.decided_at, 'en') || a.review_id.localeCompare(b.review_id, 'en'));
+      .sort(
+        (a, b) => a.decided_at.localeCompare(b.decided_at, 'en') || a.proposal_id.localeCompare(b.proposal_id, 'en'),
+      ),
+    appliedDirections = (input.directions ?? [])
+      .filter((row) => scoped(row) && selected(row.initiative_id))
+      .sort((a, b) => a.initiative_id.localeCompare(b.initiative_id, 'en'));
   if (
     !unique(work, (row) => row.id) ||
     !unique(sourceEvidence, (row) => row.evidence_id) ||
@@ -325,6 +351,10 @@ export function buildReviewSnapshot(input: ReviewInput): ReviewSnapshot {
       (row) =>
         !fields(row, [
           'scope_id',
+          'proposal_id',
+          'option_id',
+          'application',
+          'direction_version',
           'review_id',
           'review_revision',
           'initiative_id',
@@ -334,11 +364,46 @@ export function buildReviewSnapshot(input: ReviewInput): ReviewSnapshot {
           'decided_at',
         ]) ||
         !reviewId(row.review_id) ||
+        !reviewIdentifier(row.proposal_id) ||
+        !reviewIdentifier(row.option_id) ||
+        !['not_applied', 'applied', 'superseded'].includes(row.application) ||
+        (row.application === 'not_applied'
+          ? row.direction_version !== null
+          : row.decision !== 'approved' || !reviewInteger(row.direction_version)) ||
         !reviewInteger(row.review_revision) ||
         !['approved', 'rejected'].includes(row.decision) ||
         !directions.includes(row.direction) ||
         !reviewText(row.rationale, 500) ||
         !before(row.decided_at, input.as_of),
+    ) ||
+    !unique(decisions, (row) => row.proposal_id) ||
+    !unique(appliedDirections, (row) => row.initiative_id) ||
+    appliedDirections.some(
+      (row) =>
+        !fields(row, [
+          'scope_id',
+          'initiative_id',
+          'version',
+          'direction',
+          'rationale',
+          'expected_record_version',
+          'proposal_id',
+          'review_id',
+          'review_revision',
+          'option_id',
+          'applied_at',
+          'superseded_version',
+        ]) ||
+        !reviewInteger(row.version) ||
+        !reviewInteger(row.expected_record_version) ||
+        !directions.includes(row.direction) ||
+        !reviewText(row.rationale, 500) ||
+        !reviewIdentifier(row.proposal_id) ||
+        !reviewId(row.review_id) ||
+        !reviewInteger(row.review_revision) ||
+        !reviewIdentifier(row.option_id) ||
+        !before(row.applied_at, input.as_of) ||
+        row.superseded_version !== (row.version === 1 ? null : row.version - 1),
     )
   )
     throw Error('review_snapshot_invalid');
@@ -368,6 +433,7 @@ export function buildReviewSnapshot(input: ReviewInput): ReviewSnapshot {
     source_evidence: sourceEvidence,
     calendar_allocations: allocations,
     decisions,
+    directions: appliedDirections,
     previous_review: input.previous_review,
     truncated: input.truncated,
     coverage:
@@ -725,9 +791,16 @@ export function renderReview(review: ReviewArtifact): string {
     ...(snapshot.decisions.length
       ? snapshot.decisions.map(
           (row) =>
-            `- ${row.review_id} revision ${row.review_revision}, ${row.initiative_id}: ${row.decision} ${row.direction} at ${row.decided_at}. Rationale: ${label(row.rationale)}.`,
+            `- ${row.review_id} revision ${row.review_revision}, option ${row.option_id}, ${row.initiative_id}: ${row.decision} ${row.direction} at ${row.decided_at}; ${row.application === 'not_applied' ? 'not applied' : row.application + ' direction v' + row.direction_version}. Proposal rationale: ${label(row.rationale)}.`,
         )
       : ['No prior decisions in this authorised snapshot.']),
+    'Applied strategic directions as of this snapshot:',
+    ...(snapshot.directions.length
+      ? snapshot.directions.map(
+          (row) =>
+            `- ${row.initiative_id}: ${row.direction}, direction v${row.version}${row.superseded_version === null ? '' : '; supersedes v' + row.superseded_version}; approved record v${row.expected_record_version}, applied ${row.applied_at}. Review ${row.review_id} revision ${row.review_revision}, option ${row.option_id}. Rationale: ${label(row.rationale)}.`,
+        )
+      : ['No applied directions admitted in this snapshot.']),
     'Owner approval is a decision, not a success label. Later outcomes must be observed separately.',
     ...(snapshot.previous_review
       ? [

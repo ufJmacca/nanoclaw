@@ -273,6 +273,10 @@ it('S10-T06 all review perspectives exclude foreign scope and unselected initiat
   });
   source.decisions.push({
     scope_id: 'foreign',
+    proposal_id: observed,
+    option_id: 'pause',
+    application: 'not_applied',
+    direction_version: null,
     review_id: source.review_id,
     review_revision: 1,
     initiative_id: 'busy',
@@ -339,6 +343,10 @@ it('S10-T09 later evidence cannot rewrite the earlier snapshot or turn acceptanc
   source.observations[0].statement = 'The hoped-for result did not persist';
   source.decisions.push({
     scope_id: 'private',
+    proposal_id: observed,
+    option_id: 'change',
+    application: 'not_applied',
+    direction_version: null,
     review_id: source.review_id,
     review_revision: 1,
     initiative_id: 'busy',
@@ -359,6 +367,52 @@ it('S10-T09 later evidence cannot rewrite the earlier snapshot or turn acceptanc
   expect(text).toContain('Previous recommendation: Try a smaller experiment');
   expect(text).toContain('Previous forecast horizon: 2026-11-01T00:00:00Z');
   expect(text).toContain('Assumption more-tasks: previously unknown; now unknown');
+});
+
+it('S10 captures applied direction versions separately from rejected and unapplied choices', () => {
+  const source = input();
+  source.directions = [
+    {
+      scope_id: 'private',
+      initiative_id: 'busy',
+      version: 2,
+      direction: 'continue',
+      rationale: 'Test a useful result',
+      expected_record_version: 1,
+      proposal_id: observed,
+      review_id: source.review_id,
+      review_revision: 1,
+      option_id: 'continue',
+      applied_at: source.as_of,
+      superseded_version: 1,
+    },
+  ];
+  source.decisions = [
+    {
+      scope_id: 'private',
+      proposal_id: evidence,
+      option_id: 'pause',
+      review_id: source.review_id,
+      review_revision: 1,
+      initiative_id: 'busy',
+      decision: 'rejected',
+      direction: 'pause',
+      rationale: 'Rejected proposal reason',
+      decided_at: source.as_of,
+      application: 'not_applied',
+      direction_version: null,
+    },
+  ];
+  const snapshot = buildReviewSnapshot(source),
+    text = renderReview(assembleReview(snapshot, draft()));
+  expect(snapshot.directions).toEqual(source.directions);
+  expect(text).toContain('Applied strategic directions');
+  expect(text).toContain('direction v2');
+  expect(text).toContain('supersedes v1');
+  expect(text).toContain('not applied');
+  expect(text).toContain('Proposal rationale: Rejected proposal reason');
+  source.directions[0].scope_id = 'foreign';
+  expect(buildReviewSnapshot(source).directions).toEqual([]);
 });
 it('S10-T10 review advice has no implicit mission, event or commitment effects', () => {
   const value = draft();

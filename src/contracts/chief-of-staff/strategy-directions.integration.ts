@@ -337,8 +337,24 @@ test('S10-T10 a revised approved direction records one revision without silently
   const proposed = await direction('Pause expansion; retain every existing approved obligation');
   assert.equal(proposed.status, 'ok');
   assert.equal((await decision(proposed, 'approve')).status, 'ok');
+  const captured = await store.reviewArtifacts!.collector.collect(context, request, {
+    review_id: 'review-' + digest(randomUUID()),
+    revision: 1,
+    previous: null,
+  });
+  assert.equal(captured.status, 'ok');
   const applied = await store.apply(scope, String(proposed.proposal_id));
   assert.equal(applied.status, 'ok');
+  const stillCurrent = await knowledge.answers.dependencies.transaction(async (client) => ({
+    status: 'ok',
+    valid: await store.reviewArtifacts!.collector.validateSnapshot(
+      client,
+      context,
+      captured.snapshot as ReviewSnapshot,
+      captured.version_refs,
+    ),
+  }));
+  assert.equal(stillCurrent.valid, false, 'applying direction invalidates a captured pre-application review');
   assert.deepEqual(await store.apply(scope, String(proposed.proposal_id)), applied);
   assert.deepEqual(await protectedState(), before);
   const head = (
@@ -357,6 +373,16 @@ test('S10-T10 a revised approved direction records one revision without silently
       .rows[0].n,
     1,
   );
+  const fresh = await store.reviewArtifacts!.collector.collect(context, request, {
+    review_id: 'review-' + digest(randomUUID()),
+    revision: 1,
+    previous: null,
+  });
+  assert.equal(fresh.status, 'ok');
+  const snapshot = fresh.snapshot as ReviewSnapshot;
+  assert.equal(snapshot.directions[0].version, 1);
+  assert.equal(snapshot.directions[0].direction, 'pause');
+  assert.equal(snapshot.decisions.find((row) => row.proposal_id === proposed.proposal_id)?.application, 'applied');
 });
 test('S10-T05 accepting a stale direction triggers revalidation without overwriting newer priorities', async () => {
   const proposed = await direction('A stale proposal must not overwrite newer priorities', 1, 1);
@@ -383,6 +409,15 @@ test('S10 direction apply revalidates approved core versions and preserves the h
     ])
   ).rows;
   assert.deepEqual(historical, [{ decision: 'approved' }]);
+  const fresh = await store.reviewArtifacts!.collector.collect(context, request, {
+    review_id: 'review-' + digest(randomUUID()),
+    revision: 1,
+    previous: null,
+  });
+  assert.equal(fresh.status, 'ok');
+  const snapshot = fresh.snapshot as ReviewSnapshot;
+  assert.equal(snapshot.directions[0].version, 1);
+  assert.equal(snapshot.decisions.find((row) => row.proposal_id === proposed.proposal_id)?.application, 'not_applied');
   assert.equal(
     (
       await admin.query('SELECT version FROM cos.strategy_directions WHERE scope_id=$1 AND initiative_id=$2', [
@@ -530,6 +565,47 @@ test('S10 host-derived direction values cannot bypass the dedicated route or own
   );
   assert.deepEqual(await protectedState(), before);
   assert.equal((await decision(proposed, 'reject')).status, 'ok');
+});
+test('S10 a new charter excludes source-derived historical rationale before model disclosure', async () => {
+  const definition = (await admin.query('SELECT definition FROM cos.review_charters WHERE scope_id=$1', [scope]))
+    .rows[0].definition;
+  await change({
+    kind: 'review_charter',
+    expected_version: 1,
+    reason: 'Fixture source-free review',
+    definition: { ...definition, source_ids: [] },
+  });
+  request.charter_version = 2;
+  let captured;
+  try {
+    captured = await store.reviewArtifacts!.collector.collect(context, request, {
+      review_id: 'review-' + digest(randomUUID()),
+      revision: 1,
+      previous: null,
+    });
+  } finally {
+    await change({
+      kind: 'review_charter',
+      expected_version: 2,
+      reason: 'Fixture restore selected source review',
+      definition,
+    });
+    request.charter_version = 3;
+    reviewId = await publishReview();
+  }
+  assert.equal(captured.status, 'ok');
+  const snapshot = captured.snapshot as ReviewSnapshot;
+  assert.deepEqual(snapshot.decisions, []);
+  assert.deepEqual(snapshot.directions, []);
+  assert.equal(snapshot.coverage, 'limited');
+  assert.equal(JSON.stringify(snapshot).includes('A reply loss must preserve the exact historical choice'), false);
+  const admitted = await store.reviewArtifacts!.collector.collect(context, request, {
+    review_id: 'review-' + digest(randomUUID()),
+    revision: 1,
+    previous: null,
+  });
+  assert.equal(admitted.status, 'ok');
+  assert.equal((admitted.snapshot as ReviewSnapshot).directions[0].version, 3);
 });
 test('S10 withdrawal of a source hides pending direction previews and keeps the approved direction history', async () => {
   const proposed = await direction('Source withdrawal must close this pending direction', 3, 3);
