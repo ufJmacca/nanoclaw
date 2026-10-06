@@ -458,6 +458,25 @@ test(
         assert.match(submitted.result.text, /Challenged: conflicting observations/);
         assert.match(submitted.result.text, /Untested/);
         assert.match(submitted.result.text, /Calendar allocation does not establish actual effort/);
+        const rendered = String(submitted.result.text),
+          evidenceStart = rendered.indexOf('## Outcomes and evidence'),
+          decision = rendered.slice(0, evidenceStart);
+        assert.ok(evidenceStart > 0);
+        assert.ok(
+          decision.includes(
+            'Recommendation: ' + (later ? 'Continue unchanged' : 'Pause expansion of the busy initiative'),
+          ),
+        );
+        assert.ok(
+          decision.includes('Next action: ' + (later ? 'Observe a useful outcome' : 'Keep approved obligations')),
+        );
+        assert.match(rendered, /\n\n## Options for owner decision\n\n/);
+        if (later) {
+          assert.ok(decision.includes('## Since the previous review'));
+          assert.ok(decision.includes('Previous recommendation: Pause expansion of the busy initiative'));
+          assert.ok(decision.includes('rejected pause'));
+          assert.ok(decision.includes('approved change'));
+        }
         return {
           snapshot,
           text: String(submitted.result.text),

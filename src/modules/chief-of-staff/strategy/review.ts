@@ -697,7 +697,198 @@ function missionResultLines(result: MissionResult | TeamBrief): string[] {
     }),
   ];
 }
-export function renderReview(review: ReviewArtifact): string {
+export type ReviewRendering = 'cos-strategy-render/v1' | 'cos-strategy-render/v2';
+export function renderReview(review: ReviewArtifact, rendering: ReviewRendering = 'cos-strategy-render/v2'): string {
+  if (rendering === 'cos-strategy-render/v1') return renderReviewV1(review);
+  if (rendering !== 'cos-strategy-render/v2') throw Error('review_rendering_invalid');
+  if (review.format !== 'cos-strategy-review/v1' || review.owner_disposition !== 'awaiting_decision')
+    throw Error('review_artifact_invalid');
+  assembleReview(review.snapshot, review.draft);
+  const { snapshot, draft } = review,
+    definition = snapshot.charter.definition,
+    recommended = draft.options.find((option) => option.id === draft.recommended_option_id)!,
+    initiativeTitle = (id: string) => label(snapshot.initiatives.find((initiative) => initiative.id === id)!.title),
+    decisionHistory = [
+      '### Prior owner decisions',
+      '',
+      ...(snapshot.decisions.length
+        ? snapshot.decisions.map(
+            (row) =>
+              `- ${row.review_id} revision ${row.review_revision}, option ${row.option_id}, ${row.initiative_id}: ${row.decision} ${row.direction} at ${row.decided_at}; ${row.application === 'not_applied' ? 'not applied' : row.application + ' direction v' + row.direction_version}. Proposal rationale: ${label(row.rationale)}.`,
+          )
+        : ['No prior decisions in this authorised snapshot.']),
+      '',
+      '### Applied strategic directions',
+      '',
+      ...(snapshot.directions.length
+        ? snapshot.directions.map(
+            (row) =>
+              `- ${row.initiative_id}: ${row.direction}, direction v${row.version}${row.superseded_version === null ? '' : '; supersedes v' + row.superseded_version}; approved record v${row.expected_record_version}, applied ${row.applied_at}. Review ${row.review_id} revision ${row.review_revision}, option ${row.option_id}. Rationale: ${label(row.rationale)}.`,
+          )
+        : ['No applied directions admitted in this snapshot.']),
+      '',
+      'Owner approval is a decision, not a success label. Later outcomes must be observed separately.',
+    ];
+  const output = [
+    `# CoS strategic review — revision ${snapshot.revision}`,
+    '',
+    `As of ${snapshot.as_of}.`,
+    '',
+    '## Decision to consider',
+    '',
+    `Recommendation: ${label(recommended.title)}.`,
+    `Initiative: ${initiativeTitle(recommended.initiative_id)}.`,
+    `Why: ${label(draft.rationale)}.`,
+    `Next action: ${label(recommended.next_action)}.`,
+    '',
+    `Confidence: ${draft.confidence}; forecast horizon: ${draft.forecast_until}.`,
+    `Uncertainty: ${label(draft.uncertainty)}.`,
+    `Evidence that would change the recommendation: ${label(draft.evidence_would_change)}.`,
+    '',
+    'Owner disposition for this new revision: awaiting decision. Advice grants no permission to execute work.',
+    'Changing direction does not cancel commitments, missions or calendar events. Any consequences require separate exact proposals and approvals.',
+    '',
+    '## Options for owner decision',
+    '',
+    ...draft.options.flatMap((option) => [
+      `### ${label(option.title)} — ${initiativeTitle(option.initiative_id)}`,
+      '',
+      `Trade-off: ${label(option.trade_off)}.`,
+      `Opportunity cost: ${label(option.opportunity_cost)}.`,
+      `Next action: ${label(option.next_action)}.`,
+      `Option: ${option.id}; initiative ${option.initiative_id}; direction ${option.direction}${option.id === recommended.id ? '; recommended' : ''}.`,
+      '',
+    ]),
+    ...(snapshot.previous_review
+      ? [
+          '## Since the previous review',
+          '',
+          `Previous recommendation: ${label(snapshot.previous_review.recommended_option.title)} [${snapshot.previous_review.recommended_option.id}; ${snapshot.previous_review.recommended_option.direction}]. ${label(snapshot.previous_review.rationale)}`,
+          `Previous forecast horizon: ${snapshot.previous_review.forecast_until}. Confidence: ${snapshot.previous_review.confidence}; uncertainty: ${label(snapshot.previous_review.uncertainty)}.`,
+          ...snapshot.previous_review.assumption_statuses.map((previous) => {
+            const current = definition.assumptions.find(
+                (assumption) => assumption.id === previous.id && assumption.initiative_id === previous.initiative_id,
+              ),
+              currentStatus = current
+                ? status(
+                    snapshot.observations.filter(
+                      (row) =>
+                        row.charter_version === snapshot.charter.version &&
+                        row.initiative_id === current.initiative_id &&
+                        row.target.kind === 'assumption' &&
+                        row.target.id === current.id,
+                    ),
+                  )
+                : 'not selected in the current charter';
+            return `- Assumption ${previous.id}: previously ${previous.status}; now ${currentStatus}.`;
+          }),
+          '',
+          ...decisionHistory,
+          '',
+          'The outcome observations below describe what was observed later; they do not rewrite the earlier recommendation.',
+          `Comparison with ${snapshot.previous_review.review_id} revision ${snapshot.previous_review.revision} (as of ${snapshot.previous_review.as_of}; charter v${snapshot.previous_review.charter_version}).`,
+          '',
+        ]
+      : []),
+    '## Outcomes and evidence',
+    '',
+    'Recorded activity is not evidence that a desired outcome was achieved. Evidence references do not prove causation.',
+    '',
+    ...snapshot.initiatives.flatMap((initiative) => [
+      `### ${label(initiative.title)}`,
+      '',
+      `Initiative: ${initiative.id} v${initiative.version}; ${initiative.lifecycle}.`,
+      `Approved description: ${label(initiative.description)}`,
+      ...definition.measures
+        .filter((measure) => measure.initiative_id === initiative.id)
+        .map(
+          (measure) =>
+            `- Outcome sought: ${label(measure.outcome)} [${measure.id}]. Test: ${label(measure.test)}. Observed status: ${outcomeStatus(snapshot, initiative.id, measure.id).replaceAll('_', ' ')}.`,
+        ),
+      ...snapshot.work
+        .filter((work) => work.project_id === initiative.id)
+        .map(
+          (work) => `- Recorded ${work.kind}: ${label(work.title)} (${work.state}) [work ${work.id} v${work.version}].`,
+        ),
+      ...snapshot.observations
+        .filter((row) => row.initiative_id === initiative.id)
+        .map((row) => observationLine(row, snapshot.charter.version)),
+      ...definition.assumptions
+        .filter((assumption) => assumption.initiative_id === initiative.id)
+        .map((assumption) => {
+          const observations = snapshot.observations.filter(
+              (row) =>
+                row.charter_version === snapshot.charter.version &&
+                row.initiative_id === initiative.id &&
+                row.target.kind === 'assumption' &&
+                row.target.id === assumption.id,
+            ),
+            result = status(observations);
+          return `- Assumption: ${label(assumption.statement)} [${assumption.id}]. ${
+            result === 'unknown'
+              ? 'Untested'
+              : result === 'conflicting'
+                ? 'Challenged: conflicting observations'
+                : result === 'challenged'
+                  ? 'Challenged'
+                  : 'Supported by ' + result.replaceAll('_', ' ') + ' observations'
+          }.`;
+        }),
+      '',
+    ]),
+    '## Review findings',
+    '',
+    ...draft.findings.flatMap((finding) => [
+      `- ${findingLabel[finding.kind]}: ${label(finding.statement)} [${finding.initiative_id}; ${finding.domain}]. ${
+        finding.evidence.length ? finding.evidence.map(referenceLabel).join('; ') : 'No supporting evidence'
+      }${finding.uncertainty ? '. Uncertainty: ' + label(finding.uncertainty) : ''}.`,
+      '',
+    ]),
+    ...(!snapshot.previous_review ? ['## Decision history', '', ...decisionHistory, ''] : []),
+    '## Resources and evidence limits',
+    '',
+    `Resources: ${label(definition.resource_constraints)}. Exploration capacity: ${definition.exploration_minutes_per_week} minutes/week.`,
+    `Evidence limits: ${label(definition.evidence_limits)}. Source coverage: ${snapshot.coverage.replaceAll('_', ' ')}.`,
+    ...definition.source_ids.map((id) => {
+      const source = snapshot.source_coverage.find((row) => row.source_id === id);
+      return `- Source ${id}: ${source ? source.state + ' v' + source.version : 'unavailable; no checked snapshot'}.`;
+    }),
+    'Incomplete sources do not establish no progress outside connected systems.',
+    '',
+    '### Calendar allocation',
+    '',
+    'Calendar allocation does not establish actual effort or achievement.',
+    ...snapshot.calendar_allocations.map(
+      (row) => `- ${row.scheduled_minutes} scheduled minutes [source evidence ${row.evidence_id}].`,
+    ),
+    '',
+    '### Specialist evidence',
+    '',
+    'Mission results are advisory and may be incomplete. Agreement between agents is not outcome evidence.',
+    ...snapshot.missions.map(
+      (row) =>
+        `- ${row.state} mission ${row.mission_id}; submission ${row.submission_id}, digest ${row.digest}: ${label(row.conclusion)}`,
+    ),
+    ...snapshot.missions.flatMap((row) => missionResultLines(row.result)),
+    ...snapshot.mission_coverage
+      .filter((row) => row.coverage !== 'available')
+      .map(
+        (row) =>
+          `- Mission coverage ${row.coverage}: ${row.mission_id} (${row.state}). This does not establish an outcome.`,
+      ),
+    '',
+    '## Review record',
+    '',
+    `Review: ${snapshot.review_id} revision ${snapshot.revision}.`,
+    `Privacy scope: ${label(snapshot.scope_id)}; review charter v${snapshot.charter.version}.`,
+    `Horizon: ${definition.starts_at} to ${definition.ends_at}. Cadence: manual.`,
+  ].join('\n');
+  if (Buffer.byteLength(output) > 32768) throw Error('review_output_limit');
+  return output;
+}
+
+/** Frozen renderer for already published artifacts. Do not rewrite historical advice when layout changes. */
+function renderReviewV1(review: ReviewArtifact): string {
   if (review.format !== 'cos-strategy-review/v1' || review.owner_disposition !== 'awaiting_decision')
     throw Error('review_artifact_invalid');
   assembleReview(review.snapshot, review.draft);

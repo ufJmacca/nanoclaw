@@ -174,6 +174,73 @@ function draft(): ReviewDraft {
     forecast_until: '2026-11-01T00:00:00Z',
   };
 }
+it('S10 owner can find the recommended decision and next action before the supporting record list', () => {
+  const source = input();
+  source.records[0].title = 'Reporting programme';
+  const text = renderReview(assembleReview(buildReviewSnapshot(source), draft())),
+    firstCommitment = text.indexOf('- Recorded commitment:'),
+    decision = text.slice(0, firstCommitment);
+  expect(firstCommitment).toBeGreaterThan(0);
+  expect(decision).toContain('Recommendation: Try a smaller experiment');
+  expect(decision).toContain('Initiative: Reporting programme');
+  expect(decision).toContain('Next action: Ask for exact owner approval');
+  expect(decision).toContain('Confidence: low');
+  expect(decision).toContain('Evidence that would change the recommendation:');
+  expect(decision).toContain('awaiting decision');
+  expect(text).toMatch(/\n\n## Outcomes and evidence\n\n/);
+  expect(text).toMatch(/\n\n## Review findings\n\n/);
+  expect(text).toContain('work work-0 v1');
+});
+it('S10 alternatives expose each trade-off, opportunity cost and next action on separate lines', () => {
+  const source = input();
+  source.records[0].title = 'Reporting programme';
+  const text = renderReview(assembleReview(buildReviewSnapshot(source), draft())),
+    alternative = text.slice(text.indexOf('## Options for owner decision'), text.indexOf('## Outcomes and evidence'));
+  expect(alternative).toMatch(/### Continue unchanged — Reporting programme\n/);
+  expect(alternative).toContain('\nTrade-off: No disruption.\n');
+  expect(alternative).toContain('\nOpportunity cost: Less time for exploration.\n');
+  expect(alternative).toContain('\nNext action: Measure the result.\n');
+  expect(alternative).toContain('continue-busy');
+  expect(alternative).toContain('continue-useful');
+});
+it('S10 later reviews present the previous recommendation and owner choice before raw evidence', () => {
+  const source = input(),
+    first = assembleReview(buildReviewSnapshot(source), draft());
+  source.revision = 2;
+  source.previous_review = summarizeReview(first);
+  source.as_of = '2026-10-07T00:00:00Z';
+  source.decisions.push({
+    scope_id: source.scope_id,
+    proposal_id: observed,
+    review_id: source.review_id,
+    review_revision: 1,
+    option_id: 'change-busy',
+    initiative_id: 'busy',
+    direction: 'change',
+    decision: 'approved',
+    application: 'not_applied',
+    direction_version: null,
+    rationale: 'Try the experiment',
+    decided_at: source.as_of,
+  });
+  const text = renderReview(assembleReview(buildReviewSnapshot(source), draft())),
+    comparison = text.slice(text.indexOf('## Since the previous review'), text.indexOf('## Outcomes and evidence'));
+  expect(comparison).toContain('Previous recommendation: Try a smaller experiment');
+  expect(comparison).toContain('approved change');
+  expect(comparison).toContain('not applied');
+  expect(comparison).toContain('Try the experiment');
+  expect(comparison).toContain('Assumption more-tasks: previously unknown; now unknown');
+  expect(text).toContain('Owner approval is a decision, not a success label');
+});
+it('S10 saved reviews can reproduce their original layout and refuse unknown rendering versions', () => {
+  const review = assembleReview(buildReviewSnapshot(input()), draft()),
+    retained = renderReview(review, 'cos-strategy-render/v1');
+  expect(retained).toMatch(/^CoS strategic review review-a{64} revision 1\n/);
+  expect(retained).toContain('Recommendation: change-busy. We have activity but little evidence');
+  expect(retained).not.toContain('## Decision to consider');
+  expect(renderReview(review, 'cos-strategy-render/v2')).toBe(renderReview(review));
+  expect(() => renderReview(review, 'unrecognised' as 'cos-strategy-render/v1')).toThrow('review_rendering_invalid');
+});
 it('S10 charter proposals are bounded and manual cadence does not claim a standing mandate', () => {
   const value = {
     kind: 'review_charter',

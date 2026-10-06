@@ -385,7 +385,12 @@ export class ReviewArtifacts {
     const old = await d.transaction((client) => this.operation(client, context, id, method, hash));
     if (old.status !== 'ok') return old;
     if (old.review_id) return this.get(context, review, revision);
-    const body = JSON.stringify({ format: 'cos-strategy-review/v1', review: artifact, text });
+    const body = JSON.stringify({
+      format: 'cos-strategy-review/v1',
+      rendering: 'cos-strategy-render/v2',
+      review: artifact,
+      text,
+    });
     if (Buffer.byteLength(body) > 65536) return { status: 'unavailable' };
     let result: Result;
     try {
@@ -450,13 +455,16 @@ export class ReviewArtifacts {
         body.format !== 'cos-strategy-review/v1' ||
         body.review.format !== body.format ||
         body.review.owner_disposition !== 'awaiting_decision' ||
+        (body.rendering !== undefined &&
+          body.rendering !== 'cos-strategy-render/v1' &&
+          body.rendering !== 'cos-strategy-render/v2') ||
         digest(body.review.snapshot) !== digest(snapshot) ||
         digest(body.review.draft) !== metadata.draft_digest ||
         digest(body.text) !== metadata.output_digest
       )
         return { status: 'denied' };
       artifact = assembleReview(snapshot, body.review.draft);
-      text = renderReview(artifact);
+      text = renderReview(artifact, body.rendering ?? 'cos-strategy-render/v1');
       if (text !== body.text) return { status: 'denied' };
       if (historical)
         text =

@@ -16,7 +16,12 @@ import { digest, type ProposalChange } from '../../modules/chief-of-staff/domain
 import { ReviewCollector } from '../../modules/chief-of-staff/strategy/collector.js';
 import { ReviewArtifacts } from '../../modules/chief-of-staff/strategy/artifacts.js';
 import type { ReviewDraft } from '../../modules/chief-of-staff/contracts/strategy-protocol.js';
-import { outcomeStatus, type ReviewSnapshot } from '../../modules/chief-of-staff/strategy/review.js';
+import {
+  assembleReview,
+  renderReview,
+  outcomeStatus,
+  type ReviewSnapshot,
+} from '../../modules/chief-of-staff/strategy/review.js';
 
 const scope = 'strategy-collect-' + randomUUID(),
   foreign = 'strategy-other-' + randomUUID();
@@ -410,6 +415,59 @@ test('S10 result revisions reject forged findings, foreign reads and attempts to
       .status,
     'conflict',
   );
+  assert.equal((await reviews.get(context, reviewId, 1)).text, reviewText);
+});
+test('S10 retained artifacts use their recorded renderer, preserving old advice and denying unknown layouts', async () => {
+  const original = (
+    await admin.query('SELECT artifact_id FROM cos.strategy_review_results WHERE scope_id=$1 AND review_id=$2', [
+      scope,
+      reviewId,
+    ])
+  ).rows[0];
+  const published = (
+    await admin.query('SELECT digest FROM cos.artifacts WHERE scope_id=$1 AND id=$2', [scope, original.artifact_id])
+  ).rows[0];
+  assert.equal(
+    JSON.parse(knowledge.artifacts.read(original.artifact_id, published.digest)).rendering,
+    'cos-strategy-render/v2',
+  );
+  // Seed separate owned Test fixtures in the old persisted format; never rewrite a published revision.
+  for (const rendering of [undefined, 'unrecognised']) {
+    const captured = await reviews.request(context, randomUUID(), request);
+    assert.equal(captured.status, 'ok');
+    const artifact = assembleReview(captured.snapshot as ReviewSnapshot, draft),
+      text = renderReview(artifact, 'cos-strategy-render/v1'),
+      body = JSON.stringify({ format: 'cos-strategy-review/v1', rendering, review: artifact, text });
+    await knowledge.artifacts.exclusive(async (lease) => {
+      const stored = knowledge.artifacts.publishText(randomUUID(), body, lease);
+      await admin.query(
+        "INSERT INTO cos.artifacts(id,scope_id,kind,digest,byte_length,lifecycle,provenance) VALUES($1,$2,'summary',$3,$4,'published',$5)",
+        [stored.id, scope, stored.digest, stored.byteLength, JSON.stringify({ format: 'cos-strategy-review/v1' })],
+      );
+      await admin.query(
+        'INSERT INTO cos.derivation_links(scope_id,artifact_id,evidence_id) SELECT scope_id,$1,evidence_id FROM cos.derivation_links WHERE scope_id=$2 AND artifact_id=$3',
+        [stored.id, scope, original.artifact_id],
+      );
+      await admin.query(
+        'INSERT INTO cos.strategy_review_results(scope_id,review_id,revision,artifact_id,draft_digest,output_digest) VALUES($1,$2,1,$3,$4,$5)',
+        [scope, captured.review_id, stored.id, digest(draft), digest(text)],
+      );
+    });
+    const result = await reviews.get(context, String(captured.review_id), 1);
+    if (rendering === undefined) {
+      assert.equal(result.status, 'ok');
+      assert.equal(result.text, text);
+      assert.doesNotMatch(String(result.text), /## Decision to consider/);
+      assert.equal((await reviews.authorizePublication(context, text)).status, 'ok');
+      assert.equal(
+        (await reviews.get(context, String(captured.review_id), 1, true)).text,
+        'Historical strategic review — priorities and observations may have changed since this advice.\n\n' + text,
+      );
+    } else {
+      assert.equal(result.status, 'denied');
+      assert.equal(Object.hasOwn(result, 'text'), false);
+    }
+  }
   assert.equal((await reviews.get(context, reviewId, 1)).text, reviewText);
 });
 test('S10 private review integrity failure withholds both reading and exact-ticket publication', async () => {
