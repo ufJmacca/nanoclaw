@@ -1,6 +1,6 @@
 # S11 — Inspect, pause and recover the whole assistant
 
-**Status:** in progress; inspection, readiness and owner-denial development checks passed; full recovery and release acceptance pending.
+**Status:** in progress; inspection, readiness, owner-denial, manifest and private-export development checks passed; full recovery and release acceptance pending.
 
 **Repository:** `ufJmacca/nanoclaw`  
 **Branch:** `codex/s11-operations-and-recovery`
