@@ -18,14 +18,16 @@ import { guardedFixtureOperation, type FixtureRunReceipt } from './guarded-fixtu
 import { stopFixtureWorkers } from './fixture-workers.js';
 import { sourceFixtureEnvironment, validatePreparedFixtureSource } from './source-fixture.js';
 import { startFixtureProcess } from './fixture-process.js';
+import type pg from 'pg';
+import { captureRecoveryDrill } from './recovery-drill.js';
 
 export type RuntimeFixtureRequest = {
   version: 1;
   owner: string;
   execution: 'source' | 'packaged';
-  mode: 'slice' | 'demo';
+  mode: 'slice' | 'demo' | 'recovery-capture';
   /** Absent only in historical S01 requests; never normalize their replay identity. */
-  slice?: 'S01' | 'S02' | 'S03' | 'S04' | 'S05' | 'S06' | 'S07' | 'S08' | 'S09';
+  slice?: 'S01' | 'S02' | 'S03' | 'S04' | 'S05' | 'S06' | 'S07' | 'S08' | 'S09' | 'S10' | 'S11';
   sourceCommit: string;
   sourceTree: string;
   hostImage: string;
@@ -61,8 +63,10 @@ export function validateRuntimeFixtureRequest(value: unknown): RuntimeFixtureReq
     request.version !== 1 ||
     !/^[a-zA-Z0-9_-]{1,100}$/.test(request.owner ?? '') ||
     !['source', 'packaged'].includes(request.execution) ||
-    !['slice', 'demo'].includes(request.mode) ||
-    (explicitSlice && !['S01', 'S02', 'S03', 'S04', 'S05', 'S06', 'S07', 'S08', 'S09'].includes(request.slice ?? '')) ||
+    !['slice', 'demo', 'recovery-capture'].includes(request.mode) ||
+    (request.mode === 'recovery-capture' && request.slice !== 'S11') ||
+    (explicitSlice &&
+      !['S01', 'S02', 'S03', 'S04', 'S05', 'S06', 'S07', 'S08', 'S09', 'S10', 'S11'].includes(request.slice ?? '')) ||
     ![request.sourceCommit, request.sourceTree].every((v) => /^[a-f0-9]{40}$/.test(v ?? '')) ||
     ![request.hostImage, request.workerImage].every((v) => /^sha256:[a-f0-9]{64}$/.test(v ?? '')) ||
     ![request.databaseFingerprint, request.bindingDigest].every((v) => /^[a-f0-9]{64}$/.test(v ?? '')) ||
@@ -196,6 +200,7 @@ export async function runRuntimeFixtureDriver(file: string) {
   }
   let child: ReturnType<typeof startFixtureProcess> | undefined,
     failed = false;
+  let captureClient: pg.Client | undefined, captureRun: Promise<unknown> | undefined;
   let rejectLost!: (error: Error) => void;
   const lost = new Promise<never>((_, reject) => {
     rejectLost = reject;
@@ -212,7 +217,12 @@ export async function runRuntimeFixtureDriver(file: string) {
   const stop = async () => {
     if (heartbeat) clearInterval(heartbeat);
     await child?.stop();
-    if (['S05', 'S06', 'S07'].includes(request.slice ?? '')) {
+    // Never release the exclusion connection while an inline capture can still write.
+    if (captureRun) await captureRun.catch(() => undefined);
+    if (
+      ['S05', 'S06', 'S07', 'S08', 'S09', 'S10', 'S11'].includes(request.slice ?? '') &&
+      request.mode !== 'recovery-capture'
+    ) {
       const location = source
         ? sourceFixtureEnvironment(request.hostRoot, process.env).COS_FIXTURE_HOST_ROOT!
         : request.hostRoot;
@@ -241,6 +251,7 @@ export async function runRuntimeFixtureDriver(file: string) {
             (await client.query('SELECT pg_try_advisory_lock(73101003) AS locked')).rows[0]?.locked !== true
           )
             throw new Error('runtime_fixture_fence_unavailable');
+          captureClient = client;
           return async () => {
             await client.end();
           };
@@ -261,6 +272,24 @@ export async function runRuntimeFixtureDriver(file: string) {
               checking = false;
             });
         }, 2000);
+        if (request.mode === 'recovery-capture') {
+          if (!captureClient) throw Error('runtime_fixture_fence_unavailable');
+          captureRun = captureRecoveryDrill(
+            path.join(root, 'recovery'),
+            {
+              ...env,
+              COS_FIXTURE_DATABASE_PROFILE: 'runtime-disposable',
+              COS_FIXTURE_GUARD_SOCKET: guard.socket,
+              COS_FIXTURE_GUARD_TOKEN: guard.token,
+            },
+            captureClient,
+            () => {
+              if (failed) throw Error('runtime_test_control_lost');
+            },
+          );
+          await captureRun;
+          return;
+        }
         child = startFixtureProcess(
           [
             ...(source ? ['--import', 'tsx'] : []),

@@ -3,12 +3,12 @@
 set -euo pipefail
 umask 077
 [[ "$(uname -s)" == Darwin && $# == 8 ]] || {
-  echo 'Usage: cos-runtime-fixture.sh owner source|packaged slice|demo host-root host-image worker-image runner-volume fixture-volume' >&2; exit 1;
+  echo 'Usage: cos-runtime-fixture.sh owner source|packaged slice|demo|recovery-capture host-root host-image worker-image runner-volume fixture-volume' >&2; exit 1;
 }
 owner=$1 execution=$2 mode=$3 host_root=$4 host_image=$5 worker_image=$6 runner_volume=$7 fixture_volume=$8
 [[ "$owner" =~ ^[a-zA-Z0-9_-]{1,100}$ && "$host_image" =~ ^sha256:[a-f0-9]{64}$ && "$worker_image" =~ ^sha256:[a-f0-9]{64}$ ]] || exit 1
 [[ "$execution" == source || "$execution" == packaged ]] || exit 1
-[[ "$mode" == slice || "$mode" == demo ]] || exit 1
+[[ "$mode" == slice || "$mode" == demo || "$mode" == recovery-capture ]] || exit 1
 [[ -z "${DOCKER_HOST:-}${DOCKER_CONTEXT:-}${DOCKER_TLS_VERIFY:-}${DOCKER_CERT_PATH:-}" ]] || exit 1
 if [[ "$execution" == packaged ]]; then [[ "$fixture_volume" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,100}$ && -z "$runner_volume" ]] || exit 1; fi
 root=$(git rev-parse --show-toplevel)
