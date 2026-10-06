@@ -4,6 +4,43 @@ import { assertNativeReleaseCompatibility } from './native-release-compatibility
 import { fixtureRelease } from '../../../contracts/chief-of-staff/release-fixture.js';
 import { validateReleaseManifest } from './release-manifest.js';
 import { fenceLegacyCoordinators } from './legacy-rollback.js';
+
+it.each([null, 'S01', 'S05', 'S09', 'S10'] as const)(
+  'retained owner denials forbid downgrade to %s without changing native state',
+  (slice) => {
+    const db = new Database(':memory:');
+    try {
+      db.exec(
+        "CREATE TABLE cos_operator_denials(opaque TEXT); INSERT INTO cos_operator_denials VALUES('reconciled revocation'); CREATE TABLE messages(body TEXT); INSERT INTO messages VALUES('KEEP')",
+      );
+      const before = db.serialize();
+      expect(() => assertNativeReleaseCompatibility(db, slice ? fixtureRelease(slice) : null)).toThrow(
+        'operator_denial_release_required',
+      );
+      expect(() => fenceLegacyCoordinators(db)).toThrow('operator_denial_release_required');
+      expect(() => assertNativeReleaseCompatibility(db, validateReleaseManifest(fixtureRelease('S11')))).not.toThrow();
+      expect(db.serialize()).toEqual(before);
+    } finally {
+      db.close();
+    }
+  },
+);
+
+it('an empty owner-denial journal permits S10 but a malformed catalog object denies downgrade', () => {
+  const db = new Database(':memory:');
+  try {
+    db.exec('CREATE TABLE cos_operator_denials(opaque TEXT)');
+    expect(() => assertNativeReleaseCompatibility(db, fixtureRelease('S10'))).not.toThrow();
+    db.exec('DROP TABLE cos_operator_denials; CREATE VIEW cos_operator_denials AS SELECT 1 WHERE 0');
+    const before = db.serialize();
+    expect(() => assertNativeReleaseCompatibility(db, fixtureRelease('S10'))).toThrow(
+      'operator_denial_release_required',
+    );
+    expect(db.serialize()).toEqual(before);
+  } finally {
+    db.close();
+  }
+});
 it.each([
   'cos_mission_boundaries',
   'cos_mission_allocations',

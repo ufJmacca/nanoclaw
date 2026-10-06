@@ -219,6 +219,13 @@ and native identities. It preserves current messages, sessions, approvals, inten
 and effect receipts, and leaves CoS paused. Keep the current healthy release and
 its complete compatible predecessor, source checkout, images and receipts.
 
+Once S11 records an owner denial or revocation in native SQLite, S10 and older
+releases are incompatible, even when their PostgreSQL/schema versions match.
+Reconciled denials remain permanent downgrade barriers. Retain a tested S11
+predecessor for rollback; if none is available, keep admission closed while a
+compatible correction is built and tested on the Mac. Never delete denial records
+or restore older live SQLite to make a downgrade pass.
+
 ## Programme closure and remaining live gates
 
 After all S01–S11 and required corrections have verified human merges and mandatory

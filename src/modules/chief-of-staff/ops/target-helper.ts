@@ -297,6 +297,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
         'wrong_deployment_target',
         'unsafe_target_credentials',
         'rollback_not_compatible',
+        'operator_denial_release_required',
         'rollback_unverified',
         'rollback_receipt_conflict',
         'rollback_source_changed',

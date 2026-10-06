@@ -143,7 +143,11 @@ export function createTargetEffects(
       assertNativeReleaseCompatibility(db, candidate);
       return true;
     } catch (error) {
-      if (error instanceof Error && error.message === 'specialist_release_required') return false;
+      if (
+        error instanceof Error &&
+        ['specialist_release_required', 'operator_denial_release_required'].includes(error.message)
+      )
+        return false;
       throw error;
     } finally {
       db.close();

@@ -31,6 +31,60 @@ import * as missions from './mission-backup.js';
 import * as calendars from '../calendar/backup.js';
 import * as databaseCli from './db-cli.js';
 import * as targetHost from './target-host.js';
+
+it('S11 declines a retained S10 rollback before service or database effects when owner denials exist', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-owner-denial-downgrade-'));
+  const settings = {
+    stateRoot: root + '/state',
+    releaseRoot: root + '/releases',
+    stagingRoot: root + '/staging',
+    sourceRoot: root + '/source',
+    userHome: root,
+    installationRoot: root + '/app',
+    dataRoot: root + '/app/data',
+    service: 'nano.service',
+    hostFingerprint: '1'.repeat(64),
+    databaseFingerprint: '2'.repeat(64),
+  } as DeploymentSettings;
+  const prior = { ...fixtureRelease('S10'), releaseId: 'release-prior-s10' };
+  const candidate = { ...fixtureRelease('S11'), previousReleaseIds: [prior.releaseId] };
+  const receipt = path.join(settings.stateRoot, 'releases', candidate.releaseId);
+  fs.mkdirSync(settings.dataRoot, { recursive: true, mode: 0o700 });
+  fs.mkdirSync(receipt, { recursive: true, mode: 0o700 });
+  fs.mkdirSync(path.join(settings.releaseRoot, prior.releaseId), { recursive: true, mode: 0o700 });
+  const db = new Database(path.join(settings.dataRoot, 'v2.db'));
+  db.exec(
+    "CREATE TABLE cos_operator_denials(opaque TEXT); INSERT INTO cos_operator_denials VALUES('retained denial'); CREATE TABLE messages(body TEXT); INSERT INTO messages VALUES('KEEP')",
+  );
+  const before = db.serialize();
+  db.close();
+  writeAtomic(path.join(settings.releaseRoot, prior.releaseId), 'release.json', prior);
+  writeAtomic(receipt, 'baseline.json', {
+    version: 1,
+    bindingDigest: digest(targetBinding(settings)),
+    releaseId: prior.releaseId,
+    executable: '/prior/node',
+    entryPoint: '/prior/index.js',
+    unit: 'prior',
+  });
+  vi.spyOn(maintenance, 'maintenanceLeaseForOwner').mockReturnValue({} as maintenance.MaintenanceLease);
+  vi.spyOn(maintenance, 'assertMaintenanceLease').mockReturnValue({} as import('./target-state.js').TargetState);
+  calls.service.mockClear();
+  calls.database.mockClear();
+  try {
+    await expect(createTargetEffects(settings, candidate, digest(candidate)).rollback(prior.releaseId)).resolves.toBe(
+      false,
+    );
+    expect(calls.service).not.toHaveBeenCalled();
+    expect(calls.database).not.toHaveBeenCalled();
+    const check = new Database(path.join(settings.dataRoot, 'v2.db'), { readonly: true });
+    expect(check.serialize()).toEqual(before);
+    check.close();
+  } finally {
+    vi.restoreAllMocks();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
 it('S10 preserves S09 paired action backup before recording current-schema migration acceptance', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-action-migration-'));
   const settings = {
