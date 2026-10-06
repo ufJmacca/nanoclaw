@@ -1,6 +1,6 @@
 # S11 — Inspect, pause and recover the whole assistant
 
-**Status:** in progress; inspection, readiness, owner denial, manifest, export, cumulative replay, demonstration and protection development checks passed; target recovery and release acceptance pending.
+**Status:** tested unreviewed candidate accepted on the Pi; all seven local gates, native checks, installed backup/isolated restore, independent operation and preservation passed. S11 human review/merge, merged-source acceptance and protected-data closure remain pending.
 
 **Repository:** `ufJmacca/nanoclaw`  
 **Branch:** `codex/s11-operations-and-recovery`
@@ -9,7 +9,7 @@
 **Delivery unit:** one independently reviewable PR; multiple red–green commits are expected.  
 **User-visible outcome:** You can see what the assistant is doing and why, stop it safely, restore it after failure and export your own records.
 
-Development evidence is recorded in [S11](../chief-of-staff/evidence/S11.md). These milestones do not satisfy the full slice, Pi deployment or human merge gates below.
+Development evidence is recorded in [S11](../chief-of-staff/evidence/S11.md). The receipt identifies the tested candidate and actual Pi/recovery evidence; the human merge and final closure gates below remain pending.
 
 Read [START HERE](00_START_HERE.md), [architecture/contracts](ARCHITECTURE_AND_CONTRACTS.md), [external PostgreSQL](EXTERNAL_POSTGRES.md), [goal execution](GOAL.md), [Mac-to-Pi delivery](MAC_TO_PI_DELIVERY.md), [Mattermost interaction](INTERACTION_MODEL.md), [implementation authority](IMPLEMENTATION_AUTHORITY.md), and [baseline](REPOSITORY_BASELINE.md) before implementation. This plan inherits their identity, scope, replay, approval, budget and retention rules; none may be postponed to S11.
 

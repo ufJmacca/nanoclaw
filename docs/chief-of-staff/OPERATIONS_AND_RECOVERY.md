@@ -1,9 +1,9 @@
 # Chief-of-Staff operations and recovery
 
-These procedures use the installed S11 release. S11 development checks have
-passed; its Pi deployment, final review and merged-source acceptance are still
-pending. Check [the acceptance receipt](evidence/S11.md) before treating a command
-as available on the target. Keep CoS paused and the calendar writer disabled
+These procedures use the installed, tested S11 candidate. Its Pi deployment,
+maintenance, backup and isolated restore passed; human review/merge and
+merged-source acceptance remain pending. Check [the acceptance receipt](evidence/S11.md)
+for the exact installed identity. Keep CoS paused and the calendar writer disabled
 until the separate live activation checks pass.
 
 ## Prerequisites and responsibilities
