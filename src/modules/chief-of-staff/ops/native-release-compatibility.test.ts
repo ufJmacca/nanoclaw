@@ -25,7 +25,7 @@ it.each([
   }
 });
 
-it.each(['S08', 'S09'] as const)(
+it.each(['S08', 'S09', 'S10'] as const)(
   '%s preserves permanent specialist identities when its verified release is selected',
   (slice) => {
     const db = new Database(':memory:');
