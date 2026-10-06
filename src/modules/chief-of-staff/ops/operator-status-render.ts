@@ -69,6 +69,10 @@ export function renderOperatorStatus(value: unknown, admission: 'paused' | 'clos
       `Purpose: ${item.purpose_ref.kind} \`${item.purpose_ref.id}\`. Authority: ${item.authority_ref.kind} \`${item.authority_ref.id}\`. Evidence: ${item.evidence_ref.kind} \`${item.evidence_ref.id}\`.`,
     );
   }
+  if (id(value.selected_id) && value.items.length === 0)
+    lines.push(
+      'The selected action or receipt is absent from this current scope. Absence does not establish that an external effect did not happen.',
+    );
   if (
     STATUS_CATEGORIES.includes(value.category as (typeof STATUS_CATEGORIES)[number]) &&
     count(value.next_offset) &&

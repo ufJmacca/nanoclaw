@@ -48,7 +48,7 @@ export function parseAdminArguments(args: string[]): AdminArguments {
     const values: Record<string, string> = {};
     for (let i = 1; i < args.length; i += 2) {
       if (
-        !['--scope', '--category', '--offset', '--limit'].includes(args[i]) ||
+        !['--scope', '--category', '--offset', '--limit', '--id'].includes(args[i]) ||
         values[args[i]] !== undefined ||
         !args[i + 1]
       )
@@ -60,6 +60,7 @@ export function parseAdminArguments(args: string[]): AdminArguments {
       if (values[key] !== undefined && !/^(0|[1-9][0-9]{0,4})$/.test(values[key]))
         throw Error('invalid_admin_arguments');
     const input = {
+      ...(values['--id'] !== undefined ? { id: values['--id'] } : {}),
       ...(values['--category'] !== undefined ? { category: values['--category'] } : {}),
       ...(values['--offset'] !== undefined ? { offset: Number(values['--offset']) } : {}),
       ...(values['--limit'] !== undefined ? { limit: Number(values['--limit']) } : {}),

@@ -45,7 +45,7 @@ function requestFor(tool: unknown, args: unknown): CosRequest | null {
   const allowed = brief
     ? ['request_id', 'time_zone', 'artifact_id']
     : tool === 'cos_status'
-      ? ['category', 'limit', 'offset']
+      ? ['category', 'limit', 'offset', 'id']
       : tool === 'cos_context_get'
         ? ['view', 'calendar_offset']
         : proposal

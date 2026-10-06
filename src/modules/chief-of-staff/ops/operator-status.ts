@@ -102,8 +102,8 @@ async function read(client: PoolClient, context: Context, input: StatusInput): P
     const rows = category
       ? (
           await client.query(
-            `WITH identity AS (SELECT $1::text AS scope,$2::text AS owner,$3::text AS session) SELECT * FROM (${projections[category]}) scoped ORDER BY id LIMIT $4 OFFSET $5`,
-            [...params, limit + 1, offset],
+            `WITH identity AS (SELECT $1::text AS scope,$2::text AS owner,$3::text AS session) SELECT * FROM (${projections[category]}) scoped WHERE ($6::text IS NULL OR id::text=$6) ORDER BY id LIMIT $4 OFFSET $5`,
+            [...params, limit + 1, offset, input.id ?? null],
           )
         ).rows
       : [];
@@ -172,6 +172,7 @@ async function read(client: PoolClient, context: Context, input: StatusInput): P
       scope_state: scope.status,
       categories,
       category: category ?? null,
+      selected_id: input.id ?? null,
       items,
       next_offset: rows.length > limit && offset + limit <= 10000 ? offset + limit : null,
       page_truncated: rows.length > limit,

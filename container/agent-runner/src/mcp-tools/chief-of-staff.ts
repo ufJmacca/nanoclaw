@@ -322,6 +322,11 @@ export const cosTools: McpToolDefinition[] = [
           category: { type: 'string', enum: [...STATUS_CATEGORIES] },
           offset: { type: 'integer', minimum: 0, maximum: 10000 },
           limit: { type: 'integer', minimum: 1, maximum: 20 },
+          id: {
+            type: 'string',
+            maxLength: 128,
+            description: 'Exact action or action receipt ID; requires its corresponding category.',
+          },
         },
       },
     },

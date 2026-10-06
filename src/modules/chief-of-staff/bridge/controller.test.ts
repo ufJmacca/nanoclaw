@@ -81,6 +81,25 @@ const event = (text: string, id = 'ingress'): InboundEvent => ({
   },
 });
 const command = 'cos approve 11111111-1111-4111-8111-111111111111 abcdefghijklmnopqrstuvwxyz123456';
+it('S11-UI01 exact action inspection stays available while paused/model unavailable and cannot perform cancellation or provider reconciliation', async () => {
+  const f = fixture(),
+    id = 'action-' + 'a'.repeat(64),
+    inspect = vi.fn().mockResolvedValue({ status: 'ok' }),
+    replyStatus = vi.fn().mockResolvedValue(true);
+  f.enabled.mockReturnValue(false);
+  f.db.exec('UPDATE cos_identity_boundaries SET paused=1');
+  const controller = new CosController({ ...f.controller.dependencies, inspect, replyStatus });
+  await controller.ingress(binding, event('cos inspect action ' + id, 'action-inspection'));
+  expect(inspect).toHaveBeenCalledWith(expect.objectContaining({ scopeId: 'scope', ownerId: 'owner' }), {
+    category: 'actions',
+    id,
+  });
+  expect(replyStatus).toHaveBeenCalledOnce();
+  expect(f.project).not.toHaveBeenCalled();
+  expect(f.wake).not.toHaveBeenCalled();
+  expect(f.decide).not.toHaveBeenCalled();
+  expect(f.stop).not.toHaveBeenCalled();
+});
 it('S11-UI01 scoped host pause/cancel controls remain available without the model or database and never project conversation input', async () => {
   const f = fixture();
   f.enabled.mockReturnValue(false);

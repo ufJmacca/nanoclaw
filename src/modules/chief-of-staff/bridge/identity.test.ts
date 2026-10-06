@@ -25,6 +25,19 @@ it('S11 status accepts exact bounded owner commands and ignores quoted or inject
   ])
     expect(parseStatusControl(text)).toBeNull();
 });
+it('S11-UI01 inspect uncertain action is an exact deterministic host read, never a model turn or reconciliation grant', () => {
+  expect(parseStatusControl('cos inspect action action-' + 'a'.repeat(64))).toEqual({
+    category: 'actions',
+    id: 'action-' + 'a'.repeat(64),
+  });
+  for (const text of [
+    'please cos inspect action a',
+    '> cos inspect action a',
+    'cos inspect action ../../other',
+    'cos inspect action a execute',
+  ])
+    expect(parseStatusControl(text)).toBeNull();
+});
 const facts: ChannelFacts = {
   id: 'private',
   type: 'P',

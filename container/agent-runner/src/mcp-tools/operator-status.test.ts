@@ -26,4 +26,10 @@ it('S11 exposes bounded inspection in the native coordinator tool set without ac
   await invoke({ scope_id: 'foreign' });
   await invoke({ limit: 21 });
   expect(calls).toHaveLength(1);
+  await invoke({ category: 'actions', id: 'action-' + 'a'.repeat(64) });
+  expect(calls).toHaveLength(2);
+  expect(calls[1]).toMatchObject({
+    method: 'cos_status',
+    params: { category: 'actions', id: 'action-' + 'a'.repeat(64) },
+  });
 });

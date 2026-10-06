@@ -123,6 +123,12 @@ after(async () => {
     if (admin)
       for (const id of [scope, foreign]) {
         for (const table of [
+          'action_receipts',
+          'action_request_starts',
+          'actions',
+          'action_intents',
+          'action_writer_revisions',
+          'action_writer_bindings',
           'outbox',
           'revocation_tombstones',
           'sources',
@@ -507,4 +513,74 @@ test('S11-UI01 connector disable preserves scope, uses its durable account fence
   );
   assert.equal(credentialReads, 0);
   assert.equal(providerCalls, 0);
+});
+test('S11-T01/UI01 exact uncertain-action inspection is read-only, scope-bound and cannot infer that an absent effect did not happen', async () => {
+  const ownAction = 'action-' + '1'.repeat(64),
+    foreignAction = 'action-' + '2'.repeat(64);
+  for (const [id, action] of [
+    [scope, ownAction],
+    [foreign, foreignAction],
+  ]) {
+    const proposal = randomUUID(),
+      bindingId = randomUUID();
+    await admin.query(
+      "INSERT INTO cos.action_writer_bindings(scope_id,id,owner_id,session_id,version,state) VALUES($1,$2,$3,$1,1,'disabled')",
+      [id, bindingId, context.ownerId],
+    );
+    await admin.query(
+      "INSERT INTO cos.proposals(id,scope_id,session_id,ingress_id,owner_id,change,payload_hash,challenge_hash,state,expires_at,applied_record_id) VALUES($1,$2,$2,$1,$3,'{}',$4,$4,'applied',clock_timestamp()+interval '1 hour',$5)",
+      [proposal, id, context.ownerId, 'a'.repeat(64), action],
+    );
+    await admin.query(
+      "INSERT INTO cos.action_intents(scope_id,id,body,digest,authority,proposal_id,binding_id,calendar_id,event_id,expires_at) VALUES($1,$2,$3,$4,'{}',$5,$6,'synthetic',$7,clock_timestamp()+interval '1 hour')",
+      [
+        id,
+        action,
+        JSON.stringify({
+          project_id: id === scope ? 'goal-00-' + scope : 'foreign-goal-' + foreign,
+          private: sentinel,
+        }),
+        'a'.repeat(64),
+        proposal,
+        bindingId,
+        'b'.repeat(64),
+      ],
+    );
+    await admin.query("INSERT INTO cos.actions(scope_id,id,state,result) VALUES($1,$2,'outcome_uncertain',$3)", [
+      id,
+      action,
+      JSON.stringify({ private: sentinel }),
+    ]);
+    await admin.query(
+      "INSERT INTO cos.action_receipts(scope_id,id,action_id,kind,body) VALUES($1,$2,$3,'uncertain',$4)",
+      [id, randomUUID(), action, JSON.stringify({ private: sentinel })],
+    );
+  }
+  const before = (
+    await admin.query('SELECT * FROM cos.actions WHERE scope_id=ANY($1::text[]) ORDER BY scope_id,id', [
+      [scope, foreign],
+    ])
+  ).rows;
+  const result = await store.operatorStatus(context, { category: 'actions', id: ownAction });
+  assert.equal(result.status, 'ok');
+  assert.equal(result.execution_authority, 'inspection_only');
+  const items = result.items as Array<{ id: string; state: string; evidence_ref: unknown }>;
+  assert.equal(items.length, 1);
+  assert.equal(items[0].id, ownAction);
+  assert.equal(items[0].state, 'outcome_uncertain');
+  assert.deepEqual(items[0].evidence_ref, { kind: 'action', id: ownAction });
+  assert.ok(!JSON.stringify(result).includes(sentinel));
+  assert.ok(!JSON.stringify(result).includes(foreignAction));
+  const absent = await store.operatorStatus(context, { category: 'actions', id: foreignAction });
+  assert.equal(absent.status, 'ok');
+  assert.deepEqual(absent.items, []);
+  assert.equal(absent.provider_effects, 'use_current_action_reconciliation');
+  assert.deepEqual(
+    (
+      await admin.query('SELECT * FROM cos.actions WHERE scope_id=ANY($1::text[]) ORDER BY scope_id,id', [
+        [scope, foreign],
+      ])
+    ).rows,
+    before,
+  );
 });
