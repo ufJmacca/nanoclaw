@@ -15,6 +15,7 @@ import { missionCoordinatorRequest } from '../mcp-tools/mission-coordinator-tool
 import { proactiveCoordinatorRequest } from '../mcp-tools/proactive-coordinator-tools.js';
 import { mandateCoordinatorRequest } from '../mcp-tools/mandate-coordinator-tools.js';
 import { actionCoordinatorRequest } from '../mcp-tools/action-coordinator-tools.js';
+import { strategyCoordinatorRequest } from '../mcp-tools/strategy-coordinator-tools.js';
 import type { DynamicToolFunctionSpec } from './codex-app-server.js';
 
 export const cosDynamicTools: DynamicToolFunctionSpec[] = cosTools.map(({ tool }) => ({
@@ -25,6 +26,8 @@ export const cosDynamicTools: DynamicToolFunctionSpec[] = cosTools.map(({ tool }
 }));
 
 function requestFor(tool: unknown, args: unknown): CosRequest | null {
+  if (typeof tool === 'string' && (tool.startsWith('cos_review_') || tool.startsWith('cos_strategy_')))
+    return strategyCoordinatorRequest(tool, args);
   if (typeof tool === 'string' && tool.startsWith('cos_action_')) return actionCoordinatorRequest(tool, args);
   if (typeof tool === 'string' && tool.startsWith('cos_mandate_')) return mandateCoordinatorRequest(tool, args);
   if (typeof tool === 'string' && tool.startsWith('cos_proactive_')) return proactiveCoordinatorRequest(tool, args);

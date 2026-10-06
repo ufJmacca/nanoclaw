@@ -9,7 +9,7 @@ describe('S01-PG07 explicit checksummed migrations', () => {
       .mockImplementation(async (sql: string) =>
         sql.includes('pg_try_advisory_lock') ? { rows: [{ locked: true }] } : { rows: [] },
       );
-    expect(await migrate({ query } as unknown as pg.Client, 'fixture_runtime')).toBe(16);
+    expect(await migrate({ query } as unknown as pg.Client, 'fixture_runtime')).toBe(SCHEMA_VERSION);
     const statements = query.mock.calls.map(([sql]) => sql).join('\n');
     expect(statements).toContain('CREATE TABLE cos.action_intents');
     expect(statements).toContain('CREATE TABLE cos.action_request_starts');

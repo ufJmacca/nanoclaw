@@ -9,6 +9,43 @@ const call = (extra: Record<string, unknown> = {}) => ({
   method: 'item/tool/call',
   params: { threadId: 'thread', turnId: 'turn', callId: 'call', tool: 'cos_context_get', arguments: {}, ...extra },
 });
+test('S10 native strategic dispatch preserves review versions and cannot accept forged authority', async () => {
+  const f = fixture(),
+    request_id = '11111111-1111-4111-8111-111111111111',
+    review_id = 'review-' + 'a'.repeat(64);
+  const request = {
+    review_id,
+    revision: 2,
+    option_id: 'pause',
+    expected_record_version: 3,
+    expected_direction_version: 1,
+    reason: 'Measure the desired result first',
+  };
+  for (const [i, [tool, args]] of [
+    ['cos_review_request', { request_id, request: { charter_version: 1, previous_review_id: review_id } }],
+    ['cos_review_get', { review_id, revision: 2, historical: true }],
+    ['cos_strategy_direction_propose', { request_id, request }],
+  ].entries()) {
+    expect((await f.dispatch.handle(call({ callId: 'strategy-' + i, tool, arguments: args }))).success).toBe(true);
+    expect(f.calls.at(-1)?.method).toBe(tool);
+  }
+  for (const [i, args] of [
+    { request_id, request, approved: true },
+    { request_id, request: { ...request, scope_id: 'foreign' } },
+    { request },
+    { request_id, request: { ...request, expected_record_version: 0 } },
+  ].entries())
+    expect(
+      (
+        await f.dispatch.handle(
+          call({ callId: 'bad-strategy-' + i, tool: 'cos_strategy_direction_propose', arguments: args }),
+        )
+      ).success,
+    ).toBe(false);
+  expect(f.calls).toHaveLength(3);
+  expect(f.calls[2]).toMatchObject({ request_id, params: { request } });
+  f.dispatch.close();
+});
 test('S08 native subscription dispatch reaches scoped mandate activity and rejects forged scope', async () => {
   const f = fixture(),
     mandate_id = 'mandate-' + 'a'.repeat(64);
@@ -188,6 +225,12 @@ test('native CoS exposes only its fixed approved tools and dispatches validated 
     'cos_action_propose',
     'cos_action_get',
     'cos_action_cancel',
+    'cos_review_charter_propose',
+    'cos_strategy_observation_propose',
+    'cos_strategy_direction_propose',
+    'cos_review_request',
+    'cos_review_submit',
+    'cos_review_get',
   ]);
   expect((await dispatch.handle(call())).success).toBe(true);
   expect(calls).toHaveLength(1);

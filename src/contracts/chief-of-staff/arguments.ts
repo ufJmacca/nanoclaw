@@ -1,5 +1,5 @@
 type FixtureArguments = {
-  slice: 'S01' | 'S02' | 'S03' | 'S04' | 'S05' | 'S06' | 'S07' | 'S08' | 'S09';
+  slice: 'S01' | 'S02' | 'S03' | 'S04' | 'S05' | 'S06' | 'S07' | 'S08' | 'S09' | 'S10';
   demo: boolean;
   profile: 'test' | 'runtime-disposable';
 };
@@ -15,7 +15,7 @@ export function parseFixtureArguments(args: string[]): FixtureArguments {
   const demo = values.get('--demo') === true,
     profile = values.get('--db-profile');
   if (
-    !['S01', 'S02', 'S03', 'S04', 'S05', 'S06', 'S07', 'S08', 'S09'].includes(String(values.get('--slice'))) ||
+    !['S01', 'S02', 'S03', 'S04', 'S05', 'S06', 'S07', 'S08', 'S09', 'S10'].includes(String(values.get('--slice'))) ||
     !['test', 'runtime-disposable'].includes(String(profile)) ||
     (demo && values.get('--fixture') !== true) ||
     (!demo && values.has('--fixture'))
@@ -29,6 +29,19 @@ export function parseFixtureArguments(args: string[]): FixtureArguments {
 }
 
 export function fixtureFiles(args: Pick<FixtureArguments, 'slice' | 'demo'>): string[] {
+  if (args.slice === 'S10')
+    return args.demo
+      ? ['strategy-flow.integration']
+      : [
+          ...fixtureFiles({ slice: 'S09', demo: false }),
+          'strategy.integration',
+          'strategy-approval.integration',
+          'strategy-collection.integration',
+          'strategy-calendar.integration',
+          'strategy-missions.integration',
+          'strategy-directions.integration',
+          'strategy-flow.integration',
+        ];
   if (args.slice === 'S09')
     return args.demo
       ? ['actions-flow.integration']

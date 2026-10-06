@@ -1,6 +1,6 @@
 # S09 — Execute one precisely approved external action
 
-**Status:** fixture release deployed; awaiting human review/merge and live validation
+**Status:** actual human-merged fixture release accepted; live writer validation pending
 
 **Repository:** `ufJmacca/nanoclaw`
 
@@ -11,9 +11,11 @@
 **User-visible outcome:** The assistant proposes a specific focus-work block, obtains your approval and creates and verifies the exact event without inviting anyone.
 
 S08's actual reviewed merge is accepted; see [its merged-release receipt](../chief-of-staff/evidence/S08_MERGED.md).
-S09 began from `462daabef958b9ba1874168719737ad7b39ef8e8`. Its exact tested
-application source `27f1c7abe0f8863b68334e184e0a167774848168` is deployed on the
-Pi with schema 16; see [the corrected candidate receipt](../chief-of-staff/evidence/S09_REVIEW_CORRECTION.md)
+S09 began from `462daabef958b9ba1874168719737ad7b39ef8e8`. PR #66 was merged by
+the owner. Its exact tested actual merge
+`60ad9d5dd08d4dd4a64377745ad49a4cc22254fe` is deployed on the Pi with schema 16;
+see [the merged-release receipt](../chief-of-staff/evidence/S09_MERGED.md),
+[the corrected candidate history](../chief-of-staff/evidence/S09_REVIEW_CORRECTION.md)
 and [the initial candidate history](../chief-of-staff/evidence/S09.md).
 All seven local release gates, both final Linux/ARM64 profiles, Pi health,
 native fixtures, preservation, recovery checks and Pi-owned independence passed.
@@ -31,8 +33,8 @@ backup and restore-proof commands use the prebuilt host release.
 
 CoS remains paused and writer admission disabled. Live account consent, protected
 writer storage, production recovery proof and a separately approved calendar
-test remain pending. Human review/merge and acceptance of the actual merged
-deployment are required before S10. No real account or writer is activated.
+test remain pending. Human merge and actual merged-release acceptance have
+passed, so S10 fixture implementation is eligible. No real account or writer is activated.
 
 Read [START HERE](00_START_HERE.md), [architecture/contracts](ARCHITECTURE_AND_CONTRACTS.md), [external PostgreSQL](EXTERNAL_POSTGRES.md), [goal execution](GOAL.md), [Mac-to-Pi delivery](MAC_TO_PI_DELIVERY.md), [Mattermost interaction](INTERACTION_MODEL.md), [implementation authority](IMPLEMENTATION_AUTHORITY.md), and [baseline](REPOSITORY_BASELINE.md) before implementation. This plan inherits their identity, scope, replay, approval, budget and retention rules; none may be postponed to S11.
 

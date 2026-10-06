@@ -13,6 +13,8 @@ import type { MissionRequest } from '../contracts/mission-protocol.js';
 import type { TeamRequest } from '../contracts/team-protocol.js';
 import type { MandateChange } from '../contracts/mandate-protocol.js';
 import type { CalendarActionRequest } from '../contracts/action-protocol.js';
+import type { StrategyChange } from '../strategy/approval-store.js';
+import type { ReviewDraft, ReviewRequest, DirectionRequest } from '../contracts/strategy-protocol.js';
 import type {
   ProactiveDraft,
   ProactiveDispositionRequest,
@@ -75,6 +77,18 @@ export function createRpcHandler(dependencies: {
       else if (access && access.status !== 'ok') result = { status: access.status };
       else if (reservation && reservation.status !== 'ok') result = { status: reservation.status };
       else if (request.method.startsWith('cos_action_') && context.origin) result = { status: 'denied' };
+      else if (
+        [
+          'cos_review_charter_propose',
+          'cos_strategy_observation_propose',
+          'cos_strategy_direction_propose',
+          'cos_review_request',
+          'cos_review_submit',
+          'cos_review_get',
+        ].includes(request.method) &&
+        context.origin
+      )
+        result = { status: 'denied' };
       else if (
         context.origin?.kind === 'mission_review' &&
         !['cos_mission_result_get', 'cos_mission_review'].includes(request.method)
@@ -187,6 +201,51 @@ export function createRpcHandler(dependencies: {
       else if (request.method === 'cos_request_status')
         result = await dependencies.store.status(context, String(request.params.request_id));
       else if (!dependencies.knowledge || !knowledgeContext) result = { status: 'unavailable' };
+      else if (request.method === 'cos_review_request')
+        result = dependencies.store.reviewArtifacts
+          ? await dependencies.store.reviewArtifacts.request(
+              knowledgeContext,
+              request.request_id,
+              request.params.request as ReviewRequest,
+            )
+          : { status: 'unavailable' };
+      else if (request.method === 'cos_review_submit')
+        result = dependencies.store.reviewArtifacts
+          ? await dependencies.store.reviewArtifacts.submit(
+              knowledgeContext,
+              request.request_id,
+              String(request.params.review_id),
+              Number(request.params.revision),
+              request.params.draft as ReviewDraft,
+            )
+          : { status: 'unavailable' };
+      else if (request.method === 'cos_review_get')
+        result = dependencies.store.reviewArtifacts
+          ? request.params.historical === true
+            ? await dependencies.store.reviewArtifacts.readHistory(
+                knowledgeContext,
+                String(request.params.review_id),
+                Number(request.params.revision),
+              )
+            : await dependencies.store.reviewArtifacts.get(
+                knowledgeContext,
+                String(request.params.review_id),
+                Number(request.params.revision),
+              )
+          : { status: 'unavailable' };
+      else if (request.method === 'cos_strategy_direction_propose')
+        result = await dependencies.store.requestDirection(
+          knowledgeContext,
+          request.request_id,
+          request.params.request as DirectionRequest,
+        );
+      else if (request.method === 'cos_review_charter_propose' || request.method === 'cos_strategy_observation_propose')
+        result = await dependencies.store.propose(
+          context,
+          request.request_id,
+          request.params.change as StrategyChange,
+          knowledgeContext,
+        );
       else if (request.method === 'cos_proactive_disposition_propose')
         result = await dependencies.store.requestProactiveDisposition(
           knowledgeContext,

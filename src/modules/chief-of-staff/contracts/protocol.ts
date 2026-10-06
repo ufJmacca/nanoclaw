@@ -8,6 +8,19 @@ import { validMissionReview } from './mission-review.js';
 import { validTeamRequest } from './team-protocol.js';
 import { validCalendarActionRequest, validActionId } from './action-protocol.js';
 import {
+  validReviewCharterChange,
+  validStrategyObservationChange,
+  validReviewRequest,
+  validReviewDraft,
+  validDirectionRequest,
+  validStrategyDirectionChange,
+  reviewId,
+  reviewInteger,
+  type ReviewCharterChange,
+  type StrategyObservationChange,
+  type StrategyDirectionChange,
+} from './strategy-protocol.js';
+import {
   validProactivePolicyChange,
   validProactiveDisposition,
   validProactiveDraft,
@@ -132,6 +145,12 @@ export type CosMethod =
   | 'cos_action_propose'
   | 'cos_action_get'
   | 'cos_action_cancel'
+  | 'cos_review_charter_propose'
+  | 'cos_strategy_observation_propose'
+  | 'cos_strategy_direction_propose'
+  | 'cos_review_request'
+  | 'cos_review_submit'
+  | 'cos_review_get'
   | 'cos_request_status'
   | 'cos_knowledge_search'
   | 'cos_source_get'
@@ -237,6 +256,28 @@ export function validRequest(value: unknown): value is CosRequest {
       uuid.test(value.params.request_id)
     );
   if (value.method === 'cos_change_propose') return keys(value.params, ['change']) && validChange(value.params.change);
+  if (value.method === 'cos_review_charter_propose')
+    return keys(value.params, ['change']) && validReviewCharterChange(value.params.change);
+  if (value.method === 'cos_strategy_observation_propose')
+    return keys(value.params, ['change']) && validStrategyObservationChange(value.params.change);
+  if (value.method === 'cos_strategy_direction_propose')
+    return keys(value.params, ['request']) && validDirectionRequest(value.params.request);
+  if (value.method === 'cos_review_request')
+    return keys(value.params, ['request']) && validReviewRequest(value.params.request);
+  if (value.method === 'cos_review_submit')
+    return (
+      keys(value.params, ['review_id', 'revision', 'draft']) &&
+      reviewId(value.params.review_id) &&
+      reviewInteger(value.params.revision) &&
+      validReviewDraft(value.params.draft)
+    );
+  if (value.method === 'cos_review_get')
+    return (
+      keys(value.params, ['review_id', 'revision', 'historical']) &&
+      reviewId(value.params.review_id) &&
+      reviewInteger(value.params.revision) &&
+      (value.params.historical === undefined || typeof value.params.historical === 'boolean')
+    );
   if (value.method === 'cos_work_change_propose')
     return keys(value.params, ['change']) && validWorkChange(value.params.change);
   if (value.method === 'cos_work_read') return validWorkRead(value.params);
@@ -549,7 +590,10 @@ export type ProposalChange =
   | ProactivePolicyChange
   | ProactiveDispositionChange
   | MandateChange
-  | CalendarActionChange;
+  | CalendarActionChange
+  | ReviewCharterChange
+  | StrategyObservationChange
+  | StrategyDirectionChange;
 export function validProposalChange(value: unknown): value is ProposalChange {
   return (
     validChange(value) ||
@@ -560,6 +604,9 @@ export function validProposalChange(value: unknown): value is ProposalChange {
     validProactiveDispositionChange(value) ||
     validMandateChange(value) ||
     validCalendarActionChange(value) ||
+    validReviewCharterChange(value) ||
+    validStrategyObservationChange(value) ||
+    validStrategyDirectionChange(value) ||
     validMissionChange(value) ||
     validTeamChange(value)
   );

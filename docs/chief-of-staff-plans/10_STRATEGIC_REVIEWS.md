@@ -1,11 +1,31 @@
 # S10 — Connect everyday work to long-term strategy
 
-**Status:** not started  
-**Repository:** `ufJmacca/nanoclaw`  
-**Branch:** `cos/s10-strategic-reviews`  
-**Depends on:** S09 merged, with its acceptance receipt available.  
-**Delivery unit:** one independently reviewable PR; multiple red–green commits are expected.  
+**Status:** owner feedback addressed in a tested candidate; human review/merge pending
+
+**Repository:** `ufJmacca/nanoclaw`
+
+**Branch:** `codex/s10-strategic-reviews`
+
+**Depends on:** S09 merged, with its acceptance receipt available.
+
+**Delivery unit:** one independently reviewable PR; multiple red–green commits are expected.
 **User-visible outcome:** You receive a review that compares activity with approved outcomes, challenges assumptions and proposes evidence-backed changes for your decision.
+
+The owner merged S09 PR #66, and its actual merge
+`60ad9d5dd08d4dd4a64377745ad49a4cc22254fe` passed fresh local/final-image gates,
+exact Pi deployment, native checks, preservation, recovery and Pi-owned
+independence. See [the accepted predecessor receipt](../chief-of-staff/evidence/S09_MERGED.md).
+S10 starts from that merge. CoS remains paused; S09 live writer admission and
+fresh finite model/channel authority are separate pending gates.
+
+The S10 candidate passed all seven Mac release gates, exact Pi delivery, both
+native profiles, preservation, recovery verification and Pi-owned independence.
+See [the S10 evidence](../chief-of-staff/evidence/S10.md) and
+[operator runbook](../chief-of-staff/STRATEGIC_REVIEWS.md). The owner assessed both
+reviews as useful with limitations because their structure was unclear.
+The [tested correction](../chief-of-staff/evidence/S10_STRUCTURE.md)
+puts the decision first and preserves original saved text. Legitimate human
+review/merge remains pending; S11 is not yet eligible.
 
 Read [START HERE](00_START_HERE.md), [architecture/contracts](ARCHITECTURE_AND_CONTRACTS.md), [external PostgreSQL](EXTERNAL_POSTGRES.md), [goal execution](GOAL.md), [Mac-to-Pi delivery](MAC_TO_PI_DELIVERY.md), [Mattermost interaction](INTERACTION_MODEL.md), [implementation authority](IMPLEMENTATION_AUTHORITY.md), and [baseline](REPOSITORY_BASELINE.md) before implementation. This plan inherits their identity, scope, replay, approval, budget and retention rules; none may be postponed to S11.
 
@@ -37,27 +57,27 @@ Exploratory ideas stay distinct from approved initiatives. Long-term suggestions
 
 ## Required red tests
 
-| ID | Behaviour that must first fail |
-|---|---|
-| S10-T01 | Completed tasks alone cannot be reported as achieved strategic outcomes. |
-| S10-T02 | Facts, self-reports, assumptions and recommendations remain distinctly typed/rendered. |
-| S10-T03 | Every consequential finding has supporting evidence or an explicit uncertainty label. |
-| S10-T04 | Rejecting a recommendation changes no approved goals/projects/commitments. |
-| S10-T05 | Accepting a stale proposal triggers revalidation rather than overwriting new priorities. |
-| S10-T06 | Private data outside the authorised review scope is excluded from all specialist contexts. |
-| S10-T07 | Contradictory evidence and alternatives survive synthesis; agent agreement is not treated as proof. |
-| S10-T08 | Calendar time is not silently converted into actual effort or productivity. |
+| ID      | Behaviour that must first fail                                                                           |
+| ------- | -------------------------------------------------------------------------------------------------------- |
+| S10-T01 | Completed tasks alone cannot be reported as achieved strategic outcomes.                                 |
+| S10-T02 | Facts, self-reports, assumptions and recommendations remain distinctly typed/rendered.                   |
+| S10-T03 | Every consequential finding has supporting evidence or an explicit uncertainty label.                    |
+| S10-T04 | Rejecting a recommendation changes no approved goals/projects/commitments.                               |
+| S10-T05 | Accepting a stale proposal triggers revalidation rather than overwriting new priorities.                 |
+| S10-T06 | Private data outside the authorised review scope is excluded from all specialist contexts.               |
+| S10-T07 | Contradictory evidence and alternatives survive synthesis; agent agreement is not treated as proof.      |
+| S10-T08 | Calendar time is not silently converted into actual effort or productivity.                              |
 | S10-T09 | Later review preserves what was recommended/decided at the time, including unsuccessful recommendations. |
-| S10-T10 | Changing direction cannot silently cancel missions, external events or commitments. |
+| S10-T10 | Changing direction cannot silently cancel missions, external events or commitments.                      |
 
 ## External PostgreSQL requirements for this slice
 
 Build the review context from explicit remote record/source versions using short bounded reads; release connections before specialist analysis. Do not claim a complete strategic snapshot if the database goes down during context assembly. Accepted direction changes still use exact proposals and commit reconciliation.
 
-| ID | Additional required red → green behaviour |
-|---|---|
+| ID       | Additional required red → green behaviour                                                                                                                        |
+| -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | S10-PG01 | Database failure during review snapshot creation yields blocked/incomplete evidence, not a confident strategic review assembled from an unchecked partial cache. |
-| S10-PG02 | A lost accepted-decision commit acknowledgement preserves one historical decision and does not reapply side effects on associated missions. |
+| S10-PG02 | A lost accepted-decision commit acknowledgement preserves one historical decision and does not reapply side effects on associated missions.                      |
 
 ## Acceptance gate
 
@@ -82,7 +102,7 @@ Run `pnpm cos:test --slice S10 --db-profile <selected-profile>` and `pnpm cos:de
 Write a sanitised acceptance receipt at `docs/chief-of-staff/evidence/S10.md`: base/head SHA, scenario and test IDs, real red/green command results, migration version, policy changes, fixture demo evidence, rollback check, live-test status, residual limitations and reviewer decision. Private logs/artifacts stay outside Git. Record missing live credentials as **live validation pending**, not passed. Missing every eligible database target blocks the required integration gate; a missing separate test DB does not block the guarded disposable-runtime option. Include the plan revision, `cos-postgres/external-env-v3` conformance, selected test profile and target identity confirmation (without credentials/endpoints), actual local-test/final-image/transfer/Pi-migration/Pi-smoke receipts, source and image IDs, Pi-owned data lifecycle, actual remote failure tests and any pending operator configuration.
 
 Update the persistent goal ledger and create or update this slice’s PR. If review/merge is pending, checkpoint `awaiting_review` with the exact resume condition; the overall goal remains incomplete. When an authorised human merge is verified, advance automatically to the next eligible slice under [GOAL.md](GOAL.md), without a new slice-specific instruction. Execute this slice's in-scope database migrations and target deployment/restart/rollback automatically under [IMPLEMENTATION_AUTHORITY.md](IMPLEMENTATION_AUTHORITY.md), through the Mac-to-Pi release path, recording actual results without another human approval. Do not auto-merge, enable an unauthorised account, enlarge permissions or implement a dependent slice before its predecessor is merged. Resume unfinished work on its existing branch; never recreate a finished slice or discard an existing ledger.
+
 ## Pinned-source release gate
 
 Apply [GITHUB_SOURCE_SYNC.md](GITHUB_SOURCE_SYNC.md) in this slice. Push the exact tested source commit from the Mac, fetch/verify it in a detached Pi release-source checkout, and require commit/tree agreement with the tested artifact manifest before activation. Record source-push/source-sync status and verified IDs in the acceptance/deployment receipt. Never use an unattended pull, change the active checkout, build on the Pi or mount fetched source over release code. S01 introduces tests S01-REL13–S01-REL18; later slices regress them where affected.
-

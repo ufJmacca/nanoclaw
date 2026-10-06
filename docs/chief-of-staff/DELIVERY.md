@@ -3,7 +3,7 @@
 Run the host wrappers from the Mac checkout. They use the running repository devcontainer for project tools and the host's Docker, GitHub and SSH tools. They never install project dependencies on the Mac or build application code on the Pi.
 
 ```sh
-bash scripts/cos-release.sh --slice S04 --target pi --db-profile test --local-only
+bash scripts/cos-release.sh --slice S10 --target pi --db-profile test --local-only
 bash scripts/cos-deploy.sh status --target pi
 bash scripts/cos-deploy.sh --target pi --release-manifest /absolute/checkout/.cos-plan-state/releases/release-…/release.json
 bash scripts/cos-deploy.sh rollback --target pi --release-id release-…
@@ -35,9 +35,32 @@ Prefer `--db-profile test`. Explicit `--db-profile runtime-disposable` requires 
 
 Private test logs and receipts remain under `.cos-plan-state`; only sanitised acceptance evidence belongs in Git. Runtime fixture retries must retain the same owner, source, image, slice and request identity. A completed Pi receipt can reconcile a lost final reply only when the matching Mac receipt proves fixtures passed. Historical requests without a slice retain their original S01 meaning and receipt identity. See the acceptance receipts for actual deployment status.
 
+## S10 strategic-review delivery
+
+Current release construction selects S10, PostgreSQL schema 18 and SQLite
+contract 22. It requires the legitimate reviewed S09 merge and accepted delivery
+of that actual merged source. The cumulative fixture selection includes earlier
+slices and the S10 charter, observation, snapshot, private review, calendar,
+mission-evidence, direction and native owner flows. Both final worker profiles
+repeat those contracts using baked application code.
+
+Migrations 17–18 add scoped review and decision history with constrained mutable
+heads and strict review-revision lineage. Every predecessor migration checksum
+remains unchanged. The schema-16 S09 artifacts are retained but cannot serve as a
+rollback target after schema 18. Preserve pause on uncertainty and use exact
+verified schema-18 artifacts or a fully tested compatible correction; do not
+restore old live SQLite or reset the remote schema.
+
+Deployment does not approve a review charter, admit automatic reviews, renew
+model consent, resume CoS or enable a calendar writer. See [strategic reviews](STRATEGIC_REVIEWS.md)
+and [the original S10 evidence](evidence/S10.md) for implementation history.
+The [tested owner-feedback correction](evidence/S10_STRUCTURE.md) records the
+current schema-18 candidate and its retained compatible S10 predecessor.
+Human review/merge and actual merged-source acceptance remain required.
+
 ## S04 brief and commitment delivery
 
-New release construction selects S04, PostgreSQL schema 6 and SQLite contract 22. It requires S03's reviewed merge and verified delivery of that exact merged source. The manifest pins all six migration checksums; historical S01–S03 release identities remain readable under their own schema contracts. See [S04 evidence](evidence/S04.md) and [briefs and commitments](BRIEFS_AND_COMMITMENTS.md) for implementation, testing and live prerequisites.
+Historical S04 release construction selected PostgreSQL schema 6 and SQLite contract 22. It requires S03's reviewed merge and verified delivery of that exact merged source. The manifest pins all six migration checksums; historical S01–S03 release identities remain readable under their own schema contracts. See [S04 evidence](evidence/S04.md) and [briefs and commitments](BRIEFS_AND_COMMITMENTS.md) for implementation, testing and live prerequisites.
 
 Migrations 4–6 add confirmed work and immutable revisions, approved schedules, stable briefing runs, notification intents and budget reservations. The schema-3 S03 release is incompatible after these migrations. Refuse incompatible rollback, preserve maintenance and pause on unresolved failure, and use tested schema-compatible recovery code. Deployment does not approve a schedule, resume CoS, connect an account or extend model consent.
 
@@ -49,7 +72,7 @@ Calendar access remains disabled until separately configured. Calendar credentia
 
 ## S02 knowledge configuration
 
-The historical S02 host required PostgreSQL schema 2 and checked its recorded checksums at startup. The current S04 host requires schema 6. Startup never migrates the database. The knowledge controls below remain available in S04.
+The historical S02 host required PostgreSQL schema 2 and checked its recorded checksums at startup. The current S10 host requires schema 18. Startup never migrates the database. The knowledge controls below remain available in S10.
 
 S02 was human-merged and its exact merged source was tested and delivered before S03 began; see [S02 evidence](evidence/S02.md). Once schema 2 was installed, the old S01 manifest became incompatible. Listing a release as an upgrade predecessor does not make it a valid rollback target. Preserve a failed deployment's receipt and maintenance lease; do not reset the database or clear the lease to force a retry.
 
@@ -61,7 +84,7 @@ Use the knowledge switch to disable ingestion/retrieval while keeping the CoS ho
 
 The guarded `context-recover` owner command rebuilds the same CoS AgentGroup's context after verified quiescence, private membership and protected backup. It quarantines stale pending input/output and gives the runner an empty provider history and a new continuation key. It does not replay the old discussion. Subsequent answers must retrieve current approved records and permitted sources again.
 
-An S01 native conversation retains its original three-tool catalogue on resume. Before an S02 live walkthrough, use the guarded recovery path to create the current eight-tool context; ordinary restart alone does not refresh that catalogue. Candidate deployment preserved the original conversation and left CoS paused with knowledge disabled. Enabling knowledge and admitting selected notes does not itself authorize a model turn; the completed S01 test allowance cannot be reused.
+The original S02 implementation required guarded context recovery to replace an S01 conversation's three-tool catalogue with eight tools. Current Codex workers also refresh tools through the retained image-owned MCP server, including the six S10 strategic tools, without rewriting conversation history or changing context generation. Guarded context recovery remains necessary when retiring exposed history under the retention rules below. Deployment preserves the conversation and leaves CoS paused. Enabling knowledge and admitting selected notes does not itself authorize a model turn; the completed S01 test allowance cannot be reused.
 
 Recovery can carry an already-issued, unexpired allowance into that replacement context. Only the context generation changes: activation ID, account, model, consent reference, expiry, maximum attempts and all charged usage remain unchanged. Missing, expired or exhausted consent is not transferred. A private journal reconciles interrupted updates without replenishing usage. Recovery always leaves CoS paused; the separate guarded resume operation remains necessary. This code path performs no model call or message send, and it does not reactivate the completed S01 live-test allowance.
 
@@ -109,4 +132,4 @@ pnpm cos:demo --slice S02 --fixture --db-profile test
 
 The test command includes affected S01 contracts, S02 database contracts and the routed twelve-question knowledge conversation. The demo command runs that conversation independently and emits its delivered replies and bounded quality judgements. See [the recorded development demonstration](evidence/S02_DEMO.md). `COS_FIXTURE_HOST_ROOT` identifies the Mac checkout for Docker bind mounts; `COS_FIXTURE_IMAGE` identifies the explicitly selected local runner. Development may use the existing `COS_FIXTURE_RUNNER_VOLUME` with a source mount. Final release checks must omit that override and use the exact tested immutable image identity. Neither the whole private environment nor database credentials enter the runner.
 
-Runtime-disposable selection retains the existing live cross-host guard; there is no automatic fallback from the separate test database. Source and packaged fixture requests record their selected slice. The current S04 selector runs affected predecessor contracts plus work, schedule, brief and authenticated recurring-flow scenarios for each final worker profile. Passing development commands alone does not satisfy exact-image or Pi gates.
+Runtime-disposable selection retains the existing live cross-host guard; there is no automatic fallback from the separate test database. Source and packaged fixture requests record their selected slice. The current S10 selector runs cumulative predecessor and strategic-review contracts for each final worker profile. Passing development commands alone does not satisfy exact-image or Pi gates.

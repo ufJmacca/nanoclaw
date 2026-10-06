@@ -3,8 +3,8 @@
 set -euo pipefail
 umask 077
 [[ "$(uname -s)" == Darwin ]] || { echo 'cos:release requires the Mac host' >&2; exit 1; }
-[[ ( $# == 6 || ( $# == 7 && "${7:-}" == --local-only ) ) && "$1" == --slice && ( "$2" == S07 || "$2" == S08 || "$2" == S09 ) && "$3" == --target && "$4" == pi && "$5" == --db-profile ]] || {
-  echo 'Usage: cos:release --slice S07|S08|S09 --target pi --db-profile test|runtime-disposable [--local-only]' >&2; exit 1;
+[[ ( $# == 6 || ( $# == 7 && "${7:-}" == --local-only ) ) && "$1" == --slice && "$2" == S10 && "$3" == --target && "$4" == pi && "$5" == --db-profile ]] || {
+  echo 'Usage: cos:release --slice S10 --target pi --db-profile test|runtime-disposable [--local-only]' >&2; exit 1;
 }
 slice=$2 profile=$6
 [[ "$profile" == test || "$profile" == runtime-disposable ]] || exit 1

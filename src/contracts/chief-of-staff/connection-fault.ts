@@ -5,6 +5,8 @@ import type { PoolConfig } from 'pg';
 export async function connectionFault(config: PoolConfig) {
   const sockets = new Set<net.Socket>();
   let partitioned = false;
+  let repliesWithheld = false,
+    withheldReplyBytes = 0;
   const server = net.createServer((downstream) => {
     sockets.add(downstream);
     const upstream = net.connect({ host: config.host!, port: config.port! });
@@ -20,7 +22,8 @@ export async function connectionFault(config: PoolConfig) {
       if (!partitioned) upstream.write(bytes);
     });
     upstream.on('data', (bytes) => {
-      if (!partitioned) downstream.write(bytes);
+      if (repliesWithheld) withheldReplyBytes += bytes.length;
+      else if (!partitioned) downstream.write(bytes);
     });
   });
   await new Promise<void>((resolve, reject) => {
@@ -39,8 +42,15 @@ export async function connectionFault(config: PoolConfig) {
     partition() {
       partitioned = true;
     },
+    /** The already TLS-authenticated connection still sends COMMIT; only the encrypted reply is dropped. */
+    withholdReplies() {
+      repliesWithheld = true;
+      withheldReplyBytes = 0;
+    },
+    withheldReplyBytes: () => withheldReplyBytes,
     restore() {
       partitioned = false;
+      repliesWithheld = false;
       for (const socket of sockets) socket.destroy();
     },
     async close() {

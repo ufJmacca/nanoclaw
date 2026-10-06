@@ -9,6 +9,24 @@ const request: CosRequest = {
   params: { view: 'today' },
 };
 const previous = process.env.NANOCLAW_COS_PROTOCOL;
+test('S10 strategic tools expose exact bounded requests without owner or publication authority', async () => {
+  initTestSessionDb();
+  for (const [name, keys] of [
+    ['cos_review_charter_propose', ['request_id', 'change']],
+    ['cos_strategy_observation_propose', ['request_id', 'change']],
+    ['cos_strategy_direction_propose', ['request_id', 'request']],
+    ['cos_review_request', ['request_id', 'request']],
+    ['cos_review_submit', ['request_id', 'review_id', 'revision', 'draft']],
+    ['cos_review_get', ['review_id', 'revision', 'historical']],
+  ] as const) {
+    const definition = cosTools.find(({ tool }) => tool.name === name);
+    expect(definition).toBeDefined();
+    expect(Object.keys(definition!.tool.inputSchema.properties!)).toEqual([...keys]);
+    expect(definition!.tool.inputSchema.additionalProperties).toBe(false);
+    expect(JSON.stringify(await definition!.handler({ owner_id: 'forged', approved: true }))).toContain('denied');
+  }
+  expect(getOutboundDb().query('SELECT count(*) AS n FROM messages_out').get()).toEqual({ n: 0 });
+});
 test('S04 work reader exposes bounded views and exact revisions without write authority', async () => {
   const tool = cosTools.find((definition) => definition.tool.name === 'cos_work_read');
   expect(tool).toBeDefined();

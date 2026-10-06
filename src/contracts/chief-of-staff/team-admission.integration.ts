@@ -36,6 +36,8 @@ import { TEAM_ADMISSION_POLICY } from '../../modules/chief-of-staff/missions/tea
 import type { CosBinding } from '../../cos-boundary.js';
 import { createTeamCancellation } from '../../modules/chief-of-staff/missions/team-cancel.js';
 import { TeamGraphPump } from '../../modules/chief-of-staff/missions/team-graph-pump.js';
+import { ReviewCollector } from '../../modules/chief-of-staff/strategy/collector.js';
+import { outcomeStatus, type ReviewSnapshot } from '../../modules/chief-of-staff/strategy/review.js';
 
 const scope = 'team-admission-' + randomUUID();
 const context = { scopeId: scope, ownerId: 'owner', agentGroupId: scope, sessionId: scope, ingressId: randomUUID() };
@@ -85,6 +87,11 @@ after(async () => {
   if (admin) {
     await admin.query('UPDATE cos.sources SET current_revision_id=NULL WHERE scope_id=$1', [scope]);
     for (const table of [
+      'strategy_review_results',
+      'strategy_review_snapshots',
+      'strategy_observations',
+      'review_charters',
+      'review_charter_revisions',
       'mission_team_root_budget_events',
       'mission_team_root_reservations',
       'mission_team_budget_events',
@@ -2848,4 +2855,109 @@ test('S06-PG01 a real TLS-preserving LAN partition grants no child or budget res
       () => (enabled ? authority : null),
     );
   }
+});
+
+test('S10 strategic review retains both verified team perspectives without treating agreement as an outcome', async () => {
+  enabled = true;
+  await templates();
+  const k = { ...context, provider: 'codex', generation: authority.contextGeneration };
+  const project = await store.propose(
+    k,
+    randomUUID(),
+    {
+      kind: 'project',
+      title: 'Synthetic team initiative',
+      description: '',
+      lifecycle: 'active',
+      reason: 'Fixture strategy selection',
+      expected_version: 0,
+    },
+    k,
+  );
+  const applied = await approve(project);
+  assert.equal(applied.status, 'ok');
+  const initiative = String(applied.record_id);
+  let sources: string[] = [];
+  const f = await stoppedAnalyses(false, (request) => {
+    request.project_id = initiative;
+    sources = request.sources.map((s) => s.source_id);
+  });
+  await f.teams.advance(context, f.teamId);
+  await finishTeamStep(f, 'synthesis');
+  await finishTeamStep(f, 'review');
+  const now = Date.now();
+  const charter = await store.propose(
+    k,
+    randomUUID(),
+    {
+      kind: 'review_charter',
+      expected_version: 0,
+      reason: 'Fixture approved bounded team review',
+      definition: {
+        title: 'Retain opposing perspectives',
+        initiative_ids: [initiative],
+        source_ids: sources,
+        starts_at: new Date(now - 86400000).toISOString(),
+        ends_at: new Date(now + 86400000).toISOString(),
+        cadence: 'manual',
+        resource_constraints: 'Six hours per week',
+        evidence_limits: 'Synthetic connected sources only',
+        exploration_minutes_per_week: 60,
+        measures: [
+          {
+            id: 'useful-result',
+            initiative_id: initiative,
+            outcome: 'A useful decision',
+            test: 'Observe a useful result',
+          },
+        ],
+        assumptions: [],
+      },
+    },
+    k,
+  );
+  assert.equal(charter.status, 'ok');
+  assert.equal(
+    (
+      await store.decide(
+        { ...k, ingressId: randomUUID() },
+        String(charter.proposal_id),
+        String(charter.confirmation_token),
+        'approve',
+      )
+    ).status,
+    'ok',
+  );
+  assert.equal((await store.apply(scope, String(charter.proposal_id))).status, 'ok');
+  const collector = new ReviewCollector({
+    database: store.database,
+    knowledge,
+    work: store.work,
+    missionReviews: store.missionReviews,
+    teamFinalReviews: store.teamFinalReviews,
+    hooks: {
+      afterCollection: async () => {
+        assert.equal(store.database.pool.idleCount, store.database.pool.totalCount);
+      },
+    },
+  });
+  const result = await collector.collect(
+    k,
+    { charter_version: 1, previous_review_id: null },
+    { review_id: 'review-' + digest(scope), revision: 1, previous: null },
+  );
+  assert.equal(result.status, 'ok');
+  const snapshot = result.snapshot as ReviewSnapshot;
+  assert.equal(snapshot.missions.length, 1);
+  assert.equal(snapshot.missions[0].mission_id, f.teamId);
+  const brief = snapshot.missions[0].result;
+  assert.equal(brief.format, 'cos-team-brief/v1');
+  if (brief.format !== 'cos-team-brief/v1') throw Error('expected_team_brief');
+  const text = JSON.stringify(brief);
+  assert.equal(text.includes('Prefer B for capacity.'), true);
+  assert.equal(text.includes('Prefer A for cost.'), true);
+  assert.equal(text.includes('Advisory fixture judgement.'), true);
+  assert.equal(snapshot.coverage, 'limited');
+  assert.equal(outcomeStatus(snapshot, initiative, 'useful-result'), 'unknown');
+  assert.equal(store.database.pool.idleCount, store.database.pool.totalCount);
 });

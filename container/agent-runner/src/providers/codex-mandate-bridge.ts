@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { COS_MAX_BYTES, COS_WAIT_MS } from '../mcp-tools/generated/cos-protocol.js';
 import { tomlBasicString } from './codex-app-server.js';
 import type { createCosToolDispatch } from './codex-cos-tools.js';
+import { strategyCoordinatorToolNames } from '../mcp-tools/strategy-coordinator-tools.js';
 
 type McpResult = { content: { type: 'text'; text: string }[]; isError: boolean };
 const unavailable = (): McpResult => ({ content: [{ type: 'text', text: 'CoS tool unavailable.' }], isError: true });
@@ -15,6 +16,7 @@ const tools = new Set([
   'cos_action_propose',
   'cos_action_get',
   'cos_action_cancel',
+  ...strategyCoordinatorToolNames,
 ]);
 
 export async function createMandateToolBridge(

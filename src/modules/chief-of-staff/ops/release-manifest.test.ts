@@ -10,6 +10,24 @@ const sha = 'a'.repeat(40),
   tree = 'b'.repeat(40),
   image = 'sha256:' + 'c'.repeat(64),
   agent = 'sha256:' + 'd'.repeat(64);
+it('S10 binds the review migration without manufacturing schema16 rollback compatibility', () => {
+  const current = {
+    ...manifest(),
+    slice: 'S10',
+    postgres: { minimum: 18, maximum: 18 },
+    sqlite: { minimum: 22, maximum: 22 },
+    migrations: MIGRATIONS.slice(0, 18).map(({ version, checksum }) => ({ version, checksum })),
+  };
+  expect(validateReleaseManifest(current)).toEqual(current);
+  expect(supportsReleaseSchema(validateReleaseManifest(current), 16)).toBe(false);
+  for (const patch of [
+    { slice: 'S11' },
+    { postgres: { minimum: 16, maximum: 18 } },
+    { postgres: { minimum: 17, maximum: 18 } },
+    { migrations: current.migrations.map((m) => (m.version === 18 ? { ...m, checksum: '0'.repeat(64) } : m)) },
+  ])
+    expect(() => validateReleaseManifest({ ...current, ...patch })).toThrow('release_not_transferable');
+});
 it('S06 binds thirteen exact migrations without declaring historical rollback compatibility', () => {
   const current = {
     ...manifest(),

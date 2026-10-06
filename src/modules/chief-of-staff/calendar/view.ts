@@ -79,6 +79,25 @@ export class CalendarView {
     },
   ) {}
   async read(context: KnowledgeContext, input: CalendarReadInput): Promise<Result> {
+    return this.readRestricted(context, input, null);
+  }
+  /** Trusted review adapter only: the wire read contract cannot supply this selection or caller authority. */
+  async readSelected(context: KnowledgeContext, input: CalendarReadInput, sourceIds: string[]): Promise<Result> {
+    if (
+      !Array.isArray(sourceIds) ||
+      sourceIds.length < 1 ||
+      sourceIds.length > 6 ||
+      new Set(sourceIds).size !== sourceIds.length ||
+      sourceIds.some((id) => typeof id !== 'string' || !/^[a-zA-Z0-9_-]{1,100}$/.test(id))
+    )
+      return { status: 'denied' };
+    return this.readRestricted(context, input, [...sourceIds]);
+  }
+  private async readRestricted(
+    context: KnowledgeContext,
+    input: CalendarReadInput,
+    sourceIds: string[] | null,
+  ): Promise<Result> {
     if (!validCalendarReadInput(input)) return { status: 'denied' };
     const request = structuredClone(input),
       ctx = Object.freeze({ ...context }),
@@ -122,7 +141,11 @@ export class CalendarView {
       coverage = 'incomplete';
       warning = 'calendar_window_not_covered';
     }
-    const overlapping = (snapshot.items as Row[]).filter((row) => calendarEventOverlaps(row.event, window));
+    const overlapping = (snapshot.items as Row[]).filter(
+      (row) =>
+        (!sourceIds || (row.source_id !== null && sourceIds.includes(row.source_id))) &&
+        calendarEventOverlaps(row.event, window),
+    );
     if (overlapping.some((row) => row.readable !== true)) {
       coverage = 'incomplete';
       warning = 'calendar_evidence_unavailable';

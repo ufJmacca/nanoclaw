@@ -3,6 +3,11 @@ import type { PriorityStore } from '../store/priorities.js';
 import type { ProposalChange } from '../domain/contracts.js';
 import { validProposalChange, digest } from '../domain/contracts.js';
 import { validCalendarActionChange } from '../contracts/action-protocol.js';
+import {
+  validReviewCharterChange,
+  validStrategyObservationChange,
+  validStrategyDirectionChange,
+} from '../contracts/strategy-protocol.js';
 export type Preview = {
   id: string;
   proposalId: string;
@@ -47,12 +52,26 @@ export class CosOutbox {
         if (Date.parse(expiresAt) <= Date.now()) continue;
         const change = item.payload.change,
           token = item.payload.confirmation_token;
-        const json = JSON.stringify(change, null, 2);
+        const strategic =
+          validReviewCharterChange(change) ||
+          validStrategyObservationChange(change) ||
+          validStrategyDirectionChange(change);
+        const json = JSON.stringify(
+          strategic ? { change, review_dependencies: item.payload.review_dependencies } : change,
+          null,
+          2,
+        );
         // User-supplied markdown cannot terminate the exact-value block.
         const fence = '`'.repeat(Math.max(3, ...[...json.matchAll(/`+/g)].map((match) => match[0].length + 1)));
         const heading = validCalendarActionChange(change)
           ? 'Proposed calendar block — awaiting your approval.\nCreates one private ordinary event on the exact selected calendar below. No guests, invitations or event reminders. Existing account sharing still applies.'
-          : 'Proposed internal change — awaiting your approval.';
+          : validStrategyDirectionChange(change)
+            ? 'Proposed strategic direction — awaiting your approval.\nRecords the exact review option, rationale and priority versions below. Existing commitments, missions and calendar events keep their approved states. Any changes to them need separate exact approvals. Your choice will be retained for later review; approval does not establish a successful outcome.'
+            : validReviewCharterChange(change)
+              ? 'Proposed strategic review charter — awaiting your approval.\nDefines the selected initiatives, outcomes, evidence limits and resources for reviews requested by you. No tasks, missions, calendar events or recurring reviews are started.'
+              : validStrategyObservationChange(change)
+                ? 'Proposed strategic observation — awaiting your approval.\nRecords the stated evidence, self-report or uncertainty for this outcome or assumption. No tasks, missions, calendar events or recurring reviews are started.'
+                : 'Proposed internal change — awaiting your approval.';
         const text = `${heading}\n\n${fence}json\n${json}\n${fence}\n\nProposal: ${proposalId}\nChange digest: ${digest(change)}\nExpires: ${expiresAt}\n\nTo approve, send exactly:\ncos approve ${proposalId} ${token}\n\nTo reject, send exactly:\ncos reject ${proposalId} ${token}`;
         if (
           await d.preview(binding, {

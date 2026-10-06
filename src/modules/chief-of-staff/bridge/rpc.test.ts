@@ -72,6 +72,266 @@ const calendarAction = {
   mission_id: null,
   attendees: [],
 };
+const strategyObservation = {
+  kind: 'strategy_observation',
+  charter_version: 1,
+  initiative_id: 'project-one',
+  target: { kind: 'outcome', id: 'result' },
+  basis: 'unknown',
+  signal: 'unknown',
+  statement: 'Unobserved result',
+  observed_at: '2026-10-06T00:00:00Z',
+  evidence: [],
+  reason: 'Preserve uncertainty',
+};
+const reviewCharter = {
+  kind: 'review_charter',
+  expected_version: 0,
+  reason: 'Review outcomes',
+  definition: {
+    title: 'Private review',
+    initiative_ids: ['project-one'],
+    source_ids: [],
+    starts_at: '2026-10-01T00:00:00Z',
+    ends_at: '2026-10-31T00:00:00Z',
+    cadence: 'manual',
+    resource_constraints: 'Six hours a week',
+    evidence_limits: 'Connected sources only',
+    exploration_minutes_per_week: 60,
+    measures: [{ id: 'result', initiative_id: 'project-one', outcome: 'A useful result', test: 'Observe a result' }],
+    assumptions: [],
+  },
+};
+it.each(['cos_review_request', 'cos_review_submit', 'cos_review_get'])(
+  'S10 %s stays in the retained main context and withholds private results after authority changes',
+  async (method) => {
+    const f = fixture(),
+      context = {
+        scopeId: 'fixture',
+        ownerId: 'owner',
+        sessionId: 'session',
+        agentGroupId: 'group',
+        ingressId: 'verified',
+      },
+      retained = { ...context, provider: 'codex', generation: '33333333-3333-4333-8333-333333333333' },
+      resolveKnowledgeContext = vi.fn().mockResolvedValue(retained),
+      reviewArtifacts = {
+        request: vi.fn(),
+        submit: vi.fn(),
+        get: vi.fn(),
+        readHistory: vi.fn().mockResolvedValue({ status: 'ok', text: 'Historical strategic review' }),
+      };
+    const draft = {
+        findings: [
+          {
+            kind: 'assumption',
+            domain: 'outcome',
+            initiative_id: 'project-one',
+            statement: 'Progress is unknown',
+            evidence: [],
+            uncertainty: 'Limited observation',
+          },
+        ],
+        options: [
+          {
+            id: 'continue',
+            initiative_id: 'project-one',
+            direction: 'continue',
+            title: 'Continue unchanged',
+            trade_off: 'Observe a result',
+            opportunity_cost: 'Limited attention',
+            next_action: 'Review new evidence',
+          },
+        ],
+        recommended_option_id: 'continue',
+        rationale: 'Preserve uncertainty',
+        confidence: 'low',
+        uncertainty: 'Unobserved outcomes',
+        evidence_would_change: 'A confirmed useful result',
+        forecast_until: '2026-10-20T00:00:00Z',
+      },
+      review_id = 'review-' + 'a'.repeat(64),
+      input = { charter_version: 1, previous_review_id: null },
+      params =
+        method === 'cos_review_request'
+          ? { request: input }
+          : method === 'cos_review_submit'
+            ? { review_id, revision: 1, draft }
+            : { review_id, revision: 1 },
+      target =
+        method === 'cos_review_request'
+          ? reviewArtifacts.request
+          : method === 'cos_review_submit'
+            ? reviewArtifacts.submit
+            : reviewArtifacts.get;
+    target.mockResolvedValue({ status: 'ok', text: 'CheckedStrategyPrivateCanary' });
+    const handler = createRpcHandler({
+      resolveContext: f.resolveContext,
+      store: { ...f.store, reviewArtifacts } as unknown as PriorityStore,
+      knowledge: { contextReady: vi.fn().mockResolvedValue({ status: 'ok' }) } as unknown as KnowledgeStore,
+      resolveKnowledgeContext,
+      reserveTool: async () => ({ status: 'ok' }),
+    });
+    const call = async () => {
+      await handler(
+        {
+          action: 'cos_rpc',
+          delivery_id: '22222222-2222-4222-8222-222222222222',
+          request: { ...request, method, params },
+        },
+        {} as Session,
+        f.db,
+      );
+      return JSON.parse(
+        (
+          f.db.prepare('SELECT response FROM cos_rpc_responses ORDER BY rowid DESC LIMIT 1').get() as {
+            response: string;
+          }
+        ).response,
+      );
+    };
+    expect((await call()).status).toBe('ok');
+    expect(target).toHaveBeenCalledExactlyOnceWith(
+      ...(method === 'cos_review_request'
+        ? [retained, request.request_id, input]
+        : method === 'cos_review_submit'
+          ? [retained, request.request_id, review_id, 1, draft]
+          : [retained, review_id, 1]),
+    );
+    target.mockImplementationOnce(async () => {
+      resolveKnowledgeContext.mockResolvedValue({ ...retained, generation: '44444444-4444-4444-8444-444444444444' });
+      return { status: 'ok', text: 'MustNotDiscloseStrategyCanary' };
+    });
+    const changed = await call();
+    expect(changed.status).toBe('denied');
+    expect(JSON.stringify(changed)).not.toContain('MustNotDiscloseStrategyCanary');
+    resolveKnowledgeContext.mockResolvedValue(retained);
+    for (const kind of ['schedule', 'mission_review']) {
+      f.resolveContext.mockResolvedValue({ ...context, origin: { kind, runId: 'run', generation: 1 } });
+      expect((await call()).status).toBe('denied');
+    }
+    expect(target).toHaveBeenCalledTimes(2);
+    if (method === 'cos_review_get') {
+      f.resolveContext.mockResolvedValue(context);
+      Object.assign(params, { historical: true });
+      expect((await call()).status).toBe('ok');
+      expect(reviewArtifacts.readHistory).toHaveBeenCalledExactlyOnceWith(retained, review_id, 1);
+    }
+  },
+);
+it.each([
+  ['cos_review_charter_propose', reviewCharter],
+  ['cos_strategy_observation_propose', strategyObservation],
+])(
+  'S10 %s uses the existing owner context, hides tokens and withholds a result after context changes',
+  async (method, change) => {
+    const f = fixture(),
+      context = {
+        scopeId: 'fixture',
+        ownerId: 'owner',
+        sessionId: 'session',
+        agentGroupId: 'group',
+        ingressId: 'verified',
+      },
+      retained = { ...context, provider: 'codex', generation: '33333333-3333-4333-8333-333333333333' },
+      resolveKnowledgeContext = vi.fn().mockResolvedValue(retained);
+    f.store.propose.mockResolvedValue({ status: 'ok', change, confirmation_token: 'PRIVATE_STRATEGY_APPROVAL' });
+    const handler = createRpcHandler({
+      resolveContext: f.resolveContext,
+      store: f.store as unknown as PriorityStore,
+      knowledge: { contextReady: vi.fn().mockResolvedValue({ status: 'ok' }) } as unknown as KnowledgeStore,
+      resolveKnowledgeContext,
+      reserveTool: async () => ({ status: 'ok' }),
+    });
+    const call = () =>
+      handler(
+        {
+          action: 'cos_rpc',
+          delivery_id: '22222222-2222-4222-8222-222222222222',
+          request: { ...request, method, params: { change } },
+        },
+        {} as Session,
+        f.db,
+      );
+    const response = () =>
+      JSON.parse((f.db.prepare('SELECT response FROM cos_rpc_responses').get() as { response: string }).response);
+    await call();
+    expect(response().status).toBe('ok');
+    expect(f.store.propose).toHaveBeenCalledExactlyOnceWith(context, request.request_id, change, retained);
+    expect(JSON.stringify(response())).not.toContain('PRIVATE_STRATEGY_APPROVAL');
+    resolveKnowledgeContext
+      .mockResolvedValueOnce(retained)
+      .mockResolvedValue({ ...retained, generation: '44444444-4444-4444-8444-444444444444' });
+    await call();
+    expect(response().status).toBe('denied');
+    expect(response().result).not.toHaveProperty('change');
+    resolveKnowledgeContext.mockResolvedValue(retained);
+    for (const kind of ['schedule', 'mission_review']) {
+      f.resolveContext.mockResolvedValue({ ...context, origin: { kind, runId: 'run', generation: 1 } });
+      await call();
+      expect(response().status).toBe('denied');
+    }
+    expect(f.store.propose).toHaveBeenCalledTimes(2);
+  },
+);
+it('S10 direction proposals use the retained main context, hide tokens and reject automatic or changed context', async () => {
+  const f = fixture();
+  const context = {
+    scopeId: 'fixture',
+    ownerId: 'owner',
+    sessionId: 'session',
+    agentGroupId: 'group',
+    ingressId: 'verified',
+  };
+  const retained = { ...context, provider: 'codex', generation: '33333333-3333-4333-8333-333333333333' };
+  const resolveKnowledgeContext = vi.fn().mockResolvedValue(retained);
+  const requestDirection = vi
+    .fn()
+    .mockResolvedValue({ status: 'ok', proposal_id: 'proposal', confirmation_token: 'PRIVATE_DIRECTION_APPROVAL' });
+  const input = {
+    review_id: 'review-' + 'a'.repeat(64),
+    revision: 1,
+    option_id: 'pause',
+    expected_record_version: 1,
+    expected_direction_version: 0,
+    reason: 'Measure useful results before expansion',
+  };
+  const handler = createRpcHandler({
+    resolveContext: f.resolveContext,
+    store: { ...f.store, requestDirection } as unknown as PriorityStore,
+    knowledge: { contextReady: vi.fn().mockResolvedValue({ status: 'ok' }) } as unknown as KnowledgeStore,
+    resolveKnowledgeContext,
+    reserveTool: async () => ({ status: 'ok' }),
+  });
+  const call = async () => {
+    await handler(
+      {
+        action: 'cos_rpc',
+        delivery_id: '22222222-2222-4222-8222-222222222222',
+        request: { ...request, method: 'cos_strategy_direction_propose', params: { request: input } },
+      },
+      {} as Session,
+      f.db,
+    );
+    return JSON.parse((f.db.prepare('SELECT response FROM cos_rpc_responses').get() as { response: string }).response);
+  };
+  {
+    const result = await call();
+    expect(result.status).toBe('ok');
+    expect(requestDirection).toHaveBeenCalledExactlyOnceWith(retained, request.request_id, input);
+    expect(JSON.stringify(result)).not.toContain('PRIVATE_DIRECTION_APPROVAL');
+  }
+  for (const kind of ['schedule', 'mission_review']) {
+    f.resolveContext.mockResolvedValue({ ...context, origin: { kind, runId: 'run', generation: 1 } });
+    expect((await call()).status).toBe('denied');
+  }
+  f.resolveContext.mockResolvedValue(context);
+  requestDirection.mockImplementationOnce(async () => {
+    resolveKnowledgeContext.mockResolvedValue({ ...retained, generation: '44444444-4444-4444-8444-444444444444' });
+    return { status: 'ok', confirmation_token: 'PRIVATE_DIRECTION_APPROVAL' };
+  });
+  expect((await call()).status).toBe('denied');
+});
 it('S09 routes only owner calendar proposals, status and cancellation without exposing approval tokens', async () => {
   const f = fixture(),
     action_id = 'action-' + 'b'.repeat(64);

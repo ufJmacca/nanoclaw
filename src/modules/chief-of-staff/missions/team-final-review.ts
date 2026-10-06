@@ -59,6 +59,13 @@ function grant(v: unknown): Grant | null {
 /** Final team judgement belongs to the retained main CoS context, never a specialist. No model wait holds this pool. */
 export class TeamFinalReviews {
   constructor(readonly teams: TeamRunStore) {}
+  /** S10 publication pin includes reviewed team policy and template authority, not specialist consensus. */
+  reviewAuthorityDigest(context: KnowledgeContext): string | null {
+    const authority = this.teams.proposals.authority?.(context);
+    return !context.origin && context.provider === 'codex' && authority?.contextGeneration === context.generation
+      ? digest(authority)
+      : null;
+  }
   /** Retained metadata can retire native work after authority loss. It never reads artifacts or authorises execution. */
   private async metadataTransaction(operation: (client: PoolClient) => Promise<Result>): Promise<Result> {
     try {
