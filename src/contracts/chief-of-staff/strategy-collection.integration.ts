@@ -79,7 +79,7 @@ before(async () => {
           await approve({
             kind: 'project',
             title,
-            description: 'Synthetic initiative',
+            description: 'Synthetic initiative\nApproved multiline description',
             lifecycle: 'active',
             reason: 'Fixture owner direction',
             expected_version: 0,
@@ -468,6 +468,42 @@ test('S10 a captured goal changed before publication fails its current-version f
   assert.equal(fresh.status, 'ok');
   assert.equal((fresh.snapshot as ReviewSnapshot).initiatives.find((r) => r.id === busy)?.version, old.version + 1);
 });
+test('S10-T09 a later review preserves the original forecast and recommendation after priorities change', async () => {
+  const old = await reviews.readHistory(context, reviewId, 1);
+  assert.equal(old.status, 'ok');
+  assert.match(String(old.text), /Historical strategic review/);
+  assert.equal((old.review as { draft: ReviewDraft }).draft.rationale, draft.rationale);
+  const id = randomUUID(),
+    input = { charter_version: 1, previous_review_id: reviewId },
+    result = await reviews.request(context, id, input);
+  assert.equal(result.status, 'ok');
+  assert.equal(result.review_id, reviewId);
+  assert.equal(result.revision, 2);
+  const snapshot = result.snapshot as ReviewSnapshot;
+  assert.equal(snapshot.previous_review?.revision, 1);
+  assert.equal(snapshot.previous_review?.recommended_option.id, 'pause-busy');
+  assert.equal(snapshot.previous_review?.rationale, draft.rationale);
+  assert.equal(snapshot.previous_review?.forecast_until, draft.forecast_until);
+  assert.equal(snapshot.previous_review?.uncertainty, draft.uncertainty);
+  assert.equal(snapshot.initiatives.find((r) => r.id === busy)?.description, 'Revised priority');
+  assert.deepEqual(await reviews.request(context, id, input), result);
+  assert.equal((await reviews.request(context, randomUUID(), input)).status, 'denied'); // No revision can skip an unfinished predecessor.
+  const later = { ...draft, rationale: 'The previous forecast remains uncertain after revising priorities' };
+  assert.equal((await reviews.submit(context, randomUUID(), reviewId, 2, later)).status, 'ok');
+  assert.equal((await reviews.readHistory(context, reviewId, 1)).text, old.text);
+  assert.equal((await reviews.authorizePublication(context, String(old.text))).status, 'ok');
+  const rows = (
+    await admin.query(
+      'SELECT revision,previous_revision FROM cos.strategy_review_snapshots WHERE scope_id=$1 ORDER BY revision',
+      [scope],
+    )
+  ).rows;
+  assert.deepEqual(rows, [
+    { revision: 1, previous_revision: null },
+    { revision: 2, previous_revision: 1 },
+  ]);
+  assert.equal((await reviews.request({ ...context, scopeId: foreign }, randomUUID(), input)).status, 'denied');
+});
 test('S10 withdrawn source authority closes review capture and retained snapshot disclosure', async () => {
   const captured = await collector.collect(context, request, identity);
   assert.equal(captured.status, 'ok');
@@ -478,12 +514,14 @@ test('S10 withdrawn source authority closes review capture and retained snapshot
   assert.equal(checked, false);
   assert.equal((await collector.collect(context, request, identity)).status, 'denied');
   assert.equal((await reviews.get(context, reviewId, 1)).status, 'denied');
+  assert.equal((await reviews.readHistory(context, reviewId, 1)).status, 'denied');
+  assert.equal((await reviews.get(context, reviewId, 2)).status, 'denied');
   assert.equal((await reviews.request(context, reviewRequest, request)).status, 'denied');
   assert.equal((await reviews.authorizePublication(context, reviewText)).status, 'denied');
   const lifecycles = (
     await admin.query("SELECT lifecycle FROM cos.artifacts WHERE scope_id=$1 AND kind='summary'", [scope])
   ).rows;
-  assert.equal(lifecycles.length, 2);
+  assert.equal(lifecycles.length, 4);
   assert.equal(
     lifecycles.every((r) => r.lifecycle === 'quarantined'),
     true,
@@ -517,12 +555,12 @@ test('S10 due source retention removes private review bytes while preserving imm
   assert.equal(
     (await admin.query('SELECT count(*)::int AS n FROM cos.strategy_review_snapshots WHERE scope_id=$1', [scope]))
       .rows[0].n,
-    1,
+    2,
   );
   assert.equal(
     (await admin.query('SELECT count(*)::int AS n FROM cos.strategy_review_results WHERE scope_id=$1', [scope])).rows[0]
       .n,
-    1,
+    2,
   );
   assert.equal((await reviews.get(context, reviewId, 1)).status, 'denied');
 });

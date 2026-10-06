@@ -469,3 +469,14 @@ it('S10 replacing a review charter preserves old observations without carrying t
   value.findings[1].kind = 'assumption';
   expect(renderReview(assembleReview(snapshot, value))).toContain('Historical observation from charter v1');
 });
+it('S10 approved multiline descriptions remain exact in snapshots and render without new message structure or mentions', () => {
+  const source = input(),
+    description = 'Approved first line\n@all second line\t[private](link)';
+  source.records[0].description = description;
+  const snapshot = buildReviewSnapshot(source);
+  expect(snapshot.initiatives[0].description).toBe(description);
+  const text = renderReview(assembleReview(snapshot, draft()));
+  expect(text).toContain('Approved description: Approved first line ＠all second line');
+  expect(text).not.toContain('\n@all');
+  expect(text).not.toContain('[private](link)');
+});

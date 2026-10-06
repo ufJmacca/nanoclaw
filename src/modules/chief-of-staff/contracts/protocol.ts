@@ -267,9 +267,10 @@ export function validRequest(value: unknown): value is CosRequest {
     );
   if (value.method === 'cos_review_get')
     return (
-      keys(value.params, ['review_id', 'revision']) &&
+      keys(value.params, ['review_id', 'revision', 'historical']) &&
       reviewId(value.params.review_id) &&
-      reviewInteger(value.params.revision)
+      reviewInteger(value.params.revision) &&
+      (value.params.historical === undefined || typeof value.params.historical === 'boolean')
     );
   if (value.method === 'cos_work_change_propose')
     return keys(value.params, ['change']) && validWorkChange(value.params.change);

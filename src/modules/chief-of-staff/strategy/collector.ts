@@ -39,7 +39,7 @@ const sorted = <T extends { id: string }>(rows: T[]): T[] => rows.sort((a, b) =>
 const incomplete = (): Result => ({ status: 'unavailable', coverage: 'incomplete' });
 
 /** Database collection is bounded and complete before any review analysis or artifact publication.
- * Later-review, mission and calendar adapters remain closed until their validated collection path is added. */
+ * Prior summaries come only from verified private artifacts. Mission/calendar adapters remain closed. */
 export class ReviewCollector {
   constructor(
     readonly options: {
@@ -54,15 +54,20 @@ export class ReviewCollector {
     client: PoolClient,
     context: KnowledgeContext,
     version: number,
+    historical = false,
   ): Promise<ReviewCharterDefinition | null> {
     const row = (
       await client.query(
         `SELECT c.definition,c.digest,r.body,r.digest AS revision_digest FROM cos.review_charters c
-      JOIN cos.review_charter_revisions r ON r.scope_id=c.scope_id AND r.version=c.version
-      WHERE c.scope_id=$1 AND c.owner_id=$2 AND c.session_id=$3 AND c.agent_group_id=$4 AND c.version=$5 AND c.state='active'`,
-        [context.scopeId, context.ownerId, context.sessionId, context.agentGroupId, version],
+      JOIN cos.review_charter_revisions r ON r.scope_id=c.scope_id AND r.version=$5
+      WHERE c.scope_id=$1 AND c.owner_id=$2 AND c.session_id=$3 AND c.agent_group_id=$4 AND (c.version=$5 OR $6) AND c.state='active'`,
+        [context.scopeId, context.ownerId, context.sessionId, context.agentGroupId, version, historical],
       )
     ).rows[0];
+    if (historical && row && validReviewCharterChange(row.body?.change)) {
+      row.definition = row.body.change.definition;
+      row.digest = digest(row.definition);
+    }
     return row &&
       validReviewCharterChange(row.body?.change) &&
       row.body.change.expected_version + 1 === version &&
@@ -186,8 +191,16 @@ export class ReviewCollector {
       !reviewInteger(identity.revision)
     )
       return { status: 'denied' };
-    if (request.previous_review_id !== null || identity.previous !== null || identity.revision !== 1)
-      return incomplete();
+    if (
+      request.previous_review_id === null
+        ? identity.previous !== null || identity.revision !== 1
+        : !identity.previous ||
+          identity.previous.review_id !== request.previous_review_id ||
+          identity.review_id !== request.previous_review_id ||
+          identity.revision !== identity.previous.revision + 1 ||
+          identity.previous.scope_id !== context.scopeId
+    )
+      return { status: 'denied' };
     try {
       return await this.options.database.run(async (client) => {
         await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ');
@@ -346,6 +359,7 @@ export class ReviewCollector {
     context: KnowledgeContext,
     snapshot: ReviewSnapshot,
     value: unknown,
+    historical = false,
   ): Promise<boolean> {
     const refs = value as ReviewVersionRefs | null;
     if (
@@ -357,7 +371,7 @@ export class ReviewCollector {
       !(await this.options.knowledge.answers.dependencies.current(client, context))
     )
       return false;
-    const definition = await this.charter(client, context, snapshot.charter.version);
+    const definition = await this.charter(client, context, snapshot.charter.version, historical);
     if (
       !definition ||
       digest(definition) !== refs.charter_digest ||
@@ -366,6 +380,12 @@ export class ReviewCollector {
       return false;
     const sources = await this.sources(client, context, definition);
     if (!sources || digest(sources) !== digest(refs.sources)) return false;
+    if (historical) {
+      // The already integrity-checked private artifact retains the old records and advice.
+      // Source permission/version and native context authority still have to be current.
+      const calendar = await this.options.knowledge.answers.dependencies.calendarContext(client, context, true);
+      return calendar.status === 'ok' && digest(calendar.notice) === refs.calendar_digest;
+    }
     const records = await this.records(client, context, definition);
     if (digest(records) !== refs.record_digest || digest(records) !== digest(snapshot.initiatives)) return false;
     const work = await this.work(client, context, definition),

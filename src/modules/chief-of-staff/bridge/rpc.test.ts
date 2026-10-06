@@ -115,7 +115,12 @@ it.each(['cos_review_request', 'cos_review_submit', 'cos_review_get'])(
       },
       retained = { ...context, provider: 'codex', generation: '33333333-3333-4333-8333-333333333333' },
       resolveKnowledgeContext = vi.fn().mockResolvedValue(retained),
-      reviewArtifacts = { request: vi.fn(), submit: vi.fn(), get: vi.fn() };
+      reviewArtifacts = {
+        request: vi.fn(),
+        submit: vi.fn(),
+        get: vi.fn(),
+        readHistory: vi.fn().mockResolvedValue({ status: 'ok', text: 'Historical strategic review' }),
+      };
     const draft = {
         findings: [
           {
@@ -206,6 +211,12 @@ it.each(['cos_review_request', 'cos_review_submit', 'cos_review_get'])(
       expect((await call()).status).toBe('denied');
     }
     expect(target).toHaveBeenCalledTimes(2);
+    if (method === 'cos_review_get') {
+      f.resolveContext.mockResolvedValue(context);
+      Object.assign(params, { historical: true });
+      expect((await call()).status).toBe('ok');
+      expect(reviewArtifacts.readHistory).toHaveBeenCalledExactlyOnceWith(retained, review_id, 1);
+    }
   },
 );
 it.each([

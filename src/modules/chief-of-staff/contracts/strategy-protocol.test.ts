@@ -81,7 +81,11 @@ describe('S10 canonical owner review proposal contracts', () => {
       expect(
         validRequest({ ...value, params: { ...params, draft: { ...reviewDraft, confidence: 'agent_agreement' } } }),
       ).toBe(false);
-    if (method === 'cos_review_get') expect(validRequest({ ...value, params: { ...params, revision: 0 } })).toBe(false);
+    if (method === 'cos_review_get') {
+      expect(validRequest({ ...value, params: { ...params, revision: 0 } })).toBe(false);
+      expect(validRequest({ ...value, params: { ...params, historical: true } })).toBe(true);
+      expect(validRequest({ ...value, params: { ...params, historical: 'forged' } })).toBe(false);
+    }
   });
   it('packages the same bounded review validator in the runner', () => {
     expect(fs.readFileSync('container/agent-runner/src/mcp-tools/generated/strategy-protocol.ts', 'utf8')).toBe(

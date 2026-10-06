@@ -220,11 +220,17 @@ export function createRpcHandler(dependencies: {
           : { status: 'unavailable' };
       else if (request.method === 'cos_review_get')
         result = dependencies.store.reviewArtifacts
-          ? await dependencies.store.reviewArtifacts.get(
-              knowledgeContext,
-              String(request.params.review_id),
-              Number(request.params.revision),
-            )
+          ? request.params.historical === true
+            ? await dependencies.store.reviewArtifacts.readHistory(
+                knowledgeContext,
+                String(request.params.review_id),
+                Number(request.params.revision),
+              )
+            : await dependencies.store.reviewArtifacts.get(
+                knowledgeContext,
+                String(request.params.review_id),
+                Number(request.params.revision),
+              )
           : { status: 'unavailable' };
       else if (request.method === 'cos_review_charter_propose' || request.method === 'cos_strategy_observation_propose')
         result = await dependencies.store.propose(

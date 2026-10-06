@@ -11,7 +11,14 @@ import {
   type ReviewDraft,
 } from '../contracts/strategy-protocol.js';
 import type { ReviewCollector, ReviewVersionRefs } from './collector.js';
-import { assembleReview, renderReview, type ReviewArtifact, type ReviewSnapshot } from './review.js';
+import {
+  assembleReview,
+  renderReview,
+  summarizeReview,
+  type ReviewArtifact,
+  type ReviewSnapshot,
+  type ReviewPrevious,
+} from './review.js';
 
 type SnapshotMetadata = {
   id: string;
@@ -38,6 +45,9 @@ const ticket = (context: KnowledgeContext, text: string) =>
  * Files are accessed outside PostgreSQL leases; every disclosure and publication repeats remote authority checks. */
 export class ReviewArtifacts {
   constructor(readonly collector: ReviewCollector) {}
+  async readHistory(context: KnowledgeContext, review: string, revision: number): Promise<Result> {
+    return this.get(context, review, revision, true);
+  }
   private get knowledge() {
     return this.collector.options.knowledge;
   }
@@ -176,16 +186,22 @@ export class ReviewArtifacts {
     context: KnowledgeContext,
     metadata: SnapshotMetadata,
     snapshot: ReviewSnapshot,
+    historical = false,
   ): Promise<boolean> {
     const current = await this.snapshotMetadata(client, context, metadata.id, metadata.revision);
     return (
       !!current &&
       digest(current) === digest(metadata) &&
-      (await this.collector.validateSnapshot(client, context, snapshot, metadata.version_refs)) &&
+      (await this.collector.validateSnapshot(client, context, snapshot, metadata.version_refs, historical)) &&
       (await this.dependencies(client, context, metadata.artifact_id))
     );
   }
-  private async readSnapshot(context: KnowledgeContext, id: string, revision: number): Promise<Result> {
+  private async readSnapshot(
+    context: KnowledgeContext,
+    id: string,
+    revision: number,
+    historical = false,
+  ): Promise<Result> {
     if (!reviewId(id) || !reviewInteger(revision)) return { status: 'denied' };
     const d = this.knowledge.answers.dependencies;
     const before = await d.transaction(async (client) => {
@@ -210,7 +226,7 @@ export class ReviewArtifacts {
     }
     return d.transaction(
       async (client) =>
-        (await this.fence(client, context, metadata, snapshot))
+        (await this.fence(client, context, metadata, snapshot, historical))
           ? { status: 'ok', review_id: id, revision, snapshot, metadata }
           : { status: 'denied' },
       true,
@@ -228,11 +244,48 @@ export class ReviewArtifacts {
       if (read.status !== 'ok') return read;
       return { status: 'ok', review_id: read.review_id, revision: read.revision, snapshot: read.snapshot };
     }
-    const review = 'review-' + digest({ scope: context.scopeId, session: context.sessionId, request: id });
-    const collected = await this.collector.collect(context, input, { review_id: review, revision: 1, previous: null });
+    let review = 'review-' + digest({ scope: context.scopeId, session: context.sessionId, request: id }),
+      revision = 1;
+    let previous: ReviewPrevious | null = null,
+      previousMetadata: SnapshotMetadata | null = null,
+      previousSnapshot: ReviewSnapshot | null = null;
+    if (input.previous_review_id !== null) {
+      const latest = await d.transaction(async (client) => {
+        const row = (
+          await client.query(
+            'SELECT revision FROM cos.strategy_review_snapshots WHERE scope_id=$1 AND id=$2 AND owner_id=$3 AND session_id=$4 AND processing_provider=$5 ORDER BY revision DESC LIMIT 1',
+            [context.scopeId, input.previous_review_id, context.ownerId, context.sessionId, context.provider],
+          )
+        ).rows[0];
+        return row ? { status: 'ok', revision: row.revision } : { status: 'denied' };
+      });
+      if (latest.status !== 'ok') return latest;
+      const oldReview = await this.readHistory(context, input.previous_review_id, Number(latest.revision));
+      if (oldReview.status !== 'ok') return oldReview;
+      const verified = await this.readSnapshot(context, input.previous_review_id, Number(latest.revision), true);
+      if (verified.status !== 'ok') return verified;
+      previous = summarizeReview(oldReview.review as ReviewArtifact);
+      previousMetadata = verified.metadata as SnapshotMetadata;
+      previousSnapshot = verified.snapshot as ReviewSnapshot;
+      if (digest((oldReview.review as ReviewArtifact).snapshot) !== digest(previousSnapshot))
+        return { status: 'denied' };
+      review = input.previous_review_id;
+      revision = previous.revision + 1;
+    }
+    const collected = await this.collector.collect(context, input, { review_id: review, revision, previous });
     if (collected.status !== 'ok') return collected;
     const snapshot = collected.snapshot as ReviewSnapshot,
       refs = collected.version_refs as ReviewVersionRefs;
+    if (
+      previousSnapshot &&
+      (previousSnapshot.charter.definition.source_ids.some(
+        (source) => !snapshot.charter.definition.source_ids.includes(source),
+      ) ||
+        previousSnapshot.charter.definition.initiative_ids.some(
+          (initiative) => !snapshot.charter.definition.initiative_ids.includes(initiative),
+        ))
+    )
+      return { status: 'denied' };
     const body = JSON.stringify({ format: 'cos-strategy-snapshot/v1', snapshot });
     if (Buffer.byteLength(body) > 65536) return { status: 'unavailable' };
     let result: Result;
@@ -248,6 +301,17 @@ export class ReviewArtifacts {
           if (!(await this.collector.validateSnapshot(client, context, snapshot, refs))) return { status: 'denied' };
           const prior = await this.operation(client, context, id, method, hash);
           if (prior.status !== 'ok' || prior.review_id) return prior;
+          if (previousMetadata && previousSnapshot) {
+            if (!(await this.fence(client, context, previousMetadata, previousSnapshot, true)))
+              return { status: 'denied' };
+            const latest = (
+              await client.query(
+                'SELECT max(revision)::int AS revision FROM cos.strategy_review_snapshots WHERE scope_id=$1 AND id=$2',
+                [context.scopeId, review],
+              )
+            ).rows[0];
+            if (latest.revision !== previousMetadata.revision) return { status: 'conflict' };
+          }
           await this.registerArtifact(client, context, captured, 'cos-strategy-snapshot/v1', snapshot);
           const retained: KnowledgeContext = {
             scopeId: context.scopeId,
@@ -260,7 +324,7 @@ export class ReviewArtifacts {
           };
           await client.query(
             `INSERT INTO cos.strategy_review_snapshots(scope_id,id,revision,previous_revision,charter_version,owner_id,session_id,processing_provider,
-             artifact_id,snapshot_digest,context,version_refs,as_of,expires_at) VALUES($1,$2,1,NULL,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+             artifact_id,snapshot_digest,context,version_refs,as_of,expires_at) VALUES($1,$2,$13,$14,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
             [
               context.scopeId,
               review,
@@ -276,9 +340,11 @@ export class ReviewArtifacts {
               new Date(
                 Math.min(Date.parse(snapshot.as_of) + 15 * 60000, Date.parse(snapshot.charter.definition.ends_at)),
               ).toISOString(),
+              revision,
+              previous?.revision ?? null,
             ],
           );
-          const receipt: Result = { status: 'ok', review_id: review, revision: 1 };
+          const receipt: Result = { status: 'ok', review_id: review, revision };
           await this.saveOperation(client, context, id, method, hash, receipt);
           return receipt;
         }, true);
@@ -364,14 +430,14 @@ export class ReviewArtifacts {
     }
     return result.status === 'ok' ? this.get(context, review, revision) : result;
   }
-  async get(context: KnowledgeContext, review: string, revision: number): Promise<Result> {
+  async get(context: KnowledgeContext, review: string, revision: number, historical = false): Promise<Result> {
     const d = this.knowledge.answers.dependencies,
-      read = await this.readSnapshot(context, review, revision);
+      read = await this.readSnapshot(context, review, revision, historical);
     if (read.status !== 'ok') return read;
     const snapshot = read.snapshot as ReviewSnapshot,
       snapshotMetadata = read.metadata as SnapshotMetadata;
     const before = await d.transaction(async (client) => {
-      if (!(await this.fence(client, context, snapshotMetadata, snapshot))) return { status: 'denied' };
+      if (!(await this.fence(client, context, snapshotMetadata, snapshot, historical))) return { status: 'denied' };
       const metadata = await this.resultMetadata(client, context, review, revision);
       return metadata ? { status: 'ok', metadata } : { status: 'denied' };
     }, true);
@@ -392,6 +458,10 @@ export class ReviewArtifacts {
       artifact = assembleReview(snapshot, body.review.draft);
       text = renderReview(artifact);
       if (text !== body.text) return { status: 'denied' };
+      if (historical)
+        text =
+          'Historical strategic review — priorities and observations may have changed since this advice.\n\n' + text;
+      if (Buffer.byteLength(text) > 32768) return { status: 'unavailable' };
     } catch {
       return { status: 'unavailable' };
     }
@@ -400,7 +470,7 @@ export class ReviewArtifacts {
       if (
         !current ||
         digest(current) !== digest(metadata) ||
-        !(await this.fence(client, context, snapshotMetadata, snapshot)) ||
+        !(await this.fence(client, context, snapshotMetadata, snapshot, historical)) ||
         !(await this.dependencies(client, context, metadata.artifact_id))
       )
         return { status: 'denied' };
@@ -411,6 +481,7 @@ export class ReviewArtifacts {
         generation: context.generation,
         ingress_id: context.ingressId,
         output_digest: digest(text),
+        historical,
       };
       await client.query(
         `INSERT INTO cos.operations(session_id,request_id,scope_id,method,payload_hash,result) VALUES($1,$2,$3,'cos_review_read',$4,$5)
@@ -442,7 +513,12 @@ export class ReviewArtifacts {
         : { status: 'denied' };
     });
     if (checked.status !== 'ok') return checked;
-    const current = await this.get(context, String(checked.review_id), Number(checked.revision));
+    const current = await this.get(
+      context,
+      String(checked.review_id),
+      Number(checked.revision),
+      checked.historical === true,
+    );
     return current.status !== 'ok' ? current : current.text === text ? { status: 'ok' } : { status: 'denied' };
   }
 }

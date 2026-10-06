@@ -119,6 +119,9 @@ const fields = (value: object, names: string[]) =>
   Object.keys(value).length === names.length && names.every((name) => Object.hasOwn(value, name));
 const directions = ['continue', 'change', 'pause', 'stop'];
 const before = (value: unknown, asOf: string) => reviewInstant(value) && Date.parse(value) <= Date.parse(asOf);
+// Core approved records allow multiline text. Preserve it in the snapshot and flatten controls only when rendering.
+const approvedText = (value: unknown, maximum: number, empty = false) =>
+  typeof value === 'string' && reviewText(value.replace(/[\n\r\t]/g, ' '), maximum, empty);
 function observationBody(row: ReviewObservation): StrategyObservationChange {
   const { scope_id: _scope, id: _id, ...body } = row;
   return body;
@@ -160,8 +163,8 @@ export function buildReviewSnapshot(input: ReviewInput): ReviewSnapshot {
         !fields(row, ['scope_id', 'id', 'version', 'kind', 'title', 'description', 'lifecycle']) ||
         !reviewInteger(row.version) ||
         !['goal', 'project'].includes(row.kind) ||
-        !reviewText(row.title, 200) ||
-        !reviewText(row.description, 8000, true) ||
+        !approvedText(row.title, 200) ||
+        !approvedText(row.description, 8000, true) ||
         !['active', 'inactive'].includes(row.lifecycle),
     )
   )
@@ -501,7 +504,10 @@ export function summarizeReview(review: ReviewArtifact): ReviewPrevious {
   });
 }
 const label = (text: string) =>
-  text.replaceAll('@', '＠').replace(/[\\`*_{}[\]<>()!]/g, (character) => '\\' + character);
+  text
+    .replace(/[\n\r\t]/g, ' ')
+    .replaceAll('@', '＠')
+    .replace(/[\\`*_{}[\]<>()!]/g, (character) => '\\' + character);
 const referenceLabel = (ref: ReviewReference) =>
   ref.kind === 'source'
     ? `source evidence ${ref.evidence_id}`
