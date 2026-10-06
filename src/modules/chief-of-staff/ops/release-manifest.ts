@@ -28,7 +28,7 @@ export const REQUIRED_RELEASE_CHECKS = [
 export type ReleaseManifest = {
   contract: 'cos-release/v1';
   releaseId: string;
-  slice: 'S01' | 'S02' | 'S03' | 'S04' | 'S05' | 'S06' | 'S07' | 'S08' | 'S09' | 'S10';
+  slice: 'S01' | 'S02' | 'S03' | 'S04' | 'S05' | 'S06' | 'S07' | 'S08' | 'S09' | 'S10' | 'S11';
   platform: 'linux/arm64';
   source: {
     repository: 'ufJmacca/nanoclaw';
@@ -61,7 +61,7 @@ export function validateReleaseManifest(value: unknown): ReleaseManifest {
     !object(value) ||
     value.contract !== 'cos-release/v1' ||
     typeof value.slice !== 'string' ||
-    !['S01', 'S02', 'S03', 'S04', 'S05', 'S06', 'S07', 'S08', 'S09', 'S10'].includes(value.slice) ||
+    !['S01', 'S02', 'S03', 'S04', 'S05', 'S06', 'S07', 'S08', 'S09', 'S10', 'S11'].includes(value.slice) ||
     value.platform !== 'linux/arm64' ||
     value.rpc !== 'cos-rpc/v1' ||
     !matches(value.releaseId, /^release-[a-zA-Z0-9_-]{1,120}$/) ||

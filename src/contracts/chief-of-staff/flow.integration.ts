@@ -126,6 +126,7 @@ test(
         'cos_review_submit',
         'cos_source_change_propose',
         'cos_source_get',
+        'cos_status',
         'cos_strategy_direction_propose',
         'cos_strategy_observation_propose',
         'cos_team_cancel',

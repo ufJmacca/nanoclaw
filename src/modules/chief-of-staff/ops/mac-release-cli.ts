@@ -72,7 +72,7 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
   if (operation === 'init' && values.length === 3) {
     const [commit, fetchRef, slice] = values;
     // Only the current implemented slice may create a new release; historical manifests remain readable.
-    if (slice !== 'S10' || Number(SCHEMA_VERSION) !== 18) throw new Error('current_release_slice_required');
+    if (slice !== 'S11' || Number(SCHEMA_VERSION) !== 18) throw new Error('current_release_slice_required');
     if (!/^[a-f0-9]{40}$/.test(commit) || !/^refs\/heads\/[a-zA-Z0-9_./-]+$/.test(fetchRef) || fetchRef.includes('..'))
       throw new Error('invalid_candidate_source');
     const root = releaseRoot(id);
@@ -218,7 +218,11 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
           COS_FIXTURE_RUNNER_VOLUME: volume,
         },
         stdio: 'inherit',
-        timeout: ['S06', 'S07', 'S08', 'S09'].includes(plan.slice) ? 660000 : 180000,
+        timeout: ['S10', 'S11'].includes(plan.slice)
+          ? 960000
+          : ['S06', 'S07', 'S08', 'S09'].includes(plan.slice)
+            ? 660000
+            : 180000,
       },
     );
     if (result.status !== 0) throw new Error('local_fixture_failed');
