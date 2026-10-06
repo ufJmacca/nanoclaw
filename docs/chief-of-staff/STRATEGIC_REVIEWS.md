@@ -65,6 +65,11 @@ approved charter change before requesting a fresh review. Retained context and
 saved-review permission checks still apply. See the
 [source-evolution correction](evidence/S10_SOURCE_EVOLUTION.md).
 
+A snapshot includes at most 20 observations. Retired source evidence cannot crowd
+out newly approved current evidence before that limit is applied. Withheld or
+overflowing history still produces limited coverage. See the
+[collection-limit correction](evidence/S10_OBSERVATION_CAP.md).
+
 ## Scope and present limits
 
 One active manual charter selects at most ten initiatives and six sources. The

@@ -1,6 +1,9 @@
 # S10 correction: reviews after source changes
 
-**Status:** exact tested candidate deployed and technically verified; correction human review/merge pending.
+**Status:** historical first P1 candidate, technically verified. The [final collection-limit correction](S10_OBSERVATION_CAP.md) supersedes this candidate; PR #68 human review/merge remains pending.
+
+The identities and retention statements below describe this earlier deployment.
+Later scoped image-cache retirement is recorded in the final correction receipt.
 
 The owner merged [S10 PR #67](https://github.com/ufJmacca/nanoclaw/pull/67)
 at `cb221bc0f6692f7ffd798e51dea786ab17105449`. Its automated review identified
