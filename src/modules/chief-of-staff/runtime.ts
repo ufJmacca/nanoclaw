@@ -536,7 +536,8 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
       );
     },
   });
-  if (enabled())
+  // Install the handler before startup admission opens; every request still resolves fresh gated authority.
+  if (d.enabled && d.store)
     registerDeliveryAction(
       'cos_rpc',
       createRpcHandler({
@@ -563,14 +564,18 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
         resolveKnowledgeContext: async (session, context) => resolveKnowledgeContext(session, context, d.db),
       }),
     );
+  const reconcile = async (binding: CosBinding) => {
+    if (!disposed && d.store?.missionRuns)
+      await controller.reconcileControls(binding, (context, id) => d.store!.missionRuns.cancel(context, id), {
+        revokeSource: d.store.knowledge ? (context, id) => d.store!.knowledge!.revokeOwned(context, id) : undefined,
+        disableConnector: d.store.calendar ? (context, id) => d.store!.calendar!.disconnect(context, id) : undefined,
+      });
+  };
   return {
     controller,
+    reconcile,
     pump: async (binding: CosBinding) => {
-      if (!disposed && d.store?.missionRuns)
-        await controller.reconcileControls(binding, (context, id) => d.store!.missionRuns.cancel(context, id), {
-          revokeSource: d.store.knowledge ? (context, id) => d.store!.knowledge!.revokeOwned(context, id) : undefined,
-          disableConnector: d.store.calendar ? (context, id) => d.store!.calendar!.disconnect(context, id) : undefined,
-        });
+      await reconcile(binding);
       if (enabled()) await invalidations?.drain(binding);
       const recovered = enabled() ? await briefReconciliation?.drain(binding) : undefined;
       if (enabled()) await reviewDispatch?.drain(binding);

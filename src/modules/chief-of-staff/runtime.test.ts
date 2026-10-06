@@ -423,9 +423,11 @@ it.each([false, true])('S06-T06 runtime cancels the entire team with never-alloc
     }),
   };
   const register = vi.spyOn(delivery, 'registerDeliveryAction').mockImplementation(() => {});
+  let ready = false;
   runtime = createCosRuntime({
     db,
     enabled: true,
+    admission: () => ready,
     store: { teamRuns, missionRuns } as unknown as PriorityStore,
     missionExecution,
     facts: async () => ({
@@ -442,6 +444,8 @@ it.each([false, true])('S06-T06 runtime cancels the entire team with never-alloc
   });
   const handler = register.mock.calls.find(([action]) => action === 'cos_rpc')![1],
     requestId = randomUUID();
+  expect(runtime.controller.localContext(session)).toBeNull();
+  ready = true;
   await handler(
     {
       action: 'cos_rpc',
