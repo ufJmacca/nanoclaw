@@ -46,6 +46,55 @@ function fixture(enabled: boolean, specialists?: (store: PriorityStore) => Speci
 function specialist() {
   return { pump: vi.fn(async (_binding: CosBinding) => {}), fenceLocal: vi.fn(), close: vi.fn(async () => {}) };
 }
+it('S11-T08 host liveness stays distinct from database readiness and incomplete reconciliation', async () => {
+  const f = fixture(true);
+  f.connect.mockRejectedValueOnce(Object.assign(new Error('PRIVATE_NETWORK'), { code: 'ECONNREFUSED' }));
+  await f.service.tick();
+  expect(f.service.healthStatus()).toMatchObject({
+    host_process_alive: true,
+    component_stopped: false,
+    admission: 'closed',
+    live_activation: 'not_verified',
+  });
+  expect(JSON.stringify(f.service.healthStatus())).not.toContain('PRIVATE_NETWORK');
+  let release!: () => void;
+  const binding: CosBinding = {
+    scopeId: 'scope',
+    agentGroupId: 'group',
+    messagingGroupId: 'mg',
+    sessionId: 'main',
+    provider: 'codex',
+    instanceId: 'fixture',
+    channelId: 'private',
+    ownerId: 'owner',
+    botId: 'bot',
+  };
+  installCosBoundary(binding, f.db);
+  // A trusted successful connection is followed by reconciliation before infrastructure readiness.
+  const original = f.service.dependencies.specialists;
+  f.service.dependencies.specialists = () => ({
+    fenceLocal() {},
+    async close() {},
+    pump: () =>
+      new Promise<void>((r) => {
+        release = r;
+      }),
+  });
+  const pending = f.service.tick();
+  for (let i = 0; i < 20 && !release; i++) await Promise.resolve();
+  expect(f.service.healthStatus()).toMatchObject({
+    infrastructure_status: 'reconciling',
+    admission: 'closed',
+    database_readiness: { state: 'READY' },
+  });
+  release();
+  await pending;
+  expect(f.service.healthStatus()).toMatchObject({
+    infrastructure_status: 'ready',
+    admission: 'eligible_subject_to_scope_authority',
+  });
+  f.service.dependencies.specialists = original;
+});
 it('S06-T02/T07 advances specialists before waking the retained main review in the same healthy tick', async () => {
   const worker = specialist(),
     f = fixture(true, () => worker),

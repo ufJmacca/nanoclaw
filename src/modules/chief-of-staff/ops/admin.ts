@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { databaseReadiness } from './database-readiness.js';
 import { validStatusInput, type StatusInput } from '../contracts/operations-protocol.js';
 import { isKnowledgeCommand, parseKnowledgeArguments } from './knowledge-admin.js';
 import { isCalendarCommand, parseCalendarArguments } from './calendar-admin.js';
@@ -296,10 +297,13 @@ export async function adminStatus(
       status: version === SCHEMA_VERSION ? 'ready' : 'schema_incompatible',
       schema_version: version,
       lifecycle: target.lifecycle,
+      database_readiness: databaseReadiness(
+        version === SCHEMA_VERSION ? null : new DatabasePreflightError('schema_incompatible'),
+      ),
     };
     // eslint-disable-next-line no-catch-all/no-catch-all -- Status exposes fixed dependency categories, never private driver diagnostics.
   } catch (error) {
-    return { ...base, status: safeDependencyStatus(error) };
+    return { ...base, status: safeDependencyStatus(error), database_readiness: databaseReadiness(error) };
   }
 }
 /** Only the owner-run host command reaches setup; no RPC or delivery action exposes it. */

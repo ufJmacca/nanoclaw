@@ -1,12 +1,13 @@
 import type { PriorityStore } from './store/priorities.js';
 import { createCosRuntime, type RuntimeDependencies } from './runtime.js';
-import { DatabasePreflightError } from './store/preflight.js';
+import { DatabasePreflightError, preflightFailure } from './store/preflight.js';
 import { DatabaseConfigurationError } from './store/config.js';
 import type { CosBinding } from '../../cos-boundary.js';
 import { interruptReviewOrigin } from './missions/review-origin.js';
 import { interruptScheduledOrigin } from './automation/scheduled-origin.js';
 import { cosMissionIdentities } from '../../cos-mission-boundary.js';
 import { stopCosMissionAttempt } from '../../cos-mission-stop.js';
+import { databaseReadiness } from './ops/database-readiness.js';
 export type SpecialistLifecycle = {
   pump(binding: CosBinding): Promise<void>;
   fenceLocal(): void;
@@ -25,8 +26,25 @@ export class CosService {
   private closed = false;
   private specialists?: SpecialistLifecycle;
   private specialistsFenced = false;
+  private databaseState = databaseReadiness('reconciling');
   constructor(readonly dependencies: ServiceDependencies) {
     this.runtime = createCosRuntime({ ...dependencies, enabled: false });
+  }
+  /** Called in the host process; connection health never supplies scope/model/action consent. */
+  healthStatus() {
+    return {
+      host_process_alive: true,
+      component_stopped: this.stopped,
+      infrastructure_status: this.status,
+      database_readiness: this.databaseState,
+      pool: this.store?.database.inspectPool?.() ?? null,
+      admission:
+        !this.stopped && this.status === 'ready' && (this.dependencies.admission?.() ?? true)
+          ? 'eligible_subject_to_scope_authority'
+          : 'closed',
+      live_activation: 'not_verified',
+      unknown_effects: 'requires_current_scoped_reconciliation',
+    };
   }
   private fenceSpecialists(): void {
     this.specialistsFenced = !!this.specialists;
@@ -88,6 +106,7 @@ export class CosService {
         }
         if (!this.store) {
           this.status = 'reconciling';
+          this.databaseState = databaseReadiness('reconciling');
           this.store = await this.dependencies.connect();
           if (this.stopped) return;
           this.runtime.dispose();
@@ -95,8 +114,9 @@ export class CosService {
         }
         await this.store.database.run((client) => client.query('SELECT 1'));
         if (this.stopped) return;
+        this.databaseState = databaseReadiness(null);
         if (!this.specialists) this.specialists = this.dependencies.specialists?.(this.store);
-        this.status = 'ready';
+        this.status = 'reconciling';
         const rows = this.dependencies.db.prepare('SELECT binding FROM cos_identity_boundaries').all() as Array<{
           binding: string;
         }>;
@@ -106,7 +126,11 @@ export class CosService {
           await this.specialists?.pump(binding);
           if (!this.stopped) await this.runtime.pump(binding);
         }
+        if (!this.stopped) this.status = 'ready';
       } catch (error) {
+        this.databaseState = databaseReadiness(
+          error instanceof DatabaseConfigurationError ? error : preflightFailure(error),
+        );
         this.fenceSpecialists();
         this.fenceExecutions();
         try {

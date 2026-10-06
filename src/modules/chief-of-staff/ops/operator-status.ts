@@ -195,7 +195,8 @@ async function read(client: PoolClient, context: Context, input: StatusInput): P
 export async function operatorStatus(database: BoundedDatabase, context: Context, input: StatusInput): Promise<Result> {
   if (context.origin || !validStatusInput(input)) return { status: 'denied' };
   try {
-    return await database.run((client) => read(client, context, input));
+    const result = await database.run((client) => read(client, context, input));
+    return result.status === 'ok' ? { ...result, database_pool: database.inspectPool() } : result;
   } catch (error) {
     if (error instanceof DatabaseUnavailable) return { status: 'unavailable' };
     throw error;

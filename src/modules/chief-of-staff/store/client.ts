@@ -10,6 +10,7 @@ export class DatabaseUnavailable extends Error {
 export class BoundedDatabase {
   private admitted = 0;
   private cooldownUntil = 0;
+  private lastSuccess = false;
   constructor(
     readonly pool: pg.Pool,
     readonly deadlineMs = 12000,
@@ -17,8 +18,25 @@ export class BoundedDatabase {
     readonly admission?: () => boolean,
   ) {
     pool.on('error', () => {
+      this.lastSuccess = false;
       this.cooldownUntil = Date.now() + 1000;
     });
+  }
+  /** Read-only, local pool metadata. A recent query is not a grant to resume unreconciled work. */
+  inspectPool() {
+    const count = (n: unknown): number | null => (Number.isSafeInteger(n) && Number(n) >= 0 ? Number(n) : null);
+    const total = count(this.pool.totalCount),
+      idle = count(this.pool.idleCount);
+    return {
+      capacity: this.capacity,
+      admitted: this.admitted,
+      total,
+      idle,
+      used: total !== null && idle !== null ? Math.max(0, total - idle) : null,
+      waiting: count(this.pool.waitingCount),
+      connection_state:
+        Date.now() < this.cooldownUntil ? 'cooldown' : this.lastSuccess ? 'recent_success' : 'unverified',
+    };
   }
 
   async run<T>(operation: (client: PoolClient) => Promise<T>, mutation = false, signal?: AbortSignal): Promise<T> {
@@ -86,9 +104,11 @@ export class BoundedDatabase {
     })();
     try {
       const result = await Promise.race([work, deadline]);
+      this.lastSuccess = true;
       release(false);
       return result;
     } catch {
+      this.lastSuccess = false;
       release(true);
       this.cooldownUntil = Date.now() + 1000;
       throw new DatabaseUnavailable(mutation && started ? 'pending' : 'unavailable');
