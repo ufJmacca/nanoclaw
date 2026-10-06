@@ -366,19 +366,27 @@ test(
         assert.deepEqual(held.isolation, { databaseNetworkDenied: true, databaseEnvironmentAbsent: true });
         if (failure === 'cancel') {
           await ingress('Inspect the active research and briefing without changing authority.');
-          const status = await client.call('cos_status', {});
+          const status: {
+            status: string;
+            result: {
+              execution_authority: string;
+              categories: Array<{ category: string; states: Record<string, number> }>;
+              source_content: string;
+              monetary_usage: string;
+            };
+          } = await client.call('cos_status', {});
           assert.equal(status.status, 'ok');
           assert.equal(status.result.execution_authority, 'inspection_only');
           assert.equal(
             status.result.categories.find(
               (row: { category: string; states: Record<string, number> }) => row.category === 'missions',
-            ).states.running,
+            )?.states.running,
             1,
           );
           assert.equal(
             status.result.categories.find(
               (row: { category: string; states: Record<string, number> }) => row.category === 'schedules',
-            ).states.active,
+            )?.states.active,
             1,
           );
           assert.equal(status.result.source_content, 'withheld');
