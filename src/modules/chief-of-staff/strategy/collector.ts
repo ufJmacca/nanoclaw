@@ -4,6 +4,10 @@ import { digest, type Result } from '../domain/contracts.js';
 import type { KnowledgeContext, KnowledgeStore } from '../knowledge/store.js';
 import { BoundedDatabase, DatabaseUnavailable } from '../store/client.js';
 import type { WorkStore } from '../store/work.js';
+import type { CalendarView } from '../calendar/view.js';
+import type { CalendarTime } from '../calendar/normalization.js';
+import type { Evidence } from '../knowledge/store.js';
+import { scheduledMinutes } from './calendar-allocation.js';
 import {
   validReviewCharterChange,
   validStrategyObservationChange,
@@ -34,19 +38,28 @@ export type ReviewVersionRefs = {
   decision_digest: string;
   sources: SourceVersion[];
   calendar_digest: string;
+  calendar_projection_digest: string;
+};
+type CalendarLocation = {
+  source_id: string;
+  binding_id: string;
+  calendar_id: string;
+  time_zone: string;
+  [key: string]: unknown;
 };
 const sorted = <T extends { id: string }>(rows: T[]): T[] => rows.sort((a, b) => a.id.localeCompare(b.id, 'en'));
 const incomplete = (): Result => ({ status: 'unavailable', coverage: 'incomplete' });
 
 /** Database collection is bounded and complete before any review analysis or artifact publication.
- * Prior summaries come only from verified private artifacts. Mission/calendar adapters remain closed. */
+ * Prior summaries come only from verified private artifacts. Calendar reads finish outside this pool; mission adapters remain closed. */
 export class ReviewCollector {
   constructor(
     readonly options: {
       database: BoundedDatabase;
       knowledge: KnowledgeStore;
       work: WorkStore;
-      hooks?: { afterRecords?(): Promise<void> };
+      calendarView?: Pick<CalendarView, 'readSelected'>;
+      hooks?: { afterRecords?(): Promise<void>; afterCollection?(): Promise<void> };
     },
   ) {}
 
@@ -172,11 +185,115 @@ export class ReviewCollector {
         (w.body->'request'->>'project_id'=ANY($2::text[]) OR w.body->'request'->>'goal_id'=ANY($2::text[])))
       OR EXISTS(SELECT 1 FROM cos.mission_team_work_orders w WHERE w.scope_id=$1 AND
         (w.body->'request'->>'project_id'=ANY($2::text[]) OR w.body->'request'->>'goal_id'=ANY($2::text[])))
-      OR EXISTS(SELECT 1 FROM cos.calendar_observations c WHERE c.scope_id=$1 AND c.source_id=ANY($3::text[])) AS required`,
-        [context.scopeId, definition.initiative_ids, definition.source_ids],
+      AS required`,
+        [context.scopeId, definition.initiative_ids],
       )
     ).rows[0];
     return row.required;
+  }
+  private async calendarProjection(
+    client: PoolClient,
+    context: KnowledgeContext,
+    definition: ReviewCharterDefinition,
+  ): Promise<CalendarLocation[]> {
+    const rows = (
+      await client.query(
+        `SELECT o.source_id,o.binding_id::text,o.calendar_id,o.version,o.content_digest,o.event,o.last_snapshot,
+        b.time_zone,s.current_snapshot,s.last_attempt,s.last_success_at,a.status AS attempt_status,g.coverage_window
+       FROM cos.calendar_observations o JOIN cos.calendar_bindings b ON b.scope_id=o.scope_id AND b.id=o.binding_id
+       JOIN cos.calendar_states s ON s.scope_id=o.scope_id AND s.binding_id=o.binding_id AND s.calendar_id=o.calendar_id
+       LEFT JOIN cos.calendar_snapshots a ON a.scope_id=s.scope_id AND a.binding_id=s.binding_id AND a.id=s.last_attempt
+       LEFT JOIN cos.calendar_snapshots g ON g.scope_id=s.scope_id AND g.binding_id=s.binding_id AND g.id=s.current_snapshot
+       WHERE o.scope_id=$1 AND o.source_id=ANY($2::text[]) ORDER BY o.source_id LIMIT 7`,
+        [context.scopeId, definition.source_ids],
+      )
+    ).rows;
+    return rows.map(
+      ({ event, ...row }) =>
+        ({
+          ...row,
+          last_success_at: row.last_success_at instanceof Date ? row.last_success_at.toISOString() : null,
+          event_digest: digest(event),
+        }) as CalendarLocation,
+    );
+  }
+  private async calendars(context: KnowledgeContext, captured: Result): Promise<Result> {
+    if (captured.status !== 'ok') return captured;
+    const locations = captured.calendar_locations as CalendarLocation[],
+      snapshot = captured.snapshot as ReviewSnapshot,
+      refs = captured.version_refs as ReviewVersionRefs;
+    if (locations.length > 6 || new Set(locations.map((r) => r.source_id)).size !== locations.length)
+      return incomplete();
+    if (locations.length && !this.options.calendarView) return incomplete();
+    const allocations: ReviewSnapshot['calendar_allocations'] = [];
+    for (const location of locations) {
+      const result = await this.options.calendarView!.readSelected(
+        context,
+        {
+          binding_id: location.binding_id,
+          calendar_id: location.calendar_id,
+          time_min: snapshot.charter.definition.starts_at,
+          time_max: snapshot.charter.definition.ends_at,
+          limit: 5,
+        },
+        [location.source_id],
+      );
+      if (result.status !== 'ok') return result.status === 'denied' ? { status: 'denied' } : incomplete();
+      if (result.coverage === 'unavailable' || result.next_offset != null) return incomplete();
+      const coverage = snapshot.source_coverage.find((r) => r.source_id === location.source_id)!;
+      if (result.coverage !== 'complete') {
+        snapshot.truncated = true;
+        coverage.state = 'incomplete';
+      } else if (
+        !location.last_success_at ||
+        Date.parse(snapshot.as_of) - new Date(location.last_success_at as string | Date).getTime() > 3600000
+      )
+        coverage.state = 'stale';
+      for (const item of result.items as Array<Record<string, unknown>>) {
+        const evidence = item.evidence as Evidence;
+        if (
+          !evidence ||
+          evidence.source_id !== location.source_id ||
+          !snapshot.source_evidence.some(
+            (e) => e.evidence_id === evidence.evidence_id && e.source_id === location.source_id,
+          )
+        )
+          return incomplete();
+        if (!item.start || !item.end || item.end_time_unspecified) {
+          snapshot.truncated = true;
+          coverage.state = 'incomplete';
+          continue;
+        }
+        if (item.status === 'cancelled') continue;
+        allocations.push({
+          scope_id: context.scopeId,
+          source_id: location.source_id,
+          evidence_id: evidence.evidence_id,
+          scheduled_minutes:
+            item.transparent === true
+              ? 0
+              : scheduledMinutes(
+                  item.start as CalendarTime,
+                  item.end as CalendarTime,
+                  location.time_zone,
+                  snapshot.charter.definition.starts_at,
+                  snapshot.charter.definition.ends_at,
+                ),
+        });
+      }
+    }
+    const enriched = buildReviewSnapshot({
+      ...snapshot,
+      records: snapshot.initiatives,
+      calendar_allocations: allocations,
+    });
+    const finalRefs = { ...refs, snapshot_digest: digest(enriched) };
+    return this.options.knowledge.answers.dependencies.transaction(async (client) => {
+      await client.query('SELECT pg_advisory_xact_lock(73101004)');
+      return (await this.validateSnapshot(client, context, enriched, finalRefs))
+        ? { status: 'ok', snapshot: enriched, version_refs: finalRefs }
+        : { status: 'denied' };
+    }, true);
   }
 
   async collect(
@@ -202,12 +319,14 @@ export class ReviewCollector {
     )
       return { status: 'denied' };
     try {
-      return await this.options.database.run(async (client) => {
+      const captured = await this.options.database.run(async (client) => {
         await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ');
         const result = await this.capture(client, context, request, identity);
         await client.query('COMMIT');
         return result;
       }, true);
+      if (captured.status === 'ok') await this.options.hooks?.afterCollection?.();
+      return await this.calendars(context, captured);
     } catch (error) {
       if (error instanceof DatabaseUnavailable) return incomplete();
       throw error;
@@ -239,6 +358,7 @@ export class ReviewCollector {
       rawObservations = await this.observations(client, context, definition, request.charter_version),
       rawDecisions = await this.decisions(client, context, definition);
     if (await this.unsupportedEvidence(client, context, definition)) return incomplete();
+    const calendarLocations = await this.calendarProjection(client, context, definition);
     let truncated = rawWork.length > 20 || rawObservations.length > 20 || rawDecisions.length > 20;
     const work: ReviewWork[] = [],
       observations: ReviewObservation[] = [];
@@ -320,6 +440,7 @@ export class ReviewCollector {
       decision_digest: digest(rawDecisions),
       sources,
       calendar_digest: digest(calendar.notice),
+      calendar_projection_digest: digest(calendarLocations),
     };
     let snapshot: ReviewSnapshot;
     try {
@@ -350,7 +471,12 @@ export class ReviewCollector {
       throw error;
     }
     if (!(await k.current(client, context))) return { status: 'denied' };
-    return { status: 'ok', snapshot, version_refs: { ...refs, snapshot_digest: digest(snapshot) } };
+    return {
+      status: 'ok',
+      snapshot,
+      version_refs: { ...refs, snapshot_digest: digest(snapshot) },
+      calendar_locations: calendarLocations,
+    };
   }
 
   /** Fresh publication/disclosure fence; no saved metadata can bypass current remote authority. */
@@ -386,6 +512,8 @@ export class ReviewCollector {
       const calendar = await this.options.knowledge.answers.dependencies.calendarContext(client, context, true);
       return calendar.status === 'ok' && digest(calendar.notice) === refs.calendar_digest;
     }
+    if (digest(await this.calendarProjection(client, context, definition)) !== refs.calendar_projection_digest)
+      return false;
     const records = await this.records(client, context, definition);
     if (digest(records) !== refs.record_digest || digest(records) !== digest(snapshot.initiatives)) return false;
     const work = await this.work(client, context, definition),

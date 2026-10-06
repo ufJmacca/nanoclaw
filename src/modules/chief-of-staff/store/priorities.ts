@@ -125,7 +125,9 @@ export class PriorityStore {
     }
     this.work = new WorkStore(knowledge);
     if (knowledge)
-      this.reviewArtifacts = new ReviewArtifacts(new ReviewCollector({ database, knowledge, work: this.work }));
+      this.reviewArtifacts = new ReviewArtifacts(
+        new ReviewCollector({ database, knowledge, work: this.work, calendarView }),
+      );
     this.proactive = new ProactiveStore(
       knowledge
         ? {
