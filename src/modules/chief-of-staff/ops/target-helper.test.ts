@@ -3,6 +3,22 @@ import { parseTargetArguments } from './target-helper.js';
 it('accepts only fixed target operations, canonical private settings, and exact release identities', () => {
   expect(
     parseTargetArguments([
+      'operations-maintenance',
+      '--settings',
+      '/home/pi/settings.json',
+      '--request-id',
+      '01234567-89ab-4def-8123-456789abcdef',
+      '--phase',
+      'hold',
+    ]),
+  ).toEqual({
+    command: 'operations-maintenance',
+    settings: '/home/pi/settings.json',
+    requestId: '01234567-89ab-4def-8123-456789abcdef',
+    phase: 'hold',
+  });
+  expect(
+    parseTargetArguments([
       'programme-protect',
       '--settings',
       '/home/pi/settings.json',
@@ -64,6 +80,16 @@ it('accepts only fixed target operations, canonical private settings, and exact 
     expect(() => parseTargetArguments([...recovery.slice(0, -1), value])).toThrow();
   for (const args of [
     ['shell'],
+    [
+      'operations-maintenance',
+      '--settings',
+      '/tmp/settings',
+      '--request-id',
+      '01234567-89ab-4def-8123-456789abcdef',
+      '--phase',
+      'resume',
+    ],
+    ['operations-maintenance', '--settings', '/tmp/settings', '--request-id', '../foreign', '--phase', 'hold'],
     ['programme-protect', '--settings', '/tmp/settings', '--completion', '../proof'],
     ['programme-protect', '--settings', '/tmp/settings', '--completion', '/tmp/proof', '--owner', 'fixture'],
     ['status', '--settings', '/tmp/settings', '--completion', '/tmp/proof'],

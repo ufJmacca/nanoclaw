@@ -9,6 +9,7 @@ import type { BindingRequest } from './bind.js';
 type TargetArguments =
   | { command: 'status'; settings: string }
   | { command: 'programme-protect'; settings: string; completion: string }
+  | { command: 'operations-maintenance'; settings: string; requestId: string; phase: 'hold' | 'release' }
   | { command: 'runtime-test'; settings: string; owner: string }
   | { command: 'rollback'; settings: string; releaseId: string; fromReleaseId: string }
   | {
@@ -24,7 +25,12 @@ export function parseTargetArguments(args: string[]): TargetArguments {
     throw new Error('invalid_target_arguments');
   };
   const [command, ...rest] = args;
-  if (!['status', 'deploy', 'rollback', 'runtime-test', 'programme-protect'].includes(command) || rest.length % 2 !== 0)
+  if (
+    !['status', 'deploy', 'rollback', 'runtime-test', 'programme-protect', 'operations-maintenance'].includes(
+      command,
+    ) ||
+    rest.length % 2 !== 0
+  )
     return reject();
   const values: Record<string, string> = {};
   for (let i = 0; i < rest.length; i += 2) {
@@ -38,6 +44,8 @@ export function parseTargetArguments(args: string[]): TargetArguments {
         '--owner',
         '--recover-from',
         '--completion',
+        '--request-id',
+        '--phase',
       ].includes(rest[i]) ||
       !rest[i + 1] ||
       values[rest[i]]
@@ -53,7 +61,18 @@ export function parseTargetArguments(args: string[]): TargetArguments {
     return Object.keys(values).length === 2 && canonical(values['--completion'])
       ? { command, settings: values['--settings'], completion: values['--completion'] }
       : reject();
-  if (values['--completion']) return reject();
+  if (command === 'operations-maintenance')
+    return Object.keys(values).length === 3 &&
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(values['--request-id'] ?? '') &&
+      ['hold', 'release'].includes(values['--phase'])
+      ? {
+          command,
+          settings: values['--settings'],
+          requestId: values['--request-id'],
+          phase: values['--phase'] as 'hold' | 'release',
+        }
+      : reject();
+  if (values['--completion'] || values['--request-id'] || values['--phase']) return reject();
   if (command === 'status')
     return Object.keys(values).length === 1 ? { command, settings: values['--settings'] } : reject();
   if (command === 'runtime-test') {
@@ -123,6 +142,17 @@ export async function targetCommand(args: string[]): Promise<Record<string, unkn
   const parent = path.dirname(settings.stateRoot);
   if (!fs.existsSync(parent)) throw new Error('target_state_parent_required');
   return withDeploymentLock(settings.stateRoot + '.operation.lock', async () => {
+    if (request.command === 'operations-maintenance') {
+      const { operationsMaintenance } = await import('./operations-maintenance.js');
+      const { createOperationsMaintenanceEffects } = await import('./operations-maintenance-effects.js');
+      return operationsMaintenance({
+        root: settings.stateRoot,
+        binding,
+        requestId: request.requestId,
+        phase: request.phase,
+        effects: createOperationsMaintenanceEffects(settings, fileURLToPath(import.meta.url)),
+      });
+    }
     if (request.command === 'programme-protect') {
       const { protectCompletedProgramme, validateProgrammeProtection, verifyProtectionHelper } =
         await import('./programme-protection.js');
@@ -277,6 +307,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
         'installed_runtime_test_helper_required',
         'programme_completion_unverified',
         'target_protection_conflict',
+        'operations_maintenance_unverified',
+        'operations_workers_active',
       ]);
       console.error(
         JSON.stringify({
