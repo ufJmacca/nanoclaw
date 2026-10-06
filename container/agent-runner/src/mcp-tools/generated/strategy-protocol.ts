@@ -363,3 +363,126 @@ export function validReviewDraft(value: unknown): value is ReviewDraft {
     Buffer.byteLength(JSON.stringify(value)) <= 12288
   );
 }
+
+// Image-owned coordinator catalogs use the canonical bounded wire shape. Host validators also enforce
+// cross-field selection, evidence, snapshot integrity, current authority and encoded byte limits.
+const idSchema = { type: 'string', pattern: '^[a-zA-Z0-9_-]{1,100}$' };
+const uuidSchema = { type: 'string', format: 'uuid' };
+const reviewIdSchema = { type: 'string', pattern: '^review-[a-f0-9]{64}$' };
+const integerSchema = (minimum = 1, maximum = 2147483646) => ({ type: 'integer', minimum, maximum });
+const textSchema = (maximum: number, minimum = 1) => ({ type: 'string', minLength: minimum, maxLength: maximum });
+const instantSchema = {
+  type: 'string',
+  format: 'date-time',
+  pattern: '^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{3})?Z$',
+};
+const enumSchema = (...values: string[]) => ({ type: 'string', enum: values });
+const objectSchema = (properties: Record<string, object>) => ({
+  type: 'object',
+  additionalProperties: false,
+  properties,
+  required: Object.keys(properties),
+});
+const arraySchema = (items: object, minimum: number, maximum: number) => ({
+  type: 'array',
+  items,
+  minItems: minimum,
+  maxItems: maximum,
+});
+const sourceReferenceSchema = objectSchema({ kind: { const: 'source' }, evidence_id: uuidSchema });
+export const reviewCharterChangeSchema = objectSchema({
+  kind: { const: 'review_charter' },
+  expected_version: integerSchema(0),
+  reason: textSchema(500),
+  definition: objectSchema({
+    title: textSchema(200),
+    initiative_ids: { ...arraySchema(idSchema, 1, 10), uniqueItems: true },
+    source_ids: { ...arraySchema(idSchema, 0, 6), uniqueItems: true },
+    starts_at: instantSchema,
+    ends_at: instantSchema,
+    cadence: { const: 'manual' },
+    resource_constraints: textSchema(500),
+    evidence_limits: textSchema(500),
+    exploration_minutes_per_week: integerSchema(0, 10080),
+    measures: arraySchema(
+      objectSchema({ id: idSchema, initiative_id: idSchema, outcome: textSchema(500), test: textSchema(500) }),
+      1,
+      10,
+    ),
+    assumptions: arraySchema(
+      objectSchema({ id: idSchema, initiative_id: idSchema, statement: textSchema(500) }),
+      0,
+      10,
+    ),
+  }),
+});
+export const strategyObservationChangeSchema = objectSchema({
+  kind: { const: 'strategy_observation' },
+  charter_version: integerSchema(),
+  initiative_id: idSchema,
+  target: objectSchema({ kind: enumSchema('outcome', 'assumption', 'attention_cost', 'actual_effort'), id: idSchema }),
+  basis: enumSchema('evidence_backed', 'self_reported', 'unknown'),
+  signal: enumSchema('supported', 'challenged', 'unknown'),
+  statement: textSchema(500),
+  observed_at: instantSchema,
+  evidence: { ...arraySchema(sourceReferenceSchema, 0, 6), uniqueItems: true },
+  reason: textSchema(500),
+});
+export const reviewRequestSchema = objectSchema({
+  charter_version: integerSchema(),
+  previous_review_id: { anyOf: [reviewIdSchema, { type: 'null' }] },
+});
+export const directionRequestSchema = objectSchema({
+  review_id: reviewIdSchema,
+  revision: integerSchema(),
+  option_id: idSchema,
+  expected_record_version: integerSchema(),
+  expected_direction_version: integerSchema(0),
+  reason: textSchema(500),
+});
+const referenceSchema = {
+  oneOf: [
+    sourceReferenceSchema,
+    objectSchema({ kind: { const: 'record' }, record_id: idSchema, version: integerSchema() }),
+    objectSchema({ kind: { const: 'work' }, work_id: idSchema, version: integerSchema() }),
+    objectSchema({ kind: { const: 'observation' }, observation_id: uuidSchema }),
+    objectSchema({
+      kind: { const: 'mission_result' },
+      submission_id: uuidSchema,
+      digest: { type: 'string', pattern: '^[a-f0-9]{64}$' },
+    }),
+  ],
+};
+export const reviewDraftSchema = objectSchema({
+  findings: arraySchema(
+    objectSchema({
+      kind: enumSchema('fact', 'self_report', 'assumption', 'recommendation'),
+      domain: enumSchema('activity', 'outcome', 'calendar_allocation', 'actual_effort', 'attention_cost', 'other'),
+      initiative_id: idSchema,
+      statement: textSchema(500),
+      evidence: arraySchema(referenceSchema, 0, 6),
+      uncertainty: textSchema(500, 0),
+    }),
+    1,
+    12,
+  ),
+  options: arraySchema(
+    objectSchema({
+      id: idSchema,
+      initiative_id: idSchema,
+      direction: enumSchema('continue', 'change', 'pause', 'stop'),
+      title: textSchema(200),
+      trade_off: textSchema(500),
+      opportunity_cost: textSchema(500),
+      next_action: textSchema(500),
+    }),
+    1,
+    20,
+  ),
+  recommended_option_id: idSchema,
+  rationale: textSchema(500),
+  confidence: enumSchema('low', 'medium', 'high'),
+  uncertainty: textSchema(500),
+  evidence_would_change: textSchema(500),
+  forecast_until: instantSchema,
+});

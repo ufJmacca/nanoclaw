@@ -10,6 +10,7 @@ import { proactiveCoordinatorTools } from './proactive-coordinator-tools.js';
 import { missionCoordinatorTools } from './mission-coordinator-tools.js';
 import { mandateCoordinatorTools } from './mandate-coordinator-tools.js';
 import { actionCoordinatorTools } from './action-coordinator-tools.js';
+import { strategyCoordinatorTools } from './strategy-coordinator-tools.js';
 
 export async function executeCosRequest(
   request: CosRequest,
@@ -319,5 +320,6 @@ export const cosTools: McpToolDefinition[] = [
   ...proactiveCoordinatorTools(executeCosRequest),
   ...mandateCoordinatorTools(executeCosRequest),
   ...actionCoordinatorTools(executeCosRequest),
+  ...strategyCoordinatorTools(executeCosRequest),
 ];
 if (process.env.NANOCLAW_COS_PROTOCOL === COS_PROTOCOL) registerTools(cosTools);

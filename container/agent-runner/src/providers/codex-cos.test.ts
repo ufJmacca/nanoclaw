@@ -189,6 +189,12 @@ test('CoS keeps one native thread across queued replies and a new provider query
     'cos_action_propose',
     'cos_action_get',
     'cos_action_cancel',
+    'cos_review_charter_propose',
+    'cos_strategy_observation_propose',
+    'cos_strategy_direction_propose',
+    'cos_review_request',
+    'cos_review_submit',
+    'cos_review_get',
   ]);
   expect(f.writes.find((r) => r.method === 'thread/resume').params.dynamicTools).toBeUndefined();
   expect(f.configurations.every((config) => config.includes('[mcp_servers.nanoclaw_cos_mandates]'))).toBe(true);

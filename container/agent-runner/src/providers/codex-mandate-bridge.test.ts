@@ -4,6 +4,31 @@ import os from 'node:os';
 import path from 'node:path';
 import { createCosToolDispatch } from './codex-cos-tools.js';
 import { createMandateToolBridge, callNativeMandateTool } from './codex-mandate-bridge.js';
+test('S10 retained main conversations discover review tools through the existing image-owned server and turn fence', async () => {
+  const f = await fixture(),
+    review_id = 'review-' + 'a'.repeat(64);
+  try {
+    expect((await callNativeMandateTool(f.bridge.socket, 'cos_review_get', { review_id, revision: 1 })).isError).toBe(
+      true,
+    );
+    f.bridge.beginTurn('thread', 'turn');
+    expect((await callNativeMandateTool(f.bridge.socket, 'cos_review_get', { review_id, revision: 1 })).isError).toBe(
+      false,
+    );
+    const config = Bun.TOML.parse(f.bridge.configuration) as any;
+    expect(config.mcp_servers.nanoclaw_cos_mandates.enabled_tools).toContain('cos_review_request');
+    expect(config.mcp_servers.nanoclaw_cos_mandates.tools.cos_review_request.approval_mode).toBe('approve');
+    for (const tool of ['cos_review_approve', 'cos_strategy_apply', 'cos_review_schedule'])
+      expect((await callNativeMandateTool(f.bridge.socket, tool, {})).isError).toBe(true);
+    f.bridge.endTurn();
+    expect((await callNativeMandateTool(f.bridge.socket, 'cos_review_get', { review_id, revision: 1 })).isError).toBe(
+      true,
+    );
+    expect(f.calls).toEqual(['cos_review_get']);
+  } finally {
+    await f.close();
+  }
+});
 
 const mandate_id = 'mandate-' + 'a'.repeat(64);
 test('S09 retained coordinator context gains action controls through the same fenced MCP bridge', async () => {
@@ -78,6 +103,12 @@ test('S08/S09 retained-thread coordinator MCP shares the current native turn fen
       'cos_action_propose',
       'cos_action_get',
       'cos_action_cancel',
+      'cos_review_charter_propose',
+      'cos_strategy_observation_propose',
+      'cos_strategy_direction_propose',
+      'cos_review_request',
+      'cos_review_submit',
+      'cos_review_get',
     ]);
     expect(config.mcp_servers.nanoclaw_cos_mandates.default_tools_approval_mode).toBe('prompt');
     expect(Object.keys(config.mcp_servers.nanoclaw_cos_mandates.tools)).toEqual([
@@ -86,6 +117,12 @@ test('S08/S09 retained-thread coordinator MCP shares the current native turn fen
       'cos_action_propose',
       'cos_action_get',
       'cos_action_cancel',
+      'cos_review_charter_propose',
+      'cos_strategy_observation_propose',
+      'cos_strategy_direction_propose',
+      'cos_review_request',
+      'cos_review_submit',
+      'cos_review_get',
     ]);
   } finally {
     await f.close();
