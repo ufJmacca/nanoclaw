@@ -37,6 +37,7 @@ export function fixtureFiles(args: Pick<FixtureArguments, 'slice' | 'demo'>): st
           'strategy.integration',
           'strategy-approval.integration',
           'strategy-collection.integration',
+          'strategy-source-evolution.integration',
           'strategy-calendar.integration',
           'strategy-missions.integration',
           'strategy-directions.integration',

@@ -539,6 +539,7 @@ export class ReviewCollector {
     }
     for (const row of rawObservations.slice(0, 20)) {
       if (!validStrategyObservationChange(row.body) || digest(row.body) !== row.digest) return incomplete();
+      let selected = true;
       for (const ref of row.body.evidence)
         if (
           !(
@@ -547,10 +548,16 @@ export class ReviewCollector {
               [context.scopeId, ref.evidence_id, definition.source_ids],
             )
           ).rowCount
-        )
-          return incomplete();
-      if (!(await knowledge.answers.validateWorkEvidence(client, context, row.body.evidence, true)))
-        return { status: 'denied' };
+        ) {
+          selected = false;
+          break;
+        }
+      if (!selected || !(await knowledge.answers.validateWorkEvidence(client, context, row.body.evidence, true))) {
+        // Immutable history may outlive its source selection or revision. Withhold the entire
+        // observation and disclose limited coverage; current context/source fences still apply.
+        truncated = true;
+        continue;
+      }
       observations.push({ ...row.body, scope_id: context.scopeId, id: row.id });
     }
     // Even uncited source metadata influences this review; retain its version in the native context.
