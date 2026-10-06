@@ -1,5 +1,13 @@
 import { describe, it, expect, vi } from 'vitest';
-import { parseAdminArguments, adminStatus, safeAdminError } from './admin.js';
+import { parseAdminArguments, adminStatus, safeAdminError, adminEnvironment } from './admin.js';
+it('local owner denials select no database or account credentials even when caller overrides contain them', () => {
+  const env = adminEnvironment('operator-control', {
+    COS_TARGET_STATE_DIR: '/fixture',
+    COS_PGPASSWORD: 'fixture',
+    MATTERMOST_BOT_TOKEN: 'fixture',
+  });
+  expect(Object.keys(env).sort()).toEqual(['COS_ENABLED', 'COS_TARGET_STATE_DIR']);
+});
 it.each([
   'specialist_release_required',
   'unsafe_mission_purge',
