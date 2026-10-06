@@ -15,7 +15,17 @@ import Database from 'better-sqlite3';
 import { installCosBoundary, type CosBinding } from '../../cos-boundary.js';
 import type { Session } from '../../types.js';
 import { HostOwnerControls, parseOwnerControl } from '../../modules/chief-of-staff/ops/owner-controls.js';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { KnowledgeStore } from '../../modules/chief-of-staff/knowledge/store.js';
+import { KnowledgeArtifacts } from '../../modules/chief-of-staff/knowledge/artifacts.js';
+import { ownerDenialsPermitResume } from '../../modules/chief-of-staff/ops/owner-denial-resume.js';
+import { CalendarStore } from '../../modules/chief-of-staff/calendar/store.js';
+import { CalendarConnector } from '../../modules/chief-of-staff/calendar/connector.js';
+import { CalendarReadError, GOOGLE_EVENT_READ_SCOPE } from '../../modules/chief-of-staff/calendar/reader.js';
 let admin: pg.Client, store: PriorityStore;
+let knowledge: KnowledgeStore, artifactRoot: string;
 const scope = 'operations-' + randomUUID(),
   foreign = 'operations-foreign-' + randomUUID();
 const context: Context = {
@@ -27,14 +37,27 @@ const context: Context = {
 };
 const sentinel = 'PRIVATE-PROSE-NOT-STATUS-' + randomUUID();
 before(async () => {
+  console.log(JSON.stringify({ fixtureRun: scope, foreignFixtureRun: foreign }));
   admin = await connectFixtureDatabase(process.env, 'migration');
   assert.equal((await admin.query('SELECT pg_try_advisory_lock(73101002) AS locked')).rows[0].locked, true);
   await migrate(admin, fixtureRuntimeUser());
-  store = new PriorityStore(BoundedDatabase.fromConfig(await fixtureDatabaseConfig(process.env)));
+  artifactRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-s11-operations-'));
+  for (const name of ['artifacts', 'staging']) fs.mkdirSync(path.join(artifactRoot, name), { mode: 0o700 });
+  const database = BoundedDatabase.fromConfig(await fixtureDatabaseConfig(process.env));
+  knowledge = new KnowledgeStore(
+    database,
+    new KnowledgeArtifacts(path.join(artifactRoot, 'artifacts'), path.join(artifactRoot, 'staging')),
+  );
+  store = new PriorityStore(database, knowledge);
   for (const id of [scope, foreign])
     await admin.query(
       "INSERT INTO cos.scopes(id,owner_id,instance_id,channel_id,agent_group_id,status) VALUES($1,$2,'fixture',$1,$1,'active')",
       [id, context.ownerId],
+    );
+  for (const id of [scope, foreign])
+    await admin.query(
+      "INSERT INTO cos.sources(id,scope_id,source_key,title,status,processing_providers,access_policy,provenance) VALUES($1,$2,$1,$3,'current',ARRAY['codex'],'{}','{}')",
+      ['source-' + id, id, sentinel],
     );
   for (let i = 0; i < 25; i++)
     await admin.query(
@@ -96,20 +119,29 @@ before(async () => {
 });
 after(async () => {
   await store?.database.pool.end();
-  if (admin)
-    for (const id of [scope, foreign]) {
-      for (const table of [
-        'missions',
-        'mission_work_orders',
-        'mission_context_manifests',
-        'mission_template_versions',
-        'proposals',
-        'records',
-      ])
-        await admin.query('DELETE FROM cos.' + table + ' WHERE scope_id=$1', [id]);
-      await admin.query('DELETE FROM cos.scopes WHERE id=$1', [id]);
-    }
-  await admin?.end();
+  try {
+    if (admin)
+      for (const id of [scope, foreign]) {
+        for (const table of [
+          'outbox',
+          'revocation_tombstones',
+          'sources',
+          'calendar_states',
+          'calendar_bindings',
+          'missions',
+          'mission_work_orders',
+          'mission_context_manifests',
+          'mission_template_versions',
+          'proposals',
+          'records',
+        ])
+          await admin.query('DELETE FROM cos.' + table + ' WHERE scope_id=$1', [id]);
+        await admin.query('DELETE FROM cos.scopes WHERE id=$1', [id]);
+      }
+  } finally {
+    await admin?.end();
+    if (artifactRoot) fs.rmSync(artifactRoot, { recursive: true, force: true });
+  }
 });
 test('S11-T01 status reports every category and approval state without secret/prose disclosure', async () => {
   const result = await store.operatorStatus(context, {});
@@ -303,4 +335,176 @@ test('S11-T02/UI01 a durable scoped cancellation survives a test-route outage an
     await pool.end();
     await relay.close();
   }
+});
+test('S11-T05 trusted owner revocation works while paused, preserves the tombstone and cannot cross scope or grant access', async () => {
+  const source = 'source-' + scope;
+  assert.deepEqual(await knowledge.revokeOwned({ ...context, ownerId: 'foreign' }, source), { status: 'denied' });
+  assert.deepEqual(await knowledge.revokeOwned(context, 'source-' + foreign), { status: 'denied' });
+  assert.deepEqual(
+    await knowledge.revokeOwned(
+      { ...context, origin: { kind: 'schedule', runId: randomUUID(), generation: 1 } },
+      source,
+    ),
+    { status: 'denied' },
+  );
+  await admin.query("UPDATE cos.scopes SET status='paused' WHERE id=$1", [scope]);
+  try {
+    assert.equal((await knowledge.revokeOwned(context, source)).status, 'ok');
+    const first = (
+      await admin.query('SELECT status,version,processing_providers FROM cos.sources WHERE scope_id=$1 AND id=$2', [
+        scope,
+        source,
+      ])
+    ).rows[0];
+    assert.equal(first.status, 'revoked');
+    assert.deepEqual(first.processing_providers, []);
+    const marker = (
+      await admin.query(
+        'SELECT kind,version,provenance FROM cos.revocation_tombstones WHERE scope_id=$1 AND source_id=$2',
+        [scope, source],
+      )
+    ).rows[0];
+    assert.equal(marker.kind, 'revoke');
+    assert.equal(marker.version, first.version);
+    assert.equal(marker.provenance.owner_id, context.ownerId);
+    assert.equal((await knowledge.revokeOwned(context, source)).status, 'ok');
+    assert.deepEqual(
+      (
+        await admin.query('SELECT status,version,processing_providers FROM cos.sources WHERE scope_id=$1 AND id=$2', [
+          scope,
+          source,
+        ])
+      ).rows[0],
+      first,
+    );
+    assert.equal(
+      (
+        await admin.query(
+          "SELECT count(*)::int AS n FROM cos.outbox WHERE scope_id=$1 AND kind='knowledge_invalidate'",
+          [scope],
+        )
+      ).rows[0].n,
+      1,
+    );
+  } finally {
+    await admin.query("UPDATE cos.scopes SET status='active' WHERE id=$1", [scope]);
+  }
+});
+test('S11-T05 an independently retained native denial prevents resume when an older remote checkpoint lacks its tombstone', async () => {
+  const db = new Database(':memory:'),
+    binding: CosBinding = {
+      scopeId: scope,
+      ownerId: context.ownerId,
+      botId: 'fixture-bot',
+      instanceId: 'fixture',
+      channelId: scope,
+      agentGroupId: scope,
+      messagingGroupId: 'messages-' + scope,
+      sessionId: scope,
+      provider: 'codex',
+    };
+  const session = {
+    id: scope,
+    agent_group_id: scope,
+    messaging_group_id: binding.messagingGroupId,
+    thread_id: null,
+    status: 'active',
+    agent_provider: 'codex',
+  } as Session;
+  installCosBoundary(binding, db);
+  const controls = new HostOwnerControls({ db, session: () => session, stop: () => {} }),
+    source = 'source-' + scope,
+    ingress = {
+      id: 'retained-source-denial',
+      ownerId: context.ownerId,
+      text: 'cos revoke source ' + source,
+      timestamp: new Date().toISOString(),
+    };
+  const marker = (
+    await admin.query('SELECT * FROM cos.revocation_tombstones WHERE scope_id=$1 AND source_id=$2', [scope, source])
+  ).rows[0];
+  try {
+    assert.equal(controls.record(binding, ingress, parseOwnerControl(ingress.text)!).status, 'ok');
+    await controls.reconcile(binding, async () => ({ status: 'denied' }), {
+      revokeSource: (c, id) => knowledge.revokeOwned(c, id),
+    });
+    assert.equal(await ownerDenialsPermitResume(db, binding, admin), true);
+    // Controlled synthetic-row loss models the older checkpoint; this is not a full restore/PITR claim.
+    await admin.query('DELETE FROM cos.revocation_tombstones WHERE scope_id=$1 AND source_id=$2', [scope, source]);
+    assert.equal(await ownerDenialsPermitResume(db, binding, admin), false);
+    assert.deepEqual(db.prepare('SELECT paused FROM cos_identity_boundaries').get(), { paused: 1 });
+  } finally {
+    await admin.query(
+      'INSERT INTO cos.revocation_tombstones(scope_id,source_id,kind,version,provenance) VALUES($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING',
+      [scope, source, marker.kind, marker.version, marker.provenance],
+    );
+    db.close();
+  }
+});
+test('S11-UI01 connector disable preserves scope, uses its durable account fence and never reads tokens or contacts a provider', async () => {
+  const calendars = new CalendarStore(store.database),
+    bindingId = randomUUID(),
+    foreignId = randomUUID();
+  for (const [id, ctx] of [
+    [bindingId, context],
+    [foreignId, { ...context, scopeId: foreign, agentGroupId: foreign, sessionId: foreign }],
+  ] as const)
+    assert.equal(
+      (
+        await calendars.bind(ctx, {
+          id,
+          provider: 'fixture',
+          calendarIds: ['synthetic'],
+          scopes: [GOOGLE_EVENT_READ_SCOPE],
+          timeZone: 'UTC',
+          processingProviders: ['codex'],
+        })
+      ).status,
+      'ok',
+    );
+  const denied = new Set<string>();
+  let credentialReads = 0,
+    providerCalls = 0;
+  const connector = new CalendarConnector({
+    store: calendars,
+    admitted: () => false,
+    fences: {
+      deny: (s, id) => {
+        denied.add(s + ':' + id);
+      },
+      assertOpen: (s, id) => {
+        if (denied.has(s + ':' + id)) throw new CalendarReadError('calendar_auth_disconnected');
+      },
+      runCheck: async (_s, _id, operation) => operation(),
+    },
+    credentials: {
+      inspect: async () => {
+        credentialReads++;
+        throw Error('no-credentials');
+      },
+      token: async () => {
+        credentialReads++;
+        throw Error('no-credentials');
+      },
+    },
+    fetch: async () => {
+      providerCalls++;
+      throw Error('no-provider');
+    },
+  });
+  assert.equal((await connector.disconnect(context, foreignId)).status, 'denied');
+  assert.equal((await connector.disconnect(context, bindingId)).status, 'ok');
+  assert.throws(() => connector.assertOpen(scope, bindingId), /calendar_auth_disconnected/);
+  assert.equal(
+    (await admin.query('SELECT auth FROM cos.calendar_bindings WHERE scope_id=$1 AND id=$2', [scope, bindingId]))
+      .rows[0].auth,
+    'disconnected',
+  );
+  assert.equal(
+    (await admin.query('SELECT auth FROM cos.calendar_bindings WHERE scope_id=$1 AND id=$2', [foreign, foreignId]))
+      .rows[0].auth,
+    'ready',
+  );
+  assert.equal(credentialReads, 0);
+  assert.equal(providerCalls, 0);
 });

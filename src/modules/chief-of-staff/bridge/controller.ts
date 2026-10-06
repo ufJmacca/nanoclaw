@@ -16,7 +16,7 @@ import {
 } from './identity.js';
 import type { StatusInput } from '../contracts/operations-protocol.js';
 import { digest, type Context, type Result } from '../domain/contracts.js';
-import { HostOwnerControls, parseOwnerControl } from '../ops/owner-controls.js';
+import { HostOwnerControls, parseOwnerControl, type DenialHandlers } from '../ops/owner-controls.js';
 import { hasTable } from '../../../db/connection.js';
 export type ControllerDependencies = {
   db: Database.Database;
@@ -46,8 +46,12 @@ export class CosController {
   constructor(readonly dependencies: ControllerDependencies) {
     this.ownerControls = new HostOwnerControls(dependencies);
   }
-  reconcileControls(binding: CosBinding, cancel: (context: Context, id: string) => Promise<Result>): Promise<void> {
-    return this.ownerControls.reconcile(binding, cancel);
+  reconcileControls(
+    binding: CosBinding,
+    cancel: (context: Context, id: string) => Promise<Result>,
+    handlers?: DenialHandlers,
+  ): Promise<void> {
+    return this.ownerControls.reconcile(binding, cancel, handlers);
   }
   private async reply(
     binding: CosBinding,

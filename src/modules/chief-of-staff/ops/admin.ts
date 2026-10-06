@@ -235,6 +235,7 @@ export function safeAdminError(error: unknown): string {
         'context_binding_changed',
         'unsafe_context_admin_state',
         'context_recovery_requires_paused_binding',
+        'operator_denial_requires_reconciliation',
         'context_recovery_stale_generation',
         'context_recovery_superseded',
         'context_recovery_conflict',

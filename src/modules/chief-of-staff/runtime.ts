@@ -567,7 +567,10 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
     controller,
     pump: async (binding: CosBinding) => {
       if (!disposed && d.store?.missionRuns)
-        await controller.reconcileControls(binding, (context, id) => d.store!.missionRuns.cancel(context, id));
+        await controller.reconcileControls(binding, (context, id) => d.store!.missionRuns.cancel(context, id), {
+          revokeSource: d.store.knowledge ? (context, id) => d.store!.knowledge!.revokeOwned(context, id) : undefined,
+          disableConnector: d.store.calendar ? (context, id) => d.store!.calendar!.disconnect(context, id) : undefined,
+        });
       if (enabled()) await invalidations?.drain(binding);
       const recovered = enabled() ? await briefReconciliation?.drain(binding) : undefined;
       if (enabled()) await reviewDispatch?.drain(binding);

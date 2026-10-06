@@ -777,6 +777,61 @@ export class KnowledgeStore {
     if (!proposal || proposal.payload_hash !== digest(change) || digest(proposal.change) !== digest(change))
       return { status: 'denied' };
     if (!(await this.validateChange(client, scopeId, change))) return { status: 'conflict' };
+    return this.revoke(client, scopeId, proposalId, change, {
+      proposal_id: proposalId,
+      owner_id: proposal.owner_id,
+      ingress_id: proposal.decision_ingress_id,
+      reason: change.reason,
+    });
+  }
+  /** Authenticated host owner control only removes access, including while paused. No agent RPC exposes it. */
+  async revokeOwned(context: Context, sourceId: string): Promise<Result> {
+    if (context.origin || !idPattern.test(sourceId) || !context.ingressId || context.ingressId.length > 200)
+      return { status: 'denied' };
+    return this.transaction(async (client) => {
+      if (
+        (
+          await client.query(
+            "SELECT id FROM cos.scopes WHERE id=$1 AND owner_id=$2 AND agent_group_id=$3 AND status IN ('active','paused') FOR UPDATE",
+            [context.scopeId, context.ownerId, context.agentGroupId],
+          )
+        ).rowCount !== 1
+      )
+        return { status: 'denied' };
+      const source = (
+        await client.query('SELECT status,version FROM cos.sources WHERE scope_id=$1 AND id=$2 FOR UPDATE', [
+          context.scopeId,
+          sourceId,
+        ])
+      ).rows[0];
+      if (!source) return { status: 'denied' };
+      // Keep a stronger delete marker and avoid version/outbox churn after an uncertain commit.
+      if (
+        source.status === 'revoked' &&
+        (
+          await client.query('SELECT 1 FROM cos.revocation_tombstones WHERE scope_id=$1 AND source_id=$2', [
+            context.scopeId,
+            sourceId,
+          ])
+        ).rowCount === 1
+      )
+        return { status: 'ok', source_id: sourceId, version: source.version };
+      return this.revoke(
+        client,
+        context.scopeId,
+        'owner-' + digest({ scope: context.scopeId, source: sourceId, version: source.version }),
+        { kind: 'source_revoke', source_id: sourceId, expected_version: source.version, reason: 'owner_control' },
+        { owner_id: context.ownerId, ingress_id: context.ingressId, reason: 'owner_control' },
+      );
+    }, true);
+  }
+  private async revoke(
+    client: PoolClient,
+    scopeId: string,
+    eventId: string,
+    change: SourceChange,
+    provenance: Record<string, unknown>,
+  ): Promise<Result> {
     const updated = await client.query(
       `UPDATE cos.sources SET status='revoked',processing_providers='{}',version=version+1,updated_at=clock_timestamp()
       WHERE scope_id=$1 AND id=$2 AND version=$3 RETURNING version`,
@@ -784,12 +839,6 @@ export class KnowledgeStore {
     );
     if (!updated.rowCount) return { status: 'conflict' };
     const version = updated.rows[0].version;
-    const provenance = {
-      proposal_id: proposalId,
-      owner_id: proposal.owner_id,
-      ingress_id: proposal.decision_ingress_id,
-      reason: change.reason,
-    };
     // Access closes immediately. Deletion keeps a tombstone and allows a bounded retention window for local bytes.
     await client.query(
       `INSERT INTO cos.revocation_tombstones(scope_id,source_id,kind,version,provenance,purge_after)
@@ -815,12 +864,12 @@ export class KnowledgeStore {
     const payload = JSON.stringify({ source_id: change.source_id, source_version: version });
     await client.query(
       `INSERT INTO cos.outbox(id,scope_id,kind,payload) VALUES($1,$2,'knowledge_invalidate',$3) ON CONFLICT DO NOTHING`,
-      ['knowledge-proposal-' + proposalId, scopeId, payload],
+      ['knowledge-proposal-' + eventId, scopeId, payload],
     );
     if (change.kind === 'source_delete')
       await client.query(
         `INSERT INTO cos.outbox(id,scope_id,kind,payload) VALUES($1,$2,'knowledge_purge',$3) ON CONFLICT DO NOTHING`,
-        ['knowledge-purge-' + proposalId, scopeId, payload],
+        ['knowledge-purge-' + eventId, scopeId, payload],
       );
     return { status: 'ok', source_id: change.source_id, version };
   }

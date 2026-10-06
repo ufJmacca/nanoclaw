@@ -36,6 +36,7 @@ import { targetCommands } from './target-host.js';
 import { backupNativeDatabase } from './native-installation.js';
 import { backupConversations } from './conversation-backup.js';
 import { recoverConversation } from './conversation-recovery.js';
+import { hasOwnerAccessDenials, ownerDenialsPermitResume, ownerDenialCheckpoint } from './owner-denial-resume.js';
 import { issueActivation, resumeContext, rebindRecoveredActivation } from './model-activation.js';
 
 import { isKnowledgeCommand, runKnowledgeAdmin, type KnowledgeAdminArguments } from './knowledge-admin.js';
@@ -418,9 +419,33 @@ export async function contextAdminCommand(
         return issueActivation(activationOptions, readPrivate(args.policyFile));
       }
       if (args.command === 'context-resume') {
+        let ownerDenialsCheckpoint: string | undefined;
+        if (hasOwnerAccessDenials(native, binding)) {
+          const remote = await connectChecked(env, 'runtime');
+          try {
+            if (
+              (await databaseFingerprint(remote, parseDatabaseConfig(env, 'runtime'))) !==
+                target.binding.databaseFingerprint ||
+              (await migrationStatus(remote)) !== SCHEMA_VERSION
+            )
+              throw Error('operator_denial_requires_reconciliation');
+            await remote.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
+            if (!(await ownerDenialsPermitResume(native, binding, remote)))
+              throw Error('operator_denial_requires_reconciliation');
+            ownerDenialsCheckpoint = ownerDenialCheckpoint(native, binding);
+            await remote.query('COMMIT');
+          } finally {
+            await remote.end();
+          }
+          await check();
+        }
         inbound = openInboundDb(binding.agentGroupId, binding.sessionId);
         outbound = openOutboundDb(binding.agentGroupId, binding.sessionId);
-        return resumeContext({ ...activationOptions, inbound, outbound }, args.activationId, args.resumeId);
+        return resumeContext(
+          { ...activationOptions, inbound, outbound, ownerDenialsCheckpoint },
+          args.activationId,
+          args.resumeId,
+        );
       }
       if (args.command === 'context-prepare') {
         const context = createConversationState(root, db).prepare(binding, accountFingerprint);

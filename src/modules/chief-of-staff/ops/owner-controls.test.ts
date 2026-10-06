@@ -145,3 +145,47 @@ it('S11-UI01 exact controls reject quoted, malformed, broad and admission-openin
     expect(parseOwnerControl(text)).toBeNull();
   expect(parseOwnerControl('cos pause automation')).toEqual({ kind: 'pause_automation' });
 });
+it.each([
+  ['cos revoke source source-one', 'revoke_source', 'source-one', 'source_revocation_recorded'],
+  [
+    'cos disable connector 11111111-1111-4111-8111-111111111111',
+    'disable_connector',
+    '11111111-1111-4111-8111-111111111111',
+    'connector_disable_recorded',
+  ],
+])(
+  'S11-T05 source/connector denial records exact target and invalidates exposed context before stopping: %s',
+  async (text, kind, target, state) => {
+    const f = fixture();
+    f.db.exec(
+      'CREATE TABLE cos_conversation_states(scope_id TEXT PRIMARY KEY,generation TEXT,binding_digest TEXT,status TEXT,reason TEXT,updated_at TEXT)',
+    );
+    const { digest } = await import('../domain/contracts.js');
+    f.db
+      .prepare("INSERT INTO cos_conversation_states VALUES(?,'generation',?,'active',NULL,NULL)")
+      .run(binding.scopeId, digest(binding));
+    const request = f.ingress(text);
+    expect(f.controls.record(binding, request, parseOwnerControl(text)!)).toMatchObject({ status: 'ok', state });
+    expect(f.db.prepare('SELECT kind,target,state FROM cos_operator_denials').get()).toEqual({
+      kind,
+      target,
+      state: 'recorded',
+    });
+    expect(f.db.prepare('SELECT status,reason FROM cos_conversation_states').get()).toEqual({
+      status: 'invalidated',
+      reason: 'access_changed',
+    });
+    expect(f.db.prepare('SELECT paused FROM cos_identity_boundaries').get()).toEqual({ paused: 1 });
+    const revokeSource = vi.fn().mockResolvedValue({ status: 'ok' }),
+      disableConnector = vi.fn().mockResolvedValue({ status: 'ok' }),
+      cancel = vi.fn();
+    await f.controls.reconcile(binding, cancel, { revokeSource, disableConnector });
+    expect(kind === 'revoke_source' ? revokeSource : disableConnector).toHaveBeenCalledWith(
+      expect.objectContaining({ ownerId: 'owner', scopeId: 'scope' }),
+      target,
+    );
+    expect(cancel).not.toHaveBeenCalled();
+    expect(f.db.prepare('SELECT state FROM cos_operator_denials').get()).toEqual({ state: 'reconciled' });
+    expect(f.db.prepare('SELECT paused FROM cos_identity_boundaries').get()).toEqual({ paused: 1 });
+  },
+);

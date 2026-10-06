@@ -11,13 +11,22 @@ import { hasTable } from '../../../db/connection.js';
 
 export type OwnerControl =
   | { kind: 'pause_admission' | 'pause_automation' | 'stop_scope' }
-  | { kind: 'cancel_mission'; target: string };
+  | { kind: 'cancel_mission' | 'revoke_source' | 'disable_connector'; target: string };
+export type DenialHandlers = {
+  revokeSource?(context: Context, id: string): Promise<Result>;
+  disableConnector?(context: Context, id: string): Promise<Result>;
+};
 export function parseOwnerControl(text: string): OwnerControl | null {
   if (text === 'cos pause admission') return { kind: 'pause_admission' };
   if (text === 'cos pause automation') return { kind: 'pause_automation' };
   if (text === 'cos stop') return { kind: 'stop_scope' };
   const match = /^cos cancel mission ([a-zA-Z0-9_-]{1,100})$/.exec(text);
-  return match && match[0] === text ? { kind: 'cancel_mission', target: match[1] } : null;
+  if (match && match[0] === text) return { kind: 'cancel_mission', target: match[1] };
+  const source = /^cos revoke source ([a-zA-Z0-9_-]{1,128})$/.exec(text);
+  if (source && source[0] === text) return { kind: 'revoke_source', target: source[1] };
+  const connector =
+    /^cos disable connector ([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/i.exec(text);
+  return connector && connector[0] === text ? { kind: 'disable_connector', target: connector[1] } : null;
 }
 type DenialRow = { ingress_id: string; binding_digest: string; kind: string; target: string | null; state: string };
 /** Host-only deny journal. Native fences work offline; a local receipt never grants remote execution authority. */
@@ -47,7 +56,7 @@ export class HostOwnerControls {
     const { db } = this.dependencies;
     db.exec(`CREATE TABLE IF NOT EXISTS cos_operator_denials (
       scope_id TEXT NOT NULL,ingress_id TEXT NOT NULL,binding_digest TEXT NOT NULL,payload_digest TEXT NOT NULL,
-      kind TEXT NOT NULL CHECK(kind IN ('pause_admission','pause_automation','stop_scope','cancel_mission')),
+      kind TEXT NOT NULL CHECK(kind IN ('pause_admission','pause_automation','stop_scope','cancel_mission','revoke_source','disable_connector')),
       target TEXT,state TEXT NOT NULL CHECK(state IN ('recorded','reconciled','denied')),
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,PRIMARY KEY(scope_id,ingress_id));`);
     const children = cosMissionIdentities(db).filter(
@@ -69,13 +78,17 @@ export class HostOwnerControls {
         bindingDigest,
         payload,
         control.kind,
-        control.kind === 'cancel_mission' ? control.target : null,
+        'target' in control ? control.target : null,
       );
       if (control.kind === 'cancel_mission') stopCosMissionFamily(binding.scopeId, control.target, 'owner_cancel', db);
       else {
         db.prepare('UPDATE cos_identity_boundaries SET paused=1 WHERE scope_id=?').run(binding.scopeId);
         interruptScheduledOrigin(db, binding);
         interruptReviewOrigin(db, binding);
+        if (['revoke_source', 'disable_connector'].includes(control.kind) && hasTable(db, 'cos_conversation_states'))
+          db.prepare(
+            "UPDATE cos_conversation_states SET status='invalidated',reason='access_changed',updated_at=? WHERE scope_id=? AND binding_digest=? AND status='active'",
+          ).run(new Date().toISOString(), binding.scopeId, bindingDigest);
       }
       for (const identity of children)
         stopCosMissionAttempt(identity, control.kind === 'cancel_mission' ? 'cancelled' : 'authority_lost', db);
@@ -110,8 +123,15 @@ export class HostOwnerControls {
     }
     return {
       status: uncertain ? 'pending' : 'ok',
-      state: control.kind === 'cancel_mission' ? 'cancellation_recorded' : 'admission_paused',
-      ledger: control.kind === 'cancel_mission' ? 'pending' : 'host_deny_recorded',
+      state:
+        control.kind === 'cancel_mission'
+          ? 'cancellation_recorded'
+          : control.kind === 'revoke_source'
+            ? 'source_revocation_recorded'
+            : control.kind === 'disable_connector'
+              ? 'connector_disable_recorded'
+              : 'admission_paused',
+      ledger: 'target' in control ? 'pending' : 'host_deny_recorded',
       effects: 'requires_reconciliation',
       native: 'stop_requested',
     };
@@ -120,6 +140,7 @@ export class HostOwnerControls {
   async reconcile(
     binding: CosBinding,
     cancel: (context: Context, missionId: string) => Promise<Result>,
+    handlers: DenialHandlers = {},
   ): Promise<void> {
     const { db } = this.dependencies;
     if (this.reconciling.has(binding.scopeId) || !this.current(binding) || !hasTable(db, 'cos_operator_denials'))
@@ -128,7 +149,7 @@ export class HostOwnerControls {
     try {
       const rows = db
         .prepare(
-          "SELECT ingress_id,binding_digest,kind,target,state FROM cos_operator_denials WHERE scope_id=? AND kind='cancel_mission' AND state='recorded' ORDER BY created_at,ingress_id LIMIT 20",
+          "SELECT ingress_id,binding_digest,kind,target,state FROM cos_operator_denials WHERE scope_id=? AND kind IN ('cancel_mission','revoke_source','disable_connector') AND state='recorded' ORDER BY created_at,ingress_id LIMIT 20",
         )
         .all(binding.scopeId) as DenialRow[];
       for (const row of rows) {
@@ -136,12 +157,19 @@ export class HostOwnerControls {
           !this.current(binding) ||
           row.binding_digest !== digest(binding) ||
           !row.target ||
-          !/^[a-zA-Z0-9_-]{1,100}$/.test(row.target)
+          !/^[a-zA-Z0-9_-]{1,128}$/.test(row.target)
         )
           continue;
         let result: Result;
         try {
-          result = await cancel(
+          const operation =
+            row.kind === 'cancel_mission'
+              ? cancel
+              : row.kind === 'revoke_source'
+                ? handlers.revokeSource
+                : handlers.disableConnector;
+          if (!operation) continue;
+          result = await operation(
             {
               scopeId: binding.scopeId,
               ownerId: binding.ownerId,
