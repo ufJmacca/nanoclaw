@@ -8,6 +8,12 @@ import { validMissionReview } from './mission-review.js';
 import { validTeamRequest } from './team-protocol.js';
 import { validCalendarActionRequest, validActionId } from './action-protocol.js';
 import {
+  validReviewCharterChange,
+  validStrategyObservationChange,
+  type ReviewCharterChange,
+  type StrategyObservationChange,
+} from './strategy-protocol.js';
+import {
   validProactivePolicyChange,
   validProactiveDisposition,
   validProactiveDraft,
@@ -132,6 +138,8 @@ export type CosMethod =
   | 'cos_action_propose'
   | 'cos_action_get'
   | 'cos_action_cancel'
+  | 'cos_review_charter_propose'
+  | 'cos_strategy_observation_propose'
   | 'cos_request_status'
   | 'cos_knowledge_search'
   | 'cos_source_get'
@@ -237,6 +245,10 @@ export function validRequest(value: unknown): value is CosRequest {
       uuid.test(value.params.request_id)
     );
   if (value.method === 'cos_change_propose') return keys(value.params, ['change']) && validChange(value.params.change);
+  if (value.method === 'cos_review_charter_propose')
+    return keys(value.params, ['change']) && validReviewCharterChange(value.params.change);
+  if (value.method === 'cos_strategy_observation_propose')
+    return keys(value.params, ['change']) && validStrategyObservationChange(value.params.change);
   if (value.method === 'cos_work_change_propose')
     return keys(value.params, ['change']) && validWorkChange(value.params.change);
   if (value.method === 'cos_work_read') return validWorkRead(value.params);
@@ -549,7 +561,9 @@ export type ProposalChange =
   | ProactivePolicyChange
   | ProactiveDispositionChange
   | MandateChange
-  | CalendarActionChange;
+  | CalendarActionChange
+  | ReviewCharterChange
+  | StrategyObservationChange;
 export function validProposalChange(value: unknown): value is ProposalChange {
   return (
     validChange(value) ||
@@ -560,6 +574,8 @@ export function validProposalChange(value: unknown): value is ProposalChange {
     validProactiveDispositionChange(value) ||
     validMandateChange(value) ||
     validCalendarActionChange(value) ||
+    validReviewCharterChange(value) ||
+    validStrategyObservationChange(value) ||
     validMissionChange(value) ||
     validTeamChange(value)
   );
