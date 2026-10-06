@@ -165,15 +165,36 @@ export class ReviewCollector {
     definition: ReviewCharterDefinition,
     version: number,
   ) {
-    return sorted(
-      (
-        await client.query(
-          `SELECT id::text,body,digest,proposal_id FROM cos.strategy_observations
-      WHERE scope_id=$1 AND initiative_id=ANY($2::text[]) AND charter_version<=$3 ORDER BY id LIMIT 21`,
-          [context.scopeId, definition.initiative_ids, version],
+    // Rank current references before applying the bounded host collection limit.
+    // Ranking is not admission: capture still validates every selected body, digest and permission.
+    return (
+      await client.query(
+        `SELECT o.id::text,o.body,o.digest,o.proposal_id FROM cos.strategy_observations o
+      WHERE o.scope_id=$1 AND o.initiative_id=ANY($2::text[]) AND o.charter_version<=$3
+      ORDER BY CASE WHEN jsonb_typeof(o.body->'evidence')='array' THEN NOT EXISTS (
+        SELECT 1 FROM jsonb_array_elements(o.body->'evidence') ref WHERE NOT EXISTS (
+          SELECT 1 FROM cos.evidence_refs e
+          JOIN cos.sources s ON s.scope_id=e.scope_id AND s.id=e.source_id
+          JOIN cos.source_revisions r ON r.scope_id=e.scope_id AND r.id=e.revision_id AND r.source_id=s.id
+          JOIN cos.artifacts a ON a.scope_id=r.scope_id AND a.id=r.artifact_id
+          JOIN cos.chunks c ON c.scope_id=e.scope_id AND c.revision_id=e.revision_id AND c.start_line=e.start_line AND c.end_line=e.end_line
+          WHERE e.scope_id=o.scope_id AND e.id::text=ref->>'evidence_id'
+            AND e.source_id=ANY($4::text[]) AND e.session_id=$5 AND e.processing_provider=$6
+            AND s.version=e.source_version AND s.current_revision_id=e.revision_id AND r.digest=e.revision_digest
+            AND s.status IN ('current','stale') AND $6=ANY(s.processing_providers) AND a.lifecycle='published'
+            AND NOT EXISTS(SELECT 1 FROM cos.revocation_tombstones t WHERE t.scope_id=s.scope_id AND t.source_id=s.id)
         )
-      ).rows,
-    );
+      ) ELSE true END DESC, o.charter_version DESC,o.created_at DESC,o.id LIMIT 21`,
+        [
+          context.scopeId,
+          definition.initiative_ids,
+          version,
+          definition.source_ids,
+          context.sessionId,
+          context.provider,
+        ],
+      )
+    ).rows;
   }
   private async decisions(client: PoolClient, context: KnowledgeContext, definition: ReviewCharterDefinition) {
     return (
@@ -539,6 +560,7 @@ export class ReviewCollector {
     }
     for (const row of rawObservations.slice(0, 20)) {
       if (!validStrategyObservationChange(row.body) || digest(row.body) !== row.digest) return incomplete();
+      let selected = true;
       for (const ref of row.body.evidence)
         if (
           !(
@@ -547,10 +569,16 @@ export class ReviewCollector {
               [context.scopeId, ref.evidence_id, definition.source_ids],
             )
           ).rowCount
-        )
-          return incomplete();
-      if (!(await knowledge.answers.validateWorkEvidence(client, context, row.body.evidence, true)))
-        return { status: 'denied' };
+        ) {
+          selected = false;
+          break;
+        }
+      if (!selected || !(await knowledge.answers.validateWorkEvidence(client, context, row.body.evidence, true))) {
+        // Immutable history may outlive its source selection or revision. Withhold the entire
+        // observation and disclose limited coverage; current context/source fences still apply.
+        truncated = true;
+        continue;
+      }
       observations.push({ ...row.body, scope_id: context.scopeId, id: row.id });
     }
     // Even uncited source metadata influences this review; retain its version in the native context.
