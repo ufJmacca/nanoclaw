@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { after, before, test } from 'node:test';
-import { randomUUID } from 'node:crypto';
+import crypto, { randomUUID } from 'node:crypto';
+import { syncBuiltinESMExports } from 'node:module';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -63,8 +64,25 @@ after(async () => {
   }
 });
 
-for (const evolution of ['revised', 'deselected', 'revoked', 'deleted'] as const)
-  test(`S10 fresh reviews omit ${evolution} historical evidence without losing immutable observations`, async () => {
+for (const evolution of ['revised', 'deselected', 'revoked', 'deleted', 'capped-revised'] as const)
+  test(`S10 fresh reviews omit ${evolution} historical evidence without losing immutable observations`, async (t) => {
+    const revised = evolution === 'revised' || evolution === 'capped-revised';
+    if (evolution === 'capped-revised') {
+      // All approvals use the real store. Deterministic UUID ordering places every retired
+      // observation before the new one, so the regression cannot pass by random chance.
+      const prefix = randomUUID().slice(0, 24);
+      let sequence = 0;
+      const controlled = t.mock.method(
+        crypto,
+        'randomUUID',
+        () => prefix + (++sequence).toString(16).padStart(12, '0'),
+      );
+      syncBuiltinESMExports();
+      t.after(() => {
+        controlled.mock.restore();
+        syncBuiltinESMExports();
+      });
+    }
     const scope = 'strategy-evolution-' + randomUUID();
     scopes.push(scope);
     const context: KnowledgeContext = {
@@ -177,6 +195,9 @@ for (const evolution of ['revised', 'deselected', 'revoked', 'deleted'] as const
         statement: 'Current owner report',
         reason: 'Fixture report',
       });
+      if (evolution === 'capped-revised')
+        for (let index = 0; index < 24; index++)
+          await approve({ ...observation, reason: 'Retired approved observation ' + index });
       const retained = (
         await admin.query('SELECT id,body,digest FROM cos.strategy_observations WHERE scope_id=$1 ORDER BY id', [scope])
       ).rows;
@@ -190,7 +211,7 @@ for (const evolution of ['revised', 'deselected', 'revoked', 'deleted'] as const
         )
       ).rows[0].version_refs;
       let version = 1;
-      if (evolution === 'revised') {
+      if (revised) {
         fs.writeFileSync(path.join(root, 'staging', filename), 'Revised synthetic outcome evidence.', { mode: 0o600 });
         assert.equal(
           (
@@ -221,7 +242,7 @@ for (const evolution of ['revised', 'deselected', 'revoked', 'deleted'] as const
         );
       }
       const fresh = { ...context, generation: randomUUID(), ingressId: randomUUID() };
-      if (evolution !== 'revised') {
+      if (!revised) {
         if (evolution !== 'deselected')
           assert.equal(
             (
@@ -299,10 +320,10 @@ for (const evolution of ['revised', 'deselected', 'revoked', 'deleted'] as const
         ).status,
         'denied',
       );
-      if (evolution === 'revised') {
+      if (revised) {
         const currentEvidence = await knowledge.search(fresh, { query: 'Revised', sourceId: source });
         assert.equal(currentEvidence.status, 'ok');
-        await approve(
+        const currentObservation = await approve(
           {
             ...observation,
             statement: 'New verified outcome',
@@ -312,9 +333,44 @@ for (const evolution of ['revised', 'deselected', 'revoked', 'deleted'] as const
           fresh,
         );
         const current = await reviews.request(fresh, randomUUID(), request);
+        if (evolution === 'capped-revised') {
+          const beforeNew = await admin.query(
+            "SELECT count(*)::int AS n FROM cos.strategy_observations WHERE scope_id=$1 AND id<$2::uuid AND body->>'statement'=$3",
+            [scope, currentObservation.record_id, canary],
+          );
+          assert.equal(beforeNew.rows[0].n, 25);
+        }
         assert.equal(current.status, 'ok');
         assert.equal(outcomeStatus(current.snapshot as ReviewSnapshot, project, 'result'), 'evidence_backed');
         assert.equal(JSON.stringify(current).includes(canary), false);
+        if (evolution === 'capped-revised') {
+          for (let index = 0; index < 19; index++)
+            await approve(
+              {
+                ...observation,
+                statement: 'Current verified outcome ' + index,
+                reason: 'Current approved evidence',
+                evidence: [{ kind: 'source', evidence_id: (currentEvidence.items as Evidence[])[0].evidence_id }],
+              },
+              fresh,
+            );
+          const filled = await reviews.request(fresh, randomUUID(), request);
+          assert.equal(filled.status, 'ok');
+          const fullSnapshot = filled.snapshot as ReviewSnapshot;
+          assert.equal(fullSnapshot.observations.length, 20);
+          assert(fullSnapshot.observations.every((row) => row.basis === 'evidence_backed'));
+          assert.equal(fullSnapshot.coverage, 'limited');
+          assert.equal(JSON.stringify(filled).includes(canary), false);
+          assert.deepEqual(
+            (
+              await admin.query(
+                'SELECT id,body,digest FROM cos.strategy_observations WHERE scope_id=$1 AND id=ANY($2::uuid[]) ORDER BY id',
+                [scope, retained.map((row) => row.id)],
+              )
+            ).rows,
+            retained,
+          );
+        }
       }
     } finally {
       await database.pool.end();
