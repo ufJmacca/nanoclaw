@@ -20,7 +20,7 @@ import { HostFixture } from './host-fixture-client.js';
 import { McpFixture } from './mcp-fixture.js';
 
 test(
-  'S05 demo owner approves research, native specialist submits, main context reviews and notifies once',
+  'S05/S11 demo owner approves research, inspects a running specialist with a scheduled brief, and reviews once',
   { timeout: 120000 },
   async (t) => {
     const repository = process.cwd(),
@@ -94,7 +94,7 @@ test(
           scopeId: scope,
           provider: 'codex',
           model: 'fixture-model',
-          maxAttempts: 8,
+          maxAttempts: 12,
           expiresAt: new Date(Date.now() + 180000).toISOString(),
           accountFingerprint: 'a'.repeat(64),
           contextGeneration: generation,
@@ -298,6 +298,36 @@ test(
       const finished = (await host.request('mission-states')).find((row: any) => row.identity.attemptId === attempt.id);
       assert.deepEqual(finished.isolation, { databaseNetworkDenied: true, databaseEnvironmentAbsent: true });
       t.diagnostic('Reviewed notification delivered once; worker database network and credential checks passed.');
+      await ingress('Keep a weekday briefing scheduled while research runs.');
+      const scheduled = await client.call('cos_brief_schedule_propose', {
+        request_id: randomUUID(),
+        change: {
+          kind: 'brief_schedule',
+          title: 'Research briefing',
+          reason: 'Synthetic S11 demonstration',
+          expected_version: 0,
+          policy: {
+            state: 'active',
+            time_zone: 'UTC',
+            local_time: '09:00',
+            weekdays: [1, 2, 3, 4, 5],
+            quiet_hours: null,
+            snooze_until: new Date(Date.now() + 86400000).toISOString().replace(/\.\d{3}Z$/, 'Z'),
+          },
+          limits: { max_turns: 1, max_tool_calls: 4, deadline_seconds: 120, refresh_seconds: 10 },
+        },
+      });
+      assert.equal(scheduled.status, 'ok');
+      await complete();
+      await pump();
+      const scheduleApproval = host.delivered
+        .find((row) => row.id === 'cos-' + scheduled.result.proposal_id)
+        ?.text.split('\n')
+        .find((line) => line.startsWith('cos approve '));
+      assert.ok(scheduleApproval);
+      await ingress(scheduleApproval);
+      await pump();
+      await complete();
       for (const failure of ['cancel', 'outage', 'crash'] as const) {
         await host.request('mission-hold-next');
         await ingress('Compare Pilot Alpha again; exercise fixture ' + failure + '.');
@@ -334,6 +364,31 @@ test(
         const held = await heldState(),
           identity = held.identity;
         assert.deepEqual(held.isolation, { databaseNetworkDenied: true, databaseEnvironmentAbsent: true });
+        if (failure === 'cancel') {
+          await ingress('Inspect the active research and briefing without changing authority.');
+          const status = await client.call('cos_status', {});
+          assert.equal(status.status, 'ok');
+          assert.equal(status.result.execution_authority, 'inspection_only');
+          assert.equal(
+            status.result.categories.find(
+              (row: { category: string; states: Record<string, number> }) => row.category === 'missions',
+            ).states.running,
+            1,
+          );
+          assert.equal(
+            status.result.categories.find(
+              (row: { category: string; states: Record<string, number> }) => row.category === 'schedules',
+            ).states.active,
+            1,
+          );
+          assert.equal(status.result.source_content, 'withheld');
+          assert.equal(status.result.monetary_usage, 'unavailable');
+          await complete();
+          assert.equal((await heldState()).running, true, 'inspection does not stop or replace the specialist');
+          t.diagnostic(
+            'S11 status observed one native specialist and one owner-approved briefing in the same main group.',
+          );
+        }
         const before: any = (
           await admin.query('SELECT * FROM cos.mission_attempts WHERE scope_id=$1 AND id=$2', [
             scope,
@@ -445,6 +500,9 @@ test(
           'mission_work_orders',
           'mission_context_manifests',
           'mission_template_versions',
+          'brief_runs',
+          'brief_schedule_revisions',
+          'brief_schedules',
           'derivation_links',
           'evidence_refs',
           'chunks',
