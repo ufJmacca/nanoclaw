@@ -2,7 +2,12 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, expect, it } from 'vitest';
-import { readTargetDatabaseEnvironment, serviceObservation, verifyInstalledProfiles } from './target-host.js';
+import {
+  readTargetDatabaseEnvironment,
+  readTargetTestEnvironment,
+  serviceObservation,
+  verifyInstalledProfiles,
+} from './target-host.js';
 import Database from 'better-sqlite3';
 import { imageProfile } from '../../../release-runtime.js';
 import { fixtureRelease } from '../../../contracts/chief-of-staff/release-fixture.js';
@@ -10,6 +15,26 @@ import type { DeploymentSettings } from './deployment-settings.js';
 const roots: string[] = [];
 afterEach(() => {
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
+});
+it('separate restore credentials reject a mixed runtime/foreign profile and unsafe file permissions', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-test-env-'));
+  roots.push(root);
+  const file = path.join(root, 'test.env');
+  fs.writeFileSync(
+    file,
+    'COS_TEST_PGUSER=fixture-test\nCOS_TEST_PGPASSWORD=fixture-secret\nCOS_TEST_TARGET_ID=fixture-protected\n',
+    { mode: 0o600 },
+  );
+  expect(Object.keys(readTargetTestEnvironment(file)).sort()).toEqual([
+    'COS_TEST_PGPASSWORD',
+    'COS_TEST_PGUSER',
+    'COS_TEST_TARGET_ID',
+  ]);
+  fs.appendFileSync(file, 'COS_PGPASSWORD=fixture-runtime\n');
+  expect(() => readTargetTestEnvironment(file)).toThrow('unsafe_target_credentials');
+  fs.writeFileSync(file, 'COS_TEST_PGPASSWORD=fixture-test\n');
+  fs.chmodSync(file, 0o644);
+  expect(() => readTargetTestEnvironment(file)).toThrow('unsafe_target_credentials');
 });
 it('selects only Pi-owned runtime fields and adds migration credentials only for the migration process', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-env-'));

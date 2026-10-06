@@ -33,6 +33,8 @@ import { MandatePump } from './automation/mandate-pump.js';
 import { ActionPump } from './actions/pump.js';
 import { ActionNotificationDelivery } from './actions/notification-delivery.js';
 import type { KnowledgeContext } from './knowledge/store.js';
+import { renderOperatorStatus } from './ops/operator-status-render.js';
+import { renderOwnerControl } from './ops/owner-control-render.js';
 
 export type RuntimeDependencies = {
   db: Database.Database;
@@ -135,6 +137,50 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
       (await d.store.briefs.authorize(context, context.origin.runId, context.origin.generation)).status === 'ok',
     verifyReview: (context) => reviewAuthority(context, true),
     decide: (...args) => (d.store ? d.store.decide(...args) : Promise.resolve({ status: 'unavailable' })),
+    inspect: (context, input) =>
+      !disposed && d.store ? d.store.operatorStatus(context, input) : Promise.resolve({ status: 'unavailable' }),
+    replyStatus: async (binding, ingressId, result, current) => {
+      const adapter = getDeliveryAdapter(),
+        session = d.session(binding.sessionId);
+      if (disposed || !adapter || !session || adapter.isAvailable?.('mattermost') === false || !(await current()))
+        return false;
+      const context = {
+        scopeId: binding.scopeId,
+        ownerId: binding.ownerId,
+        agentGroupId: binding.agentGroupId,
+        sessionId: binding.sessionId,
+        ingressId,
+      };
+      const fresh = result.status === 'ok' ? await d.store?.operatorStatus(context, {}) : undefined;
+      const checked = result.status === 'ok' && fresh?.status !== 'ok' ? { status: 'unavailable' as const } : result;
+      if (disposed || !(await current())) return false;
+      const boundary = cosBoundary(session, d.db);
+      const admission = boundary.restricted && boundary.paused ? 'paused' : enabled() ? 'open' : 'closed';
+      const receipt = await adapter.deliver(
+        'mattermost',
+        `mattermost:${binding.instanceId}:${binding.channelId}`,
+        null,
+        'chat',
+        JSON.stringify({ text: renderOperatorStatus(checked, admission) }),
+        undefined,
+        'cos-status-' + digest({ scope: binding.scopeId, ingressId }),
+      );
+      return !!receipt;
+    },
+    replyControl: async (binding, ingressId, result, current) => {
+      const adapter = getDeliveryAdapter();
+      if (disposed || !adapter || adapter.isAvailable?.('mattermost') === false || !(await current())) return false;
+      const receipt = await adapter.deliver(
+        'mattermost',
+        `mattermost:${binding.instanceId}:${binding.channelId}`,
+        null,
+        'chat',
+        JSON.stringify({ text: renderOwnerControl(result) }),
+        undefined,
+        'cos-control-' + digest({ scope: binding.scopeId, ingressId }),
+      );
+      return !!receipt;
+    },
     acknowledge: (proposal) => deletePendingApproval('cos-' + proposal),
     stop: d.stop,
     wake: async (session) => {
@@ -490,7 +536,8 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
       );
     },
   });
-  if (enabled())
+  // Install the handler before startup admission opens; every request still resolves fresh gated authority.
+  if (d.enabled && d.store)
     registerDeliveryAction(
       'cos_rpc',
       createRpcHandler({
@@ -517,9 +564,18 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
         resolveKnowledgeContext: async (session, context) => resolveKnowledgeContext(session, context, d.db),
       }),
     );
+  const reconcile = async (binding: CosBinding) => {
+    if (!disposed && d.store?.missionRuns)
+      await controller.reconcileControls(binding, (context, id) => d.store!.missionRuns.cancel(context, id), {
+        revokeSource: d.store.knowledge ? (context, id) => d.store!.knowledge!.revokeOwned(context, id) : undefined,
+        disableConnector: d.store.calendar ? (context, id) => d.store!.calendar!.disconnect(context, id) : undefined,
+      });
+  };
   return {
     controller,
+    reconcile,
     pump: async (binding: CosBinding) => {
+      await reconcile(binding);
       if (enabled()) await invalidations?.drain(binding);
       const recovered = enabled() ? await briefReconciliation?.drain(binding) : undefined;
       if (enabled()) await reviewDispatch?.drain(binding);

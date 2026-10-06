@@ -50,9 +50,9 @@ try {
       stdio: 'inherit',
       // Complete native scenarios and actual database-time expiry use a bounded suite deadline.
       timeout:
-        args.slice === 'S10' && !args.demo
+        ['S10', 'S11'].includes(args.slice) && !args.demo
           ? 900000
-          : ['S06', 'S07', 'S08', 'S09', 'S10'].includes(args.slice)
+          : ['S06', 'S07', 'S08', 'S09', 'S10', 'S11'].includes(args.slice)
             ? 600000
             : args.slice === 'S05'
               ? 300000
@@ -69,7 +69,7 @@ try {
             : 'fixture_suite_process_failed',
       }),
     );
-  if (['S05', 'S06', 'S07', 'S08', 'S09', 'S10'].includes(args.slice))
+  if (['S05', 'S06', 'S07', 'S08', 'S09', 'S10', 'S11'].includes(args.slice))
     await stopFixtureWorkers(fixtures.COS_FIXTURE_HOST_ROOT, fixtures.COS_FIXTURE_IMAGE);
   process.exitCode = result.status ?? 1;
   // eslint-disable-next-line no-catch-all/no-catch-all -- The fixture CLI reports its bounded configuration failure and exits without admission.

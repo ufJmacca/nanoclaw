@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { pathToFileURL, fileURLToPath } from 'node:url';
 import { deploymentSettings } from './deployment-settings.js';
 import { readPrivate, readTarget, initializeTarget } from './target-state.js';
 import { withDeploymentLock } from './deployment-lock.js';
@@ -8,6 +8,9 @@ import type { BindingRequest } from './bind.js';
 
 type TargetArguments =
   | { command: 'status'; settings: string }
+  | { command: 'programme-protect'; settings: string; completion: string }
+  | { command: 'protected-release'; settings: string; releaseId: string; manifestHash: string }
+  | { command: 'operations-maintenance'; settings: string; requestId: string; phase: 'hold' | 'release' }
   | { command: 'runtime-test'; settings: string; owner: string }
   | { command: 'rollback'; settings: string; releaseId: string; fromReleaseId: string }
   | {
@@ -23,7 +26,19 @@ export function parseTargetArguments(args: string[]): TargetArguments {
     throw new Error('invalid_target_arguments');
   };
   const [command, ...rest] = args;
-  if (!['status', 'deploy', 'rollback', 'runtime-test'].includes(command) || rest.length % 2 !== 0) return reject();
+  if (
+    ![
+      'status',
+      'deploy',
+      'rollback',
+      'runtime-test',
+      'programme-protect',
+      'protected-release',
+      'operations-maintenance',
+    ].includes(command) ||
+    rest.length % 2 !== 0
+  )
+    return reject();
   const values: Record<string, string> = {};
   for (let i = 0; i < rest.length; i += 2) {
     if (
@@ -35,6 +50,9 @@ export function parseTargetArguments(args: string[]): TargetArguments {
         '--from-release-id',
         '--owner',
         '--recover-from',
+        '--completion',
+        '--request-id',
+        '--phase',
       ].includes(rest[i]) ||
       !rest[i + 1] ||
       values[rest[i]]
@@ -46,6 +64,22 @@ export function parseTargetArguments(args: string[]): TargetArguments {
     !!value && /^\/[a-zA-Z0-9_./-]+$/.test(value) && path.resolve(value) === value;
   if (!canonical(values['--settings']) || (values['--binding'] !== undefined && !canonical(values['--binding'])))
     return reject();
+  if (command === 'programme-protect')
+    return Object.keys(values).length === 2 && canonical(values['--completion'])
+      ? { command, settings: values['--settings'], completion: values['--completion'] }
+      : reject();
+  if (command === 'operations-maintenance')
+    return Object.keys(values).length === 3 &&
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(values['--request-id'] ?? '') &&
+      ['hold', 'release'].includes(values['--phase'])
+      ? {
+          command,
+          settings: values['--settings'],
+          requestId: values['--request-id'],
+          phase: values['--phase'] as 'hold' | 'release',
+        }
+      : reject();
+  if (values['--completion'] || values['--request-id'] || values['--phase']) return reject();
   if (command === 'status')
     return Object.keys(values).length === 1 ? { command, settings: values['--settings'] } : reject();
   if (command === 'runtime-test') {
@@ -67,6 +101,20 @@ export function parseTargetArguments(args: string[]): TargetArguments {
     };
   }
   if (values['--from-release-id'] || values['--owner']) return reject();
+  if (command === 'protected-release') {
+    if (
+      Object.keys(values).length !== 3 ||
+      !/^release-[a-zA-Z0-9_-]{1,120}$/.test(values['--release-id'] ?? '') ||
+      !/^[a-f0-9]{64}$/.test(values['--manifest-sha256'] ?? '')
+    )
+      return reject();
+    return {
+      command,
+      settings: values['--settings'],
+      releaseId: values['--release-id'],
+      manifestHash: values['--manifest-sha256'],
+    };
+  }
   if (
     values['--recover-from'] !== undefined &&
     (!/^release-[a-zA-Z0-9_-]{1,120}$/.test(values['--recover-from']) ||
@@ -115,6 +163,70 @@ export async function targetCommand(args: string[]): Promise<Record<string, unkn
   const parent = path.dirname(settings.stateRoot);
   if (!fs.existsSync(parent)) throw new Error('target_state_parent_required');
   return withDeploymentLock(settings.stateRoot + '.operation.lock', async () => {
+    if (request.command === 'operations-maintenance') {
+      const { operationsMaintenance } = await import('./operations-maintenance.js');
+      const { createOperationsMaintenanceEffects } = await import('./operations-maintenance-effects.js');
+      return operationsMaintenance({
+        root: settings.stateRoot,
+        binding,
+        requestId: request.requestId,
+        phase: request.phase,
+        effects: createOperationsMaintenanceEffects(settings, fileURLToPath(import.meta.url)),
+      });
+    }
+    if (request.command === 'programme-protect') {
+      const { protectCompletedProgramme, validateProgrammeProtection, verifyProtectionHelper } =
+        await import('./programme-protection.js');
+      const { digest } = await import('../domain/contracts.js');
+      const proof = validateProgrammeProtection(readPrivate(request.completion));
+      const helper = await verifyProtectionHelper(settings, binding, fileURLToPath(import.meta.url));
+      const state = protectCompletedProgramme(settings.stateRoot, binding, proof);
+      return {
+        status: 'protected',
+        lifecycle: state.lifecycle,
+        maintenance: state.maintenance,
+        testedHelperReleaseId: helper.releaseId,
+        targetReleaseId: state.releaseId,
+        bindingDigest: digest(binding),
+        completionDigest: digest(proof),
+        sourceCommit: proof.releaseManifest.source.commit,
+        sourceTree: proof.releaseManifest.source.tree,
+        accountActivation: 'not_granted_by_protection',
+      };
+    }
+    if (request.command === 'protected-release') {
+      const { artifactHash, verifyLoadedImages } = await import('./release-artifacts.js');
+      const { digest } = await import('../domain/contracts.js');
+      const { verifyProtectionHelper } = await import('./programme-protection.js');
+      const { validateReleaseManifest } = await import('./release-manifest.js');
+      const { completeProtectedRelease } = await import('./protected-release.js');
+      const { createOperationsMaintenanceEffects } = await import('./operations-maintenance-effects.js');
+      const { syncPinnedSource } = await import('./source-sync.js');
+      const file = path.join(settings.releaseRoot, request.releaseId, 'release.json');
+      const manifest = validateReleaseManifest(readPrivate(file));
+      const helper = await verifyProtectionHelper(settings, binding, fileURLToPath(import.meta.url));
+      if (
+        manifest.releaseId !== request.releaseId ||
+        digest(helper) !== digest(manifest) ||
+        (await artifactHash(file)) !== request.manifestHash
+      )
+        throw new Error('protected_release_unverified');
+      const checkout = path.join(settings.sourceRoot, request.releaseId);
+      if (fs.realpathSync(checkout) !== checkout) throw new Error('source_checkout_conflict');
+      await syncPinnedSource({
+        repository: settings.installationRoot,
+        sourceRoot: settings.sourceRoot,
+        releaseId: manifest.releaseId,
+        source: manifest.source,
+      });
+      await verifyLoadedImages(manifest, targetCommands(settings).inspect);
+      return completeProtectedRelease({
+        root: settings.stateRoot,
+        binding,
+        manifest,
+        effects: createOperationsMaintenanceEffects(settings, fileURLToPath(import.meta.url)),
+      });
+    }
     if (request.command === 'runtime-test') {
       const { serveRuntimeTestSession } = await import('./runtime-test-session.js');
       const { createRuntimeTestEffects } = await import('./runtime-test-effects.js');
@@ -241,6 +353,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
         'wrong_deployment_target',
         'unsafe_target_credentials',
         'rollback_not_compatible',
+        'operator_denial_release_required',
         'rollback_unverified',
         'rollback_receipt_conflict',
         'rollback_source_changed',
@@ -249,6 +362,10 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
         'runtime_test_history_conflict',
         'runtime_test_protocol_invalid',
         'installed_runtime_test_helper_required',
+        'programme_completion_unverified',
+        'target_protection_conflict',
+        'operations_maintenance_unverified',
+        'operations_workers_active',
       ]);
       console.error(
         JSON.stringify({

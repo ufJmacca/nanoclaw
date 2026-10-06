@@ -6,7 +6,10 @@ import { networkInterfaces } from 'node:os';
 import type { PoolConfig } from 'pg';
 
 export class DatabaseConfigurationError extends Error {
-  constructor(readonly variable: string) {
+  constructor(
+    readonly variable: string,
+    readonly phase: 'CONFIG' | 'DNS' = 'CONFIG',
+  ) {
     super(`Invalid or missing ${variable}`);
     this.name = 'DatabaseConfigurationError';
   }
@@ -31,9 +34,11 @@ export async function verifyExternalHost(host: string): Promise<string[]> {
     addresses = await Promise.race([
       net.isIP(host) ? Promise.resolve([{ address: host }]) : lookup(host, { all: true }),
       new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new DatabaseConfigurationError('COS_PGHOST')), 3000);
+        timer = setTimeout(() => reject(new DatabaseConfigurationError('COS_PGHOST', 'DNS')), 3000);
       }),
     ]);
+  } catch {
+    throw new DatabaseConfigurationError('COS_PGHOST', 'DNS');
   } finally {
     clearTimeout(timer);
   }

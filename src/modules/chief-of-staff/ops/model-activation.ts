@@ -8,6 +8,7 @@ import { createConversationState } from '../bridge/conversation-state.js';
 import { modelActivation, subscriptionActivation, type SubscriptionActivation } from '../bridge/model-policy.js';
 import { digest } from '../domain/contracts.js';
 import { readPrivate, writeAtomic } from './target-state.js';
+import { assertOwnerDenialResumeCheckpoint } from './owner-denial-resume.js';
 
 type Options = {
   root: string;
@@ -284,11 +285,12 @@ export function rebindRecoveredActivation(o: Options, request: { expectedGenerat
 }
 /** A repeated resume request observes the result; it can never undo a later pause. */
 export function resumeContext(
-  o: Options & { inbound: Database.Database; outbound: Database.Database },
+  o: Options & { inbound: Database.Database; outbound: Database.Database; ownerDenialsCheckpoint?: string },
   activationId: string,
   resumeId: string,
 ) {
   boundary(o, false);
+  assertOwnerDenialResumeCheckpoint(o.db, o.binding, o.ownerDenialsCheckpoint);
   if (
     !/^[a-f0-9]{32}$/.test(activationId) ||
     !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(resumeId)

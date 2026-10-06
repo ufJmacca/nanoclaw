@@ -38,6 +38,7 @@ function fixture(allowed = true) {
     },
     readWork: vi.fn(),
     status: vi.fn(),
+    operatorStatus: vi.fn().mockResolvedValue({ status: 'ok', execution_authority: 'inspection_only' }),
     requestMission: vi.fn().mockResolvedValue({
       status: 'ok',
       mission_id: 'mission',
@@ -72,6 +73,39 @@ const calendarAction = {
   mission_id: null,
   attendees: [],
 };
+it('S11 cos_status uses current main-context authority and never grants an automatic task inspection', async () => {
+  const f = fixture();
+  const statusRequest = { ...request, method: 'cos_status', params: { category: 'actions', limit: 5 } };
+  const deliveryId = '22222222-2222-4222-8222-222222222222';
+  await f.handler(
+    { action: 'cos_rpc', request: statusRequest, delivery_id: deliveryId },
+    { id: 'session' } as Session,
+    f.db,
+  );
+  expect(f.store.operatorStatus).toHaveBeenCalledWith(
+    expect.objectContaining({ scopeId: 'fixture', ownerId: 'owner' }),
+    { category: 'actions', limit: 5 },
+  );
+  f.resolveContext.mockResolvedValue({
+    scopeId: 'fixture',
+    ownerId: 'owner',
+    sessionId: 'session',
+    agentGroupId: 'group',
+    ingressId: 'verified',
+    origin: { kind: 'schedule', runId: 'run', generation: 1 },
+  });
+  f.store.operatorStatus.mockClear();
+  await f.handler(
+    {
+      action: 'cos_rpc',
+      request: { ...statusRequest, request_id: '33333333-3333-4333-8333-333333333333' },
+      delivery_id: deliveryId,
+    },
+    { id: 'session' } as Session,
+    f.db,
+  );
+  expect(f.store.operatorStatus).not.toHaveBeenCalled();
+});
 const strategyObservation = {
   kind: 'strategy_observation',
   charter_version: 1,

@@ -35,6 +35,11 @@ vi.mock('./action-recovery-admin.js', async () => ({
   runActionRecoveryAdmin: vi.fn(),
 }));
 import { runActionRecoveryAdmin } from './action-recovery-admin.js';
+vi.mock('./owner-export-admin.js', async () => ({
+  ...(await vi.importActual('./owner-export-admin.js')),
+  runOwnerExportAdmin: vi.fn(),
+}));
+import { runOwnerExportAdmin } from './owner-export-admin.js';
 vi.mock('./mission-admin.js', async () => ({
   ...(await vi.importActual('./mission-admin.js')),
   runMissionAdmin: vi.fn(),
@@ -71,6 +76,76 @@ const facts = vi.fn(async () => ({
 const quiescent = vi.fn(async () => true);
 const dependencies = { target: () => readTarget(state, targetBinding), quiescent, facts };
 const env = { COS_ENABLED: 'true', COS_TARGET_STATE_DIR: state };
+it.each(['operations-backup', 'operations-restore-check'] as const)(
+  'S11-PG02 %s remains owner-accessible while model execution is disabled',
+  async (command) => {
+    fs.rmSync(state + '/codex-auth', { recursive: true });
+    const args = {
+      command,
+      scopeId: 'fixture',
+      requestId: '11111111-1111-4111-8111-111111111111',
+      settingsFile: state + '/settings.json',
+      ...(command === 'operations-restore-check' ? { backupOperationId: 'release-fixture' } : {}),
+    };
+    vi.mocked(runActionRecoveryAdmin).mockImplementation(async (options) => {
+      await options.check();
+      options.assertAuthority();
+      expect(options.binding.ownerId).toBe('owner');
+      return { status: 'verified_paused', live_model: 'not_invoked', writer_enabled: false };
+    });
+    expect(
+      await contextAdminCommand(
+        args as Parameters<typeof contextAdminCommand>[0],
+        { ...env, COS_ENABLED: 'false' },
+        dependencies,
+      ),
+    ).toMatchObject({
+      status: 'verified_paused',
+      writer_enabled: false,
+    });
+    facts.mockResolvedValueOnce({
+      id: 'private',
+      type: 'P',
+      delete_at: 0,
+      members: ['bot', 'foreign'],
+      activeSubscription: true,
+    });
+    await expect(
+      contextAdminCommand(
+        args as Parameters<typeof contextAdminCommand>[0],
+        { ...env, COS_ENABLED: 'false' },
+        dependencies,
+      ),
+    ).rejects.toThrow('private_owner_membership_required');
+  },
+);
+it('S11-T06 owner export retains paused private/native authority and never needs model credentials', async () => {
+  fs.rmSync(state + '/codex-auth', { recursive: true });
+  const args = {
+    command: 'owner-export' as const,
+    scopeId: 'fixture',
+    requestId: '11111111-1111-4111-8111-111111111111',
+  };
+  vi.mocked(runOwnerExportAdmin).mockImplementation(async (options) => {
+    await options.check();
+    options.assertAuthority();
+    expect(options.binding.ownerId).toBe('owner');
+    expect(options.databaseFingerprint).toBe(targetBinding.databaseFingerprint);
+    return { status: 'ok', delivery: 'owner_local_only', live_model: 'not_invoked' };
+  });
+  expect(await contextAdminCommand(args, { ...env, COS_ENABLED: 'false' }, dependencies)).toMatchObject({
+    status: 'ok',
+    delivery: 'owner_local_only',
+  });
+  facts.mockResolvedValueOnce({
+    id: 'private',
+    type: 'P',
+    delete_at: 0,
+    members: ['bot', 'foreign'],
+    activeSubscription: true,
+  });
+  await expect(contextAdminCommand(args, env, dependencies)).rejects.toThrow('private_owner_membership_required');
+});
 beforeEach(async () => {
   fs.mkdirSync(root, { mode: 0o700 });
   fs.mkdirSync(root + '/data', { mode: 0o700 });
@@ -104,6 +179,49 @@ beforeEach(async () => {
   });
   facts.mockClear();
   quiescent.mockClear();
+});
+it('S11-T02/T09 trusted owner-local pause works with service active and Mattermost/database/model unavailable, preserving ordinary state', async () => {
+  const db = initDb(central);
+  db.exec(
+    "CREATE TABLE ordinary_canary(id TEXT,body TEXT);INSERT INTO ordinary_canary VALUES('message','protected ordinary content');UPDATE cos_identity_boundaries SET paused=0",
+  );
+  const binding = JSON.parse(
+    (db.prepare('SELECT binding FROM cos_identity_boundaries WHERE scope_id=?').get('fixture') as { binding: string })
+      .binding,
+  );
+  closeDb();
+  facts.mockRejectedValue(Error('Mattermost unavailable'));
+  quiescent.mockResolvedValue(false);
+  const stop = vi.fn();
+  const request = {
+    command: 'operator-control' as const,
+    scopeId: 'fixture',
+    requestId: '11111111-1111-4111-8111-111111111111',
+    text: 'cos pause admission',
+  };
+  expect(await contextAdminCommand(request, { ...env, COS_ENABLED: 'false' }, { ...dependencies, stop })).toMatchObject(
+    { status: 'ok', state: 'admission_paused', effects: 'requires_reconciliation', live_model: 'not_invoked' },
+  );
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  expect(await contextAdminCommand(request, { ...env, COS_ENABLED: 'false' }, { ...dependencies, stop })).toMatchObject(
+    { status: 'ok', state: 'admission_paused' },
+  );
+  expect(stop).toHaveBeenCalledWith(
+    expect.objectContaining({ id: binding.sessionId, agent_group_id: binding.agentGroupId }),
+  );
+  expect(facts).not.toHaveBeenCalled();
+  expect(quiescent).not.toHaveBeenCalled();
+  expect(connectCosHostStore).not.toHaveBeenCalled();
+  const native = new Database(central, { readonly: true });
+  try {
+    expect(native.prepare('SELECT count(*) AS n FROM cos_operator_denials').get()).toEqual({ n: 1 });
+    expect(native.prepare('SELECT * FROM ordinary_canary').all()).toEqual([
+      { id: 'message', body: 'protected ordinary content' },
+    ]);
+    expect(native.prepare('SELECT paused FROM cos_identity_boundaries').get()).toEqual({ paused: 1 });
+  } finally {
+    native.close();
+  }
 });
 afterEach(() => {
   closeDb();

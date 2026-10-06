@@ -26,6 +26,14 @@ type Container = {
   State: { Running: boolean };
   Config: { Labels: Record<string, string>; Env: string[] };
 };
+export function runtimeTestSchemaCompatible(manifest: ReleaseManifest | undefined, version: number): boolean {
+  return (
+    !!manifest &&
+    Number.isSafeInteger(version) &&
+    version >= manifest.postgres.minimum &&
+    version <= manifest.postgres.maximum
+  );
+}
 export function selectCosTestContainers(values: Container[], installation: string): string[] {
   const selected: string[] = [];
   for (const value of values) {
@@ -122,7 +130,8 @@ export function createRuntimeTestEffects(settings: DeploymentSettings, owner: st
       await ordinaryHost();
       const client = await checkedTargetDatabase(settings);
       try {
-        if ((await migrationStatus(client)) !== 1) throw new Error('schema_incompatible');
+        if (!runtimeTestSchemaCompatible(manifest, await migrationStatus(client)))
+          throw new Error('schema_incompatible');
       } finally {
         await client.end();
       }
@@ -156,7 +165,7 @@ export function createRuntimeTestEffects(settings: DeploymentSettings, owner: st
       try {
         return (
           (await client.query('SELECT pg_try_advisory_lock(73101003) AS locked')).rows[0]?.locked === true &&
-          (await migrationStatus(client)) === 1
+          runtimeTestSchemaCompatible(manifest, await migrationStatus(client))
         );
       } finally {
         await client.end();

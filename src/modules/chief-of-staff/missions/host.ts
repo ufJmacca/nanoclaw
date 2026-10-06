@@ -25,6 +25,7 @@ type Options = {
   teams?: TeamRunStore;
   authority: MissionAuthorityResolver;
   admitted(): boolean;
+  executionReady?(): boolean;
   assertHostAuthority(): void;
   facts(binding: CosBinding): Promise<ChannelFacts>;
   running(identity: CosMissionIdentity): boolean;
@@ -106,16 +107,21 @@ export class MissionHost implements SpecialistLifecycle {
       }),
     );
   }
-  private local(context: Context): boolean {
+  private local(context: Context, execution = true): boolean {
     try {
       this.options.assertHostAuthority();
-      return !this.closed && this.options.admitted() && !!this.options.authority(context);
+      return (
+        !this.closed &&
+        this.options.admitted() &&
+        (!execution || (this.options.executionReady?.() ?? true)) &&
+        !!this.options.authority(context)
+      );
     } catch {
       return false;
     }
   }
-  private async admitted(context: Context): Promise<boolean> {
-    if (!this.local(context)) return false;
+  private async admitted(context: Context, execution = true): Promise<boolean> {
+    if (!this.local(context, execution)) return false;
     const session = getSession(context.sessionId),
       boundary = session && cosBoundary(session, this.options.db);
     if (!boundary?.restricted || boundary.paused || !boundary.binding) return false;
@@ -130,7 +136,7 @@ export class MissionHost implements SpecialistLifecycle {
     const after = getSession(context.sessionId),
       fresh = after && cosBoundary(after, this.options.db);
     return (
-      this.local(context) &&
+      this.local(context, execution) &&
       validPrivateChannel(binding, facts) &&
       !!fresh?.restricted &&
       !fresh.paused &&
@@ -157,7 +163,7 @@ export class MissionHost implements SpecialistLifecycle {
         state.admitted === true &&
         !isCosMissionStopped(identity, this.options.db) &&
         absent &&
-        (await this.admitted(state.context as Context))
+        (await this.admitted(state.context as Context, false))
       )
         continue;
       // A running orphan never inherits a new lease. Preserve submissions while confirming their exact stop.
@@ -171,9 +177,22 @@ export class MissionHost implements SpecialistLifecycle {
       this.settled.add(identity.attemptId);
     }
   }
-  pump(binding: CosBinding): Promise<void> {
+  private exclusive(operation: () => Promise<void>): Promise<void> {
     if (this.closed) return Promise.resolve();
     if (this.inFlight) return this.inFlight;
+    this.inFlight = operation().finally(() => {
+      this.inFlight = undefined;
+    });
+    return this.inFlight;
+  }
+  recover(): Promise<void> {
+    return this.exclusive(async () => {
+      this.options.assertHostAuthority();
+      await this.dispatcher.poll();
+      await this.reconcile();
+    });
+  }
+  pump(binding: CosBinding): Promise<void> {
     const run = async () => {
       this.options.assertHostAuthority();
       await this.dispatcher.poll();
@@ -187,7 +206,7 @@ export class MissionHost implements SpecialistLifecycle {
         ingressId: 'host-mission-dispatch',
       };
       this.options.assertHostAuthority();
-      if (!this.options.admitted()) return;
+      if (!this.options.admitted() || !(this.options.executionReady?.() ?? true)) return;
       const retirement = await this.options.runs.retireUnallocated(
         context,
         this.retirementCursors.get(binding.scopeId) ?? null,
@@ -218,10 +237,7 @@ export class MissionHost implements SpecialistLifecycle {
         await this.dispatcher.dispatch(item.context, item.identity.attemptId);
       }
     };
-    this.inFlight = run().finally(() => {
-      this.inFlight = undefined;
-    });
-    return this.inFlight;
+    return this.exclusive(run);
   }
   fenceLocal(): void {
     this.closed = true;

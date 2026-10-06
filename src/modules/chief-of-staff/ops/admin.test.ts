@@ -1,5 +1,13 @@
 import { describe, it, expect, vi } from 'vitest';
-import { parseAdminArguments, adminStatus, safeAdminError } from './admin.js';
+import { parseAdminArguments, adminStatus, safeAdminError, adminEnvironment } from './admin.js';
+it('local owner denials select no database or account credentials even when caller overrides contain them', () => {
+  const env = adminEnvironment('operator-control', {
+    COS_TARGET_STATE_DIR: '/fixture',
+    COS_PGPASSWORD: 'fixture',
+    MATTERMOST_BOT_TOKEN: 'fixture',
+  });
+  expect(Object.keys(env).sort()).toEqual(['COS_ENABLED', 'COS_TARGET_STATE_DIR']);
+});
 it.each([
   'specialist_release_required',
   'unsafe_mission_purge',
@@ -19,6 +27,50 @@ it.each([
 import { SCHEMA_VERSION } from '../store/migrations.js';
 import { DatabasePreflightError } from '../store/preflight.js';
 import { DatabaseConfigurationError } from '../store/config.js';
+it('S11-T06 owner export CLI fixes private target delivery and cannot select another owner, file destination or model tool', () => {
+  const id = '11111111-1111-4111-8111-111111111111';
+  expect(parseAdminArguments(['owner-export', '--scope', 'fixture', '--request-id', id])).toEqual({
+    command: 'owner-export',
+    scopeId: 'fixture',
+    requestId: id,
+  });
+  expect(
+    parseAdminArguments(['export-purge', '--scope', 'fixture', '--request-id', id, '--retention-days', '7']),
+  ).toEqual({ command: 'export-purge', scopeId: 'fixture', requestId: id, retentionDays: 7 });
+  for (const extra of [
+    ['--owner', 'foreign'],
+    ['--file', '/public/export'],
+    ['--provider', 'other'],
+    ['--thread', 'public'],
+  ])
+    expect(() => parseAdminArguments(['owner-export', '--scope', 'fixture', '--request-id', id, ...extra])).toThrow(
+      'invalid_admin_arguments',
+    );
+  expect(() =>
+    parseAdminArguments(['export-purge', '--scope', 'fixture', '--request-id', id, '--retention-days', '366']),
+  ).toThrow('invalid_admin_arguments');
+});
+it('S11 owner CLI accepts only a precisely scoped deterministic denial and stable request identity', () => {
+  const args = [
+    'operator-control',
+    '--scope',
+    'fixture',
+    '--request-id',
+    '11111111-1111-4111-8111-111111111111',
+    '--text',
+    'cos pause admission',
+  ];
+  expect(parseAdminArguments(args)).toEqual({
+    command: 'operator-control',
+    scopeId: 'fixture',
+    requestId: args[4],
+    text: 'cos pause admission',
+  });
+  for (const text of ['cos resume', 'cos cancel mission ../../ordinary', '> cos stop', 'cos disable everything'])
+    expect(() => parseAdminArguments([...args.slice(0, -1), text])).toThrow('invalid_admin_arguments');
+  expect(() => parseAdminArguments(args.slice(0, 5))).toThrow('invalid_admin_arguments');
+  expect(() => parseAdminArguments([...args, '--owner', 'foreign'])).toThrow('invalid_admin_arguments');
+});
 describe('S01 owner administration', () => {
   it.each(['mission-configure', 'team-configure'])('routes exact %s through owner administration', (command) => {
     const requestId = '11111111-1111-4111-8111-111111111111';

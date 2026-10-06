@@ -46,6 +46,140 @@ function fixture(enabled: boolean, specialists?: (store: PriorityStore) => Speci
 function specialist() {
   return { pump: vi.fn(async (_binding: CosBinding) => {}), fenceLocal: vi.fn(), close: vi.fn(async () => {}) };
 }
+it('S11-T02/T07 actual main execution stays closed during startup health and after database failure', async () => {
+  const f = fixture(true);
+  const binding: CosBinding = {
+    scopeId: 'scope',
+    agentGroupId: 'group',
+    messagingGroupId: 'mg',
+    sessionId: 'main',
+    provider: 'codex',
+    instanceId: 'fixture',
+    channelId: 'private',
+    ownerId: 'owner',
+    botId: 'bot',
+  };
+  const session = {
+    id: 'main',
+    agent_group_id: 'group',
+    messaging_group_id: 'mg',
+    agent_provider: 'codex',
+    status: 'active',
+    thread_id: null,
+  } as Session;
+  installCosBoundary(binding, f.db);
+  f.db
+    .prepare('UPDATE cos_identity_boundaries SET paused=0,ingress_id=?,ingress_at=?')
+    .run('owner-event', new Date().toISOString());
+  f.session.mockReturnValue(session);
+  vi.mocked(f.service.dependencies.facts).mockResolvedValue({
+    id: 'private',
+    type: 'P',
+    delete_at: 0,
+    members: ['owner', 'bot'],
+    activeSubscription: true,
+  });
+  let release!: () => void;
+  f.query.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        release = () => resolve({ rows: [{ version: 1 }] });
+      }),
+  );
+  const starting = f.service.tick();
+  await vi.waitFor(() => expect(release).toBeDefined());
+  try {
+    expect(f.service.healthStatus().admission).toBe('closed');
+    expect(f.service.runtime.controller.localContext(session)).toBeNull();
+  } finally {
+    release();
+    await starting;
+  }
+  expect(f.service.runtime.controller.localContext(session)).toMatchObject({ scopeId: 'scope' });
+  f.query.mockRejectedValueOnce(Error('PRIVATE_FAILURE'));
+  await f.service.tick();
+  expect(f.service.healthStatus().admission).toBe('closed');
+  expect(f.service.runtime.controller.localContext(session)).toBeNull();
+});
+it('S11-T09 stale coordinator metadata cannot stop an ordinary native session', async () => {
+  const f = fixture(true);
+  installCosBoundary(
+    {
+      scopeId: 'scope',
+      agentGroupId: 'owned',
+      messagingGroupId: 'owned-mg',
+      sessionId: 'main',
+      provider: 'codex',
+      instanceId: 'fixture',
+      channelId: 'private',
+      ownerId: 'owner',
+      botId: 'bot',
+    },
+    f.db,
+  );
+  f.session.mockReturnValue({
+    id: 'main',
+    agent_group_id: 'ordinary',
+    messaging_group_id: 'ordinary-mg',
+    agent_provider: 'codex',
+    status: 'active',
+    thread_id: null,
+  } as Session);
+  f.connect.mockRejectedValueOnce(Error('fixture unavailable'));
+  await f.service.tick();
+  expect(f.stop).not.toHaveBeenCalled();
+  expect(f.db.prepare('SELECT count(*) AS n FROM cos_identity_boundaries').get()).toEqual({ n: 1 });
+});
+it('S11-T08 host liveness stays distinct from database readiness and incomplete reconciliation', async () => {
+  const f = fixture(true);
+  f.connect.mockRejectedValueOnce(Object.assign(new Error('PRIVATE_NETWORK'), { code: 'ECONNREFUSED' }));
+  await f.service.tick();
+  expect(f.service.healthStatus()).toMatchObject({
+    host_process_alive: true,
+    component_stopped: false,
+    admission: 'closed',
+    live_activation: 'not_verified',
+  });
+  expect(JSON.stringify(f.service.healthStatus())).not.toContain('PRIVATE_NETWORK');
+  let release!: () => void;
+  const binding: CosBinding = {
+    scopeId: 'scope',
+    agentGroupId: 'group',
+    messagingGroupId: 'mg',
+    sessionId: 'main',
+    provider: 'codex',
+    instanceId: 'fixture',
+    channelId: 'private',
+    ownerId: 'owner',
+    botId: 'bot',
+  };
+  installCosBoundary(binding, f.db);
+  // A trusted successful connection is followed by reconciliation before infrastructure readiness.
+  const original = f.service.dependencies.specialists;
+  f.service.dependencies.specialists = () => ({
+    fenceLocal() {},
+    async close() {},
+    pump: async () => {},
+    recover: () =>
+      new Promise<void>((r) => {
+        release = r;
+      }),
+  });
+  const pending = f.service.tick();
+  for (let i = 0; i < 20 && !release; i++) await Promise.resolve();
+  expect(f.service.healthStatus()).toMatchObject({
+    infrastructure_status: 'reconciling',
+    admission: 'closed',
+    database_readiness: { state: 'READY' },
+  });
+  release();
+  await pending;
+  expect(f.service.healthStatus()).toMatchObject({
+    infrastructure_status: 'ready',
+    admission: 'eligible_subject_to_scope_authority',
+  });
+  f.service.dependencies.specialists = original;
+});
 it('S06-T02/T07 advances specialists before waking the retained main review in the same healthy tick', async () => {
   const worker = specialist(),
     f = fixture(true, () => worker),
@@ -151,6 +285,53 @@ it('S05 shutdown closes specialist admission while a pump is in flight, then wai
   await stopping;
   expect(worker.close).toHaveBeenCalledOnce();
   expect(f.end).toHaveBeenCalledOnce();
+});
+it('S11-PG03 concurrent shutdown callers cannot claim old credential connections are closed before the pool settles', async () => {
+  const f = fixture(true);
+  await f.service.tick();
+  let release!: () => void;
+  f.end.mockImplementationOnce(
+    () =>
+      new Promise<void>((resolve) => {
+        release = resolve;
+      }),
+  );
+  const first = f.service.stop();
+  await vi.waitFor(() => expect(f.end).toHaveBeenCalledOnce());
+  let secondSettled = false;
+  const second = f.service.stop().then(() => {
+    secondSettled = true;
+  });
+  try {
+    await new Promise<void>((done) => setImmediate(done));
+    expect(secondSettled).toBe(false);
+    expect(f.service.healthStatus().admission).toBe('closed');
+    await f.service.tick();
+    expect(f.connect).toHaveBeenCalledOnce();
+  } finally {
+    release();
+    await first;
+    await second;
+  }
+  expect(f.end).toHaveBeenCalledOnce();
+});
+it('S11-PG03 an uncertain pool retirement is retained and cannot silently admit replacement credentials', async () => {
+  const f = fixture(true);
+  await f.service.tick();
+  f.end
+    .mockRejectedValueOnce(new Error('fixture close uncertainty'))
+    .mockRejectedValueOnce(new Error('fixture close uncertainty'));
+  try {
+    f.admission.mockReturnValue(false);
+    await f.service.tick();
+    f.admission.mockReturnValue(true);
+    await f.service.tick();
+    expect(f.connect).toHaveBeenCalledOnce();
+    expect(f.end).toHaveBeenCalledTimes(2);
+    expect(f.service.healthStatus().admission).toBe('closed');
+  } finally {
+    f.end.mockReset().mockResolvedValue(undefined);
+  }
 });
 describe('S01-T01 host startup and dependency service', () => {
   it('disabled operation starts and ticks without connecting to PostgreSQL', async () => {

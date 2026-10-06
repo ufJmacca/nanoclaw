@@ -12,7 +12,7 @@ import path from 'node:path';
 import { readPrivate } from './target-state.js';
 import { fixtureRelease } from '../../../contracts/chief-of-staff/release-fixture.js';
 import { macReleaseCommand } from './mac-release-cli.js';
-it('S10 execution admits only its current schema18 candidate while historical and future creation stay closed', async () => {
+it('S11 execution admits only its current schema18 candidate while historical and future creation stay closed', async () => {
   const argumentsFor = (slice: string) => [
     'init',
     'release-' + '1'.repeat(12) + '-20261005000000',
@@ -20,9 +20,9 @@ it('S10 execution admits only its current schema18 candidate while historical an
     'refs/heads/codex/fixture',
     slice,
   ];
-  for (const slice of ['S08', 'S09', 'S11'])
+  for (const slice of ['S08', 'S09', 'S10', 'S12'])
     await expect(macReleaseCommand(argumentsFor(slice))).rejects.toThrow('current_release_slice_required');
-  await expect(macReleaseCommand(argumentsFor('S10'))).rejects.toThrow('invalid_candidate_source');
+  await expect(macReleaseCommand(argumentsFor('S11'))).rejects.toThrow('invalid_candidate_source');
 });
 
 it('preserves a large programme ledger while accepting an active S01 alignment correction', () => {

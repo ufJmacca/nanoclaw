@@ -2,7 +2,27 @@ import pg from 'pg';
 import { externalDatabaseConfig } from './config.js';
 
 export class DatabasePreflightError extends Error {
-  constructor(readonly code: string) {
+  constructor(
+    readonly code: string,
+    readonly stage: 'DNS' | 'TCP' | 'TLS' | 'AUTH' | 'SCHEMA' | 'UNAVAILABLE' = code === 'tls_rejected' ||
+    code === 'tls_required'
+      ? 'TLS'
+      : code === 'authentication_denied'
+        ? 'AUTH'
+        : [
+              'schema_incompatible',
+              'schema_privilege_denied',
+              'database_identity_mismatch',
+              'unsafe_role',
+              'runtime_can_migrate',
+              'migration_role_required',
+              'unsupported_server',
+              'test_marker_required',
+              'test_target_not_admitted',
+            ].includes(code)
+          ? 'SCHEMA'
+          : 'UNAVAILABLE',
+  ) {
     super(`CoS preflight: ${code}`);
   }
 }
@@ -22,6 +42,9 @@ export function preflightFailure(error: unknown): DatabasePreflightError {
     return new DatabasePreflightError('tls_rejected');
   if (code === '42501') return new DatabasePreflightError('schema_privilege_denied');
   if (['42P01', '3F000'].includes(code)) return new DatabasePreflightError('schema_incompatible');
+  if (['ENOTFOUND', 'EAI_AGAIN'].includes(code)) return new DatabasePreflightError('unreachable', 'DNS');
+  if (['ECONNREFUSED', 'ETIMEDOUT', 'EHOSTUNREACH', 'ENETUNREACH', 'ECONNRESET', 'EPIPE'].includes(code))
+    return new DatabasePreflightError('unreachable', 'TCP');
   return new DatabasePreflightError('unreachable');
 }
 

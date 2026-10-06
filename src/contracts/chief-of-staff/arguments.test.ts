@@ -23,7 +23,7 @@ describe('CoS fixture command selection', () => {
   it.each(
     [
       [],
-      ['--slice', 'S11', '--db-profile', 'test'],
+      ['--slice', 'S12', '--db-profile', 'test'],
       ['--slice', 'S01', '--db-profile', 'runtime'],
       ['--demo', '--slice', 'S01', '--db-profile', 'test'],
       ['--slice', 'S01', '--db-profile', 'test', '--db-profile', 'test'],
@@ -31,6 +31,14 @@ describe('CoS fixture command selection', () => {
   )('rejects unsupported, duplicate or incomplete arguments', ({ args }) =>
     expect(() => parseFixtureArguments(args)).toThrow(),
   );
+});
+it('S11 replays every predecessor with owner operations and demonstrates delegated/scheduled fixture work without live transports', () => {
+  const args = parseFixtureArguments(['--demo', '--fixture', '--slice', 'S11', '--db-profile', 'test']);
+  expect(fixtureFiles(args)).toEqual(['mission-flow.integration', 'brief-flow.integration', 'operations.integration']);
+  expect(fixtureFiles({ ...args, demo: false })).toEqual([
+    ...fixtureFiles({ slice: 'S10', demo: false }),
+    'operations.integration',
+  ]);
 });
 it('registers the authenticated S04 recurring flow and all affected predecessor contracts', () => {
   const args = parseFixtureArguments(['--demo', '--fixture', '--slice', 'S04', '--db-profile', 'test']);

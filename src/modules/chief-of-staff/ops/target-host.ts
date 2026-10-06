@@ -30,6 +30,7 @@ const runtimeKeys = [
   '_IDLE_TX_TIMEOUT_MS',
   '_APPLICATION_NAME',
 ].map((suffix) => 'COS_PG' + suffix);
+export const RUNTIME_DATABASE_ENVIRONMENT_KEYS: readonly string[] = Object.freeze([...runtimeKeys]);
 function privateEnvironment(file: string, allowed: string[]): NodeJS.ProcessEnv {
   if (!path.isAbsolute(file) || fs.realpathSync(file) !== file) throw new Error('unsafe_target_credentials');
   const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
@@ -59,6 +60,15 @@ export function readTargetDatabaseEnvironment(
   if (shared.some((key) => migration[key] !== undefined && migration[key] !== runtime[key]))
     throw new Error('target_credential_profile_mismatch');
   return { ...runtime, ...migration };
+}
+/** Explicitly selected separate restore profile, read only by trusted owner tooling. */
+export function readTargetTestEnvironment(file: string): NodeJS.ProcessEnv {
+  return privateEnvironment(file, [
+    ...runtimeKeys.map((key) => key.replace('COS_PG', 'COS_TEST_PG')),
+    'COS_TEST_PG_MIGRATION_USER',
+    'COS_TEST_PG_MIGRATION_PASSWORD',
+    'COS_TEST_TARGET_ID',
+  ]);
 }
 export function serviceObservation(text: string) {
   const values: Record<string, string> = {};

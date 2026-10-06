@@ -138,10 +138,11 @@ export async function macDeployCommand(args: string[]): Promise<string | void> {
     (await artifactHash(path.join(root, 'release.json'))) !== local.manifestHash
   )
     throw new Error('local_evidence_mismatch');
-  if (operation === 'verify' && !values.length) {
+  if (['verify', 'verify-protection'].includes(operation) && !values.length) {
     await verifyReleaseBundle(root, local.manifestHash);
     if ((await artifactHash(path.join(root, 'bootstrap.mjs'), 1024 * 1024)) !== local.bootstrapHash)
       throw new Error('bootstrap_identity_mismatch');
+    if (operation === 'verify-protection') return;
     fs.copyFileSync(settingsFile, path.join(root, 'target.json'));
     fs.chmodSync(path.join(root, 'target.json'), 0o600);
     const binding = path.resolve('.cos-plan-state/coordinator-binding.json');
@@ -157,6 +158,89 @@ export async function macDeployCommand(args: string[]): Promise<string | void> {
       source: manifest.source,
       review: 'tested_unreviewed_candidate',
       at: new Date().toISOString(),
+    });
+    return;
+  }
+  if (operation === 'protected-release-command' && !values.length) {
+    const observed = validateTargetObservation(settings, readPrivate(path.join(root, 'target-observation.json')), true);
+    const closure = path.resolve('.cos-plan-state/programme-protection', id);
+    if (
+      manifest.slice !== 'S11' ||
+      observed?.lifecycle !== 'protected' ||
+      observed.releaseId !== id ||
+      !fs.lstatSync(path.join(closure, 'verified.json'), { throwIfNoEntry: false })
+    )
+      return '';
+    const sealed = readPrivate<Record<string, unknown>>(path.join(closure, 'target-result.json'));
+    const verified = readPrivate<Record<string, unknown>>(path.join(closure, 'verified.json'));
+    if (sealed.testedHelperReleaseId !== id || sealed.targetReleaseId !== id) return '';
+    if (
+      sealed.status !== 'protected' ||
+      verified.status !== 'protected' ||
+      sealed.bindingDigest !== digest(observed.binding) ||
+      verified.bindingDigest !== sealed.bindingDigest ||
+      typeof verified.completionDigest !== 'string' ||
+      !/^[a-f0-9]{64}$/.test(verified.completionDigest) ||
+      sealed.completionDigest !== verified.completionDigest ||
+      digest(verified.source) !== digest(manifest.source) ||
+      sealed.sourceCommit !== manifest.source.commit ||
+      sealed.sourceTree !== manifest.source.tree
+    ) {
+      throw new Error('protected_release_unverified');
+    }
+    const payload = path.join(settings.releaseRoot, id, 'payload');
+    return [
+      payload + '/node/bin/node',
+      payload + '/dist/modules/chief-of-staff/ops/target-helper.js',
+      'protected-release',
+      '--settings',
+      stage + '/target.json',
+      '--release-id',
+      id,
+      '--manifest-sha256',
+      local.manifestHash,
+    ]
+      .map(shellArgument)
+      .join(' ');
+  }
+  if (operation === 'protected-release-check' && !values.length) {
+    const result = readPrivate<Record<string, unknown>>(path.join(root, 'protected-release-result.json'));
+    const verified = readPrivate<Record<string, unknown>>(
+      path.resolve('.cos-plan-state/programme-protection', id, 'verified.json'),
+    );
+    const binding = {
+      hostFingerprint: settings.hostFingerprint,
+      databaseFingerprint: settings.databaseFingerprint,
+      service: settings.service,
+      installationRoot: settings.installationRoot,
+      dataRoot: settings.dataRoot,
+    };
+    validateDeliveryReceipt('healthy', manifest, result);
+    if (
+      manifest.slice !== 'S11' ||
+      verified.status !== 'protected' ||
+      verified.bindingDigest !== digest(binding) ||
+      typeof verified.completionDigest !== 'string' ||
+      !/^[a-f0-9]{64}$/.test(verified.completionDigest) ||
+      result.lifecycle !== 'protected' ||
+      result.cosResumed !== false ||
+      result.accountActivation !== 'not_granted_by_protected_release' ||
+      result.completionDigest !== verified.completionDigest ||
+      digest(verified.source) !== digest(manifest.source)
+    ) {
+      throw new Error('protected_release_unverified');
+    }
+    const prior = readPrivate<Record<string, unknown>>(path.join(root, 'delivery.json'));
+    writeAtomic(root, 'delivery.json', {
+      ...prior,
+      status: 'protected_current_release_healthy',
+      protected_finalized: new Date().toISOString(),
+    });
+    checkpointLocalExecution(path.resolve('.cos-plan-state'), {
+      delivery_phase: 'protected_current_release_healthy',
+      deployment_status: 'protected_current_release_healthy',
+      deployed_source_sha: manifest.source.commit,
+      protected_finalization_receipt: path.relative(process.cwd(), path.join(root, 'protected-release-result.json')),
     });
     return;
   }

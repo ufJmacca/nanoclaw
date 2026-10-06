@@ -1,32 +1,54 @@
 import type { PriorityStore } from './store/priorities.js';
 import { createCosRuntime, type RuntimeDependencies } from './runtime.js';
-import { DatabasePreflightError } from './store/preflight.js';
+import { DatabasePreflightError, preflightFailure } from './store/preflight.js';
 import { DatabaseConfigurationError } from './store/config.js';
-import type { CosBinding } from '../../cos-boundary.js';
+import { cosBoundary, type CosBinding } from '../../cos-boundary.js';
 import { interruptReviewOrigin } from './missions/review-origin.js';
 import { interruptScheduledOrigin } from './automation/scheduled-origin.js';
-import { cosMissionIdentities } from '../../cos-mission-boundary.js';
+import { cosMissionIdentities, missionBoundary } from '../../cos-mission-boundary.js';
 import { stopCosMissionAttempt } from '../../cos-mission-stop.js';
+import { databaseReadiness } from './ops/database-readiness.js';
+import { digest } from './domain/contracts.js';
 export type SpecialistLifecycle = {
+  /** Stop/reconcile retained allocations only; this phase never dispatches a new worker. */
+  recover?(): Promise<void>;
   pump(binding: CosBinding): Promise<void>;
   fenceLocal(): void;
   close(): Promise<void>;
 };
 export type ServiceDependencies = Omit<RuntimeDependencies, 'store'> & {
   connect(): Promise<PriorityStore>;
-  specialists?(store: PriorityStore): SpecialistLifecycle;
+  specialists?(store: PriorityStore, executionReady: () => boolean): SpecialistLifecycle;
 };
 export class CosService {
   runtime: ReturnType<typeof createCosRuntime>;
   status = 'disabled';
   private store: PriorityStore | undefined;
   private inFlight: Promise<void> | undefined;
+  private stopInFlight: Promise<void> | undefined;
+  private retiringStore: PriorityStore | undefined;
   private stopped = false;
   private closed = false;
   private specialists?: SpecialistLifecycle;
   private specialistsFenced = false;
+  private databaseState = databaseReadiness('reconciling');
   constructor(readonly dependencies: ServiceDependencies) {
     this.runtime = createCosRuntime({ ...dependencies, enabled: false });
+  }
+  private readonly executionReady = () =>
+    !this.stopped && this.dependencies.enabled && this.status === 'ready' && (this.dependencies.admission?.() ?? true);
+  /** Called in the host process; connection health never supplies scope/model/action consent. */
+  healthStatus() {
+    return {
+      host_process_alive: true,
+      component_stopped: this.stopped,
+      infrastructure_status: this.status,
+      database_readiness: this.databaseState,
+      pool: this.store?.database.inspectPool?.() ?? null,
+      admission: this.executionReady() ? 'eligible_subject_to_scope_authority' : 'closed',
+      live_activation: 'not_verified',
+      unknown_effects: 'requires_current_scoped_reconciliation',
+    };
   }
   private fenceSpecialists(): void {
     this.specialistsFenced = !!this.specialists;
@@ -41,6 +63,15 @@ export class CosService {
       this.specialistsFenced = false;
     }
   }
+  private async retireStore(): Promise<void> {
+    const old = this.retiringStore ?? this.store;
+    if (!old) return;
+    // Retain uncertainty until the old connections actually close. Never connect a replacement over it.
+    this.retiringStore = old;
+    await old.database.pool.end();
+    if (this.store === old) this.store = undefined;
+    if (this.retiringStore === old) this.retiringStore = undefined;
+  }
   private fenceExecutions(): void {
     const d = this.dependencies;
     // This also runs before the first successful PostgreSQL connection after a restart.
@@ -48,7 +79,10 @@ export class CosService {
       try {
         stopCosMissionAttempt(identity, 'authority_lost', d.db);
         const session = d.session(identity.sessionId);
-        if (session && session.agent_group_id !== identity.agentGroupId) continue;
+        if (session) {
+          const boundary = missionBoundary(session, d.db);
+          if (!boundary.restricted || !boundary.identity || digest(boundary.identity) !== digest(identity)) continue;
+        }
         d.stop(identity.sessionId);
       } catch {
         // Retain each durable denial; one uncertain stop must not leave other specialists admitted.
@@ -60,6 +94,11 @@ export class CosService {
         const binding = JSON.parse(item.binding) as CosBinding;
         interruptReviewOrigin(d.db, binding);
         interruptScheduledOrigin(d.db, binding);
+        const session = d.session(binding.sessionId);
+        if (session) {
+          const boundary = cosBoundary(session, d.db);
+          if (!boundary.restricted || !boundary.binding || digest(boundary.binding) !== digest(binding)) continue;
+        }
         d.stop(binding.sessionId);
       } catch {
         // One uncertain local stop must not prevent fencing the remaining CoS bindings.
@@ -70,6 +109,10 @@ export class CosService {
     if (this.stopped || !this.dependencies.enabled || this.inFlight) return;
     const run = async () => {
       try {
+        if (this.retiringStore) {
+          this.status = 'reconciling';
+          await this.retireStore();
+        }
         // Retain an uncertain cleanup owner. Never install replacement hooks over it.
         if (this.specialistsFenced) await this.closeSpecialists();
         if (this.dependencies.admission && !this.dependencies.admission()) {
@@ -79,27 +122,39 @@ export class CosService {
           this.fenceSpecialists();
           this.fenceExecutions();
           await this.closeSpecialists();
-          if (this.store) {
-            const old = this.store;
-            this.store = undefined;
-            await old.database.pool.end();
-          }
+          await this.retireStore();
           return;
         }
         if (!this.store) {
           this.status = 'reconciling';
+          this.databaseState = databaseReadiness('reconciling');
           this.store = await this.dependencies.connect();
           if (this.stopped) return;
           this.runtime.dispose();
-          this.runtime = createCosRuntime({ ...this.dependencies, store: this.store });
+          this.runtime = createCosRuntime({
+            ...this.dependencies,
+            store: this.store,
+            admission: this.executionReady,
+          });
         }
         await this.store.database.run((client) => client.query('SELECT 1'));
         if (this.stopped) return;
-        if (!this.specialists) this.specialists = this.dependencies.specialists?.(this.store);
-        this.status = 'ready';
+        this.databaseState = databaseReadiness(null);
+        if (!this.specialists) this.specialists = this.dependencies.specialists?.(this.store, this.executionReady);
         const rows = this.dependencies.db.prepare('SELECT binding FROM cos_identity_boundaries').all() as Array<{
           binding: string;
         }>;
+        if (this.status !== 'ready') {
+          this.status = 'reconciling';
+          // Reconcile owner denials and retained workers before installing a dispatch grant.
+          for (const row of rows) {
+            if (this.stopped) return;
+            await this.runtime.reconcile(JSON.parse(row.binding) as CosBinding);
+          }
+          await this.specialists?.recover?.();
+          if (this.stopped || !(this.dependencies.admission?.() ?? true)) return;
+          this.status = 'ready';
+        }
         for (const row of rows) {
           if (this.stopped) return;
           const binding = JSON.parse(row.binding) as CosBinding;
@@ -107,6 +162,11 @@ export class CosService {
           if (!this.stopped) await this.runtime.pump(binding);
         }
       } catch (error) {
+        // Close the actual grant before waiting for any potentially uncertain native cleanup.
+        this.status = 'reconciling';
+        this.databaseState = databaseReadiness(
+          error instanceof DatabaseConfigurationError ? error : preflightFailure(error),
+        );
         this.fenceSpecialists();
         this.fenceExecutions();
         try {
@@ -131,15 +191,21 @@ export class CosService {
   }
   async stop(): Promise<void> {
     if (this.closed) return;
-    this.stopped = true;
-    this.runtime.dispose();
-    this.fenceSpecialists();
-    this.fenceExecutions();
-    await this.inFlight;
-    await this.closeSpecialists();
-    if (!this.closed) {
+    if (this.stopInFlight) return this.stopInFlight;
+    this.stopInFlight = (async () => {
+      this.stopped = true;
+      this.runtime.dispose();
+      this.fenceSpecialists();
+      this.fenceExecutions();
+      await this.inFlight;
+      await this.closeSpecialists();
+      await this.retireStore();
       this.closed = true;
-      await this.store?.database.pool.end();
+    })();
+    try {
+      await this.stopInFlight;
+    } finally {
+      this.stopInFlight = undefined;
     }
   }
 }

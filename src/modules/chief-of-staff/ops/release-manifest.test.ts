@@ -21,10 +21,27 @@ it('S10 binds the review migration without manufacturing schema16 rollback compa
   expect(validateReleaseManifest(current)).toEqual(current);
   expect(supportsReleaseSchema(validateReleaseManifest(current), 16)).toBe(false);
   for (const patch of [
-    { slice: 'S11' },
+    { slice: 'S12' },
     { postgres: { minimum: 16, maximum: 18 } },
     { postgres: { minimum: 17, maximum: 18 } },
     { migrations: current.migrations.map((m) => (m.version === 18 ? { ...m, checksum: '0'.repeat(64) } : m)) },
+  ])
+    expect(() => validateReleaseManifest({ ...current, ...patch })).toThrow('release_not_transferable');
+});
+it('S11 operations preserves schema18 compatibility and every exact reviewed migration', () => {
+  const current = {
+    ...manifest(),
+    slice: 'S11',
+    postgres: { minimum: 18, maximum: 18 },
+    sqlite: { minimum: 22, maximum: 22 },
+    migrations: MIGRATIONS.map(({ version, checksum }) => ({ version, checksum })),
+  };
+  expect(validateReleaseManifest(current)).toEqual(current);
+  expect(supportsReleaseSchema(validateReleaseManifest(current), 18)).toBe(true);
+  for (const patch of [
+    { postgres: { minimum: 16, maximum: 18 } },
+    { migrations: current.migrations.slice(0, 17) },
+    { slice: 'S12' },
   ])
     expect(() => validateReleaseManifest({ ...current, ...patch })).toThrow('release_not_transferable');
 });

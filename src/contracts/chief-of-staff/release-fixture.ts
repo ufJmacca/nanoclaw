@@ -69,7 +69,9 @@ export function fixtureRelease(slice: ReleaseManifest['slice'] = 'S01'): Release
                         ? 'refs/heads/cos/s08-standing-mandates'
                         : slice === 'S09'
                           ? 'refs/heads/codex/s09-approved-calendar-actions'
-                          : 'refs/heads/codex/s10-strategic-reviews',
+                          : slice === 'S10'
+                            ? 'refs/heads/codex/s10-strategic-reviews'
+                            : 'refs/heads/codex/s11-operations-and-recovery',
       syncContract: 'cos-source-sync/github-pinned-v1',
     },
     buildInputDigest: 'e'.repeat(64),

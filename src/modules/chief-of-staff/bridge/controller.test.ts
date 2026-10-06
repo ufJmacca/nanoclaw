@@ -81,6 +81,132 @@ const event = (text: string, id = 'ingress'): InboundEvent => ({
   },
 });
 const command = 'cos approve 11111111-1111-4111-8111-111111111111 abcdefghijklmnopqrstuvwxyz123456';
+it('S11-UI01 exact action inspection stays available while paused/model unavailable and cannot perform cancellation or provider reconciliation', async () => {
+  const f = fixture(),
+    id = 'action-' + 'a'.repeat(64),
+    inspect = vi.fn().mockResolvedValue({ status: 'ok' }),
+    replyStatus = vi.fn().mockResolvedValue(true);
+  f.enabled.mockReturnValue(false);
+  f.db.exec('UPDATE cos_identity_boundaries SET paused=1');
+  const controller = new CosController({ ...f.controller.dependencies, inspect, replyStatus });
+  await controller.ingress(binding, event('cos inspect action ' + id, 'action-inspection'));
+  expect(inspect).toHaveBeenCalledWith(expect.objectContaining({ scopeId: 'scope', ownerId: 'owner' }), {
+    category: 'actions',
+    id,
+  });
+  expect(replyStatus).toHaveBeenCalledOnce();
+  expect(f.project).not.toHaveBeenCalled();
+  expect(f.wake).not.toHaveBeenCalled();
+  expect(f.decide).not.toHaveBeenCalled();
+  expect(f.stop).not.toHaveBeenCalled();
+});
+it('S11-UI01 scoped host pause/cancel controls remain available without the model or database and never project conversation input', async () => {
+  const f = fixture();
+  f.enabled.mockReturnValue(false);
+  await f.controller.ingress(binding, event('cos cancel mission mission', 'offline-cancel'));
+  expect(f.db.prepare('SELECT kind,target,state FROM cos_operator_denials').get()).toEqual({
+    kind: 'cancel_mission',
+    target: 'mission',
+    state: 'recorded',
+  });
+  await f.controller.ingress(binding, event('cos pause admission', 'offline-pause'));
+  expect(f.db.prepare('SELECT paused FROM cos_identity_boundaries').get()).toEqual({ paused: 1 });
+  expect(f.stop).toHaveBeenCalledWith('session');
+  expect(f.project).not.toHaveBeenCalled();
+  expect(f.wake).not.toHaveBeenCalled();
+  expect(f.decide).not.toHaveBeenCalled();
+});
+it('S11-UI01 malformed or quoted denial commands cannot become model instructions', async () => {
+  const f = fixture();
+  for (const text of [
+    'please cos stop',
+    '> cos cancel mission mission',
+    'cos pause admission extra',
+    'cos cancel mission ../../other',
+  ])
+    await f.controller.ingress(binding, event(text, text));
+  expect(f.project).not.toHaveBeenCalled();
+  expect(f.wake).not.toHaveBeenCalled();
+  expect(f.stop).not.toHaveBeenCalled();
+});
+it('S11-UI01 event identities cannot be reused to turn a prior status/message into a different stop command', async () => {
+  const f = fixture();
+  const controller = new CosController({
+    ...f.controller.dependencies,
+    inspect: vi.fn().mockResolvedValue({ status: 'unavailable' }),
+  });
+  await controller.ingress(binding, event('cos status', 'same-status'));
+  await controller.ingress(binding, event('cos stop', 'same-status'));
+  expect(f.stop).not.toHaveBeenCalled();
+  expect(f.db.prepare('SELECT paused FROM cos_identity_boundaries').get()).toEqual({ paused: 0 });
+  await controller.ingress(binding, event('hello', 'same-message'));
+  await controller.ingress(binding, event('cos stop', 'same-message'));
+  expect(f.stop).not.toHaveBeenCalled();
+});
+it('S11-UI01 control acknowledgements are private, stable and never resend after an ambiguous delivery', async () => {
+  const f = fixture(),
+    replyControl = vi.fn().mockRejectedValue(Error('PRIVATE_SEND_ERROR'));
+  const controller = new CosController({ ...f.controller.dependencies, replyControl });
+  await controller.ingress(binding, event('cos pause admission', 'control-reply'));
+  await controller.ingress(binding, event('cos pause admission', 'control-reply'));
+  expect(replyControl).toHaveBeenCalledOnce();
+  expect(replyControl.mock.calls[0][2]).toMatchObject({
+    state: 'admission_paused',
+    effects: 'requires_reconciliation',
+  });
+  expect(f.db.prepare('SELECT state FROM cos_operator_requests').get()).toEqual({ state: 'delivery_uncertain' });
+  expect(f.db.prepare('SELECT paused FROM cos_identity_boundaries').get()).toEqual({ paused: 1 });
+});
+it('S11-UI01 owner status works while paused/model unavailable, without a model wake or changing admission', async () => {
+  const f = fixture();
+  f.enabled.mockReturnValue(false);
+  f.db.exec('UPDATE cos_identity_boundaries SET paused=1');
+  const inspect = vi.fn().mockResolvedValue({ status: 'ok', format: 'cos-operator-status/v1' }),
+    reply = vi.fn().mockResolvedValue(true);
+  const controller = new CosController({ ...f.controller.dependencies, inspect, replyStatus: reply });
+  await controller.ingress(binding, event('cos status missions', 'status-event'));
+  expect(inspect).toHaveBeenCalledWith(expect.objectContaining({ ownerId: 'owner', scopeId: 'scope' }), {
+    category: 'missions',
+  });
+  expect(reply).toHaveBeenCalledOnce();
+  expect(f.project).not.toHaveBeenCalled();
+  expect(f.wake).not.toHaveBeenCalled();
+  expect(f.db.prepare('SELECT paused FROM cos_identity_boundaries').get()).toEqual({ paused: 1 });
+  await controller.ingress(binding, event('cos status missions', 'status-event'));
+  expect(reply).toHaveBeenCalledOnce();
+});
+it('S11-UI01 database loss gives only unavailable metadata, and changed private membership prevents delivery', async () => {
+  const f = fixture(),
+    reply = vi.fn().mockResolvedValue(true),
+    inspect = vi.fn().mockRejectedValue(new Error('PRIVATE_DATABASE_ERROR'));
+  const controller = new CosController({ ...f.controller.dependencies, inspect, replyStatus: reply });
+  await controller.ingress(binding, event('cos status', 'status-outage'));
+  expect(reply.mock.calls[0][2]).toEqual({ status: 'unavailable' });
+  f.facts.mockResolvedValue({
+    id: 'private',
+    type: 'O',
+    delete_at: 0,
+    members: ['owner', 'bot'],
+    activeSubscription: true,
+  });
+  await controller.ingress(binding, event('cos status', 'status-public'));
+  expect(reply).toHaveBeenCalledOnce();
+});
+it('S11-UI01 ambiguous delivery stays explicit and replay cannot send again or grant admission', async () => {
+  const f = fixture(),
+    reply = vi.fn().mockRejectedValue(new Error('PRIVATE_TRANSPORT_ERROR'));
+  const controller = new CosController({
+    ...f.controller.dependencies,
+    inspect: vi.fn().mockResolvedValue({ status: 'ok' }),
+    replyStatus: reply,
+  });
+  await controller.ingress(binding, event('cos status', 'status-uncertain'));
+  await controller.ingress(binding, event('cos status', 'status-uncertain'));
+  expect(reply).toHaveBeenCalledOnce();
+  expect(f.db.prepare('SELECT state FROM cos_operator_requests WHERE ingress_id=?').get('status-uncertain')).toEqual({
+    state: 'delivery_uncertain',
+  });
+});
 describe('S01 deterministic host control and replay authority', () => {
   it('S01-UI08 persists emergency pause without model or PostgreSQL, even disabled', async () => {
     const f = fixture();

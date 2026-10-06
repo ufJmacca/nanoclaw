@@ -1,5 +1,6 @@
 /** Canonical CoS wire contract; copied verbatim into the runner and checked for drift. */
 import { createHash } from 'node:crypto';
+import { validStatusInput } from './operations-protocol.js';
 import { validScheduleChange, type ScheduleChange } from './schedule-protocol.js';
 import { validMissionRequest } from './mission-protocol.js';
 import { validMandateChange, type MandateChange } from './mandate-protocol.js';
@@ -121,6 +122,7 @@ export function canonical(value: unknown): string {
 }
 export const digest = (value: unknown): string => createHash('sha256').update(canonical(value)).digest('hex');
 export type CosMethod =
+  | 'cos_status'
   | 'cos_context_get'
   | 'cos_change_propose'
   | 'cos_work_change_propose'
@@ -239,6 +241,7 @@ export function validRequest(value: unknown): value is CosRequest {
       throw error;
     }
   }
+  if (value.method === 'cos_status') return validStatusInput(value.params);
   if (value.method === 'cos_context_get')
     return (
       keys(value.params, ['view', 'calendar_offset']) &&

@@ -18,7 +18,7 @@ import {
 import { databaseFingerprint } from './target-identity.js';
 import { KnowledgeArtifacts } from '../knowledge/artifacts.js';
 import { ActionWitness, initializeActionWitness } from '../actions/witness.js';
-import { MIGRATIONS } from '../store/migrations.js';
+import { MIGRATIONS, SCHEMA_VERSION } from '../store/migrations.js';
 import { digest } from '../domain/contracts.js';
 const roots: string[] = [];
 afterEach(() => {
@@ -104,6 +104,32 @@ const sandboxConfig = {
   database: 'fixture',
   ssl: { rejectUnauthorized: true, ca: 'FIXTURE_CA' },
 };
+it('S11-PG02 pairs the actual coordinated SQLite/artifact checkpoint with a software manifest and verifies both without rewriting the archive', async () => {
+  const { backupOperationsState, verifyOperationsBackup } = await import('./recovery-manifest.js');
+  const f = fixture(),
+    software = {
+      sourceCommit: '1'.repeat(40),
+      sourceTree: '2'.repeat(40),
+      hostPayloadSha256: '3'.repeat(64),
+      schemaVersion: SCHEMA_VERSION,
+      nativeSchemaVersion: 22,
+    };
+  const options = { base: f.options, software, externalCheckpoint: { kind: 'application_scope_logical' as const } };
+  const manifest = await backupOperationsState(options);
+  expect(manifest).toMatchObject({
+    backupGeneration: 1,
+    revocations: [],
+    nativeDenials: [],
+    serverBackupPolicy: 'not_verified',
+    admissionRestored: false,
+    effectsEnabled: false,
+  });
+  f.query.mockClear();
+  expect(await verifyOperationsBackup(options)).toEqual(manifest);
+  expect(await verifyCoordinatedBackup(f.options)).toMatchObject({ operationId: f.options.operationId });
+  expect(f.query).not.toHaveBeenCalled();
+  expect(fs.readdirSync(f.archive)).not.toContain(f.options.operationId + '.operations.json');
+});
 it('S09 verifies an isolated local restore without a database connection and rejects changed SQLite bytes', async () => {
   const f = fixture(),
     checkpoint = await backupCoordinatedState(f.options),

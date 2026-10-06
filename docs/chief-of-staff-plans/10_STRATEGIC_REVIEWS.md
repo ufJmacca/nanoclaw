@@ -1,6 +1,6 @@
 # S10 — Connect everyday work to long-term strategy
 
-**Status:** PR #67 owner-merged; required source-evolution and collection-limit corrections verified, PR #68 human review/merge pending
+**Status:** PRs #67 and #68 owner-merged; actual merged-source acceptance passed
 
 **Repository:** `ufJmacca/nanoclaw`
 
@@ -33,8 +33,8 @@ so historical observations cannot permanently prevent fresh reviews. PR #68's
 P2 finding also required a
 [collection-limit correction](../chief-of-staff/evidence/S10_OBSERVATION_CAP.md)
 so retired history cannot crowd out current evidence. That exact final candidate
-is deployed, healthy and technically verified. Its human merge and actual
-merged-source acceptance remain pending; S11 is not yet eligible.
+is deployed, healthy and technically verified. [Actual merged-source acceptance](../chief-of-staff/evidence/S10_MERGED.md)
+is complete following the owner's merge of PR #68; S11 is now eligible.
 
 Read [START HERE](00_START_HERE.md), [architecture/contracts](ARCHITECTURE_AND_CONTRACTS.md), [external PostgreSQL](EXTERNAL_POSTGRES.md), [goal execution](GOAL.md), [Mac-to-Pi delivery](MAC_TO_PI_DELIVERY.md), [Mattermost interaction](INTERACTION_MODEL.md), [implementation authority](IMPLEMENTATION_AUTHORITY.md), and [baseline](REPOSITORY_BASELINE.md) before implementation. This plan inherits their identity, scope, replay, approval, budget and retention rules; none may be postponed to S11.
 

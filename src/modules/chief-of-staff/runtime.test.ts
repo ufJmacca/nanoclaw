@@ -27,6 +27,150 @@ import { isCosMissionStopped } from '../../cos-mission-stop.js';
 import { NativeMandateTasks } from './automation/mandate-native.js';
 
 let runtime: ReturnType<typeof createCosRuntime> | undefined;
+it('S11-UI01 the outage-only host acknowledges pause privately without a database or model and does not resend a replay', async () => {
+  const db = initTestDb(),
+    binding: CosBinding = {
+      scopeId: 'offline-scope',
+      ownerId: 'owner',
+      botId: 'bot',
+      instanceId: 'fixture',
+      channelId: 'private',
+      agentGroupId: 'offline-group',
+      messagingGroupId: 'offline-mg',
+      sessionId: 'offline-session',
+      provider: 'codex',
+    };
+  const session = {
+    id: binding.sessionId,
+    agent_group_id: binding.agentGroupId,
+    messaging_group_id: binding.messagingGroupId,
+    thread_id: null,
+    status: 'active',
+    agent_provider: 'codex',
+  } as Session;
+  installCosBoundary(binding, db);
+  db.prepare('UPDATE cos_identity_boundaries SET paused=0').run();
+  const send = vi.fn().mockResolvedValue('fixture-control-receipt'),
+    wake = vi.fn(),
+    stop = vi.fn();
+  vi.spyOn(delivery, 'getDeliveryAdapter').mockReturnValue({ deliver: send } as unknown as ReturnType<
+    typeof getDeliveryAdapter
+  >);
+  runtime = createCosRuntime({
+    db,
+    enabled: false,
+    facts: async () => ({
+      id: 'private',
+      type: 'P',
+      delete_at: 0,
+      members: ['owner', 'bot'],
+      activeSubscription: true,
+    }),
+    session: () => session,
+    destination: () => undefined,
+    stop,
+    wake,
+  });
+  const event = {
+    channelType: 'mattermost',
+    platformId: 'mattermost:fixture:private',
+    threadId: null,
+    message: {
+      id: 'owner-offline-pause',
+      kind: 'chat' as const,
+      timestamp: new Date().toISOString(),
+      content: JSON.stringify({ senderId: 'mattermost:owner', text: 'cos pause admission' }),
+    },
+  };
+  await runtime.controller.ingress(binding, event);
+  await runtime.controller.ingress(binding, event);
+  expect(stop).toHaveBeenCalledWith(binding.sessionId);
+  expect(wake).not.toHaveBeenCalled();
+  expect(send).toHaveBeenCalledOnce();
+  expect(send.mock.calls[0].slice(0, 4)).toEqual(['mattermost', 'mattermost:fixture:private', null, 'chat']);
+  expect(JSON.parse(send.mock.calls[0][4]).text).toContain('CoS admission paused.');
+  expect(send.mock.calls[0][6]).toMatch(/^cos-control-[a-f0-9]{64}$/);
+  expect(db.prepare('SELECT paused FROM cos_identity_boundaries').get()).toEqual({ paused: 1 });
+});
+it('S11-UI01 the paused host answers owner status without a model, using fresh database authority and a stable private delivery', async () => {
+  const db = initTestDb(),
+    binding: CosBinding = {
+      scopeId: 'status-scope',
+      agentGroupId: 'status-group',
+      messagingGroupId: 'status-mg',
+      sessionId: 'status-session',
+      provider: 'codex',
+      instanceId: 'fixture',
+      channelId: 'private',
+      ownerId: 'owner',
+      botId: 'bot',
+    };
+  const session = {
+    id: binding.sessionId,
+    agent_group_id: binding.agentGroupId,
+    messaging_group_id: binding.messagingGroupId,
+    thread_id: null,
+    status: 'active',
+    agent_provider: 'codex',
+  } as Session;
+  installCosBoundary(binding, db);
+  const status = {
+    status: 'ok',
+    format: 'cos-operator-status/v1',
+    execution_authority: 'inspection_only',
+    categories: [{ category: 'missions', states: { running: 1 } }],
+    items: [],
+    category: null,
+  };
+  const operatorStatus = vi.fn().mockResolvedValue(status),
+    send = vi.fn().mockResolvedValue('fixture-status-receipt'),
+    wake = vi.fn();
+  vi.spyOn(delivery, 'getDeliveryAdapter').mockReturnValue({ deliver: send } as unknown as ReturnType<
+    typeof getDeliveryAdapter
+  >);
+  runtime = createCosRuntime({
+    db,
+    enabled: false,
+    store: { operatorStatus, pendingOutbox: vi.fn() } as unknown as PriorityStore,
+    facts: async () => ({
+      id: 'private',
+      type: 'P',
+      delete_at: 0,
+      members: ['owner', 'bot'],
+      activeSubscription: true,
+    }),
+    session: () => session,
+    destination: () => undefined,
+    stop: vi.fn(),
+    wake,
+  });
+  const event = {
+    channelType: 'mattermost',
+    platformId: 'mattermost:fixture:private',
+    threadId: null,
+    message: {
+      id: 'owner-status-one',
+      kind: 'chat' as const,
+      timestamp: new Date().toISOString(),
+      content: JSON.stringify({ senderId: 'mattermost:owner', text: 'cos status' }),
+    },
+  };
+  await runtime.controller.ingress(binding, event);
+  expect(send).toHaveBeenCalledOnce();
+  expect(operatorStatus).toHaveBeenCalledTimes(2);
+  expect(wake).not.toHaveBeenCalled();
+  expect(send.mock.calls[0].slice(0, 4)).toEqual(['mattermost', 'mattermost:fixture:private', null, 'chat']);
+  expect(JSON.parse(send.mock.calls[0][4]).text).toContain('CoS status — admission paused');
+  const stableId = send.mock.calls[0][6];
+  expect(stableId).toMatch(/^cos-status-[a-f0-9]{64}$/);
+  await runtime.controller.ingress(binding, event);
+  expect(send).toHaveBeenCalledOnce();
+  operatorStatus.mockResolvedValueOnce(status).mockResolvedValueOnce({ status: 'unavailable' });
+  await runtime.controller.ingress(binding, { ...event, message: { ...event.message, id: 'owner-status-outage' } });
+  expect(JSON.parse(send.mock.calls[1][4]).text).toContain('Status unavailable');
+  expect(JSON.parse(send.mock.calls[1][4]).text).not.toContain('running: 1');
+  expect(db.prepare('SELECT paused FROM cos_identity_boundaries').get()).toEqual({ paused: 1 });
+});
 afterEach(() => {
   runtime?.dispose();
   closeDb();
@@ -279,9 +423,11 @@ it.each([false, true])('S06-T06 runtime cancels the entire team with never-alloc
     }),
   };
   const register = vi.spyOn(delivery, 'registerDeliveryAction').mockImplementation(() => {});
+  let ready = false;
   runtime = createCosRuntime({
     db,
     enabled: true,
+    admission: () => ready,
     store: { teamRuns, missionRuns } as unknown as PriorityStore,
     missionExecution,
     facts: async () => ({
@@ -298,6 +444,8 @@ it.each([false, true])('S06-T06 runtime cancels the entire team with never-alloc
   });
   const handler = register.mock.calls.find(([action]) => action === 'cos_rpc')![1],
     requestId = randomUUID();
+  expect(runtime.controller.localContext(session)).toBeNull();
+  ready = true;
   await handler(
     {
       action: 'cos_rpc',

@@ -1,4 +1,6 @@
 import path from 'node:path';
+import { databaseReadiness } from './database-readiness.js';
+import { validStatusInput, type StatusInput } from '../contracts/operations-protocol.js';
 import { isKnowledgeCommand, parseKnowledgeArguments } from './knowledge-admin.js';
 import { isCalendarCommand, parseCalendarArguments } from './calendar-admin.js';
 import { isCalendarAccountCommand, parseCalendarAccountArguments } from './calendar-account-admin.js';
@@ -17,9 +19,57 @@ import { activeMaintenanceLease, assertMaintenanceLease, admittedGeneration } fr
 import type { BindingRequest } from './bind.js';
 import { readEnvFile } from '../../../env.js';
 import { contextAdminCommand, type ContextAdminArguments } from './context-admin.js';
+import { parseOwnerControl } from './owner-controls.js';
+import { isOwnerExportCommand, parseOwnerExportArguments } from './owner-export-admin.js';
 
 type AdminArguments = { command: 'status' } | { command: 'bind'; binding: BindingRequest } | ContextAdminArguments;
 export function parseAdminArguments(args: string[]): AdminArguments {
+  if (isOwnerExportCommand({ command: args[0] })) return parseOwnerExportArguments(args);
+  if (args[0] === 'operator-control') {
+    const values: Record<string, string> = {};
+    if (args.length !== 7) throw Error('invalid_admin_arguments');
+    for (let i = 1; i < args.length; i += 2) {
+      if (!['--scope', '--request-id', '--text'].includes(args[i]) || values[args[i]] !== undefined || !args[i + 1])
+        throw Error('invalid_admin_arguments');
+      values[args[i]] = args[i + 1];
+    }
+    if (
+      !/^[a-zA-Z0-9_-]{1,128}$/.test(values['--scope'] ?? '') ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(values['--request-id'] ?? '') ||
+      !parseOwnerControl(values['--text'] ?? '')
+    )
+      throw Error('invalid_admin_arguments');
+    return {
+      command: 'operator-control',
+      scopeId: values['--scope'],
+      requestId: values['--request-id'],
+      text: values['--text'],
+    };
+  }
+  if (args[0] === 'operator-status') {
+    const values: Record<string, string> = {};
+    for (let i = 1; i < args.length; i += 2) {
+      if (
+        !['--scope', '--category', '--offset', '--limit', '--id'].includes(args[i]) ||
+        values[args[i]] !== undefined ||
+        !args[i + 1]
+      )
+        throw Error('invalid_admin_arguments');
+      values[args[i]] = args[i + 1];
+    }
+    if (!/^[a-zA-Z0-9_-]{1,128}$/.test(values['--scope'] ?? '')) throw Error('invalid_admin_arguments');
+    for (const key of ['--offset', '--limit'])
+      if (values[key] !== undefined && !/^(0|[1-9][0-9]{0,4})$/.test(values[key]))
+        throw Error('invalid_admin_arguments');
+    const input = {
+      ...(values['--id'] !== undefined ? { id: values['--id'] } : {}),
+      ...(values['--category'] !== undefined ? { category: values['--category'] } : {}),
+      ...(values['--offset'] !== undefined ? { offset: Number(values['--offset']) } : {}),
+      ...(values['--limit'] !== undefined ? { limit: Number(values['--limit']) } : {}),
+    };
+    if (!validStatusInput(input)) throw Error('invalid_admin_arguments');
+    return { command: 'operator-status', scopeId: values['--scope'], input: input as StatusInput };
+  }
   if (isActionRecoveryCommand({ command: args[0] })) return parseActionRecoveryArguments(args);
   if (isActionAdminCommand({ command: args[0] })) return parseActionAdminArguments(args);
   if (isActionAccountCommand({ command: args[0] })) return parseActionAccountArguments(args);
@@ -210,6 +260,7 @@ export function safeAdminError(error: unknown): string {
         'context_binding_changed',
         'unsafe_context_admin_state',
         'context_recovery_requires_paused_binding',
+        'operator_denial_requires_reconciliation',
         'context_recovery_stale_generation',
         'context_recovery_superseded',
         'context_recovery_conflict',
@@ -272,10 +323,13 @@ export async function adminStatus(
       status: version === SCHEMA_VERSION ? 'ready' : 'schema_incompatible',
       schema_version: version,
       lifecycle: target.lifecycle,
+      database_readiness: databaseReadiness(
+        version === SCHEMA_VERSION ? null : new DatabasePreflightError('schema_incompatible'),
+      ),
     };
     // eslint-disable-next-line no-catch-all/no-catch-all -- Status exposes fixed dependency categories, never private driver diagnostics.
   } catch (error) {
-    return { ...base, status: safeDependencyStatus(error) };
+    return { ...base, status: safeDependencyStatus(error), database_readiness: databaseReadiness(error) };
   }
 }
 /** Only the owner-run host command reaches setup; no RPC or delivery action exposes it. */
@@ -342,43 +396,49 @@ export async function bindCommand(request: BindingRequest, env: NodeJS.ProcessEn
     }
   }
 }
-function adminEnvironment(command: AdminArguments['command']): NodeJS.ProcessEnv {
-  const recovery = command === 'action-restore-check';
-  const keys = [
-    'COS_ENABLED',
-    'COS_TARGET_STATE_DIR',
-    'COS_KNOWLEDGE_ENABLED',
-    'COS_CALENDAR_ENABLED',
-    'COS_KNOWLEDGE_RETENTION_DAYS',
-    'MATTERMOST_URL',
-    'MATTERMOST_BOT_TOKEN',
-    'MATTERMOST_INSTANCE',
-    ...(isMissionCommand({ command }) || command === 'action-configure'
-      ? ['COS_PG_MIGRATION_USER', 'COS_PG_MIGRATION_PASSWORD']
-      : []),
-    ...(recovery ? ['COS_TEST_TARGET_ID'] : []),
-    ...[
-      'HOST',
-      'PORT',
-      'DATABASE',
-      'USER',
-      'PASSWORD',
-      'SSLMODE',
-      'SSLROOTCERT',
-      '_ALLOW_PLAINTEXT',
-      '_POOL_MAX',
-      '_CONNECT_TIMEOUT_MS',
-      '_STATEMENT_TIMEOUT_MS',
-      '_QUERY_TIMEOUT_MS',
-      '_LOCK_TIMEOUT_MS',
-      '_IDLE_TIMEOUT_MS',
-      '_IDLE_TX_TIMEOUT_MS',
-      '_APPLICATION_NAME',
-      ...(recovery ? ['_MIGRATION_USER', '_MIGRATION_PASSWORD'] : []),
-    ].map((key) => (recovery ? 'COS_TEST_PG' : 'COS_PG') + key),
-  ];
+export function adminEnvironment(
+  command: AdminArguments['command'],
+  overrides: NodeJS.ProcessEnv = {},
+): NodeJS.ProcessEnv {
+  const recovery = ['action-restore-check', 'operations-restore-check'].includes(command);
+  const keys =
+    command === 'operator-control'
+      ? ['COS_ENABLED', 'COS_TARGET_STATE_DIR']
+      : [
+          'COS_ENABLED',
+          'COS_TARGET_STATE_DIR',
+          'COS_KNOWLEDGE_ENABLED',
+          'COS_CALENDAR_ENABLED',
+          'COS_KNOWLEDGE_RETENTION_DAYS',
+          'MATTERMOST_URL',
+          'MATTERMOST_BOT_TOKEN',
+          'MATTERMOST_INSTANCE',
+          ...(isMissionCommand({ command }) || command === 'action-configure'
+            ? ['COS_PG_MIGRATION_USER', 'COS_PG_MIGRATION_PASSWORD']
+            : []),
+          ...(recovery ? ['COS_TEST_TARGET_ID'] : []),
+          ...[
+            'HOST',
+            'PORT',
+            'DATABASE',
+            'USER',
+            'PASSWORD',
+            'SSLMODE',
+            'SSLROOTCERT',
+            '_ALLOW_PLAINTEXT',
+            '_POOL_MAX',
+            '_CONNECT_TIMEOUT_MS',
+            '_STATEMENT_TIMEOUT_MS',
+            '_QUERY_TIMEOUT_MS',
+            '_LOCK_TIMEOUT_MS',
+            '_IDLE_TIMEOUT_MS',
+            '_IDLE_TX_TIMEOUT_MS',
+            '_APPLICATION_NAME',
+            ...(recovery ? ['_MIGRATION_USER', '_MIGRATION_PASSWORD'] : []),
+          ].map((key) => (recovery ? 'COS_TEST_PG' : 'COS_PG') + key),
+        ];
   const file = readEnvFile(keys);
-  return Object.fromEntries(keys.map((key) => [key, process.env[key] ?? file[key]]));
+  return Object.fromEntries(keys.map((key) => [key, overrides[key] ?? process.env[key] ?? file[key]]));
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   process.env.NANOCLAW_LOG_STDERR = 'true';

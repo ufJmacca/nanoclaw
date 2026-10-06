@@ -175,6 +175,7 @@ function setup() {
     runs: runs as unknown as MissionRunStore,
     authority: vi.fn(() => (state.admitted ? authority : null)),
     admitted: () => true,
+    executionReady: vi.fn(() => true),
     assertHostAuthority: vi.fn(),
     facts: vi.fn(async () => ({
       id: 'private',
@@ -290,6 +291,41 @@ it('S05 host discovers, allocates and wakes the exact native child, then registe
   } finally {
     inbox.close();
   }
+});
+it('S11-T07 startup recovery retains an absent queued identity without dispatch until the service is ready', async () => {
+  const f = setup();
+  await f.allocation.prepare(f.input, async () => true);
+  f.state.phase = 'allocating';
+  f.options.executionReady.mockReturnValue(false);
+  const host = f.create();
+  await host.recover();
+  await host.pump(f.binding);
+  expect(f.options.stop).not.toHaveBeenCalled();
+  expect(f.runs.claimDispatch).not.toHaveBeenCalled();
+  expect(f.options.wake).not.toHaveBeenCalled();
+  expect(isCosMissionStopped(f.identity, f.db)).toBe(false);
+  f.options.executionReady.mockReturnValue(true);
+  await host.pump(f.binding);
+  expect(f.runs.claimDispatch).toHaveBeenCalledOnce();
+  expect(f.runs.beginExecution).toHaveBeenCalledOnce();
+  await host.pump(f.binding);
+  expect(f.runs.claimDispatch).toHaveBeenCalledOnce();
+  expect(f.db.prepare('SELECT count(*) AS n FROM cos_mission_boundaries').get()).toEqual({ n: 1 });
+});
+it('S11-T07 recovery stops a retained orphan with dispatch closed and preserves its permanent identity', async () => {
+  const f = setup();
+  await f.allocation.prepare(f.input, async () => true);
+  f.state.phase = 'running';
+  f.state.present = true;
+  f.options.executionReady.mockReturnValue(false);
+  const host = f.create();
+  await host.recover();
+  expect(f.options.stop).toHaveBeenCalledWith(f.identity);
+  expect(f.runs.confirmStopped).toHaveBeenCalledWith(f.identity);
+  expect(f.runs.claimDispatch).not.toHaveBeenCalled();
+  expect(f.options.wake).not.toHaveBeenCalled();
+  expect(isCosMissionStopped(f.identity, f.db)).toBe(true);
+  expect(f.db.prepare('SELECT count(*) AS n FROM cos_mission_boundaries').get()).toEqual({ n: 1 });
 });
 it('S05 restart resumes a verified absent partial allocation with the same identity and input', async () => {
   const f = setup();

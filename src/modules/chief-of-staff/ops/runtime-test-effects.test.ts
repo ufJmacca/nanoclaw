@@ -1,5 +1,13 @@
 import { expect, it } from 'vitest';
-import { selectCosTestContainers } from './runtime-test-effects.js';
+import { selectCosTestContainers, runtimeTestSchemaCompatible } from './runtime-test-effects.js';
+import { fixtureRelease } from '../../../contracts/chief-of-staff/release-fixture.js';
+it('S11-PG02 the installed verified release defines runtime fixture schema compatibility', () => {
+  expect(runtimeTestSchemaCompatible(fixtureRelease('S10'), 18)).toBe(true);
+  expect(runtimeTestSchemaCompatible(fixtureRelease('S10'), 1)).toBe(false);
+  expect(runtimeTestSchemaCompatible(fixtureRelease('S10'), 19)).toBe(false);
+  expect(runtimeTestSchemaCompatible(fixtureRelease('S01'), 18)).toBe(false);
+  expect(runtimeTestSchemaCompatible(undefined, 18)).toBe(false);
+});
 const worker = {
   Id: '1'.repeat(64),
   Name: '/nanoclaw-cos-fixture',

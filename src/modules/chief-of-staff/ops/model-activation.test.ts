@@ -10,6 +10,8 @@ import { getDeliveredIds, getDueOutboundMessages } from '../../../db/session-db.
 import { createConversationState } from '../bridge/conversation-state.js';
 import { ensureModelBudget, reserveSubscriptionAttempt, type SubscriptionActivation } from '../bridge/model-policy.js';
 import { issueActivation, resumeContext } from './model-activation.js';
+import { HostOwnerControls, parseOwnerControl } from './owner-controls.js';
+import type { Session } from '../../../types.js';
 const cleanup: Array<() => void> = [];
 afterEach(() => {
   vi.restoreAllMocks();
@@ -61,6 +63,29 @@ function fixture() {
   const options = { root, db, inbound, outbound, binding, accountFingerprint, assertAuthority: vi.fn() };
   return { root, db, inbound, outbound, binding, state, context, policy, options };
 }
+it('S11-T05 every resume entry point requires the current remote denial checkpoint, including prepared-history replay', () => {
+  const f = fixture();
+  issueActivation(f.options, f.policy);
+  const session = {
+    id: f.binding.sessionId,
+    agent_group_id: f.binding.agentGroupId,
+    messaging_group_id: f.binding.messagingGroupId,
+    thread_id: null,
+    status: 'active',
+    agent_provider: 'codex',
+  } as Session;
+  const controls = new HostOwnerControls({ db: f.db, session: () => session, stop: () => {} }),
+    text = 'cos revoke source fixture-source';
+  controls.record(
+    f.binding,
+    { id: 'deny-source', ownerId: f.binding.ownerId, text, timestamp: new Date().toISOString() },
+    parseOwnerControl(text)!,
+  );
+  expect(() => resumeContext(f.options, f.policy.activationId, randomUUID())).toThrow(
+    'operator_denial_requires_reconciliation',
+  );
+  expect(f.db.prepare('SELECT paused FROM cos_identity_boundaries').get()).toEqual({ paused: 1 });
+});
 it('resumes retained context without reviving cancelled inputs, unsent replies, scheduled output or RPC work', () => {
   const f = fixture();
   issueActivation(f.options, f.policy);

@@ -16,6 +16,7 @@ const f = vi.hoisted(() => ({
   conversations: vi.fn(),
   missions: vi.fn(),
   calendar: vi.fn(),
+  operations: vi.fn(),
 }));
 vi.mock('./host-fingerprint.js', () => ({ machineFingerprint: () => 'a'.repeat(64) }));
 vi.mock('../store/preflight.js', async (original) => ({
@@ -38,6 +39,10 @@ vi.mock('./coordinated-backup.js', async (original) => ({
 vi.mock('./conversation-backup.js', () => ({ verifyConversationBackup: f.conversations }));
 vi.mock('./mission-backup.js', () => ({ verifyMissionBackup: f.missions }));
 vi.mock('../calendar/backup.js', () => ({ verifyCalendarBackup: f.calendar }));
+vi.mock('./recovery-manifest.js', async (original) => ({
+  ...(await original<typeof import('./recovery-manifest.js')>()),
+  verifyOperationsBackup: f.operations,
+}));
 import { runActionRecoveryAdmin } from './action-recovery-admin.js';
 import { parseAdminArguments } from './admin.js';
 import { initializeTarget, writeAtomic, readPrivate } from './target-state.js';
@@ -47,6 +52,65 @@ import { initializeTargetActionWitness } from '../actions/host-ownership.js';
 import { digest } from '../domain/contracts.js';
 import { MIGRATIONS, SCHEMA_VERSION } from '../store/migrations.js';
 import type { CoordinatedRestoreProof } from './coordinated-backup.js';
+import { recoveryReleaseForManifest } from './recovery-manifest.js';
+import { fixtureRelease } from '../../../contracts/chief-of-staff/release-fixture.js';
+it('S11-PG02 operations backup/restore require the bound settings and cannot select a live overwrite or restore admission', () => {
+  const requestId = '11111111-1111-4111-8111-111111111111';
+  expect(
+    parseAdminArguments([
+      'operations-backup',
+      '--scope',
+      'scope',
+      '--request-id',
+      requestId,
+      '--settings',
+      '/private/target.json',
+    ]),
+  ).toEqual({ command: 'operations-backup', scopeId: 'scope', requestId, settingsFile: '/private/target.json' });
+  expect(
+    parseAdminArguments([
+      'operations-restore-check',
+      '--scope',
+      'scope',
+      '--request-id',
+      requestId,
+      '--backup-release',
+      'release-fixture',
+      '--settings',
+      '/private/target.json',
+    ]),
+  ).toEqual({
+    command: 'operations-restore-check',
+    scopeId: 'scope',
+    requestId,
+    backupOperationId: 'release-fixture',
+    settingsFile: '/private/target.json',
+  });
+  expect(() =>
+    parseAdminArguments([
+      'operations-restore-check',
+      '--scope',
+      'scope',
+      '--request-id',
+      requestId,
+      '--backup-release',
+      'release-fixture',
+    ]),
+  ).toThrow('invalid_admin_arguments');
+  expect(() =>
+    parseAdminArguments([
+      'operations-backup',
+      '--scope',
+      'scope',
+      '--request-id',
+      requestId,
+      '--settings',
+      '/private/target.json',
+      '--resume',
+      'true',
+    ]),
+  ).toThrow('invalid_admin_arguments');
+});
 const directories: string[] = [],
   databases: Database.Database[] = [];
 afterEach(() => {
@@ -97,6 +161,7 @@ async function fixture() {
       schemaDigest: digest(MIGRATIONS.map(({ version, checksum }) => ({ version, checksum }))),
       journal: { installationDigest: witness.installationDigest, generation: witness.generation },
       sqlite: [{ file: 'sqlite/0/native.sqlite' }],
+      remote: { file: 'remote.json', sha256: 'c'.repeat(64), bytes: 1 },
     },
     header = {
       format: 'cos-target-action-backup/v1',
@@ -185,7 +250,21 @@ async function fixture() {
     operationId,
     inputs: { ...header.inputs, context: { ...header.inputs.context, ingressId: 'operator-backup-' + operationId } },
   }));
-  return { root, roots, targetBinding, witness, binding, header, proof, receiptRoot, args, options, native, hostLease };
+  return {
+    root,
+    roots,
+    targetBinding,
+    witness,
+    binding,
+    header,
+    proof,
+    receiptRoot,
+    args,
+    options,
+    native,
+    hostLease,
+    checkpoint,
+  };
 }
 it('S09 records a verified separate restore without reopening runtime admission, restoring tokens or replacing the journal', async () => {
   const s = await fixture();
@@ -304,5 +383,116 @@ it('S09 fresh backup uses only exact bound settings and the already held private
   f.nativeBackup.mockClear();
   writeAtomic(s.roots.targetRoot, 'settings.json', { ...settings, databaseFingerprint: digest('foreign DB') });
   await expect(runActionRecoveryAdmin({ ...s.options, args })).rejects.toThrow('action_recovery_unavailable');
+  expect(f.nativeBackup).not.toHaveBeenCalled();
+});
+
+it('S11-T03/PG02 operations restore pairs the archived tested release and manifest without restoring admission or action journals', async () => {
+  const s = await fixture(),
+    manifest = fixtureRelease('S10'),
+    release = recoveryReleaseForManifest(manifest),
+    settings = {
+      version: 1,
+      target: 'pi',
+      sshAlias: 'fixture',
+      userHome: s.root,
+      installationRoot: s.roots.installationRoot,
+      dataRoot: s.roots.dataRoot,
+      stateRoot: s.roots.targetRoot,
+      releaseRoot: s.root + '/releases',
+      stagingRoot: s.root + '/staging',
+      sourceRoot: s.root + '/sources',
+      runtimeEnvironment: s.root + '/.config/runtime',
+      migrationEnvironment: s.root + '/.config/migration',
+      service: 'nano.service',
+      hostFingerprint: s.targetBinding.hostFingerprint,
+      databaseFingerprint: s.targetBinding.databaseFingerprint,
+    };
+  fs.mkdirSync(path.join(settings.releaseRoot, release.releaseId), { recursive: true, mode: 0o700 });
+  writeAtomic(path.join(settings.releaseRoot, release.releaseId), 'release.json', manifest);
+  fs.mkdirSync(path.join(s.roots.targetRoot, 'releases', release.releaseId), { recursive: true, mode: 0o700 });
+  writeAtomic(path.join(s.roots.targetRoot, 'releases', release.releaseId), 'deployment.json', {
+    version: 1,
+    releaseId: release.releaseId,
+    manifestDigest: release.manifestDigest,
+    bindingDigest: digest(s.targetBinding),
+    completed: ['source', 'artifacts', 'quiesce', 'backup', 'migrate', 'activate', 'health'],
+    pending: null,
+    status: 'healthy',
+  });
+  writeAtomic(s.roots.targetRoot, 'settings.json', settings);
+  const operationsManifest = {
+    coordinatedDigest: digest(s.checkpoint),
+    backupGeneration: s.header.maintenanceGeneration,
+    software: release.software,
+  };
+  const operations = { release, manifestDigest: digest(operationsManifest) };
+  writeAtomic(s.receiptRoot, 'action-backup.json', { ...s.header, operations });
+  f.operations.mockResolvedValue(operationsManifest);
+  const args = {
+    ...s.args,
+    command: 'operations-restore-check' as const,
+    settingsFile: s.roots.targetRoot + '/settings.json',
+  };
+  expect(await runActionRecoveryAdmin({ ...s.options, args })).toMatchObject({
+    status: 'restore_verified_paused',
+    operations_manifest_digest: operations.manifestDigest,
+    recovery_software: release.software,
+    admission_restored: false,
+    effects_enabled: false,
+    writer_enabled: false,
+  });
+  expect(f.connect).toHaveBeenCalledWith(s.options.env, 'test', 'migration');
+  expect(f.operations).toHaveBeenCalled();
+  expect(fs.existsSync(path.join(s.roots.targetRoot, 'actions', 'writer-profile.json'))).toBe(false);
+  f.connect.mockClear();
+  writeAtomic(path.join(settings.releaseRoot, release.releaseId), 'release.json', {
+    ...manifest,
+    source: { ...manifest.source, tree: '9'.repeat(40) },
+  });
+  await expect(runActionRecoveryAdmin({ ...s.options, args })).rejects.toThrow('action_recovery_unavailable');
+  expect(f.connect).not.toHaveBeenCalled();
+});
+it('S11-T03 an operations backup cannot claim an unrecorded release manifest as tested source provenance', async () => {
+  const s = await fixture(),
+    manifest = fixtureRelease('S10'),
+    release = recoveryReleaseForManifest(manifest),
+    settings = {
+      version: 1,
+      target: 'pi',
+      sshAlias: 'fixture',
+      userHome: s.root,
+      installationRoot: s.roots.installationRoot,
+      dataRoot: s.roots.dataRoot,
+      stateRoot: s.roots.targetRoot,
+      releaseRoot: s.root + '/releases',
+      stagingRoot: s.root + '/staging',
+      sourceRoot: s.root + '/sources',
+      runtimeEnvironment: s.root + '/.config/runtime',
+      migrationEnvironment: s.root + '/.config/migration',
+      service: 'nano.service',
+      hostFingerprint: s.targetBinding.hostFingerprint,
+      databaseFingerprint: s.targetBinding.databaseFingerprint,
+    };
+  fs.mkdirSync(path.join(settings.releaseRoot, release.releaseId), { recursive: true, mode: 0o700 });
+  writeAtomic(path.join(settings.releaseRoot, release.releaseId), 'release.json', manifest);
+  writeAtomic(s.roots.targetRoot, 'settings.json', settings);
+  const state = readPrivate<Record<string, unknown>>(path.join(s.roots.targetRoot, 'state.json'));
+  writeAtomic(s.roots.targetRoot, 'state.json', { ...state, releaseId: release.releaseId });
+  f.nativeBackup.mockImplementation(async (_settings, operationId) => ({
+    ...s.header,
+    operationId,
+    operations: { release, manifestDigest: 'c'.repeat(64) },
+  }));
+  await expect(
+    runActionRecoveryAdmin({
+      ...s.options,
+      args: {
+        command: 'operations-backup',
+        scopeId: 'scope',
+        requestId: randomUUID(),
+        settingsFile: s.roots.targetRoot + '/settings.json',
+      },
+    }),
+  ).rejects.toThrow('action_recovery_unavailable');
   expect(f.nativeBackup).not.toHaveBeenCalled();
 });

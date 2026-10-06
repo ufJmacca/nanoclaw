@@ -1,6 +1,6 @@
 # S10 correction: current observations retain review capacity
 
-**Status:** exact tested candidate deployed and technically verified; [PR #68](https://github.com/ufJmacca/nanoclaw/pull/68) human review/merge pending.
+**Status:** historical tested correction candidate. The owner merged PR #68; [actual merged-source acceptance](S10_MERGED.md) is complete. The identities and remaining-gate statements below describe the preceding candidate deployment.
 
 After the owner merged [S10 PR #67](https://github.com/ufJmacca/nanoclaw/pull/67),
 its P1 review identified historical source evidence that could block fresh reviews.

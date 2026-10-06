@@ -23,6 +23,10 @@ function invoke(recovery: boolean, failCommand = 0) {
   const script = (file: string, body: string) =>
     fs.writeFileSync(file, '#!/bin/bash\nset -eu\n' + body, { mode: 0o700 });
   script(path.join(root, 'scripts/cos-push-source.sh'), 'exit 0\n');
+  script(
+    path.join(root, 'scripts/cos-protect-programme.sh'),
+    'echo protection >> "$COS_TEST_SSH_LOG"\n[[ "$COS_TEST_FAIL" != 3 ]] || exit 24\n',
+  );
   script(path.join(bin, 'uname'), 'echo Darwin\n');
   script(
     path.join(bin, 'git'),
@@ -43,7 +47,8 @@ if [[ "$1" == compose ]]; then echo fixture; exit 0; fi
 operation=$9; shift 9
 case "$operation" in
  alias) echo fixture-pi ;;
- verify|target-check|checkpoint) exit 0 ;;
+ verify|target-check|checkpoint|protected-release-check) exit 0 ;;
+ protected-release-command) [[ "$COS_TEST_FAIL" != 4 ]] || echo finish-protected-release ;;
  preflight-command) echo inspect ;;
  stage-command) echo stage ;;
  seal-command) echo seal ;;
@@ -90,12 +95,13 @@ esac
       },
     },
   );
-  if (!fs.existsSync(path.join(root, 'args'))) throw new Error(result.stderr + result.stdout);
   return {
     result,
     id,
-    args: fs.readFileSync(path.join(root, 'args'), 'utf8').trim(),
-    remote: fs.readFileSync(path.join(root, 'ssh.log'), 'utf8').trimEnd().split('\n'),
+    args: fs.existsSync(path.join(root, 'args')) ? fs.readFileSync(path.join(root, 'args'), 'utf8').trim() : '',
+    remote: fs.existsSync(path.join(root, 'ssh.log'))
+      ? fs.readFileSync(path.join(root, 'ssh.log'), 'utf8').trimEnd().split('\n')
+      : [],
   };
 }
 
@@ -104,6 +110,19 @@ it('runs ordinary delivery with no recovery argument', () => {
   expect(result.status, result.stderr).toBe(0);
   expect(args).toBe('1:' + id);
   expect(remote.at(-1)).toBe('activate ' + id);
+  expect(remote[0]).toBe('protection');
+});
+it('finishes the verified protected current release without replaying normal deployment or archive preparation', () => {
+  const { result, args, remote } = invoke(false, 4);
+  expect(result.status, result.stderr).toBe(0);
+  expect(args).toBe('');
+  expect(remote).toEqual(['protection', 'inspect', 'finish-protected-release']);
+});
+it('protects before target/deployment repair and refuses delivery if required protection is unconfirmed', () => {
+  const { result, args, remote } = invoke(false, 3);
+  expect(result.status).not.toBe(0);
+  expect(args).toBe('');
+  expect(remote).toEqual(['protection']);
 });
 
 it('passes only the explicit failed-release identity for recovery', () => {

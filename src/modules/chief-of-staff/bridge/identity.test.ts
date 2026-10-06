@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { verifyIngress, parseControl, type Binding, type ChannelFacts } from './identity.js';
+import { verifyIngress, parseControl, parseStatusControl, type Binding, type ChannelFacts } from './identity.js';
 import type { InboundEvent } from '../../../channels/adapter.js';
 const binding: Binding = {
   scopeId: 'scope',
@@ -12,6 +12,32 @@ const binding: Binding = {
   provider: 'codex',
 };
 const now = Date.parse('2026-09-29T12:00:00Z');
+it('S11 status accepts exact bounded owner commands and ignores quoted or injected control text', () => {
+  expect(parseStatusControl('cos status')).toEqual({});
+  expect(parseStatusControl('cos status missions offset 20')).toEqual({ category: 'missions', offset: 20 });
+  for (const text of [
+    '> cos status',
+    'please cos status',
+    'cos status\nprivate',
+    'cos status secrets',
+    'cos status missions offset 01',
+    'cos status missions offset 10001',
+  ])
+    expect(parseStatusControl(text)).toBeNull();
+});
+it('S11-UI01 inspect uncertain action is an exact deterministic host read, never a model turn or reconciliation grant', () => {
+  expect(parseStatusControl('cos inspect action action-' + 'a'.repeat(64))).toEqual({
+    category: 'actions',
+    id: 'action-' + 'a'.repeat(64),
+  });
+  for (const text of [
+    'please cos inspect action a',
+    '> cos inspect action a',
+    'cos inspect action ../../other',
+    'cos inspect action a execute',
+  ])
+    expect(parseStatusControl(text)).toBeNull();
+});
 const facts: ChannelFacts = {
   id: 'private',
   type: 'P',

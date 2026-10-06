@@ -2,6 +2,7 @@ import type Database from 'better-sqlite3';
 import type { DeliveryActionHandler } from '../../../delivery.js';
 import type { Session } from '../../../types.js';
 import type { Context } from '../domain/contracts.js';
+import type { StatusInput } from '../contracts/operations-protocol.js';
 import { digest } from '../domain/contracts.js';
 import { COS_PROTOCOL, validRequest, validResponse, type CosResponse } from '../contracts/protocol.js';
 import type { Change, SourceChange, Result } from '../domain/contracts.js';
@@ -77,6 +78,10 @@ export function createRpcHandler(dependencies: {
       else if (access && access.status !== 'ok') result = { status: access.status };
       else if (reservation && reservation.status !== 'ok') result = { status: reservation.status };
       else if (request.method.startsWith('cos_action_') && context.origin) result = { status: 'denied' };
+      else if (request.method === 'cos_status')
+        result = context.origin
+          ? { status: 'denied' }
+          : await dependencies.store.operatorStatus(context, request.params as StatusInput);
       else if (
         [
           'cos_review_charter_propose',

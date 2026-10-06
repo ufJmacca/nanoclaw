@@ -188,7 +188,7 @@ export function startCosHostModule(assertHostAuthority: () => void): { service: 
     running,
     missionExecution,
     wake: wakeContainer,
-    specialists: (store) =>
+    specialists: (store, executionReady) =>
       new MissionHost({
         root: targetRoot,
         db: getDb(),
@@ -196,6 +196,7 @@ export function startCosHostModule(assertHostAuthority: () => void): { service: 
         teams: store.teamRuns,
         authority: missionAuthority,
         admitted,
+        executionReady,
         assertHostAuthority,
         facts,
         running: missionExecution.running,

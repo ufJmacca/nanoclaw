@@ -194,6 +194,7 @@ function fixture() {
 test('native CoS exposes only its fixed approved tools and dispatches validated RPC', async () => {
   const { dispatch, calls } = fixture();
   expect(cosDynamicTools.map((tool) => tool.name)).toEqual([
+    'cos_status',
     'cos_context_get',
     'cos_change_propose',
     'cos_request_status',

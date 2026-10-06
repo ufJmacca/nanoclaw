@@ -1,4 +1,5 @@
 import type { InboundEvent } from '../../../channels/adapter.js';
+import { validStatusInput, type StatusInput } from '../contracts/operations-protocol.js';
 
 export type Binding = {
   scopeId: string;
@@ -74,4 +75,14 @@ export function parseControl(text: string): Control | null {
     );
   if (!match || match[0] !== text) return null;
   return { kind: match[1].toLowerCase() as 'approve' | 'reject', proposalId: match[2], token: match[3] };
+}
+/** Exact deterministic owner command, including bounded continuation. Quoted prose is never a control. */
+export function parseStatusControl(text: string): StatusInput | null {
+  if (text === 'cos status') return {};
+  const action = /^cos inspect action (action-[a-f0-9]{64})$/.exec(text);
+  if (action && action[0] === text) return { category: 'actions', id: action[1] };
+  const match = /^cos status ([a-z_]+)(?: offset (0|[1-9][0-9]{0,4}))?$/.exec(text);
+  if (!match || match[0] !== text) return null;
+  const value = { category: match[1], ...(match[2] !== undefined ? { offset: Number(match[2]) } : {}) };
+  return validStatusInput(value) ? value : null;
 }

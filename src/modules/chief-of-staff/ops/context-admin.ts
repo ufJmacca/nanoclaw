@@ -6,7 +6,7 @@ import os from 'node:os';
 import { createHash } from 'node:crypto';
 import Database from 'better-sqlite3';
 import { cosBoundary, type CosBinding } from '../../../cos-boundary.js';
-import { initDb, closeDb } from '../../../db/connection.js';
+import { initDb, initReadOnlyDb, initOwnerControlDb, closeDb } from '../../../db/connection.js';
 import { getSession } from '../../../db/sessions.js';
 import {
   acquireHostExecutionLease,
@@ -22,6 +22,13 @@ import { validPrivateChannel, type ChannelFacts } from '../bridge/identity.js';
 import { createConversationState } from '../bridge/conversation-state.js';
 import { subscriptionActivation } from '../bridge/model-policy.js';
 import { digest } from '../domain/contracts.js';
+import { validStatusInput, type StatusInput } from '../contracts/operations-protocol.js';
+import { connectChecked } from '../store/preflight.js';
+import { parseDatabaseConfig, externalDatabaseConfig } from '../store/config.js';
+import { migrationStatus, SCHEMA_VERSION } from '../store/migrations.js';
+import { BoundedDatabase } from '../store/client.js';
+import { PriorityStore } from '../store/priorities.js';
+import { databaseFingerprint } from './target-identity.js';
 import { localTarget } from './target-identity.js';
 import { acquireTargetLock, readPrivate, type TargetState } from './target-state.js';
 import { activeMaintenanceLease, assertMaintenanceLease } from './maintenance.js';
@@ -29,11 +36,17 @@ import { targetCommands } from './target-host.js';
 import { backupNativeDatabase } from './native-installation.js';
 import { backupConversations } from './conversation-backup.js';
 import { recoverConversation } from './conversation-recovery.js';
+import { HostOwnerControls, parseOwnerControl } from './owner-controls.js';
+import { RestrictedExecutionProbe } from '../bridge/native-execution.js';
+import { getInstallSlug } from '../../../install-slug.js';
+import type { Session } from '../../../types.js';
+import { hasOwnerAccessDenials, ownerDenialsPermitResume, ownerDenialCheckpoint } from './owner-denial-resume.js';
 import { issueActivation, resumeContext, rebindRecoveredActivation } from './model-activation.js';
 
 import { isKnowledgeCommand, runKnowledgeAdmin, type KnowledgeAdminArguments } from './knowledge-admin.js';
 import { isCalendarCommand, runCalendarAdmin, type CalendarAdminArguments } from './calendar-admin.js';
 import { isMissionCommand, runMissionAdmin, type MissionAdminArguments } from './mission-admin.js';
+import { isOwnerExportCommand, runOwnerExportAdmin, type OwnerExportArguments } from './owner-export-admin.js';
 import {
   isCalendarAccountCommand,
   runCalendarAccountAdmin,
@@ -48,6 +61,7 @@ import {
 } from './action-recovery-admin.js';
 
 export type ContextAdminArguments =
+  | OwnerExportArguments
   | ActionRecoveryArguments
   | ActionAdminArguments
   | ActionAccountArguments
@@ -56,6 +70,8 @@ export type ContextAdminArguments =
   | CalendarAdminArguments
   | CalendarAccountArguments
   | { command: 'context-status'; scopeId: string }
+  | { command: 'operator-status'; scopeId: string; input: StatusInput }
+  | { command: 'operator-control'; scopeId: string; requestId: string; text: string }
   | { command: 'context-prepare'; scopeId: string }
   | { command: 'model-activate'; scopeId: string; policyFile: string }
   | { command: 'context-resume'; scopeId: string; activationId: string; resumeId: string }
@@ -64,6 +80,7 @@ type Dependencies = {
   target(root: string): TargetState;
   quiescent(target: TargetState): Promise<boolean>;
   facts(binding: CosBinding): Promise<ChannelFacts>;
+  stop?(session: Session): void;
 };
 function privateDirectory(directory: string) {
   const stat = fs.lstatSync(directory);
@@ -175,10 +192,21 @@ export async function contextAdminCommand(
   env: NodeJS.ProcessEnv,
   dependencies?: Dependencies,
 ): Promise<Record<string, unknown>> {
-  if (env.COS_ENABLED !== 'true') return { status: 'disabled', live_model: 'not_verified' };
+  if (
+    env.COS_ENABLED !== 'true' &&
+    ![
+      'operator-status',
+      'operator-control',
+      'owner-export',
+      'export-purge',
+      'operations-backup',
+      'operations-restore-check',
+    ].includes(args.command)
+  )
+    return { status: 'disabled', live_model: 'not_verified' };
   if (!/^[a-zA-Z0-9_-]{1,128}$/.test(args.scopeId)) throw new Error('invalid_admin_arguments');
   const root = env.COS_TARGET_STATE_DIR ?? '';
-  const d = dependencies ?? {
+  const d: Dependencies = dependencies ?? {
     target: (root: string) => localTarget(root, process.cwd(), path.join(process.cwd(), 'data')),
     quiescent: async (target: TargetState) => {
       const commands = targetCommands({
@@ -216,12 +244,99 @@ export async function contextAdminCommand(
     stat.mode & 0o022
   )
     throw new Error('unsafe_context_admin_state');
+  if (args.command === 'operator-control') {
+    const control = parseOwnerControl(args.text);
+    if (!control || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(args.requestId))
+      throw Error('invalid_admin_arguments');
+    const native = initOwnerControlDb(central);
+    try {
+      const binding = bindingFor(native, args.scopeId);
+      if (!nativeBinding(binding)) return { status: 'denied', live_model: 'not_invoked' };
+      const probe = new RestrictedExecutionProbe(getInstallSlug(target.binding.installationRoot));
+      const controls = new HostOwnerControls({
+        db: native,
+        session: getSession,
+        stop: (id) => {
+          const session = getSession(id);
+          if (
+            !session ||
+            !/^[a-zA-Z0-9_-]{1,128}$/.test(session.id) ||
+            !/^[a-zA-Z0-9_-]{1,128}$/.test(session.agent_group_id)
+          )
+            throw Error('cos_execution_identity_unknown');
+          if (d.stop) d.stop(session);
+          else
+            probe.stop(path.join(target.binding.dataRoot, 'v2-sessions', session.agent_group_id, session.id, 'cos-v1'));
+        },
+      });
+      // A local owner authenticated by private target/native ownership may only reduce authority, without channel/network/model access.
+      const result = controls.record(
+        binding,
+        {
+          id: 'owner-local-' + args.requestId,
+          ownerId: binding.ownerId,
+          text: args.text,
+          timestamp: new Date().toISOString(),
+        },
+        control,
+      );
+      return { ...result, scope_id: binding.scopeId, live_model: 'not_invoked', delivery: 'owner_local_only' };
+    } finally {
+      closeDb();
+    }
+  }
   if (args.command === 'context-status') {
     const db = new Database(central, { readonly: true, fileMustExist: true });
     try {
       return localStatus(db, root, bindingFor(db, args.scopeId));
     } finally {
       db.close();
+    }
+  }
+  if (args.command === 'operator-status') {
+    if (!validStatusInput(args.input)) throw new Error('invalid_admin_arguments');
+    const native = initReadOnlyDb(central);
+    let store: PriorityStore | undefined;
+    try {
+      const binding = bindingFor(native, args.scopeId),
+        session = getSession(binding.sessionId);
+      const current = async () => {
+        if (!session || !nativeBinding(binding) || !validPrivateChannel(binding, await d.facts(binding))) return false;
+        return nativeBinding(binding) && digest(d.target(root).binding) === digest(target.binding);
+      };
+      if (!(await current())) return { status: 'denied' };
+      const check = await connectChecked(env, 'runtime');
+      try {
+        if (
+          (await databaseFingerprint(check, parseDatabaseConfig(env, 'runtime'))) !==
+            target.binding.databaseFingerprint ||
+          (await migrationStatus(check)) !== SCHEMA_VERSION
+        )
+          return { status: 'unavailable' };
+      } finally {
+        await check.end();
+      }
+      store = new PriorityStore(BoundedDatabase.fromConfig(await externalDatabaseConfig(env, 'runtime')));
+      const result = await store.operatorStatus({ ...binding, ingressId: 'owner-local-inspection' }, args.input);
+      if (result.status === 'ok') {
+        const fresh = await store.operatorStatus({ ...binding, ingressId: 'owner-local-inspection' }, {});
+        if (fresh.status !== 'ok') return { status: fresh.status };
+      }
+      const boundary = cosBoundary(session!, native);
+      return (await current())
+        ? {
+            ...result,
+            scope_id: binding.scopeId,
+            paused: boundary.restricted && boundary.paused,
+            live_model: 'not_invoked',
+          }
+        : { status: 'denied' };
+    } finally {
+      try {
+        await store?.database.pool.end();
+      } finally {
+        closeDb();
+      }
     }
   }
   const unlock = acquireTargetLock(root);
@@ -254,6 +369,21 @@ export async function contextAdminCommand(
         assertAuthority();
       };
       await check();
+      if (isOwnerExportCommand(args)) {
+        return runOwnerExportAdmin({
+          args,
+          env,
+          roots: {
+            targetRoot: root,
+            installationRoot: target.binding.installationRoot,
+            dataRoot: target.binding.dataRoot,
+          },
+          binding,
+          databaseFingerprint: target.binding.databaseFingerprint,
+          check,
+          assertAuthority,
+        });
+      }
       if (isActionRecoveryCommand(args)) {
         return runActionRecoveryAdmin({
           args,
@@ -364,9 +494,33 @@ export async function contextAdminCommand(
         return issueActivation(activationOptions, readPrivate(args.policyFile));
       }
       if (args.command === 'context-resume') {
+        let ownerDenialsCheckpoint: string | undefined;
+        if (hasOwnerAccessDenials(native, binding)) {
+          const remote = await connectChecked(env, 'runtime');
+          try {
+            if (
+              (await databaseFingerprint(remote, parseDatabaseConfig(env, 'runtime'))) !==
+                target.binding.databaseFingerprint ||
+              (await migrationStatus(remote)) !== SCHEMA_VERSION
+            )
+              throw Error('operator_denial_requires_reconciliation');
+            await remote.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
+            if (!(await ownerDenialsPermitResume(native, binding, remote)))
+              throw Error('operator_denial_requires_reconciliation');
+            ownerDenialsCheckpoint = ownerDenialCheckpoint(native, binding);
+            await remote.query('COMMIT');
+          } finally {
+            await remote.end();
+          }
+          await check();
+        }
         inbound = openInboundDb(binding.agentGroupId, binding.sessionId);
         outbound = openOutboundDb(binding.agentGroupId, binding.sessionId);
-        return resumeContext({ ...activationOptions, inbound, outbound }, args.activationId, args.resumeId);
+        return resumeContext(
+          { ...activationOptions, inbound, outbound, ownerDenialsCheckpoint },
+          args.activationId,
+          args.resumeId,
+        );
       }
       if (args.command === 'context-prepare') {
         const context = createConversationState(root, db).prepare(binding, accountFingerprint);

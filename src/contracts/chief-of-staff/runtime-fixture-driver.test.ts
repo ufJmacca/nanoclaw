@@ -38,8 +38,21 @@ it('binds new runs to their slice without changing historical request identities
   expect(validateRuntimeFixtureRequest({ ...request, slice: 'S07' }).slice).toBe('S07');
   expect(validateRuntimeFixtureRequest({ ...request, slice: 'S08' }).slice).toBe('S08');
   expect(validateRuntimeFixtureRequest({ ...request, slice: 'S09' }).slice).toBe('S09');
-  for (const slice of ['S10', '', null, undefined])
+  expect(validateRuntimeFixtureRequest({ ...request, slice: 'S10' }).slice).toBe('S10');
+  expect(validateRuntimeFixtureRequest({ ...request, slice: 'S11' }).slice).toBe('S11');
+  for (const slice of ['', null, undefined])
     expect(() => validateRuntimeFixtureRequest({ ...request, slice })).toThrow('invalid_runtime_fixture_request');
+});
+it('S11 binds a synthetic recovery capture to the live guarded runtime session without adding a second credential profile', () => {
+  const capture = { ...request, slice: 'S11', mode: 'recovery-capture' };
+  expect(validateRuntimeFixtureRequest(capture)).toEqual(capture);
+  for (const patch of [
+    { slice: 'S10' },
+    { slice: undefined },
+    { COS_TEST_PGPASSWORD: 'not-a-request-field' },
+    { recoveryRoot: '/elsewhere' },
+  ])
+    expect(() => validateRuntimeFixtureRequest({ ...capture, ...patch })).toThrow('invalid_runtime_fixture_request');
 });
 
 it('requires the private capability and a fresh live control check for every database admission', async () => {
