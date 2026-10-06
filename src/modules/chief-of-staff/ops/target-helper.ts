@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { pathToFileURL, fileURLToPath } from 'node:url';
 import { deploymentSettings } from './deployment-settings.js';
 import { readPrivate, readTarget, initializeTarget } from './target-state.js';
 import { withDeploymentLock } from './deployment-lock.js';
@@ -8,6 +8,7 @@ import type { BindingRequest } from './bind.js';
 
 type TargetArguments =
   | { command: 'status'; settings: string }
+  | { command: 'programme-protect'; settings: string; completion: string }
   | { command: 'runtime-test'; settings: string; owner: string }
   | { command: 'rollback'; settings: string; releaseId: string; fromReleaseId: string }
   | {
@@ -23,7 +24,8 @@ export function parseTargetArguments(args: string[]): TargetArguments {
     throw new Error('invalid_target_arguments');
   };
   const [command, ...rest] = args;
-  if (!['status', 'deploy', 'rollback', 'runtime-test'].includes(command) || rest.length % 2 !== 0) return reject();
+  if (!['status', 'deploy', 'rollback', 'runtime-test', 'programme-protect'].includes(command) || rest.length % 2 !== 0)
+    return reject();
   const values: Record<string, string> = {};
   for (let i = 0; i < rest.length; i += 2) {
     if (
@@ -35,6 +37,7 @@ export function parseTargetArguments(args: string[]): TargetArguments {
         '--from-release-id',
         '--owner',
         '--recover-from',
+        '--completion',
       ].includes(rest[i]) ||
       !rest[i + 1] ||
       values[rest[i]]
@@ -46,6 +49,11 @@ export function parseTargetArguments(args: string[]): TargetArguments {
     !!value && /^\/[a-zA-Z0-9_./-]+$/.test(value) && path.resolve(value) === value;
   if (!canonical(values['--settings']) || (values['--binding'] !== undefined && !canonical(values['--binding'])))
     return reject();
+  if (command === 'programme-protect')
+    return Object.keys(values).length === 2 && canonical(values['--completion'])
+      ? { command, settings: values['--settings'], completion: values['--completion'] }
+      : reject();
+  if (values['--completion']) return reject();
   if (command === 'status')
     return Object.keys(values).length === 1 ? { command, settings: values['--settings'] } : reject();
   if (command === 'runtime-test') {
@@ -115,6 +123,24 @@ export async function targetCommand(args: string[]): Promise<Record<string, unkn
   const parent = path.dirname(settings.stateRoot);
   if (!fs.existsSync(parent)) throw new Error('target_state_parent_required');
   return withDeploymentLock(settings.stateRoot + '.operation.lock', async () => {
+    if (request.command === 'programme-protect') {
+      const { protectCompletedProgramme, validateProgrammeProtection, verifyProtectionHelper } =
+        await import('./programme-protection.js');
+      const { digest } = await import('../domain/contracts.js');
+      const proof = validateProgrammeProtection(readPrivate(request.completion));
+      await verifyProtectionHelper(settings, binding, fileURLToPath(import.meta.url));
+      const state = protectCompletedProgramme(settings.stateRoot, binding, proof);
+      return {
+        status: 'protected',
+        lifecycle: state.lifecycle,
+        maintenance: state.maintenance,
+        bindingDigest: digest(binding),
+        completionDigest: digest(proof),
+        sourceCommit: proof.releaseManifest.source.commit,
+        sourceTree: proof.releaseManifest.source.tree,
+        accountActivation: 'not_granted_by_protection',
+      };
+    }
     if (request.command === 'runtime-test') {
       const { serveRuntimeTestSession } = await import('./runtime-test-session.js');
       const { createRuntimeTestEffects } = await import('./runtime-test-effects.js');
@@ -249,6 +275,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
         'runtime_test_history_conflict',
         'runtime_test_protocol_invalid',
         'installed_runtime_test_helper_required',
+        'programme_completion_unverified',
+        'target_protection_conflict',
       ]);
       console.error(
         JSON.stringify({

@@ -122,9 +122,18 @@ export function readTarget(root: string, binding: TargetBinding): TargetState {
     throw new Error('target_state_conflict');
   const sealPath = path.join(root, 'protected.json');
   if (fs.lstatSync(sealPath, { throwIfNoEntry: false })) {
-    const seal = readPrivate<{ bindingDigest: string; generation: number }>(sealPath);
+    const seal = readPrivate<{ bindingDigest: string; generation: number; completionDigest?: string }>(sealPath);
     if (seal.bindingDigest !== digest(binding) || !Number.isSafeInteger(seal.generation) || seal.generation < 1)
       throw new Error('target_protection_conflict');
+    if (seal.completionDigest !== undefined) {
+      const proof = readPrivate<{ bindingDigest: string }>(path.join(root, 'programme-protection.json'));
+      if (
+        !/^[a-f0-9]{64}$/.test(seal.completionDigest) ||
+        proof.bindingDigest !== digest(binding) ||
+        digest(proof) !== seal.completionDigest
+      )
+        throw new Error('target_protection_conflict');
+    }
     return { ...state, lifecycle: 'protected', generation: Math.max(state.generation, seal.generation) };
   }
   if (state.lifecycle === 'protected') throw new Error('target_protection_history_missing');

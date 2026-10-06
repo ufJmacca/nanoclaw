@@ -3,7 +3,7 @@
 Run the host wrappers from the Mac checkout. They use the running repository devcontainer for project tools and the host's Docker, GitHub and SSH tools. They never install project dependencies on the Mac or build application code on the Pi.
 
 ```sh
-bash scripts/cos-release.sh --slice S10 --target pi --db-profile test --local-only
+bash scripts/cos-release.sh --slice S11 --target pi --db-profile test --local-only
 bash scripts/cos-deploy.sh status --target pi
 bash scripts/cos-deploy.sh --target pi --release-manifest /absolute/checkout/.cos-plan-state/releases/release-…/release.json
 bash scripts/cos-deploy.sh rollback --target pi --release-id release-…
@@ -35,9 +35,45 @@ Prefer `--db-profile test`. Explicit `--db-profile runtime-disposable` requires 
 
 Private test logs and receipts remain under `.cos-plan-state`; only sanitised acceptance evidence belongs in Git. Runtime fixture retries must retain the same owner, source, image, slice and request identity. A completed Pi receipt can reconcile a lost final reply only when the matching Mac receipt proves fixtures passed. Historical requests without a slice retain their original S01 meaning and receipt identity. See the acceptance receipts for actual deployment status.
 
+## S11 programme closure
+
+Current release construction selects S11, PostgreSQL schema 18 and SQLite
+contract 22. It requires S10's reviewed merge and accepted delivery of that exact
+merged source. The cumulative replay covers S01–S10 and S11 inspection/export
+scenarios. The demonstration includes the native mission, scheduled brief and
+operations flows. Both worker profiles repeat the packaged contracts with baked
+application code. S11 adds no PostgreSQL migration.
+
+After the final human merge and all mandatory local/image checks, delivery
+automatically verifies the required GitHub merges, human identities and source
+ancestry, then seals the Pi lifecycle before target repair or activation. The
+closure uses a retained, tested S11 helper and checks its recorded deployment and
+payload bytes. Database or service failure does not need to be repaired first.
+An unavailable Pi or missing trusted helper leaves protection unconfirmed and
+valuable-data admission closed.
+
+The same closure check can run independently when deployment needs repair:
+
+```sh
+bash scripts/cos-protect-programme.sh --release-manifest /absolute/checkout/.cos-plan-state/releases/release-…/release.json
+```
+
+Before all reviewed merge/test gates pass, this command reports pending and makes
+no target change. Once verified, the Pi stores `programme-protection.json` and a
+checksum-bound `protected.json` outside application code and worker mounts.
+An active deployment lease retains its identity for compatible repair; an
+interrupted runtime-disposable lease loses cleanup authority. Stale target state,
+lost Mac progress and older code cannot reopen disposal through the current
+helper. Missing or changed closure evidence fails closed.
+
+Protection grants no account, action, channel or model consent. A successful seal
+does not itself complete the programme: final merged-source delivery, Pi health,
+recovery and independent operation must still pass. See [S11 evidence](evidence/S11.md)
+for actual status.
+
 ## S10 strategic-review delivery
 
-Current release construction selects S10, PostgreSQL schema 18 and SQLite
+Historical S10 release construction selected PostgreSQL schema 18 and SQLite
 contract 22. It requires the legitimate reviewed S09 merge and accepted delivery
 of that actual merged source. The cumulative fixture selection includes earlier
 slices and the S10 charter, observation, snapshot, private review, calendar,

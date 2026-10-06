@@ -138,10 +138,11 @@ export async function macDeployCommand(args: string[]): Promise<string | void> {
     (await artifactHash(path.join(root, 'release.json'))) !== local.manifestHash
   )
     throw new Error('local_evidence_mismatch');
-  if (operation === 'verify' && !values.length) {
+  if (['verify', 'verify-protection'].includes(operation) && !values.length) {
     await verifyReleaseBundle(root, local.manifestHash);
     if ((await artifactHash(path.join(root, 'bootstrap.mjs'), 1024 * 1024)) !== local.bootstrapHash)
       throw new Error('bootstrap_identity_mismatch');
+    if (operation === 'verify-protection') return;
     fs.copyFileSync(settingsFile, path.join(root, 'target.json'));
     fs.chmodSync(path.join(root, 'target.json'), 0o600);
     const binding = path.resolve('.cos-plan-state/coordinator-binding.json');

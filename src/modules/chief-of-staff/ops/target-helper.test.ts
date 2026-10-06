@@ -2,6 +2,19 @@ import { expect, it } from 'vitest';
 import { parseTargetArguments } from './target-helper.js';
 it('accepts only fixed target operations, canonical private settings, and exact release identities', () => {
   expect(
+    parseTargetArguments([
+      'programme-protect',
+      '--settings',
+      '/home/pi/settings.json',
+      '--completion',
+      '/home/pi/completion.json',
+    ]),
+  ).toEqual({
+    command: 'programme-protect',
+    settings: '/home/pi/settings.json',
+    completion: '/home/pi/completion.json',
+  });
+  expect(
     parseTargetArguments(['runtime-test', '--settings', '/home/pi/settings.json', '--owner', 'fixture-run']),
   ).toEqual({ command: 'runtime-test', settings: '/home/pi/settings.json', owner: 'fixture-run' });
   expect(
@@ -51,6 +64,9 @@ it('accepts only fixed target operations, canonical private settings, and exact 
     expect(() => parseTargetArguments([...recovery.slice(0, -1), value])).toThrow();
   for (const args of [
     ['shell'],
+    ['programme-protect', '--settings', '/tmp/settings', '--completion', '../proof'],
+    ['programme-protect', '--settings', '/tmp/settings', '--completion', '/tmp/proof', '--owner', 'fixture'],
+    ['status', '--settings', '/tmp/settings', '--completion', '/tmp/proof'],
     ['status', '--settings', 'relative'],
     ['status', '--settings', '/tmp/settings', '--settings', '/tmp/other'],
     ['deploy', '--settings', '/tmp/settings', '--release-id', '../active', '--manifest-sha256', 'a'.repeat(64)],
