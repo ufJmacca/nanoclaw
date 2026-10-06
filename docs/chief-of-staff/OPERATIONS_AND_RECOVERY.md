@@ -1,11 +1,15 @@
 # Chief-of-Staff operations and recovery
 
-These procedures use the reviewed final S11 release. Its exact merged-source
+These procedures use the reviewed S11 release. Its exact merged-source
 deployment, native checks, protection, compatibility and preservation passed.
 Earlier maintenance and isolated restore evidence retains its original identity.
 Check [final acceptance](evidence/S11_MERGED.md) for the installed artifacts and
 protected lifecycle. CoS remains paused and the calendar writer disabled until
 their separate live activation checks pass.
+
+The later test-fixture correction in PR #71 awaits human review/merge. It has not
+changed these installed artifacts; [the acceptance receipt](evidence/S11_MERGED.md)
+records the remaining programme checkpoint and its exact tested release.
 
 ## Prerequisites and responsibilities
 

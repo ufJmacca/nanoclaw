@@ -104,8 +104,10 @@ latest fully verified candidate and its complete compatible recovery release;
 The owner merged PR #68, and [actual merged-source acceptance](evidence/S10_MERGED.md)
 passed with fresh Mac-built artifacts and Pi verification. [S11 final
 acceptance](evidence/S11_MERGED.md) now verifies its human merge, exact final
-release and Pi-owned protected-data transition. The implementation programme is
-complete; live account/model activation remains separately gated.
+release and Pi-owned protected-data transition. A later CI failure exposed a
+date-dependent approval fixture; PR #71 awaits human review/merge and resulting
+merged-source acceptance before the final programme checkpoint. Live
+account/model activation remains separately gated.
 
 ## S04 brief and commitment delivery
 
