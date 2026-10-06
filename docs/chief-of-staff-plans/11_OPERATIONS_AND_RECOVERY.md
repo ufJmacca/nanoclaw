@@ -1,11 +1,15 @@
 # S11 — Inspect, pause and recover the whole assistant
 
-**Status:** not started  
+**Status:** in progress; inspection, readiness and owner-denial development checks passed; full recovery and release acceptance pending.
+
 **Repository:** `ufJmacca/nanoclaw`  
-**Branch:** `cos/s11-operations-and-recovery`  
+**Branch:** `codex/s11-operations-and-recovery`
+
 **Depends on:** S10 merged, with its acceptance receipt available.  
 **Delivery unit:** one independently reviewable PR; multiple red–green commits are expected.  
 **User-visible outcome:** You can see what the assistant is doing and why, stop it safely, restore it after failure and export your own records.
+
+Development evidence is recorded in [S11](../chief-of-staff/evidence/S11.md). These milestones do not satisfy the full slice, Pi deployment or human merge gates below.
 
 Read [START HERE](00_START_HERE.md), [architecture/contracts](ARCHITECTURE_AND_CONTRACTS.md), [external PostgreSQL](EXTERNAL_POSTGRES.md), [goal execution](GOAL.md), [Mac-to-Pi delivery](MAC_TO_PI_DELIVERY.md), [Mattermost interaction](INTERACTION_MODEL.md), [implementation authority](IMPLEMENTATION_AUTHORITY.md), and [baseline](REPOSITORY_BASELINE.md) before implementation. This plan inherits their identity, scope, replay, approval, budget and retention rules; none may be postponed to S11.
 
@@ -32,49 +36,49 @@ A consolidated chat/CLI operator view, health and evidence inspection, coordinat
 
 ## Required red tests
 
-| ID | Behaviour that must first fail |
-|---|---|
-| S11-T01 | Status remains accurate across queued/running/blocked/review/uncertain/cancelled states. |
+| ID      | Behaviour that must first fail                                                                        |
+| ------- | ----------------------------------------------------------------------------------------------------- |
+| S11-T01 | Status remains accurate across queued/running/blocked/review/uncertain/cancelled states.              |
 | S11-T02 | Pause closes admission immediately while preserving safe inspection and unrelated NanoClaw operation. |
-| S11-T03 | Restore with mismatched schema/checksum or missing required artifacts cannot enable execution. |
-| S11-T04 | Restored old state cannot re-execute an already-created external action without reconciliation. |
-| S11-T05 | Revocation tombstones survive backup/restore and prevent resurrection of restricted content. |
-| S11-T06 | Export obeys scope, excludes secrets and does not publish to a public/default channel. |
-| S11-T07 | Orphan/lease/schedule recovery preserves stable identities and does not spawn duplicate workers. |
-| S11-T08 | Host/PostgreSQL/connector outages do not silently turn missing knowledge into confident conclusions. |
-| S11-T09 | Global CoS stop affects only CoS-owned execution identities and resources. |
-| S11-T10 | Upgrade/rollback preserves historical approvals, immutable intents and adapter receipt semantics. |
+| S11-T03 | Restore with mismatched schema/checksum or missing required artifacts cannot enable execution.        |
+| S11-T04 | Restored old state cannot re-execute an already-created external action without reconciliation.       |
+| S11-T05 | Revocation tombstones survive backup/restore and prevent resurrection of restricted content.          |
+| S11-T06 | Export obeys scope, excludes secrets and does not publish to a public/default channel.                |
+| S11-T07 | Orphan/lease/schedule recovery preserves stable identities and does not spawn duplicate workers.      |
+| S11-T08 | Host/PostgreSQL/connector outages do not silently turn missing knowledge into confident conclusions.  |
+| S11-T09 | Global CoS stop affects only CoS-owned execution identities and resources.                            |
+| S11-T10 | Upgrade/rollback preserves historical approvals, immutable intents and adapter receipt semantics.     |
 
 ## External PostgreSQL requirements for this slice
 
 Separate the external DBA’s server responsibilities from the NanoClaw operator’s client configuration and local runtime backups. Test network failures through a controlled test path, never by stopping the shared database. Reinject credentials through the real service environment during the pre-authorised restart. Restore into a separate external target or the guarded quiesced disposable-runtime target; always isolate local restore roots. Never require a new migration/deployment reviewer.
 
-| ID | Additional required red → green behaviour |
-|---|---|
-| S11-PG01 | Redacted preflight distinguishes network, authentication, TLS, schema and reconciling states without leaking environment values. |
+| ID       | Additional required red → green behaviour                                                                                                                                                                            |
+| -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| S11-PG01 | Redacted preflight distinguishes network, authentication, TLS, schema and reconciling states without leaking environment values.                                                                                     |
 | S11-PG02 | A coordinated remote/local manifest restores to an admitted test target or eligible quiesced disposable runtime; protected runtime content and actual local NanoClaw state are never overwritten by fixture restore. |
-| S11-PG03 | Credential rotation uses the standing-authorised service restart, closes old pool connections, validates new access and never forwards either password to an agent. |
-| S11-PG04 | Outage simulation affects only the test route; normal operations never create/stop a PostgreSQL server or manipulate a local database volume. |
+| S11-PG03 | Credential rotation uses the standing-authorised service restart, closes old pool connections, validates new access and never forwards either password to an agent.                                                  |
+| S11-PG04 | Outage simulation affects only the test route; normal operations never create/stop a PostgreSQL server or manipulate a local database volume.                                                                        |
 
 ## Automatic deployment and protected-data closure tests
 
-| ID | Required red → green behaviour |
-|---|---|
+| ID        | Required red → green behaviour                                                                                                                                             |
+| --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | S11-OPS01 | The final eligible release migrates/deploys/restarts/verifies on the bound target without another approval; failed health is recovered or reported as a technical blocker. |
-| S11-OPS02 | Completion of all implementation/merge gates automatically latches data to protected before valuable data can be admitted. |
-| S11-OPS03 | Reopening a goal, a stale ledger, lost local progress or a restored blank template cannot reactivate runtime-disposable cleanup after closure. |
-| S11-OPS04 | Disposable-mode cleanup/restore cannot erase identities needed to reconcile real external effects or reset ordinary NanoClaw data. |
-| S11-OPS05 | Code review/merge and account/action approvals remain enforced; migration/deployment receipts are evidence, not new approval gates. |
+| S11-OPS02 | Completion of all implementation/merge gates automatically latches data to protected before valuable data can be admitted.                                                 |
+| S11-OPS03 | Reopening a goal, a stale ledger, lost local progress or a restored blank template cannot reactivate runtime-disposable cleanup after closure.                             |
+| S11-OPS04 | Disposable-mode cleanup/restore cannot erase identities needed to reconcile real external effects or reset ordinary NanoClaw data.                                         |
+| S11-OPS05 | Code review/merge and account/action approvals remain enforced; migration/deployment receipts are evidence, not new approval gates.                                        |
 
 ## Final Mac/Pi release and recovery tests
 
-| ID | Required behaviour |
-|---|---|
-| S11-REL01 | Final merged source/image identities match the healthy Pi release; the Pi runs when the Mac is offline. |
-| S11-REL02 | Interrupted staging, load, extraction, migration or restart reconciles the same target release, without builds on the Pi. |
-| S11-REL03 | Rollback preserves current NanoClaw messages/sessions and uses only schema-compatible recorded artifacts. |
-| S11-REL04 | Pi-owned lifecycle protection survives a stale/lost Mac ledger, code-directory changes and target restart. |
-| S11-UI01 | Mattermost owner can inspect/cancel/pause via deterministic host controls when model execution is unavailable; private content still fails closed on lost DB authority. |
+| ID        | Required behaviour                                                                                                                                                      |
+| --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| S11-REL01 | Final merged source/image identities match the healthy Pi release; the Pi runs when the Mac is offline.                                                                 |
+| S11-REL02 | Interrupted staging, load, extraction, migration or restart reconciles the same target release, without builds on the Pi.                                               |
+| S11-REL03 | Rollback preserves current NanoClaw messages/sessions and uses only schema-compatible recorded artifacts.                                                               |
+| S11-REL04 | Pi-owned lifecycle protection survives a stale/lost Mac ledger, code-directory changes and target restart.                                                              |
+| S11-UI01  | Mattermost owner can inspect/cancel/pause via deterministic host controls when model execution is unavailable; private content still fails closed on lost DB authority. |
 
 Restore drills keep local Mac fixtures distinct from protected Pi runtime data. Release archives, Pi data backups and database backups are different artifacts; none substitutes for the other. Record where each was actually created and verified. Retain last-known-good payload/images and target receipts outside disposable CoS records. Do not copy Pi account secrets or real conversation history to the Mac as test data.
 
@@ -107,7 +111,7 @@ Run `pnpm cos:test --slice S11 --db-profile <selected-profile>` and `pnpm cos:de
 Write a sanitised acceptance receipt at `docs/chief-of-staff/evidence/S11.md`: base/head SHA, scenario and test IDs, real red/green command results, migration version, policy changes, fixture demo evidence, rollback check, live-test status, residual limitations and reviewer decision. Private logs/artifacts stay outside Git. Record missing live credentials as **live validation pending**, not passed. Missing every eligible database target blocks the required integration gate; a missing separate test DB does not block the guarded disposable-runtime option. Include the plan revision, `cos-postgres/external-env-v3` conformance, selected test profile and target identity confirmation (without credentials/endpoints), actual local-test/final-image/transfer/Pi-migration/Pi-smoke receipts, source and image IDs, Pi-owned data lifecycle, actual remote failure tests and any pending operator configuration.
 
 Update the persistent goal ledger and create or update this slice’s PR. If review/merge is pending, checkpoint `awaiting_review` with the exact resume condition; the overall goal remains incomplete. When an authorised human merge is verified, advance automatically to the next eligible slice under [GOAL.md](GOAL.md), without a new slice-specific instruction. Execute this slice's in-scope database migrations and target deployment/restart/rollback automatically under [IMPLEMENTATION_AUTHORITY.md](IMPLEMENTATION_AUTHORITY.md), through the Mac-to-Pi release path, recording actual results without another human approval. Do not auto-merge, enable an unauthorised account, enlarge permissions or implement a dependent slice before its predecessor is merged. Resume unfinished work on its existing branch; never recreate a finished slice or discard an existing ledger.
+
 ## Pinned-source release gate
 
 Apply [GITHUB_SOURCE_SYNC.md](GITHUB_SOURCE_SYNC.md) in this slice. Push the exact tested source commit from the Mac, fetch/verify it in a detached Pi release-source checkout, and require commit/tree agreement with the tested artifact manifest before activation. Record source-push/source-sync status and verified IDs in the acceptance/deployment receipt. Never use an unattended pull, change the active checkout, build on the Pi or mount fetched source over release code. S01 introduces tests S01-REL13–S01-REL18; later slices regress them where affected.
-
