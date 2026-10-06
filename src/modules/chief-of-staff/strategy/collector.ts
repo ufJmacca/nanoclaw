@@ -9,6 +9,12 @@ import type { CalendarTime } from '../calendar/normalization.js';
 import type { Evidence } from '../knowledge/store.js';
 import { scheduledMinutes } from './calendar-allocation.js';
 import {
+  missionProjection,
+  readReviewMissions,
+  type MissionProjection,
+  type MissionReaders,
+} from './mission-evidence.js';
+import {
   validReviewCharterChange,
   validStrategyObservationChange,
   validReviewRequest,
@@ -39,6 +45,8 @@ export type ReviewVersionRefs = {
   sources: SourceVersion[];
   calendar_digest: string;
   calendar_projection_digest: string;
+  mission_projection_digest: string;
+  mission_authorities: { single: string | null; team: string | null };
 };
 type CalendarLocation = {
   source_id: string;
@@ -51,10 +59,10 @@ const sorted = <T extends { id: string }>(rows: T[]): T[] => rows.sort((a, b) =>
 const incomplete = (): Result => ({ status: 'unavailable', coverage: 'incomplete' });
 
 /** Database collection is bounded and complete before any review analysis or artifact publication.
- * Prior summaries come only from verified private artifacts. Calendar reads finish outside this pool; mission adapters remain closed. */
+ * Prior summaries come only from verified private artifacts. Calendar and mission adapters run after capture releases this pool. */
 export class ReviewCollector {
   constructor(
-    readonly options: {
+    readonly options: MissionReaders & {
       database: BoundedDatabase;
       knowledge: KnowledgeStore;
       work: WorkStore;
@@ -172,24 +180,55 @@ export class ReviewCollector {
       )
     ).rows.map((r) => ({ ...r, decided_at: (r.decided_at as Date).toISOString() }));
   }
-  private async unsupportedEvidence(
-    client: PoolClient,
-    context: KnowledgeContext,
-    definition: ReviewCharterDefinition,
-  ): Promise<boolean> {
-    // Do not claim a complete review while required adapters have not been implemented.
-    const row = (
-      await client.query(
-        `SELECT EXISTS(SELECT 1 FROM cos.mission_result_submissions s JOIN cos.mission_work_orders w
-        ON w.scope_id=s.scope_id AND w.id=s.mission_id WHERE s.scope_id=$1 AND
-        (w.body->'request'->>'project_id'=ANY($2::text[]) OR w.body->'request'->>'goal_id'=ANY($2::text[])))
-      OR EXISTS(SELECT 1 FROM cos.mission_team_work_orders w WHERE w.scope_id=$1 AND
-        (w.body->'request'->>'project_id'=ANY($2::text[]) OR w.body->'request'->>'goal_id'=ANY($2::text[])))
-      AS required`,
-        [context.scopeId, definition.initiative_ids],
-      )
-    ).rows[0];
-    return row.required;
+  private async missions(context: KnowledgeContext, captured: Result): Promise<Result> {
+    if (captured.status !== 'ok') return captured;
+    if (!(captured.mission_projection as MissionProjection[]).length) return captured;
+    const snapshot = captured.snapshot as ReviewSnapshot,
+      refs = captured.version_refs as ReviewVersionRefs;
+    const result = await readReviewMissions(
+      context,
+      snapshot.charter.definition,
+      refs.sources,
+      captured.mission_projection as MissionProjection[],
+      this.options,
+    );
+    if (result.status !== 'ok') return result;
+    // Accepted result readers register every influencing chunk, including uncited influence. Keep those references
+    // in the review artifact before a model can receive the full submitted claims and opposing perspectives.
+    return this.options.knowledge.answers.dependencies.transaction(async (client) => {
+      await client.query('SELECT pg_advisory_xact_lock(73101004)');
+      if (!(await this.validateSnapshot(client, context, snapshot, refs))) return { status: 'denied' };
+      const evidence = (
+        await client.query(
+          `SELECT scope_id,source_id,id AS evidence_id FROM cos.evidence_refs WHERE scope_id=$1 AND session_id=$2 AND processing_provider=$3
+          AND source_id=ANY($4::text[]) AND (context_generation=$5 OR id=ANY($6::text[])) ORDER BY id LIMIT 101`,
+          [
+            context.scopeId,
+            context.sessionId,
+            context.provider,
+            snapshot.charter.definition.source_ids,
+            context.generation,
+            snapshot.observations.flatMap((o) => o.evidence.map((e) => e.evidence_id)),
+          ],
+        )
+      ).rows;
+      if (evidence.length > 100) return incomplete();
+      let enriched: ReviewSnapshot;
+      try {
+        enriched = buildReviewSnapshot({
+          ...snapshot,
+          records: snapshot.initiatives,
+          missions: result.missions,
+          mission_coverage: result.coverage,
+          source_evidence: evidence,
+          truncated: snapshot.truncated || result.truncated,
+        });
+      } catch (error) {
+        if (error instanceof Error && error.message.startsWith('review_')) return incomplete();
+        throw error;
+      }
+      return { ...captured, snapshot: enriched, version_refs: { ...refs, snapshot_digest: digest(enriched) } };
+    }, true);
   }
   private async calendarProjection(
     client: PoolClient,
@@ -326,7 +365,11 @@ export class ReviewCollector {
         return result;
       }, true);
       if (captured.status === 'ok') await this.options.hooks?.afterCollection?.();
-      return await this.calendars(context, captured);
+      const enriched = await this.missions(context, captured);
+      const result = await this.calendars(context, enriched);
+      return result.status === 'ok'
+        ? result
+        : { status: result.status, ...(result.status === 'denied' ? {} : { coverage: 'incomplete' }) };
     } catch (error) {
       if (error instanceof DatabaseUnavailable) return incomplete();
       throw error;
@@ -357,7 +400,7 @@ export class ReviewCollector {
     const rawWork = await this.work(client, context, definition),
       rawObservations = await this.observations(client, context, definition, request.charter_version),
       rawDecisions = await this.decisions(client, context, definition);
-    if (await this.unsupportedEvidence(client, context, definition)) return incomplete();
+    const missionVersions = await missionProjection(client, context, definition);
     const calendarLocations = await this.calendarProjection(client, context, definition);
     let truncated = rawWork.length > 20 || rawObservations.length > 20 || rawDecisions.length > 20;
     const work: ReviewWork[] = [],
@@ -441,6 +484,15 @@ export class ReviewCollector {
       sources,
       calendar_digest: digest(calendar.notice),
       calendar_projection_digest: digest(calendarLocations),
+      mission_projection_digest: digest(missionVersions),
+      mission_authorities: {
+        single: missionVersions.some((m) => m.kind === 'single')
+          ? (this.options.missionReviews?.reviewAuthorityDigest(context) ?? null)
+          : null,
+        team: missionVersions.some((m) => m.kind === 'team')
+          ? (this.options.teamFinalReviews?.reviewAuthorityDigest(context) ?? null)
+          : null,
+      },
     };
     let snapshot: ReviewSnapshot;
     try {
@@ -476,6 +528,7 @@ export class ReviewCollector {
       snapshot,
       version_refs: { ...refs, snapshot_digest: digest(snapshot) },
       calendar_locations: calendarLocations,
+      mission_projection: missionVersions,
     };
   }
 
@@ -506,6 +559,14 @@ export class ReviewCollector {
       return false;
     const sources = await this.sources(client, context, definition);
     if (!sources || digest(sources) !== digest(refs.sources)) return false;
+    for (const mission of snapshot.missions) {
+      const kind = mission.mission_id.startsWith('team-') ? 'team' : 'single';
+      const current =
+        kind === 'single'
+          ? this.options.missionReviews?.reviewAuthorityDigest(context)
+          : this.options.teamFinalReviews?.reviewAuthorityDigest(context);
+      if (!current || refs.mission_authorities?.[kind] !== current) return false;
+    }
     if (historical) {
       // The already integrity-checked private artifact retains the old records and advice.
       // Source permission/version and native context authority still have to be current.
@@ -523,7 +584,7 @@ export class ReviewCollector {
       digest(work) !== refs.work_digest ||
       digest(observations) !== refs.observation_digest ||
       digest(decisions) !== refs.decision_digest ||
-      (await this.unsupportedEvidence(client, context, definition))
+      digest(await missionProjection(client, context, definition)) !== refs.mission_projection_digest
     )
       return false;
     const calendar = await this.options.knowledge.answers.dependencies.calendarContext(client, context, true);

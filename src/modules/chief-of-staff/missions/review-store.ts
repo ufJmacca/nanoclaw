@@ -36,6 +36,13 @@ export class MissionReviews {
     readonly proposals: MissionProposalStore,
     readonly knowledge: KnowledgeStore,
   ) {}
+  /** S10 publication pin. Delegation is checked again without rereading private bytes under a publication lease. */
+  reviewAuthorityDigest(context: KnowledgeContext): string | null {
+    const authority = this.proposals.authority?.(context);
+    return !context.origin && context.provider === 'codex' && authority?.contextGeneration === context.generation
+      ? digest(authority)
+      : null;
+  }
   private async transaction(operation: (client: PoolClient) => Promise<Result>): Promise<Result> {
     try {
       return await this.knowledge.artifacts.exclusive(() =>
