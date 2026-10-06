@@ -13,7 +13,7 @@ import {
   fixtureRuntimeUser,
   fixtureProfile,
 } from './fixture-database.js';
-import { migrate } from '../../modules/chief-of-staff/store/migrations.js';
+import { migrate, SCHEMA_VERSION } from '../../modules/chief-of-staff/store/migrations.js';
 import { BoundedDatabase } from '../../modules/chief-of-staff/store/client.js';
 import { PriorityStore } from '../../modules/chief-of-staff/store/priorities.js';
 import { digest, type Result } from '../../modules/chief-of-staff/domain/contracts.js';
@@ -1116,7 +1116,7 @@ test('S09-T10 coordinated sandbox restore reconciles a fixture event created aft
       enabled = true;
     }
     assert.equal(checkpoint.format, 'cos-coordinated-backup/v1');
-    assert.equal(checkpoint.schemaVersion, 16);
+    assert.equal(checkpoint.schemaVersion, SCHEMA_VERSION);
     assert.equal(checkpoint.admissionRestored, false);
     const native = new Database(path.join(receiptRoot, 'coordinated', 'sqlite', '0', 'native.sqlite'), {
       readonly: true,

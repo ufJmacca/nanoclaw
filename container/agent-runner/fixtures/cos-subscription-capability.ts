@@ -88,7 +88,13 @@ if (mandateRefresh && (!runnerEntry || cancellation || compaction || sharedOwner
   throw new Error('invalid_mandate_refresh_fixture');
 const s01Tools = ['cos_change_propose', 'cos_context_get', 'cos_request_status'];
 const legacyCoordinatorTools = cosDynamicTools
-  .filter((tool) => !tool.name.startsWith('cos_mandate_') && !tool.name.startsWith('cos_action_'))
+  .filter(
+    (tool) =>
+      !tool.name.startsWith('cos_mandate_') &&
+      !tool.name.startsWith('cos_action_') &&
+      !tool.name.startsWith('cos_review_') &&
+      !tool.name.startsWith('cos_strategy_'),
+  )
   .map((tool) => tool.name);
 const mandateMcpTools = [
   'mcp__nanoclaw_cos_mandates__cos_mandate_activity',
@@ -96,6 +102,12 @@ const mandateMcpTools = [
   'mcp__nanoclaw_cos_mandates__cos_action_propose',
   'mcp__nanoclaw_cos_mandates__cos_action_get',
   'mcp__nanoclaw_cos_mandates__cos_action_cancel',
+  'mcp__nanoclaw_cos_mandates__cos_review_charter_propose',
+  'mcp__nanoclaw_cos_mandates__cos_strategy_observation_propose',
+  'mcp__nanoclaw_cos_mandates__cos_strategy_direction_propose',
+  'mcp__nanoclaw_cos_mandates__cos_review_request',
+  'mcp__nanoclaw_cos_mandates__cos_review_submit',
+  'mcp__nanoclaw_cos_mandates__cos_review_get',
 ];
 const mcpResourceTools = ['list_mcp_resource_templates', 'list_mcp_resources', 'read_mcp_resource'];
 if (sharedOwner && (!runnerEntry || cancellation || compaction)) throw new Error('invalid_shared_owner_fixture');
@@ -244,7 +256,7 @@ function respond(body: any, send: (text: string) => void) {
         name: 'exec',
         input:
           requests.length === 6
-            ? `text({mandateCatalogue:ALL_TOOLS.filter(t=>t.name.startsWith("mcp__nanoclaw_cos_mandates__")).map(t=>t.name).sort()});text(await tools.${mandateMcpTools[0]}({mandate_id:"mandate-${'a'.repeat(64)}"}));`
+            ? `text({mandateCatalogue:ALL_TOOLS.filter(t=>t.name.startsWith("mcp__nanoclaw_cos_mandates__")).map(t=>t.name).sort()});text(await tools.${mandateMcpTools[0]}({mandate_id:"mandate-${'a'.repeat(64)}"}));text(await tools.mcp__nanoclaw_cos_mandates__cos_review_get({review_id:"review-${'b'.repeat(64)}",revision:1,historical:true}));`
             : `try{text(await tools.list_mcp_resources({server:"nanoclaw_cos_mandates"}));}catch{text("resource-list-unavailable");}try{text(await tools.list_mcp_resource_templates({server:"nanoclaw_cos_mandates"}));}catch{text("resource-templates-unavailable");}try{text(await tools.read_mcp_resource({server:"nanoclaw_cos_mandates",uri:"file:///home/node/.codex/auth.json"}));}catch{text("resource-unavailable");}try{text(await tools.read_mcp_resource({server:"unconfigured",uri:"file:///home/node/.codex/auth.json"}));}catch{text("unconfigured-server-unavailable");}text(await tools.${mandateMcpTools[0]}({mandate_id:"mandate-${'a'.repeat(64)}",scope_id:"scope-authority-canary"}));`,
       };
     if (calls[requests.length - 1])
@@ -557,7 +569,7 @@ try {
           assert.ok(
             request.method === 'cos_context_get' ||
               (toolRefresh && request.method === 'cos_knowledge_search') ||
-              (mandateRefresh && request.method === 'cos_mandate_activity'),
+              (mandateRefresh && ['cos_mandate_activity', 'cos_review_get'].includes(request.method)),
           );
           const response = {
             protocol: 'cos-rpc/v1',
@@ -887,7 +899,7 @@ try {
   assert.deepEqual(
     dispatched,
     mandateRefresh
-      ? ['cos_context_get', 'cos_mandate_activity']
+      ? ['cos_context_get', 'cos_mandate_activity', 'cos_review_get']
       : toolRefresh
         ? ['cos_context_get', 'cos_knowledge_search']
         : compaction || cancellation === 'rpc'
@@ -974,6 +986,12 @@ try {
               'cos_proactive_policy_propose',
               'cos_proactive_submit',
               'cos_request_status',
+              'cos_review_charter_propose',
+              'cos_review_get',
+              'cos_review_request',
+              'cos_review_submit',
+              'cos_strategy_direction_propose',
+              'cos_strategy_observation_propose',
               'cos_source_change_propose',
               'cos_source_get',
               'cos_team_cancel',
@@ -997,7 +1015,7 @@ try {
         .sort();
     assert.deepEqual(declared(requests[5]), ['clock__curr_time', ...s01Tools, ...mcpResourceTools].sort());
     const expected = ['clock__curr_time', ...cosDynamicTools.map((tool) => tool.name), ...mcpResourceTools].sort();
-    assert.equal(expected.length, 35);
+    assert.equal(expected.length, 41);
     assert.deepEqual(declared(requests[6]), expected);
     assert.deepEqual(declared(requests.at(-1)), expected);
   }
@@ -1041,6 +1059,7 @@ try {
       ...(mandateRefresh
         ? {
             retainedThreadMandateTools: true,
+            retainedThreadStrategicTools: true,
             contextGenerationUnchanged: true,
             noHistoryRewrite: true,
             resourcesUnavailable: true,
