@@ -994,6 +994,7 @@ try {
               'cos_strategy_observation_propose',
               'cos_source_change_propose',
               'cos_source_get',
+              'cos_status',
               'cos_team_cancel',
               'cos_team_get',
               'cos_team_request',
