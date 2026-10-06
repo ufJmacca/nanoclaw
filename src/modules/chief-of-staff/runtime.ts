@@ -34,6 +34,7 @@ import { ActionPump } from './actions/pump.js';
 import { ActionNotificationDelivery } from './actions/notification-delivery.js';
 import type { KnowledgeContext } from './knowledge/store.js';
 import { renderOperatorStatus } from './ops/operator-status-render.js';
+import { renderOwnerControl } from './ops/owner-control-render.js';
 
 export type RuntimeDependencies = {
   db: Database.Database;
@@ -163,6 +164,20 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
         JSON.stringify({ text: renderOperatorStatus(checked, admission) }),
         undefined,
         'cos-status-' + digest({ scope: binding.scopeId, ingressId }),
+      );
+      return !!receipt;
+    },
+    replyControl: async (binding, ingressId, result, current) => {
+      const adapter = getDeliveryAdapter();
+      if (disposed || !adapter || adapter.isAvailable?.('mattermost') === false || !(await current())) return false;
+      const receipt = await adapter.deliver(
+        'mattermost',
+        `mattermost:${binding.instanceId}:${binding.channelId}`,
+        null,
+        'chat',
+        JSON.stringify({ text: renderOwnerControl(result) }),
+        undefined,
+        'cos-control-' + digest({ scope: binding.scopeId, ingressId }),
       );
       return !!receipt;
     },
@@ -551,6 +566,8 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
   return {
     controller,
     pump: async (binding: CosBinding) => {
+      if (!disposed && d.store?.missionRuns)
+        await controller.reconcileControls(binding, (context, id) => d.store!.missionRuns.cancel(context, id));
       if (enabled()) await invalidations?.drain(binding);
       const recovered = enabled() ? await briefReconciliation?.drain(binding) : undefined;
       if (enabled()) await reviewDispatch?.drain(binding);

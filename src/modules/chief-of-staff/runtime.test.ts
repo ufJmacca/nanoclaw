@@ -27,6 +27,71 @@ import { isCosMissionStopped } from '../../cos-mission-stop.js';
 import { NativeMandateTasks } from './automation/mandate-native.js';
 
 let runtime: ReturnType<typeof createCosRuntime> | undefined;
+it('S11-UI01 the outage-only host acknowledges pause privately without a database or model and does not resend a replay', async () => {
+  const db = initTestDb(),
+    binding: CosBinding = {
+      scopeId: 'offline-scope',
+      ownerId: 'owner',
+      botId: 'bot',
+      instanceId: 'fixture',
+      channelId: 'private',
+      agentGroupId: 'offline-group',
+      messagingGroupId: 'offline-mg',
+      sessionId: 'offline-session',
+      provider: 'codex',
+    };
+  const session = {
+    id: binding.sessionId,
+    agent_group_id: binding.agentGroupId,
+    messaging_group_id: binding.messagingGroupId,
+    thread_id: null,
+    status: 'active',
+    agent_provider: 'codex',
+  } as Session;
+  installCosBoundary(binding, db);
+  db.prepare('UPDATE cos_identity_boundaries SET paused=0').run();
+  const send = vi.fn().mockResolvedValue('fixture-control-receipt'),
+    wake = vi.fn(),
+    stop = vi.fn();
+  vi.spyOn(delivery, 'getDeliveryAdapter').mockReturnValue({ deliver: send } as unknown as ReturnType<
+    typeof getDeliveryAdapter
+  >);
+  runtime = createCosRuntime({
+    db,
+    enabled: false,
+    facts: async () => ({
+      id: 'private',
+      type: 'P',
+      delete_at: 0,
+      members: ['owner', 'bot'],
+      activeSubscription: true,
+    }),
+    session: () => session,
+    destination: () => undefined,
+    stop,
+    wake,
+  });
+  const event = {
+    channelType: 'mattermost',
+    platformId: 'mattermost:fixture:private',
+    threadId: null,
+    message: {
+      id: 'owner-offline-pause',
+      kind: 'chat' as const,
+      timestamp: new Date().toISOString(),
+      content: JSON.stringify({ senderId: 'mattermost:owner', text: 'cos pause admission' }),
+    },
+  };
+  await runtime.controller.ingress(binding, event);
+  await runtime.controller.ingress(binding, event);
+  expect(stop).toHaveBeenCalledWith(binding.sessionId);
+  expect(wake).not.toHaveBeenCalled();
+  expect(send).toHaveBeenCalledOnce();
+  expect(send.mock.calls[0].slice(0, 4)).toEqual(['mattermost', 'mattermost:fixture:private', null, 'chat']);
+  expect(JSON.parse(send.mock.calls[0][4]).text).toContain('CoS admission paused.');
+  expect(send.mock.calls[0][6]).toMatch(/^cos-control-[a-f0-9]{64}$/);
+  expect(db.prepare('SELECT paused FROM cos_identity_boundaries').get()).toEqual({ paused: 1 });
+});
 it('S11-UI01 the paused host answers owner status without a model, using fresh database authority and a stable private delivery', async () => {
   const db = initTestDb(),
     binding: CosBinding = {

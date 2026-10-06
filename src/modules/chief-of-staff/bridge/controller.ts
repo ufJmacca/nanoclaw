@@ -7,9 +7,17 @@ import type { InboundEvent } from '../../../channels/adapter.js';
 import type { CosBinding } from '../../../cos-boundary.js';
 import { cosBoundary } from '../../../cos-boundary.js';
 import type { ChannelFacts } from './identity.js';
-import { parseControl, parseStatusControl, verifyIngress, validPrivateChannel } from './identity.js';
+import {
+  parseControl,
+  parseStatusControl,
+  verifyIngress,
+  validPrivateChannel,
+  type VerifiedIngress,
+} from './identity.js';
 import type { StatusInput } from '../contracts/operations-protocol.js';
 import { digest, type Context, type Result } from '../domain/contracts.js';
+import { HostOwnerControls, parseOwnerControl } from '../ops/owner-controls.js';
+import { hasTable } from '../../../db/connection.js';
 export type ControllerDependencies = {
   db: Database.Database;
   enabled(): boolean;
@@ -31,9 +39,55 @@ export type ControllerDependencies = {
     result: Result,
     current: () => Promise<boolean>,
   ): Promise<boolean>;
+  replyControl?: ControllerDependencies['replyStatus'];
 };
 export class CosController {
-  constructor(readonly dependencies: ControllerDependencies) {}
+  private readonly ownerControls: HostOwnerControls;
+  constructor(readonly dependencies: ControllerDependencies) {
+    this.ownerControls = new HostOwnerControls(dependencies);
+  }
+  reconcileControls(binding: CosBinding, cancel: (context: Context, id: string) => Promise<Result>): Promise<void> {
+    return this.ownerControls.reconcile(binding, cancel);
+  }
+  private async reply(
+    binding: CosBinding,
+    ingress: VerifiedIngress,
+    result: Result,
+    deliver: ControllerDependencies['replyStatus'],
+  ): Promise<void> {
+    const d = this.dependencies;
+    d.db.exec(`CREATE TABLE IF NOT EXISTS cos_operator_requests(
+      scope_id TEXT NOT NULL,ingress_id TEXT NOT NULL,payload_digest TEXT NOT NULL,
+      state TEXT NOT NULL CHECK(state IN ('claimed','delivered','withheld','delivery_uncertain')),
+      PRIMARY KEY(scope_id,ingress_id))`);
+    const payload = digest(ingress);
+    if (
+      d.db
+        .prepare(
+          "INSERT OR IGNORE INTO cos_operator_requests(scope_id,ingress_id,payload_digest,state) VALUES(?,?,?,'claimed')",
+        )
+        .run(binding.scopeId, ingress.id, payload).changes !== 1
+    )
+      return;
+    const current = async () => {
+      if (!validPrivateChannel(binding, await d.facts(binding))) return false;
+      const session = d.session(binding.sessionId);
+      if (!session) return false;
+      const fresh = cosBoundary(session, d.db);
+      return fresh.restricted && !!fresh.binding && digest(fresh.binding) === digest(binding);
+    };
+    let state = 'withheld';
+    try {
+      if ((await current()) && deliver)
+        state = (await deliver(binding, ingress.id, result, current)) ? 'delivered' : 'withheld';
+      // eslint-disable-next-line no-catch-all/no-catch-all -- An ambiguous send is permanently recorded without private diagnostics or an automatic retry.
+    } catch {
+      state = 'delivery_uncertain';
+    }
+    d.db
+      .prepare('UPDATE cos_operator_requests SET state=? WHERE scope_id=? AND ingress_id=? AND payload_digest=?')
+      .run(state, binding.scopeId, ingress.id, payload);
+  }
   async ingress(binding: CosBinding, event: InboundEvent): Promise<boolean> {
     const d = this.dependencies,
       now = d.now?.() ?? Date.now();
@@ -43,24 +97,20 @@ export class CosController {
     if (!session) return true;
     const boundary = cosBoundary(session, d.db);
     if (!boundary.restricted || !boundary.binding || digest(boundary.binding) !== digest(binding)) return true;
+    const payloadDigest = digest(verified);
+    const previous = d.db
+      .prepare('SELECT payload_digest FROM cos_ingress_receipts WHERE scope_id=? AND ingress_id=?')
+      .get(binding.scopeId, verified.id) as { payload_digest: string | null } | undefined;
+    if (previous && previous.payload_digest !== payloadDigest) return true;
+    if (
+      hasTable(d.db, 'cos_operator_requests') &&
+      d.db
+        .prepare('SELECT 1 FROM cos_operator_requests WHERE scope_id=? AND ingress_id=?')
+        .get(binding.scopeId, verified.id)
+    )
+      return true;
     const inspection = parseStatusControl(verified.text);
     if (inspection) {
-      d.db.exec(`CREATE TABLE IF NOT EXISTS cos_operator_requests(
-        scope_id TEXT NOT NULL,ingress_id TEXT NOT NULL,payload_digest TEXT NOT NULL,
-        state TEXT NOT NULL CHECK(state IN ('claimed','delivered','withheld','delivery_uncertain')),
-        PRIMARY KEY(scope_id,ingress_id))`);
-      const payload = digest(verified);
-      const claim = d.db
-        .prepare(
-          "INSERT OR IGNORE INTO cos_operator_requests(scope_id,ingress_id,payload_digest,state) VALUES(?,?,?,'claimed')",
-        )
-        .run(binding.scopeId, verified.id, payload);
-      if (claim.changes !== 1) return true;
-      const current = async () => {
-        if (!validPrivateChannel(binding, await d.facts(binding))) return false;
-        const fresh = cosBoundary(session, d.db);
-        return fresh.restricted && !!fresh.binding && digest(fresh.binding) === digest(binding);
-      };
       let result: Result = { status: 'unavailable' };
       try {
         result =
@@ -78,29 +128,18 @@ export class CosController {
       } catch {
         result = { status: 'unavailable' };
       }
-      let state = 'withheld';
-      try {
-        if ((await current()) && d.replyStatus)
-          state = (await d.replyStatus(binding, verified.id, result, current)) ? 'delivered' : 'withheld';
-        // eslint-disable-next-line no-catch-all/no-catch-all -- A timed-out send is uncertain, never an automatic retry.
-      } catch {
-        state = 'delivery_uncertain';
-      }
-      d.db
-        .prepare('UPDATE cos_operator_requests SET state=? WHERE scope_id=? AND ingress_id=? AND payload_digest=?')
-        .run(state, binding.scopeId, verified.id, payload);
+      await this.reply(binding, verified, result, d.replyStatus);
+      return true;
+    }
+    const denial = parseOwnerControl(verified.text);
+    if (denial) {
+      const result = this.ownerControls.record(binding, verified, denial);
+      await this.reply(binding, verified, result, d.replyControl);
       return true;
     }
     const control = parseControl(verified.text);
-    if (control?.kind === 'pause') {
-      d.db.prepare('UPDATE cos_identity_boundaries SET paused=1 WHERE scope_id=?').run(binding.scopeId);
-      interruptScheduledOrigin(d.db, binding);
-      interruptReviewOrigin(d.db, binding);
-      d.stop(binding.sessionId);
-      return true;
-    }
     if (!d.enabled() || boundary.paused) return true;
-    if (control) {
+    if (control && control.kind !== 'pause') {
       const result = await d.decide(
         {
           scopeId: binding.scopeId,
@@ -118,8 +157,7 @@ export class CosController {
       return true;
     }
     // Keep malformed/quoted controls out of model history; they never become commands.
-    if (/\bcos\s+(approve|reject|pause|status)\b/i.test(verified.text)) return true;
-    const payloadDigest = digest(verified);
+    if (/\bcos\s+(approve|reject|pause|status|stop|cancel|revoke|disable|inspect)\b/i.test(verified.text)) return true;
     const pending = d.db.transaction(() => {
       d.db
         .prepare(

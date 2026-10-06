@@ -11,6 +11,10 @@ import type { Context } from '../../modules/chief-of-staff/domain/contracts.js';
 import { STATUS_CATEGORIES, type StatusInput } from '../../modules/chief-of-staff/contracts/operations-protocol.js';
 import { connectionFault } from './connection-fault.js';
 import { MISSION_DEFAULT_LIMITS } from '../../modules/chief-of-staff/contracts/mission-protocol.js';
+import Database from 'better-sqlite3';
+import { installCosBoundary, type CosBinding } from '../../cos-boundary.js';
+import type { Session } from '../../types.js';
+import { HostOwnerControls, parseOwnerControl } from '../../modules/chief-of-staff/ops/owner-controls.js';
 let admin: pg.Client, store: PriorityStore;
 const scope = 'operations-' + randomUUID(),
   foreign = 'operations-foreign-' + randomUUID();
@@ -69,6 +73,7 @@ before(async () => {
         scope,
         id,
         JSON.stringify({
+          origin: context,
           request: { limits: MISSION_DEFAULT_LIMITS },
           related: { goal: { id: 'goal-00-' + scope } },
           private: sentinel,
@@ -214,5 +219,88 @@ test('S11-T06 status denies foreign owners/groups, automatic tasks and extra aut
     status: 'denied',
   });
   await admin.query("UPDATE cos.scopes SET status='revoked' WHERE id=$1", [scope]);
-  assert.deepEqual(await store.operatorStatus(context, {}), { status: 'denied' });
+  try {
+    assert.deepEqual(await store.operatorStatus(context, {}), { status: 'denied' });
+  } finally {
+    await admin.query("UPDATE cos.scopes SET status='active' WHERE id=$1", [scope]);
+  }
+});
+test('S11-T02/UI01 a durable scoped cancellation survives a test-route outage and reconciles exactly once', async () => {
+  const relay = await connectionFault(await fixtureDatabaseConfig(process.env)),
+    pool = new pg.Pool(relay.config),
+    interrupted = new PriorityStore(new BoundedDatabase(pool, 500));
+  const db = new Database(':memory:'),
+    binding: CosBinding = {
+      scopeId: scope,
+      ownerId: context.ownerId,
+      botId: 'fixture-bot',
+      instanceId: 'fixture',
+      channelId: scope,
+      agentGroupId: scope,
+      messagingGroupId: 'messages-' + scope,
+      sessionId: scope,
+      provider: 'codex',
+    };
+  const session = {
+    id: scope,
+    agent_group_id: scope,
+    messaging_group_id: binding.messagingGroupId,
+    thread_id: null,
+    status: 'active',
+    agent_provider: 'codex',
+  } as Session;
+  installCosBoundary(binding, db);
+  db.prepare('UPDATE cos_identity_boundaries SET paused=0').run();
+  const controls = new HostOwnerControls({
+    db,
+    session: () => session,
+    stop: () => {
+      throw Error('ordinary-work-must-not-be-stopped');
+    },
+  });
+  const mission = 'mission-queued-' + scope,
+    ingress = {
+      id: 'offline-cancel',
+      ownerId: context.ownerId,
+      text: 'cos cancel mission ' + mission,
+      timestamp: new Date().toISOString(),
+    };
+  try {
+    assert.equal((await interrupted.operatorStatus(context, {})).status, 'ok');
+    relay.partition();
+    assert.equal(controls.record(binding, ingress, parseOwnerControl(ingress.text)!).status, 'ok');
+    await controls.reconcile(binding, (c, id) => interrupted.missionRuns.cancel(c, id));
+    assert.deepEqual(db.prepare('SELECT state FROM cos_operator_denials').get(), { state: 'recorded' });
+    assert.equal(
+      (await admin.query('SELECT state FROM cos.missions WHERE scope_id=$1 AND id=$2', [scope, mission])).rows[0].state,
+      'queued',
+    );
+    relay.restore();
+    await new Promise((resolve) => setTimeout(resolve, 1050));
+    assert.equal((await interrupted.missionRuns.cancel({ ...context, ownerId: 'foreign' }, mission)).status, 'denied');
+    await controls.reconcile(binding, (c, id) => interrupted.missionRuns.cancel(c, id));
+    const first = (
+      await admin.query('SELECT state,generation,version FROM cos.missions WHERE scope_id=$1 AND id=$2', [
+        scope,
+        mission,
+      ])
+    ).rows[0];
+    assert.equal(first.state, 'cancelled');
+    await controls.reconcile(binding, (c, id) => interrupted.missionRuns.cancel(c, id));
+    assert.deepEqual(
+      (
+        await admin.query('SELECT state,generation,version FROM cos.missions WHERE scope_id=$1 AND id=$2', [
+          scope,
+          mission,
+        ])
+      ).rows[0],
+      first,
+    );
+    assert.deepEqual(db.prepare('SELECT state FROM cos_operator_denials').get(), { state: 'reconciled' });
+    assert.deepEqual(db.prepare('SELECT paused FROM cos_identity_boundaries').get(), { paused: 0 });
+  } finally {
+    db.close();
+    await pool.end();
+    await relay.close();
+  }
 });
