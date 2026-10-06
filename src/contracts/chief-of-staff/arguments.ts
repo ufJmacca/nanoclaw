@@ -32,7 +32,12 @@ export function fixtureFiles(args: Pick<FixtureArguments, 'slice' | 'demo'>): st
   if (args.slice === 'S10')
     return args.demo
       ? ['strategy-flow.integration']
-      : [...fixtureFiles({ slice: 'S09', demo: false }), 'strategy.integration', 'strategy-flow.integration'];
+      : [
+          ...fixtureFiles({ slice: 'S09', demo: false }),
+          'strategy.integration',
+          'strategy-approval.integration',
+          'strategy-flow.integration',
+        ];
   if (args.slice === 'S09')
     return args.demo
       ? ['actions-flow.integration']

@@ -120,6 +120,7 @@ it('registers S10 strategic review and owner-decision flows with every predecess
   expect(fixtureFiles({ ...args, demo: false })).toEqual([
     ...fixtureFiles({ slice: 'S09', demo: false }),
     'strategy.integration',
+    'strategy-approval.integration',
     'strategy-flow.integration',
   ]);
 });

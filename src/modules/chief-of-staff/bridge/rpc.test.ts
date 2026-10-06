@@ -72,6 +72,91 @@ const calendarAction = {
   mission_id: null,
   attendees: [],
 };
+const strategyObservation = {
+  kind: 'strategy_observation',
+  charter_version: 1,
+  initiative_id: 'project-one',
+  target: { kind: 'outcome', id: 'result' },
+  basis: 'unknown',
+  signal: 'unknown',
+  statement: 'Unobserved result',
+  observed_at: '2026-10-06T00:00:00Z',
+  evidence: [],
+  reason: 'Preserve uncertainty',
+};
+const reviewCharter = {
+  kind: 'review_charter',
+  expected_version: 0,
+  reason: 'Review outcomes',
+  definition: {
+    title: 'Private review',
+    initiative_ids: ['project-one'],
+    source_ids: [],
+    starts_at: '2026-10-01T00:00:00Z',
+    ends_at: '2026-10-31T00:00:00Z',
+    cadence: 'manual',
+    resource_constraints: 'Six hours a week',
+    evidence_limits: 'Connected sources only',
+    exploration_minutes_per_week: 60,
+    measures: [{ id: 'result', initiative_id: 'project-one', outcome: 'A useful result', test: 'Observe a result' }],
+    assumptions: [],
+  },
+};
+it.each([
+  ['cos_review_charter_propose', reviewCharter],
+  ['cos_strategy_observation_propose', strategyObservation],
+])(
+  'S10 %s uses the existing owner context, hides tokens and withholds a result after context changes',
+  async (method, change) => {
+    const f = fixture(),
+      context = {
+        scopeId: 'fixture',
+        ownerId: 'owner',
+        sessionId: 'session',
+        agentGroupId: 'group',
+        ingressId: 'verified',
+      },
+      retained = { ...context, provider: 'codex', generation: '33333333-3333-4333-8333-333333333333' },
+      resolveKnowledgeContext = vi.fn().mockResolvedValue(retained);
+    f.store.propose.mockResolvedValue({ status: 'ok', change, confirmation_token: 'PRIVATE_STRATEGY_APPROVAL' });
+    const handler = createRpcHandler({
+      resolveContext: f.resolveContext,
+      store: f.store as unknown as PriorityStore,
+      knowledge: { contextReady: vi.fn().mockResolvedValue({ status: 'ok' }) } as unknown as KnowledgeStore,
+      resolveKnowledgeContext,
+      reserveTool: async () => ({ status: 'ok' }),
+    });
+    const call = () =>
+      handler(
+        {
+          action: 'cos_rpc',
+          delivery_id: '22222222-2222-4222-8222-222222222222',
+          request: { ...request, method, params: { change } },
+        },
+        {} as Session,
+        f.db,
+      );
+    const response = () =>
+      JSON.parse((f.db.prepare('SELECT response FROM cos_rpc_responses').get() as { response: string }).response);
+    await call();
+    expect(response().status).toBe('ok');
+    expect(f.store.propose).toHaveBeenCalledExactlyOnceWith(context, request.request_id, change, retained);
+    expect(JSON.stringify(response())).not.toContain('PRIVATE_STRATEGY_APPROVAL');
+    resolveKnowledgeContext
+      .mockResolvedValueOnce(retained)
+      .mockResolvedValue({ ...retained, generation: '44444444-4444-4444-8444-444444444444' });
+    await call();
+    expect(response().status).toBe('denied');
+    expect(response().result).not.toHaveProperty('change');
+    resolveKnowledgeContext.mockResolvedValue(retained);
+    for (const kind of ['schedule', 'mission_review']) {
+      f.resolveContext.mockResolvedValue({ ...context, origin: { kind, runId: 'run', generation: 1 } });
+      await call();
+      expect(response().status).toBe('denied');
+    }
+    expect(f.store.propose).toHaveBeenCalledTimes(2);
+  },
+);
 it('S09 routes only owner calendar proposals, status and cancellation without exposing approval tokens', async () => {
   const f = fixture(),
     action_id = 'action-' + 'b'.repeat(64);

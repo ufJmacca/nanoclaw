@@ -32,6 +32,35 @@ function fixture() {
   return { store, admitted, preview, outbox: new CosOutbox({ store, admitted, preview }) };
 }
 describe('S01 native approval outbox reconciliation', () => {
+  it('S10 previews selected versions and explains that an approved observation starts no work', async () => {
+    const f = fixture(),
+      observation = {
+        kind: 'strategy_observation',
+        charter_version: 1,
+        initiative_id: 'project-one',
+        target: { kind: 'outcome', id: 'result' },
+        basis: 'unknown',
+        signal: 'unknown',
+        statement: 'Outcome not observed',
+        observed_at: '2026-10-06T00:00:00Z',
+        evidence: [],
+        reason: 'Preserve uncertainty',
+      },
+      review_dependencies = { records: [{ id: 'project-one', version: 7 }], sources: [] };
+    f.store.pendingOutbox.mockResolvedValue({
+      status: 'ok',
+      items: [{ ...item, payload: { ...item.payload, change: observation, review_dependencies } }],
+    });
+    await f.outbox.drain(binding);
+    const text = f.preview.mock.calls[0][1].text as string;
+    expect(text).toContain('Proposed strategic observation');
+    expect(text).toContain('No tasks, missions, calendar events or recurring reviews are started');
+    expect(text).toContain('review_dependencies');
+    expect(text).toContain('"version": 7');
+    expect(text).toContain('"basis": "unknown"');
+    expect(text).toContain('cos approve ' + item.payload.proposal_id);
+    expect(f.store.apply).not.toHaveBeenCalled();
+  });
   it('S09 identifies the exact external calendar effect and explicitly states its narrow notification scope', async () => {
     const f = fixture();
     const action = {
