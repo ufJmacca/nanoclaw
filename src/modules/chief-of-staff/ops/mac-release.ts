@@ -21,7 +21,7 @@ export function readLocalExecution(root: string, forRelease = false): LocalExecu
   const ledger = readPrivate<LocalExecution>(path.join(root, 'execution.json'), 1024 * 1024);
   const slice = ledger.slices?.find((item) => item.id === ledger.active_slice);
   if (
-    !['S01', 'S02', 'S03', 'S04', 'S05', 'S06', 'S07', 'S08', 'S09', 'S10'].includes(ledger.active_slice) ||
+    !['S01', 'S02', 'S03', 'S04', 'S05', 'S06', 'S07', 'S08', 'S09', 'S10', 'S11'].includes(ledger.active_slice) ||
     !slice ||
     (forRelease && !['in_progress', 'alignment_in_progress'].includes(slice.implementation_status ?? ''))
   )
@@ -37,6 +37,7 @@ export function readLocalExecution(root: string, forRelease = false): LocalExecu
       S08: 'S07',
       S09: 'S08',
       S10: 'S09',
+      S11: 'S10',
     }[ledger.active_slice];
     const previous = ledger.slices.find((item) => item.id === predecessor);
     if (
@@ -58,7 +59,10 @@ export function readLocalExecution(root: string, forRelease = false): LocalExecu
 export function checkpointLocalExecution(root: string, patch: Record<string, unknown>): void {
   const ledger = readLocalExecution(root);
   const slice = ledger.slices.find((item) => item.id === ledger.active_slice);
-  if (!['S01', 'S02', 'S03', 'S04', 'S05', 'S06', 'S07', 'S08', 'S09', 'S10'].includes(ledger.active_slice) || !slice)
+  if (
+    !['S01', 'S02', 'S03', 'S04', 'S05', 'S06', 'S07', 'S08', 'S09', 'S10', 'S11'].includes(ledger.active_slice) ||
+    !slice
+  )
     throw new Error('active_slice_required');
   Object.assign(slice, patch, { checkpoint_at: new Date().toISOString() });
   writeAtomic(root, 'execution.json', ledger);
