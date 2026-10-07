@@ -5,6 +5,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { allocateVaultFile, inspectVaultAllocation } from '/code/modules/chief-of-staff/ops/vault-allocation.js';
 import { createVaultCrypto } from '/code/modules/chief-of-staff/ops/vault-crypto.js';
 import { createVaultKey, inspectVaultKey } from '/code/modules/chief-of-staff/ops/vault-key.js';
+import { installVaultUtilities, vaultUtilitiesStatus } from '/code/modules/chief-of-staff/ops/vault-utilities.js';
 import { verifyVaultMemory } from '/code/modules/chief-of-staff/ops/vault-memory.js';
 const mapping = `cos-vault-fixture-${randomUUID()}`;
 const paths = {
@@ -84,6 +85,17 @@ try {
   assert.equal(process.arch, 'arm64');
   assert.equal(process.env.NANOCLAW_COS_VAULT_FIXTURE, '1');
   verifyVaultMemory();
+  // Remove only this disposable image's utility, then reinstall its cached pinned package offline.
+  run('/usr/bin/dpkg', ['--remove', 'cryptsetup-bin']);
+  const utilityControls = { assertAuthority: async () => {}, assertMemory: verifyVaultMemory };
+  assert.equal(vaultUtilitiesStatus(utilityControls), 'absent');
+  await installVaultUtilities(utilityControls);
+  assert.equal(vaultUtilitiesStatus(utilityControls), 'matching');
+  await installVaultUtilities(utilityControls);
+  console.log('{"rootUtilityInstallation":"passed","offline":true,"unrelatedPackageUpgrade":false}');
+  const units = JSON.parse(run(process.execPath, ['/probe/verify-units.mjs']));
+  assert.equal(units.systemdUnitVerification, 'passed');
+  console.log(JSON.stringify(units));
   assert.equal(fs.existsSync('/case'), false);
   assert.equal(fs.existsSync('/dev/mapper/' + mapping), false);
   privateDirectory('/case', 0, 0o711);
