@@ -226,3 +226,18 @@ it('uses the proven filesystem identity rather than a previous dm minor for pers
   fs.writeFileSync(file, JSON.stringify(claim));
   expect(f.mounts.inspect()).toBe('matching');
 });
+it('pins a claimed encrypted area, denies unmounted or asynchronous use and catches replacement after writing', async () => {
+  const f = fixture();
+  expect(() => f.mounts.withArea('journals', () => {})).toThrow('vault_mounts_unavailable');
+  await f.mounts.mount();
+  expect(() => f.mounts.withArea('journals', () => Promise.resolve())).toThrow('vault_mounts_unavailable');
+  expect(() =>
+    f.mounts.withArea('journals', (fd) => {
+      fs.renameSync(f.paths.vaultRoot + '/journals', f.paths.vaultRoot + '/journals-original');
+      fs.mkdirSync(f.paths.vaultRoot + '/journals', { mode: 0o700 });
+      fs.writeFileSync(`/proc/self/fd/${fd}/synthetic-canary`, 'synthetic');
+    }),
+  ).toThrow('vault_mounts_unavailable');
+  expect(fs.readdirSync(f.paths.vaultRoot + '/journals')).toEqual([]);
+  expect(fs.readFileSync(f.paths.vaultRoot + '/journals-original/synthetic-canary', 'utf8')).toBe('synthetic');
+});

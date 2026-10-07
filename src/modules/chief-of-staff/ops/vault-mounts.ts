@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { digest } from '../domain/contracts.js';
 import { readPrivate, writeAtomic } from './target-state.js';
 import type { VaultProvisionIdentity } from './vault-provision.js';
-import { VAULT_DIRECTORIES } from './vault-storage.js';
+import { VAULT_DIRECTORIES, type VaultArea } from './vault-storage.js';
 export type VaultMountPaths = { stateRoot: string; vaultRoot: string; calendarRoot: string };
 export type VaultMountProof = {
   target: string;
@@ -274,6 +274,39 @@ export function createVaultMounts(
     });
   return {
     inspect,
+    withArea<T>(area: VaultArea, operation: (fd: number) => T): T {
+      try {
+        return safe(() => {
+          guard();
+          if (!VAULT_DIRECTORIES.includes(area)) throw Error('invalid_vault_area');
+          return controls.withMappedDevice((_deviceFd, device) => {
+            const record = read();
+            if (!record || observe(record, device) !== 'matching') throw Error('vault_mount_unavailable');
+            const before = checkArea(area, record, device),
+              file = path.join(paths.vaultRoot, area);
+            const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+            try {
+              if (!same(fs.fstatSync(fd), inode(before))) throw Error('vault_area_changed');
+              const result = operation(fd);
+              if (result && typeof (result as { then?: unknown }).then === 'function')
+                throw Error('synchronous_descriptor_operation_required');
+              if (
+                !same(fs.fstatSync(fd), inode(before)) ||
+                observe(read(), device) !== 'matching' ||
+                !same(checkArea(area, read()!, device), inode(before))
+              )
+                throw Error('vault_area_changed');
+              return result;
+            } finally {
+              fs.closeSync(fd);
+            }
+          });
+        });
+      } catch {
+        // eslint-disable-next-line preserve-caught-error -- Root effect paths and mount diagnostics cannot enter output.
+        throw Error('vault_mounts_unavailable');
+      }
+    },
     async mount() {
       try {
         await authority();
