@@ -16,18 +16,20 @@ export type VaultPreflight = {
 /** Initial creation only. Reconciliation of an existing operation must verify its original journal.
  * This contract never admits adoption or formatting of an existing file, partition or filesystem.
  */
-export function admitVaultProvisioning(facts: VaultPreflight): void {
+export function assertVaultProvisionAuthority(facts: VaultPreflight): void {
   if (
     facts.platform !== 'linux' ||
     facts.architecture !== 'arm64' ||
     facts.lifecycle !== 'protected' ||
     facts.maintenanceHeld !== true ||
     facts.hostLeaseHeld !== true ||
-    facts.privilegedAccess !== true ||
-    facts.volumePresent !== false ||
-    facts.mountPresent !== false ||
-    facts.credentialsPresent !== false
+    facts.privilegedAccess !== true
   )
+    throw new Error('vault_provisioning_unverified');
+}
+export function admitVaultProvisioning(facts: VaultPreflight): void {
+  assertVaultProvisionAuthority(facts);
+  if (facts.volumePresent !== false || facts.mountPresent !== false || facts.credentialsPresent !== false)
     throw new Error('vault_provisioning_unverified');
   if (
     !Number.isSafeInteger(facts.availableBytes) ||
