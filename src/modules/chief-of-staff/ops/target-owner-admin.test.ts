@@ -3,6 +3,24 @@ import { parseOwnerAdminArguments, selectedOwnerAdminProfile, ownerDatabasePrefl
 import { fixtureRelease } from '../../../contracts/chief-of-staff/release-fixture.js';
 import { DatabasePreflightError } from '../store/preflight.js';
 const request = ['owner-export', '--scope', 'fixture', '--request-id', '01234567-89ab-4def-8123-456789abcdef'];
+it('G01 installed vault health uses no database or external account credentials', async () => {
+  expect(parseOwnerAdminArguments(['--settings', '/home/pi/target.json', '--', 'vault-status'])).toMatchObject({
+    admin: ['vault-status'],
+  });
+  expect(() =>
+    parseOwnerAdminArguments(['--settings', '/home/pi/target.json', '--', 'vault-status', '--root', '/private']),
+  ).toThrow();
+  await expect(
+    selectedOwnerAdminProfile('vault-status', {
+      runtime: () => {
+        throw Error('runtime must not be read');
+      },
+      test: () => {
+        throw Error('test must not be read');
+      },
+    }),
+  ).resolves.toEqual({});
+});
 it('installed owner tooling accepts only existing inspection, deny, export and recovery commands with the selected profile', async () => {
   expect(parseOwnerAdminArguments(['--settings', '/home/pi/target.json', '--', 'database-check'])).toMatchObject({
     admin: ['database-check'],

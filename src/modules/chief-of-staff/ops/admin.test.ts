@@ -1,5 +1,15 @@
 import { describe, it, expect, vi } from 'vitest';
 import { parseAdminArguments, adminStatus, safeAdminError, adminEnvironment } from './admin.js';
+it('G01 vault health accepts no credential or path overrides and selects no database/channel profile', () => {
+  expect(parseAdminArguments(['vault-status'])).toEqual({ command: 'vault-status' });
+  expect(() => parseAdminArguments(['vault-status', '--root', '/private'])).toThrow('invalid_admin_arguments');
+  const env = adminEnvironment('vault-status', {
+    COS_TARGET_STATE_DIR: '/fixture',
+    COS_PGPASSWORD: 'PRIVATE_DB_CANARY',
+    MATTERMOST_BOT_TOKEN: 'PRIVATE_CHANNEL_CANARY',
+  });
+  expect(Object.keys(env).sort()).toEqual(['COS_ENABLED', 'COS_TARGET_STATE_DIR']);
+});
 it('local owner denials select no database or account credentials even when caller overrides contain them', () => {
   const env = adminEnvironment('operator-control', {
     COS_TARGET_STATE_DIR: '/fixture',

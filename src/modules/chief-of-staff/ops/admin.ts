@@ -21,9 +21,18 @@ import { readEnvFile } from '../../../env.js';
 import { contextAdminCommand, type ContextAdminArguments } from './context-admin.js';
 import { parseOwnerControl } from './owner-controls.js';
 import { isOwnerExportCommand, parseOwnerExportArguments } from './owner-export-admin.js';
+import { vaultStatusCommand } from './vault-admin.js';
 
-type AdminArguments = { command: 'status' } | { command: 'bind'; binding: BindingRequest } | ContextAdminArguments;
+type AdminArguments =
+  | { command: 'status' }
+  | { command: 'vault-status' }
+  | { command: 'bind'; binding: BindingRequest }
+  | ContextAdminArguments;
 export function parseAdminArguments(args: string[]): AdminArguments {
+  if (args[0] === 'vault-status') {
+    if (args.length !== 1) throw new Error('invalid_admin_arguments');
+    return { command: 'vault-status' };
+  }
   if (isOwnerExportCommand({ command: args[0] })) return parseOwnerExportArguments(args);
   if (args[0] === 'operator-control') {
     const values: Record<string, string> = {};
@@ -401,42 +410,41 @@ export function adminEnvironment(
   overrides: NodeJS.ProcessEnv = {},
 ): NodeJS.ProcessEnv {
   const recovery = ['action-restore-check', 'operations-restore-check'].includes(command);
-  const keys =
-    command === 'operator-control'
-      ? ['COS_ENABLED', 'COS_TARGET_STATE_DIR']
-      : [
-          'COS_ENABLED',
-          'COS_TARGET_STATE_DIR',
-          'COS_KNOWLEDGE_ENABLED',
-          'COS_CALENDAR_ENABLED',
-          'COS_KNOWLEDGE_RETENTION_DAYS',
-          'MATTERMOST_URL',
-          'MATTERMOST_BOT_TOKEN',
-          'MATTERMOST_INSTANCE',
-          ...(isMissionCommand({ command }) || command === 'action-configure'
-            ? ['COS_PG_MIGRATION_USER', 'COS_PG_MIGRATION_PASSWORD']
-            : []),
-          ...(recovery ? ['COS_TEST_TARGET_ID'] : []),
-          ...[
-            'HOST',
-            'PORT',
-            'DATABASE',
-            'USER',
-            'PASSWORD',
-            'SSLMODE',
-            'SSLROOTCERT',
-            '_ALLOW_PLAINTEXT',
-            '_POOL_MAX',
-            '_CONNECT_TIMEOUT_MS',
-            '_STATEMENT_TIMEOUT_MS',
-            '_QUERY_TIMEOUT_MS',
-            '_LOCK_TIMEOUT_MS',
-            '_IDLE_TIMEOUT_MS',
-            '_IDLE_TX_TIMEOUT_MS',
-            '_APPLICATION_NAME',
-            ...(recovery ? ['_MIGRATION_USER', '_MIGRATION_PASSWORD'] : []),
-          ].map((key) => (recovery ? 'COS_TEST_PG' : 'COS_PG') + key),
-        ];
+  const keys = ['operator-control', 'vault-status'].includes(command)
+    ? ['COS_ENABLED', 'COS_TARGET_STATE_DIR']
+    : [
+        'COS_ENABLED',
+        'COS_TARGET_STATE_DIR',
+        'COS_KNOWLEDGE_ENABLED',
+        'COS_CALENDAR_ENABLED',
+        'COS_KNOWLEDGE_RETENTION_DAYS',
+        'MATTERMOST_URL',
+        'MATTERMOST_BOT_TOKEN',
+        'MATTERMOST_INSTANCE',
+        ...(isMissionCommand({ command }) || command === 'action-configure'
+          ? ['COS_PG_MIGRATION_USER', 'COS_PG_MIGRATION_PASSWORD']
+          : []),
+        ...(recovery ? ['COS_TEST_TARGET_ID'] : []),
+        ...[
+          'HOST',
+          'PORT',
+          'DATABASE',
+          'USER',
+          'PASSWORD',
+          'SSLMODE',
+          'SSLROOTCERT',
+          '_ALLOW_PLAINTEXT',
+          '_POOL_MAX',
+          '_CONNECT_TIMEOUT_MS',
+          '_STATEMENT_TIMEOUT_MS',
+          '_QUERY_TIMEOUT_MS',
+          '_LOCK_TIMEOUT_MS',
+          '_IDLE_TIMEOUT_MS',
+          '_IDLE_TX_TIMEOUT_MS',
+          '_APPLICATION_NAME',
+          ...(recovery ? ['_MIGRATION_USER', '_MIGRATION_PASSWORD'] : []),
+        ].map((key) => (recovery ? 'COS_TEST_PG' : 'COS_PG') + key),
+      ];
   const file = readEnvFile(keys);
   return Object.fromEntries(keys.map((key) => [key, overrides[key] ?? process.env[key] ?? file[key]]));
 }
@@ -447,6 +455,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       const args = parseAdminArguments(process.argv.slice(2)),
         env = adminEnvironment(args.command);
       if (args.command === 'status') return adminStatus(env);
+      if (args.command === 'vault-status') return vaultStatusCommand(env);
       if (args.command === 'bind') return bindCommand(args.binding, env);
       return contextAdminCommand(args, env);
     })
