@@ -244,7 +244,7 @@ export function createVaultCrypto(
       fs.closeSync(fd);
     }
   };
-  const deviceCommand = (tool: string, args: string[]) =>
+  const withMappedDevice = <T>(operation: (fd: number) => T): T =>
     safe(() => {
       if (mapping() !== 'matching') throw Error('mapper_unverified');
       const withDevice =
@@ -280,11 +280,14 @@ export function createVaultCrypto(
           }
         });
       return withDevice((fd) => {
-        const result = runCommand(tool, args, fd, null);
+        const result = operation(fd);
+        if (result && typeof (result as { then?: unknown }).then === 'function')
+          throw Error('synchronous_descriptor_operation_required');
         if (mapping() !== 'matching') throw Error('mapper_changed');
         return result;
       });
     });
+  const deviceCommand = (tool: string, args: string[]) => withMappedDevice((fd) => runCommand(tool, args, fd, null));
   const filesystemStatus = (): 'absent' | 'matching' | 'conflict' => {
     try {
       return safe(() => {
@@ -307,6 +310,7 @@ export function createVaultCrypto(
     }
   };
   return {
+    withMappedDevice,
     inspect,
     recoveryStatus,
     filesystemStatus,

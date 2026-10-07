@@ -154,6 +154,19 @@ it('formats only a proven empty mapper descriptor and verifies the predetermined
   expect(calls).toHaveLength(1);
   expect(calls[0][1]).toEqual(['-q', '-U', f.identity.filesystemUuid, '/proc/self/fd/3']);
 });
+it('pins a matching mapper for synchronous mount effects and rejects revoked mapping or asynchronous use', async () => {
+  const f = await fixture();
+  f.setFormatted();
+  expect(() => f.crypto.withMappedDevice(() => {})).toThrow('vault_crypto_unavailable');
+  f.crypto.open();
+  expect(f.crypto.withMappedDevice((fd) => fs.fstatSync(fd).ino)).toBe(fs.statSync(f.paths.volume).ino);
+  expect(() => f.crypto.withMappedDevice(() => Promise.resolve())).toThrow('vault_crypto_unavailable');
+  expect(() =>
+    f.crypto.withMappedDevice(() => {
+      f.controls.mapping = () => 'conflict';
+    }),
+  ).toThrow('vault_crypto_unavailable');
+});
 it.each(['uuid', 'filesystem', 'ambiguous', 'mapping'])(
   'refuses %s conflict before formatting a filesystem',
   async (reason) => {
