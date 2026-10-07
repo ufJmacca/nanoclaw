@@ -7,5 +7,5 @@ RUN rm -f /etc/apt/sources.list.d/debian.sources && \
       cryptsetup-bin=2:2.7.5-2 cifs-utils=2:7.4-1 util-linux mount e2fsprogs libstdc++6 && \
     rm -rf /var/lib/apt/lists/*
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
-COPY probe.sh probe.mjs /probe/
+COPY probe.sh probe.mjs probe-authority.mjs /probe/
 ENTRYPOINT ["/bin/sh", "/probe/probe.sh"]

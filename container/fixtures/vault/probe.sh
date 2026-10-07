@@ -44,6 +44,7 @@ for p in target application data; do
   mkdir -m 0700 "/case/$p"
   chown 1000:1000 "/case/$p"
 done
+node /probe/probe-authority.mjs root
 mkdir -m 0000 /case/vault /case/target/calendar
 head -c 64 /dev/urandom > /case/boot.key
 if test "${NANOCLAW_COS_VAULT_KEYCHAIN_FIXTURE:-}" = 1; then

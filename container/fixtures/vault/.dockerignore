@@ -2,3 +2,4 @@
 !Dockerfile
 !probe.sh
 !probe.mjs
+!probe-authority.mjs
