@@ -13,6 +13,7 @@ import { provisionVault } from '/code/modules/chief-of-staff/ops/vault-provision
 import { vaultUnits } from '/code/modules/chief-of-staff/ops/vault-units.js';
 import { checkVaultAuthority } from '/code/modules/chief-of-staff/ops/vault-authority.js';
 import { runtimeTestMessages, writeRuntimeTestMessage } from '/code/modules/chief-of-staff/ops/runtime-test-wire.js';
+import { writeVaultRootRequest } from '/code/modules/chief-of-staff/ops/vault-root-wire.js';
 const mapping = `cos-vault-fixture-${randomUUID()}`;
 const paths = {
   stateRoot: '/case/control',
@@ -120,6 +121,46 @@ async function provisionRoot(identity, cryptoControls) {
     assert.equal(fs.existsSync(paths.stateRoot + '/deploy.lock'), false);
     assert.equal(JSON.parse(fs.readFileSync(paths.stateRoot + '/provision.json', 'utf8')).phase, 'complete');
     console.log('{"rootOrchestration":"passed","managerActivation":"modeled","targetLeases":"not_exercised"}');
+    const receiver = spawn(process.execPath, ['/probe/probe-wire.mjs'], {
+      cwd: '/',
+      env: { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', NANOCLAW_COS_VAULT_FIXTURE: '1' },
+      stdio: ['pipe', 'pipe', 'ignore'],
+      timeout: 15000,
+    });
+    const exited = new Promise((resolve, reject) => {
+      receiver.once('error', reject);
+      receiver.once('exit', (code, signal) =>
+        code === 0 && !signal ? resolve() : reject(Error('wire fixture unavailable')),
+      );
+    });
+    exited.catch(() => {});
+    try {
+      await writeVaultRootRequest(
+        receiver.stdin,
+        {
+          contract: 'cos-vault-root-request/v1',
+          configurationDigest: 'b'.repeat(64),
+          identity,
+          scope: grant.scope,
+          authority: { socket: grant.socket, token: grant.token },
+        },
+        recovery,
+      );
+      receiver.stdin.end();
+      const messages = [];
+      for await (const message of runtimeTestMessages(receiver.stdout)) messages.push(message);
+      await exited;
+      assert.equal(messages.length, 1);
+      assert.deepEqual(messages[0], {
+        rootRecoveryWire: 'passed',
+        liveOwnerProof: 'verified',
+        realRecoverySlot: 'verified',
+        recoveryKeyOnDisk: false,
+      });
+      console.log(JSON.stringify(messages[0]));
+    } finally {
+      if (receiver.exitCode === null && receiver.signalCode === null) receiver.kill();
+    }
   } finally {
     const result = spawnSync('/usr/bin/findmnt', ['--noheadings', '--mountpoint', '/case/vault']);
     mounted = result.status === 0;

@@ -5,3 +5,4 @@
 !probe-authority.mjs
 !probe-provision.mjs
 !verify-units.mjs
+!probe-wire.mjs
