@@ -183,3 +183,14 @@ it('finishes only missing boot links after partial enablement', async () => {
   expect(f.installer.inspect()).toBe('matching');
   expect(fs.lstatSync(wants + '/' + names[1]).ino).toBe(retained);
 });
+it('sets the new root drop-in traversal mode explicitly under a private process umask', async () => {
+  const previous = process.umask(0o077);
+  try {
+    const f = fixture();
+    await f.installer.install();
+    expect(fs.statSync(f.paths.ownerUnits + '/' + f.input.service + '.d').mode & 0o777).toBe(0o755);
+    expect(f.installer.inspect()).toBe('matching');
+  } finally {
+    process.umask(previous);
+  }
+});

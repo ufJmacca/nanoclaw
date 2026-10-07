@@ -11,6 +11,7 @@ try {
   const root = '/unit-fixture';
   assert.equal(fs.existsSync(root), false);
   fs.mkdirSync(root, { mode: 0o711 });
+  fs.chmodSync(root, 0o711);
   const paths = { stateRoot: root + '/control', systemUnits: root + '/system', ownerUnits: root + '/owner' };
   for (const directory of Object.values(paths)) fs.mkdirSync(directory, { mode: 0o700 });
   fs.chownSync(paths.ownerUnits, 1000, 1000);
@@ -74,6 +75,19 @@ try {
     assert.equal(stat.mode & 0o777, 0o644);
     assert.equal(fs.readFileSync(file, 'utf8'), units[name]);
   }
+  const ownerRead = spawnSync(
+    '/usr/bin/setpriv',
+    [
+      '--reuid=1000',
+      '--regid=1000',
+      '--clear-groups',
+      '/usr/bin/cat',
+      paths.ownerUnits + '/' + input.service + '.d/50-cos-vault.conf',
+    ],
+    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000, maxBuffer: 4096 },
+  );
+  assert.equal(ownerRead.status, 0);
+  assert.equal(ownerRead.stdout, units['owner-service.conf']);
   console.log(
     '{"systemdUnitVerification":"passed","scope":"static_generated_units_and_owned_files","activation":"not_exercised"}',
   );

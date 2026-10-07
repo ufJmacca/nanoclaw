@@ -241,6 +241,21 @@ export function createVaultUnitInstaller(
             if (!same(fs.fstatSync(fd), inode(directory(paths.ownerUnits, input.userId, 0o700))))
               throw Error('unit_parent_changed');
             fs.mkdirSync(`/proc/self/fd/${fd}/${input.service}.d`, { mode: 0o755 });
+            const created = directory(dropin, process.getuid!());
+            const childFd = fs.openSync(
+              `/proc/self/fd/${fd}/${input.service}.d`,
+              fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW,
+            );
+            try {
+              if (!same(fs.fstatSync(childFd), inode(created))) throw Error('unit_dropin_changed');
+              // A private administration umask is expected. Change only the inode just created by this operation.
+              fs.fchmodSync(childFd, 0o755);
+              fs.fsyncSync(childFd);
+              if (!same(directory(dropin, process.getuid!(), 0o755), inode(created)))
+                throw Error('unit_dropin_changed');
+            } finally {
+              fs.closeSync(childFd);
+            }
             fs.fsyncSync(fd);
             record.directory = inode(directory(dropin, process.getuid!(), 0o755));
             persist();
