@@ -1,9 +1,12 @@
 import fs from 'node:fs';
 import assert from 'node:assert/strict';
 import { configureVaultStorage, verifyVaultStorage, withVaultDirectory, vaultStorageStatus } from '/code/modules/chief-of-staff/ops/vault-storage.js';
+import { verifyVaultMemory } from '/code/modules/chief-of-staff/ops/vault-memory.js';
 const roots = { targetRoot: '/case/target', installationRoot: '/case/application', dataRoot: '/case/data' };
 const mode = process.argv[2];
-if (mode === 'capture') {
+if (mode === 'memory') {
+  verifyVaultMemory();
+} else if (mode === 'capture') {
   configureVaultStorage(roots, '/case/vault');
   await withVaultDirectory(roots, 'backup-credentials', async (pinned) => {
     const fd = fs.openSync(pinned + '/canary', 'wx', 0o600);
