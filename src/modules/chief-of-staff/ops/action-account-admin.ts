@@ -1,5 +1,6 @@
 /** Owner-run account commands, never model RPC. Linking credentials does not grant runtime write admission. */
 import fs from 'node:fs';
+import { verifyVaultMemory } from './vault-memory.js';
 import path from 'node:path';
 import type { CosBinding } from '../../../cos-boundary.js';
 import { digest } from '../domain/contracts.js';
@@ -87,6 +88,7 @@ type Options = {
 };
 type Dependencies = {
   inspect?: StorageInspection;
+  memory?: () => void;
   fetch?: OAuthTransport['fetch'];
   display?(url: string): void | Promise<void>;
 };
@@ -143,6 +145,7 @@ export function readActionAccountConsent(
 }
 export async function runActionAccountAdmin(o: Options, d: Dependencies = {}): Promise<Record<string, unknown>> {
   const { args, binding, roots } = o;
+  (d.memory ?? verifyVaultMemory)();
   if (args.scopeId !== binding.scopeId || binding.provider !== 'codex') throw Error('context_binding_changed');
   await o.check();
   if (args.command === 'action-setup') configureCalendarStorage(roots, args.backupRoot, d.inspect);
@@ -164,6 +167,7 @@ export async function runActionAccountAdmin(o: Options, d: Dependencies = {}): P
       receiptRoot: directory(journal.root, phase),
       check: o.check,
       inspect: d.inspect,
+      memory: d.memory,
     });
   await backup('before');
   await o.check();
@@ -179,7 +183,7 @@ export async function runActionAccountAdmin(o: Options, d: Dependencies = {}): P
           else CalendarAccessFences.initialize(child);
         }
       }
-    openWriterCredentials(roots, d.inspect);
+    openWriterCredentials(roots, d.inspect, {}, d.memory);
     await backup('after');
     await o.check();
     if (digest(setupState(roots, d.inspect).expected) !== digest(setup.expected)) throw Error('action_setup_conflict');
@@ -192,7 +196,7 @@ export async function runActionAccountAdmin(o: Options, d: Dependencies = {}): P
       live_model: 'not_invoked',
     };
   }
-  const owner = openWriterCredentials(roots, d.inspect),
+  const owner = openWriterCredentials(roots, d.inspect, {}, d.memory),
     attempt = path.join(journal.root, 'authorization.json'),
     reference = args.bindingId;
   owner.fences.assertOpen(binding.scopeId, reference);

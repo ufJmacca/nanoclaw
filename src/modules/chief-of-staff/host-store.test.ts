@@ -51,6 +51,40 @@ function fixture() {
   f.open.mockReturnValue(f.artifacts);
   f.configure.mockResolvedValue({});
 }
+it('keeps the ordinary host store available while lost vault protection closes Google readers and writers', async () => {
+  fixture();
+  f.calendarOpen.mockImplementation(() => {
+    throw Error('calendar_configuration_unavailable');
+  });
+  f.actionOpen.mockRejectedValue(Error('action_host_unavailable'));
+  const store = await connectCosHostStore(
+    { COS_CALENDAR_ENABLED: 'true', COS_ACTIONS_ENABLED: 'true' },
+    { targetRoot: '/state', installationRoot: '/install', dataRoot: '/install/data' },
+    () => true,
+    {},
+    undefined,
+    undefined,
+    undefined,
+    () => null,
+  );
+  expect(store.knowledge).toBeDefined();
+  expect(store.calendar).toBeUndefined();
+  expect(store.actions.dependencies).toBeUndefined();
+  expect(f.configure).toHaveBeenCalledOnce();
+});
+it('propagates unexpected host setup failures rather than classifying them as vault unavailability', async () => {
+  fixture();
+  f.calendarOpen.mockImplementation(() => {
+    throw Error('unexpected_host_fault');
+  });
+  await expect(
+    connectCosHostStore(
+      { COS_CALENDAR_ENABLED: 'true' },
+      { targetRoot: '/state', installationRoot: '/install', dataRoot: '/install/data' },
+      () => true,
+    ),
+  ).rejects.toThrow('unexpected_host_fault');
+});
 it('S09 opens the production writer after checking the exact target database/schema with a separate main authority', async () => {
   fixture();
   const roots = { targetRoot: '/state', installationRoot: '/install', dataRoot: '/install/data' },

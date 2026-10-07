@@ -104,6 +104,7 @@ export class CalendarCredentialCore {
     fences: CalendarAccessFences,
     profile: OAuthScopeProfile,
     transport: OAuthTransport = {},
+    private readonly protection: () => void = () => {},
   ) {
     const selected = profileSpec(profile);
     this.#profile = profile;
@@ -135,6 +136,7 @@ export class CalendarCredentialCore {
     }
   }
   private guard(): void {
+    this.protection();
     const current = rootGuard(this.root);
     if (current.dev !== this.#rootIdentity.dev || current.ino !== this.#rootIdentity.ino)
       throw new Error('credential_root_changed');

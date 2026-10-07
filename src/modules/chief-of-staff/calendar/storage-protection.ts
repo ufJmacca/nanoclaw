@@ -71,15 +71,14 @@ export function verifyEncryptedCalendarDirectory(
       !['ext4', 'xfs', 'btrfs'].includes(mount.fstype) ||
       typeof mount['maj:min'] !== 'string' ||
       !/^\d{1,8}:\d{1,8}$/.test(mount['maj:min']) ||
-      typeof mount.uuid !== 'string' ||
-      !/^[a-zA-Z0-9-]{4,128}$/.test(mount.uuid)
+      (mount.uuid != null && (typeof mount.uuid !== 'string' || !/^[a-zA-Z0-9-]{4,128}$/.test(mount.uuid)))
     )
       throw new Error('unsupported_storage_mount');
     const devices = decode(inspect('/usr/bin/lsblk', ['--json', '--paths', '--output', 'NAME,TYPE,MAJ:MIN,UUID']));
     if (!Array.isArray(devices.blockdevices)) throw new Error('missing_storage_devices');
     let visited = 0;
-    const matches: boolean[] = [];
-    const members: boolean[] = [];
+    const devicesSeen: Array<{ encrypted: boolean; uuid: unknown }> = [];
+    const matches: Array<{ encrypted: boolean; uuid: unknown }> = [];
     const visit = (value: unknown, encrypted: boolean, depth: number) => {
       if (
         ++visited > 1024 ||
@@ -91,15 +90,27 @@ export function verifyEncryptedCalendarDirectory(
       )
         throw new Error('storage_topology_bounds');
       const protectedPath = encrypted || value.type === 'crypt';
-      if (value['maj:min'] === mount['maj:min']) matches.push(protectedPath && value.uuid === mount.uuid);
-      if (value.uuid === mount.uuid) members.push(protectedPath);
+      const device = { encrypted: protectedPath, uuid: value.uuid };
+      devicesSeen.push(device);
+      if (value['maj:min'] === mount['maj:min']) matches.push(device);
       if (value.children !== undefined) {
         if (!Array.isArray(value.children)) throw new Error('storage_topology_shape');
         for (const child of value.children) visit(child, protectedPath, depth + 1);
       }
     };
     for (const device of devices.blockdevices) visit(device, false, 0);
-    if (matches.length !== 1 || !matches[0] || !members.length || members.some((encrypted) => !encrypted))
+    // findmnt's UUID probe may require raw-device access. The kernel device number still
+    // identifies exactly one member in the bounded lsblk topology, which supplies its UUID.
+    // If both tools provide a UUID they must agree; every member of that UUID stays encrypted.
+    const filesystemUuid = matches[0]?.uuid;
+    if (
+      matches.length !== 1 ||
+      !matches[0].encrypted ||
+      typeof filesystemUuid !== 'string' ||
+      !/^[a-zA-Z0-9-]{4,128}$/.test(filesystemUuid) ||
+      (mount.uuid != null && mount.uuid !== filesystemUuid) ||
+      devicesSeen.some((device) => device.uuid === filesystemUuid && !device.encrypted)
+    )
       throw new Error('storage_encryption_unverified');
     const after = privateDirectory(directory);
     if (before.dev !== after.dev || before.ino !== after.ino) throw new Error('storage_changed');
@@ -108,7 +119,7 @@ export function verifyEncryptedCalendarDirectory(
       directoryDigest: digest(directory),
       mountDigest: digest(mount.target),
       filesystem: mount.fstype,
-      filesystemUuid: mount.uuid,
+      filesystemUuid,
       encryption: 'dm-crypt',
     };
   } catch {

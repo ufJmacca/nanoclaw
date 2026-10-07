@@ -184,6 +184,7 @@ export async function runCalendarAdmin(
   },
   dependencies: {
     inspect?: StorageInspection;
+    memory?: () => void;
     fetch?: OAuthTransport['fetch'];
     connect?: typeof connectCosHostStore;
     artifacts?: typeof openKnowledgeArtifacts;
@@ -214,6 +215,7 @@ export async function runCalendarAdmin(
       receiptRoot: childDirectory(journal.root, phase),
       check: options.check,
       inspect: dependencies.inspect,
+      memory: dependencies.memory,
     });
   };
   // Native ownership is already checked. A deny-only local tombstone must survive even an unavailable database.
@@ -293,7 +295,7 @@ export async function runCalendarAdmin(
         () => input!.window ?? snapshotWindow(new Date(Date.now()).toISOString(), connection.timeZone),
       );
       await backup('before');
-      const owner = openCalendarCredentials(roots, dependencies.inspect);
+      const owner = openCalendarCredentials(roots, dependencies.inspect, dependencies.memory);
       await options.check();
       const connector = new CalendarConnector({ store, ...owner, admitted, fetch: dependencies.fetch });
       const refreshed = await connector.refresh(

@@ -8,6 +8,7 @@ import { DatabaseConfigurationError } from '../store/config.js';
 import { verifyCalendarStorage, type CalendarStorageRoots } from './storage-policy.js';
 import type { StorageInspection } from './storage-protection.js';
 import { digest } from '../domain/contracts.js';
+import { verifyVaultMemory } from '../ops/vault-memory.js';
 export function calendarSettings(env: NodeJS.ProcessEnv): { enabled: boolean } {
   const enabled = env.COS_CALENDAR_ENABLED ?? 'false';
   if (!['true', 'false'].includes(enabled)) throw new DatabaseConfigurationError('COS_CALENDAR_ENABLED');
@@ -42,8 +43,10 @@ export function openCalendarFences(roots: CalendarStorageRoots, inspect?: Storag
 export function openCalendarCredentials(
   roots: CalendarStorageRoots,
   inspect?: StorageInspection,
-): { fences: CalendarAccessFences; credentials: CalendarCredentialOwner } {
+  memory: () => void = verifyVaultMemory,
+): { fences: CalendarAccessFences; credentials: CalendarCredentialOwner; verifyStorage(): void } {
   try {
+    memory();
     const { targetRoot, installationRoot, dataRoot } = roots;
     privateDirectory(targetRoot);
     if (
@@ -64,10 +67,15 @@ export function openCalendarCredentials(
     if (!stat.isFile() || stat.nlink !== 1) throw new Error('unsafe_calendar_client');
     const client = readPrivate<GoogleOAuthClient>(clientFile, 16384);
     const fences = new CalendarAccessFences(path.join(root, 'access-denials'));
-    const credentials = new CalendarCredentialOwner(path.join(root, 'credentials'), client, fences);
+    const guard = () => {
+      memory();
+      if (digest(verifyCalendarStorage(roots, inspect)) !== digest(protection))
+        throw new Error('calendar_storage_changed');
+    };
+    const credentials = new CalendarCredentialOwner(path.join(root, 'credentials'), client, fences, {}, guard);
     if (digest(verifyCalendarStorage(roots, inspect)) !== digest(protection))
       throw new Error('calendar_storage_changed');
-    return { fences, credentials };
+    return { fences, credentials, verifyStorage: guard };
   } catch {
     // eslint-disable-next-line preserve-caught-error -- Host paths and credential parse failures must not expose sensitive configuration, including through a nested cause.
     throw new Error('calendar_configuration_unavailable');

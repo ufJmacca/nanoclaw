@@ -14,6 +14,7 @@ import { openCalendarCredentials } from '../calendar/config.js';
 import { GOOGLE_EVENT_READ_SCOPE } from '../calendar/reader.js';
 import type { StorageInspection } from '../calendar/storage-protection.js';
 vi.mock('../host-store.js', () => ({ connectCosHostStore: vi.fn() }));
+vi.mock('./vault-memory.js', () => ({ verifyVaultMemory: vi.fn() }));
 const dirs: string[] = [];
 const inspect: StorageInspection = (command, args) =>
   JSON.stringify(

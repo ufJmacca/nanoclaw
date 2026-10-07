@@ -87,7 +87,7 @@ function currentPolicy(roots: CalendarStorageRoots, vaultRoot: string, inspect: 
     mounts.length !== 1 ||
     mounts[0].target !== calendarRoot ||
     mounts[0].fsroot !== '/google/calendar' ||
-    mounts[0].uuid !== volume.filesystemUuid
+    (mounts[0].uuid != null && mounts[0].uuid !== volume.filesystemUuid)
   )
     throw new Error('vault_calendar_bind_missing');
   return {

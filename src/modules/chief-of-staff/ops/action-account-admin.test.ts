@@ -10,6 +10,7 @@ import { runActionAccountAdmin, parseActionSelection, readActionAccountConsent }
 import { openWriterCredentials } from '../actions/config.js';
 import { GOOGLE_OWNED_EVENT_WRITE_SCOPE, GOOGLE_CALENDAR_METADATA_SCOPE } from '../actions/writer.js';
 import type { StorageInspection } from '../calendar/storage-protection.js';
+vi.mock('./vault-memory.js', () => ({ verifyVaultMemory: vi.fn() }));
 const directories: string[] = [];
 const inspect: StorageInspection = (command, args) =>
   JSON.stringify(

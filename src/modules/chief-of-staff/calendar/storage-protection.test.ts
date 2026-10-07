@@ -48,6 +48,21 @@ it('accepts an LVM filesystem under encryption, with a stable proof across kerne
   f.state.mount.filesystems[0]['maj:min'] = '253:7';
   expect(verifyEncryptedCalendarDirectory(f.directory, f.inspect)).toEqual(proof);
 });
+it('uses the uniquely matched encrypted device UUID when unprivileged findmnt cannot read it', () => {
+  const f = setup();
+  Object.assign(f.state.mount.filesystems[0], { uuid: null });
+  expect(verifyEncryptedCalendarDirectory(f.directory, f.inspect).filesystemUuid).toBe(uuid);
+  Object.assign(f.device, { uuid: null });
+  expect(() => verifyEncryptedCalendarDirectory(f.directory, f.inspect)).toThrow('calendar_storage_unverified');
+});
+it('still rejects plaintext members and ambiguous devices when findmnt has no UUID', () => {
+  const f = setup();
+  Object.assign(f.state.mount.filesystems[0], { uuid: null });
+  f.state.devices.blockdevices[0].children.push({ ...f.device, type: 'part', 'maj:min': '8:1' });
+  expect(() => verifyEncryptedCalendarDirectory(f.directory, f.inspect)).toThrow('calendar_storage_unverified');
+  f.state.devices.blockdevices[0].children[1] = { ...f.device };
+  expect(() => verifyEncryptedCalendarDirectory(f.directory, f.inspect)).toThrow('calendar_storage_unverified');
+});
 it.each(['plain', 'unrelated-crypt', 'wrong-device', 'wrong-uuid', 'wrong-mount', 'duplicate-device'])(
   'rejects unsupported or contradictory encrypted-storage claims: %s',
   (reason) => {

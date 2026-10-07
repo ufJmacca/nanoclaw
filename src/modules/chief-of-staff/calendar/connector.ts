@@ -16,6 +16,7 @@ export type CalendarConnectorOptions = {
   credentials?: Pick<CalendarCredentialOwner, 'inspect' | 'token'>;
   fences: Pick<CalendarAccessFences, 'assertOpen' | 'deny' | 'runCheck'>;
   admitted(): boolean;
+  verifyStorage?(): void;
   fixtureReader?(binding: CalendarConnection): CalendarReader;
   fetch?: (url: string, init: RequestInit) => Promise<Response>;
   now?: () => number;
@@ -25,6 +26,7 @@ export class CalendarConnector {
   constructor(private readonly options: CalendarConnectorOptions) {}
   /** Shared by cached-knowledge disclosure as well as connector requests. */
   assertOpen(scopeId: string, bindingId: string): void {
+    this.options.verifyStorage?.();
     const auth = this.denied.get(digest({ scopeId, bindingId }));
     if (auth) throw new CalendarReadError('calendar_auth_' + auth);
     this.options.fences.assertOpen(scopeId, bindingId);
