@@ -1,7 +1,8 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { CosOutbox } from './outbox.js';
 import type { CosBinding } from '../../../cos-boundary.js';
 const binding = { scopeId: 'scope', sessionId: 'session' } as CosBinding;
+const now = Date.parse('2026-10-06T21:00:00Z');
 const change = {
   kind: 'goal',
   title: 'Launch pilot',
@@ -14,7 +15,7 @@ const item = {
   id: 'preview-id',
   kind: 'approval_preview',
   session_id: 'session',
-  expires_at: new Date(Date.now() + 60000).toISOString(),
+  expires_at: new Date(now + 60000).toISOString(),
   payload: {
     proposal_id: '11111111-1111-4111-8111-111111111111',
     confirmation_token: 'abcdefghijklmnopqrstuvwxyz123456',
@@ -32,6 +33,12 @@ function fixture() {
   return { store, admitted, preview, outbox: new CosOutbox({ store, admitted, preview }) };
 }
 describe('S01 native approval outbox reconciliation', () => {
+  beforeEach(() => {
+    vi.spyOn(Date, 'now').mockReturnValue(now);
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
   it('S10 direction preview identifies the exact choice and preserves commitments, missions and calendar events', async () => {
     const f = fixture();
     const direction = {
@@ -166,6 +173,14 @@ describe('S01 native approval outbox reconciliation', () => {
     await f.outbox.drain(binding);
     expect(f.preview).toHaveBeenCalledOnce();
     expect(f.store.acknowledgePreview).not.toHaveBeenCalled();
+  });
+  it('withholds expired previews without acknowledging or applying them', async () => {
+    const f = fixture();
+    vi.mocked(Date.now).mockReturnValue(now + 60000);
+    await f.outbox.drain(binding);
+    expect(f.preview).not.toHaveBeenCalled();
+    expect(f.store.acknowledgePreview).not.toHaveBeenCalled();
+    expect(f.store.apply).not.toHaveBeenCalled();
   });
   it('applies only approved outbox work in a separate operation', async () => {
     const f = fixture();
