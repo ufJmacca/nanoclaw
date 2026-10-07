@@ -105,8 +105,8 @@ The owner merged PR #68, and [actual merged-source acceptance](evidence/S10_MERG
 passed with fresh Mac-built artifacts and Pi verification. [S11 final
 acceptance](evidence/S11_MERGED.md) now verifies its human merge, exact final
 release and Pi-owned protected-data transition. A later CI failure exposed a
-date-dependent approval fixture; PR #71 awaits human review/merge and resulting
-merged-source acceptance before the final programme checkpoint. Live
+date-dependent approval fixture; PR #71 is human-merged and its actual source
+`567f454899932f8ba62d59f7ebc523d23e46e3ba` passed fresh Mac and Pi acceptance. Live
 account/model activation remains separately gated.
 
 ## S04 brief and commitment delivery

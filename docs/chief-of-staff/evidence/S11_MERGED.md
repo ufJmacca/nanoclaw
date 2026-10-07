@@ -1,10 +1,57 @@
-# S11: reviewed merged-source acceptance and programme closure
+# S11: final reviewed-source acceptance
 
-**Status:** all S01–S11 implementation merges and the exact reviewed release's Mac/Pi acceptance are verified. The Pi owns the protected-data seal. A later CI failure exposed a date-dependent test fixture; [PR #71](https://github.com/ufJmacca/nanoclaw/pull/71) awaits human review/merge and acceptance of the resulting merged source before the programme's completion checkpoint. Live account/model activation remains separately gated.
+**Status:** all S01–S11 implementation and required correction merges are verified. The exact final source passed fresh Mac and Pi acceptance, and the Pi's protected-data seal remains intact. CoS stays paused; live account/model activation is separate.
+
+The owner merged [PR #71](https://github.com/ufJmacca/nanoclaw/pull/71) at `567f454899932f8ba62d59f7ebc523d23e46e3ba` on `2026-10-07T06:23:06Z`. This fixes a date-dependent approval test fixture; production behaviour is unchanged. Its actual merge identity was rebuilt, tested and deployed. Candidate artifacts were not relabelled. All twelve required original/follow-up merge references were reobserved as human merges and verified as ancestors of this source.
+
+## Final delivered identity
+
+| Item                 | Verified value                                                     |
+| -------------------- | ------------------------------------------------------------------ |
+| Source               | `567f454899932f8ba62d59f7ebc523d23e46e3ba`                         |
+| Tree                 | `e0c8339c774dd59bc52271d3c467f66fe99ee8a6`                         |
+| Release              | `release-567f45489993-20261007065452`                              |
+| Platform             | Linux/ARM64                                                        |
+| Manifest SHA-256     | `b0800ce4519d5cc54477562770327ed7c65c2e8a432a7edfe5f51ff0efb3e6f2` |
+| Archive SHA-256      | `bba3ed56c1eeb070718a3c47fb7f301ebe245ebf547bca8450ca2160c63d39be` |
+| Archive bytes        | 1,149,503,883                                                      |
+| Host payload SHA-256 | `89c0ac69bc929da147a2bc5e0df5e16f52175be4550976be8303a6d0c465740a` |
+
+| Role             | Engine image ID                                                           | Archive configuration ID                                                  |
+| ---------------- | ------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| host             | `sha256:6a611330f93cd5d6f4e79c777c3ae4e7c4b749ef5ea36450907b6a619eca72fe` | `sha256:bc5ba5e420317e84dd53366793da3220238b9238ab03738f58408f57a91db5b0` |
+| standard worker  | `sha256:63589f2f137b238b3cba856a3b4dd93ffd2291251fa7ce299caef378c74740b5` | `sha256:813f0f44022cfff66719205f55ed66d9e011a7fe7fce203c8a8eba1227cf6f67` |
+| documents worker | `sha256:dcb35518441b00ff4dc9e6bfe689414ac9ed898332dbf3f9136b279dd57c7676` | `sha256:c88a09a9ff6d0e91a2c8587640d5e85396fdd489a51511cb401247210a59f431` |
+
+All seven Mac gates passed: 2,745 application tests across 270 files, host/runner types, build, lint and formatting, 215 runner tests, 395 source contracts, 18 demonstrations, image isolation, baked worker checks and 395 packaged contracts per profile, with no contract failures or skips. Both profiles passed seven native isolation and seven offline subscription scenarios. The final packaged host also passed clock, action and protected-completion probes with no network, credentials or checkout override.
+
+The first fresh-source candidate passed 357 of 395 source contracts and failed 38 after concurrent team admission became unavailable. Its exact cause was not captured. The Mac was subsequently observed with a full disk and stalled Docker. Verified, compressed source-snapshot copies were retained; the owner approved Docker recovery. All 50 unchanged team diagnostics then passed, followed by this complete fresh release run. Failed logs and identities remain retained; no assertion, application source or timeout was changed, and the failed candidate was never transferred.
+
+The Pi fetched the exact commit/tree into a clean detached source checkout, loaded the Mac-tested archive and activated its prebuilt payload. Source, artifacts, quiesce, backup, migration, activation and health passed at `2026-10-07T07:43:43.910Z`. Installed read-only checks verified database readiness and the bound private Mattermost channel/owner. Both Pi profiles passed native isolation, 215 runner tests and seven offline subscription scenarios, plus operator/clock/action/protected-completion fixtures, at `2026-10-07T07:49:54.309Z`. The Pi did no build, dependency installation or source fix.
+
+## Retained protection and recovery
+
+The original irreversible protection proof still binds `release-e916c4d1388a-20261006215547` and has digest `3805891a4c460e409be05baee747ae34d64fdda5a8c0f2d5f3ffdcf30d6fca0f`. This proof and its seal stayed byte-identical through the new data-preserving deployment. They were not rewritten or relabelled to the follow-up source. The new compiled helper independently refused an actual runtime-disposable maintenance request; protected records, admission and service PID stayed unchanged. A same-release deployment replay returned healthy without changing the original deployment, migration, paired-backup or protected-state records. The earlier actual e916 protected-current coordinator replay remains historical evidence; no new-source protection shortcut is claimed.
+
+The fresh paired backup covers 19 native databases and the independent action journal, with digest `776d6ca2976e2228166bf530380181af43d2ff2f44460334c112b91e3f0bc728`. PostgreSQL remains at schema 18 with all migration checksums; native compatibility remains 22 with all 20 required named migrations. The complete compatible previous release `release-e916c4d1388a-20261006215547` retains all three images, payload and clean pinned source. The original isolated restore proof `58fa742a4436070579c03281f31ac5cb47f98c336924f82beb49a8e743f40859` remains tied to `release-2ac71c185d65-20261006182617` and was reverified. No restore over live data, new actual restore drill or actual rollback is claimed.
+
+All 698 backed-up messages and 18 session databases were preserved, including the original 694 message identities/content. Credentials, main context, continuation, model policy, three approved records, four proposals, ten replies and ten charged attempts were unchanged.
+
+A Pi-owned service ran after its scheduling SSH session disconnected, from `2026-10-07T07:50:37.995Z` to `2026-10-07T07:52:39.888Z`, while the Mac repository development container was stopped. Both profiles passed offline subscription and specialist context/stop checks, and clock/action probes passed. The Pi service stayed active and the Mac container was restored. Physical Mac power-off and new live inference were not tested.
+
+Before transfer, complete Mac archives and image configurations were verified. Scoped cache retirement removed the duplicate e916 Pi transport archive and only the obsolete 2ac host carrier, documents worker and payload. Free space rose from 3,216,097,280 to 5,223,002,112 bytes. The current and compatible previous complete releases, other worker images, all containers, volumes, source checkouts, receipts, original restore proof, protected backups, runtime history and credentials were retained. The retired artifacts remain recoverable from their verified complete Mac archive.
+
+CoS remains an agent group within NanoClaw: its main conversation retains one shared context, reply threads group messages visually, and only authorised specialists have independent model contexts. Deterministic owner status/inspection/pause controls remain available. The subscription runtime had prior live acceptance, but its finite allowance is expired. This acceptance used zero new live model calls, real messages, OAuth requests or calendar writes. Writer, live delegation policies and account-specific pilots remain separately pending.
+
+The owner's two strategic-review ratings remain **useful with limitations because their structure was unclear**. No improved rating, time saving or model-quality outcome is inferred. Private final evidence is indexed by `.cos-plan-state/s11-clock-merged-acceptance-assessment.json` and the additive execution ledger; the Pi retains authoritative deployment/protection/recovery records. Later documentation commits describe this release and are not its tested application identity.
+
+## Earlier e916 acceptance and original protection
+
+The following receipt records the e916 checkpoint before PR #71 merged. Statements about pending review and installed artifacts refer to that earlier checkpoint.
 
 The owner merged [PR #69](https://github.com/ufJmacca/nanoclaw/pull/69) at `e916c4d1388a141ea6095a215742f39521d4b7b2` on `2026-10-06T21:50:35Z`. Its tree matches the published receipt head. A fresh complete Mac build/test and Pi deployment nevertheless used the actual merged identity; candidate images were not relabelled. [Earlier S11 candidate and recovery evidence](S11.md) remains historical, including its genuine failures and recoveries.
 
-## Reviewed implementation
+### Reviewed implementation
 
 | Slice | Original implementation PR                             | Final accepted merge PR                                | Accepted merged source                     |
 | ----- | ------------------------------------------------------ | ------------------------------------------------------ | ------------------------------------------ |
@@ -22,7 +69,7 @@ The owner merged [PR #69](https://github.com/ufJmacca/nanoclaw/pull/69) at `e916
 
 The final protection coordinator independently reobserved these human merges through GitHub and verified each accepted commit's ancestry in the tested final source. S01's subscription runtime alignment is included. Three stale ledger links to original PRs were reconciled to their already accepted correction merges; the original references and publication history were preserved.
 
-## Delivered identity
+### Delivered identity
 
 | Item                    | Verified value                                                     |
 | ----------------------- | ------------------------------------------------------------------ |
@@ -44,7 +91,7 @@ The final protection coordinator independently reobserved these human merges thr
 
 The Pi fetched and verified this exact source/tree in a clean detached release checkout, loaded the Mac-tested image archive and extracted the matching prebuilt payload. No source build, dependency installation or source fix occurred on the Pi. Later acceptance-document commits describe this release; they are not its tested application identity.
 
-## Final checks and protection
+### Final checks and protection
 
 All seven fresh Mac gates passed: 2,744 application tests across 270 files, host/runner types, build, lint and formatting, 215 runner tests, 395 source contracts, 18 combined demonstration checks, image isolation, baked worker checks and 395 packaged contracts per profile, with no contract failures or skips. Lint retained 324 warnings with no errors. Both profiles passed seven native isolation cases and seven offline subscription scenarios. The exact final host also passed compiled clock, action and protected-completion probes without network, credentials or checkout overrides.
 
@@ -62,7 +109,7 @@ Final normal delivery passed source, artifacts, quiesce, backup, migrate, activa
 
 The standard delivery coordinator was then rerun against the exact protected current release. Its dedicated completion path returned healthy with `cosResumed=false`. The original deployment, migration and paired-backup records, protected target records and service PID stayed unchanged. The actual compiled runtime-disposable maintenance request was refused by the Pi's own protected state, with target records and PID unchanged. Synthetic failed-health and same-identity retry cases remain separate from these actual checks.
 
-## Preservation, recovery and independent operation
+### Preservation, recovery and independent operation
 
 All 698 backed-up messages and 18 session databases were preserved, including the original 694 message identities/content. Credentials, main context and continuation, model policy, three approved records, four proposals, ten replies and ten charged model attempts were unchanged.
 
@@ -74,7 +121,7 @@ A Pi-owned transient service ran after its scheduling SSH session disconnected, 
 
 Before transfer, three complete Mac recovery archives and image configurations were verified. Scoped retirement removed only the current candidate's duplicate Pi transport archive and the obsolete S10 host carrier/payload cache. Free space rose from 3,473,096,704 to 5,359,575,040 bytes. Both complete S11 recovery releases, every worker image, container, volume, source checkout, receipt, protected backup, credential and runtime history were retained. The obsolete S10 artifacts remain reconstructible from their verified Mac archive. Earlier failures and refusal logs remain preserved in the private ledger and [historical S11 receipt](S11.md).
 
-## What is available and what remains gated
+### What is available and what remains gated
 
 S01–S11 implement persistent priorities, grounded knowledge, calendar awareness, scheduled preparation, direct missions, specialist teams, proactive proposals, bounded mandates, exact-action approvals, strategy reviews and owner inspection/recovery. CoS is an agent group within NanoClaw. Its main conversation shares one retained context; reply threads group messages visually. Only authorised specialist agents use separate model contexts.
 

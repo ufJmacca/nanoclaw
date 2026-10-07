@@ -7,9 +7,10 @@ Check [final acceptance](evidence/S11_MERGED.md) for the installed artifacts and
 protected lifecycle. CoS remains paused and the calendar writer disabled until
 their separate live activation checks pass.
 
-The later test-fixture correction in PR #71 awaits human review/merge. It has not
-changed these installed artifacts; [the acceptance receipt](evidence/S11_MERGED.md)
-records the remaining programme checkpoint and its exact tested release.
+The later test-fixture correction in PR #71 is human-merged. Its exact source
+`567f454899932f8ba62d59f7ebc523d23e46e3ba` was rebuilt, tested and deployed;
+[the acceptance receipt](evidence/S11_MERGED.md) records the installed release
+and its fresh Pi acceptance. The original protected-data proof remains intact.
 
 ## Prerequisites and responsibilities
 

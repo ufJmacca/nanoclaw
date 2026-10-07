@@ -2,7 +2,7 @@
 
 **Target:** `ufJmacca/nanoclaw`, v2 fork.  
 **Baseline:** `1a432912c00d96abf6c39cd19b1a312631d78a9c` (`package.json` 2.0.25).  
-**Status:** planning specification retained; [S01–S11 implementation and protected Pi acceptance](../chief-of-staff/evidence/S11_MERGED.md) are verified. Final closure awaits the date-dependent fixture correction's human merge and merged-source acceptance. Live account/model activation remains separately gated.\
+**Status:** planning specification retained; [S01–S11 implementation and protected Pi acceptance](../chief-of-staff/evidence/S11_MERGED.md) are verified. The date-dependent fixture correction in PR #71 is human-merged, and its exact source passed fresh Mac and Pi acceptance. Live account/model activation remains separately gated.\
 **Date:** 29 September 2026.  
 **Plan revision:** 5 — GitHub-pinned source sync, Mac-tested images delivered to the Pi, external PostgreSQL, and Mattermost-first interaction.
 
@@ -22,19 +22,19 @@ Use NanoClaw's runtime, providers, messaging, container lifecycle, scheduling an
 
 First read [Mac-to-Pi delivery](MAC_TO_PI_DELIVERY.md), [interaction model](INTERACTION_MODEL.md), [repository baseline](REPOSITORY_BASELINE.md), [shared architecture/contracts](ARCHITECTURE_AND_CONTRACTS.md), [external PostgreSQL](EXTERNAL_POSTGRES.md), [implementation authority](IMPLEMENTATION_AUTHORITY.md) and [the execution goal](GOAL.md). Then execute the numbered slices sequentially under the same persistent goal. Every slice ends in a user-visible demonstration, tests, an acceptance receipt, a PR and a review gate.
 
-| Order | Plan | What becomes usable |
-|---|---|---|
-| 1 | [S01 — First use and priorities](01_FIRST_USE_AND_PRIORITIES.md) | Approve direction and ask what matters, with durable records. |
-| 2 | [S02 — Grounded knowledge](02_GROUNDED_KNOWLEDGE.md) | Import selected notes, answer with citations, correct and revoke evidence. |
-| 3 | [S03 — Calendar awareness](03_CALENDAR_AWARENESS.md) | Read an approved calendar and show freshness/coverage. |
-| 4 | [S04 — Daily brief and commitments](04_DAILY_BRIEF_AND_COMMITMENTS.md) | Receive scheduled briefs and track confirmed follow-ups. |
-| 5 | [S05 — Isolated research missions](05_ISOLATED_RESEARCH_MISSIONS.md) | Delegate a bounded assignment, inspect it and cancel it. |
-| 6 | [S06 — Specialist teams and review](06_SPECIALIST_TEAMS_AND_REVIEW.md) | Coordinate bounded parallel analysis and a reviewed recommendation. |
-| 7 | [S07 — Proactive proposals](07_PROACTIVE_PROPOSALS.md) | Surface useful work without silently creating commitments or repeated noise. |
-| 8 | [S08 — Standing mandates](08_STANDING_MANDATES.md) | Perform approved read-only/preparation work autonomously. |
-| 9 | [S09 — Approved calendar actions](09_APPROVED_CALENDAR_ACTIONS.md) | Preview, approve, execute and verify one exact external effect. |
-| 10 | [S10 — Strategic reviews](10_STRATEGIC_REVIEWS.md) | Compare activity with outcomes and propose changes for the owner to decide. |
-| 11 | [S11 — Operations and recovery](11_OPERATIONS_AND_RECOVERY.md) | Inspect, pause, export, restore and operate the full capability. |
+| Order | Plan                                                                   | What becomes usable                                                          |
+| ----- | ---------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| 1     | [S01 — First use and priorities](01_FIRST_USE_AND_PRIORITIES.md)       | Approve direction and ask what matters, with durable records.                |
+| 2     | [S02 — Grounded knowledge](02_GROUNDED_KNOWLEDGE.md)                   | Import selected notes, answer with citations, correct and revoke evidence.   |
+| 3     | [S03 — Calendar awareness](03_CALENDAR_AWARENESS.md)                   | Read an approved calendar and show freshness/coverage.                       |
+| 4     | [S04 — Daily brief and commitments](04_DAILY_BRIEF_AND_COMMITMENTS.md) | Receive scheduled briefs and track confirmed follow-ups.                     |
+| 5     | [S05 — Isolated research missions](05_ISOLATED_RESEARCH_MISSIONS.md)   | Delegate a bounded assignment, inspect it and cancel it.                     |
+| 6     | [S06 — Specialist teams and review](06_SPECIALIST_TEAMS_AND_REVIEW.md) | Coordinate bounded parallel analysis and a reviewed recommendation.          |
+| 7     | [S07 — Proactive proposals](07_PROACTIVE_PROPOSALS.md)                 | Surface useful work without silently creating commitments or repeated noise. |
+| 8     | [S08 — Standing mandates](08_STANDING_MANDATES.md)                     | Perform approved read-only/preparation work autonomously.                    |
+| 9     | [S09 — Approved calendar actions](09_APPROVED_CALENDAR_ACTIONS.md)     | Preview, approve, execute and verify one exact external effect.              |
+| 10    | [S10 — Strategic reviews](10_STRATEGIC_REVIEWS.md)                     | Compare activity with outcomes and propose changes for the owner to decide.  |
+| 11    | [S11 — Operations and recovery](11_OPERATIONS_AND_RECOVERY.md)         | Inspect, pause, export, restore and operate the full capability.             |
 
 There are no independent horizontal “database”, “API” or “agent framework” delivery phases. Each slice includes the smallest changes across all layers necessary for that outcome. S01 carries more enabling work because it establishes the first complete path; later slices must not use that as an excuse to prebuild all future infrastructure.
 
