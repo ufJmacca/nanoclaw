@@ -7,6 +7,7 @@ import { createVaultCrypto } from '/code/modules/chief-of-staff/ops/vault-crypto
 import { createVaultKey, inspectVaultKey } from '/code/modules/chief-of-staff/ops/vault-key.js';
 import { installVaultUtilities, vaultUtilitiesStatus } from '/code/modules/chief-of-staff/ops/vault-utilities.js';
 import { verifyVaultMemory } from '/code/modules/chief-of-staff/ops/vault-memory.js';
+import { createVaultMounts } from '/code/modules/chief-of-staff/ops/vault-mounts.js';
 const mapping = `cos-vault-fixture-${randomUUID()}`;
 const paths = {
   stateRoot: '/case/control',
@@ -16,6 +17,7 @@ const paths = {
 };
 let recovery,
   crypto,
+  mounts,
   mounted = false,
   bound = false,
   race;
@@ -73,12 +75,34 @@ function metadata() {
   fs.writeFileSync(file, `I:1\nE:ID_FS_UUID=${uuid}\nE:ID_FS_UUID_ENC=${uuid}\nE:ID_FS_TYPE=ext4\n`, { mode: 0o644 });
   fs.chmodSync(file, 0o644);
 }
-function mount() {
+async function mount() {
   metadata();
-  run('/usr/bin/mount', ['-t', 'ext4', '-o', 'nosuid,nodev,noexec', '/dev/mapper/' + mapping, '/case/vault']);
-  mounted = true;
-  run('/usr/bin/mount', ['-o', 'bind,nosuid,nodev,noexec', '/case/vault/google/calendar', '/case/target/calendar']);
-  bound = true;
+  console.log(JSON.stringify({ stage: 'mount_adapter', status: mounts.inspect() }));
+  try {
+    await mounts.mount();
+  } finally {
+    const number = crypto.withMappedDevice((fd) => BigInt(fs.fstatSync(fd).rdev));
+    const major = ((number >> 8n) & 0xfffn) | ((number >> 32n) & 0xfffff000n),
+      minor = (number & 0xffn) | ((number >> 12n) & 0xffffff00n);
+    const ownsMount = (directory, fsroot) => {
+      const result = spawnSync(
+        '/usr/bin/findmnt',
+        ['--json', '--mountpoint', directory, '--output', 'TARGET,FSROOT,MAJ:MIN'],
+        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000, maxBuffer: 262144 },
+      );
+      if (result.status === 1 && !result.stdout.trim()) return false;
+      assert.equal(result.status, 0);
+      const files = JSON.parse(result.stdout).filesystems;
+      assert.equal(files.length, 1);
+      assert.equal(files[0].target, directory);
+      assert.equal(files[0].fsroot, fsroot);
+      assert.equal(files[0]['maj:min'], `${major}:${minor}`);
+      return true;
+    };
+    mounted = ownsMount('/case/vault', '/');
+    bound = ownsMount('/case/target/calendar', '/google/calendar');
+  }
+  assert.equal(mounts.inspect(), 'matching');
 }
 try {
   assert.equal(process.getuid(), 0);
@@ -104,8 +128,6 @@ try {
   const authority = JSON.parse(run(process.execPath, ['/probe/probe-authority.mjs', 'root']));
   assert.equal(authority.rootAuthority, 'passed');
   console.log(JSON.stringify(authority));
-  privateDirectory('/case/vault', 0, 0);
-  privateDirectory('/case/target/calendar', 0, 0);
   if (process.env.NANOCLAW_COS_VAULT_KEYCHAIN_FIXTURE === '1') {
     const chunks = [];
     let length = 0;
@@ -187,23 +209,24 @@ try {
   crypto.formatFilesystem();
   assert.equal(crypto.filesystemStatus(), 'matching');
   assert.throws(() => crypto.formatFilesystem(), /vault_crypto_unavailable/);
-  metadata();
-  run('/usr/bin/mount', ['-t', 'ext4', '-o', 'nosuid,nodev,noexec', '/dev/mapper/' + mapping, '/case/vault']);
-  mounted = true;
-  fs.chmodSync('/case/vault', 0o700);
-  fs.chownSync('/case/vault', 1000, 1000);
-  for (const area of [
-    'google',
-    'google/calendar',
-    'backup-credentials',
-    'journals',
-    'staging',
-    'cache',
-    'calendar-backups',
-  ])
-    privateDirectory('/case/vault/' + area, 1000);
-  run('/usr/bin/mount', ['-o', 'bind,nosuid,nodev,noexec', '/case/vault/google/calendar', '/case/target/calendar']);
-  bound = true;
+  mounts = createVaultMounts(
+    { stateRoot: paths.stateRoot, vaultRoot: '/case/vault', calendarRoot: '/case/target/calendar' },
+    identity,
+    { uid: 1000, gid: 1000 },
+    {
+      assertAuthority: async () => {},
+      assertMemory: verifyVaultMemory,
+      assertFilesystem() {
+        assert.equal(crypto.filesystemStatus(), 'matching');
+      },
+      withMappedDevice(operation) {
+        return crypto.withMappedDevice((fd) => operation(fd, fs.fstatSync(fd).rdev));
+      },
+    },
+  );
+  assert.equal(mounts.inspect(), 'absent');
+  await mount();
+  await mount();
   owner('capture');
   fs.chmodSync('/case/vault/google', 0o755);
   owner('denied');
@@ -251,7 +274,7 @@ try {
   }
   console.log('{"stage":"independent_recovery"}');
   crypto.open(recovery);
-  mount();
+  await mount();
   owner('recovery');
   run('/usr/bin/umount', ['/case/target/calendar']);
   bound = false;
@@ -261,7 +284,7 @@ try {
   assert.deepEqual(fs.readdirSync('/case/vault'), []);
   assert.deepEqual(fs.readdirSync('/case/target/calendar'), []);
   console.log(
-    '{"kernelVault":"passed","volumeBytes":1073741824,"wrongKeyDenied":true,"recoveredCanary":true,"bootKeyRemoved":true,"ownershipDenied":true,"symlinkDenied":true,"mountRaceDenied":true,"memoryProtection":"verified","plaintextFallback":false,"allocationAdapter":"passed","cryptsetupAdapter":"passed","recoveryKeyOnDisk":false}',
+    '{"kernelVault":"passed","volumeBytes":1073741824,"wrongKeyDenied":true,"recoveredCanary":true,"bootKeyRemoved":true,"ownershipDenied":true,"symlinkDenied":true,"mountRaceDenied":true,"memoryProtection":"verified","plaintextFallback":false,"allocationAdapter":"passed","cryptsetupAdapter":"passed","mountAdapter":"passed","recoveryKeyOnDisk":false}',
   );
 } catch {
   console.error('{"code":"vault_provision_fixture_unavailable"}');
