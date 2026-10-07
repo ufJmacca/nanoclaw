@@ -11,7 +11,7 @@ try {
   const mode = process.argv[2];
   if (mode === 'owner') {
     assert.equal(process.getuid(), 1000);
-    const scope = { operationId: randomUUID(), targetDigest: 'a'.repeat(64), generation: 1 };
+    const scope = { operationId: process.argv[3] ?? randomUUID(), targetDigest: 'a'.repeat(64), generation: 1 };
     let allowed = true;
     const grant = await openVaultAuthority('/case/authority', scope, async () => {
       assert.equal(allowed, true);

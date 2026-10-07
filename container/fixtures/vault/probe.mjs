@@ -7,7 +7,11 @@ import {
   vaultStorageStatus,
 } from '/code/modules/chief-of-staff/ops/vault-storage.js';
 import { verifyVaultMemory } from '/code/modules/chief-of-staff/ops/vault-memory.js';
-const roots = { targetRoot: '/case/target', installationRoot: '/case/application', dataRoot: '/case/data' };
+const roots = {
+  targetRoot: '/home/fixture/.config/nanoclaw-cos/state',
+  installationRoot: '/case/application',
+  dataRoot: '/case/data',
+};
 const mode = process.argv[2];
 if (mode === 'memory') {
   verifyVaultMemory();
@@ -31,10 +35,13 @@ if (mode === 'memory') {
 } else if (mode === 'race') {
   await assert.rejects(
     withVaultDirectory(roots, 'backup-credentials', async (pinned) => {
-      fs.writeFileSync('/case/target/race-request', 'synthetic', { flag: 'wx', mode: 0o600 });
+      fs.writeFileSync('/home/fixture/.config/nanoclaw-cos/state/race-request', 'synthetic', {
+        flag: 'wx',
+        mode: 0o600,
+      });
       let detached = false;
       for (let attempt = 0; attempt < 500; attempt++) {
-        if (fs.existsSync('/case/target/race-closed')) {
+        if (fs.existsSync('/home/fixture/.config/nanoclaw-cos/state/race-closed')) {
           detached = true;
           break;
         }
