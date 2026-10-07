@@ -6,3 +6,4 @@
 !probe-provision.mjs
 !verify-units.mjs
 !probe-wire.mjs
+!probe-config.mjs
