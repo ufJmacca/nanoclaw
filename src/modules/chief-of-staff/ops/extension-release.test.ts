@@ -1,12 +1,25 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, expect, it } from 'vitest';
+import { afterEach, expect, it, vi } from 'vitest';
 import { readExtensionRelease, checkpointExtensionRelease } from './extension-release.js';
 import { readReleaseExecution, checkpointReleaseExecution } from './mac-release.js';
 const roots: string[] = [];
 afterEach(() => {
+  vi.restoreAllMocks();
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
+});
+it('reads the sealed original history when Docker exposes it as root-owned, without changing it', () => {
+  const f = fixture(),
+    original = fs.readFileSync(f.root + '/execution.json'),
+    actual = fs.fstatSync;
+  vi.spyOn(fs, 'fstatSync').mockImplementation(((fd: number) => {
+    const stat = actual(fd);
+    if (stat.size === original.length) return Object.assign(stat, { uid: 0 });
+    return stat;
+  }) as typeof fs.fstatSync);
+  expect(readExtensionRelease(f.root, true)).toEqual(f.extension);
+  expect(fs.readFileSync(f.root + '/execution.json')).toEqual(original);
 });
 function fixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'extension-release-'));

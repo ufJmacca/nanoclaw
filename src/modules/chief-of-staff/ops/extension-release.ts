@@ -1,5 +1,40 @@
 import path from 'node:path';
+import fs from 'node:fs';
 import { readPrivate, writeAtomic } from './target-state.js';
+/** Completed history may be exposed as root-owned by Docker's Mac filesystem. It is read-only here. */
+function completedProgramme<T>(file: string): T {
+  const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+  try {
+    const before = fs.fstatSync(fd);
+    if (
+      !before.isFile() ||
+      before.nlink !== 1 ||
+      ![0, process.getuid?.()].includes(before.uid) ||
+      (before.mode & 0o777) !== 0o600 ||
+      before.size > 1024 * 1024 ||
+      fs.realpathSync(file) !== file
+    )
+      throw Error('unsafe_completed_programme');
+    const bytes = Buffer.alloc(before.size + 1),
+      count = fs.readSync(fd, bytes, 0, bytes.length, 0),
+      after = fs.fstatSync(fd),
+      current = fs.lstatSync(file);
+    if (
+      count !== before.size ||
+      after.size !== before.size ||
+      after.uid !== before.uid ||
+      after.mode !== before.mode ||
+      after.mtimeMs !== before.mtimeMs ||
+      after.ctimeMs !== before.ctimeMs ||
+      current.dev !== before.dev ||
+      current.ino !== before.ino
+    )
+      throw Error('completed_programme_changed');
+    return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(0, count))) as T;
+  } finally {
+    fs.closeSync(fd);
+  }
+}
 export type ExtensionReleaseState = {
   contract: 'cos-google-mail-storage-execution/v1';
   goal: 'nanoclaw-google-mail-storage';
@@ -13,12 +48,12 @@ export type ExtensionReleaseState = {
 /** Additive extension admission. It never reopens or rewrites the completed original programme. */
 export function readExtensionRelease(root: string, forRelease = false): ExtensionReleaseState {
   try {
-    const original = readPrivate<{
+    const original = completedProgramme<{
       active_slice: string;
       programme_complete: boolean;
       actual_goal_tool_completion?: { status: string };
       slices: Array<Record<string, unknown>>;
-    }>(path.join(root, 'execution.json'), 1024 * 1024);
+    }>(path.join(root, 'execution.json'));
     const previous = original.slices?.find((slice) => slice.id === 'S11');
     if (
       original.active_slice !== 'S11' ||
