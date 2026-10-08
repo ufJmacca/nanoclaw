@@ -146,11 +146,20 @@ volume_root=$(docker volume inspect --format '{{.Mountpoint}}' "$volume")
 docker run --rm --pull=never --network=none --user 0:0 --mount "type=volume,src=$volume,dst=/fixture" \
   --entrypoint node "$fixture_image" -e 'const f=require("fs");for(const p of ["/fixture","/fixture/.cos-plan-state","/fixture/s"]){f.mkdirSync(p,{recursive:true,mode:448});f.chmodSync(p,448);f.chownSync(p,1000,1000)}'
 host_checks() {
+  docker run --rm --pull=never --network=none "$host_image" --input-type=module \
+    -e 'import {payloadDigest} from "/release/dist/modules/chief-of-staff/ops/payload.js";console.log(await payloadDigest("/release"))' > "$directory/payload.sha256" || return
+  local payload_digest
+  payload_digest=$(cat "$directory/payload.sha256")
+  [[ "$payload_digest" =~ ^[a-f0-9]{64}$ ]] || return 1
   docker run --rm --pull=never --network=none --entrypoint /release/node/bin/node "$host_image" \
     --input-type=module -e 'await import("/release/bootstrap.mjs"); const {default:D}=await import("/release/node_modules/better-sqlite3/lib/index.js");const d=new D(":memory:");if(d.prepare("select 1 as n").get().n!==1)process.exit(1);d.close()' || return
   docker run --rm --pull=never --network=none --read-only --user 1000:1000 \
     --tmpfs /tmp:rw,nosuid,nodev -w /tmp "$host_image" --test \
     /release/src/contracts/chief-of-staff/subscription-operator.integration.mjs || return
+  docker run --rm --pull=never --network=none --read-only --user 1000:1000 --group-add 0 \
+    --tmpfs /tmp:rw,nosuid,nodev --mount type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock \
+    -e "COS_CARRIER_IMAGE=$host_image" -e "COS_CARRIER_PAYLOAD_DIGEST=$payload_digest" "$host_image" --test \
+    /release/dist/contracts/chief-of-staff/carrier-extraction.integration.js || return
   local worker
   for worker in "$standard_image" "$documents_image"; do
     if [[ "$profile" == runtime-disposable ]]; then
@@ -165,8 +174,6 @@ host_checks() {
       -e "COS_FIXTURE_IMAGE=$worker" -e "COS_FIXTURE_HOST_ROOT=$volume_root" \
       "$host_image" /release/dist/contracts/chief-of-staff/run.js --slice "$slice" --db-profile test || return
   done
-  docker run --rm --pull=never --network=none "$host_image" --input-type=module \
-    -e 'import {payloadDigest} from "/release/dist/modules/chief-of-staff/ops/payload.js";console.log(await payloadDigest("/release"))' > "$directory/payload.sha256"
 }
 agent_checks() {
   local worker
