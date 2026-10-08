@@ -1,4 +1,5 @@
 import { policyAllowsBriefContext } from '../bridge/brief-context-renewal.js';
+import { runVaultProvisionAdmin } from './vault-owner-admin.js';
 /** Owner-run controls. Calendar sync may refresh its own tokens; no model calls or message sends. */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -61,6 +62,7 @@ import {
 } from './action-recovery-admin.js';
 
 export type ContextAdminArguments =
+  | { command: 'vault-provision'; scopeId: string }
   | OwnerExportArguments
   | ActionRecoveryArguments
   | ActionAdminArguments
@@ -201,6 +203,7 @@ export async function contextAdminCommand(
       'export-purge',
       'operations-backup',
       'operations-restore-check',
+      'vault-provision',
     ].includes(args.command)
   )
     return { status: 'disabled', live_model: 'not_verified' };
@@ -369,6 +372,9 @@ export async function contextAdminCommand(
         assertAuthority();
       };
       await check();
+      if (args.command === 'vault-provision') {
+        return runVaultProvisionAdmin({ root, maintenance, native, hostLease: lease, check });
+      }
       if (isOwnerExportCommand(args)) {
         return runOwnerExportAdmin({
           args,

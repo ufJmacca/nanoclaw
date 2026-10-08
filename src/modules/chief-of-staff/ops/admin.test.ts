@@ -233,3 +233,13 @@ describe('S01 owner administration', () => {
     }
   });
 });
+it('parses vault provisioning with only the bound owner scope', () => {
+  expect(parseAdminArguments(['vault-provision', '--scope', 'fixture'])).toEqual({
+    command: 'vault-provision',
+    scopeId: 'fixture',
+  });
+  expect(() => parseAdminArguments(['vault-provision', '--scope', 'fixture', '--volume', '/dev/foreign'])).toThrow(
+    'invalid_admin_arguments',
+  );
+  expect(() => parseAdminArguments(['vault-provision', '--scope', '../foreign'])).toThrow('invalid_admin_arguments');
+});

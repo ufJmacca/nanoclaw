@@ -6,6 +6,7 @@ import { withDeploymentLock } from './deployment-lock.js';
 import { validateReleaseManifest, type ReleaseManifest } from './release-manifest.js';
 const commands = [
   'vault-status',
+  'vault-provision',
   'database-check',
   'status',
   'operator-status',

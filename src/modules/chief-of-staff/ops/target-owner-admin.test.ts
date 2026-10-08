@@ -126,3 +126,17 @@ it('owner preflight classifies current schema and dependency failures without pr
     expect(JSON.stringify(result)).not.toContain('PRIVATE_CANARY');
   }
 });
+it('admits vault provisioning through the pinned owner helper with the selected runtime profile', async () => {
+  expect(
+    parseOwnerAdminArguments(['--settings', '/home/pi/target.json', '--', 'vault-provision', '--scope', 'fixture']),
+  ).toMatchObject({ admin: ['vault-provision', '--scope', 'fixture'] });
+  const runtime = { COS_PG_USER: 'owner-runtime-profile' };
+  expect(
+    await selectedOwnerAdminProfile('vault-provision', {
+      runtime: () => runtime,
+      test: () => {
+        throw Error('test_profile_must_not_be_read');
+      },
+    }),
+  ).toBe(runtime);
+});
