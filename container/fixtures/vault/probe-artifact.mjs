@@ -52,12 +52,23 @@ try {
   // Keep the baked exact-source package as immutable fixture input, then exercise the actual fixed-path installer.
   const releaseId = 'release-' + seal.sourceCommit.slice(0, 12) + '-20261008000000',
     stagedBase = '/home/fixture/.config/nanoclaw-cos/releases/' + releaseId + '/payload/vault-artifacts';
-  fs.mkdirSync(path.dirname(stagedBase), { recursive: true, mode: 0o700 });
-  fs.renameSync('/opt/nanoclaw-cos/vault', stagedBase);
-  fs.rmdirSync('/opt/nanoclaw-cos');
   const sourceRoot = stagedBase + '/' + artifactDigest;
+  fs.mkdirSync(sourceRoot, { recursive: true, mode: 0o700 });
+  const names = ['artifact.json', 'gateway.mjs', 'node'];
+  assert.deepEqual(fs.readdirSync(root).sort(), [...names].sort());
+  for (const name of names) {
+    fs.copyFileSync(root + '/' + name, sourceRoot + '/' + name, fs.constants.COPYFILE_EXCL);
+    fs.chownSync(sourceRoot + '/' + name, 1000, 1000);
+    fs.chmodSync(sourceRoot + '/' + name, name === 'node' ? 0o555 : 0o444);
+  }
   fs.chownSync(sourceRoot, 1000, 1000);
-  for (const name of ['artifact.json', 'gateway.mjs', 'node']) fs.chownSync(sourceRoot + '/' + name, 1000, 1000);
+  fs.chmodSync(sourceRoot, 0o555);
+  // Overlayfs may refuse a lower-layer directory rename. Remove only this verified disposable fixture package after its copy.
+  fs.chmodSync(root, 0o700);
+  for (const name of names) fs.unlinkSync(root + '/' + name);
+  fs.rmdirSync(root);
+  fs.rmdirSync(base);
+  fs.rmdirSync('/opt/nanoclaw-cos');
   assert.equal(fs.existsSync('/etc/nanoclaw-cos'), false);
   assert.equal(fs.existsSync('/opt/nanoclaw-cos'), false);
   fs.mkdirSync('/case/authority', { mode: 0o700 });
