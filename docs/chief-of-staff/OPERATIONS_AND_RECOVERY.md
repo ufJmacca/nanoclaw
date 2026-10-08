@@ -119,6 +119,92 @@ before completing the lease. Failed health leaves it closed for repair/retry.
 It restarts ordinary NanoClaw operation while the CoS binding remains paused;
 `cosResumed` stays false. It grants no account, writer or model authority.
 
+## Install the G01 vault
+
+G01 remains a draft candidate; its target installation and acceptance are pending.
+Use this procedure only after the exact Mac-tested G01 bundle has been verified,
+deployed and recorded healthy on the existing protected target. The S11 payload
+cannot run these vault commands. Capacity must cover release staging, pinned
+utilities, the new 1 GiB volume and at least 2 GiB free after allocation.
+
+Pause CoS, drain ordinary workers and use the hold procedure above. Retain the
+maintenance UUID through retries; choose a fresh UUID for the next operation.
+Vault installation and provisioning require current owner membership, the real
+maintenance and native host leases, and a quiescent installation.
+
+Run the owner process with scoped core and swap restrictions. With the verified
+payload, settings and scope above, define this on the Pi:
+
+```sh
+cos_vault_owner() {
+  systemd-run --user --quiet --pipe --wait --collect \
+    --property=LimitCORE=0 --property=MemorySwapMax=0 \
+    --property=RuntimeMaxSec=700 -- \
+    /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C LC_ALL=C \
+    "$COS_OPERATOR_PAYLOAD/node/bin/node" \
+    "$COS_OPERATOR_PAYLOAD/dist/modules/chief-of-staff/ops/target-owner-admin.js" \
+    --settings "$COS_OPERATOR_SETTINGS" -- "$@"
+}
+cos_vault_owner vault-install --scope "$COS_OPERATOR_SCOPE"
+```
+
+Use the same scoped properties for credential-bearing G01 maintenance, backup
+and restore helper processes before they read their selected profiles. The
+`cos_vault_owner` wrapper also accepts the existing owner backup commands; use
+it for those commands once G01 is installed. Verify the actual memory controls
+on the Pi as part of installed acceptance.
+
+The installation receipt returns the non-secret `recoveryReference`. Installation
+creates only claimed root configuration and sealed executables at fixed paths;
+it does not allocate the volume or read recovery material. Keep the reference
+stable in the private owner configuration. Run `vault-install` again under each
+fresh held operation before provisioning, including upgrades; it refreshes the
+checked authority while preserving the vault identity and recovery reference.
+Repeat the same command after a lost installation reply. Foreign resources and
+changed payloads are refused.
+
+On the Mac, use the Keychain helper exported from the tested release's exact
+source. Verify its bytes against that source before invoking it. `ensure` creates
+the reference's 64-byte recovery key only when absent, and `check` reports presence
+without exposing it. Both take the receipt's UUID as metadata:
+
+```sh
+swift "$COS_VAULT_KEYCHAIN_HELPER" ensure "$COS_VAULT_RECOVERY_REFERENCE"
+swift "$COS_VAULT_KEYCHAIN_HELPER" check "$COS_VAULT_RECOVERY_REFERENCE"
+```
+
+Provisioning consumes the helper's `stream` output only through a private pipe
+to the trusted SSH connection. Use the exact verified Pi payload/settings/scope
+in the remote command, under the same held maintenance operation:
+
+```sh
+set -o pipefail
+swift "$COS_VAULT_KEYCHAIN_HELPER" stream "$COS_VAULT_RECOVERY_REFERENCE" | \
+  ssh -T -o BatchMode=yes -o StrictHostKeyChecking=yes PI_ALIAS \
+  'systemd-run --user --quiet --pipe --wait --collect \
+    --property=LimitCORE=0 --property=MemorySwapMax=0 \
+    --property=RuntimeMaxSec=700 -- \
+    /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C LC_ALL=C \
+    /absolute/current/payload/node/bin/node \
+    /absolute/current/payload/dist/modules/chief-of-staff/ops/target-owner-admin.js \
+    --settings /absolute/current/target.json -- \
+    vault-provision --scope VERIFIED_SCOPE'
+```
+
+Key bytes stay out of files, arguments, environment variables and captured
+output. The owner process verifies memory controls before reading the key, sends
+it through the separate bounded root pipe, clears received buffers and closes
+its live capability. A lost provisioning reply is reconciled using the same
+maintenance operation and permanent identity.
+
+Inspect `cos_owner vault-status` and the fixed receipts. Verify actual unit
+activation, mount ordering, private ownership, scoped memory controls, encrypted
+canary remount and independent recovery before recording G01 acceptance. A
+missing vault must deny Google credentials without a plaintext replacement;
+ordinary NanoClaw data and messaging must remain intact. Release the held
+operation using its original maintenance UUID after the checks pass. These
+commands grant no Google, Calendar writer or model authority.
+
 ## Rotate credentials
 
 Use the hold procedure before changing client credentials. An unreachable old
