@@ -2,6 +2,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import type { Readable } from 'node:stream';
+import type { CalendarStorageRoots } from '../calendar/storage-policy.js';
 import { digest } from '../domain/contracts.js';
 import { readPrivate } from './target-state.js';
 import { vaultRootConfiguration, type VaultRootConfiguration } from './vault-root-config.js';
@@ -11,6 +12,7 @@ import { writeVaultRootRequest, type VaultRootHeader } from './vault-root-wire.j
 import { runtimeTestMessages } from './runtime-test-wire.js';
 import { verifyVaultMemory } from './vault-memory.js';
 import { VAULT_BYTES } from './vault-admission.js';
+import { configureVaultStorage } from './vault-storage.js';
 export function vaultRootInvocation(input: VaultRootConfiguration) {
   const config = vaultRootConfiguration(input),
     root = '/opt/nanoclaw-cos/vault/' + config.artifact.digest;
@@ -92,6 +94,7 @@ type OwnerControls = {
   openAuthority?: typeof openProtectedVaultAuthority;
   readRecovery?: typeof readVaultRecoveryKey;
   invoke?: (header: VaultRootHeader, key: Buffer) => Promise<unknown>;
+  configureStorage?: (roots: CalendarStorageRoots, vaultRoot: string) => void | Promise<void>;
 };
 /** Installed owner command. Configuration is non-secret metadata at one fixed private target path; recovery is pipe-only. */
 export async function runVaultProvisionAdmin(
@@ -142,6 +145,22 @@ export async function runVaultProvisionAdmin(
       receipt.artifactDigest !== config.artifact.digest
     )
       throw Error('root_result_binding_conflict');
+    recovery.fill(0);
+    await (
+      controls.configureStorage ??
+      ((roots, vaultRoot) => {
+        configureVaultStorage(roots, vaultRoot);
+      })
+    )(
+      {
+        targetRoot: config.owner.targetRoot,
+        installationRoot: config.target.binding.installationRoot,
+        dataRoot: config.target.binding.dataRoot,
+      },
+      '/var/lib/nanoclaw-cos/vault',
+    );
+    await proof.check();
+    memory();
     verified = Object.freeze({ ...receipt });
     // eslint-disable-next-line no-catch-all/no-catch-all -- Retain only failure status while clearing bytes and closing the private authority below.
   } catch {

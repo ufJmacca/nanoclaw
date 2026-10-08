@@ -49,6 +49,7 @@ function fixture() {
     openAuthority: vi.fn(async () => proof),
     readRecovery: vi.fn(async () => recovery),
     invoke: vi.fn(async (_header: VaultRootHeader, _key: Buffer) => receipt),
+    configureStorage: vi.fn(async (_roots: unknown, _vaultRoot: string) => {}),
   };
   return {
     config,
@@ -86,6 +87,43 @@ it('binds the private root request to the actual owner proof and clears recovery
   expect(f.recovery.every((byte) => byte === 0)).toBe(true);
   expect(JSON.stringify(result)).not.toContain(f.authority.token);
 });
+it('publishes the verified mounted storage policy before acknowledging provisioning, under the live owner lease', async () => {
+  const f = fixture();
+  f.controls.configureStorage.mockImplementation(async (roots, vaultRoot) => {
+    expect(f.controls.invoke).toHaveBeenCalledOnce();
+    expect(f.authority.close).not.toHaveBeenCalled();
+    expect(f.recovery.every((byte) => byte === 0)).toBe(true);
+    expect(roots).toEqual({
+      targetRoot: f.config.owner.targetRoot,
+      installationRoot: f.config.target.binding.installationRoot,
+      dataRoot: f.config.target.binding.dataRoot,
+    });
+    expect(vaultRoot).toBe('/var/lib/nanoclaw-cos/vault');
+  });
+  await expect(runVaultProvisionAdmin(f.input, f.controls)).resolves.toEqual(f.receipt);
+  expect(f.controls.configureStorage).toHaveBeenCalledOnce();
+  expect(f.proof.check.mock.calls.length).toBeGreaterThanOrEqual(4);
+  expect(f.authority.close).toHaveBeenCalledOnce();
+});
+it('keeps provisioning unavailable when mounted-storage verification or policy publication fails', async () => {
+  const f = fixture();
+  f.controls.configureStorage.mockRejectedValue(Error('PRIVATE_MOUNT_CHANGED'));
+  await expect(runVaultProvisionAdmin(f.input, f.controls)).rejects.toThrow('vault_owner_provision_unavailable');
+  expect(f.controls.invoke).toHaveBeenCalledOnce();
+  expect(f.controls.configureStorage).toHaveBeenCalledOnce();
+  expect(f.authority.close).toHaveBeenCalledOnce();
+  expect(f.recovery.every((byte) => byte === 0)).toBe(true);
+});
+it('denies completion when owner authority is withdrawn during storage policy publication', async () => {
+  const f = fixture();
+  f.controls.configureStorage.mockImplementation(async () => {
+    f.proof.check.mockRejectedValue(Error('PRIVATE_REVOKED'));
+  });
+  await expect(runVaultProvisionAdmin(f.input, f.controls)).rejects.toThrow('vault_owner_provision_unavailable');
+  expect(f.controls.configureStorage).toHaveBeenCalledOnce();
+  expect(f.authority.close).toHaveBeenCalledOnce();
+  expect(f.recovery.every((byte) => byte === 0)).toBe(true);
+});
 it.each(['memory', 'authority', 'request', 'invoke', 'receipt', 'withdrawal', 'cleanup'])(
   'closes owner authority and refuses %s failure',
   async (reason) => {
@@ -102,6 +140,7 @@ it.each(['memory', 'authority', 'request', 'invoke', 'receipt', 'withdrawal', 'c
       f.proof.check.mockResolvedValueOnce(undefined).mockRejectedValue(Error('PRIVATE_REVOKED'));
     if (reason === 'cleanup') f.authority.close.mockRejectedValue(Error('PRIVATE_CLEANUP'));
     await expect(runVaultProvisionAdmin(f.input, f.controls)).rejects.toThrow('vault_owner_provision_unavailable');
+    if (reason !== 'cleanup') expect(f.controls.configureStorage).not.toHaveBeenCalled();
     if (f.controls.readRecovery.mock.results[0]?.type === 'return' && reason !== 'request')
       expect(f.recovery.every((byte) => byte === 0)).toBe(true);
     if (!['memory', 'authority'].includes(reason)) expect(f.authority.close).toHaveBeenCalledOnce();
