@@ -138,6 +138,7 @@ it('opens and closes only its verified mapping and supports the independent reco
     .mock.calls.filter((c) => c[1][0] === 'open' && !c[1].includes('--test-passphrase'));
   expect(calls).toHaveLength(2);
   expect(calls[0][4]).toBeUndefined();
+  expect(calls[1][3]).toBeNull();
   expect(calls[1][4]).toEqual(key);
   f.controls.mapping = () => 'conflict';
   expect(() => f.crypto.close()).toThrow('vault_crypto_unavailable');

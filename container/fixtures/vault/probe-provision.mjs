@@ -352,7 +352,7 @@ try {
     disableKeyring: true,
     run(tool, args, volumeFd, keyFd, input) {
       if (args[0] === 'open' && !args.includes('--test-passphrase') && input) {
-        assert.equal(keyFd, undefined);
+        assert.equal(keyFd, null);
         assert.equal(input.equals(recovery), true);
         recoveryOpens++;
       }
@@ -431,7 +431,7 @@ try {
   assert.equal((await checkVaultRecovery(identity, rootPorts)).status, 'ready');
   assert.equal(recoveryOpens, beforeRecovery + 1);
   assert.equal(mounts.inspect(), 'matching');
-  owner('recovery');
+  owner('recovery-before-race');
   console.log(
     '{"installedRecoveryWorkflow":"passed","recoveryMapperOpenedWithPipeOnly":true,"normalUnlockRestored":true,"unitManager":"modeled"}',
   );

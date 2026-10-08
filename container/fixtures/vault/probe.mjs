@@ -26,11 +26,12 @@ if (mode === 'memory') {
       fs.closeSync(fd);
     }
   });
-} else if (mode === 'recovery') {
+} else if (mode === 'recovery' || mode === 'recovery-before-race') {
   verifyVaultStorage(roots);
   await withVaultDirectory(roots, 'backup-credentials', async (pinned) => {
     assert.equal(fs.readFileSync(pinned + '/canary', 'utf8'), 'SYNTHETIC_ENCRYPTED_CANARY');
-    assert.equal(fs.readFileSync(pinned + '/race-canary', 'utf8'), 'SYNTHETIC_RACE_CANARY');
+    if (mode === 'recovery') assert.equal(fs.readFileSync(pinned + '/race-canary', 'utf8'), 'SYNTHETIC_RACE_CANARY');
+    else assert.equal(fs.existsSync(pinned + '/race-canary'), false);
   });
 } else if (mode === 'race') {
   await assert.rejects(
