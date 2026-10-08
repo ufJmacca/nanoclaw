@@ -61,7 +61,8 @@ directory=${manifest%/release.json}
 id=${directory##*/}
 cli verify "$id"
 # Close disposal before target/migration/health repair can delay the final release.
-bash scripts/cos-protect-programme.sh --release-manifest "$manifest"
+slice=$(cli field "$id" slice)
+if [[ "$slice" != G01 ]]; then bash scripts/cos-protect-programme.sh --release-manifest "$manifest"; fi
 remote "$(cli preflight-command)" > "$directory/target-observation.json"
 cli target-check "$id"
 command=$(cli protected-release-command "$id")

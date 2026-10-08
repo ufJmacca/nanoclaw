@@ -6,7 +6,12 @@ import { deploymentSettings, shellArgument } from './deployment-settings.js';
 import { readPrivate, writeAtomic } from './target-state.js';
 import { artifactHash, verifyReleaseBundle } from './release-artifacts.js';
 import { validateReleaseManifest } from './release-manifest.js';
-import { targetPreflightCommand, validateTargetObservation, validateDeliveryReceipt } from './mac-deploy.js';
+import {
+  targetPreflightCommand,
+  validateTargetObservation,
+  validateDeliveryReceipt,
+  validateReleaseTargetObservation,
+} from './mac-deploy.js';
 import { digest } from '../domain/contracts.js';
 import { checkpointReleaseExecution, readReleaseExecution } from './mac-release.js';
 
@@ -107,7 +112,14 @@ export async function macDeployCommand(args: string[]): Promise<string | void> {
       .join(' ');
   }
   if (operation === 'target-check' && !values.length) {
-    validateTargetObservation(settings, readPrivate(path.join(root, 'target-observation.json')), true);
+    const observation = readPrivate(path.join(root, 'target-observation.json'));
+    if (id === 'status') validateTargetObservation(settings, observation, true);
+    else
+      validateReleaseTargetObservation(
+        settings,
+        validateReleaseManifest(readPrivate(path.join(root, 'release.json'))),
+        observation,
+      );
     return;
   }
   if (operation === 'unbound-status' && !values.length) {
@@ -250,6 +262,7 @@ export async function macDeployCommand(args: string[]): Promise<string | void> {
       commit: manifest.source.commit,
       tree: manifest.source.tree,
       fetchRef: manifest.source.fetchRef,
+      slice: manifest.slice,
       stage,
       manifestHash: local.manifestHash,
     };

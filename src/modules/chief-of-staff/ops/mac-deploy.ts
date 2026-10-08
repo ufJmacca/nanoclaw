@@ -1,4 +1,4 @@
-import type { ReleaseManifest } from './release-manifest.js';
+import { validateReleaseManifest, type ReleaseManifest } from './release-manifest.js';
 import { deploymentSettings, shellArgument, type DeploymentSettings } from './deployment-settings.js';
 import { digest } from '../domain/contracts.js';
 import type { TargetState } from './target-state.js';
@@ -86,6 +86,18 @@ export function validateBuildTargetObservation(settings: DeploymentSettings, val
     (!state?.maintenance || !/^[a-f0-9-]{36}$/.test(state.maintenanceId ?? ''))
   )
     throw new Error('wrong_deployment_target');
+  return state;
+}
+/** Original target initialisation is closed for extension delivery. The installed helper independently verifies its durable seal. */
+export function validateReleaseTargetObservation(
+  settings: DeploymentSettings,
+  input: ReleaseManifest,
+  value: unknown,
+): TargetState | null {
+  const manifest = validateReleaseManifest(input),
+    state = validateTargetObservation(settings, value, true);
+  if (manifest.slice === 'G01' && (state?.lifecycle !== 'protected' || !state.releaseId))
+    throw Error('protected_extension_target_required');
   return state;
 }
 
