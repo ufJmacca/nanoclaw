@@ -49,7 +49,7 @@ export async function runVaultRootGateway(stream: Readable, controls: VaultRootG
     if (
       header.configurationDigest !== configurationDigest ||
       digest(header.identity) !== digest(config.identity) ||
-      header.scope.operationId !== config.identity.operationId ||
+      header.scope.operationId !== config.authority.operationId ||
       header.scope.targetDigest !== config.identity.targetDigest ||
       !Number.isSafeInteger(header.scope.generation) ||
       header.scope.generation < config.target.minimumGeneration

@@ -31,7 +31,8 @@ try {
     dataRoot: '/home/fixture/app/data',
   };
   const config = {
-    contract: 'cos-vault-root-config/v1',
+    contract: 'cos-vault-root-config/v2',
+    authority: { operationId: randomUUID() },
     identity: {
       operationId: randomUUID(),
       targetDigest: digest(binding),
@@ -59,7 +60,7 @@ try {
       process.execPath,
       '/probe/probe-authority.mjs',
       'owner',
-      config.identity.operationId,
+      config.authority.operationId,
       config.identity.targetDigest,
       '1',
     ],

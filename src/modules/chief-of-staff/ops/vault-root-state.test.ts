@@ -31,7 +31,8 @@ it('keeps resource ownership stable across reviewed-source upgrades and authorit
     dataRoot: '/home/fixture/app/data',
   };
   const config = vaultRootConfiguration({
-    contract: 'cos-vault-root-config/v1',
+    contract: 'cos-vault-root-config/v2',
+    authority: { operationId: randomUUID() },
     identity: {
       operationId: randomUUID(),
       targetDigest: digest(binding),
@@ -45,6 +46,7 @@ it('keeps resource ownership stable across reviewed-source upgrades and authorit
   });
   const upgraded = vaultRootConfiguration({
     ...config,
+    authority: { operationId: randomUUID() },
     artifact: { sourceCommit: 'f'.repeat(40), sourceTree: '0'.repeat(40), digest: '1'.repeat(64) },
     target: { ...config.target, minimumGeneration: 4 },
   });

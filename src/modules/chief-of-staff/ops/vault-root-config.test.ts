@@ -11,7 +11,8 @@ function fixture() {
     dataRoot: '/home/fixture/nanoclaw/data',
   };
   return {
-    contract: 'cos-vault-root-config/v1',
+    contract: 'cos-vault-root-config/v2',
+    authority: { operationId: randomUUID() },
     identity: {
       operationId: randomUUID(),
       targetDigest: digest(binding),
@@ -24,6 +25,18 @@ function fixture() {
     artifact: { sourceCommit: 'c'.repeat(40), sourceTree: 'd'.repeat(40), digest: 'e'.repeat(64) },
   };
 }
+it('binds a fresh operation independently of the permanent volume identity', () => {
+  const input = fixture(),
+    operationId = randomUUID();
+  const value = vaultRootConfiguration({
+    ...input,
+    contract: 'cos-vault-root-config/v2',
+    authority: { operationId },
+  });
+  expect(value.authority.operationId).toBe(operationId);
+  expect(value.identity.operationId).toBe(input.identity.operationId);
+  expect(Object.isFrozen(value.authority)).toBe(true);
+});
 it('binds root configuration to the protected target and derives only fixed programme storage paths', () => {
   const input = fixture(),
     value = vaultRootConfiguration(input);
@@ -55,6 +68,8 @@ it.each([
   'foreign-service',
   'relative-data',
   'bad-uuid',
+  'bad-operation',
+  'legacy-config',
   'mutable-source',
   'bad-artifact',
 ])('refuses %s without accepting caller-selected root commands or resource paths', (reason) => {
@@ -72,6 +87,8 @@ it.each([
   if (reason === 'foreign-service') value.target.binding.service = 'foreign\nExecStart=/bin/sh';
   if (reason === 'relative-data') value.target.binding.dataRoot = 'private/data';
   if (reason === 'bad-uuid') Object.assign(value.identity, { luksUuid: 'PRIVATE_UUID' });
+  if (reason === 'bad-operation') Object.assign(value.authority, { operationId: 'PRIVATE_OPERATION' });
+  if (reason === 'legacy-config') value.contract = 'cos-vault-root-config/v1';
   if (reason === 'mutable-source') value.artifact.sourceCommit = 'main';
   if (reason === 'bad-artifact') value.artifact.digest = 'PRIVATE_DIGEST';
   expect(() => vaultRootConfiguration(value)).toThrow('vault_root_configuration_unavailable');

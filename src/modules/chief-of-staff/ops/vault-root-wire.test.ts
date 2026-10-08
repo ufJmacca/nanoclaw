@@ -15,7 +15,7 @@ function header(): VaultRootHeader {
       luksUuid: randomUUID(),
       filesystemUuid: randomUUID(),
     },
-    scope: { operationId, targetDigest, generation: 1 },
+    scope: { operationId: randomUUID(), targetDigest, generation: 1 },
     authority: { socket: '/private/owner/authority.sock', token: 'c'.repeat(64) },
   };
 }
@@ -80,7 +80,7 @@ it.each([
     bytes.writeUInt32BE(1);
   }
   if (reason === 'extra-command') bytes = frame({ ...value, command: 'PRIVATE_COMMAND' });
-  if (reason === 'foreign-scope') bytes = frame({ ...value, scope: { ...value.scope, operationId: randomUUID() } });
+  if (reason === 'foreign-scope') bytes = frame({ ...value, scope: { ...value.scope, targetDigest: 'd'.repeat(64) } });
   if (reason === 'bad-token') bytes = frame({ ...value, authority: { ...value.authority, token: 'PRIVATE_TOKEN' } });
   if (reason === 'bad-socket')
     bytes = frame({ ...value, authority: { ...value.authority, socket: '/private/../foreign.sock' } });

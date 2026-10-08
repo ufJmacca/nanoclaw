@@ -17,7 +17,8 @@ function fixture() {
     dataRoot: '/home/fixture/app/data',
   };
   const config = vaultRootConfiguration({
-    contract: 'cos-vault-root-config/v1',
+    contract: 'cos-vault-root-config/v2',
+    authority: { operationId: randomUUID() },
     identity: {
       operationId: randomUUID(),
       targetDigest: digest(binding),
@@ -33,7 +34,7 @@ function fixture() {
     contract: 'cos-vault-root-request/v1',
     configurationDigest: digest(config),
     identity: { ...config.identity },
-    scope: { operationId: config.identity.operationId, targetDigest: config.identity.targetDigest, generation: 3 },
+    scope: { operationId: config.authority.operationId, targetDigest: config.identity.targetDigest, generation: 3 },
     authority: { socket: '/home/fixture/private/proof.sock', token: 'f'.repeat(64) },
   };
   const recovery = Buffer.alloc(64, 47),
@@ -109,13 +110,14 @@ it('checks trusted config and sealed bytes before reading recovery, rechecks liv
   });
   expect(JSON.stringify(receipt)).not.toContain(f.header.authority.token);
 });
-it.each(['configuration', 'identity', 'operation', 'target', 'generation'])(
+it.each(['configuration', 'identity', 'operation', 'resource-operation', 'target', 'generation'])(
   'denies request %s mismatch before constructing effects and clears recovery',
   async (reason) => {
     const f = fixture();
     if (reason === 'configuration') f.header.configurationDigest = '0'.repeat(64);
     if (reason === 'identity') f.header.identity.filesystemUuid = randomUUID();
     if (reason === 'operation') f.header.scope.operationId = randomUUID();
+    if (reason === 'resource-operation') f.header.scope.operationId = f.config.identity.operationId;
     if (reason === 'target') f.header.scope.targetDigest = '0'.repeat(64);
     if (reason === 'generation') f.header.scope.generation = 2;
     await expect(runVaultRootGateway(f.stream, f.controls)).rejects.toThrow('vault_root_gateway_unavailable');

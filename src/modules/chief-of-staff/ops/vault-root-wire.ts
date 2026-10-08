@@ -37,7 +37,7 @@ function validate(value: unknown): asserts value is VaultRootHeader {
     ) ||
     !object(scope) ||
     Object.keys(scope).sort().join(',') !== 'generation,operationId,targetDigest' ||
-    scope.operationId !== identity.operationId ||
+    !uuid(scope.operationId) ||
     scope.targetDigest !== identity.targetDigest ||
     !Number.isSafeInteger(scope.generation) ||
     Number(scope.generation) < 1 ||

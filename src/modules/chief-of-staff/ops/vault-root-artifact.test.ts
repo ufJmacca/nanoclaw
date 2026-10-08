@@ -45,7 +45,8 @@ function fixture() {
     dataRoot: '/home/fixture/app/data',
   };
   const config = vaultRootConfiguration({
-    contract: 'cos-vault-root-config/v1',
+    contract: 'cos-vault-root-config/v2',
+    authority: { operationId: randomUUID() },
     identity: {
       operationId: randomUUID(),
       targetDigest: digest(binding),

@@ -40,7 +40,7 @@ export async function openProtectedVaultAuthority(
       config.owner.gid !== process.getgid?.() ||
       root !== targetRoot ||
       (controls.ownerTargetRoot === undefined && config.owner.home !== os.homedir()) ||
-      maintenance.owner !== 'operations-' + config.identity.operationId ||
+      maintenance.owner !== 'operations-' + config.authority.operationId ||
       maintenance.purpose !== 'deployment' ||
       maintenance.generation < config.target.minimumGeneration
     )
@@ -62,7 +62,7 @@ export async function openProtectedVaultAuthority(
     const directory = path.join(root, 'vault-authority');
     if (!fs.lstatSync(directory, { throwIfNoEntry: false })) fs.mkdirSync(directory, { mode: 0o700 });
     const scope = Object.freeze({
-      operationId: config.identity.operationId,
+      operationId: config.authority.operationId,
       targetDigest: config.identity.targetDigest,
       generation: maintenance.generation,
     });

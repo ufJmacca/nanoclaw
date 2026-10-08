@@ -39,9 +39,10 @@ async function fixture() {
   );
   const hostLease = acquireHostExecutionLease(native);
   const config = vaultRootConfiguration({
-    contract: 'cos-vault-root-config/v1',
+    contract: 'cos-vault-root-config/v2',
+    authority: { operationId },
     identity: {
-      operationId,
+      operationId: randomUUID(),
       targetDigest: digest(binding),
       recoveryReference: randomUUID(),
       luksUuid: randomUUID(),
@@ -94,11 +95,38 @@ it('provides a live proof fenced by real protected maintenance and SQLite host l
     proof = await f.open();
   await checkVaultAuthority(proof.authority, proof.scope, process.getuid!());
   expect(proof.scope).toEqual({
-    operationId: f.config.identity.operationId,
+    operationId: f.config.authority.operationId,
     targetDigest: digest(f.binding),
     generation: f.maintenance.generation,
   });
   expect(JSON.stringify(proof)).not.toContain(proof.authority.token);
+  expect(proof.scope.operationId).not.toBe(f.config.identity.operationId);
+});
+it('opens a fresh maintenance proof after a source upgrade while retaining the vault identity', async () => {
+  const f = await fixture(),
+    first = await f.open();
+  await first.authority.close();
+  await finishMaintenance(f.root, f.binding, f.maintenance, async () => true);
+  const operationId = randomUUID(),
+    maintenance = beginMaintenance(f.root, f.binding, 'operations-' + operationId, 'deployment');
+  await confirmQuiescence(f.root, f.binding, maintenance, async () => ({
+    activeCoordinators: 0,
+    activeDatabaseOperations: 0,
+  }));
+  f.options.maintenance = maintenance;
+  f.options.configuration = vaultRootConfiguration({
+    ...f.config,
+    authority: { operationId },
+    target: { ...f.config.target, minimumGeneration: maintenance.generation },
+    artifact: { sourceCommit: 'f'.repeat(40), sourceTree: '0'.repeat(40), digest: '1'.repeat(64) },
+  });
+  const next = await f.open();
+  await checkVaultAuthority(next.authority, next.scope, process.getuid!());
+  expect(next.scope.operationId).toBe(operationId);
+  expect(f.options.configuration.identity).toEqual(f.config.identity);
+  await expect(checkVaultAuthority(next.authority, first.scope, process.getuid!())).rejects.toThrow(
+    'vault_authority_unavailable',
+  );
 });
 it.each(['host-release', 'host-replacement', 'maintenance-release', 'lost-quiescence', 'unpaused'])(
   'withdraws root proof after %s without changing data or restoring authority',

@@ -7,7 +7,9 @@ import type { VaultProvisionIdentity } from './vault-provision.js';
 import type { VaultRootPaths } from './vault-root-effects.js';
 import { verifyVaultMemory } from './vault-memory.js';
 export type VaultRootConfiguration = {
-  contract: 'cos-vault-root-config/v1';
+  contract: 'cos-vault-root-config/v2';
+  /** A fresh protected maintenance operation; the resource identity below survives releases. */
+  authority: { operationId: string };
   identity: VaultProvisionIdentity;
   target: { binding: TargetBinding; lifecycle: 'protected'; minimumGeneration: number };
   owner: { uid: number; gid: number; home: string; targetRoot: string };
@@ -27,11 +29,13 @@ export function vaultRootConfiguration(value: unknown): VaultRootConfiguration {
   try {
     if (
       !object(value) ||
-      !keys(value, 'artifact,contract,identity,owner,target') ||
-      value.contract !== 'cos-vault-root-config/v1'
+      !keys(value, 'artifact,authority,contract,identity,owner,target') ||
+      value.contract !== 'cos-vault-root-config/v2'
     )
       throw Error('invalid_root_configuration');
-    const { identity, owner, target, artifact } = value;
+    const { identity, owner, target, artifact, authority } = value;
+    if (!object(authority) || !keys(authority, 'operationId') || !uuid(authority.operationId))
+      throw Error('invalid_root_authority');
     if (
       !object(identity) ||
       !keys(identity, 'filesystemUuid,luksUuid,operationId,recoveryReference,targetDigest') ||
@@ -82,7 +86,8 @@ export function vaultRootConfiguration(value: unknown): VaultRootConfiguration {
     )
       throw Error('invalid_root_artifact');
     return Object.freeze({
-      contract: 'cos-vault-root-config/v1',
+      contract: 'cos-vault-root-config/v2',
+      authority: Object.freeze({ ...authority }),
       identity: Object.freeze({ ...identity }),
       owner: Object.freeze({ ...owner }),
       target: Object.freeze({ ...target, binding: Object.freeze({ ...binding }) }),

@@ -21,7 +21,8 @@ try {
     dataRoot: '/home/fixture/nanoclaw/data',
   };
   const value = {
-    contract: 'cos-vault-root-config/v1',
+    contract: 'cos-vault-root-config/v2',
+    authority: { operationId: randomUUID() },
     identity: {
       operationId: randomUUID(),
       targetDigest: digest(binding),

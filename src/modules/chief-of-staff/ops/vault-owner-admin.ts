@@ -14,7 +14,7 @@ import { VAULT_BYTES } from './vault-admission.js';
 export function vaultRootInvocation(input: VaultRootConfiguration) {
   const config = vaultRootConfiguration(input),
     root = '/opt/nanoclaw-cos/vault/' + config.artifact.digest;
-  const unit = 'nanoclaw-cos-vault-admin-' + config.identity.operationId + '-' + randomUUID() + '.service';
+  const unit = 'nanoclaw-cos-vault-admin-' + config.authority.operationId + '-' + randomUUID() + '.service';
   const env = { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', LANG: 'C', LC_ALL: 'C' };
   return {
     tool: '/usr/bin/sudo',

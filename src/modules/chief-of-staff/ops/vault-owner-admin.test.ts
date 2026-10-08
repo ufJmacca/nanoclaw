@@ -14,7 +14,8 @@ function fixture() {
     dataRoot: '/home/fixture/app/data',
   };
   const config = vaultRootConfiguration({
-    contract: 'cos-vault-root-config/v1',
+    contract: 'cos-vault-root-config/v2',
+    authority: { operationId: randomUUID() },
     identity: {
       operationId: randomUUID(),
       targetDigest: digest(binding),
@@ -29,7 +30,7 @@ function fixture() {
   const authority = { socket: '/home/fixture/private/proof.sock', token: 'f'.repeat(64), close: vi.fn(async () => {}) };
   const proof = {
     authority,
-    scope: { operationId: config.identity.operationId, targetDigest: config.identity.targetDigest, generation: 3 },
+    scope: { operationId: config.authority.operationId, targetDigest: config.identity.targetDigest, generation: 3 },
     check: vi.fn(async () => {}),
   };
   const recovery = Buffer.alloc(64, 29);
