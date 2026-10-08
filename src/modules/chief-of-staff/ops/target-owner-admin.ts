@@ -7,6 +7,7 @@ import { validateReleaseManifest, type ReleaseManifest } from './release-manifes
 const commands = [
   'vault-status',
   'vault-provision',
+  'vault-install',
   'database-check',
   'status',
   'operator-status',
@@ -132,7 +133,10 @@ export async function targetOwnerAdmin(args: string[]): Promise<Record<string, u
       return vaultStatusCommand(env);
     }
     const { contextAdminCommand } = await import('./context-admin.js');
-    return contextAdminCommand(parsed, env);
+    return contextAdminCommand(parsed, env, undefined, {
+      release,
+      payloadRoot: path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../..'),
+    });
   };
   // Inspection and durable owner denials remain available while another operation owns its longer lease.
   return ['operator-control', 'operator-status', 'status', 'database-check', 'vault-status'].includes(parsed.command)

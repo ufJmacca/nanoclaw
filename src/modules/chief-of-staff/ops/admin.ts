@@ -29,10 +29,10 @@ type AdminArguments =
   | { command: 'bind'; binding: BindingRequest }
   | ContextAdminArguments;
 export function parseAdminArguments(args: string[]): AdminArguments {
-  if (args[0] === 'vault-provision') {
+  if (args[0] === 'vault-provision' || args[0] === 'vault-install') {
     if (args.length !== 3 || args[1] !== '--scope' || !/^[a-zA-Z0-9_-]{1,128}$/.test(args[2]))
       throw Error('invalid_admin_arguments');
-    return { command: 'vault-provision', scopeId: args[2] };
+    return { command: args[0], scopeId: args[2] };
   }
   if (args[0] === 'vault-status') {
     if (args.length !== 1) throw new Error('invalid_admin_arguments');

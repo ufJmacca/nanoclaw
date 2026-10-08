@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import path from 'node:path';
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
@@ -6,7 +7,7 @@ import { digest } from '/code/modules/chief-of-staff/domain/contracts.js';
 import { verifyVaultMemory } from '/code/modules/chief-of-staff/ops/vault-memory.js';
 import { readVaultRootConfiguration } from '/code/modules/chief-of-staff/ops/vault-root-config.js';
 import { verifyVaultRootArtifact } from '/code/modules/chief-of-staff/ops/vault-root-artifact.js';
-import { installVaultRoot } from '/code/modules/chief-of-staff/ops/vault-root-install.js';
+import { writeVaultInstallRequest } from '/code/modules/chief-of-staff/ops/vault-install-wire.js';
 import { initializeVaultRootState, vaultRootStateDigest } from '/code/modules/chief-of-staff/ops/vault-root-state.js';
 import { checkVaultAuthority } from '/code/modules/chief-of-staff/ops/vault-authority.js';
 import { writeVaultRootRequest } from '/code/modules/chief-of-staff/ops/vault-root-wire.js';
@@ -49,8 +50,12 @@ try {
   fs.mkdirSync('/case', { mode: 0o755 });
   fs.chmodSync('/case', 0o755);
   // Keep the baked exact-source package as immutable fixture input, then exercise the actual fixed-path installer.
-  fs.renameSync('/opt/nanoclaw-cos', '/case/export');
-  const sourceRoot = '/case/export/vault/' + artifactDigest;
+  const releaseId = 'release-' + seal.sourceCommit.slice(0, 12) + '-20261008000000',
+    stagedBase = '/home/fixture/.config/nanoclaw-cos/releases/' + releaseId + '/payload/vault-artifacts';
+  fs.mkdirSync(path.dirname(stagedBase), { recursive: true, mode: 0o700 });
+  fs.renameSync('/opt/nanoclaw-cos/vault', stagedBase);
+  fs.rmdirSync('/opt/nanoclaw-cos');
+  const sourceRoot = stagedBase + '/' + artifactDigest;
   fs.chownSync(sourceRoot, 1000, 1000);
   for (const name of ['artifact.json', 'gateway.mjs', 'node']) fs.chownSync(sourceRoot + '/' + name, 1000, 1000);
   assert.equal(fs.existsSync('/etc/nanoclaw-cos'), false);
@@ -83,11 +88,42 @@ try {
   ownerExit.catch(() => {});
   const messages = runtimeTestMessages(owner.stdout),
     grant = (await messages.next()).value;
-  const installationAuthority = { assertAuthority: () => checkVaultAuthority(grant, grant.scope, 1000) };
-  const installation = await installVaultRoot({ configuration: config, sourceRoot }, installationAuthority);
-  assert.equal(installation.status, 'installed');
+  const install = async () => {
+    const child = spawn(sourceRoot + '/node', [sourceRoot + '/gateway.mjs', '--install'], {
+      cwd: '/',
+      env: { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', LANG: 'C', LC_ALL: 'C' },
+      stdio: ['pipe', 'pipe', 'ignore'],
+      timeout: 120000,
+    });
+    child.stdin.on('error', () => {});
+    const exited = new Promise((resolve, reject) => {
+      child.once('error', reject);
+      child.once('exit', (code, signal) =>
+        code === 0 && !signal ? resolve() : reject(Error('installer_fixture_failed')),
+      );
+    });
+    exited.catch(() => {});
+    try {
+      await writeVaultInstallRequest(child.stdin, {
+        contract: 'cos-vault-root-install-request/v1',
+        releaseId,
+        configuration: config,
+        authority: { socket: grant.socket, token: grant.token },
+      });
+      child.stdin.end();
+      const replies = [];
+      for await (const value of runtimeTestMessages(child.stdout)) replies.push(value);
+      await exited;
+      assert.equal(replies.length, 1);
+      assert.equal(replies[0].status, 'installed');
+      assert.equal(replies[0].configurationDigest, digest(config));
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) child.kill();
+    }
+  };
+  await install();
   const installedNodeInode = fs.statSync(root + '/node').ino;
-  await installVaultRoot({ configuration: config, sourceRoot }, installationAuthority);
+  await install();
   assert.equal(fs.statSync(root + '/node').ino, installedNodeInode);
   const guards = { executable: root + '/node', entrypoint: root + '/gateway.mjs' };
   assert.deepEqual(verifyVaultRootArtifact(readVaultRootConfiguration(), guards), seal);
@@ -196,6 +232,7 @@ try {
       rootEffects: 'foreign_parent_denied',
       rootBootstrap: 'compiled_native_passed',
       rootInstallation: 'compiled_native_passed',
+      installationEntrypoint: 'sealed_native_passed',
       targetLeases: 'not_exercised',
       managerActivation: 'not_exercised',
       recoveryKeyOnDisk: false,

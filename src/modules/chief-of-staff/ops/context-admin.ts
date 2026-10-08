@@ -1,5 +1,6 @@
 import { policyAllowsBriefContext } from '../bridge/brief-context-renewal.js';
 import { runVaultProvisionAdmin } from './vault-owner-admin.js';
+import { runVaultInstallAdmin } from './vault-owner-install.js';
 /** Owner-run controls. Calendar sync may refresh its own tokens; no model calls or message sends. */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -63,6 +64,7 @@ import {
 
 export type ContextAdminArguments =
   | { command: 'vault-provision'; scopeId: string }
+  | { command: 'vault-install'; scopeId: string }
   | OwnerExportArguments
   | ActionRecoveryArguments
   | ActionAdminArguments
@@ -193,6 +195,7 @@ export async function contextAdminCommand(
   args: ContextAdminArguments,
   env: NodeJS.ProcessEnv,
   dependencies?: Dependencies,
+  vaultRelease?: Pick<Parameters<typeof runVaultInstallAdmin>[0], 'release' | 'payloadRoot'>,
 ): Promise<Record<string, unknown>> {
   if (
     env.COS_ENABLED !== 'true' &&
@@ -204,6 +207,7 @@ export async function contextAdminCommand(
       'operations-backup',
       'operations-restore-check',
       'vault-provision',
+      'vault-install',
     ].includes(args.command)
   )
     return { status: 'disabled', live_model: 'not_verified' };
@@ -372,6 +376,10 @@ export async function contextAdminCommand(
         assertAuthority();
       };
       await check();
+      if (args.command === 'vault-install') {
+        if (!vaultRelease) throw Error('vault_owner_installation_unavailable');
+        return runVaultInstallAdmin({ root, target, maintenance, native, hostLease: lease, check, ...vaultRelease });
+      }
       if (args.command === 'vault-provision') {
         return runVaultProvisionAdmin({ root, maintenance, native, hostLease: lease, check });
       }
