@@ -6,6 +6,21 @@ import { createHash } from 'node:crypto';
 import { safeHostEnvironment } from '../../../host-environment.js';
 const execute = promisify(execFile);
 const rootFiles = new Set(['package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', '.npmrc', 'tsconfig.json']);
+const vaultFiles = new Set([
+  'container/fixtures/vault/Dockerfile.release',
+  ...[
+    'probe.sh',
+    'probe.mjs',
+    'probe-authority.mjs',
+    'probe-provision.mjs',
+    'verify-units.mjs',
+    'probe-wire.mjs',
+    'probe-config.mjs',
+    'probe-artifact.mjs',
+  ].map((name) => 'container/fixtures/vault/' + name),
+  'scripts/cos-vault-fixture.sh',
+  'scripts/cos-vault-keychain.swift',
+]);
 function allowed(name: string): boolean {
   const pieces = name.split('/');
   if (
@@ -19,6 +34,7 @@ function allowed(name: string): boolean {
     return false;
   return (
     rootFiles.has(name) ||
+    vaultFiles.has(name) ||
     name.startsWith('src/') ||
     name.startsWith('container/skills/') ||
     name.startsWith('container/agent-runner/src/') ||
