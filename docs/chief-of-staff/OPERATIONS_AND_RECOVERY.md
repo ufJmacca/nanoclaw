@@ -129,7 +129,7 @@ utilities, the new 1 GiB volume and at least 2 GiB free after allocation.
 
 Pause CoS, drain ordinary workers and use the hold procedure above. Retain the
 maintenance UUID through retries; choose a fresh UUID for the next operation.
-Vault installation and provisioning require current owner membership, the real
+Vault installation, provisioning and recovery checks require current owner membership, the real
 maintenance and native host leases, and a quiescent installation.
 
 Run the owner process with scoped core and swap restrictions. With the verified
@@ -158,7 +158,7 @@ The installation receipt returns the non-secret `recoveryReference`. Installatio
 creates only claimed root configuration and sealed executables at fixed paths;
 it does not allocate the volume or read recovery material. Keep the reference
 stable in the private owner configuration. Run `vault-install` again under each
-fresh held operation before provisioning, including upgrades; it refreshes the
+fresh held operation before provisioning or checking recovery, including upgrades; it refreshes the
 checked authority while preserving the vault identity and recovery reference.
 Repeat the same command after a lost installation reply. Foreign resources and
 changed payloads are refused.
@@ -196,6 +196,25 @@ output. The owner process verifies memory controls before reading the key, sends
 it through the separate bounded root pipe, clears received buffers and closes
 its live capability. A lost provisioning reply is reconciled using the same
 maintenance operation and permanent identity.
+
+After successful provisioning, run the same verified Keychain-to-SSH pipe with
+`vault-recovery-check --scope VERIFIED_SCOPE` in place of `vault-provision`.
+Keep the protected maintenance operation held and the bound service drained.
+This fixed command requires the completed provisioning journal, validates the
+recovery key before interrupting storage, stops only the claimed storage units,
+and verifies that both private plaintext underlays are empty. It opens a new
+mapper with the recovery bytes from the pipe, remounts the existing filesystem
+and verifies the claimed encrypted canary. It then closes that mapping, starts
+the fixed normal unlock units and verifies storage and canary again before
+publishing the storage policy and returning a recovery receipt. No volume,
+filesystem, key, credential directory or unit is provisioned by this check.
+
+The recovery open does not use the boot key. The final normal unlock check
+requires the existing boot key to remain available; do not remove a live key
+to simulate failure. The isolated kernel fixture separately tests recovery
+after its disposable boot key is removed. An interrupted check returns no
+verified receipt. A fresh held operation may repeat the check from a verified
+closed vault; partial or foreign mounts require reconciliation before retry.
 
 Inspect `cos_owner vault-status` and the fixed receipts. Verify actual unit
 activation, mount ordering, private ownership, scoped memory controls, encrypted

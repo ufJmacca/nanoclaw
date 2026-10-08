@@ -10,6 +10,7 @@ import { verifyVaultMemory } from '/code/modules/chief-of-staff/ops/vault-memory
 import { createVaultMounts } from '/code/modules/chief-of-staff/ops/vault-mounts.js';
 import { createVaultRootEffects } from '/code/modules/chief-of-staff/ops/vault-root-effects.js';
 import { provisionVault } from '/code/modules/chief-of-staff/ops/vault-provision.js';
+import { checkVaultRecovery } from '/code/modules/chief-of-staff/ops/vault-recovery.js';
 import { vaultUnits } from '/code/modules/chief-of-staff/ops/vault-units.js';
 import { checkVaultAuthority } from '/code/modules/chief-of-staff/ops/vault-authority.js';
 import { runtimeTestMessages, writeRuntimeTestMessage } from '/code/modules/chief-of-staff/ops/runtime-test-wire.js';
@@ -21,6 +22,7 @@ const paths = {
   bootKey: '/case/keys/vault.key',
   mapper: mapping,
 };
+let recoveryOpens = 0;
 let recovery,
   crypto,
   mounts,
@@ -98,6 +100,46 @@ async function provisionRoot(identity, cryptoControls) {
                 output: names.map(() => (enabled ? 'enabled\n' : 'disabled\n')).join(''),
               };
             if (args[0] === 'daemon-reload') return { status: 0, output: '' };
+            if (args[0] === 'is-active') {
+              const active =
+                fs.existsSync('/dev/mapper/' + mapping) ||
+                spawnSync('/usr/bin/findmnt', ['--noheadings', '--mountpoint', '/case/vault']).status === 0 ||
+                spawnSync('/usr/bin/findmnt', ['--noheadings', '--mountpoint', input.calendarRoot]).status === 0;
+              return { status: active ? 0 : 3, output: names.map(() => (active ? 'active\n' : 'inactive\n')).join('') };
+            }
+            if (args[0] === 'stop') {
+              assert.deepEqual(args, ['stop', ...names]);
+              if (spawnSync('/usr/bin/findmnt', ['--noheadings', '--mountpoint', input.calendarRoot]).status === 0)
+                run('/usr/bin/umount', [input.calendarRoot]);
+              bound = false;
+              if (spawnSync('/usr/bin/findmnt', ['--noheadings', '--mountpoint', '/case/vault']).status === 0)
+                run('/usr/bin/umount', ['/case/vault']);
+              mounted = false;
+              crypto.close();
+              return { status: 0, output: '' };
+            }
+            if (args[0] === 'start') {
+              assert.deepEqual(args, ['start', ...names]);
+              crypto.open();
+              metadata();
+              run('/usr/bin/mount', [
+                '-t',
+                'ext4',
+                '-o',
+                'nosuid,nodev,noexec',
+                '/dev/mapper/' + mapping,
+                '/case/vault',
+              ]);
+              mounted = true;
+              run('/usr/bin/mount', [
+                '-o',
+                'bind,nosuid,nodev,noexec',
+                '/case/vault/google/calendar',
+                input.calendarRoot,
+              ]);
+              bound = true;
+              return { status: 0, output: '' };
+            }
             assert.deepEqual(args, ['enable', '--no-reload', ...names]);
             fs.mkdirSync('/case/system/multi-user.target.wants', { mode: 0o755 });
             for (const name of names) fs.symlinkSync('../' + name, '/case/system/multi-user.target.wants/' + name);
@@ -309,6 +351,11 @@ try {
     assertMemory: verifyVaultMemory,
     disableKeyring: true,
     run(tool, args, volumeFd, keyFd, input) {
+      if (args[0] === 'open' && !args.includes('--test-passphrase') && input) {
+        assert.equal(keyFd, undefined);
+        assert.equal(input.equals(recovery), true);
+        recoveryOpens++;
+      }
       const result = spawnSync(tool, args, {
         cwd: '/',
         env: { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', LANG: 'C', LC_ALL: 'C' },
@@ -380,6 +427,14 @@ try {
   await mount();
   await mount();
   owner('capture');
+  const beforeRecovery = recoveryOpens;
+  assert.equal((await checkVaultRecovery(identity, rootPorts)).status, 'ready');
+  assert.equal(recoveryOpens, beforeRecovery + 1);
+  assert.equal(mounts.inspect(), 'matching');
+  owner('recovery');
+  console.log(
+    '{"installedRecoveryWorkflow":"passed","recoveryMapperOpenedWithPipeOnly":true,"normalUnlockRestored":true,"unitManager":"modeled"}',
+  );
   fs.chmodSync('/case/vault/google', 0o755);
   owner('denied');
   fs.chmodSync('/case/vault/google', 0o700);

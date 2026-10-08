@@ -133,9 +133,27 @@ it('admits vault provisioning through the pinned owner helper with the selected 
   expect(
     parseOwnerAdminArguments(['--settings', '/home/pi/target.json', '--', 'vault-install', '--scope', 'fixture']),
   ).toMatchObject({ admin: ['vault-install', '--scope', 'fixture'] });
+  expect(
+    parseOwnerAdminArguments([
+      '--settings',
+      '/home/pi/target.json',
+      '--',
+      'vault-recovery-check',
+      '--scope',
+      'fixture',
+    ]),
+  ).toMatchObject({ admin: ['vault-recovery-check', '--scope', 'fixture'] });
   const runtime = { COS_PG_USER: 'owner-runtime-profile' };
   expect(
     await selectedOwnerAdminProfile('vault-provision', {
+      runtime: () => runtime,
+      test: () => {
+        throw Error('test_profile_must_not_be_read');
+      },
+    }),
+  ).toBe(runtime);
+  expect(
+    await selectedOwnerAdminProfile('vault-recovery-check', {
       runtime: () => runtime,
       test: () => {
         throw Error('test_profile_must_not_be_read');

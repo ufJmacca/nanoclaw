@@ -311,6 +311,7 @@ export function createVaultCrypto(
   };
   return {
     withMappedDevice,
+    mappingStatus: mapping,
     inspect,
     recoveryStatus,
     filesystemStatus,

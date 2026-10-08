@@ -3,7 +3,7 @@ import { Readable } from 'node:stream';
 import { expect, it, vi } from 'vitest';
 import { digest } from '../domain/contracts.js';
 import { vaultRootConfiguration } from './vault-root-config.js';
-import { runVaultProvisionAdmin, vaultRootInvocation } from './vault-owner-admin.js';
+import { runVaultProvisionAdmin, runVaultRecoveryAdmin, vaultRootInvocation } from './vault-owner-admin.js';
 import type { VaultRootHeader } from './vault-root-wire.js';
 function fixture() {
   const binding = {
@@ -160,4 +160,20 @@ it('derives only the scoped root unit and sealed command, without credential-bea
   expect(invocation.args).toContain('/usr/bin/env');
   expect(invocation.args).toContain('-i');
   expect(JSON.stringify(invocation)).not.toContain(f.authority.token);
+});
+it('uses an explicit recovery capability and rejects a provisioning receipt as recovery evidence', async () => {
+  const f = fixture();
+  await expect(runVaultRecoveryAdmin(f.input, f.controls)).rejects.toThrow('vault_owner_recovery_unavailable');
+  expect(f.controls.invoke.mock.calls[0]?.[0].contract).toBe('cos-vault-root-recovery-check-request/v1');
+  expect(f.controls.configureStorage).not.toHaveBeenCalled();
+  expect(f.recovery.every((byte) => byte === 0)).toBe(true);
+});
+it('publishes storage policy only after a bound recovery receipt, then clears the key and closes authority', async () => {
+  const f = fixture();
+  const receipt = { ...f.receipt, contract: 'cos-vault-root-recovery-check-result/v1' };
+  f.controls.invoke.mockResolvedValue(receipt);
+  await expect(runVaultRecoveryAdmin(f.input, f.controls)).resolves.toEqual(receipt);
+  expect(f.controls.configureStorage).toHaveBeenCalledOnce();
+  expect(f.authority.close).toHaveBeenCalledOnce();
+  expect(f.recovery.every((byte) => byte === 0)).toBe(true);
 });

@@ -242,6 +242,13 @@ it('parses vault provisioning with only the bound owner scope', () => {
     command: 'vault-install',
     scopeId: 'fixture',
   });
+  expect(parseAdminArguments(['vault-recovery-check', '--scope', 'fixture'])).toEqual({
+    command: 'vault-recovery-check',
+    scopeId: 'fixture',
+  });
+  expect(() => parseAdminArguments(['vault-recovery-check', '--scope', 'fixture', '--mapper', 'foreign'])).toThrow(
+    'invalid_admin_arguments',
+  );
   expect(() => parseAdminArguments(['vault-install', '--scope', 'fixture', '--source', '/tmp/foreign'])).toThrow(
     'invalid_admin_arguments',
   );

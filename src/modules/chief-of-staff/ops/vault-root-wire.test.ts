@@ -120,3 +120,15 @@ it('excludes received recovery bytes and the live capability from accidental rec
   expect(result.recovery).toEqual(Buffer.alloc(64, 87));
   result.recovery.fill(0);
 });
+it('admits only the explicit recovery contract through the existing bounded binary wire', async () => {
+  const value = { ...header(), contract: 'cos-vault-root-recovery-check-request/v1' as const };
+  const result = await readVaultRootRequest(Readable.from([frame(value)]), { assertMemory: () => {} });
+  expect(result.header.contract).toBe(value.contract);
+  expect(result.recovery).toEqual(Buffer.alloc(64, 87));
+  result.recovery.fill(0);
+  await expect(
+    readVaultRootRequest(Readable.from([frame({ ...value, contract: 'arbitrary-command' })]), {
+      assertMemory: () => {},
+    }),
+  ).rejects.toThrow('vault_root_transport_unavailable');
+});

@@ -274,6 +274,20 @@ export function createVaultMounts(
     });
   return {
     inspect,
+    closed() {
+      return safe(() => {
+        guard();
+        const record = read();
+        if (!record || ['@volume', ...VAULT_DIRECTORIES].some((key) => record.areas[key]?.phase !== 'complete'))
+          throw Error('completed_mount_claim_required');
+        for (const key of ['vault', 'calendar'] as const) {
+          const file = key === 'vault' ? paths.vaultRoot : paths.calendarRoot;
+          if ((controls.inspect ?? inspectKernel)(file)) return false;
+          if (!underlay(key, record)) throw Error('claimed_underlay_required');
+        }
+        return true;
+      });
+    },
     withArea<T>(area: VaultArea, operation: (fd: number) => T): T {
       try {
         return safe(() => {

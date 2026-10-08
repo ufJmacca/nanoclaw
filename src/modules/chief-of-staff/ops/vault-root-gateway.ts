@@ -7,6 +7,7 @@ import { verifyVaultRootArtifact } from './vault-root-artifact.js';
 import { createVaultRootEffects } from './vault-root-effects.js';
 import { readVaultRootRequest } from './vault-root-wire.js';
 import { provisionVault } from './vault-provision.js';
+import { checkVaultRecovery } from './vault-recovery.js';
 import { verifyVaultMemory } from './vault-memory.js';
 import { initializeVaultRootState, vaultRootStateDigest } from './vault-root-state.js';
 /** Test composition seams are not exposed by the installed command, configuration or environment. */
@@ -19,6 +20,7 @@ export type VaultRootGatewayControls = {
   checkAuthority?: typeof checkVaultAuthority;
   createEffects?: typeof createVaultRootEffects;
   provision?: typeof provisionVault;
+  recovery?: typeof checkVaultRecovery;
   initializeState?: typeof initializeVaultRootState;
 };
 /** Fixed root gateway. The owner proof must remain live through every root effect and final receipt. */
@@ -47,6 +49,7 @@ export async function runVaultRootGateway(stream: Readable, controls: VaultRootG
     guard();
     const { header } = request;
     if (
+      !['cos-vault-root-request/v1', 'cos-vault-root-recovery-check-request/v1'].includes(header.contract) ||
       header.configurationDigest !== configurationDigest ||
       digest(header.identity) !== digest(config.identity) ||
       header.scope.operationId !== config.authority.operationId ||
@@ -85,7 +88,10 @@ export async function runVaultRootGateway(stream: Readable, controls: VaultRootG
       recovery,
       { assertAuthority, assertMemory: memory, assertRole: role },
     );
-    const result = await (controls.provision ?? provisionVault)(config.identity, ports);
+    const recovering = header.contract === 'cos-vault-root-recovery-check-request/v1';
+    const result = recovering
+      ? await (controls.recovery ?? checkVaultRecovery)(config.identity, ports)
+      : await (controls.provision ?? provisionVault)(config.identity, ports);
     await assertAuthority();
     if (
       result.status !== 'ready' ||
@@ -94,7 +100,7 @@ export async function runVaultRootGateway(stream: Readable, controls: VaultRootG
     )
       throw Error('root_result_unverified');
     return Object.freeze({
-      contract: 'cos-vault-root-result/v1',
+      contract: recovering ? 'cos-vault-root-recovery-check-result/v1' : 'cos-vault-root-result/v1',
       status: 'ready',
       volumeBytes: VAULT_BYTES,
       identityDigest: digest(config.identity),

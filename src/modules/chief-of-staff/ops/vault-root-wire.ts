@@ -4,7 +4,7 @@ import type { VaultProvisionIdentity } from './vault-provision.js';
 import type { VaultAuthorityScope } from './vault-authority.js';
 import { verifyVaultMemory } from './vault-memory.js';
 export type VaultRootHeader = {
-  contract: 'cos-vault-root-request/v1';
+  contract: 'cos-vault-root-request/v1' | 'cos-vault-root-recovery-check-request/v1';
   configurationDigest: string;
   identity: VaultProvisionIdentity;
   scope: VaultAuthorityScope;
@@ -23,7 +23,7 @@ function validate(value: unknown): asserts value is VaultRootHeader {
   if (
     !object(value) ||
     Object.keys(value).sort().join(',') !== 'authority,configurationDigest,contract,identity,scope' ||
-    value.contract !== 'cos-vault-root-request/v1' ||
+    !['cos-vault-root-request/v1', 'cos-vault-root-recovery-check-request/v1'].includes(String(value.contract)) ||
     !hash(value.configurationDigest)
   )
     throw Error('invalid_root_frame');

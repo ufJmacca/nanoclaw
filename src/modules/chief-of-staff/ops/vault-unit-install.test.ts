@@ -160,6 +160,48 @@ it('reconciles a lost enablement reply from exact files and boot links without r
   expect(f.installer.inspect()).toBe('matching');
   expect(vi.mocked(run).mock.calls.filter((c) => c[1][0] === 'enable')).toHaveLength(1);
 });
+it('changes only claimed storage units under live authority and verifies their actual manager states', async () => {
+  const f = fixture();
+  await f.installer.install();
+  const originalRun = f.controls.run!,
+    names = Object.keys(vaultUnits(f.input)).filter((name) => name !== 'owner-service.conf');
+  let active = true;
+  f.controls.run = (tool, args) => {
+    if (args[0] === 'stop') {
+      expect(args.slice(1)).toEqual(names);
+      active = false;
+      return { status: 0, output: '' };
+    }
+    if (args[0] === 'start') {
+      expect(args.slice(1)).toEqual(names);
+      active = true;
+      return { status: 0, output: '' };
+    }
+    if (args[0] === 'is-active')
+      return { status: active ? 0 : 3, output: names.map(() => (active ? 'active\n' : 'inactive\n')).join('') };
+    return originalRun(tool, args);
+  };
+  await f.installer.stopStorage();
+  expect(f.installer.inactive()).toBe(true);
+  await f.installer.startStorage();
+  expect(f.installer.inactive()).toBe(false);
+  f.controls.assertAuthority = async () => {
+    throw Error('PRIVATE_LEASE');
+  };
+  await expect(f.installer.stopStorage()).rejects.toThrow('vault_units_unavailable');
+  expect(active).toBe(true);
+});
+it('refuses changed claims and false manager acknowledgement before reporting storage activation', async () => {
+  const f = fixture();
+  await f.installer.install();
+  await expect(f.installer.startStorage()).rejects.toThrow('vault_units_unavailable');
+  fs.writeFileSync(f.paths.systemUnits + '/nanoclaw-cos-vault.service', 'PRIVATE_FOREIGN');
+  vi.mocked(f.controls.run!).mockClear();
+  await expect(f.installer.stopStorage()).rejects.toThrow('vault_units_unavailable');
+  expect(
+    vi.mocked(f.controls.run!).mock.calls.some(([, args]) => ['daemon-reload', 'start', 'stop'].includes(args[0])),
+  ).toBe(false);
+});
 it('finishes only missing boot links after partial enablement', async () => {
   const f = fixture();
   await f.installer.install();

@@ -16,6 +16,7 @@ import type {
   VaultProvisionPorts,
   VaultProvisionStep,
 } from './vault-provision.js';
+import type { VaultRecoveryPorts } from './vault-recovery.js';
 export type VaultRootPaths = VaultCryptoPaths & {
   vaultRoot: string;
   calendarRoot: string;
@@ -45,7 +46,7 @@ export function createVaultRootEffects(
   input: VaultRootInput,
   recovery: Buffer,
   controls: VaultRootControls,
-): VaultProvisionPorts {
+): VaultProvisionPorts & VaultRecoveryPorts {
   paths = Object.freeze({ ...paths });
   identity = Object.freeze({ ...identity });
   input = Object.freeze({ ...input });
@@ -261,6 +262,71 @@ export function createVaultRootEffects(
       writeAtomic(paths.stateRoot, 'provision.json', record);
     },
     inspect,
+    async inspectRecovery() {
+      await assertAuthority();
+      const { common, crypto, mounts, units } = current();
+      if (
+        (await vaultUtilitiesStatus(common)) !== 'matching' ||
+        inspectVaultKey(paths, identity) !== 'matching' ||
+        inspectVaultAllocation(paths, identity) !== 'matching' ||
+        crypto.inspect() !== 'matching' ||
+        crypto.recoveryStatus(recovery) !== 'matching' ||
+        units.inspect() !== 'matching'
+      )
+        throw Error('recovery_claims_unverified');
+      const mapping = crypto.mappingStatus();
+      if (mapping === 'matching' && crypto.filesystemStatus() === 'matching' && mounts.inspect() === 'matching')
+        return 'mounted';
+      if (mapping === 'absent' && mounts.closed() && units.inactive()) return 'closed';
+      throw Error('recovery_storage_conflict');
+    },
+    async closeStorage() {
+      await assertAuthority();
+      const { crypto, mounts, units } = current();
+      const mapped = crypto.mappingStatus();
+      if (mapped === 'absent' && mounts.closed() && units.inactive()) return;
+      if (mapped !== 'matching' || mounts.inspect() !== 'matching') throw Error('recovery_storage_conflict');
+      await units.stopStorage();
+      await assertAuthority();
+      if (!mounts.closed()) throw Error('recovery_mount_still_open');
+      crypto.close();
+      await assertAuthority();
+      if (crypto.mappingStatus() !== 'absent' || !mounts.closed() || !units.inactive())
+        throw Error('recovery_close_unverified');
+    },
+    async openRecovery() {
+      await assertAuthority();
+      const { crypto, mounts, units } = current();
+      if (crypto.mappingStatus() !== 'absent' || !mounts.closed() || !units.inactive())
+        throw Error('closed_storage_required');
+      crypto.open(recovery);
+      await assertAuthority();
+      if (crypto.filesystemStatus() !== 'matching') throw Error('recovery_filesystem_unverified');
+    },
+    async mountStorage() {
+      await assertAuthority();
+      await current().mounts.mount();
+      await assertAuthority();
+    },
+    async verifyCanary() {
+      await assertAuthority();
+      if (current().canary() !== 'matching') throw Error('recovery_canary_unverified');
+      await assertAuthority();
+    },
+    async startStorage() {
+      await assertAuthority();
+      const { crypto, mounts, units } = current();
+      if (crypto.mappingStatus() !== 'absent' || !mounts.closed() || !units.inactive())
+        throw Error('closed_storage_required');
+      await units.startStorage();
+      await assertAuthority();
+      if (
+        crypto.mappingStatus() !== 'matching' ||
+        crypto.filesystemStatus() !== 'matching' ||
+        mounts.inspect() !== 'matching'
+      )
+        throw Error('normal_storage_unverified');
+    },
     async apply(step, suppliedIdentity) {
       assertIdentity(suppliedIdentity);
       await assertAuthority();

@@ -97,9 +97,10 @@ type OwnerControls = {
   configureStorage?: (roots: CalendarStorageRoots, vaultRoot: string) => void | Promise<void>;
 };
 /** Installed owner command. Configuration is non-secret metadata at one fixed private target path; recovery is pipe-only. */
-export async function runVaultProvisionAdmin(
+async function runVaultOwnerOperation(
   input: OwnerInput,
-  controls: OwnerControls = {},
+  controls: OwnerControls,
+  operation: 'provision' | 'recovery',
 ): Promise<Record<string, unknown>> {
   let recovery: Buffer | undefined, proof: Awaited<ReturnType<typeof openProtectedVaultAuthority>> | undefined;
   let verified: Record<string, unknown> | undefined,
@@ -120,7 +121,7 @@ export async function runVaultProvisionAdmin(
     await proof.check();
     memory();
     const header: VaultRootHeader = {
-      contract: 'cos-vault-root-request/v1',
+      contract: operation === 'provision' ? 'cos-vault-root-request/v1' : 'cos-vault-root-recovery-check-request/v1',
       configurationDigest: digest(config),
       identity: config.identity,
       scope: proof.scope,
@@ -136,7 +137,8 @@ export async function runVaultProvisionAdmin(
     if (
       Object.keys(receipt).sort().join(',') !==
         'artifactDigest,contract,identityDigest,sourceCommit,sourceTree,status,volumeBytes' ||
-      receipt.contract !== 'cos-vault-root-result/v1' ||
+      receipt.contract !==
+        (operation === 'provision' ? 'cos-vault-root-result/v1' : 'cos-vault-root-recovery-check-result/v1') ||
       receipt.status !== 'ready' ||
       receipt.volumeBytes !== VAULT_BYTES ||
       receipt.identityDigest !== digest(config.identity) ||
@@ -174,6 +176,13 @@ export async function runVaultProvisionAdmin(
       failed = true;
     }
   }
-  if (failed || !verified) throw Error('vault_owner_provision_unavailable');
+  if (failed || !verified)
+    throw Error(operation === 'provision' ? 'vault_owner_provision_unavailable' : 'vault_owner_recovery_unavailable');
   return verified;
+}
+export function runVaultProvisionAdmin(input: OwnerInput, controls: OwnerControls = {}) {
+  return runVaultOwnerOperation(input, controls, 'provision');
+}
+export function runVaultRecoveryAdmin(input: OwnerInput, controls: OwnerControls = {}) {
+  return runVaultOwnerOperation(input, controls, 'recovery');
 }

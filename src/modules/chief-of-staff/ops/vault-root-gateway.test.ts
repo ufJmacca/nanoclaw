@@ -8,6 +8,7 @@ import type { VaultRootHeader } from './vault-root-wire.js';
 import type { VaultProvisionPorts } from './vault-provision.js';
 import type { VaultProvisionIdentity } from './vault-provision.js';
 import type { VaultRootControls, VaultRootInput, VaultRootPaths } from './vault-root-effects.js';
+import type { VaultRecoveryPorts } from './vault-recovery.js';
 function fixture() {
   const binding = {
     hostFingerprint: 'a'.repeat(64),
@@ -70,7 +71,7 @@ function fixture() {
         guards: VaultRootControls,
       ) => {
         events.push('effects');
-        return { assertAuthority: guards.assertAuthority } as VaultProvisionPorts;
+        return { assertAuthority: guards.assertAuthority } as VaultProvisionPorts & VaultRecoveryPorts;
       },
     ),
     provision: vi.fn(async (_identity: VaultProvisionIdentity, ports: VaultProvisionPorts) => {
@@ -109,6 +110,28 @@ it('checks trusted config and sealed bytes before reading recovery, rechecks liv
     artifactDigest: f.config.artifact.digest,
   });
   expect(JSON.stringify(receipt)).not.toContain(f.header.authority.token);
+});
+it('dispatches only the explicit recovery contract, preserves authority guards, and never calls provisioning', async () => {
+  const f = fixture();
+  f.header.contract = 'cos-vault-root-recovery-check-request/v1';
+  const recovery = vi.fn(async (_identity: VaultProvisionIdentity, ports: VaultRecoveryPorts) => {
+    await ports.assertAuthority();
+    return { status: 'ready', volumeBytes: 1073741824, identityDigest: digest(f.config.identity) };
+  });
+  await expect(runVaultRootGateway(f.stream, { ...f.controls, recovery })).resolves.toMatchObject({
+    contract: 'cos-vault-root-recovery-check-result/v1',
+    status: 'ready',
+  });
+  expect(recovery).toHaveBeenCalledOnce();
+  expect(f.controls.provision).not.toHaveBeenCalled();
+  expect(f.recovery.every((byte) => byte === 0)).toBe(true);
+});
+it('denies an arbitrary operation contract before constructing any root effects', async () => {
+  const f = fixture();
+  f.header.contract = 'arbitrary-command' as never;
+  await expect(runVaultRootGateway(f.stream, f.controls)).rejects.toThrow('vault_root_gateway_unavailable');
+  expect(f.controls.createEffects).not.toHaveBeenCalled();
+  expect(f.recovery.every((byte) => byte === 0)).toBe(true);
 });
 it.each(['configuration', 'identity', 'operation', 'resource-operation', 'target', 'generation'])(
   'denies request %s mismatch before constructing effects and clears recovery',

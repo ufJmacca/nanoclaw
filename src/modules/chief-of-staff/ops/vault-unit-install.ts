@@ -207,8 +207,36 @@ export function createVaultUnitInstaller(
     controls.assertMemory();
     guard();
   };
+  const inactive = () => {
+    if (inspect() !== 'matching') throw Error('claimed_units_required');
+    const result = command('/usr/bin/systemctl', ['is-active', ...systemNames]);
+    return result.status === 3 && result.output === systemNames.map(() => 'inactive\n').join('');
+  };
+  const active = () => {
+    const result = command('/usr/bin/systemctl', ['is-active', ...systemNames]);
+    return result.status === 0 && result.output === systemNames.map(() => 'active\n').join('');
+  };
+  const changeStorage = async (operation: 'stop' | 'start') => {
+    try {
+      await authority();
+      if (inspect() !== 'matching') throw Error('claimed_units_required');
+      if (command('/usr/bin/systemctl', ['daemon-reload']).status !== 0) throw Error('unit_reload_unavailable');
+      await authority();
+      if (inspect() !== 'matching' || command('/usr/bin/systemctl', [operation, ...systemNames]).status !== 0)
+        throw Error('unit_activation_unavailable');
+      await authority();
+      if (inspect() !== 'matching' || (operation === 'stop' ? !inactive() : !active()))
+        throw Error('unit_activation_unverified');
+    } catch {
+      // eslint-disable-next-line preserve-caught-error -- Fixed claimed storage units only; manager diagnostics remain private.
+      throw Error('vault_units_unavailable');
+    }
+  };
   return {
     inspect,
+    inactive,
+    stopStorage: () => changeStorage('stop'),
+    startStorage: () => changeStorage('start'),
     async install() {
       try {
         await authority();
