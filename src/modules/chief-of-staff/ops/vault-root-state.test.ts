@@ -3,7 +3,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { afterEach, expect, it } from 'vitest';
-import { initializeVaultRootState } from './vault-root-state.js';
+import { initializeVaultRootState, vaultRootStateDigest } from './vault-root-state.js';
+import { digest } from '../domain/contracts.js';
+import { vaultRootConfiguration } from './vault-root-config.js';
 const roots: string[] = [];
 afterEach(() => {
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
@@ -20,12 +22,47 @@ function fixture() {
   const controls = { assertRole() {}, assertMemory() {}, async assertAuthority() {} };
   return { root, paths, identityDigest, controls };
 }
+it('keeps resource ownership stable across reviewed-source upgrades and authority generation changes', () => {
+  const binding = {
+    hostFingerprint: 'a'.repeat(64),
+    databaseFingerprint: 'b'.repeat(64),
+    service: 'fixture.service',
+    installationRoot: '/home/fixture/app',
+    dataRoot: '/home/fixture/app/data',
+  };
+  const config = vaultRootConfiguration({
+    contract: 'cos-vault-root-config/v1',
+    identity: {
+      operationId: randomUUID(),
+      targetDigest: digest(binding),
+      recoveryReference: randomUUID(),
+      luksUuid: randomUUID(),
+      filesystemUuid: randomUUID(),
+    },
+    target: { binding, lifecycle: 'protected', minimumGeneration: 1 },
+    owner: { uid: 1000, gid: 1000, home: '/home/fixture', targetRoot: '/home/fixture/state' },
+    artifact: { sourceCommit: 'c'.repeat(40), sourceTree: 'd'.repeat(40), digest: 'e'.repeat(64) },
+  });
+  const upgraded = vaultRootConfiguration({
+    ...config,
+    artifact: { sourceCommit: 'f'.repeat(40), sourceTree: '0'.repeat(40), digest: '1'.repeat(64) },
+    target: { ...config.target, minimumGeneration: 4 },
+  });
+  expect(digest(config)).not.toBe(digest(upgraded));
+  expect(vaultRootStateDigest(config)).toBe(vaultRootStateDigest(upgraded));
+  expect(vaultRootStateDigest({ ...config, identity: { ...config.identity, operationId: randomUUID() } })).not.toBe(
+    vaultRootStateDigest(config),
+  );
+  expect(vaultRootStateDigest({ ...config, owner: { ...config.owner, targetRoot: '/home/fixture/foreign' } })).not.toBe(
+    vaultRootStateDigest(config),
+  );
+});
 it('exclusively claims root control and volume parents, persists inodes, and verifies replay', async () => {
   const f = fixture();
   await initializeVaultRootState(f.identityDigest, f.controls, f.paths);
   const record = JSON.parse(fs.readFileSync(f.paths.configRoot + '/vault-bootstrap.json', 'utf8'));
   expect(record.contract).toBe('cos-vault-root-state/v1');
-  expect(record.configurationDigest).toBe(f.identityDigest);
+  expect(record.identityDigest).toBe(f.identityDigest);
   expect(record.phase).toBe('complete');
   expect(fs.statSync(f.paths.stateRoot).mode & 0o777).toBe(0o700);
   expect(fs.statSync(f.paths.storageRoot).mode & 0o777).toBe(0o711);

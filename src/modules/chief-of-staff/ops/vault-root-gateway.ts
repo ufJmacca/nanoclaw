@@ -8,7 +8,7 @@ import { createVaultRootEffects } from './vault-root-effects.js';
 import { readVaultRootRequest } from './vault-root-wire.js';
 import { provisionVault } from './vault-provision.js';
 import { verifyVaultMemory } from './vault-memory.js';
-import { initializeVaultRootState } from './vault-root-state.js';
+import { initializeVaultRootState, vaultRootStateDigest } from './vault-root-state.js';
 /** Test composition seams are not exposed by the installed command, configuration or environment. */
 export type VaultRootGatewayControls = {
   assertMemory?(): void;
@@ -67,7 +67,7 @@ export async function runVaultRootGateway(stream: Readable, controls: VaultRootG
       assertArtifact();
     };
     await assertAuthority();
-    await (controls.initializeState ?? initializeVaultRootState)(configurationDigest, {
+    await (controls.initializeState ?? initializeVaultRootState)(vaultRootStateDigest(config), {
       assertAuthority,
       assertMemory: memory,
       assertRole: role,

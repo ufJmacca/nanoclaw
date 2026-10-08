@@ -2,17 +2,24 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { readPrivate, writeAtomic } from './target-state.js';
 import { verifyVaultMemory } from './vault-memory.js';
+import { digest } from '../domain/contracts.js';
+import { vaultRootConfiguration, type VaultRootConfiguration } from './vault-root-config.js';
+/** Source and maintenance generations change during reviewed delivery; claimed resource identity must not. */
+export function vaultRootStateDigest(input: VaultRootConfiguration): string {
+  const config = vaultRootConfiguration(input);
+  return digest({ identity: config.identity, owner: config.owner });
+}
 type Paths = { configRoot: string; stateRoot: string; storageRoot: string };
 type Claim = { device: number; inode: number };
 type Journal = {
   contract: 'cos-vault-root-state/v1';
-  configurationDigest: string;
+  identityDigest: string;
   phase: 'intent' | 'complete';
   claims: Partial<Record<'control' | 'storage', Claim>>;
 };
 /** Root configuration and executable have already been sealed and live owner proof verified. No existing root is adopted. */
 export async function initializeVaultRootState(
-  configurationDigest: string,
+  identityDigest: string,
   controls: {
     assertAuthority(): Promise<void>;
     assertMemory?(): void;
@@ -40,7 +47,7 @@ export async function initializeVaultRootState(
     guard();
     paths = Object.freeze({ ...paths });
     if (
-      !/^[a-f0-9]{64}$/.test(configurationDigest) ||
+      !/^[a-f0-9]{64}$/.test(identityDigest) ||
       paths.stateRoot !== paths.configRoot + '/control' ||
       Object.values(paths).some((value) => !path.isAbsolute(value) || path.resolve(value) !== value || value === '/')
     )
@@ -109,9 +116,9 @@ export async function initializeVaultRootState(
       journal = readPrivate<Journal>(file, 4096);
       if (
         !journal ||
-        Object.keys(journal).sort().join(',') !== 'claims,configurationDigest,contract,phase' ||
+        Object.keys(journal).sort().join(',') !== 'claims,contract,identityDigest,phase' ||
         journal.contract !== 'cos-vault-root-state/v1' ||
-        journal.configurationDigest !== configurationDigest ||
+        journal.identityDigest !== identityDigest ||
         !['intent', 'complete'].includes(journal.phase) ||
         !journal.claims ||
         typeof journal.claims !== 'object' ||
@@ -138,7 +145,7 @@ export async function initializeVaultRootState(
         )
       )
         throw Error('unclaimed_root_state');
-      journal = { contract: 'cos-vault-root-state/v1', configurationDigest, phase: 'intent', claims: {} };
+      journal = { contract: 'cos-vault-root-state/v1', identityDigest, phase: 'intent', claims: {} };
       writeAtomic(paths.configRoot, 'vault-bootstrap.json', journal);
     }
     for (const [name, directory, parent, mode] of [
