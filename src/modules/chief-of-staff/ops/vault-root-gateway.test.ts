@@ -39,6 +39,7 @@ function fixture() {
   const recovery = Buffer.alloc(64, 47),
     events: string[] = [];
   const controls = {
+    initializeState: vi.fn(async () => {}),
     assertMemory() {
       events.push('memory');
     },
@@ -168,7 +169,10 @@ it.each(['owner', 'config-change', 'artifact-change', 'provision', 'bad-receipt'
 );
 it('stops when the live owner withdraws authority after effects are constructed', async () => {
   const f = fixture();
-  f.controls.checkAuthority.mockResolvedValueOnce(undefined).mockRejectedValue(Error('PRIVATE_REVOKED'));
+  f.controls.checkAuthority
+    .mockResolvedValueOnce(undefined)
+    .mockResolvedValueOnce(undefined)
+    .mockRejectedValue(Error('PRIVATE_REVOKED'));
   await expect(runVaultRootGateway(f.stream, f.controls)).rejects.toThrow('vault_root_gateway_unavailable');
   expect(f.controls.createEffects).toHaveBeenCalledOnce();
   expect(f.events).not.toContain('provision');

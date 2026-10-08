@@ -8,6 +8,7 @@ import { createVaultRootEffects } from './vault-root-effects.js';
 import { readVaultRootRequest } from './vault-root-wire.js';
 import { provisionVault } from './vault-provision.js';
 import { verifyVaultMemory } from './vault-memory.js';
+import { initializeVaultRootState } from './vault-root-state.js';
 /** Test composition seams are not exposed by the installed command, configuration or environment. */
 export type VaultRootGatewayControls = {
   assertMemory?(): void;
@@ -18,6 +19,7 @@ export type VaultRootGatewayControls = {
   checkAuthority?: typeof checkVaultAuthority;
   createEffects?: typeof createVaultRootEffects;
   provision?: typeof provisionVault;
+  initializeState?: typeof initializeVaultRootState;
 };
 /** Fixed root gateway. The owner proof must remain live through every root effect and final receipt. */
 export async function runVaultRootGateway(stream: Readable, controls: VaultRootGatewayControls = {}) {
@@ -64,6 +66,12 @@ export async function runVaultRootGateway(stream: Readable, controls: VaultRootG
       await (controls.checkAuthority ?? checkVaultAuthority)(header.authority, header.scope, config.owner.uid);
       assertArtifact();
     };
+    await assertAuthority();
+    await (controls.initializeState ?? initializeVaultRootState)(configurationDigest, {
+      assertAuthority,
+      assertMemory: memory,
+      assertRole: role,
+    });
     await assertAuthority();
     const ports = (controls.createEffects ?? createVaultRootEffects)(
       fixedVaultRootPaths(config),

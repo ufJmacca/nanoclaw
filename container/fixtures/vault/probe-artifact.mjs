@@ -6,6 +6,8 @@ import { digest } from '/code/modules/chief-of-staff/domain/contracts.js';
 import { verifyVaultMemory } from '/code/modules/chief-of-staff/ops/vault-memory.js';
 import { readVaultRootConfiguration } from '/code/modules/chief-of-staff/ops/vault-root-config.js';
 import { verifyVaultRootArtifact } from '/code/modules/chief-of-staff/ops/vault-root-artifact.js';
+import { initializeVaultRootState } from '/code/modules/chief-of-staff/ops/vault-root-state.js';
+import { checkVaultAuthority } from '/code/modules/chief-of-staff/ops/vault-authority.js';
 import { writeVaultRootRequest } from '/code/modules/chief-of-staff/ops/vault-root-wire.js';
 import { runtimeTestMessages, writeRuntimeTestMessage } from '/code/modules/chief-of-staff/ops/runtime-test-wire.js';
 let owner, recovery;
@@ -119,22 +121,34 @@ try {
     assert.equal(output, '');
     assert.equal(diagnostic, '{"code":"vault_root_gateway_unavailable"}\n');
   };
+  fs.mkdirSync('/var/lib/nanoclaw-cos', { mode: 0o755 });
+  const foreignParentInode = fs.statSync('/var/lib/nanoclaw-cos').ino;
   const before = await proofs();
-  // Fixed control/volume parents are deliberately absent. This positive artifact/scope/owner proof reaches the next prerequisite and denies effects.
+  // A foreign unclaimed volume parent must be refused after the artifact/scope/owner proof, before bootstrap or storage effects.
   await invoke();
   const admitted = await proofs();
   assert.ok(admitted > before);
   assert.equal(fs.existsSync('/etc/nanoclaw-cos/control'), false);
-  assert.equal(fs.existsSync('/var/lib/nanoclaw-cos'), false);
+  assert.equal(fs.statSync('/var/lib/nanoclaw-cos').ino, foreignParentInode);
+  assert.deepEqual(fs.readdirSync('/var/lib/nanoclaw-cos'), []);
+  assert.equal(fs.existsSync('/etc/nanoclaw-cos/vault-bootstrap.json'), false);
   await invoke(['--volume=/dev/foreign']);
   assert.equal(await proofs(), admitted);
   await invoke([], { ...header, configurationDigest: '0'.repeat(64) });
   assert.equal(await proofs(), admitted);
+  fs.rmdirSync('/var/lib/nanoclaw-cos');
+  const bootstrap = { assertAuthority: () => checkVaultAuthority(grant, grant.scope, 1000) };
+  await initializeVaultRootState(digest(config), bootstrap);
+  const controlInode = fs.statSync('/etc/nanoclaw-cos/control').ino;
+  await initializeVaultRootState(digest(config), bootstrap);
+  assert.equal(fs.statSync('/etc/nanoclaw-cos/control').ino, controlInode);
+  assert.equal(fs.statSync('/var/lib/nanoclaw-cos').mode & 0o777, 0o711);
+  const afterBootstrap = await proofs();
   fs.chmodSync(root + '/gateway.mjs', 0o644);
   fs.appendFileSync(root + '/gateway.mjs', '\n');
   fs.chmodSync(root + '/gateway.mjs', 0o444);
   await invoke();
-  assert.equal(await proofs(), admitted);
+  assert.equal(await proofs(), afterBootstrap);
   fs.chmodSync(root + '/gateway.mjs', 0o644);
   const original = fs.readFileSync(root + '/gateway.mjs');
   fs.truncateSync(root + '/gateway.mjs', original.length - 1);
@@ -143,7 +157,9 @@ try {
   fs.appendFileSync(root + '/node', Buffer.alloc(1));
   fs.chmodSync(root + '/node', 0o555);
   await invoke();
-  assert.equal(await proofs(), admitted);
+  assert.equal(await proofs(), afterBootstrap);
+  assert.equal(fs.existsSync('/etc/nanoclaw-cos/vault.key'), false);
+  assert.equal(fs.existsSync('/var/lib/nanoclaw-cos/vault.luks'), false);
   await writeRuntimeTestMessage(owner.stdin, { action: 'close' });
   owner.stdin.end();
   await ownerExit;
@@ -160,7 +176,8 @@ try {
       changedGatewayDenied: true,
       changedRuntimeDenied: true,
       argumentsDenied: true,
-      rootEffects: 'prerequisite_denied',
+      rootEffects: 'foreign_parent_denied',
+      rootBootstrap: 'development_native_passed',
       targetLeases: 'not_exercised',
       managerActivation: 'not_exercised',
       recoveryKeyOnDisk: false,
