@@ -1,0 +1,23 @@
+# Immutable vault fixtures use only the tested host image's compiled code and sealed helper.
+ARG HOST_IMAGE
+FROM ${HOST_IMAGE} AS release
+FROM debian@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f
+ARG SOURCE_COMMIT
+ARG HOST_IMAGE_ID
+LABEL org.opencontainers.image.revision=$SOURCE_COMMIT nanoclaw.tested-host=$HOST_IMAGE_ID nanoclaw.release-role=vault-fixture
+RUN rm -f /etc/apt/sources.list.d/debian.sources && \
+    printf '%s\n' 'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/20261007T000000Z trixie main' > /etc/apt/sources.list && \
+    apt-get update && apt-get install -y --no-install-recommends \
+      cryptsetup-bin=2:2.7.5-2 cifs-utils=2:7.4-1 util-linux mount e2fsprogs libstdc++6 systemd && \
+    mkdir -p /fixture-download && cd /fixture-download && \
+    apt-get download cryptsetup-bin=2:2.7.5-2 && \
+    mv cryptsetup-bin_*.deb /var/cache/apt/archives/ && rmdir /fixture-download
+COPY --from=release /release/node/bin/node /usr/local/bin/node
+COPY --from=release /release/dist /code
+COPY --from=release /release/vault-artifacts /opt/nanoclaw-cos/vault
+RUN chmod 0755 /opt/nanoclaw-cos/vault && \
+    find /opt/nanoclaw-cos/vault -mindepth 1 -maxdepth 1 -type d -exec chmod 0555 {} + && \
+    find /opt/nanoclaw-cos/vault -type f -name node -exec chmod 0555 {} + && \
+    find /opt/nanoclaw-cos/vault -type f ! -name node -exec chmod 0444 {} +
+COPY probe.sh probe.mjs probe-authority.mjs probe-provision.mjs verify-units.mjs probe-wire.mjs probe-config.mjs probe-artifact.mjs /probe/
+ENTRYPOINT ["/bin/sh", "/probe/probe.sh"]

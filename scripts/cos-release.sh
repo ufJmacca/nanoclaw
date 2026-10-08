@@ -3,11 +3,12 @@
 set -euo pipefail
 umask 077
 [[ "$(uname -s)" == Darwin ]] || { echo 'cos:release requires the Mac host' >&2; exit 1; }
-[[ ( $# == 6 || ( $# == 7 && "${7:-}" == --local-only ) ) && "$1" == --slice && "$2" == S11 && "$3" == --target && "$4" == pi && "$5" == --db-profile ]] || {
-  echo 'Usage: cos:release --slice S11 --target pi --db-profile test|runtime-disposable [--local-only]' >&2; exit 1;
+[[ ( $# == 6 || ( $# == 7 && "${7:-}" == --local-only ) ) && "$1" == --slice && ( "$2" == S11 || "$2" == G01 ) && "$3" == --target && "$4" == pi && "$5" == --db-profile ]] || {
+  echo 'Usage: cos:release --slice S11|G01 --target pi --db-profile test|runtime-disposable [--local-only]' >&2; exit 1;
 }
 slice=$2 profile=$6
 [[ "$profile" == test || "$profile" == runtime-disposable ]] || exit 1
+[[ "$slice" != G01 || "$profile" == test ]] || { echo 'G01 requires the separate admitted test profile.' >&2; exit 1; }
 [[ -z "${DOCKER_HOST:-}${DOCKER_CONTEXT:-}${DOCKER_TLS_VERIFY:-}${DOCKER_CERT_PATH:-}${BUILDX_BUILDER:-}" ]] || {
   echo 'Explicit Docker endpoint overrides are not accepted for releases.' >&2; exit 1;
 }
@@ -15,6 +16,7 @@ root=$(git rev-parse --show-toplevel)
 cd "$root"
 [[ -z "$(git status --porcelain)" ]] || { echo 'Commit the candidate changes before releasing.' >&2; exit 1; }
 commit=$(git rev-parse HEAD)
+tree=$(git rev-parse 'HEAD^{tree}')
 branch=$(git symbolic-ref HEAD)
 [[ "$branch" == refs/heads/* ]] || exit 1
 mkdir -p .cos-plan-state/releases .cos-plan-state/release-tests
@@ -107,7 +109,7 @@ for target in host agent-standard agent-documents; do
   tag=$(cli field "$id" "$target-tag")
   printf 'Building Linux/ARM64 %s\n' "$target"
   docker --context "$context" buildx build --builder "$builder" --platform linux/arm64 --provenance=false \
-    --load --target "$target" --build-arg "SOURCE_COMMIT=$commit" --build-arg "WORKER_ASSETS_DIGEST=$assets" \
+    --load --target "$target" --build-arg "SOURCE_COMMIT=$commit" --build-arg "SOURCE_TREE=$tree" --build-arg "RELEASE_SLICE=$slice" --build-arg "WORKER_ASSETS_DIGEST=$assets" \
     -f "$directory/context/container/release/Dockerfile" -t "$tag" "$directory/context" \
     > "$directory/$target-build.log" 2>&1
   docker --context "$context" image inspect "$tag" > "$directory/$target-inspect.json"
@@ -116,6 +118,27 @@ cli images "$id"
 host_image=$(cli field "$id" host-id)
 standard_image=$(cli field "$id" agent-standard-id)
 documents_image=$(cli field "$id" agent-documents-id)
+if [[ "$slice" == G01 ]]; then
+  docker run --rm --pull=never --network=none "$host_image" --input-type=module \
+    -e 'import fs from "node:fs";const root="/release/vault-artifacts";const names=fs.readdirSync(root);if(names.length!==1)process.exit(1);process.stdout.write(fs.readFileSync(root+"/"+names[0]+"/artifact.json","utf8"))' > "$directory/vault-artifact.json"
+  cli vault-artifact "$id"
+  # Use a unique local tag only as the build input; verify its identity before and after the build.
+  vault_host="nanoclaw-cos-vault-input:$id"
+  vault_tag="nanoclaw-cos-vault-fixture:$id"
+  docker tag "$host_image" "$vault_host"
+  [[ "$(docker image inspect --format '{{.Id}}' "$vault_host")" == "$host_image" ]] || exit 1
+  docker --context "$context" buildx build --builder "$builder" --platform linux/arm64 --provenance=false --load \
+    --build-arg "HOST_IMAGE=$vault_host" --build-arg "HOST_IMAGE_ID=$host_image" --build-arg "SOURCE_COMMIT=$commit" \
+    -f "$directory/context/container/fixtures/vault/Dockerfile.release" -t "$vault_tag" \
+    "$directory/context/container/fixtures/vault" > "$directory/vault-fixture-build.log" 2>&1
+  [[ "$(docker image inspect --format '{{.Id}}' "$vault_host")" == "$host_image" ]] || exit 1
+  docker image inspect "$vault_tag" > "$directory/vault-fixture-inspect.json"
+  vault_image=$(cli vault-fixture "$id")
+  check vault_helper bash "$directory/context/scripts/cos-vault-fixture.sh" helper "$vault_image"
+  check vault_units bash "$directory/context/scripts/cos-vault-fixture.sh" units "$vault_image"
+  check vault_kernel bash "$directory/context/scripts/cos-vault-fixture.sh" kernel "$vault_image" "$directory/context/scripts/cos-vault-keychain.swift"
+  check vault_wire cli vault-wire "$id"
+fi
 # Daemon-native paths are required for worker Unix sockets. Only this release's synthetic volume is used.
 volume="cos-${commit:0:8}-$stamp"
 docker volume create --label "nanoclaw.cos-fixture=$id" "$volume" > "$directory/fixture-volume.txt"
@@ -173,6 +196,12 @@ isolation_checks() {
 check image_isolation isolation_checks
 check agent_image agent_checks
 check host_image host_checks
+if [[ "$slice" == G01 ]]; then
+  # Actual compiled native state, backed up while WAL pages are committed; no live stores are mounted.
+  check protected_state docker run --rm --pull=never --network=none --read-only --user 1000:1000 \
+    --tmpfs /tmp:rw,nosuid,nodev "$host_image" --test \
+    /release/dist/contracts/chief-of-staff/vault-protected-state.integration.js
+fi
 # Export the existing tested identities, without rebuilding. Configuration IDs are hashed from this archive.
 docker save -o "$directory/images.tar" \
   "$(cli field "$id" host-tag)" "$(cli field "$id" agent-standard-tag)" "$(cli field "$id" agent-documents-tag)"

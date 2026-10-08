@@ -17,6 +17,9 @@ RUN curl -fL --retry 3 https://github.com/oven-sh/bun/releases/download/bun-v1.3
     rm -rf /tmp/bun /tmp/bun.zip && npm install -g pnpm@10.33.0
 
 FROM tooling AS host-build
+ARG RELEASE_SLICE=S11
+ARG SOURCE_COMMIT
+ARG SOURCE_TREE
 RUN apt-get update && apt-get install -y --no-install-recommends build-essential python3 pkg-config && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
@@ -25,6 +28,11 @@ COPY tsconfig.json build-info.json ./
 COPY src ./src
 COPY container ./container
 RUN pnpm build && bun build src/modules/chief-of-staff/ops/target-bootstrap.ts --target=node --format=esm --outfile=/build/bootstrap.mjs
+RUN if [ "$RELEASE_SLICE" = G01 ]; then \
+      bun build src/modules/chief-of-staff/ops/vault-root-entry.ts --target=node --format=esm --packages=external --outfile=/build/vault-gateway.mjs && \
+      node --input-type=module -e 'import {packageVaultRootArtifact} from "./dist/modules/chief-of-staff/ops/vault-root-package.js";packageVaultRootArtifact({sourceCommit:process.argv[1],sourceTree:process.argv[2],gateway:"/build/vault-gateway.mjs",output:"/build/vault-artifacts"})' "$SOURCE_COMMIT" "$SOURCE_TREE" && \
+      rm /build/vault-gateway.mjs; \
+    fi
 
 FROM tooling AS host
 ARG SOURCE_COMMIT
