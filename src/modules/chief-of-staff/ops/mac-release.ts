@@ -1,6 +1,26 @@
 import { validateReleaseManifest, type ReleaseManifest } from './release-manifest.js';
 import path from 'node:path';
 import { readPrivate, writeAtomic } from './target-state.js';
+import { readExtensionRelease, checkpointExtensionRelease } from './extension-release.js';
+export function readReleaseExecution(
+  root: string,
+  slice: ReleaseManifest['slice'],
+  forRelease = false,
+): { active_slice: string } {
+  if (slice === 'G01') return readExtensionRelease(root, forRelease);
+  const ledger = readLocalExecution(root, forRelease);
+  if (ledger.active_slice !== slice) throw Error('active_slice_required');
+  return ledger;
+}
+export function checkpointReleaseExecution(
+  root: string,
+  slice: ReleaseManifest['slice'],
+  patch: Record<string, unknown>,
+): void {
+  readReleaseExecution(root, slice);
+  if (slice === 'G01') checkpointExtensionRelease(root, patch);
+  else checkpointLocalExecution(root, patch);
+}
 
 type LocalExecution = {
   active_slice: string;

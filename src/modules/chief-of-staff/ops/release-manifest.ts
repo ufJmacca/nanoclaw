@@ -16,6 +16,8 @@ import { MANDATE_CHECKSUM } from '../store/mandate-schema.js';
 import { ACTION_CHECKSUM } from '../store/action-schema.js';
 import { STRATEGY_CHECKSUM } from '../store/strategy-schema.js';
 import { STRATEGY_CHAIN_CHECKSUM } from '../store/strategy-chain-schema.js';
+import { digest } from '../domain/contracts.js';
+import { vaultRootArtifactSeal, type VaultRootArtifactSeal } from './vault-root-artifact.js';
 export const REQUIRED_RELEASE_CHECKS = [
   'root',
   'runner',
@@ -25,10 +27,21 @@ export const REQUIRED_RELEASE_CHECKS = [
   'agent_image',
   'image_isolation',
 ] as const;
+export const VAULT_RELEASE_CHECKS = [
+  'vault_helper',
+  'vault_kernel',
+  'vault_units',
+  'vault_wire',
+  'protected_state',
+] as const;
+export function requiredReleaseChecks(slice: ReleaseManifest['slice']): readonly string[] {
+  return slice === 'G01' ? [...REQUIRED_RELEASE_CHECKS, ...VAULT_RELEASE_CHECKS] : REQUIRED_RELEASE_CHECKS;
+}
 export type ReleaseManifest = {
   contract: 'cos-release/v1';
   releaseId: string;
-  slice: 'S01' | 'S02' | 'S03' | 'S04' | 'S05' | 'S06' | 'S07' | 'S08' | 'S09' | 'S10' | 'S11';
+  slice: 'S01' | 'S02' | 'S03' | 'S04' | 'S05' | 'S06' | 'S07' | 'S08' | 'S09' | 'S10' | 'S11' | 'G01';
+  vaultArtifact?: { digest: string; seal: VaultRootArtifactSeal };
   platform: 'linux/arm64';
   source: {
     repository: 'ufJmacca/nanoclaw';
@@ -61,7 +74,7 @@ export function validateReleaseManifest(value: unknown): ReleaseManifest {
     !object(value) ||
     value.contract !== 'cos-release/v1' ||
     typeof value.slice !== 'string' ||
-    !['S01', 'S02', 'S03', 'S04', 'S05', 'S06', 'S07', 'S08', 'S09', 'S10', 'S11'].includes(value.slice) ||
+    !['S01', 'S02', 'S03', 'S04', 'S05', 'S06', 'S07', 'S08', 'S09', 'S10', 'S11', 'G01'].includes(value.slice) ||
     value.platform !== 'linux/arm64' ||
     value.rpc !== 'cos-rpc/v1' ||
     !matches(value.releaseId, /^release-[a-zA-Z0-9_-]{1,120}$/) ||
@@ -165,7 +178,31 @@ export function validateReleaseManifest(value: unknown): ReleaseManifest {
     if (image.role === 'host') hosts++;
   }
   if (hosts !== 1 || !object(value.checks)) return reject();
-  for (const name of REQUIRED_RELEASE_CHECKS) {
+  if (value.slice === 'G01') {
+    try {
+      const artifact = value.vaultArtifact;
+      if (
+        !object(artifact) ||
+        Object.keys(artifact).sort().join(',') !== 'digest,seal' ||
+        !matches(artifact.digest, /^[a-f0-9]{64}$/) ||
+        value.previousReleaseIds.length < 1
+      )
+        return reject();
+      const seal = vaultRootArtifactSeal(artifact.seal);
+      if (
+        digest(seal) !== artifact.digest ||
+        seal.sourceCommit !== source.commit ||
+        seal.sourceTree !== source.tree ||
+        seal.runtime.version !== '22.23.2'
+      )
+        return reject();
+      // eslint-disable-next-line no-catch-all/no-catch-all -- Every invalid seal maps to the fixed release gate denial.
+    } catch {
+      return reject();
+    }
+  }
+  const host = value.images.find((item) => object(item) && item.role === 'host');
+  for (const name of requiredReleaseChecks(value.slice as ReleaseManifest['slice'])) {
     const check = value.checks[name];
     if (
       !object(check) ||
@@ -175,6 +212,12 @@ export function validateReleaseManifest(value: unknown): ReleaseManifest {
       !Number.isFinite(Date.parse(check.at)) ||
       !Array.isArray(check.imageIds) ||
       check.imageIds.some((id) => !images.has(id))
+    )
+      return reject();
+    if (name.startsWith('vault_') && (check.imageIds.length !== 1 || check.imageIds[0] !== host?.id)) return reject();
+    if (
+      name === 'protected_state' &&
+      (check.imageIds.length !== images.size || new Set(check.imageIds).size !== images.size)
     )
       return reject();
     if (

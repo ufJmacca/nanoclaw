@@ -23,7 +23,7 @@ export type VaultRootArtifactControls = {
 };
 const object = (value: unknown): value is Record<string, unknown> =>
   !!value && typeof value === 'object' && !Array.isArray(value);
-function seal(value: unknown): VaultRootArtifactSeal {
+export function vaultRootArtifactSeal(value: unknown): VaultRootArtifactSeal {
   const keys = (item: Record<string, unknown>, expected: string) => Object.keys(item).sort().join(',') === expected;
   if (
     !object(value) ||
@@ -145,7 +145,9 @@ export function verifyVaultRootArtifact(
         fs.closeSync(fd);
       }
     };
-    const manifest = seal(read('artifact.json', 4096, 0o444, (fd) => JSON.parse(fs.readFileSync(fd, 'utf8'))));
+    const manifest = vaultRootArtifactSeal(
+      read('artifact.json', 4096, 0o444, (fd) => JSON.parse(fs.readFileSync(fd, 'utf8'))),
+    );
     if (
       digest(manifest) !== config.artifact.digest ||
       manifest.sourceCommit !== config.artifact.sourceCommit ||

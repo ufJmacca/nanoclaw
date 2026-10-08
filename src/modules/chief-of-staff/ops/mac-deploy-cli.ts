@@ -8,7 +8,7 @@ import { artifactHash, verifyReleaseBundle } from './release-artifacts.js';
 import { validateReleaseManifest } from './release-manifest.js';
 import { targetPreflightCommand, validateTargetObservation, validateDeliveryReceipt } from './mac-deploy.js';
 import { digest } from '../domain/contracts.js';
-import { checkpointLocalExecution } from './mac-release.js';
+import { checkpointReleaseExecution, readReleaseExecution } from './mac-release.js';
 
 function localRoot(id: string) {
   if (id !== 'status' && !/^release-[a-f0-9]{12}-[0-9]{14}$/.test(id)) throw new Error('invalid_local_release');
@@ -120,6 +120,7 @@ export async function macDeployCommand(args: string[]): Promise<string | void> {
     });
   }
   const manifest = validateReleaseManifest(readPrivate(path.join(root, 'release.json')));
+  if (manifest.slice === 'G01') readReleaseExecution(path.resolve('.cos-plan-state'), manifest.slice);
   if (manifest.releaseId !== id) throw new Error('release_identity_mismatch');
   const local = readPrivate<{
     status: string;
@@ -236,7 +237,7 @@ export async function macDeployCommand(args: string[]): Promise<string | void> {
       status: 'protected_current_release_healthy',
       protected_finalized: new Date().toISOString(),
     });
-    checkpointLocalExecution(path.resolve('.cos-plan-state'), {
+    checkpointReleaseExecution(path.resolve('.cos-plan-state'), manifest.slice, {
       delivery_phase: 'protected_current_release_healthy',
       deployment_status: 'protected_current_release_healthy',
       deployed_source_sha: manifest.source.commit,
@@ -336,7 +337,7 @@ async function hash(file){const fd=f.openSync(file,f.constants.O_RDONLY|f.consta
         migration_status: 'applied_on_pi',
         deployment_receipt: path.relative(process.cwd(), path.join(root, 'deploy-result.json')),
       });
-    checkpointLocalExecution(path.resolve('.cos-plan-state'), patch);
+    checkpointReleaseExecution(path.resolve('.cos-plan-state'), manifest.slice, patch);
     return;
   }
   throw new Error('invalid_delivery_operation');
