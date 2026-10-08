@@ -60,7 +60,8 @@ export function verifyVaultWireEvidence(records: unknown[], sourceCommit: string
     kernel.mountRaceDenied !== true ||
     kernel.plaintextFallback !== false ||
     kernel.memoryProtection !== 'verified' ||
-    kernel.recoveryKeyOnDisk !== false
+    kernel.recoveryKeyOnDisk !== false ||
+    kernel.keychainRecovery !== 'verified'
   )
     deny();
 }

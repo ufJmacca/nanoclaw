@@ -177,7 +177,7 @@ try {
       changedRuntimeDenied: true,
       argumentsDenied: true,
       rootEffects: 'foreign_parent_denied',
-      rootBootstrap: 'development_native_passed',
+      rootBootstrap: 'compiled_native_passed',
       targetLeases: 'not_exercised',
       managerActivation: 'not_exercised',
       recoveryKeyOnDisk: false,

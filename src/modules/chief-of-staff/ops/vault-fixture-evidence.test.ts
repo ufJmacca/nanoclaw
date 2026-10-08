@@ -17,13 +17,14 @@ function evidence() {
       plaintextFallback: false,
       memoryProtection: 'verified',
       recoveryKeyOnDisk: false,
+      keychainRecovery: 'verified',
     },
   ];
 }
 it('accepts wire evidence only from the same successful immutable kernel fixture', () => {
   expect(() => verifyVaultWireEvidence(evidence(), source, image)).not.toThrow();
 });
-it.each(['source', 'image', 'missing-wire', 'disk-key', 'recovery', 'kernel', 'duplicate'])(
+it.each(['source', 'image', 'missing-wire', 'disk-key', 'recovery', 'kernel', 'duplicate', 'keychain'])(
   'denies %s evidence instead of manufacturing a separate wire pass',
   (reason) => {
     const records = evidence();
@@ -34,6 +35,7 @@ it.each(['source', 'image', 'missing-wire', 'disk-key', 'recovery', 'kernel', 'd
     if (reason === 'recovery') Object.assign(records[2]!, { realRecoverySlot: 'not_exercised' });
     if (reason === 'kernel') Object.assign(records[3]!, { kernelVault: 'failed' });
     if (reason === 'duplicate') records.push(records[2]!);
+    if (reason === 'keychain') Object.assign(records[3]!, { keychainRecovery: 'not_exercised' });
     expect(() => verifyVaultWireEvidence(records, source, image)).toThrow('vault_wire_evidence_unavailable');
   },
 );

@@ -30,4 +30,5 @@ swift "$3" fixture-stream | docker run --rm -i --pull=never --network=none --cap
   --device /dev/loop-control \
   --device-cgroup-rule 'b 7:* rwm' --device-cgroup-rule "b $dm_major:* rwm" \
   --device-cgroup-rule 'c 10:236 rwm' --device-cgroup-rule 'c 10:237 rwm' \
-  --ulimit core=0 --memory 768m --memory-swap 768m -e NANOCLAW_COS_VAULT_FIXTURE=1 "$image"
+  --ulimit core=0 --memory 768m --memory-swap 768m \
+  -e NANOCLAW_COS_VAULT_FIXTURE=1 -e NANOCLAW_COS_VAULT_KEYCHAIN_FIXTURE=1 "$image"

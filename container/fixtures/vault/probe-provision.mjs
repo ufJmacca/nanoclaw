@@ -446,7 +446,23 @@ try {
   authorityChild.stdin.end();
   await authorityExited;
   console.log(
-    '{"kernelVault":"passed","volumeBytes":1073741824,"wrongKeyDenied":true,"recoveredCanary":true,"bootKeyRemoved":true,"ownershipDenied":true,"symlinkDenied":true,"mountRaceDenied":true,"memoryProtection":"verified","plaintextFallback":false,"allocationAdapter":"passed","cryptsetupAdapter":"passed","mountAdapter":"passed","recoveryKeyOnDisk":false}',
+    JSON.stringify({
+      kernelVault: 'passed',
+      volumeBytes: 1073741824,
+      wrongKeyDenied: true,
+      recoveredCanary: true,
+      bootKeyRemoved: true,
+      ownershipDenied: true,
+      symlinkDenied: true,
+      mountRaceDenied: true,
+      memoryProtection: 'verified',
+      plaintextFallback: false,
+      allocationAdapter: 'passed',
+      cryptsetupAdapter: 'passed',
+      mountAdapter: 'passed',
+      recoveryKeyOnDisk: false,
+      keychainRecovery: process.env.NANOCLAW_COS_VAULT_KEYCHAIN_FIXTURE === '1' ? 'verified' : 'not_exercised',
+    }),
   );
 } catch {
   console.error('{"code":"vault_provision_fixture_unavailable"}');
