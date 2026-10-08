@@ -219,6 +219,7 @@ export async function installVaultRoot(
         if (fs.lstatSync(destination, { throwIfNoEntry: false })) throw Error('foreign_artifact');
         const parent = pins.find(({ directory }) => directory === paths.vaultRoot)!;
         fs.mkdirSync(`/proc/self/fd/${parent.fd}/${config.artifact.digest}`, { mode: 0o700 });
+        fs.fsyncSync(parent.fd);
         journal.pendingArtifact = { digest: config.artifact.digest, claim: claim(fs.lstatSync(destination)) };
         save();
       }
