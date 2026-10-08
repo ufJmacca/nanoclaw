@@ -1,4 +1,9 @@
-import { REQUIRED_RELEASE_CHECKS, type ReleaseManifest } from '../../modules/chief-of-staff/ops/release-manifest.js';
+import {
+  REQUIRED_RELEASE_CHECKS,
+  requiredReleaseChecks,
+  type ReleaseManifest,
+} from '../../modules/chief-of-staff/ops/release-manifest.js';
+import { digest } from '../../modules/chief-of-staff/domain/contracts.js';
 import { INITIAL_CHECKSUM } from '../../modules/chief-of-staff/store/migrations.js';
 import { KNOWLEDGE_CHECKSUM } from '../../modules/chief-of-staff/store/knowledge-schema.js';
 import { CALENDAR_CHECKSUM } from '../../modules/chief-of-staff/store/calendar-schema.js';
@@ -141,4 +146,38 @@ export function fixtureRelease(slice: ReleaseManifest['slice'] = 'S01'): Release
       ]),
     ),
   };
+}
+/** A complete synthetic G01 contract for admin tests; its payload/image identities are never deployment evidence. */
+export function fixtureVaultRelease(): ReleaseManifest {
+  const manifest = fixtureRelease('S11');
+  manifest.slice = 'G01';
+  const seal = {
+    contract: 'cos-vault-root-artifact/v1' as const,
+    sourceCommit: manifest.source.commit,
+    sourceTree: manifest.source.tree,
+    runtime: { name: 'node' as const, version: '22.23.2', architecture: 'arm64' as const },
+    files: {
+      'gateway.mjs': { bytes: 100, sha256: '4'.repeat(64) },
+      node: { bytes: 122159120, sha256: '5'.repeat(64) },
+    },
+  };
+  manifest.vaultArtifact = { digest: digest(seal), seal };
+  manifest.previousReleaseIds = ['release-reviewed-s11'];
+  manifest.checks = Object.fromEntries(
+    requiredReleaseChecks('G01').map((name) => [
+      name,
+      {
+        status: 'passed',
+        at: '2026-10-08T00:00:00Z',
+        sourceCommit: manifest.source.commit,
+        imageIds:
+          name === 'protected_state' || name.includes('image')
+            ? manifest.images.map(({ id }) => id)
+            : name.startsWith('vault_')
+              ? [manifest.images[0]!.id]
+              : [],
+      },
+    ]),
+  ) as ReleaseManifest['checks'];
+  return manifest;
 }
