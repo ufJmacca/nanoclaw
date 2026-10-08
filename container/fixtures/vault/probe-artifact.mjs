@@ -6,6 +6,7 @@ import { digest } from '/code/modules/chief-of-staff/domain/contracts.js';
 import { verifyVaultMemory } from '/code/modules/chief-of-staff/ops/vault-memory.js';
 import { readVaultRootConfiguration } from '/code/modules/chief-of-staff/ops/vault-root-config.js';
 import { verifyVaultRootArtifact } from '/code/modules/chief-of-staff/ops/vault-root-artifact.js';
+import { installVaultRoot } from '/code/modules/chief-of-staff/ops/vault-root-install.js';
 import { initializeVaultRootState, vaultRootStateDigest } from '/code/modules/chief-of-staff/ops/vault-root-state.js';
 import { checkVaultAuthority } from '/code/modules/chief-of-staff/ops/vault-authority.js';
 import { writeVaultRootRequest } from '/code/modules/chief-of-staff/ops/vault-root-wire.js';
@@ -16,6 +17,7 @@ try {
   assert.equal(process.arch, 'arm64');
   assert.equal(process.env.NANOCLAW_COS_VAULT_FIXTURE, '1');
   verifyVaultMemory();
+  process.umask(0o077);
   const base = '/opt/nanoclaw-cos/vault',
     roots = fs.readdirSync(base);
   assert.equal(roots.length, 1);
@@ -44,11 +46,15 @@ try {
     owner: { uid: 1000, gid: 1000, home: '/home/fixture', targetRoot: '/home/fixture/.config/nanoclaw-cos/state' },
     artifact: { sourceCommit: seal.sourceCommit, sourceTree: seal.sourceTree, digest: artifactDigest },
   };
-  fs.mkdirSync('/etc/nanoclaw-cos', { mode: 0o700 });
-  fs.writeFileSync('/etc/nanoclaw-cos/vault-root.json', JSON.stringify(config), { flag: 'wx', mode: 0o600 });
-  const guards = { executable: root + '/node', entrypoint: root + '/gateway.mjs' };
-  assert.deepEqual(verifyVaultRootArtifact(readVaultRootConfiguration(), guards), seal);
   fs.mkdirSync('/case', { mode: 0o755 });
+  fs.chmodSync('/case', 0o755);
+  // Keep the baked exact-source package as immutable fixture input, then exercise the actual fixed-path installer.
+  fs.renameSync('/opt/nanoclaw-cos', '/case/export');
+  const sourceRoot = '/case/export/vault/' + artifactDigest;
+  fs.chownSync(sourceRoot, 1000, 1000);
+  for (const name of ['artifact.json', 'gateway.mjs', 'node']) fs.chownSync(sourceRoot + '/' + name, 1000, 1000);
+  assert.equal(fs.existsSync('/etc/nanoclaw-cos'), false);
+  assert.equal(fs.existsSync('/opt/nanoclaw-cos'), false);
   fs.mkdirSync('/case/authority', { mode: 0o700 });
   fs.chownSync('/case/authority', 1000, 1000);
   owner = spawn(
@@ -77,6 +83,16 @@ try {
   ownerExit.catch(() => {});
   const messages = runtimeTestMessages(owner.stdout),
     grant = (await messages.next()).value;
+  const installationAuthority = { assertAuthority: () => checkVaultAuthority(grant, grant.scope, 1000) };
+  const installation = await installVaultRoot({ configuration: config, sourceRoot }, installationAuthority);
+  assert.equal(installation.status, 'installed');
+  const installedNodeInode = fs.statSync(root + '/node').ino;
+  await installVaultRoot({ configuration: config, sourceRoot }, installationAuthority);
+  assert.equal(fs.statSync(root + '/node').ino, installedNodeInode);
+  const guards = { executable: root + '/node', entrypoint: root + '/gateway.mjs' };
+  assert.deepEqual(verifyVaultRootArtifact(readVaultRootConfiguration(), guards), seal);
+  assert.equal(fs.statSync('/opt/nanoclaw-cos').mode & 0o777, 0o755);
+  assert.equal(fs.statSync('/opt/nanoclaw-cos/vault').mode & 0o777, 0o755);
   const proofs = async () => {
     await writeRuntimeTestMessage(owner.stdin, { action: 'status' });
     return (await messages.next()).value.proofs;
@@ -179,6 +195,7 @@ try {
       argumentsDenied: true,
       rootEffects: 'foreign_parent_denied',
       rootBootstrap: 'compiled_native_passed',
+      rootInstallation: 'compiled_native_passed',
       targetLeases: 'not_exercised',
       managerActivation: 'not_exercised',
       recoveryKeyOnDisk: false,
