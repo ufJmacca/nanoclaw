@@ -100,9 +100,9 @@ export async function targetOwnerAdmin(args: string[]): Promise<Record<string, u
     readTargetTestEnvironment,
     checkedTargetDatabase,
   } = await import('./target-host.js');
-  const { verifyProtectionHelper } = await import('./programme-protection.js');
+  const { verifyRetainedAdminHelper } = await import('./retained-admin-helper.js');
   verifyTargetPaths(settings, 0);
-  const release = await verifyProtectionHelper(
+  const release = await verifyRetainedAdminHelper(
     settings,
     targetBinding(settings),
     path.join(path.dirname(fileURLToPath(import.meta.url)), 'target-helper.js'),

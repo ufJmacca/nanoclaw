@@ -10,7 +10,7 @@ import {
   readTargetDatabaseEnvironment,
   RUNTIME_DATABASE_ENVIRONMENT_KEYS,
 } from './target-host.js';
-import { verifyProtectionHelper } from './programme-protection.js';
+import { verifyRetainedAdminHelper } from './retained-admin-helper.js';
 import { assertNativeReleaseCompatibility } from './native-release-compatibility.js';
 import { migrationStatus } from '../store/migrations.js';
 import type { ReleaseManifest } from './release-manifest.js';
@@ -81,7 +81,7 @@ export function createOperationsMaintenanceEffects(
   return {
     async verify() {
       verifyTargetPaths(settings, 0);
-      manifest = await verifyProtectionHelper(settings, binding, invokedHelper);
+      manifest = await verifyRetainedAdminHelper(settings, binding, invokedHelper);
       paused();
       return manifest;
     },

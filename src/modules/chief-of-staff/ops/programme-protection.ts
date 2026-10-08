@@ -10,7 +10,7 @@ import {
   type TargetBinding,
   type TargetState,
 } from './target-state.js';
-import { payloadDigest } from './payload.js';
+import { verifyRetainedReleaseHelper } from './retained-admin-helper.js';
 
 const SLICES = Array.from({ length: 11 }, (_, i) => 'S' + String(i + 1).padStart(2, '0'));
 const ALIGNMENT = 'S01-codex-subscription-runtime';
@@ -255,31 +255,8 @@ export async function verifyProtectionHelper(
   invoked: string,
 ): Promise<ReleaseManifest> {
   try {
-    const payload = path.resolve(path.dirname(invoked), '../../../..'),
-      archive = path.dirname(payload);
-    if (
-      path.dirname(archive) !== settings.releaseRoot ||
-      invoked !== path.join(payload, 'dist/modules/chief-of-staff/ops/target-helper.js') ||
-      fs.realpathSync(invoked) !== invoked
-    )
-      reject();
-    const manifest = validateReleaseManifest(readPrivate(path.join(archive, 'release.json')));
-    if (manifest.slice !== 'S11' || manifest.releaseId !== path.basename(archive)) reject();
-    const record = readPrivate<Record<string, unknown>>(
-      path.join(settings.stateRoot, 'releases', manifest.releaseId, 'deployment.json'),
-    );
-    const phases = ['source', 'artifacts', 'quiesce', 'backup', 'migrate', 'activate', 'health'];
-    if (
-      record.version !== 1 ||
-      record.releaseId !== manifest.releaseId ||
-      record.manifestDigest !== digest(manifest) ||
-      record.bindingDigest !== digest(binding) ||
-      record.status !== 'healthy' ||
-      record.pending !== null ||
-      digest(record.completed) !== digest(phases) ||
-      (await payloadDigest(payload)) !== manifest.hostPayloadDigest
-    )
-      reject();
+    const manifest = await verifyRetainedReleaseHelper(settings, binding, invoked);
+    if (manifest.slice !== 'S11') reject();
     return manifest;
     // eslint-disable-next-line no-catch-all/no-catch-all -- Unverified retained artifacts must not execute lifecycle changes or disclose private paths.
   } catch {
