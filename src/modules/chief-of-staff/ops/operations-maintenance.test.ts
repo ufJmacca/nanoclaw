@@ -8,6 +8,8 @@ import { initializeTarget, readTarget, readPrivate, protectTarget, writeAtomic }
 import { activeMaintenanceLease, admittedGeneration, beginMaintenance } from './maintenance.js';
 import { operationsMaintenance, type OperationsMaintenanceEffects } from './operations-maintenance.js';
 import { runtimeServiceEnvironmentMatches } from './operations-maintenance-effects.js';
+import { digest } from '../domain/contracts.js';
+import { requiredReleaseChecks, type ReleaseManifest } from './release-manifest.js';
 const roots: string[] = [];
 afterEach(() => {
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
@@ -19,12 +21,42 @@ const binding = {
   installationRoot: '/home/pi/nano',
   dataRoot: '/home/pi/nano/data',
 };
-function fixture() {
+function fixture(slice: 'S11' | 'G01' = 'S11') {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-owner-maintenance-'));
   roots.push(base);
   const root = path.join(base, 'target');
-  const manifest = fixtureRelease('S11'),
+  const manifest = fixtureRelease(slice),
     requestId = randomUUID();
+  if (slice === 'G01') {
+    const seal = {
+      contract: 'cos-vault-root-artifact/v1' as const,
+      sourceCommit: manifest.source.commit,
+      sourceTree: manifest.source.tree,
+      runtime: { name: 'node' as const, version: '22.23.2', architecture: 'arm64' as const },
+      files: {
+        'gateway.mjs': { bytes: 100, sha256: '4'.repeat(64) },
+        node: { bytes: 122159120, sha256: '5'.repeat(64) },
+      },
+    };
+    manifest.vaultArtifact = { digest: digest(seal), seal };
+    manifest.previousReleaseIds = ['release-reviewed-s11'];
+    manifest.checks = Object.fromEntries(
+      requiredReleaseChecks(slice).map((name) => [
+        name,
+        {
+          status: 'passed',
+          at: '2026-10-08T00:00:00Z',
+          sourceCommit: manifest.source.commit,
+          imageIds:
+            name === 'protected_state' || name.includes('image')
+              ? manifest.images.map(({ id }) => id)
+              : name.startsWith('vault_')
+                ? [manifest.images[0]!.id]
+                : [],
+        },
+      ]),
+    ) as ReleaseManifest['checks'];
+  }
   const original = initializeTarget(root, binding);
   writeAtomic(root, 'state.json', { ...original, releaseId: manifest.releaseId });
   const effects = {
@@ -38,6 +70,28 @@ function fixture() {
   } satisfies OperationsMaintenanceEffects;
   return { root, manifest, requestId, effects };
 }
+it('uses a fresh G01 request ID on the protected installed release and restores only checked admission', async () => {
+  const f = fixture('G01');
+  protectTarget(f.root, binding);
+  await expect(operationsMaintenance({ ...f, binding, phase: 'hold' })).resolves.toMatchObject({ status: 'held' });
+  expect(activeMaintenanceLease(f.root, binding).owner).toBe('operations-' + f.requestId);
+  await expect(operationsMaintenance({ ...f, binding, phase: 'release' })).resolves.toMatchObject({
+    status: 'released',
+    cosResumed: false,
+  });
+  const requestId = randomUUID();
+  await expect(operationsMaintenance({ ...f, requestId, binding, phase: 'hold' })).resolves.toMatchObject({
+    status: 'held',
+  });
+  expect(activeMaintenanceLease(f.root, binding).owner).toBe('operations-' + requestId);
+});
+it('denies G01 maintenance on an unprotected target before stopping any service', async () => {
+  const f = fixture('G01');
+  await expect(operationsMaintenance({ ...f, binding, phase: 'hold' })).rejects.toThrow(
+    'operations_maintenance_unverified',
+  );
+  expect(f.effects.stopNative).not.toHaveBeenCalled();
+});
 it('S11-PG03 holds a stable data-preserving lease, closes the old service and restarts only after new access is checked', async () => {
   const f = fixture();
   protectTarget(f.root, binding);
