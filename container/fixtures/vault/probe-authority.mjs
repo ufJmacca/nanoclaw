@@ -11,10 +11,16 @@ try {
   const mode = process.argv[2];
   if (mode === 'owner') {
     assert.equal(process.getuid(), 1000);
-    const scope = { operationId: process.argv[3] ?? randomUUID(), targetDigest: 'a'.repeat(64), generation: 1 };
+    const scope = {
+      operationId: process.argv[3] ?? randomUUID(),
+      targetDigest: process.argv[4] ?? 'a'.repeat(64),
+      generation: Number(process.argv[5] ?? 1),
+    };
     let allowed = true;
+    let proofs = 0;
     const grant = await openVaultAuthority('/case/authority', scope, async () => {
       assert.equal(allowed, true);
+      proofs++;
     });
     try {
       // Captured by the root fixture process's private pipe, never its log output.
@@ -23,6 +29,8 @@ try {
         if (message.action === 'deny') {
           allowed = false;
           await writeRuntimeTestMessage(process.stdout, { stage: 'denied' });
+        } else if (message.action === 'status') {
+          await writeRuntimeTestMessage(process.stdout, { proofs });
         } else if (message.action === 'close') break;
         else throw Error('invalid fixture control');
       }

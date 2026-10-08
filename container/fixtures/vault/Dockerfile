@@ -9,5 +9,5 @@ RUN rm -f /etc/apt/sources.list.d/debian.sources && \
     apt-get download cryptsetup-bin=2:2.7.5-2 && \
     mv cryptsetup-bin_*.deb /var/cache/apt/archives/ && rmdir /fixture-download
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
-COPY probe.sh probe.mjs probe-authority.mjs probe-provision.mjs verify-units.mjs probe-wire.mjs probe-config.mjs /probe/
+COPY probe.sh probe.mjs probe-authority.mjs probe-provision.mjs verify-units.mjs probe-wire.mjs probe-config.mjs probe-artifact.mjs /probe/
 ENTRYPOINT ["/bin/sh", "/probe/probe.sh"]

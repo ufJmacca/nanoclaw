@@ -7,3 +7,4 @@
 !verify-units.mjs
 !probe-wire.mjs
 !probe-config.mjs
+!probe-artifact.mjs

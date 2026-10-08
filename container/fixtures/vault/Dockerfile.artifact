@@ -1,0 +1,10 @@
+# Narrow copied-root-artifact check. This does not replace the final host/worker/kernel release gates.
+ARG BASE_IMAGE=nanoclaw-cos-vault-fixture:g01
+FROM ${BASE_IMAGE}
+ARG ROOT_ARTIFACT
+COPY --chown=0:0 artifact/ /opt/nanoclaw-cos/vault/${ROOT_ARTIFACT}/
+RUN chmod 0555 /opt/nanoclaw-cos/vault/${ROOT_ARTIFACT} && \
+    chmod 0444 /opt/nanoclaw-cos/vault/${ROOT_ARTIFACT}/artifact.json /opt/nanoclaw-cos/vault/${ROOT_ARTIFACT}/gateway.mjs && \
+    chmod 0555 /opt/nanoclaw-cos/vault/${ROOT_ARTIFACT}/node
+COPY probe-artifact.mjs probe-authority.mjs /probe/
+ENTRYPOINT ["/usr/local/bin/node", "/probe/probe-artifact.mjs"]
