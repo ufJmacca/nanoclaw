@@ -48,7 +48,7 @@ export async function openVaultAuthority(
     const fixed = Object.freeze({ ...scope }),
       token = randomBytes(32).toString('hex');
     directory = path.join(root, randomUUID());
-    const socket = path.join(directory, 'authority.sock');
+    const socket = path.join(directory, 'proof.sock');
     if (Buffer.byteLength(socket) > 100) throw Error('authority_path_bounds');
     fs.mkdirSync(directory, { mode: 0o700 });
     let active = true;

@@ -32,6 +32,23 @@ it('revalidates live maintenance and host authority for each fixed provisioning 
   });
   await expect(checkVaultAuthority(f.server, f.scope, f.ownerId)).rejects.toThrow('vault_authority_unavailable');
 });
+it('opens private live authority at the deployed target directory depth within the wire path bound', async () => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-vault-authority-'));
+  roots.push(parent);
+  const root = path.join(parent, 'x'.repeat(51 - Buffer.byteLength(parent) - 1));
+  fs.mkdirSync(root, { mode: 0o700 });
+  expect(Buffer.byteLength(root)).toBe(51);
+  const scope = { operationId: randomUUID(), targetDigest: 'a'.repeat(64), generation: 12 };
+  const check = vi.fn(async () => {});
+  const server = await openVaultAuthority(root, scope, check);
+  servers.push(server);
+  expect(Buffer.byteLength(server.socket)).toBeLessThanOrEqual(100);
+  expect(fs.statSync(server.socket).mode & 0o777).toBe(0o600);
+  await checkVaultAuthority(server, scope, process.getuid!());
+  expect(check).toHaveBeenCalledOnce();
+  await server.close();
+  await expect(checkVaultAuthority(server, scope, process.getuid!())).rejects.toThrow('vault_authority_unavailable');
+});
 it.each(['command', 'oversize'])(
   'rejects %s requests without offering a general root command channel',
   async (reason) => {
