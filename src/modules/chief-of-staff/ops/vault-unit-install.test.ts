@@ -14,6 +14,7 @@ function fixture() {
   temporary.push(root);
   const paths = { stateRoot: root + '/control', systemUnits: root + '/system', ownerUnits: root + '/owner' };
   for (const directory of Object.values(paths)) fs.mkdirSync(directory, { mode: 0o700 });
+  fs.chmodSync(paths.ownerUnits, 0o755);
   const input = {
     userId: process.getuid!(),
     service: 'nanoclaw-fixture.service',
@@ -76,6 +77,29 @@ it('installs only exact generated units, verifies before reload/enable and prese
     calls.findIndex((c) => c[1][0] === 'daemon-reload'),
   );
   expect(calls.flatMap((c) => c[1]).join(' ')).not.toMatch(/restart|user@|swapoff|sysctl|--now/);
+});
+it('installs a root-managed user drop-in while preserving the existing private release directory', async () => {
+  const f = fixture(),
+    privateUnits = f.root + '/private-owner-units',
+    releaseDirectory = privateUnits + '/' + f.input.service + '.d';
+  fs.mkdirSync(privateUnits, { mode: 0o700 });
+  fs.mkdirSync(releaseDirectory, { mode: 0o700 });
+  const releaseFile = releaseDirectory + '/90-cos-release.conf';
+  fs.writeFileSync(releaseFile, '[Service]\nLimitCORE=0\nMemorySwapMax=0\n', { mode: 0o600 });
+  const directoryBefore = fs.statSync(releaseDirectory),
+    fileBefore = fs.statSync(releaseFile),
+    textBefore = fs.readFileSync(releaseFile, 'utf8');
+  fs.chmodSync(f.paths.ownerUnits, 0o755);
+  expect(f.installer.inspect()).toBe('absent');
+  await f.installer.install();
+  expect(f.installer.inspect()).toBe('matching');
+  expect(fs.statSync(releaseDirectory).ino).toBe(directoryBefore.ino);
+  expect(fs.statSync(releaseDirectory).mode & 0o777).toBe(0o700);
+  expect(fs.statSync(releaseFile).ino).toBe(fileBefore.ino);
+  expect(fs.statSync(releaseFile).mode & 0o777).toBe(0o600);
+  expect(fs.readFileSync(releaseFile, 'utf8')).toBe(textBefore);
+  expect(fs.readdirSync(releaseDirectory)).toEqual(['90-cos-release.conf']);
+  expect(fs.statSync(f.paths.ownerUnits + '/' + f.input.service + '.d/50-cos-vault.conf').uid).toBe(process.getuid!());
 });
 it.each(['existing-unit', 'existing-dropin', 'symlink', 'authority', 'memory'])(
   'denies %s before systemd mutation',

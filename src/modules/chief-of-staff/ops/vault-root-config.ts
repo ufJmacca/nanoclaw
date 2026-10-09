@@ -109,7 +109,8 @@ export function fixedVaultRootPaths(input: VaultRootConfiguration): VaultRootPat
     vaultRoot: '/var/lib/nanoclaw-cos/vault',
     calendarRoot: value.owner.targetRoot + '/calendar',
     systemUnits: '/etc/systemd/system',
-    ownerUnits: value.owner.home + '/.config/systemd/user',
+    // Keep the bound vault drop-in separate from the owner's private release override directory.
+    ownerUnits: '/etc/systemd/user',
   });
 }
 export function readVaultRootConfiguration(): VaultRootConfiguration {

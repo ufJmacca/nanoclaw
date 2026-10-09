@@ -61,7 +61,7 @@ export function createVaultUnitInstaller(
     if (values.some((a, i) => values.some((b, j) => i !== j && (a === b || a.startsWith(b + '/')))))
       throw Error('overlapping_unit_paths');
     directory(paths.systemUnits, process.getuid!());
-    directory(paths.ownerUnits, input.userId, 0o700);
+    directory(paths.ownerUnits, process.getuid!(), 0o755);
     return directory(paths.stateRoot, process.getuid!(), 0o700);
   };
   const read = (): Claim | null => {
@@ -266,7 +266,7 @@ export function createVaultUnitInstaller(
             fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW,
           );
           try {
-            if (!same(fs.fstatSync(fd), inode(directory(paths.ownerUnits, input.userId, 0o700))))
+            if (!same(fs.fstatSync(fd), inode(directory(paths.ownerUnits, process.getuid!(), 0o755))))
               throw Error('unit_parent_changed');
             fs.mkdirSync(`/proc/self/fd/${fd}/${input.service}.d`, { mode: 0o755 });
             const created = directory(dropin, process.getuid!());

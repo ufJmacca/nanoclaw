@@ -48,7 +48,7 @@ it('binds root configuration to the protected target and derives only fixed prog
     vaultRoot: '/var/lib/nanoclaw-cos/vault',
     calendarRoot: input.owner.targetRoot + '/calendar',
     systemUnits: '/etc/systemd/system',
-    ownerUnits: input.owner.home + '/.config/systemd/user',
+    ownerUnits: '/etc/systemd/user',
   });
   input.owner.targetRoot = '/home/fixture/foreign';
   expect(value.owner.targetRoot).toBe('/home/fixture/.config/nanoclaw-cos/state');

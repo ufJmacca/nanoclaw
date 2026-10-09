@@ -321,7 +321,7 @@ try {
   ])
     privateDirectory(directory, 1000);
   privateDirectory('/case/system');
-  privateDirectory('/case/owner-units', 1000);
+  privateDirectory('/case/owner-units', 0, 0o755);
   const authority = JSON.parse(run(process.execPath, ['/probe/probe-authority.mjs', 'root']));
   assert.equal(authority.rootAuthority, 'passed');
   console.log(JSON.stringify(authority));

@@ -14,7 +14,7 @@ try {
   fs.chmodSync(root, 0o711);
   const paths = { stateRoot: root + '/control', systemUnits: root + '/system', ownerUnits: root + '/owner' };
   for (const directory of Object.values(paths)) fs.mkdirSync(directory, { mode: 0o700 });
-  fs.chownSync(paths.ownerUnits, 1000, 1000);
+  fs.chmodSync(paths.ownerUnits, 0o755);
   const input = {
     userId: 1000,
     service: 'nanoclaw-fixture.service',
@@ -22,6 +22,15 @@ try {
   };
   const units = vaultUnits(input),
     names = Object.keys(units).filter((name) => name !== 'owner-service.conf');
+  const privateUnits = root + '/private-owner-units',
+    privateDropin = privateUnits + '/' + input.service + '.d',
+    releaseFile = privateDropin + '/90-cos-release.conf';
+  fs.mkdirSync(privateUnits, { mode: 0o700 });
+  fs.mkdirSync(privateDropin, { mode: 0o700 });
+  fs.writeFileSync(releaseFile, '[Service]\nLimitCORE=0\nMemorySwapMax=0\n', { mode: 0o600 });
+  for (const file of [privateUnits, privateDropin, releaseFile]) fs.chownSync(file, 1000, 1000);
+  const releaseBefore = fs.statSync(releaseFile),
+    privateDirectoryBefore = fs.statSync(privateDropin);
   const identity = {
     operationId: randomUUID(),
     targetDigest: 'f'.repeat(64),
@@ -88,6 +97,13 @@ try {
   );
   assert.equal(ownerRead.status, 0);
   assert.equal(ownerRead.stdout, units['owner-service.conf']);
+  assert.equal(fs.statSync(releaseFile).ino, releaseBefore.ino);
+  assert.equal(fs.statSync(releaseFile).uid, 1000);
+  assert.equal(fs.statSync(releaseFile).mode & 0o777, 0o600);
+  assert.equal(fs.statSync(privateDropin).ino, privateDirectoryBefore.ino);
+  assert.equal(fs.statSync(privateDropin).mode & 0o777, 0o700);
+  assert.deepEqual(fs.readdirSync(privateDropin), ['90-cos-release.conf']);
+  assert.equal(fs.readFileSync(releaseFile, 'utf8'), '[Service]\nLimitCORE=0\nMemorySwapMax=0\n');
   console.log(
     '{"systemdUnitVerification":"passed","scope":"static_generated_units_and_owned_files","activation":"not_exercised"}',
   );
