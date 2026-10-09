@@ -255,7 +255,7 @@ export class PriorityStore {
         row.instance_id === binding.instanceId &&
         row.channel_id === binding.channelId &&
         row.agent_group_id === binding.agentGroupId &&
-        row.status === 'active';
+        (row.status === 'active' || row.status === 'paused');
       return { status: matching ? 'ok' : 'conflict' };
     });
   }
