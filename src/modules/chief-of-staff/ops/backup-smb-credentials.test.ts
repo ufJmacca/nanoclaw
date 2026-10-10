@@ -79,6 +79,15 @@ it('passes only a verified private descriptor while the encrypted owner scope st
   expect(() => fs.fstatSync(fd)).toThrow();
   expect(() => current()).toThrow(/^backup_smb_credentials_unavailable$/);
 });
+it.each([true, undefined, 'false'])('refuses ordinary mounting when current maintenance is %s', async (maintenance) => {
+  fixture();
+  f.target.mockReturnValue({ ...f.target(), maintenance });
+  const effect = vi.fn(async () => {});
+  await expect(withVaultSmbCredentials(roots, expected, effect)).rejects.toThrow(
+    /^backup_smb_credentials_unavailable$/,
+  );
+  expect(effect).not.toHaveBeenCalled();
+});
 it.each([
   'missing',
   'symlink',
@@ -146,17 +155,24 @@ it.each([
     f.target.mockReturnValue({
       binding,
       lifecycle: 'implementation_disposable',
+      maintenance: false,
       generation: 10,
       releaseId: 'release-fixture',
     });
   if (reason === 'generation')
-    f.target.mockReturnValue({ binding, lifecycle: 'protected', generation: 9, releaseId: 'release-fixture' });
+    f.target.mockReturnValue({
+      binding,
+      lifecycle: 'protected',
+      maintenance: false,
+      generation: 9,
+      releaseId: 'release-fixture',
+    });
   await expect(withVaultSmbCredentials(roots, expected, callback)).rejects.toThrow(
     /^backup_smb_credentials_unavailable$/,
   );
   expect(callback).not.toHaveBeenCalled();
 });
-it.each(['file', 'directory', 'installation', 'target', 'memory'])(
+it.each(['file', 'directory', 'installation', 'target', 'maintenance', 'memory'])(
   'refuses a late %s change and releases the credential descriptor',
   async (reason) => {
     const s = fixture();
@@ -178,6 +194,7 @@ it.each(['file', 'directory', 'installation', 'target', 'memory'])(
             JSON.stringify({ ...s.installation, credentialReference: '8c462c7f-0c31-4d63-9a8f-54c68ba17994' }),
           );
         if (reason === 'target') f.target.mockReturnValue({ ...f.target(), generation: 11 });
+        if (reason === 'maintenance') f.target.mockReturnValue({ ...f.target(), maintenance: true });
         if (reason === 'memory')
           f.memory.mockImplementation(() => {
             throw Error('PRIVATE_LATE_MEMORY');

@@ -25,7 +25,9 @@ const uuid = (value: unknown) =>
 const prefix = Buffer.from('username=nanoclaw-cos-backup\npassword=');
 const maximum = prefix.length + 64 + 1;
 
-/** Owner-side admission only. A root helper duplicates this live child's held descriptor;
+/** Ordinary mount admission requires maintenance to be explicitly inactive, so
+ * recovery can close a connection without a competing service reopening it.
+ * A root helper duplicates this live child's held descriptor;
  * mount.cifs receives that descriptor rather than reopening a canonical credential path.
  * Validation stays bounded, never decodes the password and wipes every borrowed read buffer.
  */
@@ -56,6 +58,7 @@ export async function withVaultSmbCredentials<T>(
       if (
         policy.volume.filesystemUuid !== scope.filesystemUuid ||
         target.lifecycle !== 'protected' ||
+        target.maintenance !== false ||
         !target.releaseId ||
         target.generation < scope.minimumGeneration ||
         digest(target.binding) !== scope.targetDigest
