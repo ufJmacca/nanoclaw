@@ -7,6 +7,7 @@ import type pg from 'pg';
 import { afterEach, expect, it, vi } from 'vitest';
 import {
   backupCoordinatedState,
+  captureCoordinatedState,
   restoreCoordinatedSandbox,
   verifyCoordinatedSandbox,
   verifyCoordinatedLocalSandbox,
@@ -20,6 +21,7 @@ import { KnowledgeArtifacts } from '../knowledge/artifacts.js';
 import { ActionWitness, initializeActionWitness } from '../actions/witness.js';
 import { MIGRATIONS, SCHEMA_VERSION } from '../store/migrations.js';
 import { digest } from '../domain/contracts.js';
+import { BackupQueue } from './backup-queue.js';
 const roots: string[] = [];
 afterEach(() => {
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
@@ -104,6 +106,128 @@ const sandboxConfig = {
   database: 'fixture',
   ssl: { rejectUnauthorized: true, ca: 'FIXTURE_CA' },
 };
+it('G02 captures coordinated bytes directly into a queue and preserves the existing receipt reader', async () => {
+  const f = fixture(),
+    files = new Map<string, Buffer>();
+  const receipt = await captureCoordinatedState(f.options, {
+    write(name, bytes) {
+      files.set(name, Buffer.from(bytes));
+    },
+  });
+  expect(fs.readdirSync(f.options.receiptRoot)).toEqual([]);
+  expect(receipt).toMatchObject({
+    format: 'cos-coordinated-backup/v1',
+    admissionRestored: false,
+    operationId: f.options.operationId,
+  });
+  expect([...files.keys()].filter((name) => name.endsWith('native-backup.json'))).toEqual([]);
+  expect(JSON.parse(files.get('coordinated/remote.json')!.toString())).toMatchObject({
+    format: 'cos-scoped-checkpoint/v1',
+    scopeId: 'scope',
+  });
+  const restoredRoot = path.join(f.root, 'isolated-restored');
+  fs.mkdirSync(restoredRoot, { mode: 0o700 });
+  for (const [name, bytes] of files) {
+    const file = path.join(restoredRoot, name);
+    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(file, bytes, { mode: 0o600 });
+  }
+  f.query.mockClear();
+  expect(await verifyCoordinatedBackup({ ...f.options, receiptRoot: restoredRoot })).toEqual(receipt);
+  expect(f.query).not.toHaveBeenCalled();
+  const copy = new Database(path.join(restoredRoot, 'coordinated', receipt.sqlite[0].file), { readonly: true });
+  try {
+    expect(copy.prepare('SELECT body FROM messages').get()).toEqual({ body: 'preserved' });
+  } finally {
+    copy.close();
+  }
+});
+it('G02 refuses an active writer before querying or emitting checkpoint bytes', async () => {
+  const f = fixture();
+  f.quiescent.mockResolvedValue({
+    generation: 1,
+    activeWorkers: 1,
+    activeOperations: 0,
+    nativeWriters: 0,
+    effectsEnabled: false,
+  } as unknown as QuiescentCheckpoint);
+  let wrote = false;
+  await expect(
+    captureCoordinatedState(f.options, {
+      write() {
+        wrote = true;
+      },
+    }),
+  ).rejects.toThrow(/^coordinated_backup_unavailable$/);
+  expect(wrote).toBe(false);
+  expect(f.query).not.toHaveBeenCalled();
+});
+it('G02 publishes a complete coordinated capture only inside its bounded queue', async () => {
+  const f = fixture(),
+    area = path.join(f.root, 'synthetic-vault');
+  fs.mkdirSync(area, { mode: 0o700 });
+  const queue = new BackupQueue('a'.repeat(64), async (_kind, operation) => operation(area));
+  await queue.capture(
+    'state',
+    f.options.operationId,
+    async (sink) => {
+      await captureCoordinatedState(f.options, sink);
+    },
+    131072,
+  );
+  await queue.withPending('state', f.options.operationId, async (directory, receipt) => {
+    expect(receipt.state).toBe('pending');
+    const coordinated = JSON.parse(fs.readFileSync(path.join(directory, 'coordinated/manifest.json'), 'utf8'));
+    expect(coordinated).toMatchObject({ admissionRestored: false, operationId: f.options.operationId });
+    expect(receipt.files.some((file) => file.name === 'coordinated/sqlite/0/native.sqlite')).toBe(true);
+  });
+  expect(fs.readdirSync(f.options.receiptRoot)).toEqual([]);
+  expect(fs.existsSync(f.archive)).toBe(false);
+});
+it('G02 leaves an encrypted failed queue slot when the maintenance generation changes during capture', async () => {
+  const f = fixture(),
+    area = path.join(f.root, 'synthetic-vault');
+  fs.mkdirSync(area, { mode: 0o700 });
+  const queue = new BackupQueue('a'.repeat(64), async (_kind, operation) => operation(area));
+  f.quiescent
+    .mockResolvedValueOnce({
+      generation: 1,
+      activeWorkers: 0,
+      activeOperations: 0,
+      nativeWriters: 0,
+      effectsEnabled: false,
+    })
+    .mockResolvedValue({
+      generation: 2,
+      activeWorkers: 0,
+      activeOperations: 0,
+      nativeWriters: 0,
+      effectsEnabled: false,
+    });
+  await expect(
+    queue.capture('state', f.options.operationId, async (sink) => {
+      await captureCoordinatedState(f.options, sink);
+    }),
+  ).rejects.toThrow(/^backup_queue_unavailable$/);
+  expect((await queue.pending('state'))[0].state).toBe('failed');
+  expect(fs.readdirSync(f.options.receiptRoot)).toEqual([]);
+  expect(f.query.mock.calls.some(([sql]) => sql.includes('pg_advisory_unlock'))).toBe(true);
+});
+it('G02 excludes credentials from historical restriction metadata without claiming a complete capture', async () => {
+  const f = fixture(),
+    files = new Map<string, Buffer>();
+  fs.writeFileSync(f.restriction, JSON.stringify({ scopeId: 'scope', access_token: 'synthetic-secret' }));
+  await expect(
+    captureCoordinatedState(f.options, {
+      write(name, bytes) {
+        files.set(name, Buffer.from(bytes));
+      },
+    }),
+  ).rejects.toThrow(/^coordinated_backup_unavailable$/);
+  expect(files.has('coordinated/manifest.json')).toBe(false);
+  expect([...files.values()].some((bytes) => bytes.includes(Buffer.from('synthetic-secret')))).toBe(false);
+  expect(fs.readdirSync(f.options.receiptRoot)).toEqual([]);
+});
 it('S11-PG02 pairs the actual coordinated SQLite/artifact checkpoint with a software manifest and verifies both without rewriting the archive', async () => {
   const { backupOperationsState, verifyOperationsBackup } = await import('./recovery-manifest.js');
   const f = fixture(),

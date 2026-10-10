@@ -9,6 +9,8 @@ import type { KnowledgeArtifacts } from '../knowledge/artifacts.js';
 import type { ActionWitness } from '../actions/witness.js';
 import { MIGRATIONS, SCHEMA_VERSION, migrationStatus } from '../store/migrations.js';
 import { backupNativeDatabase } from './native-installation.js';
+import { captureNativeDatabase } from './backup-native.js';
+import type { BackupSnapshotSink } from './backup-queue.js';
 import { readPrivate, writeAtomic } from './target-state.js';
 import { artifactHash } from './release-artifacts.js';
 import { assertTestTarget } from '../store/preflight.js';
@@ -291,7 +293,7 @@ async function remoteSnapshot(
     throw error;
   }
 }
-function copyArtifacts(options: CoordinatedBackupOptions, temporary: string) {
+function artifactContents(options: CoordinatedBackupOptions, write: (name: string, bytes: Buffer) => void) {
   directory(options.artifacts.root);
   const names = fs
     .readdirSync(options.artifacts.root)
@@ -305,13 +307,116 @@ function copyArtifacts(options: CoordinatedBackupOptions, temporary: string) {
     if (name !== '.cos-artifacts' && !/^[a-f0-9]{64}-[a-f0-9]{64}\.blob$/.test(name))
       throw new Error('coordinated_backup_artifacts_invalid');
     const content = privateBytes(path.join(options.artifacts.root, name), 1024 * 1024);
-    bytes += content.length;
-    if (bytes > maximumRemoteBytes) throw new Error('coordinated_backup_bounds');
-    publishBytes(path.join(temporary, 'artifacts'), name, content);
-    result.push(fileReceipt('artifacts/' + name, content));
+    try {
+      bytes += content.length;
+      if (bytes > maximumRemoteBytes) throw new Error('coordinated_backup_bounds');
+      result.push(fileReceipt('artifacts/' + name, content));
+      write(name, content);
+    } finally {
+      content.fill(0);
+    }
   }
+  return result;
+}
+function copyArtifacts(options: CoordinatedBackupOptions, temporary: string) {
+  const result = artifactContents(options, (name, content) =>
+    publishBytes(path.join(temporary, 'artifacts'), name, content),
+  );
   sync(path.join(temporary, 'artifacts'));
   return result;
+}
+/** Captures the existing portable v1 receipt directly through an admitted encrypted queue sink.
+ * receiptRoot is validated for identity only; no staging directory or plaintext file is created there.
+ * The caller retains maintenance and publishes the queue only after this operation succeeds. */
+export async function captureCoordinatedState(
+  options: CoordinatedBackupOptions,
+  sink: BackupSnapshotSink,
+): Promise<CoordinatedBackupReceipt> {
+  try {
+    parameters(options);
+    const epoch = await barrier(options);
+    const locked = (await options.client.query('SELECT pg_try_advisory_lock(73101003) AS locked')).rows[0]?.locked;
+    if (!locked) throw Error('coordinated_backup_busy');
+    try {
+      return await options.artifacts.exclusive(async () => {
+        await barrier(options, epoch);
+        const snapshot = await remoteSnapshot(options),
+          remoteBytes = Buffer.from(JSON.stringify(snapshot) + '\n');
+        let remote: FileReceipt;
+        try {
+          if (remoteBytes.length > maximumRemoteBytes) throw Error('coordinated_backup_bounds');
+          remote = fileReceipt('remote.json', remoteBytes);
+          sink.write('coordinated/remote.json', remoteBytes);
+        } finally {
+          remoteBytes.fill(0);
+        }
+        const sqlite: FileReceipt[] = [];
+        for (const [index, source] of options.nativeDatabases.entries()) {
+          await barrier(options, epoch);
+          const prefix = 'sqlite/' + index;
+          const native = captureNativeDatabase(
+            source,
+            {
+              write(name, bytes) {
+                // The portable coordinated manifest carries this hash; the helper's source-path receipt is redundant.
+                if (name === prefix + '/native.sqlite') sink.write('coordinated/' + name, bytes);
+              },
+            },
+            prefix,
+            maximumRemoteBytes,
+          );
+          sqlite.push({ file: native.file, bytes: native.bytes, sha256: native.sha256 });
+        }
+        const artifacts = artifactContents(options, (name, bytes) =>
+          sink.write('coordinated/artifacts/' + name, bytes),
+        );
+        const restrictions: FileReceipt[] = [];
+        for (const [index, source] of options.restrictionFiles.entries()) {
+          await barrier(options, epoch);
+          const bytes = privateBytes(source, 1024 ** 2);
+          try {
+            if (!secretFree(JSON.parse(bytes.toString('utf8')))) throw Error('coordinated_backup_credentials_excluded');
+            restrictions.push(fileReceipt('restrictions/' + index + '.json', bytes));
+            sink.write('coordinated/restrictions/' + index + '.json', bytes);
+          } finally {
+            bytes.fill(0);
+          }
+        }
+        if (2 + sqlite.length + artifacts.length + restrictions.length > 4096) throw Error('coordinated_backup_bounds');
+        const receipt: CoordinatedBackupReceipt = {
+          format: 'cos-coordinated-backup/v1',
+          operationId: options.operationId,
+          contextDigest: digest(options.context),
+          inputsDigest: inputsDigest(options),
+          databaseFingerprint: options.databaseFingerprint,
+          schemaVersion: SCHEMA_VERSION,
+          schemaDigest,
+          barrierDigest: epoch,
+          admissionRestored: false,
+          journal: { installationDigest: options.witness.installationDigest, generation: options.witness.generation },
+          remote,
+          sqlite,
+          artifacts,
+          restrictions,
+        };
+        await barrier(options, epoch);
+        const metadata = Buffer.from(JSON.stringify(receipt) + '\n');
+        try {
+          if (metadata.length > 1024 ** 2) throw Error('coordinated_backup_bounds');
+          sink.write('coordinated/manifest.json', metadata);
+        } finally {
+          metadata.fill(0);
+        }
+        await barrier(options, epoch);
+        return receipt;
+      });
+    } finally {
+      await options.client.query('SELECT pg_advisory_unlock(73101003)');
+    }
+  } catch {
+    // eslint-disable-next-line preserve-caught-error -- Database contents, source paths and capture diagnostics are private.
+    throw Error('coordinated_backup_unavailable');
+  }
 }
 async function verify(options: CoordinatedBackupIdentity): Promise<CoordinatedBackupReceipt> {
   const root = parameters(options);
