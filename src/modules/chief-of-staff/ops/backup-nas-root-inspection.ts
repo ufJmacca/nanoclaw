@@ -4,7 +4,7 @@ import { readVaultRootConfiguration, vaultRootConfiguration } from './vault-root
 import { withVaultRootArtifact } from './vault-root-artifact.js';
 import { backupNasSetupRequest, readBackupNasSetupRequest } from './backup-nas-setup-wire.js';
 import { checkVaultAuthority } from './vault-authority.js';
-import { inspectBackupNasUnclaimedUnderlay } from './backup-nas-underlay.js';
+import { inspectBackupNasInitialization } from './backup-nas-initialization-inspection.js';
 import {
   backupNasInitializationResource,
   type BackupNasInitializationResource,
@@ -16,7 +16,7 @@ export type BackupNasRootInspectionControls = {
   withArtifact?: typeof withVaultRootArtifact;
   readRequest?: typeof readBackupNasSetupRequest;
   checkAuthority?: typeof checkVaultAuthority;
-  inspectResource?: typeof inspectBackupNasUnclaimedUnderlay;
+  inspectResource?: typeof inspectBackupNasInitialization;
 };
 export type BackupNasInitializationInspectionResult = Readonly<{
   contract: 'cos-backup-nas-initialization-inspection-result/v1';
@@ -30,7 +30,7 @@ export type BackupNasInitializationInspectionResult = Readonly<{
 /** Fixed read-only route. Setup permission admits inspection, never resource
  * adoption or retirement. The owner must verify this receipt and obtain a new
  * resource-bound grant; root recovery independently rechecks the resource then.
- * Configuration/service-stage observation will be connected separately.
+ * Resource selection follows fixed setup order and exposes no path selector.
  */
 export async function runBackupNasRootInitializationInspection(
   stream: Readable,
@@ -72,7 +72,7 @@ export async function runBackupNasRootInitializationInspection(
       };
       await assertAuthority();
       const resource = backupNasInitializationResource(
-        await (controls.inspectResource ?? inspectBackupNasUnclaimedUnderlay)(vault, request.nas, {
+        await (controls.inspectResource ?? inspectBackupNasInitialization)(vault, request.nas, {
           assertAuthority,
           assertMemory: memory,
         }),
