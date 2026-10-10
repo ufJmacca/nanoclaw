@@ -41,6 +41,39 @@ vi.mock('./vault-storage.js', () => ({
 vi.mock('./recovery-manifest.js', () => ({ captureOperationsState: f.capture }));
 vi.mock('../calendar/backup.js', () => ({ captureCalendarState: f.calendar }));
 const cleanup: Array<() => void> = [];
+function rootCanaryMetadataFixture(properties: Partial<fs.Stats> = {}) {
+  const lstat = fs.lstatSync,
+    fstat = fs.fstatSync,
+    open = fs.openSync,
+    read = fs.readSync,
+    close = fs.closeSync,
+    held = new Set<number>(),
+    reads: number[] = [];
+  const observed = (stat: fs.Stats) =>
+    Object.assign(Object.create(Object.getPrototypeOf(stat)), stat, { uid: 0, gid: 0 }, properties);
+  vi.spyOn(fs, 'lstatSync').mockImplementation(((file: fs.PathLike, options?: fs.StatOptions) => {
+    const stat = lstat(file, options as never);
+    return String(file).endsWith('/.vault-canary') && stat ? observed(stat) : stat;
+  }) as typeof fs.lstatSync);
+  vi.spyOn(fs, 'openSync').mockImplementation((file, flags, mode) => {
+    const fd = open(file, flags, mode);
+    if (String(file).endsWith('/.vault-canary') && typeof flags === 'number' && flags & 0x200000) held.add(fd);
+    return fd;
+  });
+  vi.spyOn(fs, 'fstatSync').mockImplementation(((fd: number, options?: fs.StatOptions) => {
+    const stat = fstat(fd, options as never);
+    return held.has(fd) ? observed(stat) : stat;
+  }) as typeof fs.fstatSync);
+  vi.spyOn(fs, 'readSync').mockImplementation(((fd: number, ...args: unknown[]) => {
+    if (held.has(fd)) reads.push(fd);
+    return (read as (...args: unknown[]) => unknown)(fd, ...args);
+  }) as typeof fs.readSync);
+  vi.spyOn(fs, 'closeSync').mockImplementation((fd) => {
+    held.delete(fd);
+    close(fd);
+  });
+  return { reads, held };
+}
 afterEach(() => {
   for (const close of cleanup.splice(0).reverse()) close();
   vi.restoreAllMocks();
@@ -229,6 +262,62 @@ it('refuses unsafe credential files without following them', async () => {
   await expect(captureTargetVaultState(s.settings, s.operationId, s.admin, s.recovery)).rejects.toThrow(
     'target_vault_capture_unavailable',
   );
+  expect(f.connect).not.toHaveBeenCalled();
+});
+it('records the G01 root-owned recovery canary as excluded forensic metadata without reading or copying its bytes', async () => {
+  const s = await fixture();
+  fs.writeFileSync(f.areas.journals + '/.vault-canary', 'SYNTHETIC_HOST_BOUND_PROOF', { mode: 0o600 });
+  const observed = rootCanaryMetadataFixture();
+  expect((await captureTargetVaultState(s.settings, s.operationId, s.admin, s.recovery)).status).toBe('queued');
+  const receipt = JSON.parse(fs.readFileSync(s.queue() + '/data/vault-journals.capture.json', 'utf8'));
+  expect(receipt.excluded).toEqual([
+    {
+      name: '.vault-canary',
+      reason: 'host_bound_vault_proof',
+      metadataDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+    },
+  ]);
+  expect(receipt.files.map((file: { name: string }) => file.name)).not.toContain('.vault-canary');
+  expect(fs.existsSync(s.queue() + '/data/vault-journals/.vault-canary')).toBe(false);
+  expect(observed.reads).toEqual([]);
+});
+it.each(['owner-marker', 'linked-marker', 'public-marker', 'other-hidden-file'] as const)(
+  'refuses %s while excluding only the intact G01 root proof',
+  async (reason) => {
+    const s = await fixture();
+    fs.writeFileSync(
+      f.areas.journals + (reason === 'other-hidden-file' ? '/.other-canary' : '/.vault-canary'),
+      'SYNTHETIC_PRIVATE_FILE',
+      { mode: 0o600 },
+    );
+    if (reason !== 'owner-marker')
+      rootCanaryMetadataFixture(
+        reason === 'linked-marker' ? { nlink: 2 } : reason === 'public-marker' ? { mode: 0o100644 } : {},
+      );
+    await expect(captureTargetVaultState(s.settings, s.operationId, s.admin, s.recovery)).rejects.toThrow(
+      'target_vault_capture_unavailable',
+    );
+    expect(f.connect).not.toHaveBeenCalled();
+  },
+);
+it('refuses replacement of the pinned root canary while checking current capture authority', async () => {
+  const s = await fixture(),
+    file = f.areas.journals + '/.vault-canary';
+  fs.writeFileSync(file, 'SYNTHETIC_HOST_BOUND_PROOF', { mode: 0o600 });
+  const observed = rootCanaryMetadataFixture();
+  let changed = false;
+  s.admin.check = async () => {
+    if (observed.held.size && !changed) {
+      changed = true;
+      fs.renameSync(file, file + '.original');
+      fs.writeFileSync(file, 'SYNTHETIC_REPLACEMENT', { mode: 0o600 });
+    }
+  };
+  await expect(captureTargetVaultState(s.settings, s.operationId, s.admin, s.recovery)).rejects.toThrow(
+    'target_vault_capture_unavailable',
+  );
+  expect(changed).toBe(true);
+  expect(observed.reads).toEqual([]);
   expect(f.connect).not.toHaveBeenCalled();
 });
 it('fails closed before reads when the memory policy is unavailable', async () => {

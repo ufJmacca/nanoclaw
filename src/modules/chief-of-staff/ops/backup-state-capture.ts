@@ -52,7 +52,8 @@ async function captureTree(
   current: () => void,
 ) {
   const directories: string[] = [],
-    files: Array<{ name: string; bytes: number; sha256: string }> = [];
+    files: Array<{ name: string; bytes: number; sha256: string }> = [],
+    excluded: Array<{ name: string; reason: 'host_bound_vault_proof'; metadataDigest: string }> = [];
   let total = 0,
     entries = 0;
   const visit = async (directory: string, relative = '') => {
@@ -80,9 +81,38 @@ async function captureTree(
       for (const name of fs.readdirSync(pinned(fd)).sort()) {
         if (++entries > 4096) throw Error('capture_bounds');
         const relativeName = relative ? relative + '/' + name : name;
-        if (!nameValid(prefix + '/' + relativeName)) throw Error('capture_name');
         const file = path.join(pinned(fd), name),
           before = fs.lstatSync(file);
+        if (prefix === 'vault-journals' && relativeName === '.vault-canary') {
+          // G01's root-only mount/recovery proof belongs to this live vault. Its
+          // bytes must never become portable recovery or restored authority.
+          if (
+            !before.isFile() ||
+            before.dev !== initial.dev ||
+            before.uid !== 0 ||
+            before.gid !== 0 ||
+            before.nlink !== 1 ||
+            (before.mode & 0o7777) !== 0o600 ||
+            before.size < 1 ||
+            before.size > 4096
+          )
+            throw Error('capture_host_proof_changed');
+          // Linux O_PATH pins metadata without granting read access to root's file.
+          const proof = fs.openSync(file, 0x200000 | fs.constants.O_NOFOLLOW);
+          try {
+            if (identity(fs.fstatSync(proof)) !== identity(before)) throw Error('capture_host_proof_changed');
+            stable();
+            await check();
+            stable();
+            if (identity(fs.fstatSync(proof)) !== identity(before) || identity(fs.lstatSync(file)) !== identity(before))
+              throw Error('capture_host_proof_changed');
+            excluded.push({ name: relativeName, reason: 'host_bound_vault_proof', metadataDigest: identity(before) });
+          } finally {
+            fs.closeSync(proof);
+          }
+          continue;
+        }
+        if (!nameValid(prefix + '/' + relativeName)) throw Error('capture_name');
         if (before.uid !== initial.uid || before.dev !== initial.dev || before.isSymbolicLink())
           throw Error('unsafe_capture_file');
         if (before.isDirectory()) {
@@ -137,7 +167,7 @@ async function captureTree(
     }
   };
   await visit(source);
-  const receipt = { contract: 'cos-private-tree-capture/v1', prefix, bytes: total, files, directories };
+  const receipt = { contract: 'cos-private-tree-capture/v1', prefix, bytes: total, files, directories, excluded };
   const bytes = Buffer.from(JSON.stringify(receipt) + '\n');
   try {
     if (bytes.length > 1024 ** 2) throw Error('capture_bounds');

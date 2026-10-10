@@ -27,6 +27,27 @@ function fixture() {
 }
 const op = '9f99d9b4-4dac-423a-956c-afd953993c2d',
   next = '6ea53126-7177-469b-8bc1-cedd11635b79';
+it('captures and verifies through the held self-descriptor used by the default vault accessor', async () => {
+  const f = fixture();
+  const queue = new BackupQueue('a'.repeat(64), async (_kind, operation) => {
+    const fd = fs.openSync(f.root, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+    try {
+      return await operation('/proc/self/fd/' + fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+  });
+  expect(await queue.inspect('state')).toEqual([]);
+  await queue.capture(
+    'state',
+    op,
+    async (sink) => sink.write('private.json', Buffer.from('SYNTHETIC_PRIVATE_STATE')),
+    65536,
+  );
+  await queue.withPending('state', op, async (directory) => {
+    expect(fs.readFileSync(directory + '/private.json', 'utf8')).toBe('SYNTHETIC_PRIVATE_STATE');
+  });
+});
 it('durably captures private files and retains exactly one pending full checkpoint during an outage', async () => {
   const f = fixture();
   let captures = 0;
