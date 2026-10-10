@@ -5,11 +5,19 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { readPrivate, writeAtomic } from './target-state.js';
+import type { BackupSnapshotSink } from './backup-queue.js';
+import { BACKUP_LIMITS } from './backup-policy.js';
 
 type Receipt = { version: 1; source: string; present: boolean; sha256: string; files: number; bytes: number };
 type Profile = 'conversation' | 'mission';
 const generation = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const maximumBytes = 4 * 1024 * 1024 * 1024;
+type Capture = {
+  maximumBytes: number;
+  check(relative: string): void;
+  directory?(relative: string): void;
+  write?(relative: string, bytes: Buffer): void;
+};
 function directory(file: string, profile: Profile, privateMode = false) {
   const stat = fs.lstatSync(file);
   if (
@@ -31,7 +39,7 @@ function syncDirectory(file: string) {
   }
 }
 /** Bound traversal, refuse links/special files, normalize copies to private modes. */
-async function inventory(root: string, profile: Profile, destination?: string, archived = false) {
+async function inventory(root: string, profile: Profile, destination?: string, archived = false, capture?: Capture) {
   directory(root, profile, true);
   const unsafe = () => new Error(`unsafe_${profile}_backup`);
   const selected = (name: string) =>
@@ -44,7 +52,7 @@ async function inventory(root: string, profile: Profile, destination?: string, a
     files = 0,
     bytes = 0;
   const visit = async (relative: string, depth: number): Promise<void> => {
-    if (++entries > 100000 || depth > 64) throw unsafe();
+    if (++entries > (capture ? 4096 : 100000) || depth > (capture ? 6 : 64)) throw unsafe();
     const parts = relative.split('/'),
       file = path.join(root, relative),
       stat = fs.lstatSync(file);
@@ -90,17 +98,19 @@ async function inventory(root: string, profile: Profile, destination?: string, a
       if (archived || !stat.isFile() || stat.nlink !== 1) throw unsafe();
       return;
     }
+    capture?.check(relative);
     const copy = destination ? path.join(destination, relative) : undefined;
     if (stat.isDirectory()) {
       directory(file, profile, archived);
       hash.update(JSON.stringify([relative, 'directory']) + '\n');
+      capture?.directory?.(relative);
       if (copy) fs.mkdirSync(copy, { mode: 0o700 });
       for (const child of fs.readdirSync(file).sort()) await visit(relative + '/' + child, depth + 1);
       if (copy) syncDirectory(copy);
     } else if (stat.isFile() && stat.nlink === 1) {
       if (archived && (stat.mode & 0o777) !== 0o600) throw unsafe();
       bytes += stat.size;
-      if (bytes > maximumBytes) throw unsafe();
+      if (bytes > (capture?.maximumBytes ?? maximumBytes)) throw unsafe();
       const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
       let output: number | undefined;
       try {
@@ -111,12 +121,21 @@ async function inventory(root: string, profile: Profile, destination?: string, a
         let length = 0;
         for await (const chunk of fs.createReadStream(file, { fd, autoClose: false })) {
           const buffer = chunk as Buffer;
-          length += buffer.length;
-          if (length > stat.size) throw unsafe();
-          fileHash.update(buffer);
-          if (output !== undefined) {
-            let offset = 0;
-            while (offset < buffer.length) offset += fs.writeSync(output, buffer, offset, buffer.length - offset);
+          try {
+            length += buffer.length;
+            if (length > stat.size) throw unsafe();
+            fileHash.update(buffer);
+            capture?.write?.(relative, buffer);
+            if (output !== undefined) {
+              let offset = 0;
+              while (offset < buffer.length) {
+                const written = fs.writeSync(output, buffer, offset, buffer.length - offset);
+                if (written < 1) throw unsafe();
+                offset += written;
+              }
+            }
+          } finally {
+            buffer.fill(0);
           }
         }
         const after = fs.fstatSync(fd);
@@ -139,6 +158,72 @@ async function inventory(root: string, profile: Profile, destination?: string, a
   }
   if (destination) syncDirectory(destination);
   return { sha256: hash.digest('hex'), files, bytes };
+}
+/** The admitted queue provides encrypted storage and the caller holds maintenance throughout.
+ * The additive directory list permits recovery of empty history directories using the v1 reader. */
+export async function capturePrivateHistory(
+  source: string,
+  sink: BackupSnapshotSink,
+  profile: Profile,
+  limit = BACKUP_LIMITS.staging,
+): Promise<Receipt & { directories: string[] }> {
+  try {
+    if (
+      !['conversation', 'mission'].includes(profile) ||
+      !Number.isSafeInteger(limit) ||
+      limit < 16384 ||
+      limit > BACKUP_LIMITS.staging ||
+      !path.isAbsolute(source) ||
+      path.resolve(source) !== source
+    )
+      throw Error('history_capture_bounds');
+    directory(profile === 'mission' ? source : path.dirname(source), profile, true);
+    const prefix = profile + '-backup/history/';
+    const bounds: Capture = {
+      maximumBytes: limit,
+      check(relative) {
+        const name = prefix + relative;
+        if (
+          name.length > 192 ||
+          name.split('/').length > 8 ||
+          !name.split('/').every((part) => /^(?:[A-Za-z0-9]|\.cos-)[A-Za-z0-9_.-]*$/.test(part))
+        )
+          throw Error('history_capture_name');
+      },
+    };
+    const present = !!fs.lstatSync(source, { throwIfNoEntry: false });
+    const empty = { sha256: createHash('sha256').digest('hex'), files: 0, bytes: 0 };
+    const before = present ? await inventory(source, profile, undefined, false, bounds) : empty;
+    const directories: string[] = [];
+    const copied = present
+      ? await inventory(source, profile, undefined, false, {
+          ...bounds,
+          directory: (relative) => {
+            directories.push(relative);
+          },
+          write: (relative, bytes) => sink.write(prefix + relative, bytes),
+        })
+      : empty;
+    const after = present ? await inventory(source, profile, undefined, false, bounds) : empty;
+    if (
+      JSON.stringify(before) !== JSON.stringify(copied) ||
+      JSON.stringify(before) !== JSON.stringify(after) ||
+      present !== !!fs.lstatSync(source, { throwIfNoEntry: false })
+    )
+      throw Error('history_capture_changed');
+    const receipt = { version: 1 as const, source, present, ...copied, directories };
+    const bytes = Buffer.from(JSON.stringify(receipt) + '\n');
+    try {
+      if (bytes.length > 1024 ** 2) throw Error('history_capture_bounds');
+      sink.write(profile + '-backup/receipt.json', bytes);
+    } finally {
+      bytes.fill(0);
+    }
+    return receipt;
+  } catch {
+    // eslint-disable-next-line preserve-caught-error -- Conversation contents, source paths and provider diagnostics are private.
+    throw Error('private_history_capture_unavailable');
+  }
 }
 export async function verifyPrivateHistory(source: string, receiptRoot: string, profile: Profile): Promise<Receipt> {
   directory(receiptRoot, profile, true);
