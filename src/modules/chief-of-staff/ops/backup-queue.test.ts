@@ -147,6 +147,35 @@ it('does not steal a concurrent writer lease', async () => {
   finish();
   await first;
 });
+it('a slow upload does not hold the credential publication lease', async () => {
+  const f = fixture();
+  await f.queue.capture('credentials', op, async (sink) => sink.write('token.json', Buffer.from('synthetic')), 65536);
+  let entered!: () => void, finish!: () => void;
+  const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    }),
+    done = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+  const reading = f.queue.withPending('credentials', op, async () => {
+    entered();
+    await done;
+  });
+  await started;
+  try {
+    await expect(
+      f.queue.capture(
+        'credentials',
+        next,
+        async (sink) => sink.write('token.json', Buffer.from('new-synthetic')),
+        65536,
+      ),
+    ).resolves.toMatchObject({ status: 'queued' });
+  } finally {
+    finish();
+    await reading;
+  }
+});
 it.each(['changed', 'symlink', 'unlisted', 'hardlink'])('denies %s pending files before upload', async (reason) => {
   const f = fixture();
   await f.queue.capture('state', op, async (sink) => sink.write('state.json', Buffer.from('original')), 65536);

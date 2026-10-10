@@ -405,7 +405,9 @@ export class BackupQueue {
     operationId: string,
     operation: (directory: string, receipt: BackupQueueReceipt) => Promise<T>,
   ): Promise<T> {
-    return this.area(kind, false, true, async (root, device) => {
+    // The repository uploader owns its separate lease. Published slots are immutable;
+    // a slow reader must not block new credential captures behind the writer lease.
+    return this.area(kind, false, false, async (root, device) => {
       const receipt = this.receipts(root, kind, device).find((value) => value.operationId === operationId);
       if (!receipt || receipt.state !== 'pending') throw Error('pending_checkpoint_required');
       const dataFd = privateDirectory(path.join(root, kind === 'state' ? 'full' : operationId, 'data'), device);
