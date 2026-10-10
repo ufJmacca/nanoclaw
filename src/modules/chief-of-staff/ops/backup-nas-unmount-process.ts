@@ -28,8 +28,10 @@ export async function executeBackupNasUnmount(
     if (!child?.pid || exited) return;
     try {
       process.kill(-child.pid, signal);
+      // eslint-disable-next-line no-catch-all/no-catch-all -- Signal failure denies acknowledgement and still requires actual owned child closure.
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+      // Keep uncertain effects closed to acknowledgement while still draining the child.
+      if ((error as NodeJS.ErrnoException).code !== 'ESRCH') stopped = true;
     }
   };
   const stop = () => {

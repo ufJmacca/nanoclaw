@@ -27,8 +27,10 @@ export async function executeBackupNasMount(
     if (!child?.pid || exited) return;
     try {
       process.kill(-child.pid, signal);
+      // eslint-disable-next-line no-catch-all/no-catch-all -- Failed signalling must not skip actual child closure or escape a timer callback.
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+      // Signal refusal must not escape a timer or bypass the awaited child close.
+      if ((error as NodeJS.ErrnoException).code !== 'ESRCH') stopped = true;
     }
   };
   const stop = () => {

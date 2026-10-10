@@ -124,3 +124,28 @@ it.each(['busy', 'stall', 'abort', 'late-lease', 'late-destination'])(
     expect(s.children[0].exitCode !== null || s.children[0].signalCode !== null).toBe(true);
   },
 );
+
+it('signal refusal cannot skip actual owned child closure or expose signal diagnostics', async () => {
+  const s = fixture(),
+    actual = process.kill;
+  const spy = vi.spyOn(process, 'kill').mockImplementation((pid, signal) => {
+    if (s.children.some((child) => pid === -child.pid!))
+      throw Object.assign(Error('PRIVATE_SIGNAL_DENIED'), { code: 'EPERM' });
+    return actual(pid, signal);
+  });
+  s.controls.spawnUnmount.mockImplementation((_command, _args, options) => {
+    const child = spawn(process.execPath, ['-e', 'setTimeout(()=>{},125)'], options);
+    s.children.push(child);
+    s.abort.abort();
+    return child;
+  });
+  try {
+    await expect(executeBackupNasUnmount(s.claim, s.lease, s.destination, s.controls)).rejects.toThrow(
+      /^backup_nas_unmount_unavailable$/,
+    );
+    expect(s.children[0].exitCode !== null || s.children[0].signalCode !== null).toBe(true);
+    expect(s.destination.mock.calls.some((call) => call[0] === 'after')).toBe(false);
+  } finally {
+    spy.mockRestore();
+  }
+});
