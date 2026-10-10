@@ -3,32 +3,34 @@ import { parseOwnerAdminArguments, selectedOwnerAdminProfile, ownerDatabasePrefl
 import { fixtureRelease } from '../../../contracts/chief-of-staff/release-fixture.js';
 import { DatabasePreflightError } from '../store/preflight.js';
 const request = ['owner-export', '--scope', 'fixture', '--request-id', '01234567-89ab-4def-8123-456789abcdef'];
-it.each(['backup-nas-configure', 'backup-nas-recover-unmount', 'backup-nas-inspect-initialization'])(
-  'admits %s through the retained helper with only the selected runtime profile',
-  async (command) => {
-    const admin = [
-      command,
-      '--scope',
-      'fixture',
-      '--request-id',
-      '48f99256-b105-4ee3-848c-00140c98151d',
-      '--host',
-      '192.168.56.12',
-      '--credential-reference',
-      '319c6740-24ba-4d68-9d3c-a4d53c9607d1',
-    ];
-    expect(parseOwnerAdminArguments(['--settings', '/home/pi/target.json', '--', ...admin])).toMatchObject({ admin });
-    const runtime = { MATTERMOST_BOT_TOKEN: 'fixture-runtime' };
-    await expect(
-      selectedOwnerAdminProfile(admin[0], {
-        runtime: () => runtime,
-        test: () => {
-          throw Error('test_profile_forbidden');
-        },
-      }),
-    ).resolves.toBe(runtime);
-  },
-);
+it.each([
+  'backup-nas-configure',
+  'backup-nas-recover-unmount',
+  'backup-nas-inspect-initialization',
+  'backup-nas-recover-initialization',
+])('admits %s through the retained helper with only the selected runtime profile', async (command) => {
+  const admin = [
+    command,
+    '--scope',
+    'fixture',
+    '--request-id',
+    '48f99256-b105-4ee3-848c-00140c98151d',
+    '--host',
+    '192.168.56.12',
+    '--credential-reference',
+    '319c6740-24ba-4d68-9d3c-a4d53c9607d1',
+  ];
+  expect(parseOwnerAdminArguments(['--settings', '/home/pi/target.json', '--', ...admin])).toMatchObject({ admin });
+  const runtime = { MATTERMOST_BOT_TOKEN: 'fixture-runtime' };
+  await expect(
+    selectedOwnerAdminProfile(admin[0], {
+      runtime: () => runtime,
+      test: () => {
+        throw Error('test_profile_forbidden');
+      },
+    }),
+  ).resolves.toBe(runtime);
+});
 it('admits credential installation only through the retained owner helper and selected runtime profile', async () => {
   const admin = [
     'backup-credentials-install',

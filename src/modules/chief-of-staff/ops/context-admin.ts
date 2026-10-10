@@ -6,9 +6,11 @@ import {
   runBackupNasConfigureAdmin,
   runBackupNasRecoverAdmin,
   runBackupNasInspectAdmin,
+  runBackupNasInitializationRecoverAdmin,
   type BackupNasConfigureArguments,
   type BackupNasRecoverArguments,
   type BackupNasInspectArguments,
+  type BackupNasInitializationRecoverArguments,
 } from './backup-nas-owner-setup.js';
 /** Owner-run controls. Calendar sync may refresh its own tokens; no model calls or message sends. */
 import fs from 'node:fs';
@@ -76,6 +78,7 @@ export type ContextAdminArguments =
   | BackupNasConfigureArguments
   | BackupNasRecoverArguments
   | BackupNasInspectArguments
+  | BackupNasInitializationRecoverArguments
   | { command: 'vault-provision'; scopeId: string }
   | { command: 'vault-install'; scopeId: string }
   | { command: 'vault-recovery-check'; scopeId: string }
@@ -227,6 +230,7 @@ export async function contextAdminCommand(
       'backup-nas-configure',
       'backup-nas-recover-unmount',
       'backup-nas-inspect-initialization',
+      'backup-nas-recover-initialization',
     ].includes(args.command)
   )
     return { status: 'disabled', live_model: 'not_verified' };
@@ -398,7 +402,8 @@ export async function contextAdminCommand(
       if (
         args.command === 'backup-nas-configure' ||
         args.command === 'backup-nas-recover-unmount' ||
-        args.command === 'backup-nas-inspect-initialization'
+        args.command === 'backup-nas-inspect-initialization' ||
+        args.command === 'backup-nas-recover-initialization'
       ) {
         if (!vaultRelease)
           throw Error(
@@ -406,7 +411,9 @@ export async function contextAdminCommand(
               ? 'backup_nas_owner_setup_unavailable'
               : args.command === 'backup-nas-inspect-initialization'
                 ? 'backup_nas_owner_inspection_unavailable'
-                : 'backup_nas_owner_recovery_unavailable',
+                : args.command === 'backup-nas-recover-initialization'
+                  ? 'backup_nas_owner_initialization_recovery_unavailable'
+                  : 'backup_nas_owner_recovery_unavailable',
           );
         const input = {
           args,
@@ -422,7 +429,9 @@ export async function contextAdminCommand(
           ? runBackupNasConfigureAdmin({ ...input, args })
           : args.command === 'backup-nas-inspect-initialization'
             ? runBackupNasInspectAdmin({ ...input, args })
-            : runBackupNasRecoverAdmin({ ...input, args });
+            : args.command === 'backup-nas-recover-initialization'
+              ? runBackupNasInitializationRecoverAdmin({ ...input, args })
+              : runBackupNasRecoverAdmin({ ...input, args });
       }
       if (args.command === 'backup-credentials-install') {
         return runBackupCredentialInstallAdmin({

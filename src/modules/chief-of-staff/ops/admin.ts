@@ -27,6 +27,7 @@ import {
   parseBackupNasConfigureArguments,
   parseBackupNasRecoverArguments,
   parseBackupNasInspectArguments,
+  parseBackupNasInitializationRecoverArguments,
 } from './backup-nas-owner-setup.js';
 
 type AdminArguments =
@@ -39,6 +40,7 @@ export function parseAdminArguments(args: string[]): AdminArguments {
   if (args[0] === 'backup-nas-configure') return parseBackupNasConfigureArguments(args);
   if (args[0] === 'backup-nas-recover-unmount') return parseBackupNasRecoverArguments(args);
   if (args[0] === 'backup-nas-inspect-initialization') return parseBackupNasInspectArguments(args);
+  if (args[0] === 'backup-nas-recover-initialization') return parseBackupNasInitializationRecoverArguments(args);
   if (args[0] === 'vault-provision' || args[0] === 'vault-install' || args[0] === 'vault-recovery-check') {
     if (args.length !== 3 || args[1] !== '--scope' || !/^[a-zA-Z0-9_-]{1,128}$/.test(args[2]))
       throw Error('invalid_admin_arguments');

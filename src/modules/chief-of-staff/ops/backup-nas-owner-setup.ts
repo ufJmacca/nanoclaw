@@ -10,6 +10,7 @@ import type { BackupNasSetupOwnerInput } from './backup-nas-owner-authority.js';
 import {
   openProtectedBackupNasSetupAuthority,
   openProtectedBackupNasRecoveryAuthority,
+  openProtectedBackupNasInitializationRecoveryAuthority,
 } from './backup-nas-owner-authority.js';
 import { backupNasSetupRequest, backupNasSetupScope, type BackupNasSetupRequest } from './backup-nas-setup-wire.js';
 import { backupNasRootConfiguration } from './backup-nas-root-config.js';
@@ -25,8 +26,19 @@ import {
 import { executeBackupNasRecovery } from './backup-nas-recovery-process.js';
 import { executeBackupNasInitializationInspection } from './backup-nas-inspection-process.js';
 import { backupNasInitializationResource } from './backup-nas-initialization-recovery-scope.js';
+import {
+  backupNasInitializationRecoveryRequest,
+  backupNasInitializationRecoveryScope,
+  type BackupNasInitializationRecoveryRequest,
+} from './backup-nas-initialization-recovery-wire.js';
+import { executeBackupNasInitializationRecovery } from './backup-nas-initialization-recovery-process.js';
+import { withBackupNasInitializationProgress } from './backup-nas-initialization-progress.js';
 export { backupNasSetupInvocation } from './backup-nas-setup-process.js';
-type NasAdminCommand = 'backup-nas-configure' | 'backup-nas-recover-unmount' | 'backup-nas-inspect-initialization';
+type NasAdminCommand =
+  | 'backup-nas-configure'
+  | 'backup-nas-recover-unmount'
+  | 'backup-nas-inspect-initialization'
+  | 'backup-nas-recover-initialization';
 type NasAdminArguments<C extends NasAdminCommand> = {
   command: C;
   scopeId: string;
@@ -55,6 +67,16 @@ export type BackupNasRecoverControls = NasAdminControls<BackupNasRecoveryRequest
 export type BackupNasInspectArguments = NasAdminArguments<'backup-nas-inspect-initialization'>;
 export type BackupNasInspectInput = NasAdminInput<BackupNasInspectArguments>;
 export type BackupNasInspectControls = NasAdminControls<BackupNasSetupRequest>;
+export type BackupNasInitializationRecoverArguments = NasAdminArguments<'backup-nas-recover-initialization'>;
+export type BackupNasInitializationRecoverInput = NasAdminInput<BackupNasInitializationRecoverArguments>;
+export type BackupNasInitializationRecoverControls = NasAdminControls<BackupNasSetupRequest> & {
+  openRecoveryAuthority?: typeof openProtectedBackupNasInitializationRecoveryAuthority;
+  invokeRecovery?(
+    vault: VaultRootConfiguration,
+    request: BackupNasInitializationRecoveryRequest,
+    check: () => Promise<void>,
+  ): Promise<unknown>;
+};
 export function parseBackupNasConfigureArguments(args: string[]): BackupNasConfigureArguments {
   return parseNasAdminArguments('backup-nas-configure', args);
 }
@@ -63,6 +85,9 @@ export function parseBackupNasRecoverArguments(args: string[]): BackupNasRecover
 }
 export function parseBackupNasInspectArguments(args: string[]): BackupNasInspectArguments {
   return parseNasAdminArguments('backup-nas-inspect-initialization', args);
+}
+export function parseBackupNasInitializationRecoverArguments(args: string[]): BackupNasInitializationRecoverArguments {
+  return parseNasAdminArguments('backup-nas-recover-initialization', args);
 }
 function parseNasAdminArguments<C extends NasAdminCommand>(command: C, args: string[]): NasAdminArguments<C> {
   const values: Record<string, string> = {};
@@ -186,6 +211,13 @@ type NasAdminPolicy<C extends NasAdminCommand, R> = {
   ): Promise<unknown>;
   receipt(vault: VaultRootConfiguration, result: unknown): Record<string, unknown>;
   unavailable: string;
+  operation?(context: {
+    vault: VaultRootConfiguration;
+    nas: ReturnType<typeof backupNasRootConfiguration>;
+    args: NasAdminArguments<C>;
+    check(): Promise<void>;
+    memory(): void;
+  }): Promise<Record<string, unknown>>;
 };
 export function runBackupNasConfigureAdmin(
   input: BackupNasConfigureInput,
@@ -248,6 +280,173 @@ export function runBackupNasInspectAdmin(
       ),
     }),
     unavailable: 'backup_nas_owner_inspection_unavailable',
+  });
+}
+/** Save a verified observation before cleanup. A lost root or owner acknowledgement
+ * retries that exact metadata with fresh permission; absence alone cannot recreate
+ * an observation or authorize removal. Root independently checks current claims
+ * and its durable resource-specific intent on every attempt.
+ */
+export function runBackupNasInitializationRecoverAdmin(
+  input: BackupNasInitializationRecoverInput,
+  controls: BackupNasInitializationRecoverControls = {},
+): Promise<Record<string, unknown>> {
+  return runProtectedNasAdmin(input, controls, {
+    parse: parseBackupNasInitializationRecoverArguments,
+    scope: backupNasSetupScope,
+    request: backupNasSetupRequest,
+    requestContract: 'cos-backup-nas-setup-request/v1',
+    openAuthority: openProtectedBackupNasSetupAuthority,
+    invoke: (vault, request, check, memory) =>
+      executeBackupNasInitializationInspection(vault, request, check, { assertMemory: memory }),
+    receipt: () => ({}),
+    unavailable: 'backup_nas_owner_initialization_recovery_unavailable',
+    operation: async ({ vault, nas, args, check, memory }) =>
+      withBackupNasInitializationProgress(
+        { root: vault.owner.targetRoot, nasDigest: digest(nas), vaultStateDigest: vaultRootStateDigest(vault), check },
+        async (progress) => {
+          const current = async () => {
+            progress.assertCurrent();
+            await check();
+            progress.assertCurrent();
+          };
+          const observationUnavailable = Error('initialization_observation_unavailable');
+          const invokePhase = async (
+            kind: 'inspect' | 'retire',
+            resource?: ReturnType<typeof backupNasInitializationResource>,
+          ): Promise<Record<string, unknown>> => {
+            let proof: Awaited<ReturnType<typeof openProtectedBackupNasSetupAuthority>> | undefined;
+            try {
+              await current();
+              const scope =
+                  kind === 'inspect'
+                    ? backupNasSetupScope(vault, nas, args.requestId, input.maintenance.generation)
+                    : backupNasInitializationRecoveryScope(
+                        vault,
+                        nas,
+                        resource!,
+                        args.requestId,
+                        input.maintenance.generation,
+                      ),
+                selected = {
+                  root: vault.owner.targetRoot,
+                  configuration: vault,
+                  nas,
+                  operationId: args.requestId,
+                  maintenance: input.maintenance,
+                  native: input.native,
+                  hostLease: input.hostLease,
+                  check: current,
+                };
+              proof =
+                kind === 'inspect'
+                  ? await (controls.openAuthority ?? openProtectedBackupNasSetupAuthority)(selected)
+                  : await (controls.openRecoveryAuthority ?? openProtectedBackupNasInitializationRecoveryAuthority)({
+                      ...selected,
+                      resource: resource!,
+                    });
+              await proof.check();
+              await current();
+              if (digest(proof.scope) !== digest(scope)) throw Error('initialization_permission_conflict');
+              const live = async () => {
+                await proof!.check();
+                await current();
+              };
+              const common = {
+                configurationDigest: digest(vault),
+                nas,
+                scope,
+                authority: { socket: proof.authority.socket, token: proof.authority.token },
+              };
+              let result: unknown;
+              if (kind === 'inspect') {
+                const request = backupNasSetupRequest(
+                  { contract: 'cos-backup-nas-setup-request/v1', ...common },
+                  vault,
+                );
+                try {
+                  result = await (controls.invoke
+                    ? controls.invoke(vault, request, live)
+                    : executeBackupNasInitializationInspection(vault, request, live, { assertMemory: memory }));
+                } catch {
+                  // Only an invocation refusal with still-current permission can select
+                  // completed metadata for fresh independent root reconciliation.
+                  await live();
+                  throw observationUnavailable;
+                }
+              } else {
+                const request = backupNasInitializationRecoveryRequest(
+                  { contract: 'cos-backup-nas-recover-initialization-request/v1', ...common, resource },
+                  vault,
+                );
+                result = await (controls.invokeRecovery
+                  ? controls.invokeRecovery(vault, request, live)
+                  : executeBackupNasInitializationRecovery(vault, request, live, { assertMemory: memory }));
+              }
+              await live();
+              const expected = {
+                contract:
+                  kind === 'inspect'
+                    ? 'cos-backup-nas-initialization-inspection-result/v1'
+                    : 'cos-backup-nas-initialization-recovery-result/v1',
+                status: kind === 'inspect' ? 'observed' : 'retired',
+                configurationDigest: digest(vault),
+                nasDigest: digest(nas),
+                artifactDigest: vault.artifact.digest,
+                scopeDigest: digest(scope),
+                ...(kind === 'inspect'
+                  ? {
+                      resource: backupNasInitializationResource(
+                        result && typeof result === 'object' ? (result as Record<string, unknown>).resource : undefined,
+                      ),
+                    }
+                  : { vaultStateDigest: vaultRootStateDigest(vault), resourceDigest: digest(resource) }),
+              };
+              if (
+                !result ||
+                typeof result !== 'object' ||
+                Array.isArray(result) ||
+                Reflect.ownKeys(result).sort().join(',') !== Reflect.ownKeys(expected).sort().join(',') ||
+                digest(result) !== digest(expected)
+              )
+                throw Error('initialization_receipt_conflict');
+              return Object.freeze(expected);
+            } finally {
+              try {
+                await proof?.authority.close();
+              } finally {
+                await current();
+              }
+            }
+          };
+          let selected = progress.read();
+          if (!selected || selected.phase === 'retired') {
+            let observation: Record<string, unknown> | undefined;
+            try {
+              observation = await invokePhase('inspect');
+            } catch (error) {
+              if (!selected || error !== observationUnavailable) throw error;
+              await current();
+            }
+            if (observation) {
+              selected = Object.freeze({
+                contract: 'cos-backup-nas-initialization-progress/v1' as const,
+                nasDigest: digest(nas),
+                vaultStateDigest: vaultRootStateDigest(vault),
+                resource: backupNasInitializationResource(observation.resource),
+                phase: 'observed' as const,
+              });
+              await progress.write(selected);
+            }
+          }
+          if (!selected) throw Error('initialization_progress_unavailable');
+          const result = await invokePhase('retire', selected.resource);
+          await current();
+          await progress.write({ ...selected, phase: 'retired' });
+          await current();
+          return result;
+        },
+      ),
   });
 }
 async function runProtectedNasAdmin<C extends NasAdminCommand, R>(
@@ -344,54 +543,59 @@ async function runProtectedNasAdmin<C extends NasAdminCommand, R>(
       guard();
     };
     await check();
-    proof = await (controls.openAuthority ?? policy.openAuthority)({
-      root: input.root,
-      configuration: vault,
-      nas,
-      operationId: args.requestId,
-      maintenance: input.maintenance,
-      native: input.native,
-      hostLease: input.hostLease,
-      check,
-    });
-    await proof.check();
-    guard();
-    if (digest(proof.scope) !== digest(scope)) throw Error('setup_permission_conflict');
-    const request = policy.request(
-      {
-        contract: policy.requestContract,
-        configurationDigest,
-        nas,
-        scope,
-        authority: { socket: proof.authority.socket, token: proof.authority.token },
-      },
-      vault,
-    );
-    const current = async () => {
-      await proof!.check();
+    if (policy.operation) {
+      verified = Object.freeze(await policy.operation({ vault, nas, args, check, memory }));
       await check();
-    };
-    const result = await (controls.invoke
-      ? controls.invoke(vault, request, current)
-      : policy.invoke(vault, request, current, memory));
-    await current();
-    guard();
-    const expected = {
-      ...policy.receipt(vault, result),
-      configurationDigest,
-      nasDigest: digest(nas),
-      artifactDigest: vault.artifact.digest,
-      scopeDigest: digest(scope),
-    };
-    if (
-      !result ||
-      typeof result !== 'object' ||
-      Array.isArray(result) ||
-      Object.keys(result).sort().join(',') !== Object.keys(expected).sort().join(',') ||
-      digest(result) !== digest(expected)
-    )
-      throw Error('setup_root_receipt_conflict');
-    verified = Object.freeze(expected);
+    } else {
+      proof = await (controls.openAuthority ?? policy.openAuthority)({
+        root: input.root,
+        configuration: vault,
+        nas,
+        operationId: args.requestId,
+        maintenance: input.maintenance,
+        native: input.native,
+        hostLease: input.hostLease,
+        check,
+      });
+      await proof.check();
+      guard();
+      if (digest(proof.scope) !== digest(scope)) throw Error('setup_permission_conflict');
+      const request = policy.request(
+        {
+          contract: policy.requestContract,
+          configurationDigest,
+          nas,
+          scope,
+          authority: { socket: proof.authority.socket, token: proof.authority.token },
+        },
+        vault,
+      );
+      const current = async () => {
+        await proof!.check();
+        await check();
+      };
+      const result = await (controls.invoke
+        ? controls.invoke(vault, request, current)
+        : policy.invoke(vault, request, current, memory));
+      await current();
+      guard();
+      const expected = {
+        ...policy.receipt(vault, result),
+        configurationDigest,
+        nasDigest: digest(nas),
+        artifactDigest: vault.artifact.digest,
+        scopeDigest: digest(scope),
+      };
+      if (
+        !result ||
+        typeof result !== 'object' ||
+        Array.isArray(result) ||
+        Object.keys(result).sort().join(',') !== Object.keys(expected).sort().join(',') ||
+        digest(result) !== digest(expected)
+      )
+        throw Error('setup_root_receipt_conflict');
+      verified = Object.freeze(expected);
+    }
     // eslint-disable-next-line no-catch-all/no-catch-all -- Only status is retained while private authority and configuration descriptors close.
   } catch {
     failed = true;
