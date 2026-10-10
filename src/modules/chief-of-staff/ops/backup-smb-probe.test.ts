@@ -109,6 +109,29 @@ it('keeps the live owner credential lease through fresh private challenges and c
   expect(f.credentials).toHaveBeenCalledWith(s.roots, s.expected, expect.any(Function));
   expect(Buffer.concat(observed).toString('utf8')).not.toContain('synthetic-password');
 });
+it('supports the repeated fresh checks required by mount journal reconciliation within the bounded pipe lifetime', async () => {
+  const s = fixture();
+  const running = runBackupSmbCredentialProbe(s.input, s.output, s.controls);
+  const reply = () =>
+    Promise.race([
+      s.messages.next(),
+      running.then(() => {
+        throw Error('unexpected_probe_completion');
+      }),
+    ]);
+  await writeRuntimeTestMessage(s.input, s.open);
+  await reply();
+  for (let sequence = 1; sequence <= 40; sequence++) {
+    const check = challenge('check', sequence);
+    await writeRuntimeTestMessage(s.input, check);
+    expect((await reply()).value).toEqual({ contract: 'cos-backup-smb-current/v1', sequence, nonce: check.nonce });
+  }
+  const release = challenge('release', 41);
+  await writeRuntimeTestMessage(s.input, release);
+  s.input.end();
+  expect((await reply()).value).toEqual({ contract: 'cos-backup-smb-released/v1', sequence: 41, nonce: release.nonce });
+  await running;
+});
 it.each([
   'parent',
   'owner',

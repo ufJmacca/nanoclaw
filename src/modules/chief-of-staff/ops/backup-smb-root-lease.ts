@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { digest } from '../domain/contracts.js';
-import { backupSmbMessages, backupSmbOpenRequest } from './backup-smb-probe.js';
+import { BACKUP_SMB_MAX_CHALLENGES, backupSmbMessages, backupSmbOpenRequest } from './backup-smb-probe.js';
 import { writeRuntimeTestMessage } from './runtime-test-wire.js';
 import { verifyVaultMemory } from './vault-memory.js';
 import { verifyVaultRootArtifact } from './vault-root-artifact.js';
@@ -226,7 +226,7 @@ export async function withRootBackupSmbCredentials<T>(
     let sequence = 0,
       checking = false;
     const challenge = async (action: 'check' | 'release') => {
-      if (!active || checking || ++sequence > 32) throw Error('root_lease_released');
+      if (!active || checking || ++sequence > BACKUP_SMB_MAX_CHALLENGES) throw Error('root_lease_released');
       checking = true;
       try {
         trusted();

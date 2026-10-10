@@ -152,6 +152,19 @@ it('duplicates the actual spawned child descriptor, challenges it throughout the
   });
   expect(JSON.stringify([command, args, options])).not.toContain('synthetic-password');
 });
+it('retains the actual spawned owner descriptor through the repeated journal checks', async () => {
+  const s = fixture();
+  await withRootBackupSmbCredentials(
+    s.config,
+    s.reference,
+    async (lease) => {
+      for (let check = 0; check < 40; check++) await lease.assertCurrent();
+      expect(fs.fstatSync(lease.fd).isFile()).toBe(true);
+    },
+    s.controls,
+  );
+  expect(s.children[0].exitCode).toBe(0);
+});
 it.each(['role', 'memory', 'artifact', 'configuration', 'reference'])(
   'denies initial %s before spawning any credential process',
   async (reason) => {

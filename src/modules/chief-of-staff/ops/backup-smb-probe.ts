@@ -6,6 +6,9 @@ import { withVaultSmbCredentials, type BackupSmbCredentialScope } from './backup
 import { runtimeTestMessages, writeRuntimeTestMessage } from './runtime-test-wire.js';
 import { verifyVaultMemory } from './vault-memory.js';
 
+/** Enough fresh challenges for journal reconciliation; byte and wall-clock limits remain independent. */
+export const BACKUP_SMB_MAX_CHALLENGES = 128;
+
 export type BackupSmbOpenRequest = Readonly<{
   contract: 'cos-backup-smb-open/v1';
   owner: Readonly<{ uid: number; gid: number }>;
@@ -65,7 +68,7 @@ export function backupSmbChallenge(value: unknown, sequence: number): BackupSmbC
     value.sequence !== sequence ||
     !Number.isSafeInteger(sequence) ||
     sequence < 1 ||
-    sequence > 32 ||
+    sequence > BACKUP_SMB_MAX_CHALLENGES ||
     !uuid(value.nonce)
   )
     throw Error('backup_smb_probe_unavailable');
@@ -189,7 +192,7 @@ export async function runBackupSmbCredentialProbe(
           ctimeMs: stat.ctimeMs,
         },
       });
-      for (let sequence = 1; sequence <= 32; sequence++) {
+      for (let sequence = 1; sequence <= BACKUP_SMB_MAX_CHALLENGES; sequence++) {
         const next = await messages.next();
         current();
         if (next.done) throw Error('probe_closed_without_release');
