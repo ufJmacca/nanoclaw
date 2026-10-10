@@ -81,6 +81,83 @@ it('routes G01 release checkpoints exclusively to the extension ledger', () => {
   ).toBe('fixture_pending');
   expect(() => readReleaseExecution(f.root, 'S10')).toThrow();
 });
+function completedG01(f: ReturnType<typeof fixture>) {
+  const commit = 'c'.repeat(40),
+    tree = 'd'.repeat(40),
+    releaseId = 'release-reviewed-g01';
+  Object.assign(f.extension.slices.G01, {
+    status: 'complete',
+    review: { status: 'human_review_and_merge_verified', reviewed: true, merged: true, mergeCommit: commit },
+    current_source: { commit, tree, releaseId },
+    deployed_source_sha: commit,
+    pi_smoke_status: 'passed',
+    merged_release_reconciliation: {
+      status: 'passed',
+      commit,
+      tree,
+      releaseId,
+      humanReview: 'verified',
+      allMandatoryGates: 'passed',
+      actualPiAcceptance: 'passed',
+    },
+  });
+  f.extension.active_slice = 'G02';
+  f.extension.slices.G02.status = 'in_progress';
+  f.save();
+  return f.extension.slices.G01 as Record<string, unknown>;
+}
+it('admits G02 only after reviewed matching G01 acceptance and checkpoints only G02', () => {
+  const f = fixture();
+  completedG01(f);
+  const original = fs.readFileSync(f.root + '/execution.json'),
+    g01 = structuredClone(f.extension.slices.G01);
+  expect(readExtensionRelease(f.root, true)).toEqual(f.extension);
+  expect(() => readReleaseExecution(f.root, 'G01', true)).toThrow('active_slice_required');
+  checkpointExtensionRelease(f.root, { release_status: 'g02_local_checks_pending' });
+  const saved = JSON.parse(fs.readFileSync(f.root + '/google-mail-storage-execution.json', 'utf8'));
+  expect(saved.slices.G02.release_status).toBe('g02_local_checks_pending');
+  expect(saved.slices.G01).toEqual(g01);
+  expect(saved.unknown).toEqual(f.extension.unknown);
+  expect(fs.readFileSync(f.root + '/execution.json')).toEqual(original);
+});
+it.each([
+  'incomplete',
+  'unreviewed',
+  'unmerged',
+  'wrong-source',
+  'wrong-tree',
+  'wrong-release',
+  'gates',
+  'health',
+  'pi',
+  'future',
+  'dependency',
+  'review-wait',
+])('denies G02 %s without updating either ledger', (reason) => {
+  const f = fixture(),
+    s = completedG01(f);
+  const review = s.review as Record<string, unknown>,
+    current = s.current_source as Record<string, unknown>;
+  const accepted = s.merged_release_reconciliation as Record<string, unknown>;
+  if (reason === 'incomplete') s.status = 'in_progress';
+  if (reason === 'unreviewed') review.reviewed = false;
+  if (reason === 'unmerged') review.merged = false;
+  if (reason === 'wrong-source') s.deployed_source_sha = 'e'.repeat(40);
+  if (reason === 'wrong-tree') accepted.tree = 'e'.repeat(40);
+  if (reason === 'wrong-release') current.releaseId = 'release-other';
+  if (reason === 'gates') accepted.allMandatoryGates = 'pending';
+  if (reason === 'health') accepted.actualPiAcceptance = 'pending';
+  if (reason === 'pi') s.pi_smoke_status = 'failed';
+  if (reason === 'future') f.extension.active_slice = 'G03';
+  if (reason === 'dependency') f.extension.slices.G02.depends_on = 'S11';
+  if (reason === 'review-wait') f.extension.slices.G02.status = 'awaiting_review';
+  f.save();
+  const original = fs.readFileSync(f.root + '/execution.json'),
+    extension = fs.readFileSync(f.root + '/google-mail-storage-execution.json');
+  expect(() => readExtensionRelease(f.root, true)).toThrow('extension_release_not_admitted');
+  expect(fs.readFileSync(f.root + '/execution.json')).toEqual(original);
+  expect(fs.readFileSync(f.root + '/google-mail-storage-execution.json')).toEqual(extension);
+});
 it.each([
   'incomplete',
   'unreviewed',

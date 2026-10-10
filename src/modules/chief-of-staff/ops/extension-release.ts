@@ -40,7 +40,7 @@ export type ExtensionReleaseState = {
   goal: 'nanoclaw-google-mail-storage';
   plan_revision: 1;
   published_specification_commit: string;
-  active_slice: 'G01';
+  active_slice: 'G01' | 'G02';
   status: string;
   slices: Record<string, Record<string, unknown>>;
   [key: string]: unknown;
@@ -81,17 +81,54 @@ export function readExtensionRelease(root: string, forRelease = false): Extensio
       ledger.goal !== 'nanoclaw-google-mail-storage' ||
       ledger.plan_revision !== 1 ||
       !/^[a-f0-9]{40}$/.test(ledger.published_specification_commit) ||
-      ledger.active_slice !== 'G01' ||
+      !['G01', 'G02'].includes(ledger.active_slice) ||
       ledger.status !== 'in_progress' ||
       !ledger.slices ||
       typeof ledger.slices !== 'object' ||
       Array.isArray(ledger.slices) ||
-      !ledger.slices.G01 ||
-      typeof ledger.slices.G01 !== 'object' ||
-      Array.isArray(ledger.slices.G01) ||
-      (forRelease && !['in_progress', 'alignment_in_progress'].includes(String(ledger.slices.G01.status)))
+      !ledger.slices[ledger.active_slice] ||
+      typeof ledger.slices[ledger.active_slice] !== 'object' ||
+      Array.isArray(ledger.slices[ledger.active_slice]) ||
+      (forRelease &&
+        !['in_progress', 'alignment_in_progress'].includes(String(ledger.slices[ledger.active_slice].status)))
     )
       throw Error('active_extension_slice_required');
+    if (ledger.active_slice === 'G02') {
+      const predecessor = ledger.slices.G01;
+      const object = (value: unknown): value is Record<string, unknown> =>
+        !!value && typeof value === 'object' && !Array.isArray(value);
+      if (!object(predecessor)) throw Error('extension_predecessor_acceptance_required');
+      const review = predecessor.review,
+        current = predecessor.current_source;
+      const accepted = predecessor.merged_release_reconciliation;
+      if (
+        ledger.slices.G02.depends_on !== 'G01' ||
+        predecessor.status !== 'complete' ||
+        !object(review) ||
+        review.status !== 'human_review_and_merge_verified' ||
+        review.reviewed !== true ||
+        review.merged !== true ||
+        typeof review.mergeCommit !== 'string' ||
+        !/^[a-f0-9]{40}$/.test(review.mergeCommit) ||
+        predecessor.deployed_source_sha !== review.mergeCommit ||
+        predecessor.pi_smoke_status !== 'passed' ||
+        !object(current) ||
+        current.commit !== review.mergeCommit ||
+        typeof current.tree !== 'string' ||
+        !/^[a-f0-9]{40}$/.test(current.tree) ||
+        typeof current.releaseId !== 'string' ||
+        !/^release-[a-zA-Z0-9_-]{1,120}$/.test(current.releaseId) ||
+        !object(accepted) ||
+        accepted.status !== 'passed' ||
+        accepted.commit !== current.commit ||
+        accepted.tree !== current.tree ||
+        accepted.releaseId !== current.releaseId ||
+        accepted.humanReview !== 'verified' ||
+        accepted.allMandatoryGates !== 'passed' ||
+        accepted.actualPiAcceptance !== 'passed'
+      )
+        throw Error('extension_predecessor_acceptance_required');
+    }
     return ledger;
   } catch {
     // eslint-disable-next-line preserve-caught-error -- Private ledger paths/history are never included in release errors.
@@ -100,6 +137,6 @@ export function readExtensionRelease(root: string, forRelease = false): Extensio
 }
 export function checkpointExtensionRelease(root: string, patch: Record<string, unknown>): void {
   const ledger = readExtensionRelease(root);
-  Object.assign(ledger.slices.G01, patch, { checkpoint_at: new Date().toISOString() });
+  Object.assign(ledger.slices[ledger.active_slice], patch, { checkpoint_at: new Date().toISOString() });
   writeAtomic(root, 'google-mail-storage-execution.json', ledger);
 }

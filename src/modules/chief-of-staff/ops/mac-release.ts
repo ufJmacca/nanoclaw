@@ -7,7 +7,11 @@ export function readReleaseExecution(
   slice: ReleaseManifest['slice'],
   forRelease = false,
 ): { active_slice: string } {
-  if (slice === 'G01') return readExtensionRelease(root, forRelease);
+  if (slice === 'G01') {
+    const ledger = readExtensionRelease(root, forRelease);
+    if (ledger.active_slice !== slice) throw Error('active_slice_required');
+    return ledger;
+  }
   const ledger = readLocalExecution(root, forRelease);
   if (ledger.active_slice !== slice) throw Error('active_slice_required');
   return ledger;
