@@ -13,6 +13,7 @@ import {
 import {
   verifyResticBinary,
   verifyResticRepositoryIdentity,
+  withVerifiedResticBinary,
 } from '../../modules/chief-of-staff/ops/restic-artifact.js';
 // Synthetic fixtures only. Runtime uploads also require the vault/memory, NAS mount and repository leases.
 const binary = process.env.COS_BACKUP_FIXTURE_BINARY;
@@ -52,6 +53,65 @@ test('official pinned ARM64 binary initializes repository v2 and binds its decry
   repositoryId = (JSON.parse(config) as { id: string }).id;
   assert.deepEqual(verifyResticRepositoryIdentity(config, repositoryId), { version: 2, id: repositoryId });
   assert.throws(() => verifyResticRepositoryIdentity(config, 'f'.repeat(64)), /^Error: backup_repository_unverified$/);
+});
+test('the verified executable stays pinned across awaited work and its lease expires afterward', async () => {
+  let fd = -1,
+    assertCurrent!: () => void;
+  await withVerifiedResticBinary(binary, async (lease) => {
+    fd = lease.fd;
+    assertCurrent = lease.assertCurrent;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    lease.assertCurrent();
+    assert.match(
+      execFileSync('/proc/self/fd/3', ['version'], {
+        env,
+        cwd: '/',
+        encoding: 'utf8',
+        timeout: 10000,
+        stdio: ['ignore', 'pipe', 'pipe', fd],
+      }),
+      /^restic 0\.19\.1 /,
+    );
+  });
+  assert.throws(() => fs.fstatSync(fd), { code: 'EBADF' });
+  assert.throws(() => assertCurrent(), /^Error: backup_artifact_unverified$/);
+});
+test('a changed executable path is refused before any credential command', async () => {
+  const copy = path.join(root, 'verified-executable'),
+    held = copy + '.held';
+  fs.copyFileSync(binary, copy);
+  fs.chmodSync(copy, 0o500);
+  let invoked = false,
+    fd = -1;
+  try {
+    await assert.rejects(
+      withVerifiedResticBinary(copy, async (lease) => {
+        fd = lease.fd;
+        fs.renameSync(copy, held);
+        fs.writeFileSync(copy, 'unverified substitute', { mode: 0o500 });
+        lease.assertCurrent();
+        invoked = true;
+      }),
+      /^Error: backup_artifact_unverified$/,
+    );
+    assert.equal(invoked, false);
+    assert.throws(() => fs.fstatSync(fd), { code: 'EBADF' });
+  } finally {
+    fs.rmSync(copy, { force: true });
+    fs.rmSync(held, { force: true });
+  }
+});
+test('an awaited private command failure closes the verified descriptor and exposes a fixed error', async () => {
+  let fd = -1;
+  await assert.rejects(
+    withVerifiedResticBinary(binary, async (lease) => {
+      fd = lease.fd;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      throw Error('private credential-bearing diagnostic');
+    }),
+    /^Error: backup_artifact_unverified$/,
+  );
+  assert.throws(() => fs.fstatSync(fd), { code: 'EBADF' });
 });
 test('real stdin backup encrypts content and metadata and restores only into an isolated fixture', () => {
   run(
@@ -159,12 +219,12 @@ test('a real command producer streams a verified PAX checkpoint through Restic a
     },
     262144,
   );
-  const data = path.join(area, 'backup-queue/full/data'),
-    receipt = path.join(area, 'backup-queue/full/receipt.json');
-  const moduleUrl = new URL('../../modules/chief-of-staff/ops/backup-archive.js', import.meta.url).href;
-  const producer = `import fs from 'node:fs'; import {streamBackupArchive} from ${JSON.stringify(moduleUrl)};
-    const receipt = JSON.parse(fs.readFileSync(${JSON.stringify(receipt)}, 'utf8'));
-    try { await streamBackupArchive(${JSON.stringify(data)}, receipt, bytes => new Promise((resolve, reject) => {
+  const moduleUrl = new URL('../../modules/chief-of-staff/ops/backup-archive-producer.js', import.meta.url).href;
+  const queueUrl = new URL('../../modules/chief-of-staff/ops/backup-queue.js', import.meta.url).href;
+  const producer = `import {streamQueuedBackup} from ${JSON.stringify(moduleUrl)};
+    import {BackupQueue} from ${JSON.stringify(queueUrl)};
+    const queue = new BackupQueue('a'.repeat(64), async (_kind, operation) => operation(${JSON.stringify(area)}));
+    try { await streamQueuedBackup(queue, 'state', ${JSON.stringify(operationId)}, bytes => new Promise((resolve, reject) => {
       process.stdout.write(bytes, error => error ? reject(error) : resolve());
     })); } catch { process.exitCode = 77; }`;
   run([

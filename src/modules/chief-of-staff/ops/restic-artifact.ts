@@ -22,8 +22,9 @@ export function validateResticArtifactSeal(value: unknown): typeof RESTIC_ARTIFA
     throw Error('backup_artifact_unverified');
   return RESTIC_ARTIFACT;
 }
-/** Trusted host only. Verify bytes and inode stability before any credential-bearing invocation. */
-export function verifyResticBinary(file: string): typeof RESTIC_ARTIFACT {
+export type VerifiedResticBinary = Readonly<{ fd: number; assertCurrent(): void }>;
+/** Trusted host only. Keep this descriptor open for every credential-bearing invocation. */
+function openVerifiedResticBinary(file: string): { lease: VerifiedResticBinary; close(): void } {
   let fd: number | undefined;
   try {
     if (
@@ -44,11 +45,38 @@ export function verifyResticBinary(file: string): typeof RESTIC_ARTIFACT {
       before.size !== RESTIC_ARTIFACT.bytes
     )
       throw Error('unsafe_binary');
+    const heldFd = fd;
+    let active = true;
+    const assertCurrent = () => {
+      try {
+        if (!active) throw Error('released_binary');
+        const after = fs.fstatSync(heldFd),
+          current = fs.lstatSync(file);
+        if (
+          fs.realpathSync(file) !== file ||
+          after.dev !== before.dev ||
+          after.ino !== before.ino ||
+          after.size !== before.size ||
+          after.nlink !== before.nlink ||
+          after.mode !== before.mode ||
+          after.uid !== before.uid ||
+          after.mtimeMs !== before.mtimeMs ||
+          after.ctimeMs !== before.ctimeMs ||
+          current.dev !== before.dev ||
+          current.ino !== before.ino
+        )
+          throw Error('binary_changed');
+      } catch {
+        // eslint-disable-next-line preserve-caught-error -- Paths and ownership diagnostics are private.
+        throw Error('backup_artifact_unverified');
+      }
+    };
     const hash = createHash('sha256'),
       buffer = Buffer.alloc(65536);
     let count: number;
     while ((count = fs.readSync(fd, buffer, 0, buffer.length, null)) > 0) hash.update(buffer.subarray(0, count));
     if (hash.digest('hex') !== RESTIC_ARTIFACT.sha256) throw Error('wrong_binary');
+    assertCurrent();
     const version = execFileSync('/proc/self/fd/3', ['version'], {
       env: { PATH: '/usr/bin:/bin', LANG: 'C', LC_ALL: 'C' },
       cwd: '/',
@@ -58,26 +86,48 @@ export function verifyResticBinary(file: string): typeof RESTIC_ARTIFACT {
       stdio: ['ignore', 'pipe', 'pipe', fd],
     }).trim();
     if (!/^restic 0\.19\.1 compiled with go1\.26\.4 on linux\/arm64$/.test(version)) throw Error('wrong_version');
-    const after = fs.fstatSync(fd),
-      current = fs.lstatSync(file);
-    if (
-      after.dev !== before.dev ||
-      after.ino !== before.ino ||
-      after.size !== before.size ||
-      after.mode !== before.mode ||
-      after.uid !== before.uid ||
-      after.mtimeMs !== before.mtimeMs ||
-      after.ctimeMs !== before.ctimeMs ||
-      current.dev !== before.dev ||
-      current.ino !== before.ino
-    )
-      throw Error('binary_changed');
-    return RESTIC_ARTIFACT;
+    assertCurrent();
+    const lease = Object.freeze({ fd: heldFd, assertCurrent });
+    fd = undefined; // The returned scope now owns the verified descriptor.
+    return {
+      lease,
+      close() {
+        active = false;
+        fs.closeSync(heldFd);
+      },
+    };
   } catch {
     // eslint-disable-next-line preserve-caught-error -- Artifact paths and subprocess diagnostics never reach status output.
     throw Error('backup_artifact_unverified');
   } finally {
     if (fd !== undefined) fs.closeSync(fd);
+  }
+}
+/** Existing verification callers do not retain a descriptor. Credential callers use the scoped API below. */
+export function verifyResticBinary(file: string): typeof RESTIC_ARTIFACT {
+  const handle = openVerifiedResticBinary(file);
+  try {
+    handle.lease.assertCurrent();
+    return RESTIC_ARTIFACT;
+  } finally {
+    handle.close();
+  }
+}
+export async function withVerifiedResticBinary<T>(
+  file: string,
+  operation: (binary: VerifiedResticBinary) => Promise<T>,
+): Promise<T> {
+  const handle = openVerifiedResticBinary(file);
+  try {
+    handle.lease.assertCurrent();
+    const result = await operation(handle.lease);
+    handle.lease.assertCurrent();
+    return result;
+  } catch {
+    // eslint-disable-next-line preserve-caught-error -- Awaited command diagnostics may contain private credentials.
+    throw Error('backup_artifact_unverified');
+  } finally {
+    handle.close();
   }
 }
 /** Restic decrypts/authenticates config; the host independently binds its version and repository identity. */
