@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { afterEach, expect, it, vi } from 'vitest';
-import { fixtureRelease } from '../../../contracts/chief-of-staff/release-fixture.js';
+import { fixtureRelease, fixtureVaultRelease } from '../../../contracts/chief-of-staff/release-fixture.js';
 import { initializeTarget, readTarget, readPrivate, protectTarget, writeAtomic } from './target-state.js';
 import { activeMaintenanceLease, admittedGeneration, beginMaintenance } from './maintenance.js';
 import { operationsMaintenance, type OperationsMaintenanceEffects } from './operations-maintenance.js';
@@ -21,11 +21,11 @@ const binding = {
   installationRoot: '/home/pi/nano',
   dataRoot: '/home/pi/nano/data',
 };
-function fixture(slice: 'S11' | 'G01' = 'S11') {
+function fixture(slice: 'S11' | 'G01' | 'G02' = 'S11') {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-owner-maintenance-'));
   roots.push(base);
   const root = path.join(base, 'target');
-  const manifest = fixtureRelease(slice),
+  const manifest = slice === 'G02' ? fixtureVaultRelease('G02') : fixtureRelease(slice),
     requestId = randomUUID();
   if (slice === 'G01') {
     const seal = {
@@ -84,6 +84,26 @@ it('uses a fresh G01 request ID on the protected installed release and restores 
     status: 'held',
   });
   expect(activeMaintenanceLease(f.root, binding).owner).toBe('operations-' + requestId);
+});
+it('holds and releases fresh G02 maintenance under all backup gates while preserving protection and paused CoS', async () => {
+  const f = fixture('G02');
+  protectTarget(f.root, binding);
+  await expect(operationsMaintenance({ ...f, binding, phase: 'hold' })).resolves.toMatchObject({ status: 'held' });
+  expect(activeMaintenanceLease(f.root, binding).owner).toBe('operations-' + f.requestId);
+  await expect(operationsMaintenance({ ...f, binding, phase: 'release' })).resolves.toMatchObject({
+    status: 'released',
+    cosResumed: false,
+  });
+  expect(readTarget(f.root, binding).lifecycle).toBe('protected');
+});
+it.each(['unprotected', 'backup-gate'])('denies G02 maintenance %s before stopping any service', async (reason) => {
+  const f = fixture('G02');
+  if (reason === 'backup-gate') {
+    protectTarget(f.root, binding);
+    delete f.manifest.checks.backup_mount;
+  }
+  await expect(operationsMaintenance({ ...f, binding, phase: 'hold' })).rejects.toThrow();
+  expect(f.effects.stopNative).not.toHaveBeenCalled();
 });
 it('denies G01 maintenance on an unprotected target before stopping any service', async () => {
   const f = fixture('G01');

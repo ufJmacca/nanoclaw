@@ -42,7 +42,7 @@ export async function verifyRetainedReleaseHelper(
     throw Error('retained_admin_helper_unverified');
   }
 }
-/** Extension administration uses a sealed, healthy G01 payload only on the already protected target. */
+/** Extension administration uses sealed, healthy G01/G02 payloads on the already protected target. */
 export async function verifyRetainedAdminHelper(
   settings: { releaseRoot: string; stateRoot: string },
   binding: TargetBinding,
@@ -51,7 +51,7 @@ export async function verifyRetainedAdminHelper(
   try {
     const manifest = await verifyRetainedReleaseHelper(settings, binding, invoked);
     if (manifest.slice === 'S11') return manifest;
-    if (manifest.slice !== 'G01' || readTarget(settings.stateRoot, binding).lifecycle !== 'protected')
+    if (!['G01', 'G02'].includes(manifest.slice) || readTarget(settings.stateRoot, binding).lifecycle !== 'protected')
       throw Error('helper_scope_conflict');
     return manifest;
   } catch {
