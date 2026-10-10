@@ -2,7 +2,12 @@ import { policyAllowsBriefContext } from '../bridge/brief-context-renewal.js';
 import { runVaultProvisionAdmin, runVaultRecoveryAdmin } from './vault-owner-admin.js';
 import { runVaultInstallAdmin } from './vault-owner-install.js';
 import { runBackupCredentialInstallAdmin, type BackupCredentialInstallArguments } from './backup-credential-admin.js';
-import { runBackupNasConfigureAdmin, type BackupNasConfigureArguments } from './backup-nas-owner-setup.js';
+import {
+  runBackupNasConfigureAdmin,
+  runBackupNasRecoverAdmin,
+  type BackupNasConfigureArguments,
+  type BackupNasRecoverArguments,
+} from './backup-nas-owner-setup.js';
 /** Owner-run controls. Calendar sync may refresh its own tokens; no model calls or message sends. */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -67,6 +72,7 @@ import {
 export type ContextAdminArguments =
   | BackupCredentialInstallArguments
   | BackupNasConfigureArguments
+  | BackupNasRecoverArguments
   | { command: 'vault-provision'; scopeId: string }
   | { command: 'vault-install'; scopeId: string }
   | { command: 'vault-recovery-check'; scopeId: string }
@@ -216,6 +222,7 @@ export async function contextAdminCommand(
       'vault-recovery-check',
       'backup-credentials-install',
       'backup-nas-configure',
+      'backup-nas-recover-unmount',
     ].includes(args.command)
   )
     return { status: 'disabled', live_model: 'not_verified' };
@@ -384,9 +391,14 @@ export async function contextAdminCommand(
         assertAuthority();
       };
       await check();
-      if (args.command === 'backup-nas-configure') {
-        if (!vaultRelease) throw Error('backup_nas_owner_setup_unavailable');
-        return runBackupNasConfigureAdmin({
+      if (args.command === 'backup-nas-configure' || args.command === 'backup-nas-recover-unmount') {
+        if (!vaultRelease)
+          throw Error(
+            args.command === 'backup-nas-configure'
+              ? 'backup_nas_owner_setup_unavailable'
+              : 'backup_nas_owner_recovery_unavailable',
+          );
+        const input = {
           args,
           root,
           target,
@@ -395,7 +407,10 @@ export async function contextAdminCommand(
           hostLease: lease,
           check,
           release: vaultRelease.release,
-        });
+        };
+        return args.command === 'backup-nas-configure'
+          ? runBackupNasConfigureAdmin({ ...input, args })
+          : runBackupNasRecoverAdmin({ ...input, args });
       }
       if (args.command === 'backup-credentials-install') {
         return runBackupCredentialInstallAdmin({

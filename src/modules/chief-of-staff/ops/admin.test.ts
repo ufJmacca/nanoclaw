@@ -280,24 +280,27 @@ it('parses backup credential installation metadata without accepting credential 
   ])
     expect(() => parseAdminArguments([...args, ...extra])).toThrow('invalid_admin_arguments');
 });
-it('parses NAS setup metadata only through its fixed administrative command', () => {
-  const args = [
-    'backup-nas-configure',
-    '--scope',
-    'fixture',
-    '--request-id',
-    '48f99256-b105-4ee3-848c-00140c98151d',
-    '--host',
-    '192.168.56.12',
-    '--credential-reference',
-    '319c6740-24ba-4d68-9d3c-a4d53c9607d1',
-  ];
-  expect(parseAdminArguments(args)).toEqual({
-    command: 'backup-nas-configure',
-    scopeId: 'fixture',
-    requestId: args[4],
-    host: args[6],
-    credentialReference: args[8],
-  });
-  expect(() => parseAdminArguments([...args, '--password', 'PRIVATE_VALUE'])).toThrow('invalid_admin_arguments');
-});
+it.each(['backup-nas-configure', 'backup-nas-recover-unmount'])(
+  'parses %s metadata only through its fixed administrative command',
+  (command) => {
+    const args = [
+      command,
+      '--scope',
+      'fixture',
+      '--request-id',
+      '48f99256-b105-4ee3-848c-00140c98151d',
+      '--host',
+      '192.168.56.12',
+      '--credential-reference',
+      '319c6740-24ba-4d68-9d3c-a4d53c9607d1',
+    ];
+    expect(parseAdminArguments(args)).toEqual({
+      command,
+      scopeId: 'fixture',
+      requestId: args[4],
+      host: args[6],
+      credentialReference: args[8],
+    });
+    expect(() => parseAdminArguments([...args, '--password', 'PRIVATE_VALUE'])).toThrow('invalid_admin_arguments');
+  },
+);

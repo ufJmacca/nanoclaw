@@ -11,6 +11,7 @@ const commands = [
   'vault-recovery-check',
   'backup-credentials-install',
   'backup-nas-configure',
+  'backup-nas-recover-unmount',
   'database-check',
   'status',
   'operator-status',

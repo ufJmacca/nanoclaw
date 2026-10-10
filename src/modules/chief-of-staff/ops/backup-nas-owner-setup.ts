@@ -7,36 +7,58 @@ import { readTarget, type TargetState } from './target-state.js';
 import { validateReleaseManifest, type ReleaseManifest } from './release-manifest.js';
 import { vaultRootConfiguration, type VaultRootConfiguration } from './vault-root-config.js';
 import type { BackupNasSetupOwnerInput } from './backup-nas-owner-authority.js';
-import { openProtectedBackupNasSetupAuthority } from './backup-nas-owner-authority.js';
+import {
+  openProtectedBackupNasSetupAuthority,
+  openProtectedBackupNasRecoveryAuthority,
+} from './backup-nas-owner-authority.js';
 import { backupNasSetupRequest, backupNasSetupScope, type BackupNasSetupRequest } from './backup-nas-setup-wire.js';
 import { backupNasRootConfiguration } from './backup-nas-root-config.js';
 import { vaultRootStateDigest } from './vault-root-state.js';
 import { backupNasMountService } from './backup-nas-units.js';
 import { verifyVaultMemory } from './vault-memory.js';
 import { executeBackupNasSetup } from './backup-nas-setup-process.js';
+import {
+  backupNasRecoveryRequest,
+  backupNasRecoveryScope,
+  type BackupNasRecoveryRequest,
+} from './backup-nas-recovery-wire.js';
+import { executeBackupNasRecovery } from './backup-nas-recovery-process.js';
 export { backupNasSetupInvocation } from './backup-nas-setup-process.js';
-export type BackupNasConfigureArguments = {
-  command: 'backup-nas-configure';
+type NasAdminCommand = 'backup-nas-configure' | 'backup-nas-recover-unmount';
+type NasAdminArguments<C extends NasAdminCommand> = {
+  command: C;
   scopeId: string;
   requestId: string;
   host: string;
   credentialReference: string;
 };
-export type BackupNasConfigureInput = Omit<BackupNasSetupOwnerInput, 'configuration' | 'nas' | 'operationId'> & {
-  args: BackupNasConfigureArguments;
+type NasAdminInput<A> = Omit<BackupNasSetupOwnerInput, 'configuration' | 'nas' | 'operationId'> & {
+  args: A;
   target: TargetState;
   release: ReleaseManifest;
 };
-export type BackupNasConfigureControls = {
+type NasAdminControls<R> = {
   assertMemory?(): void;
   readConfiguration?(): VaultRootConfiguration;
   readTarget?: (root: string, binding: TargetState['binding']) => TargetState;
   openAuthority?: typeof openProtectedBackupNasSetupAuthority;
-  invoke?(vault: VaultRootConfiguration, request: BackupNasSetupRequest, check: () => Promise<void>): Promise<unknown>;
+  invoke?(vault: VaultRootConfiguration, request: R, check: () => Promise<void>): Promise<unknown>;
 };
+export type BackupNasConfigureArguments = NasAdminArguments<'backup-nas-configure'>;
+export type BackupNasConfigureInput = NasAdminInput<BackupNasConfigureArguments>;
+export type BackupNasConfigureControls = NasAdminControls<BackupNasSetupRequest>;
+export type BackupNasRecoverArguments = NasAdminArguments<'backup-nas-recover-unmount'>;
+export type BackupNasRecoverInput = NasAdminInput<BackupNasRecoverArguments>;
+export type BackupNasRecoverControls = NasAdminControls<BackupNasRecoveryRequest>;
 export function parseBackupNasConfigureArguments(args: string[]): BackupNasConfigureArguments {
+  return parseNasAdminArguments('backup-nas-configure', args);
+}
+export function parseBackupNasRecoverArguments(args: string[]): BackupNasRecoverArguments {
+  return parseNasAdminArguments('backup-nas-recover-unmount', args);
+}
+function parseNasAdminArguments<C extends NasAdminCommand>(command: C, args: string[]): NasAdminArguments<C> {
   const values: Record<string, string> = {};
-  if (args[0] !== 'backup-nas-configure' || args.length !== 9) throw Error('invalid_admin_arguments');
+  if (args[0] !== command || args.length !== 9) throw Error('invalid_admin_arguments');
   for (let index = 1; index < args.length; index += 2) {
     if (
       !['--scope', '--request-id', '--host', '--credential-reference'].includes(args[index]) ||
@@ -63,7 +85,7 @@ export function parseBackupNasConfigureArguments(args: string[]): BackupNasConfi
   )
     throw Error('invalid_admin_arguments');
   return {
-    command: 'backup-nas-configure',
+    command,
     scopeId: values['--scope'],
     requestId: values['--request-id'],
     host,
@@ -142,9 +164,62 @@ function openOwnerConfiguration(root: string) {
  * paused private membership checks. This adds a destination-bound live permission
  * without rewriting owner configuration, vault resources or recovery references.
  */
-export async function runBackupNasConfigureAdmin(
+type NasAdminPolicy<C extends NasAdminCommand, R> = {
+  parse(args: string[]): NasAdminArguments<C>;
+  scope: typeof backupNasSetupScope;
+  request(value: unknown, vault: VaultRootConfiguration): R;
+  requestContract: string;
+  openAuthority: typeof openProtectedBackupNasSetupAuthority;
+  invoke(
+    vault: VaultRootConfiguration,
+    request: R,
+    check: () => Promise<void>,
+    assertMemory: () => void,
+  ): Promise<unknown>;
+  receipt(vault: VaultRootConfiguration): Record<string, unknown>;
+  unavailable: string;
+};
+export function runBackupNasConfigureAdmin(
   input: BackupNasConfigureInput,
   controls: BackupNasConfigureControls = {},
+): Promise<Record<string, unknown>> {
+  return runProtectedNasAdmin(input, controls, {
+    parse: parseBackupNasConfigureArguments,
+    scope: backupNasSetupScope,
+    request: backupNasSetupRequest,
+    requestContract: 'cos-backup-nas-setup-request/v1',
+    openAuthority: openProtectedBackupNasSetupAuthority,
+    invoke: (vault, request, check, memory) => executeBackupNasSetup(vault, request, check, { assertMemory: memory }),
+    receipt: (vault) => ({
+      contract: 'cos-backup-nas-setup-result/v1',
+      status: 'configured',
+      unitDigest: createHash('sha256')
+        .update(backupNasMountService({ artifactDigest: vault.artifact.digest }).contents)
+        .digest('hex'),
+    }),
+    unavailable: 'backup_nas_owner_setup_unavailable',
+  });
+}
+export function runBackupNasRecoverAdmin(
+  input: BackupNasRecoverInput,
+  controls: BackupNasRecoverControls = {},
+): Promise<Record<string, unknown>> {
+  return runProtectedNasAdmin(input, controls, {
+    parse: parseBackupNasRecoverArguments,
+    scope: backupNasRecoveryScope,
+    request: backupNasRecoveryRequest,
+    requestContract: 'cos-backup-nas-recover-unmount-request/v1',
+    openAuthority: openProtectedBackupNasRecoveryAuthority,
+    invoke: (vault, request, check, memory) =>
+      executeBackupNasRecovery(vault, request, check, { assertMemory: memory }),
+    receipt: () => ({ contract: 'cos-backup-nas-recover-unmount-result/v1', status: 'closed' }),
+    unavailable: 'backup_nas_owner_recovery_unavailable',
+  });
+}
+async function runProtectedNasAdmin<C extends NasAdminCommand, R>(
+  input: NasAdminInput<NasAdminArguments<C>>,
+  controls: NasAdminControls<R>,
+  policy: NasAdminPolicy<C, R>,
 ): Promise<Record<string, unknown>> {
   let proof: Awaited<ReturnType<typeof openProtectedBackupNasSetupAuthority>> | undefined,
     held: ReturnType<typeof openOwnerConfiguration> | undefined,
@@ -163,7 +238,7 @@ export async function runBackupNasConfigureAdmin(
     role();
     if (Object.keys(input.args).sort().join(',') !== 'command,credentialReference,host,requestId,scopeId')
       throw Error('invalid_setup_arguments');
-    const args = parseBackupNasConfigureArguments([
+    const args = policy.parse([
         input.args.command,
         '--scope',
         input.args.scopeId,
@@ -211,7 +286,7 @@ export async function runBackupNasConfigureAdmin(
         },
         vault,
       ),
-      scope = backupNasSetupScope(vault, nas, args.requestId, input.maintenance.generation);
+      scope = policy.scope(vault, nas, args.requestId, input.maintenance.generation);
     const guard = () => {
       role();
       held?.check();
@@ -235,7 +310,7 @@ export async function runBackupNasConfigureAdmin(
       guard();
     };
     await check();
-    proof = await (controls.openAuthority ?? openProtectedBackupNasSetupAuthority)({
+    proof = await (controls.openAuthority ?? policy.openAuthority)({
       root: input.root,
       configuration: vault,
       nas,
@@ -248,9 +323,9 @@ export async function runBackupNasConfigureAdmin(
     await proof.check();
     guard();
     if (digest(proof.scope) !== digest(scope)) throw Error('setup_permission_conflict');
-    const request = backupNasSetupRequest(
+    const request = policy.request(
       {
-        contract: 'cos-backup-nas-setup-request/v1',
+        contract: policy.requestContract,
         configurationDigest,
         nas,
         scope,
@@ -264,18 +339,14 @@ export async function runBackupNasConfigureAdmin(
     };
     const result = await (controls.invoke
       ? controls.invoke(vault, request, current)
-      : executeBackupNasSetup(vault, request, current, { assertMemory: memory }));
+      : policy.invoke(vault, request, current, memory));
     await current();
     guard();
     const expected = {
-      contract: 'cos-backup-nas-setup-result/v1',
-      status: 'configured',
+      ...policy.receipt(vault),
       configurationDigest,
       nasDigest: digest(nas),
       artifactDigest: vault.artifact.digest,
-      unitDigest: createHash('sha256')
-        .update(backupNasMountService({ artifactDigest: vault.artifact.digest }).contents)
-        .digest('hex'),
       scopeDigest: digest(scope),
     };
     if (
@@ -306,6 +377,6 @@ export async function runBackupNasConfigureAdmin(
       }
     }
   }
-  if (failed || !verified) throw Error('backup_nas_owner_setup_unavailable');
+  if (failed || !verified) throw Error(policy.unavailable);
   return verified;
 }
