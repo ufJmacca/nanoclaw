@@ -6,7 +6,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { digest } from '../domain/contracts.js';
 import { vaultRootConfiguration } from './vault-root-config.js';
 import { vaultRootStateDigest } from './vault-root-state.js';
-import { prepareBackupNasUnderlay } from './backup-nas-underlay.js';
+import { prepareBackupNasUnderlay, inspectBackupNasUnclaimedUnderlay } from './backup-nas-underlay.js';
 const roots: string[] = [];
 afterEach(() => {
   vi.restoreAllMocks();
@@ -73,6 +73,99 @@ function fixture() {
   };
   return { root, vault, nas, bootstrap, bootstrapFile, controls, mount, journal };
 }
+it('observes the exact closed unclaimed underlay under the root writer without claiming or repairing it', async () => {
+  const s = fixture();
+  fs.mkdirSync(s.mount, { mode: 0 });
+  const before = fs.lstatSync(s.mount),
+    bootstrap = fs.readFileSync(s.bootstrapFile);
+  const result = await inspectBackupNasUnclaimedUnderlay(s.vault, s.nas, s.controls);
+  expect(result).toEqual({ kind: 'closed-underlay', device: before.dev, inode: before.ino });
+  expect(Object.isFrozen(result)).toBe(true);
+  expect(s.controls.assertAuthority.mock.calls.length).toBeGreaterThanOrEqual(3);
+  expect(fs.existsSync(s.journal)).toBe(false);
+  expect(fs.lstatSync(s.mount).ino).toBe(before.ino);
+  expect(fs.lstatSync(s.mount).mode & 0o7777).toBe(0);
+  expect(fs.readdirSync(s.mount)).toEqual([]);
+  expect(fs.readFileSync(s.bootstrapFile)).toEqual(bootstrap);
+  await expect(prepareBackupNasUnderlay(s.vault, s.nas, s.controls)).rejects.toThrow(
+    /^backup_nas_underlay_unavailable$/,
+  );
+});
+it.each(['missing', 'claimed', 'mode', 'payload', 'symlink', 'file', 'mounted', 'authority'])(
+  'refuses to observe an ambiguous %s underlay without publishing a new claim',
+  async (reason) => {
+    const s = fixture();
+    if (reason === 'claimed') await prepareBackupNasUnderlay(s.vault, s.nas, s.controls);
+    else if (reason === 'symlink') fs.symlinkSync(s.controls.paths.configRoot, s.mount);
+    else if (reason === 'file') fs.writeFileSync(s.mount, 'KEEP', { mode: 0o600 });
+    else if (reason !== 'missing') fs.mkdirSync(s.mount, { mode: 0 });
+    if (reason === 'mode') fs.chmodSync(s.mount, 0o700);
+    if (reason === 'payload') fs.writeFileSync(s.mount + '/payload', 'KEEP');
+    if (reason === 'mounted') s.controls.isMounted.mockReturnValue(true);
+    if (reason === 'authority') s.controls.assertAuthority.mockRejectedValue(Error('PRIVATE_AUTHORITY'));
+    const before = fs.existsSync(s.journal) ? fs.readFileSync(s.journal) : null;
+    await expect(inspectBackupNasUnclaimedUnderlay(s.vault, s.nas, s.controls)).rejects.toThrow(
+      /^backup_nas_underlay_observation_unavailable$/,
+    );
+    expect(fs.existsSync(s.journal)).toBe(before !== null);
+    if (before) expect(fs.readFileSync(s.journal)).toEqual(before);
+    if (reason === 'payload') expect(fs.readFileSync(s.mount + '/payload', 'utf8')).toBe('KEEP');
+    if (reason === 'file') expect(fs.readFileSync(s.mount, 'utf8')).toBe('KEEP');
+  },
+);
+it.each(['inode', 'mode', 'payload', 'journal', 'bootstrap', 'revocation'])(
+  'refuses a %s change across the fresh authority await with the observed directory held',
+  async (reason) => {
+    const s = fixture();
+    fs.mkdirSync(s.mount, { mode: 0 });
+    let checks = 0;
+    s.controls.assertAuthority.mockImplementation(async () => {
+      if (++checks !== 3) return;
+      if (reason === 'inode') {
+        fs.renameSync(s.mount, s.mount + '.original');
+        fs.mkdirSync(s.mount, { mode: 0 });
+      }
+      if (reason === 'mode') fs.chmodSync(s.mount, 0o700);
+      if (reason === 'payload') fs.writeFileSync(s.mount + '/payload', 'KEEP');
+      if (reason === 'journal') fs.writeFileSync(s.journal, 'FOREIGN', { mode: 0o600 });
+      if (reason === 'bootstrap')
+        fs.writeFileSync(s.bootstrapFile, JSON.stringify({ ...s.bootstrap, phase: 'intent' }));
+      if (reason === 'revocation') throw Error('PRIVATE_REVOKED');
+    });
+    await expect(inspectBackupNasUnclaimedUnderlay(s.vault, s.nas, s.controls)).rejects.toThrow(
+      /^backup_nas_underlay_observation_unavailable$/,
+    );
+    expect(checks).toBe(3);
+    if (reason === 'journal') expect(fs.readFileSync(s.journal, 'utf8')).toBe('FOREIGN');
+    else expect(fs.existsSync(s.journal)).toBe(false);
+  },
+);
+it.each(['inode', 'claim'])(
+  'rechecks an observed %s change during final writer closure before returning its identity',
+  async (reason) => {
+    const s = fixture();
+    fs.mkdirSync(s.mount, { mode: 0 });
+    const close = fs.closeSync;
+    let changed = false;
+    vi.spyOn(fs, 'closeSync').mockImplementation((fd) => {
+      const file = fs.readlinkSync('/proc/self/fd/' + fd);
+      close(fd);
+      if (!changed && file.endsWith('/repository.lock')) {
+        changed = true;
+        if (reason === 'inode') {
+          fs.renameSync(s.mount, s.mount + '.original');
+          fs.mkdirSync(s.mount, { mode: 0 });
+        } else fs.writeFileSync(s.journal, 'FOREIGN', { mode: 0o600 });
+      }
+    });
+    await expect(inspectBackupNasUnclaimedUnderlay(s.vault, s.nas, s.controls)).rejects.toThrow(
+      /^backup_nas_underlay_observation_unavailable$/,
+    );
+    expect(changed).toBe(true);
+    if (reason === 'claim') expect(fs.readFileSync(s.journal, 'utf8')).toBe('FOREIGN');
+    else expect(fs.existsSync(s.journal)).toBe(false);
+  },
+);
 it('exclusively creates a closed root-owned mountpoint and durable claim while preserving all G01 state', async () => {
   const s = fixture(),
     before = fs.readFileSync(s.bootstrapFile);

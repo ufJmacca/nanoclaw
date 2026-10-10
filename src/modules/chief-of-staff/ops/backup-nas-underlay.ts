@@ -8,6 +8,12 @@ import { BackupRepositoryWriter } from './backup-repository-lease.js';
 import { vaultRootConfiguration, type VaultRootConfiguration } from './vault-root-config.js';
 import { vaultRootStateDigest } from './vault-root-state.js';
 import { verifyVaultMemory } from './vault-memory.js';
+import {
+  backupNasInitializationResource,
+  type BackupNasInitializationResource,
+} from './backup-nas-initialization-recovery-scope.js';
+import { observeBackupNasMount } from './backup-nas-kernel.js';
+
 type Paths = Readonly<{ configRoot: string; controlRoot: string; storageRoot: string; mount: string }>;
 export type BackupNasUnderlayControls = {
   /** Fresh installed owner/native maintenance and sealed-artifact checks, never a stored receipt. */
@@ -47,13 +53,45 @@ function isMounted(directory: string): boolean {
  * No existing directory is adopted, and no mount is activated. The real kernel writer
  * serializes programme helpers; exclusive writes and inode claims refuse collisions.
  */
-export async function prepareBackupNasUnderlay(
+export function prepareBackupNasUnderlay(
   input: VaultRootConfiguration,
   selected: BackupNasRootConfiguration,
   controls: BackupNasUnderlayControls,
 ): Promise<BackupNasMountJournal> {
+  return withBackupNasUnderlay(input, selected, controls, 'prepare');
+}
+/** Private metadata observation only. This requires current root/native setup
+ * authority and returns a held, independently closed kernel identity. It never
+ * adopts an unclaimed resource; a separate fresh resource-bound grant is required
+ * before recovery can act on the observation. No installed route exposes it yet.
+ */
+export function inspectBackupNasUnclaimedUnderlay(
+  input: VaultRootConfiguration,
+  selected: BackupNasRootConfiguration,
+  controls: BackupNasUnderlayControls,
+): Promise<BackupNasInitializationResource> {
+  return withBackupNasUnderlay(input, selected, controls, 'inspect');
+}
+function withBackupNasUnderlay(
+  input: VaultRootConfiguration,
+  selected: BackupNasRootConfiguration,
+  controls: BackupNasUnderlayControls,
+  mode: 'prepare',
+): Promise<BackupNasMountJournal>;
+function withBackupNasUnderlay(
+  input: VaultRootConfiguration,
+  selected: BackupNasRootConfiguration,
+  controls: BackupNasUnderlayControls,
+  mode: 'inspect',
+): Promise<BackupNasInitializationResource>;
+async function withBackupNasUnderlay(
+  input: VaultRootConfiguration,
+  selected: BackupNasRootConfiguration,
+  controls: BackupNasUnderlayControls,
+  mode: 'prepare' | 'inspect',
+): Promise<BackupNasMountJournal | BackupNasInitializationResource> {
   const descriptors: number[] = [];
-  let journalFd: number | undefined, underlayFd: number | undefined;
+  let journalFd: number | undefined, underlayFd: number | undefined, finalObservation: (() => void) | undefined;
   try {
     const memory = controls.assertMemory ?? verifyVaultMemory;
     const role = () => {
@@ -199,7 +237,7 @@ export async function prepareBackupNasUnderlay(
         return result;
       },
     );
-    return await writer.exclusive(async (lease) => {
+    const result = await writer.exclusive(async (lease) => {
       const current = async () => {
         lease.assertCurrent();
         await authority();
@@ -216,6 +254,60 @@ export async function prepareBackupNasUnderlay(
       const journal = '/proc/self/fd/' + control!.fd + '/nas-mount.json',
         point = '/proc/self/fd/' + storage!.fd + '/nas';
       const existing = fs.lstatSync(journal, { throwIfNoEntry: false });
+      if (mode === 'inspect') {
+        if (existing) throw Error('claimed_underlay_observation_denied');
+        const before = fs.lstatSync(point);
+        underlayFd = fs.openSync(point, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+        const held = underlayFd,
+          resource = backupNasInitializationResource({
+            kind: 'closed-underlay',
+            device: before.dev,
+            inode: before.ino,
+          });
+        const state = backupNasMountJournal(
+          {
+            contract: 'cos-backup-nas-mount-state/v1',
+            configurationDigest: scope.configurationDigest,
+            underlay: inode(before),
+            phase: 'closed',
+            attemptId: null,
+            mount: null,
+          },
+          scope,
+        );
+        const observe = () => {
+          guard();
+          bootstrap.check();
+          absent();
+          if (fs.lstatSync(journal, { throwIfNoEntry: false })) throw Error('underlay_claim_appeared');
+          for (const stat of [fs.fstatSync(held), fs.lstatSync(point)]) {
+            if (
+              !stat.isDirectory() ||
+              stat.uid !== 0 ||
+              (stat.mode & 0o7777) !== 0 ||
+              stat.nlink !== 2 ||
+              stat.dev !== storage!.before.dev ||
+              stat.dev !== before.dev ||
+              stat.ino !== before.ino ||
+              stat.mtimeMs !== before.mtimeMs ||
+              stat.ctimeMs !== before.ctimeMs
+            )
+              throw Error('observed_underlay_changed');
+          }
+          if (fs.realpathSync(paths.mount) !== paths.mount || fs.readdirSync('/proc/self/fd/' + held).length)
+            throw Error('observed_underlay_not_empty');
+          const actual = observeBackupNasMount(vault, nas, state, { mount: paths.mount, assertMemory: memory });
+          if (actual.state !== 'closed' || digest(actual.underlay) !== digest(state.underlay))
+            throw Error('observed_underlay_not_closed');
+          guard();
+          bootstrap.check();
+        };
+        finalObservation = observe;
+        observe();
+        await current();
+        observe();
+        return resource;
+      }
       let record: BackupNasMountJournal, read: ReturnType<typeof metadata> | undefined;
       if (existing) {
         read = metadata(control!, 'nas-mount.json');
@@ -295,9 +387,13 @@ export async function prepareBackupNasUnderlay(
       closed();
       return record;
     });
+    // Keep the observed directory and G01 descriptors current through the final
+    // writer await; no new native permission await follows writer release.
+    finalObservation?.();
+    return result;
   } catch {
     // eslint-disable-next-line preserve-caught-error -- Root resource paths, selected configuration and native-authority diagnostics remain private.
-    throw Error('backup_nas_underlay_unavailable');
+    throw Error(mode === 'prepare' ? 'backup_nas_underlay_unavailable' : 'backup_nas_underlay_observation_unavailable');
   } finally {
     try {
       if (journalFd !== undefined) fs.closeSync(journalFd);
