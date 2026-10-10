@@ -28,7 +28,7 @@ RUN pnpm build && bun build src/modules/chief-of-staff/ops/target-bootstrap.ts -
 ARG RELEASE_SLICE=S11
 ARG SOURCE_COMMIT
 ARG SOURCE_TREE
-RUN if [ "$RELEASE_SLICE" = G01 ]; then \
+RUN if [ "$RELEASE_SLICE" = G01 ] || [ "$RELEASE_SLICE" = G02 ]; then \
       bun build src/modules/chief-of-staff/ops/vault-root-entry.ts --target=node --format=esm --packages=external --outfile=/build/vault-gateway.mjs && \
       node --input-type=module -e 'import {packageVaultRootArtifact} from "./dist/modules/chief-of-staff/ops/vault-root-package.js";packageVaultRootArtifact({sourceCommit:process.argv[1],sourceTree:process.argv[2],gateway:"/build/vault-gateway.mjs",output:"/build/vault-artifacts"})' "$SOURCE_COMMIT" "$SOURCE_TREE" && \
       rm /build/vault-gateway.mjs; \
