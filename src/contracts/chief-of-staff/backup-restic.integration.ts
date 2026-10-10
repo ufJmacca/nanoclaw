@@ -446,6 +446,101 @@ test('wrong repository identity and exhausted capacity refuse transfer before a 
   assert.equal(admissions, 1);
   assert.deepEqual(JSON.parse(run(['snapshots', '--tag', 'cos-operation=' + operationId])), []);
 });
+test('fresh verification reads the exact existing encrypted archive without producer or upload admission', async () => {
+  let admissions = 0,
+    producers = 0;
+  const before = (JSON.parse(run(['snapshots'])) as Array<{ id: string }>).map((s) => s.id);
+  const verified = await withTransfer(
+    repositoryId,
+    async () => {
+      admissions++;
+      throw Error('must not admit upload');
+    },
+    (transfer) => transfer.verify('credentials', transferOperation, transferArchive),
+    () => {
+      producers++;
+      throw Error('must not produce archive');
+    },
+  );
+  assert.equal(verified.snapshotId, transferSnapshot);
+  assert.equal(verified.repositoryId, repositoryId);
+  assert.equal(verified.ownerDigest, transferOwner);
+  assert.equal(verified.archiveSha256, transferArchive.sha256);
+  assert.equal(verified.archiveBytes, transferArchive.bytes);
+  assert.equal(verified.reconciled, true);
+  assert.equal(admissions, 0);
+  assert.equal(producers, 0);
+  assert.deepEqual(
+    (JSON.parse(run(['snapshots'])) as Array<{ id: string }>).map((s) => s.id),
+    before,
+  );
+});
+test('fresh verification refuses an absent operation without manufacturing a new checkpoint', async () => {
+  const missing = '3469b9b3-ddd5-49d1-a349-baa769cbf0cd';
+  let admissions = 0,
+    producers = 0;
+  await assert.rejects(
+    withTransfer(
+      repositoryId,
+      async () => {
+        admissions++;
+      },
+      (transfer) => transfer.verify('credentials', missing, transferArchive),
+      () => {
+        producers++;
+        return transferProducer(missing);
+      },
+    ),
+    /^Error: backup_artifact_unverified$/,
+  );
+  assert.equal(admissions, 0);
+  assert.equal(producers, 0);
+  assert.deepEqual(JSON.parse(run(['snapshots', '--tag', 'cos-operation=' + missing])), []);
+});
+test('fresh verification refuses wrong archive hashes and lengths while leaving its queued source intact', async () => {
+  for (const archive of [
+    { ...transferArchive, sha256: 'f'.repeat(64) },
+    { ...transferArchive, bytes: transferArchive.bytes + 512 },
+  ])
+    await assert.rejects(
+      withTransfer(
+        repositoryId,
+        async () => {
+          throw Error('must not upload');
+        },
+        (transfer) => transfer.verify('credentials', transferOperation, archive),
+      ),
+      /^Error: backup_artifact_unverified$/,
+    );
+  assert.equal((await transferQueue.pending('credentials'))[0].state, 'pending');
+});
+test('fresh verification still checks the current repository identity before any archive readback', async () => {
+  await assert.rejects(
+    withTransfer(
+      '0'.repeat(64),
+      async () => {
+        throw Error('must not upload');
+      },
+      (transfer) => transfer.verify('credentials', transferOperation, transferArchive),
+    ),
+    /^Error: backup_artifact_unverified$/,
+  );
+});
+test('a completed writer or binary lifetime cannot be replayed as fresh verification authority', async () => {
+  let expired: BackupResticTransfer | undefined;
+  await withTransfer(
+    repositoryId,
+    async () => {},
+    async (transfer) => {
+      expired = transfer;
+    },
+  );
+  assert(expired);
+  await assert.rejects(
+    expired.verify('credentials', transferOperation, transferArchive),
+    /^Error: backup_transfer_unavailable$/,
+  );
+});
 test('a mismatched remote archive cannot be acknowledged as a verified checkpoint', async () => {
   await assert.rejects(
     withTransfer(

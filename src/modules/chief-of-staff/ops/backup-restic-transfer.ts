@@ -37,6 +37,21 @@ export type RemoteCheckpoint = {
 };
 const hex = /^[a-f0-9]{64}$/,
   uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
+function verifiedInput(kind: BackupKind, operationId: string, input: Archive): Archive {
+  const archive = { ...input };
+  if (
+    !['state', 'credentials'].includes(kind) ||
+    typeof operationId !== 'string' ||
+    !uuid.test(operationId) ||
+    typeof archive.sha256 !== 'string' ||
+    !hex.test(archive.sha256) ||
+    !Number.isSafeInteger(archive.bytes) ||
+    archive.bytes < 2048 ||
+    archive.bytes > (kind === 'state' ? BACKUP_LIMITS.staging : BACKUP_LIMITS.credentials) + 2 * 1024 ** 2
+  )
+    throw Error('invalid_transfer_archive');
+  return archive;
+}
 /** Trusted transport with admitted descriptor scopes and mandatory growth admission.
  * Synthetic fixtures inject those scopes. Installed construction must use the vault,
  * signed NAS access, verified artifact and kernel writer factories; this is not an agent tool. */
@@ -179,20 +194,51 @@ export class BackupResticTransfer {
       bytes.fill(0);
     }
   }
+  /** Fresh readback only. Durable local metadata is never a repository lease. */
+  async verify(kind: BackupKind, operationId: string, input: Archive): Promise<RemoteCheckpoint> {
+    try {
+      const archive = verifiedInput(kind, operationId, input);
+      const snapshot = await this.find(kind, operationId);
+      if (!snapshot) throw Error('remote_checkpoint_missing');
+      return await this.readSnapshot(kind, operationId, archive, snapshot, true);
+    } catch {
+      // eslint-disable-next-line preserve-caught-error -- Remote metadata and provider diagnostics remain private.
+      throw Error('backup_transfer_unavailable');
+    }
+  }
+  private async readSnapshot(
+    kind: BackupKind,
+    operationId: string,
+    archive: Archive,
+    snapshot: Snapshot,
+    reconciled: boolean,
+  ): Promise<RemoteCheckpoint> {
+    const hash = createHash('sha256');
+    let bytes = 0;
+    const output = await this.command(['dump', snapshot.id, 'checkpoint.tar'], archive.bytes, (chunk) => {
+      bytes += chunk.length;
+      hash.update(chunk);
+    });
+    output.fill(0);
+    if (bytes !== archive.bytes || hash.digest('hex') !== archive.sha256) throw Error('remote_checkpoint_changed');
+    this.current();
+    return {
+      contract: 'cos-backup-remote-checkpoint/v1',
+      repositoryId: this.options.repositoryId,
+      ownerDigest: this.options.ownerDigest,
+      kind,
+      operationId,
+      snapshotId: snapshot.id,
+      snapshotAt: snapshot.time,
+      archiveBytes: bytes,
+      archiveSha256: archive.sha256,
+      reconciled,
+      verifiedAt: new Date().toISOString(),
+    };
+  }
   async upload(kind: BackupKind, operationId: string, input: Archive): Promise<RemoteCheckpoint> {
     try {
-      const archive = { ...input };
-      if (
-        !['state', 'credentials'].includes(kind) ||
-        typeof operationId !== 'string' ||
-        !uuid.test(operationId) ||
-        typeof archive.sha256 !== 'string' ||
-        !hex.test(archive.sha256) ||
-        !Number.isSafeInteger(archive.bytes) ||
-        archive.bytes < 2048 ||
-        archive.bytes > (kind === 'state' ? BACKUP_LIMITS.staging : BACKUP_LIMITS.credentials) + 2 * 1024 ** 2
-      )
-        throw Error('invalid_transfer_archive');
+      const archive = verifiedInput(kind, operationId, input);
       let snapshot = await this.find(kind, operationId);
       const reconciled = !!snapshot;
       if (!snapshot) {
@@ -225,27 +271,7 @@ export class BackupResticTransfer {
         snapshot = await this.find(kind, operationId);
         if (!snapshot) throw Error('remote_checkpoint_missing');
       }
-      const hash = createHash('sha256');
-      let bytes = 0;
-      const output = await this.command(['dump', snapshot.id, 'checkpoint.tar'], archive.bytes, (chunk) => {
-        bytes += chunk.length;
-        hash.update(chunk);
-      });
-      output.fill(0);
-      if (bytes !== archive.bytes || hash.digest('hex') !== archive.sha256) throw Error('remote_checkpoint_changed');
-      return {
-        contract: 'cos-backup-remote-checkpoint/v1',
-        repositoryId: this.options.repositoryId,
-        ownerDigest: this.options.ownerDigest,
-        kind,
-        operationId,
-        snapshotId: snapshot.id,
-        snapshotAt: snapshot.time,
-        archiveBytes: bytes,
-        archiveSha256: archive.sha256,
-        reconciled,
-        verifiedAt: new Date().toISOString(),
-      };
+      return await this.readSnapshot(kind, operationId, archive, snapshot, reconciled);
     } catch {
       // eslint-disable-next-line preserve-caught-error -- Remote snapshot metadata, source paths and provider diagnostics are private.
       throw Error('backup_transfer_unavailable');
