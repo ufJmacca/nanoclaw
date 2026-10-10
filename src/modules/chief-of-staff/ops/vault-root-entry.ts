@@ -5,6 +5,7 @@ import { runBackupNasRootMount } from './backup-nas-root-runtime.js';
 import { runBackupNasRootSetup } from './backup-nas-root-setup.js';
 import { runBackupNasRootRecovery } from './backup-nas-root-recovery.js';
 import { runBackupNasRootInitializationInspection } from './backup-nas-root-inspection.js';
+import { runBackupNasRootInitializationRecovery } from './backup-nas-root-initialization-recovery.js';
 try {
   // Fixed capabilities only. The owner probe independently verifies its actual root parent, owner and vault before holding any credential.
   if (
@@ -20,6 +21,7 @@ try {
           '--backup-configure',
           '--backup-recover-unmount',
           '--backup-inspect-initialization',
+          '--backup-recover-initialization',
         ].includes(process.argv[2]))
     )
   )
@@ -36,9 +38,11 @@ try {
             ? await runBackupNasRootRecovery(process.stdin)
             : process.argv[2] === '--backup-inspect-initialization'
               ? await runBackupNasRootInitializationInspection(process.stdin)
-              : process.argv[2] === '--backup-mount' || process.argv[2] === '--backup-unmount'
-                ? await runBackupNasRootMount(process.argv[2] === '--backup-mount' ? 'mount' : 'unmount')
-                : await runVaultRootGateway(process.stdin);
+              : process.argv[2] === '--backup-recover-initialization'
+                ? await runBackupNasRootInitializationRecovery(process.stdin)
+                : process.argv[2] === '--backup-mount' || process.argv[2] === '--backup-unmount'
+                  ? await runBackupNasRootMount(process.argv[2] === '--backup-mount' ? 'mount' : 'unmount')
+                  : await runVaultRootGateway(process.stdin);
     process.stdout.write(JSON.stringify(result) + '\n');
   }
   // eslint-disable-next-line no-catch-all/no-catch-all -- Installed CLI errors are always a fixed non-secret receipt.
@@ -54,9 +58,11 @@ try {
             ? '{"code":"backup_nas_root_recovery_unavailable"}\n'
             : process.argv.length === 3 && process.argv[2] === '--backup-inspect-initialization'
               ? '{"code":"backup_nas_root_inspection_unavailable"}\n'
-              : process.argv.length === 3 && ['--backup-mount', '--backup-unmount'].includes(process.argv[2])
-                ? '{"code":"backup_nas_root_mount_unavailable"}\n'
-                : '{"code":"vault_root_gateway_unavailable"}\n',
+              : process.argv.length === 3 && process.argv[2] === '--backup-recover-initialization'
+                ? '{"code":"backup_nas_root_initialization_recovery_unavailable"}\n'
+                : process.argv.length === 3 && ['--backup-mount', '--backup-unmount'].includes(process.argv[2])
+                  ? '{"code":"backup_nas_root_mount_unavailable"}\n'
+                  : '{"code":"vault_root_gateway_unavailable"}\n',
   );
   process.exitCode = 1;
 }

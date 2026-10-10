@@ -7,6 +7,7 @@ const f = vi.hoisted(() => ({
   setup: vi.fn(),
   recovery: vi.fn(),
   inspection: vi.fn(),
+  initializationRecovery: vi.fn(),
 }));
 vi.mock('./vault-root-gateway.js', () => ({ runVaultRootGateway: f.gateway }));
 vi.mock('./vault-root-installer.js', () => ({ runVaultRootInstaller: f.installer }));
@@ -15,6 +16,9 @@ vi.mock('./backup-nas-root-runtime.js', () => ({ runBackupNasRootMount: f.mount 
 vi.mock('./backup-nas-root-setup.js', () => ({ runBackupNasRootSetup: f.setup }));
 vi.mock('./backup-nas-root-recovery.js', () => ({ runBackupNasRootRecovery: f.recovery }));
 vi.mock('./backup-nas-root-inspection.js', () => ({ runBackupNasRootInitializationInspection: f.inspection }));
+vi.mock('./backup-nas-root-initialization-recovery.js', () => ({
+  runBackupNasRootInitializationRecovery: f.initializationRecovery,
+}));
 const originalArgv = process.argv,
   originalExitCode = process.exitCode;
 const tty = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY');
@@ -150,6 +154,7 @@ it.each(
     ['--backup-configure', '--host=192.168.56.13'],
     ['--backup-recover-unmount', '--mount-id=55'],
     ['--backup-inspect-initialization', '--path=/tmp'],
+    ['--backup-recover-initialization', '--path=/tmp'],
     ['--probe'],
     ['--install', '--backup-credential-probe'],
   ].map((args) => ({ args })),
@@ -162,6 +167,7 @@ it.each(
   expect(f.setup).not.toHaveBeenCalled();
   expect(f.recovery).not.toHaveBeenCalled();
   expect(f.inspection).not.toHaveBeenCalled();
+  expect(f.initializationRecovery).not.toHaveBeenCalled();
   expect(result.stdout).toBe('');
   expect(result.exitCode).toBe(1);
   expect(result.stderr).toMatch(/unavailable/);
@@ -176,6 +182,7 @@ it.each(
     ['--backup-configure'],
     ['--backup-recover-unmount'],
     ['--backup-inspect-initialization'],
+    ['--backup-recover-initialization'],
   ].map((args) => ({
     args,
   })),
@@ -188,6 +195,7 @@ it.each(
   expect(f.setup).not.toHaveBeenCalled();
   expect(f.recovery).not.toHaveBeenCalled();
   expect(f.inspection).not.toHaveBeenCalled();
+  expect(f.initializationRecovery).not.toHaveBeenCalled();
   expect(result.exitCode).toBe(1);
 });
 it('emits only a fixed probe failure for private nested diagnostics', async () => {
@@ -205,6 +213,26 @@ it('redacts private NAS setup failures into one fixed CLI result', async () => {
   expect(await invoke(['--backup-configure'])).toEqual({
     stdout: '',
     stderr: '{"code":"backup_nas_root_setup_unavailable"}\n',
+    exitCode: 1,
+  });
+});
+
+it('routes only the fixed resource-specific private initialization recovery command', async () => {
+  f.initializationRecovery.mockResolvedValue({ contract: 'fixture-initialization-recovery', status: 'retired' });
+  expect(await invoke(['--backup-recover-initialization'])).toEqual({
+    stdout: '{"contract":"fixture-initialization-recovery","status":"retired"}\n',
+    stderr: '',
+    exitCode: undefined,
+  });
+  expect(f.initializationRecovery).toHaveBeenCalledWith(process.stdin);
+  for (const fn of [f.setup, f.recovery, f.inspection, f.mount, f.gateway, f.installer, f.probe])
+    expect(fn).not.toHaveBeenCalled();
+});
+it('redacts private resource retirement failures at the fixed CLI boundary', async () => {
+  f.initializationRecovery.mockRejectedValue(Error('PRIVATE_ROOT_RESOURCE'));
+  expect(await invoke(['--backup-recover-initialization'])).toEqual({
+    stdout: '',
+    stderr: '{"code":"backup_nas_root_initialization_recovery_unavailable"}\n',
     exitCode: 1,
   });
 });
