@@ -10,6 +10,7 @@ import { assertHostExecutionLease, type HostExecutionLease } from '../../../db/h
 import { openVaultAuthority, type VaultAuthority, type VaultAuthorityScope } from './vault-authority.js';
 import { readTarget } from './target-state.js';
 import { backupNasSetupScope } from './backup-nas-setup-wire.js';
+import { backupNasRecoveryScope } from './backup-nas-recovery-wire.js';
 import { verifyVaultMemory } from './vault-memory.js';
 export type BackupNasSetupOwnerInput = {
   root: string;
@@ -21,13 +22,26 @@ export type BackupNasSetupOwnerInput = {
   hostLease: HostExecutionLease;
   check(): Promise<void>;
 };
+export async function openProtectedBackupNasRecoveryAuthority(
+  input: BackupNasSetupOwnerInput,
+  controls: { assertMemory?(): void; ownerTargetRoot?: string } = {},
+): ReturnType<typeof openProtectedBackupNasSetupAuthority> {
+  return openProtectedBackupNasAuthority(input, controls, backupNasRecoveryScope);
+}
 /** The enclosing owner command holds its operation lock and paused native boundary.
- * Each root challenge checks those live leases again. NAS setup uses its own fresh
+ * Each root challenge checks those live leases again. NAS administration uses its own fresh
  * operation; the accepted vault configuration and resource identity stay intact.
  */
 export async function openProtectedBackupNasSetupAuthority(
   input: BackupNasSetupOwnerInput,
   controls: { assertMemory?(): void; ownerTargetRoot?: string } = {},
+): Promise<{ scope: Readonly<VaultAuthorityScope>; authority: VaultAuthority; check(): Promise<void> }> {
+  return openProtectedBackupNasAuthority(input, controls, backupNasSetupScope);
+}
+async function openProtectedBackupNasAuthority(
+  input: BackupNasSetupOwnerInput,
+  controls: { assertMemory?(): void; ownerTargetRoot?: string },
+  scopeFactory: typeof backupNasSetupScope,
 ): Promise<{ scope: Readonly<VaultAuthorityScope>; authority: VaultAuthority; check(): Promise<void> }> {
   let authority: VaultAuthority | undefined;
   try {
@@ -40,7 +54,7 @@ export async function openProtectedBackupNasSetupAuthority(
       nas = backupNasRootConfiguration(input.nas, config),
       maintenance = Object.freeze({ ...input.maintenance }),
       hostLease = Object.freeze({ ...input.hostLease });
-    const scope = backupNasSetupScope(config, nas, input.operationId, maintenance.generation);
+    const scope = scopeFactory(config, nas, input.operationId, maintenance.generation);
     if (
       process.platform !== 'linux' ||
       process.arch !== 'arm64' ||

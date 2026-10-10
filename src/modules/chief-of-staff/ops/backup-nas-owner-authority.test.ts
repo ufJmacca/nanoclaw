@@ -12,12 +12,16 @@ import { vaultRootConfiguration } from './vault-root-config.js';
 import { vaultRootStateDigest } from './vault-root-state.js';
 import { checkVaultAuthority } from './vault-authority.js';
 import { backupNasSetupScope } from './backup-nas-setup-wire.js';
-import { openProtectedBackupNasSetupAuthority } from './backup-nas-owner-authority.js';
+import { backupNasRecoveryScope } from './backup-nas-recovery-wire.js';
+import {
+  openProtectedBackupNasSetupAuthority,
+  openProtectedBackupNasRecoveryAuthority,
+} from './backup-nas-owner-authority.js';
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0)) await cleanup();
 });
-async function fixture() {
+async function fixture(recovery = false) {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'bn-')),
     root = parent + '/s';
   const binding = {
@@ -76,7 +80,11 @@ async function fixture() {
     },
   };
   const controls = { ownerTargetRoot: root, assertMemory() {} },
-    open = async () => (opened = await openProtectedBackupNasSetupAuthority(input, controls));
+    open = async () =>
+      (opened = await (recovery ? openProtectedBackupNasRecoveryAuthority : openProtectedBackupNasSetupAuthority)(
+        input,
+        controls,
+      ));
   cleanups.push(async () => {
     await opened?.authority.close();
     native.close();
@@ -101,6 +109,48 @@ async function fixture() {
     },
   };
 }
+it('grants fresh native recovery only for closing the configured NAS connection while preserving accepted vault identity', async () => {
+  const f = await fixture(true),
+    before = digest(f.vault),
+    proof = await f.open();
+  expect(proof.scope).toEqual(backupNasRecoveryScope(f.vault, f.nas, f.input.operationId, f.maintenance.generation));
+  await checkVaultAuthority(proof.authority, proof.scope, process.getuid!());
+  await expect(
+    checkVaultAuthority(
+      proof.authority,
+      backupNasSetupScope(f.vault, f.nas, f.input.operationId, f.maintenance.generation),
+      process.getuid!(),
+    ),
+  ).rejects.toThrow(/^vault_authority_unavailable$/);
+  expect(digest(f.vault)).toBe(before);
+  expect(JSON.stringify(proof)).not.toContain(proof.authority.token);
+});
+it('refuses to use an ordinary setup permission as fresh recovery authority', async () => {
+  const f = await fixture(),
+    proof = await f.open();
+  await expect(
+    checkVaultAuthority(
+      proof.authority,
+      backupNasRecoveryScope(f.vault, f.nas, f.input.operationId, f.maintenance.generation),
+      process.getuid!(),
+    ),
+  ).rejects.toThrow(/^vault_authority_unavailable$/);
+});
+it.each(['host-release', 'host-replacement', 'maintenance-release', 'unpaused', 'not-quiescent'])(
+  'withdraws recovery permission after %s from the actual native owner boundary',
+  async (reason) => {
+    const f = await fixture(true),
+      proof = await f.open();
+    if (reason === 'host-release') releaseHostExecutionLease(f.native, f.hostLease);
+    if (reason === 'host-replacement') f.native.prepare('UPDATE host_execution_lease SET owner_id=?').run(randomUUID());
+    if (reason === 'maintenance-release') await finishMaintenance(f.root, f.binding, f.maintenance, async () => true);
+    if (reason === 'unpaused') f.unpause();
+    if (reason === 'not-quiescent') f.loseQuiescence();
+    await expect(checkVaultAuthority(proof.authority, proof.scope, process.getuid!())).rejects.toThrow(
+      /^vault_authority_unavailable$/,
+    );
+  },
+);
 it('grants only a live NAS-specific permission under actual native and protected maintenance leases without changing vault identity', async () => {
   const f = await fixture(),
     before = digest(f.vault),
