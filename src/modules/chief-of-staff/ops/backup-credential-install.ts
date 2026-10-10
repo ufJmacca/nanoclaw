@@ -8,6 +8,7 @@ import { writeAtomic } from './target-state.js';
 import { verifyVaultStorage, withVaultDirectory } from './vault-storage.js';
 import { verifyVaultMemory } from './vault-memory.js';
 import { consumeBackupCredentials } from './backup-credential-wire.js';
+import { createVaultCredentialJournal } from './backup-credential-journal.js';
 
 type Installation = {
   contract: 'cos-backup-credential-installation/v1';
@@ -261,8 +262,39 @@ export async function installBackupCredentials(input: {
             }
             matches('smb-credentials', smb);
             matches('restic-password', restic);
-            readBackupCredentialInstallation(at, roots, identity.filesystemUuid);
+            const installed = readBackupCredentialInstallation(at, roots, identity.filesystemUuid);
             await check();
+            const installation = Buffer.from(JSON.stringify(installed) + '\n');
+            try {
+              await createVaultCredentialJournal(roots)(
+                {
+                  sourceKind: 'backup_repository',
+                  sourceKey: digest({
+                    rootsDigest: identity.rootsDigest,
+                    credentialReference: identity.credentialReference,
+                  }),
+                  generation: 1,
+                  phase: 'ready',
+                  files: [
+                    { name: 'smb-credentials', bytes: smb },
+                    { name: 'restic-password', bytes: restic },
+                    { name: journal, bytes: installation },
+                  ],
+                },
+                () => {
+                  guard();
+                  matches('smb-credentials', smb);
+                  matches('restic-password', restic);
+                  if (
+                    digest(readBackupCredentialInstallation(at, roots, identity.filesystemUuid)) !== digest(installed)
+                  )
+                    throw Error('credential_installation_changed');
+                },
+              );
+              await check();
+            } finally {
+              installation.fill(0);
+            }
           } finally {
             smb.fill(0);
             restic.fill(0);

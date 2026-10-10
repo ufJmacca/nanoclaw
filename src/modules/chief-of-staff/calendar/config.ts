@@ -9,6 +9,7 @@ import { verifyCalendarStorage, type CalendarStorageRoots } from './storage-poli
 import type { StorageInspection } from './storage-protection.js';
 import { digest } from '../domain/contracts.js';
 import { verifyVaultMemory } from '../ops/vault-memory.js';
+import { createVaultCredentialJournal } from '../ops/backup-credential-journal.js';
 export function calendarSettings(env: NodeJS.ProcessEnv): { enabled: boolean } {
   const enabled = env.COS_CALENDAR_ENABLED ?? 'false';
   if (!['true', 'false'].includes(enabled)) throw new DatabaseConfigurationError('COS_CALENDAR_ENABLED');
@@ -72,7 +73,14 @@ export function openCalendarCredentials(
       if (digest(verifyCalendarStorage(roots, inspect)) !== digest(protection))
         throw new Error('calendar_storage_changed');
     };
-    const credentials = new CalendarCredentialOwner(path.join(root, 'credentials'), client, fences, {}, guard);
+    const credentials = new CalendarCredentialOwner(
+      path.join(root, 'credentials'),
+      client,
+      fences,
+      {},
+      guard,
+      createVaultCredentialJournal(roots, memory),
+    );
     if (digest(verifyCalendarStorage(roots, inspect)) !== digest(protection))
       throw new Error('calendar_storage_changed');
     return { fences, credentials, verifyStorage: guard };

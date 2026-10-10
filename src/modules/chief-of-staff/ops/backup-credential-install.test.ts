@@ -8,6 +8,7 @@ vi.mock('./vault-memory.js', () => ({ verifyVaultMemory: f.memory }));
 vi.mock('./vault-storage.js', () => ({ withVaultDirectory: f.access, verifyVaultStorage: f.vault }));
 vi.mock('./target-identity.js', () => ({ localTarget: f.target }));
 import { installBackupCredentials, readBackupCredentialInstallation } from './backup-credential-install.js';
+import { createVaultBackupQueue } from './backup-queue.js';
 
 const temporary: string[] = [];
 const operationId = '48f99256-b105-4ee3-848c-00140c98151d';
@@ -26,10 +27,12 @@ function fixture() {
   temporary.push(root);
   const directory = path.join(root, 'backup-credentials');
   fs.mkdirSync(directory, { mode: 0o700 });
+  const journals = path.join(root, 'journals');
+  fs.mkdirSync(journals, { mode: 0o700 });
   const roots = { targetRoot: root + '/state', installationRoot: root + '/install', dataRoot: root + '/data' };
   const policy = { vaultRoot: root, targetDigest: digest(roots.targetRoot), volume: { filesystemUuid } };
   f.vault.mockReturnValue(policy);
-  f.access.mockImplementation(async (_roots, _area, callback) => callback(directory));
+  f.access.mockImplementation(async (_roots, area, callback) => callback(area === 'journals' ? journals : directory));
   f.target.mockReturnValue({
     lifecycle: 'protected',
     maintenance: true,
@@ -85,6 +88,17 @@ it('publishes a ready marker only after both private credential files are synced
     expect(stat.nlink).toBe(1);
   }
   expect(s.input.bytes.every((byte) => byte === 0)).toBe(true);
+  const queue = createVaultBackupQueue(s.roots),
+    pending = await queue.pending('credentials');
+  expect(pending).toHaveLength(1);
+  await queue.withPending('credentials', pending[0].operationId, async (directory) => {
+    expect(fs.readFileSync(directory + '/smb-credentials').equals(smb)).toBe(true);
+    expect(JSON.parse(fs.readFileSync(directory + '/credential-event.json', 'utf8'))).toMatchObject({
+      sourceKind: 'backup_repository',
+      phase: 'ready',
+      generation: 1,
+    });
+  });
 });
 
 it('replays the same installation without changing either credential inode or contents', async () => {
@@ -99,6 +113,7 @@ it('replays the same installation without changing either credential inode or co
     expect(after.ctimeMs).toBe(before[index].ctimeMs);
     expect(after.mtimeMs).toBe(before[index].mtimeMs);
   });
+  expect(await createVaultBackupQueue(s.roots).pending('credentials')).toHaveLength(1);
 });
 
 it.each(['smb', 'restic', 'reference', 'operation'])(

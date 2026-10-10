@@ -8,6 +8,7 @@ import { verifyCalendarStorage, type CalendarStorageRoots } from '../calendar/st
 import type { StorageInspection } from '../calendar/storage-protection.js';
 import type { GoogleOAuthClient, OAuthTransport } from '../calendar/oauth.js';
 import { CalendarWriterCredentialOwner } from './credentials.js';
+import { createVaultCredentialJournal } from '../ops/backup-credential-journal.js';
 import { verifyVaultMemory } from '../ops/vault-memory.js';
 
 export function actionSettings(env: NodeJS.ProcessEnv): { enabled: boolean } {
@@ -85,6 +86,7 @@ export function openWriterCredentials(
         fences,
         transport,
         guard,
+        createVaultCredentialJournal(roots, memory),
       );
     const verify = () => {
       try {

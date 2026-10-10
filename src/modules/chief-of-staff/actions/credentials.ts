@@ -1,4 +1,5 @@
 import { CalendarCredentialCore } from '../calendar/credential-core.js';
+import type { CredentialJournal } from '../ops/backup-credential-event.js';
 import type { CalendarAccessFences } from '../calendar/access-fences.js';
 import type { GoogleOAuthClient, OAuthTransport } from '../calendar/oauth.js';
 /** Separate writer vault. A reader-owned directory cannot supply writer authority or tokens. */
@@ -9,8 +10,9 @@ export class CalendarWriterCredentialOwner extends CalendarCredentialCore {
     fences: CalendarAccessFences,
     transport: OAuthTransport = {},
     protection?: () => void,
+    journal?: CredentialJournal,
   ) {
-    super(root, client, fences, 'owned_event_writer', transport, protection);
+    super(root, client, fences, 'owned_event_writer', transport, protection, journal);
   }
   static initialize(root: string): void {
     CalendarCredentialCore.initialize(root, 'owned_event_writer');

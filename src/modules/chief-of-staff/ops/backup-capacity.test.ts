@@ -85,3 +85,58 @@ it('denies unavailable vault access with a fixed error', async () => {
   });
   await expect(readBackupCapacity(roots, s.repository)).rejects.toThrow(/^backup_capacity_unavailable$/);
 });
+function rootProof(file: string) {
+  const lstat = fs.lstatSync,
+    fstat = fs.fstatSync,
+    open = fs.openSync;
+  const descriptors = new Set<number>();
+  const rootStat = (stat: fs.Stats) =>
+    Object.assign(Object.create(Object.getPrototypeOf(stat)), stat, { uid: 0, gid: 0 });
+  vi.spyOn(fs, 'lstatSync').mockImplementation(((path: fs.PathLike, options?: fs.StatOptions) => {
+    const stat = lstat(path, options as never);
+    return String(path).endsWith('/' + file) ? rootStat(stat) : stat;
+  }) as typeof fs.lstatSync);
+  vi.spyOn(fs, 'openSync').mockImplementation((path, flags, mode) => {
+    const fd = open(path, flags, mode);
+    if (String(path).endsWith('/' + file)) {
+      expect(flags).toBe(0x200000 | fs.constants.O_NOFOLLOW);
+      descriptors.add(fd);
+    } else descriptors.delete(fd);
+    return fd;
+  });
+  vi.spyOn(fs, 'fstatSync').mockImplementation(((fd: number) => {
+    const stat = fstat(fd);
+    return descriptors.has(fd) ? rootStat(stat) : stat;
+  }) as typeof fs.fstatSync);
+}
+it('charges the fixed root-owned vault proof by metadata without reading its bytes', async () => {
+  const s = fixture();
+  fs.writeFileSync(s.areas.journals + '/.vault-canary', 'SYNTHETIC_ROOT_PROOF', { mode: 0o600 });
+  rootProof('.vault-canary');
+  const read = vi.spyOn(fs, 'readSync'),
+    readFile = vi.spyOn(fs, 'readFileSync');
+  const capacity = await readBackupCapacity(roots, s.repository);
+  expect(capacity.credentials).toBeGreaterThanOrEqual(8192);
+  expect(read).not.toHaveBeenCalled();
+  expect(readFile).not.toHaveBeenCalled();
+});
+it.each(['mode', 'hardlink', 'too-large', 'other-root-file', 'nested-proof'])(
+  'refuses an unsafe or out-of-scope root proof: %s',
+  async (reason) => {
+    const s = fixture(),
+      name = reason === 'other-root-file' ? 'unrelated-root-proof' : '.vault-canary';
+    let directory = s.areas.journals;
+    if (reason === 'nested-proof') {
+      directory += '/nested';
+      fs.mkdirSync(directory, { mode: 0o700 });
+    }
+    const file = directory + '/' + name;
+    fs.writeFileSync(file, Buffer.alloc(reason === 'too-large' ? 4097 : 32), {
+      mode: reason === 'mode' ? 0o644 : 0o600,
+    });
+    if (reason === 'mode') fs.chmodSync(file, 0o644);
+    if (reason === 'hardlink') fs.linkSync(file, file + '.other');
+    rootProof(name);
+    await expect(readBackupCapacity(roots, s.repository)).rejects.toThrow(/^backup_capacity_unavailable$/);
+  },
+);

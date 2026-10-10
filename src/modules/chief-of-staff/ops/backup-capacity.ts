@@ -12,7 +12,7 @@ function allocated(stat: fs.Stats): number {
   if (!Number.isSafeInteger(bytes)) throw Error('capacity_bounds');
   return bytes;
 }
-function measure(root: string, device?: number, depth = 0, visited = { count: 0 }): number {
+function measure(root: string, device?: number, depth = 0, visited = { count: 0 }, vaultProof = false): number {
   const alias = /^\/proc\/self\/fd\/\d+$/.test(root);
   const heldChild = device !== undefined && /^\/proc\/self\/fd\/\d+\/[^/]+$/.test(root);
   if (
@@ -48,6 +48,42 @@ function measure(root: string, device?: number, depth = 0, visited = { count: 0 
         throw Error('capacity_tree_bounds');
       const file = path.join(pinned(fd), name),
         stat = fs.lstatSync(file);
+      if (vaultProof && depth === 0 && name === '.vault-canary') {
+        if (
+          !stat.isFile() ||
+          stat.dev !== before.dev ||
+          stat.uid !== 0 ||
+          stat.gid !== 0 ||
+          stat.nlink !== 1 ||
+          (stat.mode & 0o7777) !== 0o600 ||
+          stat.size < 1 ||
+          stat.size > 4096
+        )
+          throw Error('unsafe_vault_proof');
+        // G01's fixed root-only recovery marker is counted, never read or made portable.
+        const proof = fs.openSync(file, 0x200000 | fs.constants.O_NOFOLLOW);
+        try {
+          const identity = (value: fs.Stats) =>
+            [
+              value.dev,
+              value.ino,
+              value.mode,
+              value.uid,
+              value.gid,
+              value.nlink,
+              value.size,
+              value.blocks,
+              value.mtimeMs,
+              value.ctimeMs,
+            ].join(',');
+          if (identity(fs.fstatSync(proof)) !== identity(stat) || identity(fs.lstatSync(file)) !== identity(stat))
+            throw Error('vault_proof_changed');
+          total += allocated(stat);
+        } finally {
+          fs.closeSync(proof);
+        }
+        continue;
+      }
       if (stat.isSymbolicLink() || stat.uid !== before.uid || stat.dev !== before.dev)
         throw Error('unsafe_capacity_file');
       if (stat.isDirectory()) total += measure(file, before.dev, depth + 1, visited);
@@ -105,7 +141,7 @@ export async function readBackupCapacity(
     const usage: Record<string, number> = {};
     for (const area of ['staging', 'cache', 'journals'] as const)
       usage[area] = await withVaultDirectory(roots, area, async (directory) => {
-        const bytes = measure(directory);
+        const bytes = measure(directory, undefined, 0, { count: 0 }, area === 'journals');
         vaultFree = Math.min(vaultFree, free(directory));
         return bytes;
       });

@@ -9,6 +9,19 @@ import { verifyVaultStorage, withVaultDirectory } from './vault-storage.js';
 import type { RemoteCheckpoint } from './backup-restic-transfer.js';
 import { streamBackupArchive } from './backup-archive.js';
 import { BackupRepositoryWriter } from './backup-repository-lease.js';
+import {
+  credentialEventName,
+  credentialHead,
+  credentialMetadata,
+  credentialOrder,
+  credentialSource,
+  makeCredentialEvent,
+  publishCredentialHead,
+  readCredentialMetadata,
+  recoverCredentialTemporaries,
+  type CredentialChange,
+  type CredentialHead,
+} from './backup-credential-event.js';
 export type BackupRemoteIdentity = Omit<RemoteCheckpoint, 'verifiedAt' | 'reconciled'>;
 export type BackupRetirementRequest = {
   receipt: BackupQueueReceipt;
@@ -661,11 +674,15 @@ export class BackupQueue {
     const intent = retirement(root, intentName, this.ownerDigest, kind, device);
     retirement(root, ackName, this.ownerDigest, kind, device);
     const temporary = new Set(publicationTemporaries(root, device));
+    const journals =
+      kind === 'credentials' ? credentialMetadata(root, device, this.ownerDigest) : { heads: [], names: [] };
+    for (const head of journals.heads) validateReceipt(head.receipt, this.ownerDigest, 'credentials');
     const names = fs
       .readdirSync(root)
       .filter(
         (name) =>
-          !['owner.json', '.lock', '.cos-writer.lock', intentName, ackName].includes(name) && !temporary.has(name),
+          !['owner.json', '.lock', '.cos-writer.lock', intentName, ackName, ...journals.names].includes(name) &&
+          !temporary.has(name),
       );
     if (names.length > (kind === 'state' ? 1 : 1024)) throw Error('queue_bounds');
     const values = names.sort().map((name) => {
@@ -696,156 +713,295 @@ export class BackupQueue {
     produce: (sink: BackupSnapshotSink) => Promise<void>,
     maximumBytes = kind === 'state' ? BACKUP_LIMITS.staging : BACKUP_LIMITS.credentials,
   ) {
-    return this.area(kind, true, true, async (root, device) => {
-      const limit = kind === 'state' ? BACKUP_LIMITS.staging : BACKUP_LIMITS.credentials;
-      if (!uuid(operationId) || !Number.isSafeInteger(maximumBytes) || maximumBytes < 16384 || maximumBytes > limit)
-        throw Error('capture_bounds');
-      const previous = this.receipts(root, kind, device);
-      if (retirement(root, ackName, this.ownerDigest, kind, device)?.receipt.operationId === operationId)
-        throw Error('capture_already_retired');
-      if (kind === 'state' && previous.length)
-        return { status: 'skipped_pending' as const, kind, operationId: previous[0].operationId };
-      const same = previous.find((receipt) => receipt.operationId === operationId);
-      if (same) {
-        if (same.state !== 'pending') throw Error('capture_interrupted');
-        return { status: 'queued' as const, kind, operationId };
+    return this.area(kind, true, true, async (root, device) =>
+      this.captureLocked(root, device, kind, operationId, produce, maximumBytes),
+    );
+  }
+  private async captureLocked(
+    root: string,
+    device: number,
+    kind: BackupKind,
+    operationId: string,
+    produce: (sink: BackupSnapshotSink) => Promise<void>,
+    maximumBytes: number,
+  ) {
+    const limit = kind === 'state' ? BACKUP_LIMITS.staging : BACKUP_LIMITS.credentials;
+    if (!uuid(operationId) || !Number.isSafeInteger(maximumBytes) || maximumBytes < 16384 || maximumBytes > limit)
+      throw Error('capture_bounds');
+    const previous = this.receipts(root, kind, device);
+    if (retirement(root, ackName, this.ownerDigest, kind, device)?.receipt.operationId === operationId)
+      throw Error('capture_already_retired');
+    if (kind === 'state' && previous.length)
+      return { status: 'skipped_pending' as const, kind, operationId: previous[0].operationId };
+    const same = previous.find((receipt) => receipt.operationId === operationId);
+    if (same) {
+      if (same.state !== 'pending') throw Error('capture_interrupted');
+      return { status: 'queued' as const, kind, operationId };
+    }
+    const used = measure(root, device),
+      budget = Math.min(maximumBytes, limit - used - 8192);
+    if (budget < 16384) throw Error('capture_capacity');
+    const location = path.join(root, kind === 'state' ? 'full' : operationId);
+    fs.mkdirSync(location, { mode: 0o700 });
+    const slotFd = privateDirectory(location, device),
+      slot = pinned(slotFd);
+    const reserve = Math.max(4096, Math.min(1024 ** 2, Math.floor(budget / 8 / 4096) * 4096));
+    const receipt: BackupQueueReceipt = {
+      format: 'cos-backup-queue/v1',
+      ownerDigest: this.ownerDigest,
+      kind,
+      operationId,
+      state: 'capturing',
+      createdAt: new Date().toISOString(),
+      maximumBytes: budget,
+      bytes: 0,
+      files: [],
+    };
+    const files = new Map<string, { fd: number; bytes: number; hash: ReturnType<typeof createHash> }>(),
+      directories = new Map<string, number>();
+    let active = true;
+    try {
+      fs.mkdirSync(path.join(slot, 'data'), { mode: 0o700 });
+      const dataFd = privateDirectory(path.join(slot, 'data'), device),
+        data = pinned(dataFd);
+      directories.set('', dataFd);
+      writeAtomic(slot, 'receipt.json', receipt);
+      await produce({
+        write: (name, bytes) => {
+          if (!active || !validName(name) || !Buffer.isBuffer(bytes)) throw Error('invalid_capture_write');
+          const prospective = files.get(name),
+            nextBytes = (prospective?.bytes ?? 0) + bytes.length;
+          const prefixes = name
+            .split('/')
+            .slice(0, -1)
+            .map((_, index) =>
+              name
+                .split('/')
+                .slice(0, index + 1)
+                .join('/'),
+            );
+          const additionalDirectories = prefixes.filter((prefix) => !directories.has(prefix)).length;
+          const preflight =
+            [...files.values()].reduce(
+              (sum, item) =>
+                sum + (item === prospective ? Math.ceil(nextBytes / 4096) * 4096 : allocated(fs.fstatSync(item.fd))),
+              0,
+            ) +
+            (prospective ? 0 : Math.ceil(nextBytes / 4096) * 4096) +
+            additionalDirectories * 4096 +
+            [...directories.values()].reduce((sum, fd) => sum + allocated(fs.fstatSync(fd)), 0) +
+            allocated(fs.fstatSync(slotFd)) +
+            2 * reserve;
+          const availability = fs.statfsSync(data, { bigint: true });
+          if (preflight > budget || availability.ffree < BigInt(additionalDirectories + (prospective ? 0 : 1) + 4096))
+            throw Error('capture_capacity');
+          const parts = name.split('/'),
+            basename = parts.pop()!;
+          let parent = dataFd,
+            prefix = '';
+          for (const part of parts) {
+            prefix = prefix ? prefix + '/' + part : part;
+            if (!directories.has(prefix)) {
+              fs.mkdirSync(path.join(pinned(parent), part), { mode: 0o700 });
+              directories.set(prefix, privateDirectory(path.join(pinned(parent), part), device));
+            }
+            parent = directories.get(prefix)!;
+          }
+          let file = files.get(name);
+          if (!file) {
+            if (files.size >= 4096) throw Error('capture_file_bounds');
+            file = {
+              fd: fs.openSync(
+                path.join(pinned(parent), basename),
+                fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW,
+                0o600,
+              ),
+              bytes: 0,
+              hash: createHash('sha256'),
+            };
+            files.set(name, file);
+          }
+          const nextSize = file.bytes + bytes.length;
+          const charge =
+            [...files.values()].reduce(
+              (sum, item) =>
+                sum + (item === file ? Math.ceil(nextSize / 4096) * 4096 : allocated(fs.fstatSync(item.fd))),
+              0,
+            ) +
+            [...directories.values()].reduce((sum, fd) => sum + allocated(fs.fstatSync(fd)), 0) +
+            allocated(fs.fstatSync(slotFd)) +
+            2 * reserve;
+          const statfs = fs.statfsSync(data, { bigint: true }),
+            free = statfs.bavail * statfs.bsize;
+          if (charge > budget || free < BigInt(bytes.length + BACKUP_LIMITS.vaultReserve))
+            throw Error('capture_capacity');
+          for (let offset = 0; offset < bytes.length; ) {
+            const count = fs.writeSync(file.fd, bytes, offset, bytes.length - offset);
+            if (count < 1) throw Error('short_capture_write');
+            offset += count;
+          }
+          file.hash.update(bytes);
+          file.bytes = nextSize;
+        },
+      });
+      active = false;
+      for (const [name, file] of files) {
+        fs.fsyncSync(file.fd);
+        receipt.files.push({ name, bytes: file.bytes, sha256: file.hash.digest('hex') });
       }
-      const used = measure(root, device),
-        budget = Math.min(maximumBytes, limit - used - 8192);
-      if (budget < 16384) throw Error('capture_capacity');
-      const location = path.join(root, kind === 'state' ? 'full' : operationId);
-      fs.mkdirSync(location, { mode: 0o700 });
-      const slotFd = privateDirectory(location, device),
-        slot = pinned(slotFd);
-      const reserve = Math.max(4096, Math.min(1024 ** 2, Math.floor(budget / 8 / 4096) * 4096));
-      const receipt: BackupQueueReceipt = {
-        format: 'cos-backup-queue/v1',
-        ownerDigest: this.ownerDigest,
-        kind,
-        operationId,
-        state: 'capturing',
-        createdAt: new Date().toISOString(),
-        maximumBytes: budget,
-        bytes: 0,
-        files: [],
-      };
-      const files = new Map<string, { fd: number; bytes: number; hash: ReturnType<typeof createHash> }>(),
-        directories = new Map<string, number>();
-      let active = true;
-      try {
-        fs.mkdirSync(path.join(slot, 'data'), { mode: 0o700 });
-        const dataFd = privateDirectory(path.join(slot, 'data'), device),
-          data = pinned(dataFd);
-        directories.set('', dataFd);
-        writeAtomic(slot, 'receipt.json', receipt);
-        await produce({
-          write: (name, bytes) => {
-            if (!active || !validName(name) || !Buffer.isBuffer(bytes)) throw Error('invalid_capture_write');
-            const prospective = files.get(name),
-              nextBytes = (prospective?.bytes ?? 0) + bytes.length;
-            const prefixes = name
-              .split('/')
-              .slice(0, -1)
-              .map((_, index) =>
-                name
-                  .split('/')
-                  .slice(0, index + 1)
-                  .join('/'),
-              );
-            const additionalDirectories = prefixes.filter((prefix) => !directories.has(prefix)).length;
-            const preflight =
-              [...files.values()].reduce(
-                (sum, item) =>
-                  sum + (item === prospective ? Math.ceil(nextBytes / 4096) * 4096 : allocated(fs.fstatSync(item.fd))),
-                0,
-              ) +
-              (prospective ? 0 : Math.ceil(nextBytes / 4096) * 4096) +
-              additionalDirectories * 4096 +
-              [...directories.values()].reduce((sum, fd) => sum + allocated(fs.fstatSync(fd)), 0) +
-              allocated(fs.fstatSync(slotFd)) +
-              2 * reserve;
-            const availability = fs.statfsSync(data, { bigint: true });
-            if (preflight > budget || availability.ffree < BigInt(additionalDirectories + (prospective ? 0 : 1) + 4096))
-              throw Error('capture_capacity');
-            const parts = name.split('/'),
-              basename = parts.pop()!;
-            let parent = dataFd,
-              prefix = '';
-            for (const part of parts) {
-              prefix = prefix ? prefix + '/' + part : part;
-              if (!directories.has(prefix)) {
-                fs.mkdirSync(path.join(pinned(parent), part), { mode: 0o700 });
-                directories.set(prefix, privateDirectory(path.join(pinned(parent), part), device));
-              }
-              parent = directories.get(prefix)!;
-            }
-            let file = files.get(name);
-            if (!file) {
-              if (files.size >= 4096) throw Error('capture_file_bounds');
-              file = {
-                fd: fs.openSync(
-                  path.join(pinned(parent), basename),
-                  fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW,
-                  0o600,
-                ),
-                bytes: 0,
-                hash: createHash('sha256'),
-              };
-              files.set(name, file);
-            }
-            const nextSize = file.bytes + bytes.length;
-            const charge =
-              [...files.values()].reduce(
-                (sum, item) =>
-                  sum + (item === file ? Math.ceil(nextSize / 4096) * 4096 : allocated(fs.fstatSync(item.fd))),
-                0,
-              ) +
-              [...directories.values()].reduce((sum, fd) => sum + allocated(fs.fstatSync(fd)), 0) +
-              allocated(fs.fstatSync(slotFd)) +
-              2 * reserve;
-            const statfs = fs.statfsSync(data, { bigint: true }),
-              free = statfs.bavail * statfs.bsize;
-            if (charge > budget || free < BigInt(bytes.length + BACKUP_LIMITS.vaultReserve))
-              throw Error('capture_capacity');
-            for (let offset = 0; offset < bytes.length; ) {
-              const count = fs.writeSync(file.fd, bytes, offset, bytes.length - offset);
-              if (count < 1) throw Error('short_capture_write');
-              offset += count;
-            }
-            file.hash.update(bytes);
-            file.bytes = nextSize;
-          },
-        });
-        active = false;
-        for (const [name, file] of files) {
-          fs.fsyncSync(file.fd);
-          receipt.files.push({ name, bytes: file.bytes, sha256: file.hash.digest('hex') });
-        }
-        if (!receipt.files.length) throw Error('empty_capture');
-        receipt.files.sort((a, b) => a.name.localeCompare(b.name));
-        if (Buffer.byteLength(JSON.stringify(receipt)) + 1 > reserve) throw Error('capture_manifest_bounds');
-        for (const fd of directories.values()) fs.fsyncSync(fd);
-        receipt.state = 'pending';
-        receipt.bytes = measure(slot, device);
-        writeAtomic(slot, 'receipt.json', receipt);
-        fs.fsyncSync(slotFd);
-        if (measure(root, device) > limit || measure(slot, device) > budget) throw Error('capture_capacity');
-        return { status: 'queued' as const, kind, operationId };
-      } catch {
-        active = false;
-        receipt.state = 'failed';
-        receipt.files = [];
-        receipt.bytes = measure(slot, device);
-        writeAtomic(slot, 'receipt.json', receipt);
-        // eslint-disable-next-line preserve-caught-error -- A failed capture remains encrypted and occupies its owned slot.
-        throw Error('capture_failed');
-      } finally {
-        active = false;
-        for (const file of files.values()) fs.closeSync(file.fd);
-        for (const fd of directories.values()) fs.closeSync(fd);
-        fs.closeSync(slotFd);
-      }
+      if (!receipt.files.length) throw Error('empty_capture');
+      receipt.files.sort((a, b) => a.name.localeCompare(b.name));
+      if (Buffer.byteLength(JSON.stringify(receipt)) + 1 > reserve) throw Error('capture_manifest_bounds');
+      for (const fd of directories.values()) fs.fsyncSync(fd);
+      receipt.state = 'pending';
+      receipt.bytes = measure(slot, device);
+      writeAtomic(slot, 'receipt.json', receipt);
+      fs.fsyncSync(slotFd);
+      if (measure(root, device) > limit || measure(slot, device) > budget) throw Error('capture_capacity');
+      return { status: 'queued' as const, kind, operationId };
+    } catch {
+      active = false;
+      receipt.state = 'failed';
+      receipt.files = [];
+      receipt.bytes = measure(slot, device);
+      writeAtomic(slot, 'receipt.json', receipt);
+      // eslint-disable-next-line preserve-caught-error -- A failed capture remains encrypted and occupies its owned slot.
+      throw Error('capture_failed');
+    } finally {
+      active = false;
+      for (const file of files.values()) fs.closeSync(file.fd);
+      for (const fd of directories.values()) fs.closeSync(fd);
+      fs.closeSync(slotFd);
+    }
+  }
+  private async pendingCredentialHead(operationId: string): Promise<CredentialHead | undefined> {
+    return this.withPending('credentials', operationId, async (directory, receipt) => {
+      if (!receipt.files.some((file) => file.name === credentialEventName)) return undefined;
+      const event = readCredentialMetadata<CredentialHead['event']>(
+        path.join(directory, credentialEventName),
+        fs.statSync(directory).dev,
+      );
+      return credentialHead(event, receipt);
     });
+  }
+  private async rememberCredential(
+    root: string,
+    device: number,
+    proposed: CredentialHead,
+    assertCurrent: () => void,
+  ): Promise<void> {
+    const metadata = credentialMetadata(root, device, this.ownerDigest);
+    for (const head of metadata.heads) validateReceipt(head.receipt, this.ownerDigest, 'credentials');
+    if (metadata.temporaries.length) {
+      const candidates = [...metadata.heads, proposed];
+      for (const receipt of this.receipts(root, 'credentials', device)) {
+        if (receipt.state === 'pending' && receipt.files.some((file) => file.name === credentialEventName)) {
+          const head = await this.pendingCredentialHead(receipt.operationId);
+          if (head) candidates.push(head);
+        }
+      }
+      assertCurrent();
+      recoverCredentialTemporaries(root, device, metadata.temporaries, candidates, assertCurrent);
+    }
+    const old = metadata.heads.find((head) => credentialSource(head.event) === credentialSource(proposed.event));
+    if (old && credentialOrder(old.event) > credentialOrder(proposed.event)) return;
+    if (old && credentialOrder(old.event) === credentialOrder(proposed.event)) {
+      if (digest(old) !== digest(proposed)) throw Error('credential_head_conflict');
+      return;
+    }
+    const charge = Math.ceil((Buffer.byteLength(JSON.stringify(proposed)) + 1) / 4096) * 4096,
+      availability = fs.statfsSync(root, { bigint: true });
+    if (
+      (metadata.heads.length >= 1024 && !old) ||
+      measure(root, device) + charge + 8192 > BACKUP_LIMITS.credentials ||
+      availability.bavail * availability.bsize < BigInt(charge + BACKUP_LIMITS.vaultReserve)
+    )
+      throw Error('credential_head_capacity');
+    assertCurrent();
+    publishCredentialHead(root, proposed, assertCurrent);
+  }
+  /** No network work occurs here. The primary credential owner supplies fresh guards and
+   * awaits completion before acknowledging its durable write. Stored heads are deduplication
+   * evidence only; they cannot restore credentials or authorize payload retirement. */
+  async recordCredential(change: CredentialChange, guard: () => void) {
+    const held: Buffer[] = [];
+    try {
+      if (typeof guard !== 'function') throw Error('credential_guard_required');
+      const captured = {
+        ...change,
+        files: change.files.map((file) => {
+          const bytes = Buffer.from(file.bytes);
+          held.push(bytes);
+          return { name: file.name, bytes };
+        }),
+      };
+      const event = makeCredentialEvent(captured, this.ownerDigest),
+        bytes = Buffer.from(JSON.stringify(event) + '\n');
+      held.push(bytes);
+      return await this.area('credentials', true, true, async (root, device, writer) => {
+        const assertCurrent = () => {
+          writer();
+          guard();
+        };
+        assertCurrent();
+        const metadata = credentialMetadata(root, device, this.ownerDigest),
+          old = metadata.heads.find((head) => credentialSource(head.event) === credentialSource(event));
+        const receipts = this.receipts(root, 'credentials', device),
+          same = receipts.find((receipt) => receipt.operationId === event.operationId);
+        if (old && credentialOrder(old.event) >= credentialOrder(event)) {
+          if (digest(old.event) !== digest(event)) throw Error('credential_generation_conflict');
+          if (same?.state === 'pending') {
+            const pending = await this.pendingCredentialHead(event.operationId);
+            if (digest(pending) !== digest(old)) throw Error('credential_pending_changed');
+          } else if (same) {
+            const intent = retirement(root, intentName, this.ownerDigest, 'credentials', device);
+            if (!intent || digest(intent.receipt) !== digest(old.receipt))
+              throw Error('credential_pending_interrupted');
+          }
+          await this.rememberCredential(root, device, old, assertCurrent);
+          assertCurrent();
+          return { status: 'recorded' as const, operationId: event.operationId };
+        }
+        if (!same) {
+          const budget = Math.max(
+              65536,
+              captured.files.reduce((sum, file) => sum + Math.ceil(file.bytes.length / 4096) * 4096, 0) + 65536,
+            ),
+            availability = fs.statfsSync(root, { bigint: true });
+          if (
+            (metadata.heads.length >= 1024 && !old) ||
+            receipts.length >= 1024 ||
+            measure(root, device) + budget + 32768 > BACKUP_LIMITS.credentials ||
+            availability.bavail * availability.bsize < BigInt(budget + BACKUP_LIMITS.vaultReserve)
+          )
+            throw Error('credential_capture_capacity');
+          await this.captureLocked(
+            root,
+            device,
+            'credentials',
+            event.operationId,
+            async (sink) => {
+              assertCurrent();
+              for (const file of captured.files) sink.write(file.name, file.bytes);
+              sink.write(credentialEventName, bytes);
+              assertCurrent();
+            },
+            budget,
+          );
+        }
+        const proposed = await this.pendingCredentialHead(event.operationId);
+        if (!proposed || digest(proposed.event) !== digest(event)) throw Error('credential_pending_conflict');
+        assertCurrent();
+        await this.rememberCredential(root, device, proposed, assertCurrent);
+        assertCurrent();
+        return { status: 'recorded' as const, operationId: event.operationId };
+      });
+    } catch {
+      // eslint-disable-next-line preserve-caught-error -- Credential contents and filesystem paths never enter diagnostics.
+      throw Error('backup_queue_unavailable');
+    } finally {
+      for (const bytes of held) bytes.fill(0);
+    }
   }
   async pending(kind: BackupKind): Promise<BackupQueueReceipt[]> {
     return this.area(kind, false, false, async (root, device) => this.receipts(root, kind, device));
@@ -935,6 +1091,11 @@ export class BackupQueue {
         }
         if (intent ? !currentIntent || digest(currentIntent) !== initialMetadata : !!currentIntent)
           throw Error('retirement_changed');
+        if (kind === 'credentials' && !intent) {
+          const head = await this.pendingCredentialHead(operationId);
+          if (head) await this.rememberCredential(lockedRoot, device, head, assertAuthority);
+          assertAuthority();
+        }
         retireSlot(lockedRoot, selected, device, !!intent, assertAuthority, false);
         recoverPublicationTemporaries(lockedRoot, selected, device, this.ownerDigest, assertAuthority);
         if (!intent) {
