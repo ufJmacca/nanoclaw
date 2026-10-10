@@ -123,6 +123,25 @@ it('the uploader repairs a missing completion head only from a fully verified lo
   await f.rebuild().recordCredential(event(), () => {});
   expect(await f.queue.pending('credentials')).toEqual([]);
 });
+it('finishes the completion directory sync on replay before acknowledging a record', async () => {
+  const f = fixture(),
+    sync = fs.fsyncSync;
+  const failed = vi.spyOn(fs, 'fsyncSync').mockImplementation((fd) => {
+    const directory = fs.readlinkSync('/proc/self/fd/' + fd);
+    if (
+      directory === f.root + '/backup-queue' &&
+      fs.readdirSync(directory).some((name) => /^\.cos-credential-[a-f0-9]{64}\.json$/.test(name))
+    )
+      throw Error('PRIVATE_DIRECTORY_SYNC_FAILURE');
+    sync(fd);
+  });
+  await expect(f.queue.recordCredential(event(), () => {})).rejects.toThrow(/^backup_queue_unavailable$/);
+  expect(await f.queue.pending('credentials')).toHaveLength(1);
+  await expect(f.rebuild().recordCredential(event(), () => {})).rejects.toThrow(/^backup_queue_unavailable$/);
+  failed.mockRestore();
+  await f.queue.recordCredential(event(), () => {});
+  expect(await f.queue.pending('credentials')).toHaveLength(1);
+});
 it('does not acknowledge a corrupted pending payload even when its journal head is intact', async () => {
   const f = fixture();
   const captured = await f.queue.recordCredential(event(), () => {});

@@ -904,9 +904,25 @@ export class BackupQueue {
       recoverCredentialTemporaries(root, device, metadata.temporaries, candidates, assertCurrent);
     }
     const old = metadata.heads.find((head) => credentialSource(head.event) === credentialSource(proposed.event));
-    if (old && credentialOrder(old.event) > credentialOrder(proposed.event)) return;
+    const synchronize = () => {
+      const directory = privateDirectory(root, device);
+      try {
+        assertCurrent();
+        fs.fsyncSync(directory);
+        assertCurrent();
+      } finally {
+        fs.closeSync(directory);
+      }
+    };
+    if (old && credentialOrder(old.event) > credentialOrder(proposed.event)) {
+      synchronize();
+      return;
+    }
     if (old && credentialOrder(old.event) === credentialOrder(proposed.event)) {
       if (digest(old) !== digest(proposed)) throw Error('credential_head_conflict');
+      // A previous rename may have succeeded while its directory sync failed or
+      // its process was killed. Complete durability before acknowledging replay.
+      synchronize();
       return;
     }
     const charge = Math.ceil((Buffer.byteLength(JSON.stringify(proposed)) + 1) / 4096) * 4096,
