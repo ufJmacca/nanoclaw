@@ -81,6 +81,88 @@ it('repeats durability of an existing exact journal before exposing it to a retr
     fs.closeSync(f.fd);
   }
 });
+it('recovers an interrupted first publication only by its exact private temporary alias under fresh permission', async () => {
+  const f = fixture(),
+    alias = f.root + '/.nas-initialization-retirement.' + randomUUID() + '.tmp';
+  fs.writeFileSync(f.filename, JSON.stringify(f.record('retiring')), { mode: 0o600 });
+  fs.linkSync(f.filename, alias);
+  const before = fs.lstatSync(f.filename),
+    unlink = fs.unlinkSync;
+  let effect = false;
+  vi.spyOn(fs, 'unlinkSync').mockImplementation((file) => {
+    if (String(file).endsWith('/' + path.basename(alias))) {
+      effect = true;
+      expect(f.controls.assertAuthority.mock.calls.length).toBeGreaterThanOrEqual(2);
+      expect(fs.lstatSync(f.filename).ino).toBe(before.ino);
+    }
+    unlink(file);
+  });
+  try {
+    await withBackupNasInitializationRetirementJournal(f.scope, f.controls, async (lease) => {
+      expect(lease.readJournal()).toEqual(f.record('retiring'));
+      expect(fs.lstatSync(f.filename).nlink).toBe(1);
+      expect(fs.existsSync(alias)).toBe(false);
+    });
+    expect(effect).toBe(true);
+    expect(fs.lstatSync(f.filename).ino).toBe(before.ino);
+  } finally {
+    fs.closeSync(f.fd);
+  }
+});
+it('retries a failed temporary unlink during initial publication without replacing the published journal', async () => {
+  const f = fixture(),
+    original = fs.unlinkSync;
+  const unlink = vi.spyOn(fs, 'unlinkSync').mockImplementation((file) => {
+    if (String(file).includes('/.nas-initialization-retirement.')) throw Error('PRIVATE_INTERRUPTED_UNLINK');
+    original(file);
+  });
+  try {
+    await expect(
+      withBackupNasInitializationRetirementJournal(f.scope, f.controls, async (lease) =>
+        lease.writeJournal(f.record('retiring')),
+      ),
+    ).rejects.toThrow(denied);
+    const before = fs.lstatSync(f.filename);
+    expect(before.nlink).toBe(2);
+    unlink.mockRestore();
+    await withBackupNasInitializationRetirementJournal(f.scope, f.controls, async (lease) =>
+      expect(lease.readJournal()).toEqual(f.record('retiring')),
+    );
+    expect(fs.lstatSync(f.filename).ino).toBe(before.ino);
+    expect(fs.lstatSync(f.filename).nlink).toBe(1);
+    expect(fs.readdirSync(f.root)).toEqual([path.basename(f.filename)]);
+  } finally {
+    fs.closeSync(f.fd);
+  }
+});
+it.each(['foreign-name', 'two-aliases', 'changed-alias', 'permission'])(
+  'refuses %s publication recovery and preserves uncertain metadata',
+  async (reason) => {
+    const f = fixture(),
+      alias = f.root + '/.nas-initialization-retirement.' + randomUUID() + '.tmp';
+    fs.writeFileSync(f.filename, JSON.stringify(f.record('retiring')), { mode: 0o600 });
+    fs.linkSync(f.filename, alias);
+    if (reason === 'foreign-name') fs.renameSync(alias, f.filename + '.keep');
+    if (reason === 'two-aliases')
+      fs.linkSync(f.filename, f.root + '/.nas-initialization-retirement.' + randomUUID() + '.tmp');
+    if (reason === 'permission') f.controls.assertAuthority.mockRejectedValue(Error('PRIVATE_REVOKED'));
+    if (reason === 'changed-alias') {
+      let calls = 0;
+      f.controls.assertAuthority.mockImplementation(async () => {
+        if (++calls === 2) fs.renameSync(alias, f.filename + '.keep');
+      });
+    }
+    try {
+      await expect(
+        withBackupNasInitializationRetirementJournal(f.scope, f.controls, async () => undefined),
+      ).rejects.toThrow(denied);
+      expect(fs.lstatSync(f.filename).nlink).toBe(reason === 'two-aliases' ? 3 : 2);
+      expect(JSON.parse(fs.readFileSync(f.filename, 'utf8'))).toEqual(f.record('retiring'));
+    } finally {
+      fs.closeSync(f.fd);
+    }
+  },
+);
 it.each([
   'parent-mode',
   'parent-owner',

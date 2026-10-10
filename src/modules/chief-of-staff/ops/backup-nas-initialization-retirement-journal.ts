@@ -73,7 +73,7 @@ export async function withBackupNasInitializationRetirementJournal<T>(
     const root = '/proc/self/fd/' + parentFd,
       filename = 'nas-initialization-retirement.' + digest(scope) + '.json',
       destination = root + '/' + filename;
-    const open = (file: string) => {
+    const open = (file: string, links = 1) => {
       guard();
       const first = fs.lstatSync(file),
         fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
@@ -84,7 +84,7 @@ export async function withBackupNasInitializationRetirementJournal<T>(
           !stat.isFile() ||
           stat.uid !== 0 ||
           (stat.mode & 0o7777) !== 0o600 ||
-          stat.nlink !== 1 ||
+          stat.nlink !== links ||
           stat.dev !== parent.dev ||
           stat.dev !== before.dev ||
           stat.ino !== before.ino ||
@@ -113,7 +113,76 @@ export async function withBackupNasInitializationRetirementJournal<T>(
         bytes.fill(0);
       }
     };
-    let read = fs.lstatSync(destination, { throwIfNoEntry: false }) ? open(destination) : undefined;
+    const authority = async () => {
+      guard();
+      await controls.assertAuthority();
+      guard();
+    };
+    await authority();
+    const initial = fs.lstatSync(destination, { throwIfNoEntry: false });
+    let read: ReturnType<typeof open> | undefined;
+    if (initial?.nlink === 2) {
+      // A crash between exclusive publication and removing the temporary name
+      // leaves two names for the same already-complete private journal. Only its
+      // canonical programme alias can be retired, under fresh resource permission.
+      // Unknown links are preserved; this metadata is never resource authority.
+      const pending = open(destination, 2),
+        directory = fs.opendirSync(root, { bufferSize: 32 });
+      let alias: string | undefined;
+      try {
+        let count = 0,
+          entry: fs.Dirent | null;
+        while ((entry = directory.readSync())) {
+          if (++count > 256) throw Error('retirement_journal_alias_bounds');
+          if (
+            !/^\.nas-initialization-retirement\.[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}\.tmp$/.test(
+              entry.name,
+            )
+          )
+            continue;
+          const stat = fs.lstatSync(root + '/' + entry.name);
+          if (stat.dev === pending.before.dev && stat.ino === pending.before.ino) {
+            if (alias) throw Error('retirement_journal_alias_conflict');
+            alias = root + '/' + entry.name;
+          }
+        }
+      } finally {
+        directory.closeSync();
+      }
+      if (!alias) throw Error('retirement_journal_alias_missing');
+      const checkAlias = () => {
+        guard();
+        pending.check();
+        const stat = fs.lstatSync(alias!);
+        if (
+          !stat.isFile() ||
+          stat.uid !== 0 ||
+          (stat.mode & 0o7777) !== 0o600 ||
+          stat.nlink !== 2 ||
+          stat.dev !== pending.before.dev ||
+          stat.ino !== pending.before.ino ||
+          stat.size !== pending.before.size ||
+          stat.mtimeMs !== pending.before.mtimeMs ||
+          stat.ctimeMs !== pending.before.ctimeMs
+        )
+          throw Error('retirement_journal_alias_changed');
+      };
+      checkAlias();
+      await authority();
+      checkAlias();
+      fs.fsyncSync(pending.fd);
+      checkAlias();
+      fs.unlinkSync(alias);
+      fs.fsyncSync(parentFd);
+      close(pending.fd);
+      read = open(destination);
+      if (
+        read.before.dev !== pending.before.dev ||
+        read.before.ino !== pending.before.ino ||
+        digest(read.value) !== digest(pending.value)
+      )
+        throw Error('retirement_journal_alias_changed');
+    } else if (initial) read = open(destination);
     active = true;
     const check = () => {
       if (!active) throw Error('retirement_journal_released');
