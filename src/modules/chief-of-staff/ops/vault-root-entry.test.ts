@@ -1,8 +1,9 @@
 import { afterEach, expect, it, vi } from 'vitest';
-const f = vi.hoisted(() => ({ gateway: vi.fn(), installer: vi.fn(), probe: vi.fn() }));
+const f = vi.hoisted(() => ({ gateway: vi.fn(), installer: vi.fn(), probe: vi.fn(), mount: vi.fn() }));
 vi.mock('./vault-root-gateway.js', () => ({ runVaultRootGateway: f.gateway }));
 vi.mock('./vault-root-installer.js', () => ({ runVaultRootInstaller: f.installer }));
 vi.mock('./backup-smb-probe.js', () => ({ runBackupSmbCredentialProbe: f.probe }));
+vi.mock('./backup-nas-root-runtime.js', () => ({ runBackupNasRootMount: f.mount }));
 const originalArgv = process.argv,
   originalExitCode = process.exitCode;
 const tty = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY');
@@ -58,37 +59,62 @@ it('routes only the exact private owner probe invocation without appending a sec
   expect(f.installer).not.toHaveBeenCalled();
   expect(result).toEqual({ stdout: '{"contract":"fixture-probe-ready"}\n', stderr: '', exitCode: undefined });
 });
+it.each(['mount', 'unmount'])(
+  'routes only the fixed backup %s command to its independent root admission',
+  async (action) => {
+    f.mount.mockResolvedValue({ contract: 'fixture-backup-mount', status: action === 'mount' ? 'mounted' : 'closed' });
+    const result = await invoke(['--backup-' + action]);
+    expect(f.mount).toHaveBeenCalledWith(action);
+    expect(f.gateway).not.toHaveBeenCalled();
+    expect(f.installer).not.toHaveBeenCalled();
+    expect(f.probe).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      stdout:
+        JSON.stringify({ contract: 'fixture-backup-mount', status: action === 'mount' ? 'mounted' : 'closed' }) + '\n',
+      stderr: '',
+      exitCode: undefined,
+    });
+  },
+);
 it.each(
   [
     ['--root=/tmp'],
     ['--backup-credential-probe', '--owner=0'],
     ['--install', '--root=/tmp'],
-    ['--backup-mount'],
-    ['--backup-unmount'],
+    ['--backup-mount', '--target=/tmp'],
+    ['--backup-unmount', '--force'],
     ['--probe'],
     ['--install', '--backup-credential-probe'],
   ].map((args) => ({ args })),
-)('refuses uninstalled or arbitrary helper selectors $args', async ({ args }) => {
+)('refuses arbitrary helper selectors $args', async ({ args }) => {
   const result = await invoke(args);
   expect(f.gateway).not.toHaveBeenCalled();
   expect(f.installer).not.toHaveBeenCalled();
   expect(f.probe).not.toHaveBeenCalled();
+  expect(f.mount).not.toHaveBeenCalled();
   expect(result.stdout).toBe('');
   expect(result.exitCode).toBe(1);
   expect(result.stderr).toMatch(/unavailable/);
 });
-it.each([[], ['--install'], ['--backup-credential-probe']].map((args) => ({ args })))(
-  'refuses interactive entry before reading any input for $args',
-  async ({ args }) => {
-    const result = await invoke(args, true);
-    expect(f.gateway).not.toHaveBeenCalled();
-    expect(f.installer).not.toHaveBeenCalled();
-    expect(f.probe).not.toHaveBeenCalled();
-    expect(result.exitCode).toBe(1);
-  },
-);
+it.each(
+  [[], ['--install'], ['--backup-credential-probe'], ['--backup-mount'], ['--backup-unmount']].map((args) => ({
+    args,
+  })),
+)('refuses interactive entry before reading any input for $args', async ({ args }) => {
+  const result = await invoke(args, true);
+  expect(f.gateway).not.toHaveBeenCalled();
+  expect(f.installer).not.toHaveBeenCalled();
+  expect(f.probe).not.toHaveBeenCalled();
+  expect(f.mount).not.toHaveBeenCalled();
+  expect(result.exitCode).toBe(1);
+});
 it('emits only a fixed probe failure for private nested diagnostics', async () => {
   f.probe.mockRejectedValue(Error('PRIVATE_PASSWORD_OR_PATH'));
   const result = await invoke(['--backup-credential-probe']);
   expect(result).toEqual({ stdout: '', stderr: '{"code":"backup_smb_probe_unavailable"}\n', exitCode: 1 });
+});
+it.each(['mount', 'unmount'])('emits only a fixed root backup failure for private %s diagnostics', async (action) => {
+  f.mount.mockRejectedValue(Error('PRIVATE_PASSWORD_OR_PATH'));
+  const result = await invoke(['--backup-' + action]);
+  expect(result).toEqual({ stdout: '', stderr: '{"code":"backup_nas_root_mount_unavailable"}\n', exitCode: 1 });
 });
