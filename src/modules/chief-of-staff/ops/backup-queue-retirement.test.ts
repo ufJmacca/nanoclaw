@@ -68,7 +68,10 @@ it.each(['state', 'credentials'] as const)(
     expect(fs.existsSync(f.slot)).toBe(false);
     const ack = JSON.parse(fs.readFileSync(f.queueRoot + '/.cos-last-ack.json', 'utf8'));
     expect(ack.receipt.operationId).toBe(op);
-    expect(ack.remote).toEqual(result);
+    expect(result).toMatchObject(ack.remote);
+    expect(ack.remote).not.toHaveProperty('verifiedAt');
+    expect(ack.remote).not.toHaveProperty('reconciled');
+    expect(ack.retired).toBe(true);
     expect(fs.statSync(f.queueRoot + '/.cos-last-ack.json').mode & 0o777).toBe(0o600);
     expect(fs.existsSync(f.queueRoot + '/.cos-retirement.json')).toBe(false);
     await expect(
@@ -173,6 +176,121 @@ it.each(['changed', 'extra', 'symlink', 'hardlink'] as const)(
     expect(fs.existsSync(f.slot + '/data/nested/b.json')).toBe(true);
   },
 );
+async function interruptedFixture() {
+  const f = await fixture();
+  const unlink = fs.unlinkSync;
+  const fault = vi.spyOn(fs, 'unlinkSync').mockImplementation((file) => {
+    if (String(file).endsWith('/b.json')) throw Error('interrupted');
+    return unlink(file);
+  });
+  await expect(f.queue.retirePending('state', op, prove)).rejects.toThrow(/^backup_queue_unavailable$/);
+  fault.mockRestore();
+  const metadata = JSON.parse(fs.readFileSync(f.queueRoot + '/.cos-retirement.json', 'utf8'));
+  return { ...f, metadata };
+}
+const temporaryOne = '.cos-publish-11111111-1111-4111-8111-111111111111.tmp',
+  temporaryTwo = '.cos-publish-22222222-2222-4222-8222-222222222222.tmp';
+it('legacy intents and complete publication records remain evidence and require fresh proof', async () => {
+  const f = await interruptedFixture();
+  const legacy = {
+    contract: 'cos-backup-queue-retirement/v1',
+    receipt: f.metadata.receipt,
+    remote: { ...f.metadata.remote, reconciled: false, verifiedAt: '2026-10-11T00:00:01Z' },
+    slot: f.metadata.slot,
+    retiredAt: null,
+  };
+  fs.writeFileSync(f.queueRoot + '/.cos-retirement.json', JSON.stringify(legacy) + '\n', { mode: 0o600 });
+  fs.writeFileSync(f.queueRoot + '/' + temporaryOne, JSON.stringify(legacy) + '\n', { mode: 0o600 });
+  await expect(
+    f.queue.retirePending('state', op, async () => {
+      throw Error('NAS_OFFLINE');
+    }),
+  ).rejects.toThrow(/^backup_queue_unavailable$/);
+  expect(fs.existsSync(f.queueRoot + '/' + temporaryOne)).toBe(true);
+  await f.queue.retirePending('state', op, async (request) => {
+    expect(request.previous).not.toHaveProperty('verifiedAt');
+    return prove(request);
+  });
+  expect(await f.queue.pending('state')).toEqual([]);
+  expect(fs.existsSync(f.queueRoot + '/' + temporaryOne)).toBe(false);
+});
+it('a legacy acknowledgement remains readable without deleting a newer full checkpoint', async () => {
+  const f = await fixture(),
+    remote = await f.queue.retirePending('state', op, prove);
+  const current = JSON.parse(fs.readFileSync(f.queueRoot + '/.cos-last-ack.json', 'utf8'));
+  fs.writeFileSync(
+    f.queueRoot + '/.cos-last-ack.json',
+    JSON.stringify({
+      contract: 'cos-backup-queue-retirement/v1',
+      receipt: current.receipt,
+      remote,
+      slot: current.slot,
+      retiredAt: new Date().toISOString(),
+    }) + '\n',
+    { mode: 0o600 },
+  );
+  await f.queue.capture('state', next, async (sink) => sink.write('next.json', Buffer.from('newer')), 65536);
+  await f.queue.retirePending('state', op, prove);
+  expect(await f.queue.pending('state')).toMatchObject([{ operationId: next, state: 'pending' }]);
+});
+it('does not remove any temporary or payload file when another publication file is unrecognized', async () => {
+  const f = await interruptedFixture();
+  const expected = Buffer.from(JSON.stringify(f.metadata) + '\n');
+  fs.writeFileSync(f.queueRoot + '/' + temporaryOne, expected.subarray(0, 100), { mode: 0o600 });
+  fs.writeFileSync(f.queueRoot + '/' + temporaryTwo, 'UNRELATED_PRIVATE_FILE', { mode: 0o600 });
+  await expect(f.queue.retirePending('state', op, prove)).rejects.toThrow(/^backup_queue_unavailable$/);
+  expect(fs.readFileSync(f.queueRoot + '/' + temporaryOne)).toEqual(expected.subarray(0, 100));
+  expect(fs.readFileSync(f.queueRoot + '/' + temporaryTwo, 'utf8')).toBe('UNRELATED_PRIVATE_FILE');
+  expect(fs.existsSync(f.slot + '/data/nested/b.json')).toBe(true);
+});
+it.each(['mode', 'symlink', 'hardlink', 'bounds'] as const)(
+  'refuses an unsafe publication temporary (%s)',
+  async (reason) => {
+    const f = await interruptedFixture(),
+      file = f.queueRoot + '/' + temporaryOne;
+    const contents = Buffer.from(JSON.stringify(f.metadata) + '\n');
+    if (reason === 'symlink') {
+      fs.writeFileSync(f.root + '/foreign', contents, { mode: 0o600 });
+      fs.symlinkSync(f.root + '/foreign', file);
+    } else fs.writeFileSync(file, reason === 'bounds' ? Buffer.alloc(1024 ** 2 + 1) : contents, { mode: 0o600 });
+    if (reason === 'mode') fs.chmodSync(file, 0o644);
+    if (reason === 'hardlink') fs.linkSync(file, f.root + '/foreign');
+    await expect(f.queue.retirePending('state', op, prove)).rejects.toThrow(/^backup_queue_unavailable$/);
+    expect(fs.existsSync(file)).toBe(true);
+    expect(fs.existsSync(f.slot + '/data/nested/b.json')).toBe(true);
+  },
+);
+it('refuses an expired live proof without clearing matching publication remnants', async () => {
+  const f = await interruptedFixture(),
+    file = f.queueRoot + '/' + temporaryOne;
+  fs.writeFileSync(file, JSON.stringify(f.metadata) + '\n', { mode: 0o600 });
+  await expect(
+    f.queue.retirePending('state', op, async (request) => ({
+      checkpoint: checkpoint(request),
+      assertCurrent() {
+        throw Error('expired');
+      },
+    })),
+  ).rejects.toThrow(/^backup_queue_unavailable$/);
+  expect(fs.existsSync(file)).toBe(true);
+  expect(fs.existsSync(f.slot + '/data/nested/b.json')).toBe(true);
+});
+it('rechecks the queue kernel lease before removing a publication temporary', async () => {
+  const f = await interruptedFixture(),
+    file = f.queueRoot + '/' + temporaryOne;
+  fs.writeFileSync(file, JSON.stringify(f.metadata) + '\n', { mode: 0o600 });
+  let checks = 0;
+  await expect(
+    f.queue.retirePending('state', op, async (request) => ({
+      checkpoint: checkpoint(request),
+      assertCurrent() {
+        if (++checks === 2) fs.writeFileSync(f.queueRoot + '/.cos-writer.lock', 'foreign owner', { mode: 0o600 });
+      },
+    })),
+  ).rejects.toThrow(/^backup_queue_unavailable$/);
+  expect(fs.existsSync(file)).toBe(true);
+  expect(fs.existsSync(f.slot + '/data/nested/b.json')).toBe(true);
+});
 it('resumes partial cleanup only after another fresh matching repository readback', async () => {
   const f = await fixture();
   const unlink = fs.unlinkSync;
@@ -336,6 +454,93 @@ it('recovers after an actual process is killed during cleanup without stealing a
     await closed;
     await f.queue.retirePending('state', op, prove);
     expect(await f.queue.pending('state')).toEqual([]);
+  } finally {
+    child.kill('SIGKILL');
+    await closed;
+  }
+});
+it.each([
+  'intent:empty',
+  'intent:partial',
+  'intent:before_rename',
+  'intent:after_rename',
+  'ack:empty',
+  'ack:partial',
+  'ack:before_rename',
+  'ack:after_rename',
+])('recovers metadata publication after an actual writer is killed at %s', async (scenario) => {
+  const f = await fixture();
+  const [target, stage] = scenario.split(':');
+  const moduleUrl = new URL('./backup-queue.ts', import.meta.url).href;
+  const code = `import fs from 'node:fs'; import { BackupQueue } from ${JSON.stringify(moduleUrl)};
+      const root=${JSON.stringify(f.root)}, stage=${JSON.stringify(stage)}, target=${JSON.stringify(target)};
+      const pause=()=>{fs.writeSync(1,'READY\\n');Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0);};
+      const write=fs.writeFileSync, rename=fs.renameSync;
+      fs.writeFileSync=(file,bytes,...options)=>{
+        if(typeof file==='number' && Buffer.isBuffer(bytes) && bytes.toString().startsWith('{"contract":"cos-backup-queue-retirement/')) {
+          const value=JSON.parse(bytes.toString());
+          const isAck=value.retired===true || (value.retiredAt!==null && value.retiredAt!==undefined);
+          if((target==='ack')===isAck) {
+            if(stage==='empty')pause();
+            if(stage==='partial'){write(file,bytes.subarray(0,Math.floor(bytes.length/2)),...options);pause();}
+          }
+        }
+        return write(file,bytes,...options);
+      };
+      fs.renameSync=(from,to)=>{
+        const selected=String(to).endsWith(target==='ack'?'/.cos-last-ack.json':'/.cos-retirement.json');
+        if(selected && stage==='before_rename')pause();
+        const result=rename(from,to);if(selected && stage==='after_rename')pause();return result;
+      };
+      const queue=new BackupQueue('a'.repeat(64),(kind,callback)=>callback(root+'/'+kind));
+      await queue.retirePending('state',${JSON.stringify(op)},async request=>({checkpoint:{
+        contract:'cos-backup-remote-checkpoint/v1',repositoryId:'b'.repeat(64),ownerDigest:'c'.repeat(64),kind:'state',operationId:${JSON.stringify(op)},
+        snapshotId:'d'.repeat(64),snapshotAt:'2026-10-11T00:00:00Z',archiveBytes:request.archive.bytes,archiveSha256:request.archive.sha256,
+        reconciled:false,verifiedAt:new Date().toISOString()},assertCurrent(){}}));`;
+  const child = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', code], {
+    cwd: process.cwd(),
+    env: { PATH: '/usr/bin:/bin', LANG: 'C', LC_ALL: 'C' },
+    stdio: ['ignore', 'pipe', 'ignore'],
+  });
+  const closed = new Promise<void>((resolve, reject) => {
+    child.once('error', reject);
+    child.once('close', () => resolve());
+  });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(Error('fixture_start_timeout')), 5000);
+      child.stdout.once('data', (bytes) => {
+        clearTimeout(timer);
+        if (bytes.toString() === 'READY\n') resolve();
+        else reject(Error('fixture_start_failed'));
+      });
+      child.once('close', () => {
+        clearTimeout(timer);
+        reject(Error('fixture_start_failed'));
+      });
+      child.once('error', (error) => {
+        clearTimeout(timer);
+        reject(error);
+      });
+    });
+    await expect(f.queue.capture('state', next, async () => {}, 65536)).rejects.toThrow(/^backup_queue_unavailable$/);
+    child.kill('SIGKILL');
+    await closed;
+    const namesBefore = fs.readdirSync(f.queueRoot).sort();
+    await expect(
+      f.queue.retirePending('state', op, async () => {
+        throw Error('NAS_OFFLINE');
+      }),
+    ).rejects.toThrow(/^backup_queue_unavailable$/);
+    expect(fs.readdirSync(f.queueRoot).sort()).toEqual(namesBefore);
+    let fresh = 0;
+    await f.queue.retirePending('state', op, async (request) => {
+      fresh++;
+      return prove(request);
+    });
+    expect(fresh).toBe(1);
+    expect(await f.queue.pending('state')).toEqual([]);
+    expect(fs.readdirSync(f.queueRoot).filter((name) => name.endsWith('.tmp'))).toEqual([]);
   } finally {
     child.kill('SIGKILL');
     await closed;

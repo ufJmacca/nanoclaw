@@ -9,24 +9,63 @@ import { verifyVaultStorage, withVaultDirectory } from './vault-storage.js';
 import type { RemoteCheckpoint } from './backup-restic-transfer.js';
 import { streamBackupArchive } from './backup-archive.js';
 import { BackupRepositoryWriter } from './backup-repository-lease.js';
+export type BackupRemoteIdentity = Omit<RemoteCheckpoint, 'verifiedAt' | 'reconciled'>;
 export type BackupRetirementRequest = {
   receipt: BackupQueueReceipt;
   archive: { bytes: number; sha256: string };
-  previous?: RemoteCheckpoint;
+  previous?: BackupRemoteIdentity;
 };
 export type BackupRetirementProof = {
   checkpoint: RemoteCheckpoint;
   assertCurrent(): void;
 };
 type Retirement = {
-  contract: 'cos-backup-queue-retirement/v1';
+  contract: 'cos-backup-queue-retirement/v2';
   receipt: BackupQueueReceipt;
-  remote: RemoteCheckpoint;
+  remote: BackupRemoteIdentity;
   slot: { device: number; inode: number };
+  retired: boolean;
+};
+type LegacyRetirement = Omit<Retirement, 'contract' | 'remote' | 'retired'> & {
+  contract: 'cos-backup-queue-retirement/v1';
+  remote: RemoteCheckpoint;
   retiredAt: string | null;
 };
 const intentName = '.cos-retirement.json',
   ackName = '.cos-last-ack.json';
+function remoteIdentity(remote: BackupRemoteIdentity): BackupRemoteIdentity {
+  return {
+    contract: remote.contract,
+    repositoryId: remote.repositoryId,
+    ownerDigest: remote.ownerDigest,
+    kind: remote.kind,
+    operationId: remote.operationId,
+    snapshotId: remote.snapshotId,
+    snapshotAt: remote.snapshotAt,
+    archiveBytes: remote.archiveBytes,
+    archiveSha256: remote.archiveSha256,
+  };
+}
+const publicationTemporary = (name: string) =>
+  /^\.cos-publish-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\.tmp$/.test(name);
+/** Observation only: neither an incomplete publication nor its filename grants authority. */
+function publicationTemporaries(root: string, device: number): string[] {
+  const names = fs.readdirSync(root).filter(publicationTemporary);
+  if (names.length > 2) throw Error('publication_temporary_bounds');
+  for (const name of names) {
+    const stat = fs.lstatSync(path.join(root, name));
+    if (
+      !stat.isFile() ||
+      stat.dev !== device ||
+      stat.uid !== process.getuid?.() ||
+      stat.nlink !== 1 ||
+      (stat.mode & 0o777) !== 0o600 ||
+      stat.size > 1024 ** 2
+    )
+      throw Error('unsafe_publication_temporary');
+  }
+  return names;
+}
 /** A reported publication failure removes only this call's still-held temporary
  * inode. Canonical records and unexplained replacements are never removed here. */
 function publishRetirement(root: string, name: string, value: Retirement): void {
@@ -264,31 +303,54 @@ function validateRemote(
   )
     throw Error('invalid_remote_checkpoint');
 }
-function retirement(
-  root: string,
+function validateRemoteIdentity(remote: BackupRemoteIdentity, receipt: BackupQueueReceipt): void {
+  if (
+    !remote ||
+    typeof remote !== 'object' ||
+    Array.isArray(remote) ||
+    Object.keys(remote).sort().join(',') !==
+      'archiveBytes,archiveSha256,contract,kind,operationId,ownerDigest,repositoryId,snapshotAt,snapshotId' ||
+    remote.contract !== 'cos-backup-remote-checkpoint/v1' ||
+    remote.kind !== receipt.kind ||
+    remote.operationId !== receipt.operationId ||
+    [remote.repositoryId, remote.ownerDigest, remote.snapshotId, remote.archiveSha256].some(
+      (value) => typeof value !== 'string' || !/^[a-f0-9]{64}$/.test(value),
+    ) ||
+    !Number.isSafeInteger(remote.archiveBytes) ||
+    remote.archiveBytes < 2048 ||
+    remote.archiveBytes >
+      (receipt.kind === 'state' ? BACKUP_LIMITS.staging : BACKUP_LIMITS.credentials) + 2 * 1024 ** 2 ||
+    typeof remote.snapshotAt !== 'string' ||
+    !Number.isFinite(Date.parse(remote.snapshotAt))
+  )
+    throw Error('invalid_remote_identity');
+}
+function validateRetirement(
+  value: Retirement | LegacyRetirement,
   name: string,
   owner: string,
   kind: BackupKind,
   device: number,
-): Retirement | undefined {
-  const file = path.join(root, name);
-  if (!fs.lstatSync(file, { throwIfNoEntry: false })) return undefined;
-  const value = privateJson<Retirement>(file, device);
+): Retirement {
+  const legacy = value?.contract === 'cos-backup-queue-retirement/v1';
   if (
     !value ||
     typeof value !== 'object' ||
     Array.isArray(value) ||
-    Object.keys(value).sort().join(',') !== 'contract,receipt,remote,retiredAt,slot' ||
-    value.contract !== 'cos-backup-queue-retirement/v1' ||
+    Object.keys(value).sort().join(',') !==
+      (legacy ? 'contract,receipt,remote,retiredAt,slot' : 'contract,receipt,remote,retired,slot') ||
+    !['cos-backup-queue-retirement/v1', 'cos-backup-queue-retirement/v2'].includes(value.contract) ||
     !value.slot ||
     Object.keys(value.slot).sort().join(',') !== 'device,inode' ||
     !Number.isSafeInteger(value.slot.device) ||
     value.slot.device !== device ||
     !Number.isSafeInteger(value.slot.inode) ||
     value.slot.inode < 1 ||
-    (name === intentName
-      ? value.retiredAt !== null
-      : typeof value.retiredAt !== 'string' || !Number.isFinite(Date.parse(value.retiredAt)))
+    (legacy
+      ? name === intentName
+        ? value.retiredAt !== null
+        : typeof value.retiredAt !== 'string' || !Number.isFinite(Date.parse(value.retiredAt))
+      : typeof value.retired !== 'boolean' || value.retired !== (name === ackName))
   )
     throw Error('invalid_retirement');
   validateReceipt(value.receipt, owner, kind);
@@ -298,11 +360,120 @@ function retirement(
     value.receipt.bytes > value.receipt.maximumBytes
   )
     throw Error('invalid_retirement_receipt');
-  validateRemote(value.remote, value.receipt, {
-    bytes: value.remote?.archiveBytes,
-    sha256: value.remote?.archiveSha256,
-  });
-  return value;
+  if (legacy)
+    validateRemote(value.remote, value.receipt, {
+      bytes: value.remote?.archiveBytes,
+      sha256: value.remote?.archiveSha256,
+    });
+  else validateRemoteIdentity(value.remote, value.receipt);
+  return {
+    contract: 'cos-backup-queue-retirement/v2',
+    receipt: value.receipt,
+    remote: remoteIdentity(value.remote),
+    slot: { device: value.slot.device, inode: value.slot.inode },
+    retired: name === ackName,
+  };
+}
+function retirement(
+  root: string,
+  name: string,
+  owner: string,
+  kind: BackupKind,
+  device: number,
+): Retirement | undefined {
+  const file = path.join(root, name);
+  if (!fs.lstatSync(file, { throwIfNoEntry: false })) return undefined;
+  return validateRetirement(privateJson<Retirement | LegacyRetirement>(file, device), name, owner, kind, device);
+}
+/** A torn v2 publication is a prefix of deterministic metadata authenticated by
+ * the current remote archive and receipt. Check all candidates before any removal. */
+function recoverPublicationTemporaries(
+  root: string,
+  metadata: Retirement,
+  device: number,
+  owner: string,
+  assertCurrent: () => void,
+): void {
+  const templates = [false, true].map((retired) => Buffer.from(JSON.stringify({ ...metadata, retired }) + '\n'));
+  const held: Array<{ fd: number; file: string; initial: fs.Stats; bytes: Buffer }> = [];
+  try {
+    for (const name of publicationTemporaries(root, device)) {
+      const file = path.join(root, name),
+        fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+      const initial = fs.fstatSync(fd),
+        bytes = Buffer.alloc(Math.min(initial.size + 1, 1024 ** 2 + 1));
+      held.push({ fd, file, initial, bytes });
+      if (
+        !initial.isFile() ||
+        initial.dev !== device ||
+        initial.uid !== process.getuid?.() ||
+        initial.nlink !== 1 ||
+        (initial.mode & 0o777) !== 0o600 ||
+        initial.size > 1024 ** 2
+      )
+        throw Error('unsafe_publication_temporary');
+      const count = fs.readSync(fd, bytes, 0, bytes.length, 0),
+        contents = bytes.subarray(0, count);
+      const current = fs.lstatSync(file),
+        after = fs.fstatSync(fd);
+      if (
+        count !== initial.size ||
+        current.dev !== initial.dev ||
+        current.ino !== initial.ino ||
+        after.size !== initial.size ||
+        after.mtimeMs !== initial.mtimeMs ||
+        after.ctimeMs !== initial.ctimeMs
+      )
+        throw Error('publication_temporary_changed');
+      let matched = templates.some(
+        (template) => contents.length <= template.length && contents.equals(template.subarray(0, contents.length)),
+      );
+      if (!matched) {
+        // Complete historical records remain readable; an unknown or torn v1 file stays closed.
+        const parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(contents)) as LegacyRetirement;
+        if (parsed?.contract === 'cos-backup-queue-retirement/v1') {
+          const value = validateRetirement(
+            parsed,
+            parsed.retiredAt === null ? intentName : ackName,
+            owner,
+            metadata.receipt.kind,
+            device,
+          );
+          matched = [false, true].some((retired) => digest(value) === digest({ ...metadata, retired }));
+        }
+      }
+      if (!matched) throw Error('unrecognized_publication_temporary');
+    }
+    for (const item of held) {
+      assertCurrent();
+      const current = fs.lstatSync(item.file),
+        after = fs.fstatSync(item.fd);
+      if (
+        current.dev !== item.initial.dev ||
+        current.ino !== item.initial.ino ||
+        after.nlink !== 1 ||
+        after.mode !== item.initial.mode ||
+        after.uid !== item.initial.uid ||
+        after.size !== item.initial.size ||
+        after.mtimeMs !== item.initial.mtimeMs ||
+        after.ctimeMs !== item.initial.ctimeMs
+      )
+        throw Error('publication_temporary_changed');
+      fs.unlinkSync(item.file);
+      const directory = privateDirectory(root, device);
+      try {
+        fs.fsyncSync(directory);
+      } finally {
+        fs.closeSync(directory);
+      }
+    }
+  } finally {
+    for (const item of held) {
+      item.bytes.fill(0);
+      fs.closeSync(item.fd);
+    }
+    for (const template of templates) template.fill(0);
+  }
 }
 /** Only originally declared files and their parent directories may be removed. Each
  * mutation rechecks held descriptors and live proof; saved metadata grants no authority. */
@@ -427,7 +598,7 @@ export class BackupQueue {
     kind: BackupKind,
     create: boolean,
     locked: boolean,
-    operation: (root: string, device: number) => Promise<T>,
+    operation: (root: string, device: number, assertWriter: () => void) => Promise<T>,
     absent?: () => Promise<T>,
   ): Promise<T> {
     try {
@@ -470,12 +641,12 @@ export class BackupQueue {
             );
             return await writer.exclusive(async (lease) => {
               lease.assertCurrent();
-              const result = await operation(root, device);
+              const result = await operation(root, device, lease.assertCurrent);
               lease.assertCurrent();
               return result;
             });
           }
-          return await operation(root, device);
+          return await operation(root, device, () => {});
         } finally {
           if (rootFd !== undefined) fs.closeSync(rootFd);
           fs.closeSync(areaFd);
@@ -489,9 +660,13 @@ export class BackupQueue {
   private receipts(root: string, kind: BackupKind, device: number): BackupQueueReceipt[] {
     const intent = retirement(root, intentName, this.ownerDigest, kind, device);
     retirement(root, ackName, this.ownerDigest, kind, device);
+    const temporary = new Set(publicationTemporaries(root, device));
     const names = fs
       .readdirSync(root)
-      .filter((name) => !['owner.json', '.lock', '.cos-writer.lock', intentName, ackName].includes(name));
+      .filter(
+        (name) =>
+          !['owner.json', '.lock', '.cos-writer.lock', intentName, ackName].includes(name) && !temporary.has(name),
+      );
     if (names.length > (kind === 'state' ? 1 : 1024)) throw Error('queue_bounds');
     const values = names.sort().map((name) => {
       if (kind === 'state' ? name !== 'full' : !uuid(name)) throw Error('queue_directory_conflict');
@@ -718,11 +893,11 @@ export class BackupQueue {
           return result;
         });
         metadata = {
-          contract: 'cos-backup-queue-retirement/v1',
+          contract: 'cos-backup-queue-retirement/v2',
           receipt: structuredClone(receipt),
-          remote: structuredClone(supplied.checkpoint),
+          remote: remoteIdentity(supplied.checkpoint),
           slot,
-          retiredAt: null,
+          retired: false,
         };
       }
       const remote = structuredClone(supplied.checkpoint);
@@ -742,20 +917,26 @@ export class BackupQueue {
       const assertCurrent = supplied.assertCurrent.bind(supplied);
       assertCurrent();
       const selected = metadata;
-      return this.area(kind, false, true, async (lockedRoot, lockedDevice) => {
+      return this.area(kind, false, true, async (lockedRoot, lockedDevice, currentWriter) => {
+        const assertAuthority = () => {
+          assertCurrent();
+          currentWriter();
+        };
         const currentRoot = fs.statSync(lockedRoot);
         if (lockedDevice !== device || currentRoot.dev !== rootIdentity.dev || currentRoot.ino !== rootIdentity.ino)
           throw Error('queue_device_changed');
         const currentIntent = retirement(lockedRoot, intentName, this.ownerDigest, kind, device);
         const currentAck = retirement(lockedRoot, ackName, this.ownerDigest, kind, device);
-        assertCurrent();
-        if (selected.retiredAt !== null) {
+        assertAuthority();
+        if (selected.retired) {
           if (currentIntent || !currentAck || digest(currentAck) !== initialMetadata) throw Error('retirement_changed');
+          recoverPublicationTemporaries(lockedRoot, selected, device, this.ownerDigest, assertAuthority);
           return remote;
         }
         if (intent ? !currentIntent || digest(currentIntent) !== initialMetadata : !!currentIntent)
           throw Error('retirement_changed');
-        retireSlot(lockedRoot, selected, device, !!intent, assertCurrent, false);
+        retireSlot(lockedRoot, selected, device, !!intent, assertAuthority, false);
+        recoverPublicationTemporaries(lockedRoot, selected, device, this.ownerDigest, assertAuthority);
         if (!intent) {
           const charge = Math.ceil((Buffer.byteLength(JSON.stringify(selected)) + 1) / 4096) * 4096;
           const limit = kind === 'state' ? BACKUP_LIMITS.staging : BACKUP_LIMITS.credentials;
@@ -766,7 +947,7 @@ export class BackupQueue {
             availability.bavail * availability.bsize < BigInt(charge + BACKUP_LIMITS.vaultReserve)
           )
             throw Error('retirement_capacity');
-          assertCurrent();
+          assertAuthority();
           publishRetirement(lockedRoot, intentName, selected);
         }
         const durable = retirement(lockedRoot, intentName, this.ownerDigest, kind, device);
@@ -777,7 +958,7 @@ export class BackupQueue {
           device,
           !!intent,
           () => {
-            assertCurrent();
+            assertAuthority();
             if (digest(retirement(lockedRoot, intentName, this.ownerDigest, kind, device)) !== digest(selected))
               throw Error('retirement_intent_changed');
           },
@@ -786,9 +967,9 @@ export class BackupQueue {
         const rootFd = privateDirectory(lockedRoot, device);
         try {
           fs.fsyncSync(rootFd);
-          assertCurrent();
-          publishRetirement(lockedRoot, ackName, { ...selected, remote, retiredAt: new Date().toISOString() });
-          assertCurrent();
+          assertAuthority();
+          publishRetirement(lockedRoot, ackName, { ...selected, retired: true });
+          assertAuthority();
           if (digest(retirement(lockedRoot, intentName, this.ownerDigest, kind, device)) !== digest(selected))
             throw Error('retirement_intent_changed');
           fs.unlinkSync(path.join(lockedRoot, intentName));

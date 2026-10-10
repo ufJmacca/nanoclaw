@@ -180,7 +180,8 @@ it('connects only installed vault, artifact, NAS, password and writer gates befo
   expect(f.capacity).toHaveBeenCalledTimes(2);
   expect(await s.queue.pending('state')).toEqual([]);
   const ack = JSON.parse(fs.readFileSync(s.areas.staging + '/backup-queue/.cos-last-ack.json', 'utf8'));
-  expect(ack.remote).toEqual(result);
+  expect(result).toMatchObject(ack.remote);
+  expect(ack.remote).not.toHaveProperty('verifiedAt');
 });
 it('reconciles interrupted cleanup with fresh verification and never invokes another upload', async () => {
   const s = await fixture();
