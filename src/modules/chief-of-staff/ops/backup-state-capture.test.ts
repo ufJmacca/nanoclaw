@@ -12,7 +12,12 @@ import { targetBinding } from './target-host.js';
 import { initializeTargetActionWitness } from '../actions/host-ownership.js';
 import { acquireHostExecutionLease, releaseHostExecutionLease } from '../../../db/host-execution-lease.js';
 import type { DeploymentSettings } from './deployment-settings.js';
-import { captureTargetVaultState, verifyTargetVaultState } from './backup-state-capture.js';
+import {
+  captureTargetVaultState,
+  verifyTargetVaultState,
+  captureScheduledTargetVaultState,
+  verifyScheduledTargetVaultState,
+} from './backup-state-capture.js';
 import type { StorageInspection } from '../calendar/storage-protection.js';
 const f = vi.hoisted(() => ({
   observe: vi.fn(),
@@ -79,7 +84,7 @@ afterEach(() => {
   vi.restoreAllMocks();
   vi.resetAllMocks();
 });
-async function fixture(databaseFingerprint = 'd'.repeat(64), scopeId = 'scope') {
+async function fixture(databaseFingerprint = 'd'.repeat(64), scopeId = 'scope', scheduled = false) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-full-vault-capture-'));
   fs.chmodSync(root, 0o700);
   cleanup.push(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -109,8 +114,13 @@ async function fixture(databaseFingerprint = 'd'.repeat(64), scopeId = 'scope') 
     maintenance: false,
     releaseId: 'release-current',
   });
-  const operationId = 'release-action-' + randomUUID(),
-    maintenance = beginMaintenance(settings.stateRoot, initial.binding, 'fixture-admin', 'deployment');
+  const operationId = (scheduled ? 'release-backup-' : 'release-action-') + randomUUID(),
+    maintenance = beginMaintenance(
+      settings.stateRoot,
+      initial.binding,
+      scheduled ? operationId : 'fixture-admin',
+      'deployment',
+    );
   await confirmQuiescence(settings.stateRoot, initial.binding, maintenance, async () => ({
     activeCoordinators: 0,
     activeDatabaseOperations: 0,
@@ -234,6 +244,45 @@ it('refuses unpaused CoS even when the main application is stopped', async () =>
   await expect(captureTargetVaultState(s.settings, s.operationId, s.admin, s.recovery)).rejects.toThrow(
     'target_vault_capture_unavailable',
   );
+  expect(f.connect).not.toHaveBeenCalled();
+});
+it.each([0, 1])(
+  'scheduled capture preserves the current native pause=%s under only its own stopped-service maintenance',
+  async (paused) => {
+    const s = await fixture(undefined, undefined, true);
+    releaseHostExecutionLease(s.native, s.admin.hostLease);
+    s.native.prepare('UPDATE cos_identity_boundaries SET paused=?').run(paused);
+    await expect(captureScheduledTargetVaultState(s.settings, s.operationId, s.recovery)).resolves.toMatchObject({
+      status: 'queued',
+      queueOperationId: s.admin.maintenance.nonce,
+      admissionRestored: false,
+    });
+    expect(s.native.prepare('SELECT paused FROM cos_identity_boundaries').get()).toEqual({ paused });
+  },
+);
+it('scheduled capture refuses another maintenance owner and a live native writer before database access', async () => {
+  const s = await fixture();
+  await expect(
+    captureScheduledTargetVaultState(s.settings, 'release-backup-' + randomUUID(), s.recovery),
+  ).rejects.toThrow('target_vault_capture_unavailable');
+  const owned = await fixture(undefined, undefined, true);
+  await expect(captureScheduledTargetVaultState(owned.settings, owned.operationId, owned.recovery)).rejects.toThrow(
+    'target_vault_capture_unavailable',
+  );
+  expect(f.connect).not.toHaveBeenCalled();
+});
+it('a later owner pause during scheduled capture is retained and refuses a fresh success acknowledgement', async () => {
+  const s = await fixture(undefined, undefined, true);
+  releaseHostExecutionLease(s.native, s.admin.hostLease);
+  s.native.exec('UPDATE cos_identity_boundaries SET paused=0');
+  f.observe.mockImplementationOnce(async () => {
+    s.native.exec('UPDATE cos_identity_boundaries SET paused=1');
+    return { pid: 0, cwd: s.settings.installationRoot, activeState: 'inactive' };
+  });
+  await expect(captureScheduledTargetVaultState(s.settings, s.operationId, s.recovery)).rejects.toThrow(
+    'target_vault_capture_unavailable',
+  );
+  expect(s.native.prepare('SELECT paused FROM cos_identity_boundaries').get()).toEqual({ paused: 1 });
   expect(f.connect).not.toHaveBeenCalled();
 });
 it('refuses a lost real native host lease and does not publish success', async () => {
@@ -417,9 +466,9 @@ it('connects the real coordinated/native/operations/history producers to the act
   );
 });
 
-it.runIf(process.env.COS_TEST_TARGET_ID !== undefined)(
-  'captures the admitted separate PostgreSQL scope through real producers without exposing foreign records or resetting native state',
-  async () => {
+it.runIf(process.env.COS_TEST_TARGET_ID !== undefined).each([false, true])(
+  'captures the admitted separate PostgreSQL scope through real producers without exposing foreign records or resetting native state (scheduled=%s)',
+  async (scheduled) => {
     const { connectFixtureDatabase, fixtureDatabaseConfig, fixtureProfile } =
       await import('../../../contracts/chief-of-staff/fixture-database.js');
     const { migrationStatus, SCHEMA_VERSION } = await import('../store/migrations.js');
@@ -437,8 +486,12 @@ it.runIf(process.env.COS_TEST_TARGET_ID !== undefined)(
       expect((await admin.query('SELECT pg_try_advisory_lock(73101002) AS locked')).rows[0].locked).toBe(true);
       expect(await migrationStatus(admin)).toBe(SCHEMA_VERSION);
       const fingerprint = await databaseFingerprint(admin, await fixtureDatabaseConfig(process.env, 'migration')),
-        s = await fixture(fingerprint, scope),
+        s = await fixture(fingerprint, scope, scheduled),
         sentinel = 'SYNTHETIC_PG_PRIVATE_' + randomUUID();
+      if (scheduled) {
+        releaseHostExecutionLease(s.native, s.admin.hostLease);
+        s.native.exec('UPDATE cos_identity_boundaries SET paused=0');
+      }
       await admin.query('BEGIN');
       for (const id of [scope, foreign]) {
         await admin.query(
@@ -522,12 +575,16 @@ it.runIf(process.env.COS_TEST_TARGET_ID !== undefined)(
         messages: s.native.prepare('SELECT * FROM ordinary_messages').all(),
         budgets: s.native.prepare('SELECT * FROM cos_model_budgets').all(),
       };
-      const result = await captureTargetVaultState(s.settings, s.operationId, s.admin, s.recovery);
+      const result = scheduled
+        ? await captureScheduledTargetVaultState(s.settings, s.operationId, s.recovery)
+        : await captureTargetVaultState(s.settings, s.operationId, s.admin, s.recovery);
       expect(result.status).toBe('queued');
       expect(connections).toBe(1);
       if (result.status !== 'queued') throw Error('fixture_checkpoint_not_queued');
       expect(
-        await verifyTargetVaultState(s.settings, s.operationId, s.admin, s.recovery, result.snapshotDigest),
+        scheduled
+          ? await verifyScheduledTargetVaultState(s.settings, s.operationId, s.recovery, result.snapshotDigest)
+          : await verifyTargetVaultState(s.settings, s.operationId, s.admin, s.recovery, result.snapshotDigest),
       ).toEqual(result);
       expect(connections).toBe(1);
       const data = s.queue() + '/data',
@@ -569,7 +626,9 @@ it.runIf(process.env.COS_TEST_TARGET_ID !== undefined)(
       } finally {
         copy.close();
       }
-      const second = await captureTargetVaultState(s.settings, 'release-action-' + randomUUID(), s.admin, s.recovery);
+      const second = scheduled
+        ? await captureScheduledTargetVaultState(s.settings, s.operationId, s.recovery)
+        : await captureTargetVaultState(s.settings, 'release-action-' + randomUUID(), s.admin, s.recovery);
       expect(second.status).toBe('skipped_pending');
       expect(connections).toBe(1);
       expect(fs.existsSync(s.settings.stateRoot + '/releases')).toBe(false);

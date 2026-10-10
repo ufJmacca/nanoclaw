@@ -185,6 +185,7 @@ function captureAuthority(
   operationId: string,
   admin: ActionBackupAdminLease | undefined,
   recovery: RecoveryRelease,
+  mode: 'paused' | 'scheduled' = 'paused',
 ) {
   verifyVaultMemory();
   if (process.platform !== 'linux' || process.arch !== 'arm64' || !process.getuid?.()) throw Error('owner_required');
@@ -221,6 +222,15 @@ function captureAuthority(
     throw Error('capture_identity');
   const maintenance = admin?.maintenance ?? maintenanceLeaseForOwner(roots.targetRoot, binding, operationId),
     central = path.join(settings.dataRoot, 'v2.db');
+  if (
+    mode === 'scheduled' &&
+    (admin ||
+      !operationId.startsWith('release-backup-') ||
+      !uuid.test(operationId.slice('release-backup-'.length)) ||
+      maintenance.owner !== operationId ||
+      recovery.releaseId !== target.releaseId)
+  )
+    throw Error('capture_identity');
   const queueOperationId = admin ? operationId.slice('release-action-'.length) : maintenance.nonce;
   if (
     !uuid.test(queueOperationId) ||
@@ -231,6 +241,17 @@ function captureAuthority(
   const native = readBackupNativeInventory(settings.dataRoot),
     witness = openTargetActionWitness(roots.targetRoot, digest(binding)),
     commands = targetCommands(settings);
+  const readPause = () => {
+    const db = new Database(central, { readonly: true, fileMustExist: true });
+    try {
+      const rows = db.prepare('SELECT paused FROM cos_identity_boundaries LIMIT 2').all() as Array<{ paused: number }>;
+      if (rows.length !== 1 || ![0, 1].includes(rows[0].paused)) throw Error('capture_pause_required');
+      return rows[0].paused;
+    } finally {
+      db.close();
+    }
+  };
+  const originalPause = readPause();
   const current = () => {
     verifyVaultMemory();
     if (
@@ -248,15 +269,7 @@ function captureAuthority(
       openTargetActionWitness(roots.targetRoot, digest(binding)).generation !== witness.generation
     )
       throw Error('capture_native_changed');
-    const db = new Database(central, { readonly: true, fileMustExist: true });
-    try {
-      const rows = db.prepare('SELECT paused FROM cos_identity_boundaries LIMIT 2').all() as Array<{
-        paused: number;
-      }>;
-      if (rows.length !== 1 || rows[0].paused !== 1) throw Error('capture_pause_required');
-    } finally {
-      db.close();
-    }
+    if (readPause() !== (mode === 'scheduled' ? originalPause : 1)) throw Error('capture_pause_required');
   };
   const quiescent = async () => {
     current();
@@ -324,9 +337,28 @@ export async function captureTargetVaultState(
   admin: ActionBackupAdminLease | undefined,
   recovery: RecoveryRelease,
 ) {
+  return captureVaultState(input, operationId, admin, recovery, 'paused');
+}
+/** Fixed scheduled path: its own maintenance latch holds admission and the
+ * native writer must already be stopped. It never changes the owner's pause.
+ */
+export async function captureScheduledTargetVaultState(
+  input: DeploymentSettings,
+  operationId: string,
+  recovery: RecoveryRelease,
+) {
+  return captureVaultState(input, operationId, undefined, recovery, 'scheduled');
+}
+async function captureVaultState(
+  input: DeploymentSettings,
+  operationId: string,
+  admin: ActionBackupAdminLease | undefined,
+  recovery: RecoveryRelease,
+  mode: 'paused' | 'scheduled',
+) {
   try {
     const { settings, binding, roots, native, witness, maintenance, queueOperationId, current, check, quiescent } =
-      captureAuthority(input, operationId, admin, recovery);
+      captureAuthority(input, operationId, admin, recovery, mode);
     await check();
     verifyVaultStorage(roots);
     const queue = createVaultBackupQueue(roots);
@@ -465,12 +497,31 @@ export async function verifyTargetVaultState(
   recovery: RecoveryRelease,
   expectedSnapshotDigest?: string,
 ) {
+  return verifyVaultState(input, operationId, admin, recovery, expectedSnapshotDigest, 'paused');
+}
+export async function verifyScheduledTargetVaultState(
+  input: DeploymentSettings,
+  operationId: string,
+  recovery: RecoveryRelease,
+  expectedSnapshotDigest?: string,
+) {
+  return verifyVaultState(input, operationId, undefined, recovery, expectedSnapshotDigest, 'scheduled');
+}
+async function verifyVaultState(
+  input: DeploymentSettings,
+  operationId: string,
+  admin: ActionBackupAdminLease | undefined,
+  recovery: RecoveryRelease,
+  expectedSnapshotDigest: string | undefined,
+  mode: 'paused' | 'scheduled',
+) {
   try {
     const { settings, binding, roots, native, witness, maintenance, queueOperationId, check } = captureAuthority(
       input,
       operationId,
       admin,
       recovery,
+      mode,
     );
     if (expectedSnapshotDigest !== undefined && !/^[a-f0-9]{64}$/.test(expectedSnapshotDigest))
       throw Error('capture_digest_invalid');
