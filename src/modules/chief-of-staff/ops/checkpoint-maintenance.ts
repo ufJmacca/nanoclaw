@@ -91,14 +91,16 @@ export async function checkpointMaintenance(input: {
     )
       unverified();
   }
-  const slots = await effects.inspect();
-  if (
-    !Array.isArray(slots) ||
-    slots.length > 1 ||
-    slots.some((slot) => !uuid.test(slot.operationId) || !['pending', 'capturing', 'failed'].includes(slot.state))
-  )
-    unverified();
   if (!record) {
+    // Queue admission precedes a new interruption. Recovery of this recorded
+    // interruption depends on live maintenance and health, never queue readability.
+    const slots = await effects.inspect();
+    if (
+      !Array.isArray(slots) ||
+      slots.length > 1 ||
+      slots.some((slot) => !uuid.test(slot.operationId) || !['pending', 'capturing', 'failed'].includes(slot.state))
+    )
+      unverified();
     if (slots.length)
       return {
         status: 'backup_skipped_pending',

@@ -2,13 +2,16 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { spawn } from 'node:child_process';
 import Database from 'better-sqlite3';
 import { digest } from '../domain/contracts.js';
 import { afterEach, expect, it, vi } from 'vitest';
 import { fixtureVaultRelease } from '../../../contracts/chief-of-staff/release-fixture.js';
 import { initializeTarget, protectTarget, readPrivate, readTarget, writeAtomic } from './target-state.js';
-import { activeMaintenanceLease, admittedGeneration, beginMaintenance } from './maintenance.js';
+import { activeMaintenanceLease, admittedGeneration, beginMaintenance, type MaintenanceLease } from './maintenance.js';
 import { checkpointMaintenance } from './checkpoint-maintenance.js';
+import { BackupQueue } from './backup-queue.js';
+import { streamQueuedBackup } from './backup-archive-producer.js';
 
 const roots: string[] = [];
 const databases: Database.Database[] = [];
@@ -80,7 +83,7 @@ function fixture() {
       snapshot.queueOperationId = activeMaintenanceLease(root, binding).nonce;
       return snapshot;
     }),
-    verifyCapture: vi.fn(async () => {
+    verifyCapture: vi.fn(async (_lease: MaintenanceLease, _expected?: string) => {
       events.push('readback');
       return snapshot;
     }),
@@ -269,3 +272,209 @@ it('refuses changed queue readback and incompatible database health without reop
   expect(admittedGeneration(g.root, binding)).toBeNull();
   expect(g.effects.capture).not.toHaveBeenCalled();
 });
+
+it.each(['capturing', 'restarting', 'complete'] as const)(
+  'an unreadable queue does not prevent recovery of this checkpoint at %s',
+  async (phase) => {
+    const f = fixture();
+    if (phase === 'capturing') {
+      const lease = beginMaintenance(f.root, binding, 'release-backup-' + f.requestId, 'deployment');
+      const { confirmQuiescence } = await import('./maintenance.js');
+      await confirmQuiescence(f.root, binding, lease, async () => ({
+        activeCoordinators: 0,
+        activeDatabaseOperations: 0,
+      }));
+      fs.mkdirSync(f.root + '/backup-checkpoints', { mode: 0o700 });
+      writeAtomic(f.root + '/backup-checkpoints', f.requestId + '.json', {
+        version: 1,
+        requestId: f.requestId,
+        bindingDigest: digest(binding),
+        manifestDigest: digest(f.manifest),
+        releaseId: f.manifest.releaseId,
+        phase,
+        lease,
+        outcome: null,
+        snapshotDigest: null,
+      });
+    } else {
+      f.effects.capture.mockRejectedValueOnce(Error('synthetic_capture_failed'));
+      if (phase === 'restarting') {
+        f.effects.startNative.mockRejectedValueOnce(Error('synthetic_start_interrupted'));
+        await expect(f.invoke()).rejects.toThrow('synthetic_start_interrupted');
+        f.effects.healthy.mockResolvedValueOnce(false);
+      } else await f.invoke();
+    }
+    f.native.exec('UPDATE state SET paused=1');
+    const before = f.readNative();
+    f.effects.inspect.mockRejectedValue(Error('synthetic_queue_unreadable'));
+    f.effects.capture.mockClear();
+    f.effects.startNative.mockClear();
+    await expect(f.invoke()).resolves.toMatchObject({
+      status: 'backup_failed',
+      admissionRestored: true,
+      remoteCheckpoint: false,
+    });
+    expect(f.effects.capture).not.toHaveBeenCalled();
+    expect(f.effects.verifyCapture).not.toHaveBeenCalled();
+    expect(f.readNative()).toEqual(before);
+    expect(admittedGeneration(f.root, binding)).not.toBeNull();
+    expect(f.effects.startNative).toHaveBeenCalledTimes(phase === 'complete' ? 0 : 1);
+  },
+);
+it('an unreadable queue prevents a new checkpoint before service interruption', async () => {
+  const f = fixture(),
+    before = f.readNative();
+  f.effects.inspect.mockRejectedValue(Error('synthetic_queue_unreadable'));
+  await expect(f.invoke()).rejects.toThrow('synthetic_queue_unreadable');
+  expect(f.effects.stopNative).not.toHaveBeenCalled();
+  expect(f.effects.capture).not.toHaveBeenCalled();
+  expect(f.readNative()).toEqual(before);
+  expect(fs.existsSync(f.root + '/backup-checkpoints')).toBe(false);
+});
+
+it.each(['foreign_maintenance', 'changed_release', 'unhealthy', 'incompatible_database'])(
+  'unreadable queue recovery still refuses %s',
+  async (condition) => {
+    const f = fixture();
+    f.effects.capture.mockRejectedValueOnce(Error('synthetic_capture_failed'));
+    f.effects.startNative.mockRejectedValueOnce(Error('synthetic_start_interrupted'));
+    await expect(f.invoke()).rejects.toThrow('synthetic_start_interrupted');
+    f.effects.inspect.mockRejectedValue(Error('synthetic_queue_unreadable'));
+    f.native.exec('UPDATE state SET paused=1');
+    const before = f.readNative();
+    if (condition === 'foreign_maintenance') {
+      const record = readPrivate<Record<string, unknown>>(f.root + '/maintenance.json');
+      writeAtomic(f.root, 'maintenance.json', { ...record, owner: 'foreign-operation' });
+    } else if (condition === 'changed_release') f.manifest.source.tree = 'f'.repeat(40);
+    else if (condition === 'unhealthy') f.effects.healthy.mockResolvedValue(false);
+    else f.effects.databaseCompatible.mockResolvedValue(false);
+    await expect(f.invoke()).rejects.toThrow();
+    expect(admittedGeneration(f.root, binding)).toBeNull();
+    expect(f.effects.capture).toHaveBeenCalledOnce();
+    expect(f.readNative()).toEqual(before);
+  },
+);
+
+it.each(['initial_receipt', 'partial_payload', 'before_pending_rename', 'after_pending_rename'])(
+  'recovers the owned checkpoint after SIGKILL during capture at %s',
+  async (scenario) => {
+    const f = fixture(),
+      area = f.root + '/synthetic-vault';
+    fs.mkdirSync(area, { mode: 0o700 });
+    const queue = new BackupQueue('a'.repeat(64), async (_kind, operation) => operation(area));
+    const checkpointUrl = new URL('./checkpoint-maintenance.ts', import.meta.url).href,
+      queueUrl = new URL('./backup-queue.ts', import.meta.url).href;
+    const code = `import fs from 'node:fs';
+      import {checkpointMaintenance} from ${JSON.stringify(checkpointUrl)};
+      import {BackupQueue} from ${JSON.stringify(queueUrl)};
+      const scenario=${JSON.stringify(scenario)};
+      const pause=()=>{fs.writeSync(1,'READY\\n');Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0);};
+      const write=fs.writeFileSync,rename=fs.renameSync;
+      fs.writeFileSync=(file,bytes,...options)=>{
+        if(scenario==='initial_receipt'&&typeof file==='number'&&String(bytes).startsWith('{"format":"cos-backup-queue/v1"'))pause();
+        return write(file,bytes,...options);
+      };
+      fs.renameSync=(from,to)=>{
+        const selected=String(to).endsWith('/receipt.json')&&JSON.parse(fs.readFileSync(from,'utf8')).state==='pending';
+        if(selected&&scenario==='before_pending_rename')pause();const result=rename(from,to);
+        if(selected&&scenario==='after_pending_rename')pause();return result;
+      };
+      const queue=new BackupQueue('a'.repeat(64),(_,operation)=>operation(${JSON.stringify(area)}));
+      await checkpointMaintenance({root:${JSON.stringify(f.root)},binding:${JSON.stringify(binding)},requestId:${JSON.stringify(f.requestId)},effects:{
+        verify:async()=>(${JSON.stringify(f.manifest)}),inspect:async()=>queue.inspect('state'),
+        workersIdle:async()=>true,stopNative:async()=>{},nativeStopped:async()=>true,databaseCompatible:async()=>true,
+        startNative:async()=>{},healthy:async()=>true,
+        capture:async lease=>{
+          await queue.capture('state',lease.nonce,async sink=>{
+            sink.write('first.json',Buffer.from('SYNTHETIC_CAPTURE_FIRST'));
+            if(scenario==='partial_payload')pause();
+            sink.write('nested/second.json',Buffer.from('SYNTHETIC_CAPTURE_SECOND'));
+          },65536);
+          throw Error('fixture_must_stop');
+        },verifyCapture:async()=>{throw Error('fixture_must_stop');}
+      }});`;
+    const child = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', code], {
+      cwd: process.cwd(),
+      env: { PATH: '/usr/bin:/bin', LANG: 'C', LC_ALL: 'C' },
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    const closed = new Promise<NodeJS.Signals | null>((resolve, reject) => {
+      child.once('error', reject);
+      child.once('close', (_code, signal) => resolve(signal));
+    });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => reject(Error('fixture_start_timeout')), 5000);
+        child.stdout.once('data', (bytes) => {
+          clearTimeout(timer);
+          if (bytes.toString() === 'READY\n') resolve();
+          else reject(Error('fixture_start_failed'));
+        });
+        child.once('close', () => {
+          clearTimeout(timer);
+          reject(Error('fixture_start_failed'));
+        });
+        child.once('error', (error) => {
+          clearTimeout(timer);
+          reject(error);
+        });
+      });
+      const lease = activeMaintenanceLease(f.root, binding);
+      expect(admittedGeneration(f.root, binding)).toBeNull();
+      await expect(queue.capture('state', randomUUID(), async () => {}, 65536)).rejects.toThrow(
+        'backup_queue_unavailable',
+      );
+      f.native.exec('UPDATE state SET paused=1');
+      const beforeNative = f.readNative();
+      expect(child.kill('SIGKILL')).toBe(true);
+      expect(await closed).toBe('SIGKILL');
+      const contents = (directory: string): unknown[] =>
+        fs
+          .readdirSync(directory)
+          .sort()
+          .map((name) => {
+            const file = path.join(directory, name),
+              stat = fs.lstatSync(file);
+            return {
+              name,
+              inode: stat.ino,
+              mode: stat.mode,
+              body: stat.isDirectory() ? contents(file) : fs.readFileSync(file),
+            };
+          });
+      const beforeQueue = contents(area);
+      f.effects.inspect.mockImplementation(async () => queue.inspect('state'));
+      f.effects.verifyCapture.mockImplementation(async (current) => {
+        expect(current).toEqual(lease);
+        const archive = await streamQueuedBackup(queue, 'state', lease.nonce, async () => {});
+        return { status: 'queued', queueOperationId: lease.nonce, snapshotDigest: digest(archive) };
+      });
+      const result = await f.invoke();
+      expect(result).toMatchObject({
+        status: scenario === 'after_pending_rename' ? 'backup_queued' : 'backup_failed',
+        admissionRestored: true,
+        remoteCheckpoint: false,
+      });
+      expect(f.effects.capture).not.toHaveBeenCalled();
+      expect(f.effects.startNative).toHaveBeenCalledOnce();
+      expect(f.effects.verifyCapture).toHaveBeenCalledTimes(scenario === 'after_pending_rename' ? 1 : 0);
+      expect(readTarget(f.root, binding).generation).toBe(lease.generation + 1);
+      expect(f.readNative()).toEqual(beforeNative);
+      expect(contents(area)).toEqual(beforeQueue);
+      expect(await f.invoke()).toEqual(result);
+      expect(f.effects.startNative).toHaveBeenCalledOnce();
+      expect(contents(area)).toEqual(beforeQueue);
+      await expect(checkpointMaintenance({ root: f.root, binding, requestId: randomUUID(), effects: f.effects }))[
+        scenario === 'initial_receipt' ? 'rejects' : 'resolves'
+      ].toMatchObject(
+        scenario === 'initial_receipt'
+          ? { message: 'backup_queue_unavailable' }
+          : { status: 'backup_skipped_pending', interrupted: false },
+      );
+      expect(f.effects.stopNative).not.toHaveBeenCalled();
+    } finally {
+      child.kill('SIGKILL');
+      await closed;
+    }
+  },
+);
