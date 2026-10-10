@@ -3,7 +3,7 @@ import { parseOwnerAdminArguments, selectedOwnerAdminProfile, ownerDatabasePrefl
 import { fixtureRelease } from '../../../contracts/chief-of-staff/release-fixture.js';
 import { DatabasePreflightError } from '../store/preflight.js';
 const request = ['owner-export', '--scope', 'fixture', '--request-id', '01234567-89ab-4def-8123-456789abcdef'];
-it.each(['backup-nas-configure', 'backup-nas-recover-unmount'])(
+it.each(['backup-nas-configure', 'backup-nas-recover-unmount', 'backup-nas-inspect-initialization'])(
   'admits %s through the retained helper with only the selected runtime profile',
   async (command) => {
     const admin = [

@@ -23,8 +23,10 @@ import {
   type BackupNasRecoveryRequest,
 } from './backup-nas-recovery-wire.js';
 import { executeBackupNasRecovery } from './backup-nas-recovery-process.js';
+import { executeBackupNasInitializationInspection } from './backup-nas-inspection-process.js';
+import { backupNasInitializationResource } from './backup-nas-initialization-recovery-scope.js';
 export { backupNasSetupInvocation } from './backup-nas-setup-process.js';
-type NasAdminCommand = 'backup-nas-configure' | 'backup-nas-recover-unmount';
+type NasAdminCommand = 'backup-nas-configure' | 'backup-nas-recover-unmount' | 'backup-nas-inspect-initialization';
 type NasAdminArguments<C extends NasAdminCommand> = {
   command: C;
   scopeId: string;
@@ -50,11 +52,17 @@ export type BackupNasConfigureControls = NasAdminControls<BackupNasSetupRequest>
 export type BackupNasRecoverArguments = NasAdminArguments<'backup-nas-recover-unmount'>;
 export type BackupNasRecoverInput = NasAdminInput<BackupNasRecoverArguments>;
 export type BackupNasRecoverControls = NasAdminControls<BackupNasRecoveryRequest>;
+export type BackupNasInspectArguments = NasAdminArguments<'backup-nas-inspect-initialization'>;
+export type BackupNasInspectInput = NasAdminInput<BackupNasInspectArguments>;
+export type BackupNasInspectControls = NasAdminControls<BackupNasSetupRequest>;
 export function parseBackupNasConfigureArguments(args: string[]): BackupNasConfigureArguments {
   return parseNasAdminArguments('backup-nas-configure', args);
 }
 export function parseBackupNasRecoverArguments(args: string[]): BackupNasRecoverArguments {
   return parseNasAdminArguments('backup-nas-recover-unmount', args);
+}
+export function parseBackupNasInspectArguments(args: string[]): BackupNasInspectArguments {
+  return parseNasAdminArguments('backup-nas-inspect-initialization', args);
 }
 function parseNasAdminArguments<C extends NasAdminCommand>(command: C, args: string[]): NasAdminArguments<C> {
   const values: Record<string, string> = {};
@@ -176,7 +184,7 @@ type NasAdminPolicy<C extends NasAdminCommand, R> = {
     check: () => Promise<void>,
     assertMemory: () => void,
   ): Promise<unknown>;
-  receipt(vault: VaultRootConfiguration): Record<string, unknown>;
+  receipt(vault: VaultRootConfiguration, result: unknown): Record<string, unknown>;
   unavailable: string;
 };
 export function runBackupNasConfigureAdmin(
@@ -214,6 +222,32 @@ export function runBackupNasRecoverAdmin(
       executeBackupNasRecovery(vault, request, check, { assertMemory: memory }),
     receipt: () => ({ contract: 'cos-backup-nas-recover-unmount-result/v1', status: 'closed' }),
     unavailable: 'backup_nas_owner_recovery_unavailable',
+  });
+}
+/** Inspection has no credential or resource effect. Verify its exact root receipt
+ * under the same current protected context, held configuration and native leases.
+ * Returning this tuple does not authorize cleanup or adopt the observed resource.
+ */
+export function runBackupNasInspectAdmin(
+  input: BackupNasInspectInput,
+  controls: BackupNasInspectControls = {},
+): Promise<Record<string, unknown>> {
+  return runProtectedNasAdmin(input, controls, {
+    parse: parseBackupNasInspectArguments,
+    scope: backupNasSetupScope,
+    request: backupNasSetupRequest,
+    requestContract: 'cos-backup-nas-setup-request/v1',
+    openAuthority: openProtectedBackupNasSetupAuthority,
+    invoke: (vault, request, check, memory) =>
+      executeBackupNasInitializationInspection(vault, request, check, { assertMemory: memory }),
+    receipt: (_vault, result) => ({
+      contract: 'cos-backup-nas-initialization-inspection-result/v1',
+      status: 'observed',
+      resource: backupNasInitializationResource(
+        result && typeof result === 'object' ? (result as Record<string, unknown>).resource : undefined,
+      ),
+    }),
+    unavailable: 'backup_nas_owner_inspection_unavailable',
   });
 }
 async function runProtectedNasAdmin<C extends NasAdminCommand, R>(
@@ -343,7 +377,7 @@ async function runProtectedNasAdmin<C extends NasAdminCommand, R>(
     await current();
     guard();
     const expected = {
-      ...policy.receipt(vault),
+      ...policy.receipt(vault, result),
       configurationDigest,
       nasDigest: digest(nas),
       artifactDigest: vault.artifact.digest,

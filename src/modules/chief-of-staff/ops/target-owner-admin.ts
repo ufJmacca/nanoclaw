@@ -12,6 +12,7 @@ const commands = [
   'backup-credentials-install',
   'backup-nas-configure',
   'backup-nas-recover-unmount',
+  'backup-nas-inspect-initialization',
   'database-check',
   'status',
   'operator-status',

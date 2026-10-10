@@ -280,7 +280,7 @@ it('parses backup credential installation metadata without accepting credential 
   ])
     expect(() => parseAdminArguments([...args, ...extra])).toThrow('invalid_admin_arguments');
 });
-it.each(['backup-nas-configure', 'backup-nas-recover-unmount'])(
+it.each(['backup-nas-configure', 'backup-nas-recover-unmount', 'backup-nas-inspect-initialization'])(
   'parses %s metadata only through its fixed administrative command',
   (command) => {
     const args = [
