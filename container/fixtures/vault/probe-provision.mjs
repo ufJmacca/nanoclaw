@@ -35,6 +35,8 @@ let recovery,
   rootPorts;
 let assertRootAuthority;
 async function provisionRoot(identity, cryptoControls) {
+  let enabled = false,
+    normalUnlockActive = false;
   authorityChild = spawn(
     '/usr/bin/setpriv',
     [
@@ -65,7 +67,19 @@ async function provisionRoot(identity, cryptoControls) {
   const grant = first.value;
   assert.equal(grant.scope.operationId, identity.operationId);
   assert.equal(grant.scope.targetDigest, identity.targetDigest);
-  assertRootAuthority = () => checkVaultAuthority(grant, grant.scope, 1000);
+  assertRootAuthority = async () => {
+    await checkVaultAuthority(grant, grant.scope, 1000);
+    // Model BindsTo: normal mount units cannot remain mounted with their unlock service inactive.
+    if (enabled && !normalUnlockActive) {
+      const calendar = '/home/fixture/.config/nanoclaw-cos/state/calendar';
+      if (spawnSync('/usr/bin/findmnt', ['--noheadings', '--mountpoint', calendar]).status === 0)
+        run('/usr/bin/umount', [calendar]);
+      bound = false;
+      if (spawnSync('/usr/bin/findmnt', ['--noheadings', '--mountpoint', '/case/vault']).status === 0)
+        run('/usr/bin/umount', ['/case/vault']);
+      mounted = false;
+    }
+  };
   await assertRootAuthority();
   const input = {
     userId: 1000,
@@ -74,7 +88,6 @@ async function provisionRoot(identity, cryptoControls) {
     calendarRoot: '/home/fixture/.config/nanoclaw-cos/state/calendar',
   };
   const names = Object.keys(vaultUnits(input)).filter((name) => name !== 'owner-service.conf');
-  let enabled = false;
   rootPorts = createVaultRootEffects(
     {
       ...paths,
@@ -101,11 +114,15 @@ async function provisionRoot(identity, cryptoControls) {
               };
             if (args[0] === 'daemon-reload') return { status: 0, output: '' };
             if (args[0] === 'is-active') {
-              const active =
-                fs.existsSync('/dev/mapper/' + mapping) ||
-                spawnSync('/usr/bin/findmnt', ['--noheadings', '--mountpoint', '/case/vault']).status === 0 ||
-                spawnSync('/usr/bin/findmnt', ['--noheadings', '--mountpoint', input.calendarRoot]).status === 0;
-              return { status: active ? 0 : 3, output: names.map(() => (active ? 'active\n' : 'inactive\n')).join('') };
+              const active = [
+                normalUnlockActive,
+                spawnSync('/usr/bin/findmnt', ['--noheadings', '--mountpoint', '/case/vault']).status === 0,
+                spawnSync('/usr/bin/findmnt', ['--noheadings', '--mountpoint', input.calendarRoot]).status === 0,
+              ];
+              return {
+                status: active.every(Boolean) ? 0 : 3,
+                output: active.map((value) => (value ? 'active\n' : 'inactive\n')).join(''),
+              };
             }
             if (args[0] === 'stop') {
               assert.deepEqual(args, ['stop', ...names]);
@@ -116,11 +133,13 @@ async function provisionRoot(identity, cryptoControls) {
                 run('/usr/bin/umount', ['/case/vault']);
               mounted = false;
               crypto.close();
+              normalUnlockActive = false;
               return { status: 0, output: '' };
             }
             if (args[0] === 'start') {
               assert.deepEqual(args, ['start', ...names]);
               crypto.open();
+              normalUnlockActive = true;
               metadata();
               run('/usr/bin/mount', [
                 '-t',
@@ -430,6 +449,10 @@ try {
   const beforeRecovery = recoveryOpens;
   assert.equal((await checkVaultRecovery(identity, rootPorts)).status, 'ready');
   assert.equal(recoveryOpens, beforeRecovery + 1);
+  assert.equal(
+    fs.readdirSync(paths.stateRoot).some((name) => name.startsWith('recovery-')),
+    false,
+  );
   assert.equal(mounts.inspect(), 'matching');
   owner('recovery-before-race');
   console.log(

@@ -203,8 +203,11 @@ Keep the protected maintenance operation held and the bound service drained.
 This fixed command requires the completed provisioning journal, validates the
 recovery key before interrupting storage, stops only the claimed storage units,
 and verifies that both private plaintext underlays are empty. It opens a new
-mapper with the recovery bytes from the pipe, remounts the existing filesystem
-and verifies the claimed encrypted canary. It then closes that mapping, starts
+mapper with the recovery bytes from the pipe and mounts the existing filesystem
+read-only without journal replay at a fresh private root administration mountpoint.
+This avoids the normal mount units' dependency on the inactive boot-key unlock service.
+It verifies the claimed encrypted canary, unmounts and removes its own temporary
+underlay, then closes that mapping and starts
 the fixed normal unlock units and verifies storage and canary again before
 publishing the storage policy and returning a recovery receipt. No volume,
 filesystem, key, credential directory or unit is provisioned by this check.
