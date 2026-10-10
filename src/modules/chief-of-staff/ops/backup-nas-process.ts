@@ -12,13 +12,13 @@ export type BackupNasProcessControls = {
   stopUnit?(unit: string): boolean;
 };
 export function backupNasProcessInvocation(
-  kind: 'setup' | 'recovery',
+  kind: 'setup' | 'recovery' | 'inspection',
   input: VaultRootConfiguration,
   selected: unknown,
 ): { tool: string; unit: string; env: Record<string, string>; args: string[] } {
-  if (kind !== 'setup' && kind !== 'recovery') throw Error('backup_nas_process_unavailable');
+  if (kind !== 'setup' && kind !== 'recovery' && kind !== 'inspection') throw Error('backup_nas_process_unavailable');
   const vault = vaultRootConfiguration(input),
-    request = kind === 'setup' ? backupNasSetupRequest(selected, vault) : backupNasRecoveryRequest(selected, vault),
+    request = kind === 'recovery' ? backupNasRecoveryRequest(selected, vault) : backupNasSetupRequest(selected, vault),
     root = '/opt/nanoclaw-cos/vault/' + vault.artifact.digest;
   const unit = 'nanoclaw-cos-backup-' + kind + '-' + request.scope.operationId + '-' + randomUUID() + '.service',
     env = { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', LANG: 'C', LC_ALL: 'C' };
@@ -48,7 +48,11 @@ export function backupNasProcessInvocation(
       'LC_ALL=C',
       root + '/node',
       root + '/gateway.mjs',
-      kind === 'setup' ? '--backup-configure' : '--backup-recover-unmount',
+      kind === 'setup'
+        ? '--backup-configure'
+        : kind === 'inspection'
+          ? '--backup-inspect-initialization'
+          : '--backup-recover-unmount',
     ],
   };
 }
@@ -57,7 +61,7 @@ export function backupNasProcessInvocation(
  * only their generated unit and owned process group, and cannot acknowledge an operation.
  */
 export async function executeBackupNasProcess(
-  kind: 'setup' | 'recovery',
+  kind: 'setup' | 'recovery' | 'inspection',
   input: VaultRootConfiguration,
   selected: unknown,
   check: () => Promise<void>,
@@ -98,7 +102,8 @@ export async function executeBackupNasProcess(
   try {
     const memory = controls.assertMemory ?? verifyVaultMemory,
       vault = vaultRootConfiguration(input),
-      request = kind === 'setup' ? backupNasSetupRequest(selected, vault) : backupNasRecoveryRequest(selected, vault),
+      request =
+        kind === 'recovery' ? backupNasRecoveryRequest(selected, vault) : backupNasSetupRequest(selected, vault),
       deadline = controls.deadlineMs ?? 95000,
       until = Date.now() + deadline;
     if (!Number.isSafeInteger(deadline) || deadline < 1 || deadline > 95000) throw Error('invalid_setup_deadline');
@@ -136,7 +141,7 @@ export async function executeBackupNasProcess(
     if (!child.stdin || !child.stdout) throw Error('setup_pipe_unavailable');
     child.stdin.on('error', () => {});
     await within(
-      kind === 'setup'
+      kind !== 'recovery'
         ? writeBackupNasSetupRequest(child.stdin, vault, backupNasSetupRequest(request, vault), { assertMemory: guard })
         : writeBackupNasRecoveryRequest(child.stdin, vault, backupNasRecoveryRequest(request, vault), {
             assertMemory: guard,
