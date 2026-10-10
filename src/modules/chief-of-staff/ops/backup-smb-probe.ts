@@ -123,6 +123,7 @@ function parentWitness(): () => void {
 export type BackupSmbProbeControls = {
   assertParent?(): void;
   assertOwner?(owner: BackupSmbOpenRequest['owner']): void;
+  withCredentials?: typeof withVaultSmbCredentials;
   deadlineMs?: number;
 };
 export async function runBackupSmbCredentialProbe(
@@ -162,7 +163,7 @@ export async function runBackupSmbCredentialProbe(
     if (first.done) throw Error('missing_probe_request');
     const request = backupSmbOpenRequest(first.value);
     owner(request.owner);
-    await withVaultSmbCredentials(request.roots, request.expected, async (lease) => {
+    await (controls.withCredentials ?? withVaultSmbCredentials)(request.roots, request.expected, async (lease) => {
       const current = () => {
         guard();
         owner(request.owner);

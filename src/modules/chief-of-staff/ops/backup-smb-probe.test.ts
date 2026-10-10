@@ -71,6 +71,18 @@ const challenge = (action: 'check' | 'release', sequence: number) => ({
   sequence,
   nonce: randomUUID() as string,
 });
+it('admits a source-only native credential fixture through the same validated private request and denies its failure', async () => {
+  const s = fixture();
+  f.credentials.mockRejectedValue(Error('UNEXPECTED_DEFAULT_VAULT'));
+  const withCredentials = vi.fn(async () => {
+    throw Error('PRIVATE_FIXTURE_VAULT_UNAVAILABLE');
+  });
+  const running = runBackupSmbCredentialProbe(s.input, s.output, { ...s.controls, withCredentials });
+  await writeRuntimeTestMessage(s.input, s.open);
+  await expect(running).rejects.toThrow(/^backup_smb_probe_unavailable$/);
+  expect(withCredentials).toHaveBeenCalledWith(s.roots, s.expected, expect.any(Function));
+  expect(f.credentials).not.toHaveBeenCalled();
+});
 it('keeps the live owner credential lease through fresh private challenges and confirmed EOF', async () => {
   const s = fixture();
   const observed: Buffer[] = [];
