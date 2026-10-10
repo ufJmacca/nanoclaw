@@ -7,18 +7,23 @@ import { digest } from '../../../src/modules/chief-of-staff/domain/contracts.js'
 import {
   captureTargetVaultState,
   verifyTargetVaultState,
+  captureScheduledTargetVaultState,
+  verifyScheduledTargetVaultState,
 } from '../../../src/modules/chief-of-staff/ops/backup-state-capture.js';
-import { beginMaintenance, confirmQuiescence } from '../../../src/modules/chief-of-staff/ops/maintenance.js';
+import { beginMaintenance, confirmQuiescence, finishMaintenance, activeMaintenanceLease, admittedGeneration } from '../../../src/modules/chief-of-staff/ops/maintenance.js';
 import { machineFingerprint } from '../../../src/modules/chief-of-staff/ops/target-identity.js';
 import { readPrivate, readTarget, writeAtomic } from '../../../src/modules/chief-of-staff/ops/target-state.js';
 import { initializeTargetActionWitness } from '../../../src/modules/chief-of-staff/actions/host-ownership.js';
 import { acquireHostExecutionLease, releaseHostExecutionLease } from '../../../src/db/host-execution-lease.js';
 import { configureCalendarStorage } from '../../../src/modules/chief-of-staff/calendar/storage-policy.js';
-import { verifyVaultStorage } from '../../../src/modules/chief-of-staff/ops/vault-storage.js';
+import { verifyVaultStorage, withVaultDirectory } from '../../../src/modules/chief-of-staff/ops/vault-storage.js';
 import { verifyVaultMemory } from '../../../src/modules/chief-of-staff/ops/vault-memory.js';
 import { createVaultBackupQueue } from '../../../src/modules/chief-of-staff/ops/backup-queue.js';
 import { openKnowledgeArtifacts } from '../../../src/modules/chief-of-staff/knowledge/config.js';
 import { captureHostFixture } from './backup-capture-host.mjs';
+import { checkpointMaintenance } from '../../../src/modules/chief-of-staff/ops/checkpoint-maintenance.js';
+import { recoveryReleaseForManifest } from '../../../src/modules/chief-of-staff/ops/recovery-manifest.js';
+import { fixtureVaultRelease } from '../../../src/contracts/chief-of-staff/release-fixture.js';
 
 assert.equal(process.platform, 'linux');
 assert.equal(process.arch, 'arm64');
@@ -300,11 +305,102 @@ if (mode === 'unavailable') {
       );
       cases++;
       assert.equal(policy.volume.filesystem, 'ext4');
+      stage('scheduled_checkpoint');
+      // Only this disposable, independently generated fixture slot is removed.
+      // This is fixture setup, never production retirement or a remote ACK.
+      await withVaultDirectory(roots, 'staging', async (directory) => {
+        const full = directory + '/backup-queue/full', stat = fs.lstatSync(full);
+        assert.equal(stat.uid, 1000);
+        assert.equal(stat.dev, fs.statSync('/case/vault').dev);
+        assert.equal(stat.mode & 0o7777, 0o700);
+        fs.rmSync(full, { recursive: true });
+      });
+      await finishMaintenance(stateRoot, binding, maintenance, async () => true);
+      const scheduledManifest = fixtureVaultRelease('G02'),
+        scheduledRecovery = recoveryReleaseForManifest(scheduledManifest),
+        requestId = randomUUID(), scheduledOperationId = 'release-backup-' + requestId,
+        events = [];
+      writeAtomic(stateRoot, 'state.json', { ...readTarget(stateRoot, binding), releaseId: scheduledManifest.releaseId });
+      native.prepare('UPDATE cos_identity_boundaries SET paused=0').run();
+      let healthy = false, captures = 0, starts = 0, scheduledCases = 0, scheduledSnapshot;
+      const checkpointEffects = {
+        verify: async () => scheduledManifest,
+        inspect: async () => queue.inspect('state'),
+        workersIdle: async () => true,
+        stopNative: async () => { events.push('stop'); },
+        nativeStopped: async () => true,
+        databaseCompatible: async () => true,
+        startNative: async () => { starts++; events.push('start'); },
+        healthy: async () => { events.push('health'); return healthy; },
+        capture: async () => {
+          captures++; events.push('capture');
+          scheduledSnapshot = await captureScheduledTargetVaultState(settings, scheduledOperationId, scheduledRecovery);
+          assert.equal(scheduledSnapshot.status, 'queued');
+          // A later trusted owner pause must survive both restart and retry.
+          native.prepare('UPDATE cos_identity_boundaries SET paused=1').run();
+          return scheduledSnapshot;
+        },
+        verifyCapture: async (_lease, expected) => {
+          events.push('readback');
+          return verifyScheduledTargetVaultState(settings, scheduledOperationId, scheduledRecovery, expected);
+        },
+      };
+      const checkpoint = () => checkpointMaintenance({ root: stateRoot, binding, requestId, effects: checkpointEffects });
+      await assert.rejects(checkpoint(), /checkpoint_maintenance_unverified/);
+      const scheduledLease = activeMaintenanceLease(stateRoot, binding);
+      assert.equal(admittedGeneration(stateRoot, binding), null);
+      assert.equal(native.prepare('SELECT paused FROM cos_identity_boundaries').get().paused, 1);
+      assert.deepEqual(events.slice(0, 4), ['stop', 'capture', 'readback', 'start']);
+      scheduledCases++;
+      healthy = true;
+      assert.equal((await checkpoint()).status, 'backup_queued');
+      assert.equal(readTarget(stateRoot, binding).generation, scheduledLease.generation + 1);
+      assert.equal(captures, 1); assert.equal(starts, 1);
+      assert.equal(captureHostFixture.connections, 2);
+      assert.deepEqual(native.prepare('SELECT * FROM ordinary_messages').all(), initial.messages);
+      assert.deepEqual(native.prepare('SELECT * FROM cos_model_budgets').all(), initial.budgets);
+      assert.equal(native.prepare('SELECT paused FROM cos_identity_boundaries').get().paused, 1);
+      await queue.withPending('state', scheduledSnapshot.queueOperationId, async (directory) => {
+        const copy = new Database(directory + '/coordinated/sqlite/0/native.sqlite', { readonly: true });
+        try {
+          assert.equal(copy.prepare('SELECT paused FROM cos_identity_boundaries').get().paused, 0);
+          assert.deepEqual(copy.prepare('SELECT * FROM ordinary_messages').all(), initial.messages);
+          assert.deepEqual(copy.prepare('SELECT * FROM cos_model_budgets').all(), initial.budgets);
+        } finally { copy.close(); }
+      });
+      scheduledCases++;
+      assert.equal((await checkpoint()).status, 'backup_queued');
+      assert.equal(captures, 1); assert.equal(starts, 1);
+      assert.equal(native.prepare('SELECT paused FROM cos_identity_boundaries').get().paused, 1);
+      scheduledCases++;
+      const skipped = await checkpointMaintenance({ root: stateRoot, binding, requestId: randomUUID(), effects: checkpointEffects });
+      assert.equal(skipped.status, 'backup_skipped_pending');
+      assert.equal(skipped.interrupted, false);
+      assert.equal(captures, 1); assert.equal(starts, 1);
+      scheduledCases++;
+      await assert.rejects(captureScheduledTargetVaultState(settings, scheduledOperationId, scheduledRecovery), /target_vault_capture_unavailable/);
+      assert.equal(captureHostFixture.connections, 2);
+      scheduledCases++;
+      const foreignOperationId = 'release-backup-' + randomUUID(),
+        liveWriterLease = beginMaintenance(stateRoot, binding, foreignOperationId, 'deployment');
+      await confirmQuiescence(stateRoot, binding, liveWriterLease, async () => ({ activeCoordinators: 0, activeDatabaseOperations: 0 }));
+      const nativeWriter = acquireHostExecutionLease(native);
+      try {
+        await assert.rejects(captureScheduledTargetVaultState(settings, foreignOperationId, scheduledRecovery), /target_vault_capture_unavailable/);
+        assert.equal(captureHostFixture.connections, 2);
+      } finally { releaseHostExecutionLease(native, nativeWriter); }
+      scheduledCases++;
+      writeAtomic(stateRoot, 'full-capture-fixture.json', { queueOperationId: scheduledSnapshot.queueOperationId });
+      const rootProof = fs.lstatSync('/case/vault/journals/.vault-canary');
+      for (const key of ['dev','ino','uid','gid','mode','size','nlink','mtimeMs','ctimeMs'])
+        assert.equal(rootProof[key], initial.rootCanary[key]);
       stage('complete');
       console.log(
         JSON.stringify({
           encryptedFullCapture: 'passed',
           cases,
+          scheduledCheckpoint: { status: 'passed', cases: scheduledCases, laterOwnerPausePreserved: true,
+            actualNativeSqliteAndMaintenance: true, restartHealthBeforeAdmission: true, installedServiceManager: false },
           encryptedVolume: 'actual_LUKS2_ext4',
           defaultMemoryAndStorageGuards: true,
           actualNativeOwnerGuards: true,
