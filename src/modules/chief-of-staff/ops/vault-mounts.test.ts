@@ -6,6 +6,10 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { createVaultMounts, type VaultMountControls } from './vault-mounts.js';
 import { VAULT_DIRECTORIES } from './vault-storage.js';
 const temporary: string[] = [];
+function differentDevice(current: string) {
+  const [major, minor] = current.split(':');
+  return `${major}:${BigInt(minor) + 1n}`;
+}
 afterEach(() => {
   vi.restoreAllMocks();
   for (const root of temporary.splice(0)) {
@@ -194,7 +198,7 @@ it.each(['writable', 'journal-replay', 'wrong-device', 'wrong-uuid', 'wrong-inod
         const [file, proof] = [...f.mounted.entries()][0];
         if (reason === 'writable') proof.options = 'rw,norecovery,nosuid,nodev,noexec';
         if (reason === 'journal-replay') proof.options = 'ro,nosuid,nodev,noexec';
-        if (reason === 'wrong-device') proof['maj:min'] = '8:1';
+        if (reason === 'wrong-device') proof['maj:min'] = differentDevice(proof['maj:min']);
         if (reason === 'wrong-uuid') proof.uuid = randomUUID();
         if (reason === 'wrong-inode') {
           fs.renameSync(f.paths.vaultRoot + '/journals', f.paths.vaultRoot + '/journals-original');
@@ -327,7 +331,7 @@ it.each(['uuid', 'filesystem', 'fsroot', 'device', 'options', 'claim-loss'])(
     if (reason === 'uuid') entry.uuid = randomUUID();
     if (reason === 'filesystem') entry.fstype = 'xfs';
     if (reason === 'fsroot') entry.fsroot = '/foreign';
-    if (reason === 'device') entry['maj:min'] = '8:1';
+    if (reason === 'device') entry['maj:min'] = differentDevice(entry['maj:min']);
     if (reason === 'options') entry.options = 'rw,nosuid,nodev';
     if (reason === 'claim-loss') fs.unlinkSync(f.paths.stateRoot + '/mounts.json');
     expect(f.mounts.inspect()).toBe('conflict');
