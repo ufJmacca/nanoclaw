@@ -225,6 +225,88 @@ export async function capturePrivateHistory(
     throw Error('private_history_capture_unavailable');
   }
 }
+/** Recreate recorded empty directories in an admitted isolated recovery root, then run the v1
+ * hash verifier. This does not import a context, change credentials or restore execution authority. */
+export async function restoreCapturedHistoryDirectories(source: string, receiptRoot: string, profile: Profile) {
+  try {
+    if (
+      !['conversation', 'mission'].includes(profile) ||
+      !path.isAbsolute(source) ||
+      path.resolve(source) !== source ||
+      receiptRoot === source ||
+      receiptRoot.startsWith(source + '/') ||
+      source.startsWith(receiptRoot + '/')
+    )
+      throw Error('history_restore_not_isolated');
+    directory(receiptRoot, profile, true);
+    const snapshot = path.join(receiptRoot, profile + '-backup');
+    directory(snapshot, profile, true);
+    const receiptFile = path.join(snapshot, 'receipt.json');
+    const receipt = readPrivate<Receipt & { directories: string[] }>(receiptFile, 1024 ** 2);
+    if (
+      !receipt ||
+      receipt.version !== 1 ||
+      receipt.source !== source ||
+      typeof receipt.present !== 'boolean' ||
+      !Number.isSafeInteger(receipt.files) ||
+      receipt.files < 0 ||
+      receipt.files > 4096 ||
+      !Number.isSafeInteger(receipt.bytes) ||
+      receipt.bytes < 0 ||
+      receipt.bytes > BACKUP_LIMITS.staging ||
+      !/^[a-f0-9]{64}$/.test(receipt.sha256) ||
+      !Array.isArray(receipt.directories) ||
+      receipt.directories.length > 4096 ||
+      new Set(receipt.directories).size !== receipt.directories.length ||
+      (!receipt.present && (receipt.directories.length || receipt.files || receipt.bytes))
+    )
+      throw Error('invalid_history_receipt');
+    const names = new Set(receipt.directories);
+    for (const name of names) {
+      if (
+        typeof name !== 'string' ||
+        name.length > 170 ||
+        name.split('/').length > 6 ||
+        !name.split('/').every((part) => /^(?:[A-Za-z0-9]|\.cos-)[A-Za-z0-9_.-]*$/.test(part))
+      )
+        throw Error('invalid_history_directory');
+      const parts = name.split('/');
+      if (profile === 'conversation') {
+        if (!generation.test(parts[0])) throw Error('invalid_history_directory');
+      } else if (parts[0] === 'mission-purges') {
+        if (parts.length !== 1) throw Error('invalid_history_directory');
+      } else if (
+        parts[0] !== 'missions' ||
+        (parts.length >= 2 && !generation.test(parts[1])) ||
+        (parts.length >= 3 && !['context', 'provider'].includes(parts[2]))
+      )
+        throw Error('invalid_history_directory');
+      for (let index = 1; index < parts.length; index++)
+        if (!names.has(parts.slice(0, index).join('/'))) throw Error('incomplete_history_directories');
+    }
+    const history = path.join(snapshot, 'history');
+    if (!fs.lstatSync(history, { throwIfNoEntry: false })) fs.mkdirSync(history, { mode: 0o700 });
+    directory(history, profile, true);
+    for (const name of [...names].sort()) {
+      const file = path.join(history, name);
+      directory(path.dirname(file), profile, true);
+      if (!fs.lstatSync(file, { throwIfNoEntry: false })) fs.mkdirSync(file, { mode: 0o700 });
+      directory(file, profile, true);
+      syncDirectory(file);
+    }
+    syncDirectory(history);
+    const verified = await verifyPrivateHistory(source, receiptRoot, profile);
+    if (
+      JSON.stringify(verified) !== JSON.stringify(receipt) ||
+      JSON.stringify(readPrivate(receiptFile, 1024 ** 2)) !== JSON.stringify(receipt)
+    )
+      throw Error('history_restore_changed');
+    return verified;
+  } catch {
+    // eslint-disable-next-line preserve-caught-error -- Restored private history and filesystem diagnostics stay in the recovery process.
+    throw Error('private_history_restore_unavailable');
+  }
+}
 export async function verifyPrivateHistory(source: string, receiptRoot: string, profile: Profile): Promise<Receipt> {
   directory(receiptRoot, profile, true);
   const snapshot = path.join(receiptRoot, profile + '-backup');

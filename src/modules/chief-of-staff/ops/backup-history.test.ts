@@ -2,7 +2,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, expect, it } from 'vitest';
-import { capturePrivateHistory, verifyPrivateHistory } from './private-history-backup.js';
+import {
+  capturePrivateHistory,
+  verifyPrivateHistory,
+  restoreCapturedHistoryDirectories,
+} from './private-history-backup.js';
 import { BackupQueue } from './backup-queue.js';
 
 const roots: string[] = [],
@@ -48,9 +52,6 @@ it.each(['conversation', 'mission'] as const)(
     expect(capture.directories.some((name) => name.endsWith('/empty'))).toBe(true);
     const recovered = path.join(f.root, 'isolated-recovery');
     fs.mkdirSync(recovered, { mode: 0o700 });
-    const history = path.join(recovered, profile + '-backup/history');
-    fs.mkdirSync(history, { recursive: true, mode: 0o700 });
-    for (const name of capture.directories) fs.mkdirSync(path.join(history, name), { recursive: true, mode: 0o700 });
     await f.queue.withPending('state', operationId, async (directory, receipt) => {
       expect(
         receipt.files.some(
@@ -65,6 +66,7 @@ it.each(['conversation', 'mission'] as const)(
         fs.chmodSync(destination, 0o600);
       }
     });
+    expect(await restoreCapturedHistoryDirectories(f.source, recovered, profile)).toEqual(capture);
     expect(await verifyPrivateHistory(f.source, recovered, profile)).toEqual(capture);
     expect(fs.readFileSync(path.join(f.base, 'auth.json'), 'utf8')).toBe('SYNTHETIC_ACCESS_SECRET');
   },
@@ -85,6 +87,38 @@ it('denies over-budget history before sending any bytes to the queue sink', asyn
     ),
   ).rejects.toThrow(/^private_history_capture_unavailable$/);
   expect(called).toBe(false);
+});
+it('denies path traversal in restored directory metadata before creating any history directory', async () => {
+  const f = fixture('conversation'),
+    recovered = path.join(f.root, 'isolated-invalid');
+  const snapshot = path.join(recovered, 'conversation-backup');
+  fs.mkdirSync(snapshot, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(
+    path.join(snapshot, 'receipt.json'),
+    JSON.stringify({
+      version: 1,
+      source: f.source,
+      present: true,
+      files: 0,
+      bytes: 0,
+      sha256: 'a'.repeat(64),
+      directories: ['../escape'],
+    }),
+    { mode: 0o600 },
+  );
+  await expect(restoreCapturedHistoryDirectories(f.source, recovered, 'conversation')).rejects.toThrow(
+    /^private_history_restore_unavailable$/,
+  );
+  expect(fs.readdirSync(snapshot)).toEqual(['receipt.json']);
+  expect(fs.existsSync(path.join(recovered, 'escape'))).toBe(false);
+});
+it('denies recovery directory reconstruction in the live source tree', async () => {
+  const f = fixture('mission'),
+    before = fs.readdirSync(f.source);
+  await expect(restoreCapturedHistoryDirectories(f.source, f.source, 'mission')).rejects.toThrow(
+    /^private_history_restore_unavailable$/,
+  );
+  expect(fs.readdirSync(f.source)).toEqual(before);
 });
 it('detects history changed during streaming and never publishes a successful receipt', async () => {
   const f = fixture('conversation');
