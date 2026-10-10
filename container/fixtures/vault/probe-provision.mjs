@@ -485,6 +485,11 @@ try {
     const backup = JSON.parse(run(process.execPath, ['/probe/probe-backup-credentials.mjs', 'root']));
     assert.equal(backup.backupVaultCredentialHandoff, 'passed');
     console.log(JSON.stringify(backup));
+    const journal = JSON.parse(run('/usr/bin/setpriv', [
+      '--clear-groups', '--reuid=1000', '--regid=1000', process.execPath, '/probe/probe-backup-journal.mjs',
+    ]));
+    assert.equal(journal.encryptedCredentialJournal, 'passed');
+    console.log(JSON.stringify(journal));
   }
   if (process.env.NANOCLAW_COS_FULL_CAPTURE_FIXTURE === '1') {
     const full = JSON.parse(
