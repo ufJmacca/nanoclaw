@@ -6,10 +6,89 @@ import {
   type ReleaseManifest,
 } from './release-manifest.js';
 import { INITIAL_CHECKSUM, MIGRATIONS } from '../store/migrations.js';
+import { digest } from '../domain/contracts.js';
+import type { VaultRootArtifactSeal } from './vault-root-artifact.js';
 const sha = 'a'.repeat(40),
   tree = 'b'.repeat(40),
   image = 'sha256:' + 'c'.repeat(64),
   agent = 'sha256:' + 'd'.repeat(64);
+function vaultManifest() {
+  const seal: VaultRootArtifactSeal = {
+    contract: 'cos-vault-root-artifact/v1',
+    sourceCommit: sha,
+    sourceTree: tree,
+    runtime: { name: 'node', version: '22.23.2', architecture: 'arm64' },
+    files: {
+      'gateway.mjs': { bytes: 100, sha256: '4'.repeat(64) },
+      node: { bytes: 122159120, sha256: '5'.repeat(64) },
+    },
+  };
+  const checks: ReleaseManifest['checks'] = Object.fromEntries(
+    ['vault_helper', 'vault_kernel', 'vault_units', 'vault_wire', 'protected_state'].map((name) => [
+      name,
+      {
+        status: 'passed' as const,
+        at: '2026-10-08T00:00:00Z',
+        sourceCommit: sha,
+        imageIds: name === 'protected_state' ? [image, agent] : [image],
+      },
+    ]),
+  );
+  return {
+    ...manifest(),
+    slice: 'G01',
+    postgres: { minimum: 18, maximum: 18 },
+    sqlite: { minimum: 22, maximum: 22 },
+    migrations: MIGRATIONS.map(({ version, checksum }) => ({ version, checksum })),
+    previousReleaseIds: ['release-reviewed-s11'],
+    vaultArtifact: { digest: digest(seal), seal },
+    checks: { ...manifest().checks, ...checks },
+  };
+}
+it('G01 requires its sealed helper and additional immutable vault gates while preserving schema18', () => {
+  const value = vaultManifest();
+  expect(validateReleaseManifest(value)).toEqual(value);
+  expect(supportsReleaseSchema(validateReleaseManifest(value), 18, 22)).toBe(true);
+  expect(supportsReleaseSchema(validateReleaseManifest(value), 17, 22)).toBe(false);
+});
+it.each(['vault_helper', 'vault_kernel', 'vault_units', 'vault_wire', 'protected_state'])(
+  'G01 refuses a missing, failed or foreign-image %s gate',
+  (name) => {
+    const value = vaultManifest();
+    value.checks[name].status = 'failed';
+    expect(() => validateReleaseManifest(value)).toThrow('release_not_transferable');
+    value.checks[name].status = 'passed';
+    value.checks[name].imageIds = [agent];
+    expect(() => validateReleaseManifest(value)).toThrow('release_not_transferable');
+    delete value.checks[name];
+    expect(() => validateReleaseManifest(value)).toThrow('release_not_transferable');
+  },
+);
+it.each([
+  'no-seal',
+  'digest',
+  'source',
+  'tree',
+  'runtime',
+  'extra-file',
+  'predecessor',
+  'old-checks-only',
+  'native-schema',
+])('G01 refuses %s without reopening original programme release authority', (reason) => {
+  const value = vaultManifest();
+  if (reason === 'no-seal') Object.assign(value, { vaultArtifact: undefined });
+  if (reason === 'digest') value.vaultArtifact.digest = '0'.repeat(64);
+  if (reason === 'source') value.vaultArtifact.seal.sourceCommit = '0'.repeat(40);
+  if (reason === 'tree') value.vaultArtifact.seal.sourceTree = '0'.repeat(40);
+  if (reason === 'runtime') value.vaultArtifact.seal.runtime.version = '24.0.0';
+  if (reason === 'extra-file')
+    Object.assign(value.vaultArtifact.seal.files, { 'private.env': { bytes: 10, sha256: '0'.repeat(64) } });
+  if (reason === 'predecessor') value.previousReleaseIds = [];
+  if (reason === 'old-checks-only') value.checks = manifest().checks;
+  if (reason === 'native-schema') value.sqlite = { minimum: 21, maximum: 22 };
+  if (!['no-seal', 'digest'].includes(reason)) value.vaultArtifact.digest = digest(value.vaultArtifact.seal);
+  expect(() => validateReleaseManifest(value)).toThrow('release_not_transferable');
+});
 it('S10 binds the review migration without manufacturing schema16 rollback compatibility', () => {
   const current = {
     ...manifest(),

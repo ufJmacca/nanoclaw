@@ -7,12 +7,14 @@ import { verifyCalendarStorage, type CalendarStorageRoots, type CalendarStorageP
 import type { StorageInspection } from './storage-protection.js';
 import { checkedClient, validCalendarTokens } from './oauth-core.js';
 import { object } from './normalization.js';
+import { verifyVaultMemory } from '../ops/vault-memory.js';
 export type CalendarBackupOptions = {
   roots: CalendarStorageRoots;
   operationId: string;
   receiptRoot: string;
   check(): Promise<void>;
   inspect?: StorageInspection;
+  memory?: () => void;
 };
 export type CalendarBackupReceipt = {
   contract: 'cos-calendar-backup/v1';
@@ -169,6 +171,8 @@ async function protectedStorage<T>(
     assertPinned(): void;
   }) => Promise<T>,
 ): Promise<T> {
+  const memory = o.memory ?? verifyVaultMemory;
+  memory();
   const policy = verifyCalendarStorage(o.roots, o.inspect);
   const paths = [path.join(o.roots.targetRoot, 'calendar'), policy.backupRoot];
   const handles: number[] = [];
@@ -176,6 +180,7 @@ async function protectedStorage<T>(
     for (const file of paths)
       handles.push(fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW));
     const assertPinned = () => {
+      memory();
       for (let i = 0; i < paths.length; i++) {
         const current = directory(paths[i]),
           pinned = fs.fstatSync(handles[i]);

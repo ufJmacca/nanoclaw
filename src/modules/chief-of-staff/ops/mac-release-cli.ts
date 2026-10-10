@@ -13,13 +13,15 @@ import { readPrivate, writeAtomic } from './target-state.js';
 import { deploymentSettings } from './deployment-settings.js';
 import { digest } from '../domain/contracts.js';
 import { MIGRATIONS, SCHEMA_VERSION } from '../store/migrations.js';
-import { REQUIRED_RELEASE_CHECKS, type ReleaseManifest } from './release-manifest.js';
+import { requiredReleaseChecks, type ReleaseManifest } from './release-manifest.js';
+import { vaultRootArtifactSeal } from './vault-root-artifact.js';
+import { verifyVaultWireEvidence, verifyVaultFixtureImage } from './vault-fixture-evidence.js';
 import {
   completeLocalRelease,
   selectTestEnvironment,
   TEST_ENVIRONMENT_KEYS,
-  checkpointLocalExecution,
-  readLocalExecution,
+  checkpointReleaseExecution,
+  readReleaseExecution,
 } from './mac-release.js';
 import { imageConfigurations } from './image-archive.js';
 import { artifactHash, verifyReleaseBundle } from './release-artifacts.js';
@@ -48,7 +50,7 @@ function checkedPlan(id: string): { root: string; plan: Plan } {
     plan = readPrivate<Plan>(path.join(root, 'plan.json'));
   const current = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
   const dirty = execFileSync('git', ['status', '--porcelain'], { encoding: 'utf8' }).trim();
-  if (plan.slice !== readLocalExecution(path.resolve('.cos-plan-state')).active_slice)
+  if (plan.slice !== readReleaseExecution(path.resolve('.cos-plan-state'), plan.slice).active_slice)
     throw new Error('active_slice_required');
   if (plan.source.commit !== current || dirty) throw new Error('clean_candidate_required');
   const target = deploymentSettings(readPrivate(path.resolve('.cos-plan-state/deployment-target.json')));
@@ -72,13 +74,14 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
   if (operation === 'init' && values.length === 3) {
     const [commit, fetchRef, slice] = values;
     // Only the current implemented slice may create a new release; historical manifests remain readable.
-    if (slice !== 'S11' || Number(SCHEMA_VERSION) !== 18) throw new Error('current_release_slice_required');
+    if ((slice !== 'S11' && slice !== 'G01') || Number(SCHEMA_VERSION) !== 18)
+      throw new Error('current_release_slice_required');
     if (!/^[a-f0-9]{40}$/.test(commit) || !/^refs\/heads\/[a-zA-Z0-9_./-]+$/.test(fetchRef) || fetchRef.includes('..'))
       throw new Error('invalid_candidate_source');
     const root = releaseRoot(id);
     if (fs.existsSync(path.join(root, 'plan.json'))) throw new Error('release_already_exists');
     const target = deploymentSettings(readPrivate(path.resolve('.cos-plan-state/deployment-target.json')));
-    if (readLocalExecution(path.resolve('.cos-plan-state'), true).active_slice !== slice)
+    if (readReleaseExecution(path.resolve('.cos-plan-state'), slice, true).active_slice !== slice)
       throw new Error('active_slice_required');
     const metadata = await prepareBuildContext(process.cwd(), commit, path.join(root, 'context'));
     const plan: Plan = {
@@ -107,7 +110,7 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
     };
     writeAtomic(root, 'plan.json', plan);
     checkedPlan(id);
-    checkpointLocalExecution(path.resolve('.cos-plan-state'), {
+    checkpointReleaseExecution(path.resolve('.cos-plan-state'), plan.slice, {
       head_sha: commit,
       release_build_id: id,
       release_status: 'local_checks_pending',
@@ -116,6 +119,57 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
     return;
   }
   const { root, plan } = checkedPlan(id);
+  if (operation === 'vault-fixture' && !values.length) {
+    if (plan.slice !== 'G01' || !plan.vaultArtifact) throw Error('vault_release_required');
+    const host = plan.images.find((image) => image.role === 'host');
+    if (!host) throw Error('image_identity_required');
+    const image = verifyVaultFixtureImage(
+      readPrivate(path.join(root, 'vault-fixture-inspect.json')),
+      plan.source.commit,
+      host.id,
+    );
+    writeAtomic(root, 'vault-fixture.json', {
+      image,
+      hostImage: host.id,
+      source: plan.source,
+      artifactDigest: plan.vaultArtifact.digest,
+    });
+    return image;
+  }
+  if (operation === 'vault-wire' && !values.length) {
+    if (plan.slice !== 'G01') throw Error('vault_release_required');
+    const file = path.join(root, 'vault_kernel.log'),
+      stat = fs.lstatSync(file);
+    if (
+      !stat.isFile() ||
+      stat.nlink !== 1 ||
+      stat.uid !== process.getuid?.() ||
+      (stat.mode & 0o777) !== 0o600 ||
+      stat.size > 262144
+    )
+      throw Error('vault_wire_evidence_unavailable');
+    const records = fs
+      .readFileSync(file, 'utf8')
+      .split('\n')
+      .filter((line) => line.startsWith('{'))
+      .map((line) => JSON.parse(line));
+    const fixture = readPrivate<{ image: string }>(path.join(root, 'vault-fixture.json'), 1024);
+    verifyVaultWireEvidence(records, plan.source.commit, fixture.image);
+    return;
+  }
+  if (operation === 'vault-artifact' && !values.length) {
+    if (plan.slice !== 'G01') throw Error('vault_release_required');
+    const seal = vaultRootArtifactSeal(readPrivate(path.join(root, 'vault-artifact.json'), 4096));
+    if (
+      seal.sourceCommit !== plan.source.commit ||
+      seal.sourceTree !== plan.source.tree ||
+      seal.runtime.version !== '22.23.2'
+    )
+      throw Error('vault_artifact_source_mismatch');
+    plan.vaultArtifact = { digest: digest(seal), seal };
+    writeAtomic(root, 'plan.json', plan);
+    return;
+  }
   if (operation === 'target' && !values.length) {
     const settings = deploymentSettings(readPrivate(path.resolve('.cos-plan-state/deployment-target.json')));
     const state = validateBuildTargetObservation(settings, readPrivate(path.join(root, 'target-observation.json')));
@@ -258,21 +312,25 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
   }
   if (operation === 'record' && values.length === 2) {
     const [name, status] = values;
-    if (
-      !REQUIRED_RELEASE_CHECKS.includes(name as (typeof REQUIRED_RELEASE_CHECKS)[number]) ||
-      !['0', '1'].includes(status)
-    )
+    if (!requiredReleaseChecks(plan.slice).includes(name) || !['0', '1'].includes(status))
       throw new Error('invalid_check_result');
-    if (name.includes('image') && plan.images.length !== BUILD_TARGETS.length)
+    if (
+      (name.includes('image') || name.startsWith('vault_') || name === 'protected_state') &&
+      plan.images.length !== BUILD_TARGETS.length
+    )
       throw new Error('image_identity_required');
     plan.checks[name] = {
       status: status === '0' ? 'passed' : 'failed',
       at: new Date().toISOString(),
       sourceCommit: plan.source.commit,
-      imageIds: name.includes('image') ? plan.images.map((image) => image.id) : [],
+      imageIds: name.startsWith('vault_')
+        ? plan.images.filter((image) => image.role === 'host').map((image) => image.id)
+        : name.includes('image') || name === 'protected_state'
+          ? plan.images.map((image) => image.id)
+          : [],
     };
     writeAtomic(root, 'plan.json', plan);
-    checkpointLocalExecution(path.resolve('.cos-plan-state'), { release_local_checks: plan.checks });
+    checkpointReleaseExecution(path.resolve('.cos-plan-state'), plan.slice, { release_local_checks: plan.checks });
     return;
   }
   if (operation === 'finish' && !values.length) {
@@ -313,7 +371,7 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
       bootstrapHash,
       at: new Date().toISOString(),
     });
-    checkpointLocalExecution(path.resolve('.cos-plan-state'), {
+    checkpointReleaseExecution(path.resolve('.cos-plan-state'), plan.slice, {
       release_status: 'transferable',
       local_test_status: 'passed',
       target_image_test_status: 'passed_on_mac_linux_arm64',

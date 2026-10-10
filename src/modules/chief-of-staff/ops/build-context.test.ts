@@ -28,6 +28,12 @@ function fixture() {
     'container/agent-runner/fixtures/unadmitted.ts': 'UNADMITTED_FIXTURE_CANARY',
     'container/skills/fixture/SKILL.md': 'fixture skill',
     'container/CLAUDE.md': 'fixture instructions',
+    'container/fixtures/vault/Dockerfile.release': 'immutable vault build',
+    'container/fixtures/vault/probe-provision.mjs': 'synthetic kernel probe',
+    'container/fixtures/vault/unadmitted.mjs': 'UNADMITTED_VAULT_CANARY',
+    'scripts/cos-vault-fixture.sh': 'host-only private pipe orchestration',
+    'scripts/cos-vault-keychain.swift': 'trusted keychain code, never key bytes',
+    'scripts/unadmitted.sh': 'UNADMITTED_SCRIPT_CANARY',
     '.env': 'PRIVATE_ENV_CANARY',
     'data/v2.db': 'PRIVATE_STATE_CANARY',
     'container/agent-runner/node_modules/secret': 'DEPENDENCY_CANARY',
@@ -86,6 +92,26 @@ describe('S01-REL03 pinned source-only build context', () => {
     const after = await prepareBuildContext(f.repo, f.git('rev-parse', 'HEAD'), path.join(f.root, 'second'));
     expect(after.workerAssetsDigest).not.toBe(before.workerAssetsDigest);
   });
+});
+it('exports only the admitted vault drivers from the same source and binds their bytes into build identity', async () => {
+  const f = fixture(),
+    first = path.join(f.root, 'vault-first');
+  const before = await prepareBuildContext(f.repo, f.commit, first);
+  for (const name of [
+    'container/fixtures/vault/Dockerfile.release',
+    'container/fixtures/vault/probe-provision.mjs',
+    'scripts/cos-vault-fixture.sh',
+    'scripts/cos-vault-keychain.swift',
+  ])
+    expect(fs.existsSync(path.join(first, name))).toBe(true);
+  for (const name of ['container/fixtures/vault/unadmitted.mjs', 'scripts/unadmitted.sh'])
+    expect(fs.existsSync(path.join(first, name))).toBe(false);
+  fs.writeFileSync(path.join(f.repo, 'scripts/cos-vault-fixture.sh'), 'changed host orchestration');
+  f.git('add', '.');
+  f.git('commit', '-qm', 'changed vault driver');
+  const after = await prepareBuildContext(f.repo, f.git('rev-parse', 'HEAD'), path.join(f.root, 'vault-second'));
+  expect(after.buildInputDigest).not.toBe(before.buildInputDigest);
+  expect(after.workerAssetsDigest).toBe(before.workerAssetsDigest);
 });
 describe('S01-REL02 Mac-local builder', () => {
   const good = {

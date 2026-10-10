@@ -5,6 +5,10 @@ import { readPrivate } from './target-state.js';
 import { withDeploymentLock } from './deployment-lock.js';
 import { validateReleaseManifest, type ReleaseManifest } from './release-manifest.js';
 const commands = [
+  'vault-status',
+  'vault-provision',
+  'vault-install',
+  'vault-recovery-check',
   'database-check',
   'status',
   'operator-status',
@@ -39,7 +43,7 @@ export function parseOwnerAdminArguments(args: string[]): {
     !canonical(flags[1]) ||
     (flags.length === 4 && !canonical(flags[3])) ||
     (admin[0] === 'operations-restore-check') !== (flags.length === 4) ||
-    (admin[0] === 'database-check' && admin.length !== 1)
+    (['database-check', 'vault-status'].includes(admin[0]) && admin.length !== 1)
   )
     return invalid();
   return { settings: flags[1], databaseEnvironment: flags[3], admin };
@@ -71,7 +75,7 @@ export async function selectedOwnerAdminProfile(
   profiles: { runtime(): NodeJS.ProcessEnv; test(): NodeJS.ProcessEnv },
 ): Promise<NodeJS.ProcessEnv> {
   if (!commands.includes(command)) throw new Error('invalid_owner_admin_arguments');
-  return command === 'operator-control'
+  return ['operator-control', 'vault-status'].includes(command)
     ? {}
     : command === 'operations-restore-check'
       ? profiles.test()
@@ -98,9 +102,9 @@ export async function targetOwnerAdmin(args: string[]): Promise<Record<string, u
     readTargetTestEnvironment,
     checkedTargetDatabase,
   } = await import('./target-host.js');
-  const { verifyProtectionHelper } = await import('./programme-protection.js');
+  const { verifyRetainedAdminHelper } = await import('./retained-admin-helper.js');
   verifyTargetPaths(settings, 0);
-  const release = await verifyProtectionHelper(
+  const release = await verifyRetainedAdminHelper(
     settings,
     targetBinding(settings),
     path.join(path.dirname(fileURLToPath(import.meta.url)), 'target-helper.js'),
@@ -125,11 +129,18 @@ export async function targetOwnerAdmin(args: string[]): Promise<Record<string, u
         }
       });
     if (parsed.command === 'status') return adminStatus(env);
+    if (parsed.command === 'vault-status') {
+      const { vaultStatusCommand } = await import('./vault-admin.js');
+      return vaultStatusCommand(env);
+    }
     const { contextAdminCommand } = await import('./context-admin.js');
-    return contextAdminCommand(parsed, env);
+    return contextAdminCommand(parsed, env, undefined, {
+      release,
+      payloadRoot: path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../..'),
+    });
   };
   // Inspection and durable owner denials remain available while another operation owns its longer lease.
-  return ['operator-control', 'operator-status', 'status', 'database-check'].includes(parsed.command)
+  return ['operator-control', 'operator-status', 'status', 'database-check', 'vault-status'].includes(parsed.command)
     ? run()
     : withDeploymentLock(settings.stateRoot + '.operation.lock', run);
 }

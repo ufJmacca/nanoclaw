@@ -1,4 +1,4 @@
-/** Bundled into one tested bootstrap.mjs on the Mac. Uses only the Pi's existing Node, Git and Docker. */
+/** Bundled into one tested bootstrap.mjs on the Mac. Uses the Pi's existing Node, Git, Docker and GNU tar. */
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
@@ -13,6 +13,7 @@ import { payloadDigest } from './payload.js';
 import { machineFingerprint } from './host-fingerprint.js';
 import { withDeploymentLock } from './deployment-lock.js';
 import { syncPinnedSource } from './source-sync.js';
+import { extractCarrierPayload } from './carrier-extraction.js';
 
 export type BootstrapDocker = (args: string[]) => Promise<string>;
 function privateDirectory(directory: string): void {
@@ -42,6 +43,7 @@ export async function prepareTargetArtifacts(
   manifestFile: string,
   archiveFile: string,
   docker: BootstrapDocker,
+  extract: (id: string, destination: string) => Promise<void> = extractCarrierPayload,
 ) {
   const manifest = validateReleaseManifest(input);
   if (digest(validateReleaseManifest(readPrivate(manifestFile))) !== digest(manifest))
@@ -122,7 +124,7 @@ export async function prepareTargetArtifacts(
       actual.Config?.Labels?.['nanoclaw.extract-release'] !== manifest.releaseId
     )
       throw new Error('carrier_identity_conflict');
-    await docker(['cp', actual.Id + ':/release/.', partial]);
+    await extract(actual.Id, partial);
     if ((await payloadDigest(partial)) !== manifest.hostPayloadDigest) throw new Error('release_payload_mismatch');
     fs.renameSync(partial, payload);
     await docker(['rm', actual.Id]);

@@ -1,0 +1,113 @@
+import fs from 'node:fs';
+import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { vaultUnits } from '/code/modules/chief-of-staff/ops/vault-units.js';
+import { createVaultUnitInstaller } from '/code/modules/chief-of-staff/ops/vault-unit-install.js';
+import { verifyVaultMemory } from '/code/modules/chief-of-staff/ops/vault-memory.js';
+import { randomUUID } from 'node:crypto';
+try {
+  assert.equal(process.getuid(), 0);
+  assert.equal(process.env.NANOCLAW_COS_VAULT_FIXTURE, '1');
+  const root = '/unit-fixture';
+  assert.equal(fs.existsSync(root), false);
+  fs.mkdirSync(root, { mode: 0o711 });
+  fs.chmodSync(root, 0o711);
+  const paths = { stateRoot: root + '/control', systemUnits: root + '/system', ownerUnits: root + '/owner' };
+  for (const directory of Object.values(paths)) fs.mkdirSync(directory, { mode: 0o700 });
+  fs.chmodSync(paths.ownerUnits, 0o755);
+  const input = {
+    userId: 1000,
+    service: 'nanoclaw-fixture.service',
+    calendarRoot: '/home/fixture/.config/nanoclaw-cos/state/calendar',
+  };
+  const units = vaultUnits(input),
+    names = Object.keys(units).filter((name) => name !== 'owner-service.conf');
+  const privateUnits = root + '/private-owner-units',
+    privateDropin = privateUnits + '/' + input.service + '.d',
+    releaseFile = privateDropin + '/90-cos-release.conf';
+  fs.mkdirSync(privateUnits, { mode: 0o700 });
+  fs.mkdirSync(privateDropin, { mode: 0o700 });
+  fs.writeFileSync(releaseFile, '[Service]\nLimitCORE=0\nMemorySwapMax=0\n', { mode: 0o600 });
+  for (const file of [privateUnits, privateDropin, releaseFile]) fs.chownSync(file, 1000, 1000);
+  const releaseBefore = fs.statSync(releaseFile),
+    privateDirectoryBefore = fs.statSync(privateDropin);
+  const identity = {
+    operationId: randomUUID(),
+    targetDigest: 'f'.repeat(64),
+    recoveryReference: randomUUID(),
+    luksUuid: randomUUID(),
+    filesystemUuid: randomUUID(),
+  };
+  let enabled = false;
+  const installer = createVaultUnitInstaller(paths, input, identity, {
+    assertAuthority: async () => {},
+    assertMemory: verifyVaultMemory,
+    run(tool, args) {
+      // This fixture has no systemd manager. File effects and compilation are real; activation remains a target gate.
+      if (tool === '/usr/bin/systemctl') {
+        if (args[0] === 'is-enabled')
+          return { status: enabled ? 0 : 1, output: names.map(() => (enabled ? 'enabled\n' : 'disabled\n')).join('') };
+        if (args[0] === 'daemon-reload') return { status: 0, output: '' };
+        assert.deepEqual(args, ['enable', '--no-reload', ...names]);
+        const wants = paths.systemUnits + '/multi-user.target.wants';
+        fs.mkdirSync(wants, { mode: 0o755 });
+        for (const name of names) fs.symlinkSync('../' + name, wants + '/' + name);
+        enabled = true;
+        return { status: 0, output: '' };
+      }
+      assert.equal(tool, '/usr/bin/systemd-analyze');
+      const result = spawnSync(tool, args, {
+        cwd: '/',
+        env: { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', LANG: 'C', LC_ALL: 'C' },
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+        timeout: 15000,
+        maxBuffer: 65536,
+      });
+      if (result.error || result.signal || result.status !== 0) {
+        // These files contain only synthetic paths and fixed OS commands; no credentials or live configuration.
+        process.stderr.write(result.stderr ?? '');
+        throw Error('unit fixture unavailable');
+      }
+      return { status: result.status, output: result.stdout ?? '' };
+    },
+  });
+  await installer.install();
+  assert.equal(installer.inspect(), 'matching');
+  const inode = fs.statSync(paths.systemUnits + '/nanoclaw-cos-vault.service').ino;
+  await installer.install();
+  assert.equal(fs.statSync(paths.systemUnits + '/nanoclaw-cos-vault.service').ino, inode);
+  for (const name of names) {
+    const file = paths.systemUnits + '/' + name,
+      stat = fs.statSync(file);
+    assert.equal(stat.uid, 0);
+    assert.equal(stat.mode & 0o777, 0o644);
+    assert.equal(fs.readFileSync(file, 'utf8'), units[name]);
+  }
+  const ownerRead = spawnSync(
+    '/usr/bin/setpriv',
+    [
+      '--reuid=1000',
+      '--regid=1000',
+      '--clear-groups',
+      '/usr/bin/cat',
+      paths.ownerUnits + '/' + input.service + '.d/50-cos-vault.conf',
+    ],
+    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000, maxBuffer: 4096 },
+  );
+  assert.equal(ownerRead.status, 0);
+  assert.equal(ownerRead.stdout, units['owner-service.conf']);
+  assert.equal(fs.statSync(releaseFile).ino, releaseBefore.ino);
+  assert.equal(fs.statSync(releaseFile).uid, 1000);
+  assert.equal(fs.statSync(releaseFile).mode & 0o777, 0o600);
+  assert.equal(fs.statSync(privateDropin).ino, privateDirectoryBefore.ino);
+  assert.equal(fs.statSync(privateDropin).mode & 0o777, 0o700);
+  assert.deepEqual(fs.readdirSync(privateDropin), ['90-cos-release.conf']);
+  assert.equal(fs.readFileSync(releaseFile, 'utf8'), '[Service]\nLimitCORE=0\nMemorySwapMax=0\n');
+  console.log(
+    '{"systemdUnitVerification":"passed","scope":"static_generated_units_and_owned_files","activation":"not_exercised"}',
+  );
+} catch {
+  console.error('{"code":"vault_unit_fixture_unavailable"}');
+  process.exitCode = 1;
+}

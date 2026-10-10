@@ -1,9 +1,34 @@
 import Database from 'better-sqlite3';
 import { expect, it } from 'vitest';
 import { assertNativeReleaseCompatibility } from './native-release-compatibility.js';
-import { fixtureRelease } from '../../../contracts/chief-of-staff/release-fixture.js';
+import { fixtureRelease, fixtureVaultRelease } from '../../../contracts/chief-of-staff/release-fixture.js';
 import { validateReleaseManifest } from './release-manifest.js';
 import { fenceLegacyCoordinators } from './legacy-rollback.js';
+
+it.each([
+  'cos_operator_denials',
+  'cos_mission_boundaries',
+  'cos_mission_allocations',
+  'cos_mission_stop_attempts',
+  'cos_mission_stop_families',
+])('verified G01 preserves permanent S11 %s without admitting a legacy downgrade', (table) => {
+  const db = new Database(':memory:');
+  try {
+    db.exec(
+      `CREATE TABLE ${table}(opaque TEXT); INSERT INTO ${table} VALUES('retained'); CREATE TABLE messages(body TEXT); INSERT INTO messages VALUES('KEEP')`,
+    );
+    const before = db.serialize();
+    const candidate = validateReleaseManifest(fixtureVaultRelease());
+    expect(() => assertNativeReleaseCompatibility(db, candidate)).not.toThrow();
+    const denial =
+      table === 'cos_operator_denials' ? 'operator_denial_release_required' : 'specialist_release_required';
+    expect(() => assertNativeReleaseCompatibility(db, fixtureRelease('S04'))).toThrow(denial);
+    expect(() => fenceLegacyCoordinators(db)).toThrow(denial);
+    expect(db.serialize()).toEqual(before);
+  } finally {
+    db.close();
+  }
+});
 
 it.each([null, 'S01', 'S05', 'S09', 'S10'] as const)(
   'retained owner denials forbid downgrade to %s without changing native state',

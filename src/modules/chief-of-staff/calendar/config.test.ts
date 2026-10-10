@@ -1,12 +1,16 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, expect, it } from 'vitest';
+import { afterEach, expect, it, vi } from 'vitest';
+import { randomUUID } from 'node:crypto';
+import { verifyVaultMemory } from '../ops/vault-memory.js';
+import { GOOGLE_EVENT_READ_SCOPE } from './reader.js';
 import { calendarSettings, openCalendarCredentials as openConfiguredCalendar, openCalendarFences } from './config.js';
 import { CalendarAccessFences } from './access-fences.js';
 import { CalendarCredentialOwner } from './credentials.js';
 import { configureCalendarStorage } from './storage-policy.js';
 import type { StorageInspection } from './storage-protection.js';
+vi.mock('../ops/vault-memory.js', () => ({ verifyVaultMemory: vi.fn() }));
 const roots: string[] = [];
 const fixtureRoots = (root: string) => ({
   targetRoot: root,
@@ -66,7 +70,32 @@ function configure(root: string, protectedStorage = true) {
   return calendar;
 }
 afterEach(() => {
+  vi.mocked(verifyVaultMemory).mockReset();
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
+});
+it('denies opening and later token writes when actual process memory protection is lost', async () => {
+  const root = setup(),
+    calendar = configure(root),
+    binding = randomUUID(),
+    reference = randomUUID();
+  const unavailable = () => {
+    throw Error('PRIVATE_MEMORY_CANARY');
+  };
+  vi.mocked(verifyVaultMemory).mockImplementation(unavailable);
+  expect(() => openCalendarCredentials(root, [])).toThrow('calendar_configuration_unavailable');
+  vi.mocked(verifyVaultMemory).mockReset();
+  const owner = openCalendarCredentials(root, []);
+  vi.mocked(verifyVaultMemory).mockImplementation(unavailable);
+  await expect(
+    owner.credentials.install('scope', binding, reference, {
+      accessToken: 'SYNTHETIC_TOKEN',
+      refreshToken: 'SYNTHETIC_REFRESH',
+      expiresAt: Date.now() + 3600000,
+      refreshExpiresAt: null,
+      scopes: [GOOGLE_EVENT_READ_SCOPE],
+    }),
+  ).rejects.toThrow('calendar_credentials_unavailable');
+  expect(fs.existsSync(path.join(calendar, 'credentials', reference + '.json'))).toBe(false);
 });
 it('refuses private credential files when no verified storage policy exists', () => {
   const root = setup();

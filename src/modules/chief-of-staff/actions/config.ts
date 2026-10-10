@@ -8,6 +8,7 @@ import { verifyCalendarStorage, type CalendarStorageRoots } from '../calendar/st
 import type { StorageInspection } from '../calendar/storage-protection.js';
 import type { GoogleOAuthClient, OAuthTransport } from '../calendar/oauth.js';
 import { CalendarWriterCredentialOwner } from './credentials.js';
+import { verifyVaultMemory } from '../ops/vault-memory.js';
 
 export function actionSettings(env: NodeJS.ProcessEnv): { enabled: boolean } {
   const enabled = env.COS_ACTIONS_ENABLED ?? 'false';
@@ -67,8 +68,14 @@ export function openWriterCredentials(
   roots: CalendarStorageRoots,
   inspect?: StorageInspection,
   transport: OAuthTransport = {},
+  memory: () => void = verifyVaultMemory,
 ) {
   try {
+    memory();
+    const guard = () => {
+      memory();
+      verifyCalendarStorage(roots, inspect);
+    };
     const pinned = protectedOwner(roots, inspect),
       calendar = path.join(roots.targetRoot, 'calendar'),
       fences = new CalendarAccessFences(path.join(calendar, 'writer-access-denials')),
@@ -77,9 +84,11 @@ export function openWriterCredentials(
         pinned.client,
         fences,
         transport,
+        guard,
       );
     const verify = () => {
       try {
+        memory();
         if (protectedOwner(roots, inspect).pin !== pinned.pin) throw new Error('action_storage_changed');
       } catch {
         // eslint-disable-next-line preserve-caught-error -- Host credential paths and inspection diagnostics are private.

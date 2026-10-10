@@ -18,6 +18,14 @@ import type { ActionDependencies } from './actions/store.js';
 import type { ActionAuthorityResolver } from './actions/authority.js';
 import { actionSettings } from './actions/config.js';
 import { openActionHost } from './actions/host.js';
+async function optionalGoogleHost<T>(open: () => T | Promise<T>, unavailable: string): Promise<T | undefined> {
+  try {
+    return await open();
+  } catch (error) {
+    if (!(error instanceof Error) || error.message !== unavailable) throw error;
+    return undefined;
+  }
+}
 
 /** Runtime credentials only. Startup validates the schema; it never migrates or opens source access implicitly. */
 export async function connectCosHostStore(
@@ -44,9 +52,14 @@ export async function connectCosHostStore(
     await check.end();
   }
   const actions =
-    actionDependencies ?? (actionAuthority ? await openActionHost(env, roots, admitted, actionAuthority) : undefined);
+    actionDependencies ??
+    (actionAuthority
+      ? await optionalGoogleHost(() => openActionHost(env, roots, admitted, actionAuthority), 'action_host_unavailable')
+      : undefined);
   const artifacts = openKnowledgeArtifacts(roots.targetRoot, [roots.installationRoot, roots.dataRoot]);
-  const calendarOwner = calendarConfig.enabled ? openCalendarCredentials(roots) : undefined;
+  const calendarOwner = calendarConfig.enabled
+    ? await optionalGoogleHost(() => openCalendarCredentials(roots), 'calendar_configuration_unavailable')
+    : undefined;
   const database = BoundedDatabase.fromConfig(await externalDatabaseConfig(env, 'runtime'), admitted);
   const calendarStore = calendarOwner ? new CalendarStore(database, {}, new CalendarEvidence(artifacts)) : undefined;
   const calendar = calendarOwner

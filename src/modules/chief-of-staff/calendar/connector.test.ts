@@ -73,6 +73,21 @@ function setup(provider: 'google' | 'fixture' = 'google') {
   return { connector, options, store, binding, credentials, fences, fetch, fixture, fixtureReader };
 }
 describe('S03 trusted calendar connector', () => {
+  it('closes cached-source disclosure when protected storage or process controls become unavailable', () => {
+    const f = setup();
+    let protectedStorage = true;
+    const connector = new CalendarConnector({
+      ...f.options,
+      verifyStorage: () => {
+        if (!protectedStorage) throw Error('calendar_configuration_unavailable');
+      },
+    });
+    expect(() => connector.assertOpen('scope', 'binding')).not.toThrow();
+    protectedStorage = false;
+    expect(() => connector.assertOpen('scope', 'binding')).toThrow('calendar_configuration_unavailable');
+    expect(f.credentials.token).not.toHaveBeenCalled();
+    expect(f.fetch).not.toHaveBeenCalled();
+  });
   it('S04 an expired refresh performs no binding, credential or network work', async () => {
     const s = setup();
     expect(

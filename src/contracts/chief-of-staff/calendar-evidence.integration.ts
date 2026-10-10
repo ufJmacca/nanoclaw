@@ -201,6 +201,7 @@ test('S03 operator flow: explicit loopback link, selected sync, stable retry and
   const connect = async () => new PriorityStore(BoundedDatabase.fromConfig(await fixtureDatabaseConfig()));
   const dependencies = {
     inspect,
+    memory: () => {}, // Offline synthetic storage fixture; actual kernel memory checks have their own gate.
     fetch: transport,
     connect,
     artifacts: () => artifacts,

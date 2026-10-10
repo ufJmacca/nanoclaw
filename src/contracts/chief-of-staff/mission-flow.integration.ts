@@ -17,6 +17,7 @@ import { digest } from '../../modules/chief-of-staff/domain/contracts.js';
 import { RESEARCH_TEMPLATE } from '../../modules/chief-of-staff/missions/work-order.js';
 import { MISSION_DEFAULT_LIMITS } from '../../modules/chief-of-staff/contracts/mission-protocol.js';
 import { HostFixture } from './host-fixture-client.js';
+import { pumpMissionFixture } from './mission-fixture-pump.js';
 import { McpFixture } from './mcp-fixture.js';
 
 test(
@@ -181,24 +182,7 @@ test(
         await host!.request('sync-acks');
         return ids;
       };
-      const pump = async () => {
-        try {
-          return await host!.request('pump');
-        } catch (error) {
-          // Docker may still be removing an exact stopped orphan; observe again under the flow deadline.
-          if (error instanceof Error && error.message === 'fixture_host_command_failed:mission_recovery_pending')
-            return false;
-          throw new Error(
-            'mission_flow_failed:' +
-              (error instanceof Error ? error.message : 'unknown') +
-              ':' +
-              JSON.stringify(await host!.request('mission-diagnostics')),
-            {
-              cause: error,
-            },
-          );
-        }
-      };
+      const pump = () => pumpMissionFixture(host!);
       const wait = async (check: () => Promise<boolean>) => {
         const end = Date.now() + 15000;
         while (Date.now() < end) {

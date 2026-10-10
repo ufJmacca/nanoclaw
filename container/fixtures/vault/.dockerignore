@@ -1,0 +1,10 @@
+*
+!Dockerfile
+!probe.sh
+!probe.mjs
+!probe-authority.mjs
+!probe-provision.mjs
+!verify-units.mjs
+!probe-wire.mjs
+!probe-config.mjs
+!probe-artifact.mjs

@@ -137,3 +137,16 @@ it('registers S10 strategic review and owner-decision flows with every predecess
     'strategy-flow.integration',
   ]);
 });
+it('G01 regresses the completed programme using only the admitted separate test profile', () => {
+  const args = parseFixtureArguments(['--slice', 'G01', '--db-profile', 'test']);
+  expect(fixtureFiles(args)).toEqual(fixtureFiles({ slice: 'S11', demo: false }));
+  expect(
+    fixtureFiles(parseFixtureArguments(['--slice', 'G01', '--db-profile', 'test', '--demo', '--fixture'])),
+  ).toEqual(fixtureFiles({ slice: 'S11', demo: true }));
+  expect(() => parseFixtureArguments(['--slice', 'G01', '--db-profile', 'runtime-disposable'])).toThrow(
+    'explicit_supported_slice_and_profile_required',
+  );
+  expect(() => parseFixtureArguments(['--slice', 'G02', '--db-profile', 'test'])).toThrow(
+    'explicit_supported_slice_and_profile_required',
+  );
+});

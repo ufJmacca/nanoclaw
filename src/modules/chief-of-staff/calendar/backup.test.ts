@@ -8,6 +8,8 @@ import { digest } from '../domain/contracts.js';
 import { GOOGLE_CALENDAR_METADATA_SCOPE, GOOGLE_OWNED_EVENT_WRITE_SCOPE } from '../actions/writer.js';
 import { configureCalendarStorage } from './storage-policy.js';
 import type { StorageInspection } from './storage-protection.js';
+import { verifyVaultMemory } from '../ops/vault-memory.js';
+vi.mock('../ops/vault-memory.js', () => ({ verifyVaultMemory: vi.fn() }));
 const bases: string[] = [];
 function setup(configured = true) {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-calendar-backup-'));
@@ -51,8 +53,18 @@ function setup(configured = true) {
   return { base, roots, backupRoot, source, options };
 }
 afterEach(() => {
+  vi.mocked(verifyVaultMemory).mockReset();
   vi.restoreAllMocks();
   for (const base of bases.splice(0)) fs.rmSync(base, { recursive: true, force: true });
+});
+it('denies credential capture before staging when process memory protection is absent', async () => {
+  const f = setup();
+  vi.mocked(verifyVaultMemory).mockImplementation(() => {
+    throw Error('PRIVATE_MEMORY_CANARY');
+  });
+  await expect(backupCalendarState(f.options)).rejects.toThrow('calendar_backup_unavailable');
+  expect(fs.readdirSync(f.backupRoot)).toEqual(['.cos-calendar-backups']);
+  expect(fs.readdirSync(f.options.receiptRoot)).toEqual([]);
 });
 it.each(['ready', 'missing-vault', 'reader-vault', 'foreign-binding', 'broad-scope', 'uncertain'])(
   'S09 verifies the exact backed-up writer grant: %s',

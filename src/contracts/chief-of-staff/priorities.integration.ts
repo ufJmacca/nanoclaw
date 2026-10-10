@@ -131,6 +131,44 @@ test('S01 trusted scope setup is idempotent and refuses identity replacement', a
   }
 });
 
+test('G01 trusted upgrades preserve a matching paused scope and refuse revoked or conflicting bindings', async () => {
+  const id = scope + '-paused-binding';
+  const binding = {
+    scopeId: id,
+    ownerId: 'fixture-owner',
+    instanceId: 'fixture-instance',
+    channelId: id,
+    agentGroupId: id,
+    messagingGroupId: id,
+    sessionId: id,
+    botId: 'fixture-bot',
+    provider: 'codex' as const,
+  };
+  const snapshot = async () =>
+    (await pool.query('SELECT to_jsonb(s) AS scope FROM cos.scopes s WHERE id=$1', [id])).rows;
+  try {
+    assert.equal((await store.bindScope(binding)).status, 'ok');
+    await pool.query("UPDATE cos.scopes SET status='paused' WHERE id=$1", [id]);
+    const paused = await snapshot();
+    assert.equal((await store.bindScope(binding)).status, 'ok');
+    assert.equal((await store.bindScope(binding)).status, 'ok');
+    for (const key of ['ownerId', 'instanceId', 'channelId', 'agentGroupId']) {
+      assert.equal((await store.bindScope({ ...binding, [key]: 'foreign' })).status, 'conflict');
+    }
+    assert.deepEqual(await snapshot(), paused);
+    assert.equal(
+      (await store.propose({ ...context, scopeId: id, agentGroupId: id }, randomUUID(), change)).status,
+      'denied',
+    );
+    await pool.query("UPDATE cos.scopes SET status='revoked' WHERE id=$1", [id]);
+    const revoked = await snapshot();
+    assert.equal((await store.bindScope(binding)).status, 'conflict');
+    assert.deepEqual(await snapshot(), revoked);
+  } finally {
+    await pool.query('DELETE FROM cos.scopes WHERE id=$1', [id]);
+  }
+});
+
 test('S01-T03 repeated request returns its original proposal; changed payload conflicts', async () => {
   const request = randomUUID();
   const first = await store.propose(context, request, { ...change, title: 'Pilot Alpha', kind: 'project' });

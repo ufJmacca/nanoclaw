@@ -59,7 +59,12 @@ export async function operationsMaintenance(input: {
   if (!uuid.test(requestId) || !['hold', 'release'].includes(phase)) unverified();
   const manifest = validateReleaseManifest(await effects.verify()),
     state = readTarget(root, binding);
-  if (manifest.slice !== 'S11' || state.releaseId !== manifest.releaseId) unverified();
+  if (
+    !['S11', 'G01'].includes(manifest.slice) ||
+    state.releaseId !== manifest.releaseId ||
+    (manifest.slice === 'G01' && state.lifecycle !== 'protected')
+  )
+    unverified();
   const receipts = path.join(root, 'operations-maintenance');
   directory(receipts);
   const file = path.join(receipts, requestId + '.json'),
@@ -107,7 +112,8 @@ export async function operationsMaintenance(input: {
   const current = async () => {
     if (
       digest(validateReleaseManifest(await effects.verify())) !== record.manifestDigest ||
-      readTarget(root, binding).releaseId !== record.releaseId
+      readTarget(root, binding).releaseId !== record.releaseId ||
+      (manifest.slice === 'G01' && readTarget(root, binding).lifecycle !== 'protected')
     )
       unverified();
   };

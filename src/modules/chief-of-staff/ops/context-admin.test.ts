@@ -45,6 +45,12 @@ vi.mock('./mission-admin.js', async () => ({
   runMissionAdmin: vi.fn(),
 }));
 import { runMissionAdmin } from './mission-admin.js';
+vi.mock('./vault-owner-admin.js', async () => ({
+  ...(await vi.importActual('./vault-owner-admin.js')),
+  runVaultRecoveryAdmin: vi.fn(),
+}));
+import { runVaultRecoveryAdmin } from './vault-owner-admin.js';
+import { assertHostExecutionLease } from '../../../db/host-execution-lease.js';
 import { connectCosHostStore } from '../host-store.js';
 import type { PriorityStore } from '../store/priorities.js';
 import { initDb, closeDb } from '../../../db/connection.js';
@@ -76,6 +82,31 @@ const facts = vi.fn(async () => ({
 const quiescent = vi.fn(async () => true);
 const dependencies = { target: () => readTarget(state, targetBinding), quiescent, facts };
 const env = { COS_ENABLED: 'true', COS_TARGET_STATE_DIR: state };
+it('recovery requires the actual maintenance and native host leases, private owner membership and quiescence', async () => {
+  const args = { command: 'vault-recovery-check' as const, scopeId: 'fixture' };
+  vi.mocked(runVaultRecoveryAdmin).mockImplementation(async (input) => {
+    expect(input.root).toBe(state);
+    expect(input.maintenance.owner).toBe('fixture-operation');
+    assertHostExecutionLease(input.native, input.hostLease);
+    await input.check();
+    return { status: 'ready', contract: 'cos-vault-root-recovery-check-result/v1' };
+  });
+  await expect(contextAdminCommand(args, { ...env, COS_ENABLED: 'false' }, dependencies)).resolves.toMatchObject({
+    status: 'ready',
+  });
+  expect(vi.mocked(runVaultRecoveryAdmin)).toHaveBeenCalledOnce();
+  facts.mockResolvedValueOnce({
+    id: 'private',
+    type: 'P',
+    delete_at: 0,
+    members: ['bot', 'foreign'],
+    activeSubscription: true,
+  });
+  await expect(contextAdminCommand(args, env, dependencies)).rejects.toThrow('private_owner_membership_required');
+  quiescent.mockResolvedValueOnce(false);
+  await expect(contextAdminCommand(args, env, dependencies)).rejects.toThrow('target_not_quiescent');
+  expect(vi.mocked(runVaultRecoveryAdmin)).toHaveBeenCalledOnce();
+});
 it.each(['operations-backup', 'operations-restore-check'] as const)(
   'S11-PG02 %s remains owner-accessible while model execution is disabled',
   async (command) => {

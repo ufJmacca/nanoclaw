@@ -4,8 +4,9 @@ import {
   validateBuildTargetObservation,
   targetPreflightCommand,
   validateDeliveryReceipt,
+  validateReleaseTargetObservation,
 } from './mac-deploy.js';
-import { fixtureRelease } from '../../../contracts/chief-of-staff/release-fixture.js';
+import { fixtureRelease, fixtureVaultRelease } from '../../../contracts/chief-of-staff/release-fixture.js';
 import type { DeploymentSettings } from './deployment-settings.js';
 const settings: DeploymentSettings = {
   version: 1,
@@ -34,6 +35,29 @@ const observation = {
   cwd: settings.installationRoot,
   state: null,
 };
+it('G01 requires the existing protected installed target before transfer', () => {
+  const manifest = fixtureVaultRelease(),
+    state = {
+      version: 1,
+      binding: {
+        hostFingerprint: settings.hostFingerprint,
+        databaseFingerprint: settings.databaseFingerprint,
+        service: settings.service,
+        installationRoot: settings.installationRoot,
+        dataRoot: settings.dataRoot,
+      },
+      lifecycle: 'protected',
+      generation: 4,
+      maintenance: false,
+      releaseId: 'release-reviewed-s11',
+    };
+  expect(validateReleaseTargetObservation(settings, manifest, { ...observation, state })).toEqual(state);
+  for (const current of [null, { ...state, lifecycle: 'implementation_disposable' }, { ...state, releaseId: null }])
+    expect(() => validateReleaseTargetObservation(settings, manifest, { ...observation, state: current })).toThrow(
+      'protected_extension_target_required',
+    );
+  expect(validateReleaseTargetObservation(settings, fixtureRelease('S11'), observation)).toBeNull();
+});
 it('requires the bound Pi, installed service directory and native ARM64 Docker before staging', () => {
   expect(validateTargetObservation(settings, observation)).toBeNull();
   for (const patch of [

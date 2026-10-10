@@ -11,6 +11,7 @@ import { openCalendarCredentials } from '../calendar/config.js';
 import { configureCalendarStorage } from '../calendar/storage-policy.js';
 import type { StorageInspection } from '../calendar/storage-protection.js';
 import { GOOGLE_CALENDAR_METADATA_SCOPE, GOOGLE_OWNED_EVENT_WRITE_SCOPE } from './writer.js';
+vi.mock('../ops/vault-memory.js', () => ({ verifyVaultMemory: vi.fn() }));
 const temporary: string[] = [];
 const inspect: StorageInspection = (command, args) =>
   JSON.stringify(

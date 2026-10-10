@@ -9,7 +9,7 @@ afterEach(() => {
   for (const root of temporary.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
 
-function invoke(recovery: boolean, failCommand = 0) {
+function invoke(recovery: boolean, failCommand = 0, slice = 'S11') {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-deploy-wrapper-'));
   temporary.push(root);
   const bin = path.join(root, 'bin');
@@ -47,7 +47,8 @@ if [[ "$1" == compose ]]; then echo fixture; exit 0; fi
 operation=$9; shift 9
 case "$operation" in
  alias) echo fixture-pi ;;
- verify|target-check|checkpoint|protected-release-check) exit 0 ;;
+ verify|checkpoint|protected-release-check) exit 0 ;;
+ target-check) [[ "$COS_TEST_FAIL" != 5 ]] || exit 25 ;;
  protected-release-command) [[ "$COS_TEST_FAIL" != 4 ]] || echo finish-protected-release ;;
  preflight-command) echo inspect ;;
  stage-command) echo stage ;;
@@ -59,6 +60,7 @@ case "$operation" in
    tree) printf '%040d\\n' 2 ;;
    fetchRef) echo refs/heads/cos/fixture ;;
    stage) echo /fixture/stage ;;
+   slice) echo "$COS_TEST_SLICE" ;;
    *) exit 31 ;;
   esac ;;
  deploy-command)
@@ -92,6 +94,7 @@ esac
         COS_TEST_ARGS: path.join(root, 'args'),
         COS_TEST_SSH_LOG: path.join(root, 'ssh.log'),
         COS_TEST_FAIL: String(failCommand),
+        COS_TEST_SLICE: slice,
       },
     },
   );
@@ -104,6 +107,17 @@ esac
       : [],
   };
 }
+it('G01 uses the already protected target without rerunning original programme closure', () => {
+  const { result, remote } = invoke(false, 0, 'G01');
+  expect(result.status, result.stderr).toBe(0);
+  expect(remote[0]).toBe('inspect');
+  expect(remote).not.toContain('protection');
+});
+it('G01 stops before staging when its protected target observation is denied', () => {
+  const { result, remote } = invoke(false, 5, 'G01');
+  expect(result.status).not.toBe(0);
+  expect(remote).toEqual(['inspect']);
+});
 
 it('runs ordinary delivery with no recovery argument', () => {
   const { result, id, args, remote } = invoke(false);

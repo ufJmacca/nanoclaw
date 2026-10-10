@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { verifyVaultMemory } from './vault-memory.js';
 import path from 'node:path';
 import type { CosBinding } from '../../../cos-boundary.js';
 import { digest } from '../domain/contracts.js';
@@ -108,6 +109,7 @@ type Options = {
 type Dependencies = {
   connect?: typeof connectCosHostStore;
   inspect?: StorageInspection;
+  memory?: () => void;
   fetch?: OAuthTransport['fetch'];
   display?(authorizationUrl: string): void | Promise<void>;
 };
@@ -166,6 +168,7 @@ async function configure(
       receiptRoot: directory(journal.root, phase),
       check: o.check,
       inspect: d.inspect,
+      memory: d.memory,
     });
   await backup('before');
   await o.check();
@@ -181,7 +184,7 @@ async function configure(
       }
     }
   }
-  openCalendarCredentials(roots, d.inspect);
+  openCalendarCredentials(roots, d.inspect, d.memory);
   await backup('after');
   await o.check();
   if (digest(setupState(roots, clientAt(roots), d.inspect).expected) !== digest(expected))
@@ -192,6 +195,7 @@ async function configure(
 /** Explicit owner account action. Requires existing maintenance/private membership and leaves the coordinator paused. */
 export async function runCalendarAccountAdmin(o: Options, d: Dependencies = {}): Promise<Record<string, unknown>> {
   const { args, binding, roots } = o;
+  (d.memory ?? verifyVaultMemory)();
   if (args.scopeId !== binding.scopeId) throw new Error('context_binding_changed');
   await o.check();
   if (args.command === 'calendar-setup') return configure({ ...o, args }, d);
@@ -207,7 +211,7 @@ export async function runCalendarAccountAdmin(o: Options, d: Dependencies = {}):
   const client = clientAt(roots),
     setup = setupState(roots, client, d.inspect);
   if (setup.existing?.phase !== 'ready') throw new Error('calendar_setup_required');
-  const owner = openCalendarCredentials(roots, d.inspect);
+  const owner = openCalendarCredentials(roots, d.inspect, d.memory);
   owner.fences.assertOpen(binding.scopeId, args.bindingId);
   // One binding identity owns one authorization attempt/selection forever. Reconnect uses a new identity.
   const journal = operation(roots, args.bindingId, {
@@ -224,6 +228,7 @@ export async function runCalendarAccountAdmin(o: Options, d: Dependencies = {}):
       receiptRoot: directory(journal.root, phase),
       check: o.check,
       inspect: d.inspect,
+      memory: d.memory,
     });
   const admitted = () => {
     o.assertAuthority();
