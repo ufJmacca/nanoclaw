@@ -155,6 +155,7 @@ export class BackupQueue {
     create: boolean,
     locked: boolean,
     operation: (root: string, device: number) => Promise<T>,
+    absent?: () => Promise<T>,
   ): Promise<T> {
     try {
       if (!['state', 'credentials'].includes(kind)) throw Error('unknown_kind');
@@ -165,6 +166,7 @@ export class BackupQueue {
         try {
           const location = path.join(pinned(areaFd), 'backup-queue');
           if (!fs.lstatSync(location, { throwIfNoEntry: false })) {
+            if (!create && absent) return await absent();
             if (!create) throw Error('queue_not_initialized');
             fs.mkdirSync(location, { mode: 0o700 });
             rootFd = privateDirectory(location, device);
@@ -399,6 +401,16 @@ export class BackupQueue {
   }
   async pending(kind: BackupKind): Promise<BackupQueueReceipt[]> {
     return this.area(kind, false, false, async (root, device) => this.receipts(root, kind, device));
+  }
+  /** Preflight preserves an uninitialized queue and refuses unsafe or unavailable storage. */
+  async inspect(kind: BackupKind): Promise<BackupQueueReceipt[]> {
+    return this.area(
+      kind,
+      false,
+      false,
+      async (root, device) => this.receipts(root, kind, device),
+      async () => [],
+    );
   }
   async withPending<T>(
     kind: BackupKind,

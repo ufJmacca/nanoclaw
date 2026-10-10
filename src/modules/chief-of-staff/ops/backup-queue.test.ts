@@ -203,3 +203,27 @@ it('refuses an unexplained queue-directory collision without adopting or deletin
   await expect(f.queue.capture('state', op, async () => {}, 65536)).rejects.toThrow(/^backup_queue_unavailable$/);
   expect(fs.readFileSync(path.join(existing, 'foreign'), 'utf8')).toBe('preserve');
 });
+
+it('inspects an absent queue without creating plaintext or vault queue state', async () => {
+  const f = fixture();
+  expect(await f.queue.inspect('state')).toEqual([]);
+  expect(fs.readdirSync(f.root + '/state')).toEqual([]);
+  f.close();
+  await expect(f.queue.inspect('state')).rejects.toThrow('backup_queue_unavailable');
+});
+it('inspection keeps occupied and failed full slots visible without changing them', async () => {
+  const f = fixture();
+  await expect(
+    f.queue.capture(
+      'state',
+      op,
+      async () => {
+        throw Error('synthetic_failure');
+      },
+      65536,
+    ),
+  ).rejects.toThrow('backup_queue_unavailable');
+  const before = fs.readFileSync(f.root + '/state/backup-queue/full/receipt.json');
+  expect(await f.queue.inspect('state')).toMatchObject([{ operationId: op, state: 'failed' }]);
+  expect(fs.readFileSync(f.root + '/state/backup-queue/full/receipt.json')).toEqual(before);
+});

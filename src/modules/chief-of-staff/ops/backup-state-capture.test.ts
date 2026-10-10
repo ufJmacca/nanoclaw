@@ -12,7 +12,7 @@ import { targetBinding } from './target-host.js';
 import { initializeTargetActionWitness } from '../actions/host-ownership.js';
 import { acquireHostExecutionLease, releaseHostExecutionLease } from '../../../db/host-execution-lease.js';
 import type { DeploymentSettings } from './deployment-settings.js';
-import { captureTargetVaultState } from './backup-state-capture.js';
+import { captureTargetVaultState, verifyTargetVaultState } from './backup-state-capture.js';
 import type { StorageInspection } from '../calendar/storage-protection.js';
 const f = vi.hoisted(() => ({
   observe: vi.fn(),
@@ -281,10 +281,32 @@ it('connects the real coordinated/native/operations/history producers to the act
     checkpoint = JSON.parse(fs.readFileSync(data + '/coordinated/manifest.json', 'utf8')),
     operations = JSON.parse(fs.readFileSync(data + '/' + s.operationId + '.operations.json', 'utf8')),
     header = JSON.parse(fs.readFileSync(data + '/state-capture.json', 'utf8'));
+  if (result.status !== 'queued') throw Error('fixture_checkpoint_not_queued');
   expect(checkpoint.sqlite).toHaveLength(1);
   expect(operations.coordinatedDigest).toBe(digest(checkpoint));
   expect(header.operations.manifestDigest).toBe(digest(operations));
   expect(header.checkpointDigest).toBe(digest(checkpoint));
+  expect(header.inputs.context.scopeId).toBe(s.binding.scopeId);
+  const { verifyCoordinatedBackup } = await import('./coordinated-backup.js');
+  expect(
+    await verifyCoordinatedBackup({
+      ...header.inputs,
+      receiptRoot: data,
+      operationId: s.operationId,
+      databaseFingerprint: s.settings.databaseFingerprint,
+      artifacts: { root: header.inputs.artifactsRoot },
+      witness: s.witness,
+    }),
+  ).toEqual(checkpoint);
+  expect(await verifyTargetVaultState(s.settings, s.operationId, s.admin, s.recovery, result.snapshotDigest)).toEqual(
+    result,
+  );
+  await expect(verifyTargetVaultState(s.settings, s.operationId, s.admin, s.recovery, 'f'.repeat(64))).rejects.toThrow(
+    'target_vault_capture_unavailable',
+  );
+  await expect(
+    verifyTargetVaultState(s.settings, s.operationId, s.admin, { ...s.recovery, releaseId: 'release-foreign' }),
+  ).rejects.toThrow('target_vault_capture_unavailable');
   expect(JSON.parse(fs.readFileSync(data + '/calendar-capture-receipt.json', 'utf8')).present).toBe(false);
   expect(fs.existsSync(s.settings.stateRoot + '/actions/coordinated')).toBe(false);
   expect(fs.existsSync(s.settings.stateRoot + '/releases')).toBe(false);
@@ -300,6 +322,10 @@ it('connects the real coordinated/native/operations/history producers to the act
   } finally {
     copy.close();
   }
+  fs.appendFileSync(data + '/coordinated/remote.json', 'changed');
+  await expect(verifyTargetVaultState(s.settings, s.operationId, s.admin, s.recovery)).rejects.toThrow(
+    'target_vault_capture_unavailable',
+  );
 });
 
 it.runIf(process.env.COS_TEST_TARGET_ID !== undefined)(
@@ -409,6 +435,11 @@ it.runIf(process.env.COS_TEST_TARGET_ID !== undefined)(
       };
       const result = await captureTargetVaultState(s.settings, s.operationId, s.admin, s.recovery);
       expect(result.status).toBe('queued');
+      expect(connections).toBe(1);
+      if (result.status !== 'queued') throw Error('fixture_checkpoint_not_queued');
+      expect(
+        await verifyTargetVaultState(s.settings, s.operationId, s.admin, s.recovery, result.snapshotDigest),
+      ).toEqual(result);
       expect(connections).toBe(1);
       const data = s.queue() + '/data',
         remote = JSON.parse(fs.readFileSync(data + '/coordinated/remote.json', 'utf8')),

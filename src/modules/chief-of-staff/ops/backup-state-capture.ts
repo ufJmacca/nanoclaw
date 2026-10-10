@@ -150,6 +150,140 @@ async function captureTree(
   return receipt;
 }
 
+function captureAuthority(
+  input: DeploymentSettings,
+  operationId: string,
+  admin: ActionBackupAdminLease | undefined,
+  recovery: RecoveryRelease,
+) {
+  verifyVaultMemory();
+  if (process.platform !== 'linux' || process.arch !== 'arm64' || !process.getuid?.()) throw Error('owner_required');
+  const settings = deploymentSettings(input),
+    binding = targetBinding(settings),
+    roots = {
+      targetRoot: settings.stateRoot,
+      installationRoot: settings.installationRoot,
+      dataRoot: settings.dataRoot,
+    };
+  const target = localTarget(roots.targetRoot, roots.installationRoot, roots.dataRoot),
+    targetDigest = digest(target),
+    recoveryDigest = digest(recovery);
+  if (
+    target.lifecycle !== 'protected' ||
+    !target.maintenance ||
+    !target.releaseId ||
+    digest(target.binding) !== digest(binding) ||
+    !/^release-[a-zA-Z0-9_-]{1,120}$/.test(operationId) ||
+    !recovery ||
+    Object.keys(recovery).sort().join(',') !== 'manifestDigest,releaseId,software' ||
+    !/^release-[a-zA-Z0-9_-]{1,120}$/.test(recovery.releaseId) ||
+    !/^[a-f0-9]{64}$/.test(recovery.manifestDigest) ||
+    !recovery.software ||
+    Object.keys(recovery.software).sort().join(',') !==
+      'hostPayloadSha256,nativeSchemaVersion,schemaVersion,sourceCommit,sourceTree' ||
+    !/^[a-f0-9]{40}$/.test(recovery.software.sourceCommit) ||
+    !/^[a-f0-9]{40}$/.test(recovery.software.sourceTree) ||
+    !/^[a-f0-9]{64}$/.test(recovery.software.hostPayloadSha256) ||
+    recovery.software.schemaVersion !== SCHEMA_VERSION ||
+    !Number.isSafeInteger(recovery.software.nativeSchemaVersion) ||
+    recovery.software.nativeSchemaVersion < 1
+  )
+    throw Error('capture_identity');
+  const maintenance = admin?.maintenance ?? maintenanceLeaseForOwner(roots.targetRoot, binding, operationId),
+    central = path.join(settings.dataRoot, 'v2.db');
+  const queueOperationId = admin ? operationId.slice('release-action-'.length) : maintenance.nonce;
+  if (
+    !uuid.test(queueOperationId) ||
+    maintenance.purpose !== 'deployment' ||
+    (admin && !operationId.startsWith('release-action-'))
+  )
+    throw Error('capture_identity');
+  const native = readBackupNativeInventory(settings.dataRoot),
+    witness = openTargetActionWitness(roots.targetRoot, digest(binding)),
+    commands = targetCommands(settings);
+  const current = () => {
+    verifyVaultMemory();
+    if (
+      digest(localTarget(roots.targetRoot, roots.installationRoot, roots.dataRoot)) !== targetDigest ||
+      digest(recovery) !== recoveryDigest
+    )
+      throw Error('capture_identity_changed');
+    assertMaintenanceLease(roots.targetRoot, binding, maintenance);
+    if (admin) {
+      if (admin.native.name !== central) throw Error('capture_native_changed');
+      assertHostExecutionLease(admin.native, admin.hostLease);
+    } else assertBackupNativeWritersStopped(central);
+    if (
+      digest(readBackupNativeInventory(settings.dataRoot)) !== digest(native) ||
+      openTargetActionWitness(roots.targetRoot, digest(binding)).generation !== witness.generation
+    )
+      throw Error('capture_native_changed');
+    const db = new Database(central, { readonly: true, fileMustExist: true });
+    try {
+      const rows = db.prepare('SELECT paused FROM cos_identity_boundaries LIMIT 2').all() as Array<{
+        paused: number;
+      }>;
+      if (rows.length !== 1 || rows[0].paused !== 1) throw Error('capture_pause_required');
+    } finally {
+      db.close();
+    }
+  };
+  const quiescent = async () => {
+    current();
+    await admin?.check();
+    current();
+    const observed = await commands.observe();
+    if (
+      observed.pid !== 0 ||
+      observed.cwd !== settings.installationRoot ||
+      !['inactive', 'failed'].includes(observed.activeState) ||
+      (await commands.ownedContainers()).length
+    )
+      throw Error('capture_not_quiescent');
+    current();
+    return {
+      generation: maintenance.generation,
+      activeWorkers: 0 as const,
+      activeOperations: 0 as const,
+      nativeWriters: 0 as const,
+      effectsEnabled: false as const,
+    };
+  };
+  const check = async () => {
+    await quiescent();
+  };
+  return { settings, binding, roots, native, witness, maintenance, queueOperationId, current, check, quiescent };
+}
+
+function captureInputs(
+  settings: DeploymentSettings,
+  operationId: string,
+  native: ReturnType<typeof readBackupNativeInventory>,
+) {
+  const restrictionFiles = ['state.json', 'maintenance.json', 'model-activation.json']
+    .map((name) => path.join(settings.stateRoot, name))
+    .filter((file) => !!fs.lstatSync(file, { throwIfNoEntry: false }));
+  const owners = path.join(settings.stateRoot, 'conversation-owners');
+  if (fs.lstatSync(owners, { throwIfNoEntry: false }))
+    for (const name of fs.readdirSync(owners).sort()) {
+      if (!uuid.test(name.slice(0, -5)) || !name.endsWith('.json')) throw Error('capture_owner_invalid');
+      restrictionFiles.push(path.join(owners, name));
+    }
+  if (restrictionFiles.length > 4096) throw Error('capture_bounds');
+  return {
+    context: {
+      scopeId: native.binding.scopeId,
+      ownerId: native.binding.ownerId,
+      agentGroupId: native.binding.agentGroupId,
+      sessionId: native.binding.sessionId,
+      ingressId: 'operator-backup-' + operationId,
+    },
+    nativeDatabases: native.databases,
+    restrictionFiles,
+    artifactsRoot: path.join(settings.stateRoot, 'knowledge', 'artifacts'),
+  };
+}
+
 /** Concrete G02 capture. The enclosing owner or deployment operation supplies its
  * current native/maintenance authority. All writes use the default encrypted queue;
  * this operation has no NAS dependency and does not restart or resume anything.
@@ -161,102 +295,8 @@ export async function captureTargetVaultState(
   recovery: RecoveryRelease,
 ) {
   try {
-    verifyVaultMemory();
-    if (process.platform !== 'linux' || process.arch !== 'arm64' || !process.getuid?.()) throw Error('owner_required');
-    const settings = deploymentSettings(input),
-      binding = targetBinding(settings),
-      roots = {
-        targetRoot: settings.stateRoot,
-        installationRoot: settings.installationRoot,
-        dataRoot: settings.dataRoot,
-      };
-    const target = localTarget(roots.targetRoot, roots.installationRoot, roots.dataRoot),
-      targetDigest = digest(target),
-      recoveryDigest = digest(recovery);
-    if (
-      target.lifecycle !== 'protected' ||
-      !target.maintenance ||
-      !target.releaseId ||
-      digest(target.binding) !== digest(binding) ||
-      !/^release-[a-zA-Z0-9_-]{1,120}$/.test(operationId) ||
-      !recovery ||
-      Object.keys(recovery).sort().join(',') !== 'manifestDigest,releaseId,software' ||
-      !/^release-[a-zA-Z0-9_-]{1,120}$/.test(recovery.releaseId) ||
-      !/^[a-f0-9]{64}$/.test(recovery.manifestDigest) ||
-      !recovery.software ||
-      Object.keys(recovery.software).sort().join(',') !==
-        'hostPayloadSha256,nativeSchemaVersion,schemaVersion,sourceCommit,sourceTree' ||
-      !/^[a-f0-9]{40}$/.test(recovery.software.sourceCommit) ||
-      !/^[a-f0-9]{40}$/.test(recovery.software.sourceTree) ||
-      !/^[a-f0-9]{64}$/.test(recovery.software.hostPayloadSha256) ||
-      recovery.software.schemaVersion !== SCHEMA_VERSION ||
-      !Number.isSafeInteger(recovery.software.nativeSchemaVersion) ||
-      recovery.software.nativeSchemaVersion < 1
-    )
-      throw Error('capture_identity');
-    const maintenance = admin?.maintenance ?? maintenanceLeaseForOwner(roots.targetRoot, binding, operationId),
-      central = path.join(settings.dataRoot, 'v2.db');
-    const queueOperationId = admin ? operationId.slice('release-action-'.length) : maintenance.nonce;
-    if (
-      !uuid.test(queueOperationId) ||
-      maintenance.purpose !== 'deployment' ||
-      (admin && !operationId.startsWith('release-action-'))
-    )
-      throw Error('capture_identity');
-    const native = readBackupNativeInventory(settings.dataRoot),
-      witness = openTargetActionWitness(roots.targetRoot, digest(binding)),
-      commands = targetCommands(settings);
-    const current = () => {
-      verifyVaultMemory();
-      if (
-        digest(localTarget(roots.targetRoot, roots.installationRoot, roots.dataRoot)) !== targetDigest ||
-        digest(recovery) !== recoveryDigest
-      )
-        throw Error('capture_identity_changed');
-      assertMaintenanceLease(roots.targetRoot, binding, maintenance);
-      if (admin) {
-        if (admin.native.name !== central) throw Error('capture_native_changed');
-        assertHostExecutionLease(admin.native, admin.hostLease);
-      } else assertBackupNativeWritersStopped(central);
-      if (
-        digest(readBackupNativeInventory(settings.dataRoot)) !== digest(native) ||
-        openTargetActionWitness(roots.targetRoot, digest(binding)).generation !== witness.generation
-      )
-        throw Error('capture_native_changed');
-      const db = new Database(central, { readonly: true, fileMustExist: true });
-      try {
-        const rows = db.prepare('SELECT paused FROM cos_identity_boundaries LIMIT 2').all() as Array<{
-          paused: number;
-        }>;
-        if (rows.length !== 1 || rows[0].paused !== 1) throw Error('capture_pause_required');
-      } finally {
-        db.close();
-      }
-    };
-    const quiescent = async () => {
-      current();
-      await admin?.check();
-      current();
-      const observed = await commands.observe();
-      if (
-        observed.pid !== 0 ||
-        observed.cwd !== settings.installationRoot ||
-        !['inactive', 'failed'].includes(observed.activeState) ||
-        (await commands.ownedContainers()).length
-      )
-        throw Error('capture_not_quiescent');
-      current();
-      return {
-        generation: maintenance.generation,
-        activeWorkers: 0 as const,
-        activeOperations: 0 as const,
-        nativeWriters: 0 as const,
-        effectsEnabled: false as const,
-      };
-    };
-    const check = async () => {
-      await quiescent();
-    };
+    const { settings, binding, roots, native, witness, maintenance, queueOperationId, current, check, quiescent } =
+      captureAuthority(input, operationId, admin, recovery);
     await check();
     verifyVaultStorage(roots);
     const queue = createVaultBackupQueue(roots);
@@ -288,35 +328,21 @@ export async function captureTargetVaultState(
       const receiptRoot = path.join(roots.targetRoot, 'actions');
       const calendar = await captureCalendarState({ roots, operationId, receiptRoot, check }, sink);
       await check();
+      const inputs = captureInputs(settings, operationId, native);
       const client = await checkedTargetDatabase(settings);
       let captured;
       try {
-        const restrictions = ['state.json', 'maintenance.json', 'model-activation.json']
-          .map((name) => path.join(roots.targetRoot, name))
-          .filter((file) => !!fs.lstatSync(file, { throwIfNoEntry: false }));
-        const owners = path.join(roots.targetRoot, 'conversation-owners');
-        if (fs.lstatSync(owners, { throwIfNoEntry: false }))
-          for (const name of fs.readdirSync(owners).sort()) {
-            if (!uuid.test(name.slice(0, -5)) || !name.endsWith('.json')) throw Error('capture_owner_invalid');
-            restrictions.push(path.join(owners, name));
-          }
         captured = await captureOperationsState(
           {
             base: {
               client,
-              context: {
-                scopeId: native.binding.scopeId,
-                ownerId: native.binding.ownerId,
-                agentGroupId: native.binding.agentGroupId,
-                sessionId: native.binding.sessionId,
-                ingressId: 'operator-backup-' + operationId,
-              },
+              context: inputs.context,
               databaseFingerprint: settings.databaseFingerprint,
               operationId,
               receiptRoot,
               nativeDatabases: native.databases,
               artifacts: openKnowledgeArtifacts(roots.targetRoot, [roots.installationRoot, roots.dataRoot]),
-              restrictionFiles: restrictions,
+              restrictionFiles: inputs.restrictionFiles,
               witness,
               quiescent,
             },
@@ -346,6 +372,7 @@ export async function captureTargetVaultState(
         effectsDigest: digest(effects),
         backupCredentialsDigest: digest(credentials),
         credentialJournalsDigest: digest(journals),
+        inputs,
         operations: { release: recovery, manifestDigest: operationsDigest },
         writerActivated: false,
         admissionRestored: false,
@@ -393,6 +420,161 @@ export async function captureTargetVaultState(
     };
   } catch {
     // eslint-disable-next-line preserve-caught-error -- Capture buffers, filesystem names, database and queue diagnostics stay private.
+    throw Error('target_vault_capture_unavailable');
+  }
+}
+
+/** Reconcile an existing full slot only under its current owner/deployment authority.
+ * This performs a complete queue hash readback; portable metadata is evidence, never
+ * restored admission. It opens no database client and creates no staging files.
+ */
+export async function verifyTargetVaultState(
+  input: DeploymentSettings,
+  operationId: string,
+  admin: ActionBackupAdminLease | undefined,
+  recovery: RecoveryRelease,
+  expectedSnapshotDigest?: string,
+) {
+  try {
+    const { settings, binding, roots, native, witness, maintenance, queueOperationId, check } = captureAuthority(
+      input,
+      operationId,
+      admin,
+      recovery,
+    );
+    if (expectedSnapshotDigest !== undefined && !/^[a-f0-9]{64}$/.test(expectedSnapshotDigest))
+      throw Error('capture_digest_invalid');
+    await check();
+    const queue = createVaultBackupQueue(roots),
+      inputs = captureInputs(settings, operationId, native);
+    return await queue.withPending('state', queueOperationId, async (directory) => {
+      await check();
+      type Header = {
+        contract: string;
+        operationId: string;
+        queueOperationId: string;
+        targetBindingDigest: string;
+        nativeBindingDigest: string;
+        journal: { installationDigest: string; generation: string };
+        maintenanceGeneration: number;
+        nativeDatabases: number;
+        checkpointDigest: string;
+        conversationDigest: string;
+        missionDigest: string;
+        calendarDigest: string;
+        effectsDigest: string;
+        backupCredentialsDigest: string;
+        credentialJournalsDigest: string;
+        inputs: typeof inputs;
+        operations: { release: RecoveryRelease; manifestDigest: string };
+        writerActivated: false;
+        admissionRestored: false;
+      };
+      const header = readPrivate<Header>(path.join(directory, 'state-capture.json'), 1024 ** 2),
+        keys = [
+          'contract',
+          'operationId',
+          'queueOperationId',
+          'targetBindingDigest',
+          'nativeBindingDigest',
+          'journal',
+          'maintenanceGeneration',
+          'nativeDatabases',
+          'checkpointDigest',
+          'conversationDigest',
+          'missionDigest',
+          'calendarDigest',
+          'effectsDigest',
+          'backupCredentialsDigest',
+          'credentialJournalsDigest',
+          'inputs',
+          'operations',
+          'writerActivated',
+          'admissionRestored',
+        ];
+      if (
+        !header ||
+        typeof header !== 'object' ||
+        Array.isArray(header) ||
+        Object.keys(header).sort().join(',') !== keys.sort().join(',') ||
+        header.contract !== 'cos-target-vault-capture/v1' ||
+        header.operationId !== operationId ||
+        header.queueOperationId !== queueOperationId ||
+        header.targetBindingDigest !== digest(binding) ||
+        header.nativeBindingDigest !== digest(native.binding) ||
+        digest(header.journal) !==
+          digest({ installationDigest: witness.installationDigest, generation: witness.generation }) ||
+        header.maintenanceGeneration !== maintenance.generation ||
+        header.nativeDatabases !== native.databases.length ||
+        header.writerActivated !== false ||
+        header.admissionRestored !== false ||
+        digest(header.inputs) !== digest(inputs) ||
+        !header.operations ||
+        Object.keys(header.operations).sort().join(',') !== 'manifestDigest,release' ||
+        digest(header.operations.release) !== digest(recovery) ||
+        (expectedSnapshotDigest !== undefined && digest(header) !== expectedSnapshotDigest)
+      )
+        throw Error('capture_receipt_changed');
+      const components = [
+        ['coordinated/manifest.json', header.checkpointDigest],
+        ['conversation-backup/receipt.json', header.conversationDigest],
+        ['mission-backup/receipt.json', header.missionDigest],
+        ['calendar-capture-receipt.json', header.calendarDigest],
+        ['effects.capture.json', header.effectsDigest],
+        ['vault-backup-credentials.capture.json', header.backupCredentialsDigest],
+        ['vault-journals.capture.json', header.credentialJournalsDigest],
+        [operationId + '.operations.json', header.operations.manifestDigest],
+      ];
+      for (const [name, sha256] of components) {
+        if (!/^[a-f0-9]{64}$/.test(sha256) || digest(readPrivate(path.join(directory, name), 1024 ** 2)) !== sha256)
+          throw Error('capture_component_changed');
+        await check();
+      }
+      const checkpoint = readPrivate<Record<string, unknown>>(
+          path.join(directory, 'coordinated/manifest.json'),
+          1024 ** 2,
+        ),
+        operations = readPrivate<Record<string, unknown>>(
+          path.join(directory, operationId + '.operations.json'),
+          1024 ** 2,
+        );
+      if (
+        checkpoint.format !== 'cos-coordinated-backup/v1' ||
+        checkpoint.operationId !== operationId ||
+        checkpoint.contextDigest !== digest(inputs.context) ||
+        checkpoint.databaseFingerprint !== settings.databaseFingerprint ||
+        checkpoint.inputsDigest !==
+          digest({
+            nativeDatabases: inputs.nativeDatabases,
+            artifactsRoot: inputs.artifactsRoot,
+            restrictionFiles: inputs.restrictionFiles,
+          }) ||
+        checkpoint.admissionRestored !== false ||
+        operations.format !== 'cos-operations-backup/v1' ||
+        operations.operationId !== operationId ||
+        operations.coordinatedDigest !== header.checkpointDigest ||
+        digest(operations.software) !== digest(recovery.software) ||
+        operations.backupGeneration !== maintenance.generation ||
+        operations.admissionRestored !== false ||
+        operations.effectsEnabled !== false
+      )
+        throw Error('capture_component_changed');
+      await check();
+      return {
+        operationId,
+        queueOperationId,
+        targetBindingDigest: digest(binding),
+        nativeBindingDigest: digest(native.binding),
+        journal: { installationDigest: witness.installationDigest, generation: witness.generation },
+        writerActivated: false,
+        admissionRestored: false,
+        status: 'queued' as const,
+        snapshotDigest: digest(header),
+        operations: { release: recovery, manifestDigest: header.operations.manifestDigest },
+      };
+    });
+  } catch {
+    // eslint-disable-next-line preserve-caught-error -- Queue contents, metadata and nested storage failures remain private.
     throw Error('target_vault_capture_unavailable');
   }
 }
