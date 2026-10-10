@@ -11,6 +11,12 @@ import {
   backupNasInitializationResource,
   type BackupNasInitializationResource,
 } from './backup-nas-initialization-recovery-scope.js';
+import {
+  backupNasInitializationRetirementJournal,
+  transitionBackupNasInitializationRetirement,
+} from './backup-nas-initialization-retirement-state.js';
+import { withBackupNasInitializationRetirementJournal } from './backup-nas-initialization-retirement-journal.js';
+type RetirementResult = Awaited<ReturnType<typeof transitionBackupNasInitializationRetirement>>;
 type Paths = Readonly<{ configRoot: string; controlRoot: string; storageRoot: string }>;
 export type BackupNasConfigurationInstallControls = {
   /** The installed caller must recheck the sealed helper, current configuration and actual native maintenance proof. */
@@ -54,6 +60,18 @@ export function inspectBackupNasUnclaimedConfigurationStage(
 ): Promise<BackupNasInitializationResource> {
   return withBackupNasRootConfiguration(input, selected, controls, 'inspect');
 }
+/** Fresh resource-specific permission is mandatory. Only this exact complete
+ * unclaimed stage may be removed, with durable intent before the fixed unlink.
+ * Existing G01 resources and NAS publication claims are never changed.
+ */
+export function retireBackupNasUnclaimedConfigurationStage(
+  input: VaultRootConfiguration,
+  selected: BackupNasRootConfiguration,
+  resource: BackupNasInitializationResource,
+  controls: BackupNasConfigurationInstallControls,
+): Promise<RetirementResult> {
+  return withBackupNasRootConfiguration(input, selected, controls, 'retire', resource);
+}
 function withBackupNasRootConfiguration(
   input: VaultRootConfiguration,
   selected: BackupNasRootConfiguration,
@@ -66,12 +84,20 @@ function withBackupNasRootConfiguration(
   controls: BackupNasConfigurationInstallControls,
   mode: 'inspect',
 ): Promise<BackupNasInitializationResource>;
+function withBackupNasRootConfiguration(
+  input: VaultRootConfiguration,
+  selected: BackupNasRootConfiguration,
+  controls: BackupNasConfigurationInstallControls,
+  mode: 'retire',
+  resource: BackupNasInitializationResource,
+): Promise<RetirementResult>;
 async function withBackupNasRootConfiguration(
   input: VaultRootConfiguration,
   selected: BackupNasRootConfiguration,
   controls: BackupNasConfigurationInstallControls,
-  mode: 'install' | 'inspect',
-): Promise<BackupNasRootConfiguration | BackupNasInitializationResource> {
+  mode: 'install' | 'inspect' | 'retire',
+  selectedResource?: BackupNasInitializationResource,
+): Promise<BackupNasRootConfiguration | BackupNasInitializationResource | RetirementResult> {
   const descriptors = new Set<number>();
   let finalObservation: (() => void) | undefined;
   const close = (fd: number) => {
@@ -88,6 +114,8 @@ async function withBackupNasRootConfiguration(
       nas = backupNasRootConfiguration(selected, vault),
       configurationDigest = digest(nas),
       identityDigest = vaultRootStateDigest(vault);
+    const recovery = mode === 'retire' ? backupNasInitializationResource(selectedResource) : undefined;
+    if (recovery && recovery.kind !== 'configuration-stage') throw Error('configuration_stage_required');
     const paths = Object.freeze({
       ...(controls.paths ?? {
         configRoot: '/etc/nanoclaw-cos',
@@ -316,7 +344,7 @@ async function withBackupNasRootConfiguration(
           vaultStateDigest: nas.vaultStateDigest,
         }) + '\n';
       await current();
-      if (mode === 'inspect') {
+      if (mode === 'inspect' || mode === 'retire') {
         const unclaimed = () => {
           guard();
           bootstrap.check();
@@ -347,11 +375,120 @@ async function withBackupNasRootConfiguration(
             directory.closeSync();
           }
           guard();
-          if (!stage) throw Error('configuration_stage_missing');
           return stage;
         };
+        if (mode === 'retire') {
+          if (!recovery || recovery.kind !== 'configuration-stage') throw Error('configuration_stage_required');
+          const scope = Object.freeze({
+              nasDigest: configurationDigest,
+              vaultStateDigest: identityDigest,
+              resource: recovery,
+            }),
+            name = '.backup-nas.' + recovery.stageId + '.tmp',
+            point = filePath(config!, name),
+            retirementName = 'nas-initialization-retirement.' + digest(scope) + '.json';
+          let staged: ReturnType<typeof open> | undefined, retiredStat: fs.Stats | undefined;
+          const namespace = () => {
+            const actual = unclaimed();
+            if (actual !== undefined && actual !== name) throw Error('another_configuration_stage');
+            if (retiredStat) {
+              if (actual !== undefined || fs.lstatSync(point, { throwIfNoEntry: false }))
+                throw Error('retired_stage_reappeared');
+              const stat = fs.fstatSync(staged!.fd);
+              if (
+                !stat.isFile() ||
+                stat.uid !== 0 ||
+                (stat.mode & 0o7777) !== 0o600 ||
+                stat.nlink !== 0 ||
+                stat.dev !== retiredStat.dev ||
+                stat.ino !== retiredStat.ino ||
+                stat.size !== retiredStat.size ||
+                stat.mtimeMs !== retiredStat.mtimeMs ||
+                stat.ctimeMs !== retiredStat.ctimeMs
+              )
+                throw Error('removed_stage_changed');
+            } else staged?.check();
+            return actual;
+          };
+          const observe = () => {
+            const actual = namespace();
+            if (actual === undefined) {
+              // Repeat the parent sync for an unlink interrupted before durability.
+              // Absence is accepted only with a matching recorded intent.
+              fs.fsyncSync(config!.fd);
+              return Object.freeze({ state: 'absent' as const });
+            }
+            if (!staged) {
+              staged = open(config!, name);
+              if (
+                staged.text !== text ||
+                digest(backupNasRootConfiguration(staged.value, vault)) !== configurationDigest
+              )
+                throw Error('configuration_stage_content_changed');
+              resources = [staged];
+            }
+            staged.check();
+            const actualResource = backupNasInitializationResource({
+              kind: 'configuration-stage',
+              stageId: recovery.stageId,
+              ...inode(staged.before),
+              contentDigest: createHash('sha256').update(staged.text).digest('hex'),
+            });
+            if (digest(actualResource) !== digest(recovery)) throw Error('configuration_stage_resource_changed');
+            return Object.freeze({ state: 'present' as const, resource: actualResource });
+          };
+          const assertRecovery = async () => {
+            namespace();
+            await current();
+            namespace();
+          };
+          return withBackupNasInitializationRetirementJournal(
+            scope,
+            {
+              controlFd: control!.fd,
+              assertAuthority: assertRecovery,
+              assertMemory: controls.assertMemory,
+            },
+            async (retirement) => {
+              const result = await transitionBackupNasInitializationRetirement(scope, {
+                assertAuthority: retirement.assertCurrent,
+                readJournal: async () => retirement.readJournal(),
+                writeJournal: retirement.writeJournal,
+                observe: async () => observe(),
+                retire: async () => {
+                  namespace();
+                  lease.assertCurrent();
+                  guard();
+                  bootstrap.check();
+                  if (!staged || observe().state !== 'present') throw Error('held_stage_required');
+                  staged.check();
+                  fs.unlinkSync(point);
+                  retiredStat = fs.fstatSync(staged.fd);
+                  resources = [];
+                  fs.fsyncSync(config!.fd);
+                  namespace();
+                },
+              });
+              const completion = open(control!, retirementName);
+              if (backupNasInitializationRetirementJournal(completion.value, scope).phase !== 'retired')
+                throw Error('retirement_completion_required');
+              resources.push(completion);
+              finalObservation = () => {
+                guard();
+                bootstrap.check();
+                completion.check();
+                if (namespace() !== undefined) throw Error('retirement_absence_required');
+                if (backupNasInitializationRetirementJournal(completion.value, scope).phase !== 'retired')
+                  throw Error('retirement_completion_required');
+              };
+              finalObservation();
+              return result;
+            },
+          );
+        }
         const stage = unclaimed(),
-          staged = open(config!, stage);
+          staged = stage ? open(config!, stage) : undefined;
+        if (!stage || !staged) throw Error('configuration_stage_missing');
         if (staged.text !== text || digest(backupNasRootConfiguration(staged.value, vault)) !== configurationDigest)
           throw Error('configuration_stage_content_changed');
         resources = [staged];
@@ -495,7 +632,9 @@ async function withBackupNasRootConfiguration(
     throw Error(
       mode === 'inspect'
         ? 'backup_nas_configuration_stage_observation_unavailable'
-        : 'backup_nas_configuration_installation_unavailable',
+        : mode === 'retire'
+          ? 'backup_nas_configuration_stage_retirement_unavailable'
+          : 'backup_nas_configuration_installation_unavailable',
     );
   } finally {
     for (const fd of descriptors) fs.closeSync(fd);
