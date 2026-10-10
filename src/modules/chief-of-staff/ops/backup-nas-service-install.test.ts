@@ -12,7 +12,9 @@ import { backupNasMountService } from './backup-nas-units.js';
 import {
   installBackupNasOnDemandService,
   inspectBackupNasUnclaimedServiceStage,
+  retireBackupNasUnclaimedServiceStage,
 } from './backup-nas-service-install.js';
+import { backupNasInitializationResource } from './backup-nas-initialization-recovery-scope.js';
 import type { BackupNasMountJournal, BackupNasMountObservation } from './backup-nas-mount-state.js';
 import * as rootJournal from './backup-nas-root-journal.js';
 const roots: string[] = [],
@@ -140,6 +142,244 @@ async function stagedFixture(upgrade = false) {
   f.controls.run.mockClear();
   return { ...f, vault, definition, stageId, stage };
 }
+async function retirementFixture(upgrade = false) {
+  const f = await stagedFixture(upgrade),
+    stat = fs.lstatSync(f.stage);
+  const resource = backupNasInitializationResource({
+    kind: 'service-stage',
+    stageId: f.stageId,
+    device: stat.dev,
+    inode: stat.ino,
+    contentDigest: createHash('sha256').update(f.definition.contents).digest('hex'),
+  });
+  const scope = { nasDigest: digest(f.nas), vaultStateDigest: vaultRootStateDigest(f.vault), resource };
+  return {
+    ...f,
+    resource,
+    scope,
+    retirement: f.paths.controlRoot + '/nas-initialization-retirement.' + digest(scope) + '.json',
+  };
+}
+const retirementDenied = /^backup_nas_service_stage_retirement_unavailable$/;
+it.each([false, true])(
+  'retires only the exact unclaimed service stage and preserves installed resources (upgrade=%s)',
+  async (upgrade) => {
+    const f = await retirementFixture(upgrade),
+      mount = fs.readFileSync(f.paths.controlRoot + '/nas-mount.json'),
+      bootstrap = fs.readFileSync(f.paths.configRoot + '/vault-bootstrap.json'),
+      configuration = fs.readFileSync(f.paths.configRoot + '/backup-nas.json'),
+      installed = upgrade ? fs.readFileSync(f.file) : undefined,
+      journal = upgrade ? fs.readFileSync(f.journal) : undefined,
+      original = fs.unlinkSync;
+    let effect = false;
+    vi.spyOn(fs, 'unlinkSync').mockImplementation((file) => {
+      if (String(file).endsWith('/' + path.basename(f.stage))) {
+        effect = true;
+        expect(JSON.parse(fs.readFileSync(f.retirement, 'utf8'))).toEqual({
+          contract: 'cos-backup-nas-initialization-retirement/v1',
+          ...f.scope,
+          phase: 'retiring',
+        });
+      }
+      original(file);
+    });
+    const result = await retireBackupNasUnclaimedServiceStage(f.vault, f.nas, f.resource, f.controls);
+    expect(effect).toBe(true);
+    expect(Object.isFrozen(result)).toBe(true);
+    expect(result).toEqual({
+      contract: 'cos-backup-nas-initialization-retirement-result/v1',
+      status: 'retired',
+      nasDigest: digest(f.nas),
+      vaultStateDigest: vaultRootStateDigest(f.vault),
+      resourceDigest: digest(f.resource),
+    });
+    expect(fs.existsSync(f.stage)).toBe(false);
+    expect(fs.readFileSync(f.paths.controlRoot + '/nas-mount.json')).toEqual(mount);
+    expect(fs.readFileSync(f.paths.configRoot + '/vault-bootstrap.json')).toEqual(bootstrap);
+    expect(fs.readFileSync(f.paths.configRoot + '/backup-nas.json')).toEqual(configuration);
+    if (upgrade) {
+      expect(fs.readFileSync(f.file)).toEqual(installed);
+      expect(fs.readFileSync(f.journal)).toEqual(journal);
+    } else {
+      expect(fs.existsSync(f.file)).toBe(false);
+      expect(fs.existsSync(f.journal)).toBe(false);
+    }
+    expect(f.controls.run.mock.calls.every(([, args]) => args[0] === 'show')).toBe(true);
+  },
+);
+it.each(['before-effect', 'after-effect', 'after-completion'])(
+  'reconciles %s interruption with fresh permission and never replays removal',
+  async (at) => {
+    const f = await retirementFixture();
+    f.controls.assertAuthority.mockImplementation(async () => {
+      if (!fs.existsSync(f.retirement)) return;
+      const record = JSON.parse(fs.readFileSync(f.retirement, 'utf8'));
+      if (
+        at === 'before-effect' ||
+        (at === 'after-effect' && !fs.existsSync(f.stage)) ||
+        (at === 'after-completion' && record.phase === 'retired')
+      )
+        throw Error('PRIVATE_REVOKED');
+    });
+    await expect(retireBackupNasUnclaimedServiceStage(f.vault, f.nas, f.resource, f.controls)).rejects.toThrow(
+      retirementDenied,
+    );
+    expect(fs.existsSync(f.stage)).toBe(at === 'before-effect');
+    expect(JSON.parse(fs.readFileSync(f.retirement, 'utf8')).phase).toBe(
+      at === 'after-completion' ? 'retired' : 'retiring',
+    );
+    f.controls.assertAuthority.mockResolvedValue(undefined);
+    const unlink = vi.spyOn(fs, 'unlinkSync');
+    expect((await retireBackupNasUnclaimedServiceStage(f.vault, f.nas, f.resource, f.controls)).status).toBe('retired');
+    expect(unlink.mock.calls.filter(([file]) => String(file).endsWith('/' + path.basename(f.stage)))).toHaveLength(
+      at === 'before-effect' ? 1 : 0,
+    );
+  },
+);
+it.each([
+  'inode',
+  'content',
+  'mode',
+  'owner',
+  'hardlink',
+  'symlink',
+  'missing',
+  'pending',
+  'destination',
+  'another-stage',
+  'active',
+  'job',
+  'mount',
+  'permission',
+  'memory',
+  'journal-scope',
+  'journal-mode',
+  'wrong-kind',
+  'selector',
+])('denies %s retirement and preserves all remaining staging and installed claims', async (reason) => {
+  const f = await retirementFixture();
+  let resource = f.resource;
+  if (reason === 'inode') {
+    fs.renameSync(f.stage, f.stage + '.keep');
+    fs.writeFileSync(f.stage, f.definition.contents, { mode: 0o644 });
+  }
+  if (reason === 'content') fs.writeFileSync(f.stage, 'KEEP');
+  if (reason === 'mode') fs.chmodSync(f.stage, 0o600);
+  if (reason === 'owner') fs.chownSync(f.stage, 1000, 1000);
+  if (reason === 'hardlink') fs.linkSync(f.stage, f.stage + '.keep');
+  if (reason === 'symlink') {
+    fs.renameSync(f.stage, f.stage + '.keep');
+    fs.symlinkSync(f.stage + '.keep', f.stage);
+  }
+  if (reason === 'missing') fs.unlinkSync(f.stage);
+  if (reason === 'pending')
+    fs.writeFileSync(
+      f.journal,
+      JSON.stringify({
+        contract: 'cos-backup-nas-service-installation/v1',
+        configurationDigest: digest(f.nas),
+        vaultStateDigest: vaultRootStateDigest(f.vault),
+        unitsParent: { device: fs.lstatSync(f.paths.systemUnits).dev, inode: fs.lstatSync(f.paths.systemUnits).ino },
+        current: null,
+        pending: {
+          artifactDigest: f.vault.artifact.digest,
+          contentDigest: createHash('sha256').update(f.definition.contents).digest('hex'),
+          claim: { device: resource.device, inode: resource.inode },
+          stage: path.basename(f.stage),
+        },
+      }),
+      { mode: 0o600 },
+    );
+  if (reason === 'destination') fs.writeFileSync(f.file, 'KEEP', { mode: 0o644 });
+  if (reason === 'another-stage')
+    fs.writeFileSync(
+      f.paths.systemUnits + '/.nanoclaw-cos-backup-mount.' + randomUUID() + '.tmp',
+      f.definition.contents,
+      { mode: 0o644 },
+    );
+  if (reason === 'active') f.manager.ActiveState = 'active';
+  if (reason === 'job') f.manager.Job = '14';
+  if (reason === 'mount')
+    f.controls.observe.mockImplementation(() => {
+      throw Error('PRIVATE_MOUNT');
+    });
+  if (reason === 'permission') f.controls.assertAuthority.mockRejectedValue(Error('PRIVATE_PERMISSION'));
+  if (reason === 'memory')
+    f.controls.assertMemory.mockImplementation(() => {
+      throw Error('PRIVATE_MEMORY');
+    });
+  if (reason === 'journal-scope' || reason === 'journal-mode')
+    fs.writeFileSync(
+      f.retirement,
+      JSON.stringify({
+        contract: 'cos-backup-nas-initialization-retirement/v1',
+        ...f.scope,
+        nasDigest: reason === 'journal-scope' ? '0'.repeat(64) : f.scope.nasDigest,
+        phase: 'retiring',
+      }),
+      { mode: reason === 'journal-mode' ? 0o644 : 0o600 },
+    );
+  if (reason === 'wrong-kind') resource = { kind: 'closed-underlay', device: 1, inode: 2 };
+  if (reason === 'selector') resource = { ...resource, path: '/tmp/foreign' } as unknown as typeof resource;
+  const mount = fs.readFileSync(f.paths.controlRoot + '/nas-mount.json'),
+    names = fs.readdirSync(f.paths.systemUnits).sort();
+  await expect(retireBackupNasUnclaimedServiceStage(f.vault, f.nas, resource, f.controls)).rejects.toThrow(
+    retirementDenied,
+  );
+  expect(fs.readdirSync(f.paths.systemUnits).sort()).toEqual(names);
+  expect(fs.readFileSync(f.paths.controlRoot + '/nas-mount.json')).toEqual(mount);
+});
+it.each(['claim', 'inode', 'manager', 'parent', 'mount-journal'])(
+  'refuses %s changed after durable intent before removal',
+  async (reason) => {
+    const f = await retirementFixture();
+    let changed = false;
+    f.controls.assertAuthority.mockImplementation(async () => {
+      if (changed || !fs.existsSync(f.retirement)) return;
+      changed = true;
+      if (reason === 'claim') fs.writeFileSync(f.journal, 'KEEP', { mode: 0o600 });
+      if (reason === 'inode') {
+        fs.renameSync(f.stage, f.stage + '.keep');
+        fs.writeFileSync(f.stage, f.definition.contents, { mode: 0o644 });
+      }
+      if (reason === 'manager') f.manager.Job = '14';
+      if (reason === 'parent') {
+        fs.renameSync(f.paths.systemUnits, f.paths.systemUnits + '.keep');
+        fs.mkdirSync(f.paths.systemUnits, { mode: 0o755 });
+      }
+      if (reason === 'mount-journal') fs.writeFileSync(f.paths.controlRoot + '/nas-mount.json', 'KEEP');
+    });
+    await expect(retireBackupNasUnclaimedServiceStage(f.vault, f.nas, f.resource, f.controls)).rejects.toThrow(
+      retirementDenied,
+    );
+    expect(changed).toBe(true);
+    expect(fs.existsSync(reason === 'parent' ? f.paths.systemUnits + '.keep/' + path.basename(f.stage) : f.stage)).toBe(
+      true,
+    );
+  },
+);
+it.each(['resource', 'journal', 'claim', 'manager', 'mount-journal'])(
+  'refuses %s changed during the final root journal closure',
+  async (reason) => {
+    const f = await retirementFixture(),
+      original = rootJournal.withBackupNasRootJournal;
+    vi.spyOn(rootJournal, 'withBackupNasRootJournal').mockImplementation(async (...args) => {
+      const result = await original(...args);
+      if (reason === 'resource') fs.writeFileSync(f.stage, 'KEEP', { mode: 0o644 });
+      if (reason === 'journal') {
+        const record = JSON.parse(fs.readFileSync(f.retirement, 'utf8'));
+        fs.writeFileSync(f.retirement, JSON.stringify({ ...record, phase: 'retiring' }));
+      }
+      if (reason === 'claim') fs.writeFileSync(f.journal, 'KEEP', { mode: 0o600 });
+      if (reason === 'manager') f.manager.Job = '14';
+      if (reason === 'mount-journal') fs.writeFileSync(f.paths.controlRoot + '/nas-mount.json', 'KEEP');
+      return result;
+    });
+    await expect(retireBackupNasUnclaimedServiceStage(f.vault, f.nas, f.resource, f.controls)).rejects.toThrow(
+      retirementDenied,
+    );
+  },
+);
 it.each([false, true])(
   'observes an unclaimed service stage while preserving the accepted installation (upgrade=%s)',
   async (upgrade) => {

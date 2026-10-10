@@ -14,6 +14,12 @@ import {
   backupNasInitializationResource,
   type BackupNasInitializationResource,
 } from './backup-nas-initialization-recovery-scope.js';
+import {
+  backupNasInitializationRetirementJournal,
+  transitionBackupNasInitializationRetirement,
+} from './backup-nas-initialization-retirement-state.js';
+import { withBackupNasInitializationRetirementJournal } from './backup-nas-initialization-retirement-journal.js';
+type RetirementResult = Awaited<ReturnType<typeof transitionBackupNasInitializationRetirement>>;
 export type BackupNasServiceInstallControls = {
   /** Mandatory current sealed artifact/configuration and actual owner/native maintenance proof. */
   assertAuthority(): Promise<void>;
@@ -65,6 +71,18 @@ export function inspectBackupNasUnclaimedServiceStage(
 ): Promise<BackupNasInitializationResource> {
   return withBackupNasService(input, selected, controls, 'inspect');
 }
+/** Only the exact unclaimed complete fixed service stage can be removed under
+ * fresh resource-bound permission, durable intent and the actual root writer.
+ * No service is reloaded, started, stopped or enabled by retirement.
+ */
+export function retireBackupNasUnclaimedServiceStage(
+  input: VaultRootConfiguration,
+  selected: BackupNasRootConfiguration,
+  resource: BackupNasInitializationResource,
+  controls: BackupNasServiceInstallControls,
+): Promise<RetirementResult> {
+  return withBackupNasService(input, selected, controls, 'retire', resource);
+}
 function withBackupNasService(
   input: VaultRootConfiguration,
   selected: BackupNasRootConfiguration,
@@ -77,12 +95,20 @@ function withBackupNasService(
   controls: BackupNasServiceInstallControls,
   mode: 'inspect',
 ): Promise<BackupNasInitializationResource>;
+function withBackupNasService(
+  input: VaultRootConfiguration,
+  selected: BackupNasRootConfiguration,
+  controls: BackupNasServiceInstallControls,
+  mode: 'retire',
+  resource: BackupNasInitializationResource,
+): Promise<RetirementResult>;
 async function withBackupNasService(
   input: VaultRootConfiguration,
   selected: BackupNasRootConfiguration,
   controls: BackupNasServiceInstallControls,
-  mode: 'install' | 'inspect',
-): Promise<Record<string, unknown> | BackupNasInitializationResource> {
+  mode: 'install' | 'inspect' | 'retire',
+  selectedResource?: BackupNasInitializationResource,
+): Promise<Record<string, unknown> | BackupNasInitializationResource | RetirementResult> {
   const descriptors = new Set<number>();
   const close = (fd: number) => {
     if (descriptors.delete(fd)) fs.closeSync(fd);
@@ -101,6 +127,8 @@ async function withBackupNasService(
       identityDigest = vaultRootStateDigest(vault),
       configurationDigest = digest(nas),
       definition = backupNasMountService({ artifactDigest: vault.artifact.digest });
+    const recovery = mode === 'retire' ? backupNasInitializationResource(selectedResource) : undefined;
+    if (recovery && recovery.kind !== 'service-stage') throw Error('service_stage_required');
     const paths = Object.freeze({
       ...(controls.paths ?? {
         configRoot: '/etc/nanoclaw-cos',
@@ -427,7 +455,7 @@ async function withBackupNasService(
         if (record?.pending && record.pending.artifactDigest !== vault.artifact.digest)
           throw Error('pending_unit_scope_conflict');
         await current();
-        if (mode === 'inspect') {
+        if (mode === 'inspect' || mode === 'retire') {
           if (record?.pending) throw Error('claimed_service_stage');
           const unclaimed = () => {
             guard();
@@ -460,11 +488,121 @@ async function withBackupNasService(
               directory.closeSync();
             }
             guard();
-            if (!stage) throw Error('service_stage_missing');
             return stage;
           };
+          if (mode === 'retire') {
+            if (!recovery || recovery.kind !== 'service-stage') throw Error('service_stage_required');
+            const scope = Object.freeze({
+                nasDigest: configurationDigest,
+                vaultStateDigest: identityDigest,
+                resource: recovery,
+              }),
+              name = '.nanoclaw-cos-backup-mount.' + recovery.stageId + '.tmp',
+              point = filePath(units!, name),
+              retirementName = 'nas-initialization-retirement.' + digest(scope) + '.json',
+              mountState = lease.readJournal(),
+              mountRead = open(control!, 'nas-mount.json', 0o600);
+            if (mountState.phase !== 'closed' || digest(JSON.parse(mountRead.text)) !== digest(mountState))
+              throw Error('closed_nas_required');
+            resources.push(mountRead);
+            const acceptedResources = [...resources];
+            let staged: ReturnType<typeof open> | undefined, removed: fs.Stats | undefined;
+            const namespace = () => {
+              guard();
+              journal?.check();
+              mountRead.check();
+              for (const file of resources) file.check();
+              const actual = unclaimed();
+              if (actual !== undefined && actual !== name) throw Error('another_service_stage');
+              if (removed) {
+                if (actual !== undefined || fs.lstatSync(point, { throwIfNoEntry: false }))
+                  throw Error('retired_service_stage_reappeared');
+                const stat = fs.fstatSync(staged!.fd);
+                if (
+                  !stat.isFile() ||
+                  stat.uid !== 0 ||
+                  (stat.mode & 0o7777) !== 0o644 ||
+                  stat.nlink !== 0 ||
+                  stat.dev !== removed.dev ||
+                  stat.ino !== removed.ino ||
+                  stat.size !== removed.size ||
+                  stat.mtimeMs !== removed.mtimeMs ||
+                  stat.ctimeMs !== removed.ctimeMs
+                )
+                  throw Error('removed_service_stage_changed');
+              } else staged?.check();
+              const actualMount = (controls.observe ?? observeBackupNasMount)(vault, nas, mountState);
+              if (actualMount.state !== 'closed' || digest(actualMount.underlay) !== digest(mountState.underlay))
+                throw Error('closed_nas_required');
+              manager();
+              guard();
+              return actual;
+            };
+            const observe = () => {
+              const actual = namespace();
+              if (actual === undefined) {
+                fs.fsyncSync(units!.fd);
+                return Object.freeze({ state: 'absent' as const });
+              }
+              if (!staged) {
+                staged = open(units!, name, 0o644);
+                if (staged.text !== definition.contents) throw Error('service_stage_content_changed');
+                resources.push(staged);
+              }
+              staged.check();
+              const actualResource = backupNasInitializationResource({
+                kind: 'service-stage',
+                stageId: recovery.stageId,
+                ...inode(staged.before),
+                contentDigest: hash(staged.text),
+              });
+              if (digest(actualResource) !== digest(recovery)) throw Error('service_stage_resource_changed');
+              return Object.freeze({ state: 'present' as const, resource: actualResource });
+            };
+            const assertRecovery = async () => {
+              namespace();
+              await current();
+              namespace();
+            };
+            return withBackupNasInitializationRetirementJournal(
+              scope,
+              { controlFd: control!.fd, assertAuthority: assertRecovery, assertMemory: memory },
+              async (retirement) => {
+                const result = await transitionBackupNasInitializationRetirement(scope, {
+                  assertAuthority: retirement.assertCurrent,
+                  readJournal: async () => retirement.readJournal(),
+                  writeJournal: retirement.writeJournal,
+                  observe: async () => observe(),
+                  retire: async () => {
+                    namespace();
+                    local();
+                    if (!staged || observe().state !== 'present') throw Error('held_service_stage_required');
+                    staged.check();
+                    fs.unlinkSync(point);
+                    removed = fs.fstatSync(staged.fd);
+                    resources = [...acceptedResources];
+                    fs.fsyncSync(units!.fd);
+                    namespace();
+                  },
+                });
+                const completion = open(control!, retirementName, 0o600);
+                if (backupNasInitializationRetirementJournal(JSON.parse(completion.text), scope).phase !== 'retired')
+                  throw Error('retirement_completion_required');
+                resources.push(completion);
+                assertResources = () => {
+                  completion.check();
+                  if (namespace() !== undefined) throw Error('retirement_absence_required');
+                  if (backupNasInitializationRetirementJournal(JSON.parse(completion.text), scope).phase !== 'retired')
+                    throw Error('retirement_completion_required');
+                };
+                assertResources();
+                return result;
+              },
+            );
+          }
           const stage = unclaimed(),
-            staged = open(units!, stage, 0o644);
+            staged = stage ? open(units!, stage, 0o644) : undefined;
+          if (!stage || !staged) throw Error('service_stage_missing');
           if (staged.text !== definition.contents) throw Error('service_stage_content_changed');
           resources.push(staged);
           const unchanged = () => {
@@ -603,7 +741,9 @@ async function withBackupNasService(
     throw Error(
       mode === 'inspect'
         ? 'backup_nas_service_stage_observation_unavailable'
-        : 'backup_nas_service_installation_unavailable',
+        : mode === 'retire'
+          ? 'backup_nas_service_stage_retirement_unavailable'
+          : 'backup_nas_service_installation_unavailable',
     );
   } finally {
     for (const fd of descriptors) fs.closeSync(fd);
