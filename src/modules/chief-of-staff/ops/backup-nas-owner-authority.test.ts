@@ -12,16 +12,18 @@ import { vaultRootConfiguration } from './vault-root-config.js';
 import { vaultRootStateDigest } from './vault-root-state.js';
 import { checkVaultAuthority } from './vault-authority.js';
 import { backupNasSetupScope } from './backup-nas-setup-wire.js';
+import { backupNasInitializationRecoveryScope } from './backup-nas-initialization-recovery-scope.js';
 import { backupNasRecoveryScope } from './backup-nas-recovery-wire.js';
 import {
   openProtectedBackupNasSetupAuthority,
   openProtectedBackupNasRecoveryAuthority,
+  openProtectedBackupNasInitializationRecoveryAuthority,
 } from './backup-nas-owner-authority.js';
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0)) await cleanup();
 });
-async function fixture(recovery = false) {
+async function fixture(recovery: false | true | 'initialization' = false) {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'bn-')),
     root = parent + '/s';
   const binding = {
@@ -69,6 +71,7 @@ async function fixture(recovery = false) {
     opened: Awaited<ReturnType<typeof openProtectedBackupNasSetupAuthority>> | undefined;
   const input = {
     root,
+    resource: { kind: 'closed-underlay' as const, device: 17, inode: 23 },
     configuration: vault,
     nas,
     operationId,
@@ -81,10 +84,13 @@ async function fixture(recovery = false) {
   };
   const controls = { ownerTargetRoot: root, assertMemory() {} },
     open = async () =>
-      (opened = await (recovery ? openProtectedBackupNasRecoveryAuthority : openProtectedBackupNasSetupAuthority)(
-        input,
-        controls,
-      ));
+      (opened = await (
+        recovery === 'initialization'
+          ? openProtectedBackupNasInitializationRecoveryAuthority
+          : recovery
+            ? openProtectedBackupNasRecoveryAuthority
+            : openProtectedBackupNasSetupAuthority
+      )(input, controls));
   cleanups.push(async () => {
     await opened?.authority.close();
     native.close();
@@ -237,3 +243,77 @@ it.each(['operation', 'generation', 'purpose', 'foreign-owner', 'unprotected', '
     await expect(f.open()).rejects.toThrow(/^backup_nas_owner_authority_unavailable$/);
   },
 );
+
+it('grants only the observed initialization resource under fresh native owner authority', async () => {
+  const f = await fixture('initialization'),
+    before = digest(f.vault),
+    proof = await f.open();
+  expect(proof.scope).toEqual(
+    backupNasInitializationRecoveryScope(
+      f.vault,
+      f.nas,
+      f.input.resource,
+      f.input.operationId,
+      f.maintenance.generation,
+    ),
+  );
+  await checkVaultAuthority(proof.authority, proof.scope, process.getuid!());
+  for (const scope of [
+    backupNasSetupScope(f.vault, f.nas, f.input.operationId, f.maintenance.generation),
+    backupNasRecoveryScope(f.vault, f.nas, f.input.operationId, f.maintenance.generation),
+    backupNasInitializationRecoveryScope(
+      f.vault,
+      f.nas,
+      { ...f.input.resource, inode: 24 },
+      f.input.operationId,
+      f.maintenance.generation,
+    ),
+  ])
+    await expect(checkVaultAuthority(proof.authority, scope, process.getuid!())).rejects.toThrow(
+      /^vault_authority_unavailable$/,
+    );
+  expect(digest(f.vault)).toBe(before);
+  expect(JSON.stringify(proof)).not.toContain(proof.authority.token);
+});
+it.each(['host-release', 'host-replacement', 'maintenance-release', 'unpaused', 'not-quiescent'])(
+  'withdraws resource recovery permission after %s',
+  async (reason) => {
+    const f = await fixture('initialization'),
+      proof = await f.open();
+    if (reason === 'host-release') releaseHostExecutionLease(f.native, f.hostLease);
+    if (reason === 'host-replacement') f.native.prepare('UPDATE host_execution_lease SET owner_id=?').run(randomUUID());
+    if (reason === 'maintenance-release') await finishMaintenance(f.root, f.binding, f.maintenance, async () => true);
+    if (reason === 'unpaused') f.unpause();
+    if (reason === 'not-quiescent') f.loseQuiescence();
+    await expect(checkVaultAuthority(proof.authority, proof.scope, process.getuid!())).rejects.toThrow(
+      /^vault_authority_unavailable$/,
+    );
+  },
+);
+it('cannot change the granted inode by mutating caller metadata after admission', async () => {
+  const f = await fixture('initialization'),
+    proof = await f.open(),
+    scope = proof.scope;
+  f.input.resource.inode = 24;
+  expect(proof.scope).toBe(scope);
+  await checkVaultAuthority(proof.authority, scope, process.getuid!());
+  await expect(
+    checkVaultAuthority(
+      proof.authority,
+      backupNasInitializationRecoveryScope(
+        f.vault,
+        f.nas,
+        f.input.resource,
+        f.input.operationId,
+        f.maintenance.generation,
+      ),
+      process.getuid!(),
+    ),
+  ).rejects.toThrow(/^vault_authority_unavailable$/);
+});
+it('refuses invalid observed metadata without opening resource recovery permission', async () => {
+  const f = await fixture('initialization');
+  f.input.resource.inode = -1;
+  await expect(f.open()).rejects.toThrow(/^backup_nas_owner_authority_unavailable$/);
+  expect(fs.existsSync(f.root + '/vault-authority')).toBe(false);
+});

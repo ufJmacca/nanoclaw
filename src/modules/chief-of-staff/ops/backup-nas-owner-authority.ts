@@ -10,6 +10,11 @@ import { assertHostExecutionLease, type HostExecutionLease } from '../../../db/h
 import { openVaultAuthority, type VaultAuthority, type VaultAuthorityScope } from './vault-authority.js';
 import { readTarget } from './target-state.js';
 import { backupNasSetupScope } from './backup-nas-setup-wire.js';
+import {
+  backupNasInitializationResource,
+  backupNasInitializationRecoveryScope,
+  type BackupNasInitializationResource,
+} from './backup-nas-initialization-recovery-scope.js';
 import { backupNasRecoveryScope } from './backup-nas-recovery-wire.js';
 import { verifyVaultMemory } from './vault-memory.js';
 export type BackupNasSetupOwnerInput = {
@@ -22,6 +27,27 @@ export type BackupNasSetupOwnerInput = {
   hostLease: HostExecutionLease;
   check(): Promise<void>;
 };
+export type BackupNasInitializationRecoveryOwnerInput = BackupNasSetupOwnerInput & {
+  resource: BackupNasInitializationResource;
+};
+/** The enclosing command verifies the root observation first. Snapshot its exact
+ * resource before native admission, so caller mutation cannot widen this grant.
+ * Root recovery still independently verifies the held resource before any effect.
+ */
+export async function openProtectedBackupNasInitializationRecoveryAuthority(
+  input: BackupNasInitializationRecoveryOwnerInput,
+  controls: { assertMemory?(): void; ownerTargetRoot?: string } = {},
+): ReturnType<typeof openProtectedBackupNasSetupAuthority> {
+  try {
+    const resource = backupNasInitializationResource(input.resource);
+    return await openProtectedBackupNasAuthority(input, controls, (vault, nas, operationId, generation) =>
+      backupNasInitializationRecoveryScope(vault, nas, resource, operationId, generation),
+    );
+  } catch {
+    // eslint-disable-next-line preserve-caught-error -- Observed resources and private native authority never enter diagnostics.
+    throw Error('backup_nas_owner_authority_unavailable');
+  }
+}
 export async function openProtectedBackupNasRecoveryAuthority(
   input: BackupNasSetupOwnerInput,
   controls: { assertMemory?(): void; ownerTargetRoot?: string } = {},
