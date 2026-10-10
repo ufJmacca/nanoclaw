@@ -138,6 +138,30 @@ it('wipes snapshot bytes and redacts a failed sink while preserving the live dat
     live.close();
   }
 });
+it.each(['wal-hardlink', 'shm-writable', 'journal-symlink'])('refuses unsafe SQLite sidecars: %s', (kind) => {
+  const { root, source, live } = fixture();
+  try {
+    if (kind === 'wal-hardlink') fs.linkSync(source + '-wal', path.join(root, 'alias-wal'));
+    if (kind === 'shm-writable') fs.chmodSync(source + '-shm', 0o666);
+    if (kind === 'journal-symlink') fs.symlinkSync(path.join(root, 'unrelated'), source + '-journal');
+    let called = false;
+    expect(() =>
+      captureNativeDatabase(
+        source,
+        {
+          write() {
+            called = true;
+          },
+        },
+        'native',
+        65536,
+      ),
+    ).toThrow(/^native_snapshot_unavailable$/);
+    expect(called).toBe(false);
+  } finally {
+    live.close();
+  }
+});
 it.each(['../escape', '/absolute', 'native/../escape', 'a//b'])('denies unsafe snapshot prefix %s', (prefix) => {
   const { source, live } = fixture();
   try {

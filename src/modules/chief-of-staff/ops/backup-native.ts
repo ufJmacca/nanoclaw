@@ -16,6 +16,26 @@ function sameFile(before: fs.Stats, after: fs.Stats): void {
   if (before.dev !== after.dev || before.ino !== after.ino || before.uid !== after.uid)
     throw Error('native_source_changed');
 }
+function sidecars(source: string, database: fs.Stats): Map<string, fs.Stats> {
+  const result = new Map<string, fs.Stats>();
+  for (const suffix of ['-wal', '-shm', '-journal']) {
+    const file = source + suffix,
+      stat = fs.lstatSync(file, { throwIfNoEntry: false });
+    if (!stat) continue;
+    if (
+      !stat.isFile() ||
+      stat.isSymbolicLink() ||
+      stat.uid !== database.uid ||
+      stat.dev !== database.dev ||
+      stat.nlink !== 1 ||
+      stat.mode & 0o022 ||
+      fs.realpathSync(file) !== file
+    )
+      throw Error('unsafe_native_sidecar');
+    result.set(file, stat);
+  }
+  return result;
+}
 /** The caller supplies an admitted vault queue sink and holds the coordinated capture barrier. */
 export function captureNativeDatabase(
   source: string,
@@ -46,6 +66,7 @@ export function captureNativeDatabase(
     const original = fs.fstatSync(fd);
     if (!original.isFile() || original.uid !== process.getuid?.() || original.nlink !== 1 || original.mode & 0o022)
       throw Error('unsafe_native_source');
+    const originalSidecars = sidecars(source, original);
     live = new Database(source, { readonly: true, fileMustExist: true });
     sameFile(original, fs.lstatSync(source));
     live.exec('BEGIN');
@@ -72,6 +93,12 @@ export function captureNativeDatabase(
     }
     sameFile(original, fs.lstatSync(source));
     sameFile(directory, fs.lstatSync(path.dirname(source)));
+    const currentSidecars = sidecars(source, original);
+    for (const [file, stat] of originalSidecars) {
+      const current = currentSidecars.get(file);
+      if (!current) throw Error('native_sidecar_changed');
+      sameFile(stat, current);
+    }
     live.exec('ROLLBACK');
     live.close();
     live = undefined;
