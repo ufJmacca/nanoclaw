@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { afterEach, expect, it, vi } from 'vitest';
 import { digest } from '../domain/contracts.js';
 import { vaultRootConfiguration } from './vault-root-config.js';
@@ -9,7 +9,10 @@ import { vaultRootStateDigest } from './vault-root-state.js';
 import { installBackupNasRootConfiguration } from './backup-nas-config-install.js';
 import { prepareBackupNasUnderlay } from './backup-nas-underlay.js';
 import { backupNasMountService } from './backup-nas-units.js';
-import { installBackupNasOnDemandService } from './backup-nas-service-install.js';
+import {
+  installBackupNasOnDemandService,
+  inspectBackupNasUnclaimedServiceStage,
+} from './backup-nas-service-install.js';
 import type { BackupNasMountJournal, BackupNasMountObservation } from './backup-nas-mount-state.js';
 import * as rootJournal from './backup-nas-root-journal.js';
 const roots: string[] = [],
@@ -124,6 +127,181 @@ async function fixture() {
   const controls = { paths, assertMemory, assertAuthority, run, observe };
   return { root, paths, vault, nas, controls, definition, file, journal, manager };
 }
+async function stagedFixture(upgrade = false) {
+  const f = await fixture();
+  if (upgrade) await installBackupNasOnDemandService(f.vault, f.nas, f.controls);
+  const vault = upgrade
+    ? vaultRootConfiguration({ ...f.vault, artifact: { ...f.vault.artifact, digest: '9'.repeat(64) } })
+    : f.vault;
+  const definition = backupNasMountService({ artifactDigest: vault.artifact.digest }),
+    stageId = randomUUID(),
+    stage = f.paths.systemUnits + '/.nanoclaw-cos-backup-mount.' + stageId + '.tmp';
+  fs.writeFileSync(stage, definition.contents, { mode: 0o644 });
+  f.controls.run.mockClear();
+  return { ...f, vault, definition, stageId, stage };
+}
+it.each([false, true])(
+  'observes an unclaimed service stage while preserving the accepted installation (upgrade=%s)',
+  async (upgrade) => {
+    const f = await stagedFixture(upgrade),
+      before = fs.lstatSync(f.stage),
+      bootstrap = fs.readFileSync(f.paths.configRoot + '/vault-bootstrap.json'),
+      mount = fs.readFileSync(f.paths.controlRoot + '/nas-mount.json'),
+      installed = upgrade ? fs.readFileSync(f.file) : undefined,
+      journal = upgrade ? fs.readFileSync(f.journal) : undefined;
+    const result = await inspectBackupNasUnclaimedServiceStage(f.vault, f.nas, f.controls);
+    expect(result).toEqual({
+      kind: 'service-stage',
+      stageId: f.stageId,
+      device: before.dev,
+      inode: before.ino,
+      contentDigest: createHash('sha256').update(f.definition.contents).digest('hex'),
+    });
+    expect(Object.isFrozen(result)).toBe(true);
+    expect(fs.lstatSync(f.stage).ino).toBe(before.ino);
+    expect(fs.readFileSync(f.stage, 'utf8')).toBe(f.definition.contents);
+    expect(fs.readFileSync(f.paths.configRoot + '/vault-bootstrap.json')).toEqual(bootstrap);
+    expect(fs.readFileSync(f.paths.controlRoot + '/nas-mount.json')).toEqual(mount);
+    if (upgrade) {
+      expect(fs.readFileSync(f.file)).toEqual(installed);
+      expect(fs.readFileSync(f.journal)).toEqual(journal);
+    } else {
+      expect(fs.existsSync(f.file)).toBe(false);
+      expect(fs.existsSync(f.journal)).toBe(false);
+    }
+    expect(f.controls.run.mock.calls.every(([, args]) => args[0] === 'show')).toBe(true);
+    await expect(installBackupNasOnDemandService(f.vault, f.nas, f.controls)).rejects.toThrow(denied);
+  },
+);
+it.each([
+  'missing',
+  'mode',
+  'owner',
+  'symlink',
+  'hardlink',
+  'content',
+  'partial',
+  'oversized',
+  'two-stages',
+  'invalid-name',
+  'unclaimed-unit',
+  'claimed-stage',
+  'mounted',
+  'busy-manager',
+  'queued-manager',
+  'permission',
+])('refuses %s service staging without adopting or removing it', async (reason) => {
+  const f = await stagedFixture();
+  if (reason === 'missing') fs.unlinkSync(f.stage);
+  if (reason === 'mode') fs.chmodSync(f.stage, 0o600);
+  if (reason === 'owner') fs.chownSync(f.stage, 1000, 1000);
+  if (reason === 'symlink') {
+    fs.renameSync(f.stage, f.stage + '.original');
+    fs.symlinkSync(f.stage + '.original', f.stage);
+  }
+  if (reason === 'hardlink') fs.linkSync(f.stage, f.stage + '.linked');
+  if (reason === 'content')
+    fs.writeFileSync(f.stage, backupNasMountService({ artifactDigest: '8'.repeat(64) }).contents);
+  if (reason === 'partial') fs.writeFileSync(f.stage, '[Unit]');
+  if (reason === 'oversized') fs.writeFileSync(f.stage, 'x'.repeat(8193));
+  if (reason === 'two-stages')
+    fs.writeFileSync(
+      f.paths.systemUnits + '/.nanoclaw-cos-backup-mount.' + randomUUID() + '.tmp',
+      f.definition.contents,
+      { mode: 0o644 },
+    );
+  if (reason === 'invalid-name')
+    fs.renameSync(f.stage, f.paths.systemUnits + '/.nanoclaw-cos-backup-mount.foreign.tmp');
+  if (reason === 'unclaimed-unit') fs.writeFileSync(f.file, 'KEEP', { mode: 0o644 });
+  if (reason === 'claimed-stage') {
+    const st = fs.lstatSync(f.stage),
+      u = fs.lstatSync(f.paths.systemUnits);
+    fs.writeFileSync(
+      f.journal,
+      JSON.stringify({
+        contract: 'cos-backup-nas-service-installation/v1',
+        configurationDigest: digest(f.nas),
+        vaultStateDigest: vaultRootStateDigest(f.vault),
+        unitsParent: { device: u.dev, inode: u.ino },
+        current: null,
+        pending: {
+          artifactDigest: f.vault.artifact.digest,
+          contentDigest: createHash('sha256').update(f.definition.contents).digest('hex'),
+          claim: { device: st.dev, inode: st.ino },
+          stage: path.basename(f.stage),
+        },
+      }),
+      { mode: 0o600 },
+    );
+  }
+  if (reason === 'mounted') f.controls.observe.mockReturnValue({ state: 'mounted' } as never);
+  if (reason === 'busy-manager') {
+    f.manager.ActiveState = 'active';
+    f.manager.SubState = 'running';
+  }
+  if (reason === 'queued-manager') f.manager.Job = '7';
+  if (reason === 'permission') f.controls.assertAuthority.mockRejectedValue(Error('PRIVATE_NATIVE'));
+  const names = fs.readdirSync(f.paths.systemUnits).sort();
+  await expect(inspectBackupNasUnclaimedServiceStage(f.vault, f.nas, f.controls)).rejects.toThrow(
+    /^backup_nas_service_stage_observation_unavailable$/,
+  );
+  expect(fs.readdirSync(f.paths.systemUnits).sort()).toEqual(names);
+  expect(f.controls.run.mock.calls.every(([, args]) => args[0] === 'show')).toBe(true);
+});
+it.each(['inode', 'claim', 'another-stage', 'revocation'])(
+  'refuses stage %s changed after its descriptor is held',
+  async (reason) => {
+    const f = await stagedFixture(),
+      open = fs.openSync;
+    let opened = false,
+      changed = false;
+    vi.spyOn(fs, 'openSync').mockImplementation((...args: Parameters<typeof fs.openSync>) => {
+      const fd = open(...args);
+      if (String(args[0]).endsWith(path.basename(f.stage))) opened = true;
+      return fd;
+    });
+    f.controls.assertAuthority.mockImplementation(async () => {
+      if (!opened || changed) return;
+      changed = true;
+      if (reason === 'inode') {
+        fs.renameSync(f.stage, f.stage + '.original');
+        fs.writeFileSync(f.stage, f.definition.contents, { mode: 0o644 });
+      }
+      if (reason === 'claim') fs.writeFileSync(f.journal, 'KEEP', { mode: 0o600 });
+      if (reason === 'another-stage')
+        fs.writeFileSync(
+          f.paths.systemUnits + '/.nanoclaw-cos-backup-mount.' + randomUUID() + '.tmp',
+          f.definition.contents,
+          { mode: 0o644 },
+        );
+      if (reason === 'revocation') throw Error('PRIVATE_REVOKED');
+    });
+    await expect(inspectBackupNasUnclaimedServiceStage(f.vault, f.nas, f.controls)).rejects.toThrow(
+      /^backup_nas_service_stage_observation_unavailable$/,
+    );
+    expect(changed).toBe(true);
+  },
+);
+it.each(['inode', 'claim', 'manager'])(
+  'refuses stage %s changes during the enclosing root lease final closure',
+  async (reason) => {
+    const f = await stagedFixture(),
+      original = rootJournal.withBackupNasRootJournal;
+    vi.spyOn(rootJournal, 'withBackupNasRootJournal').mockImplementation(async (...args) => {
+      const result = await original(...args);
+      if (reason === 'inode') {
+        fs.renameSync(f.stage, f.stage + '.original');
+        fs.writeFileSync(f.stage, f.definition.contents, { mode: 0o644 });
+      }
+      if (reason === 'claim') fs.writeFileSync(f.journal, 'KEEP', { mode: 0o600 });
+      if (reason === 'manager') f.manager.Job = '8';
+      return result;
+    });
+    await expect(inspectBackupNasUnclaimedServiceStage(f.vault, f.nas, f.controls)).rejects.toThrow(
+      /^backup_nas_service_stage_observation_unavailable$/,
+    );
+  },
+);
 it('durably installs and reloads only the fixed on-demand definition while preserving vault and mount claims', async () => {
   const f = await fixture(),
     bootstrap = fs.readFileSync(f.paths.configRoot + '/vault-bootstrap.json'),

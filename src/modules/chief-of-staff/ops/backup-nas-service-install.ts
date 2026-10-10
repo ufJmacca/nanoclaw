@@ -10,6 +10,10 @@ import { observeBackupNasMount } from './backup-nas-kernel.js';
 import { withBackupNasRootJournal } from './backup-nas-root-journal.js';
 import { backupNasMountService } from './backup-nas-units.js';
 import { verifyVaultMemory } from './vault-memory.js';
+import {
+  backupNasInitializationResource,
+  type BackupNasInitializationResource,
+} from './backup-nas-initialization-recovery-scope.js';
 export type BackupNasServiceInstallControls = {
   /** Mandatory current sealed artifact/configuration and actual owner/native maintenance proof. */
   assertAuthority(): Promise<void>;
@@ -44,16 +48,46 @@ const object = (value: unknown): value is Record<string, unknown> =>
  * manager are required through every effect. A pending inode is journaled before
  * publication/replacement. Reload never enables, starts or stops any service.
  */
-export async function installBackupNasOnDemandService(
+export function installBackupNasOnDemandService(
   input: VaultRootConfiguration,
   selected: BackupNasRootConfiguration,
   controls: BackupNasServiceInstallControls,
 ): Promise<Record<string, unknown>> {
+  return withBackupNasService(input, selected, controls, 'install');
+}
+/** Observe a complete unclaimed fixed service stage without claiming, publishing,
+ * reloading or removing it. Existing accepted service and NAS claims stay intact.
+ */
+export function inspectBackupNasUnclaimedServiceStage(
+  input: VaultRootConfiguration,
+  selected: BackupNasRootConfiguration,
+  controls: BackupNasServiceInstallControls,
+): Promise<BackupNasInitializationResource> {
+  return withBackupNasService(input, selected, controls, 'inspect');
+}
+function withBackupNasService(
+  input: VaultRootConfiguration,
+  selected: BackupNasRootConfiguration,
+  controls: BackupNasServiceInstallControls,
+  mode: 'install',
+): Promise<Record<string, unknown>>;
+function withBackupNasService(
+  input: VaultRootConfiguration,
+  selected: BackupNasRootConfiguration,
+  controls: BackupNasServiceInstallControls,
+  mode: 'inspect',
+): Promise<BackupNasInitializationResource>;
+async function withBackupNasService(
+  input: VaultRootConfiguration,
+  selected: BackupNasRootConfiguration,
+  controls: BackupNasServiceInstallControls,
+  mode: 'install' | 'inspect',
+): Promise<Record<string, unknown> | BackupNasInitializationResource> {
   const descriptors = new Set<number>();
   const close = (fd: number) => {
     if (descriptors.delete(fd)) fs.closeSync(fd);
   };
-  let assertInstalled: (() => void) | undefined;
+  let assertResources: (() => void) | undefined;
   try {
     const memory = controls.assertMemory ?? verifyVaultMemory;
     const role = () => {
@@ -393,6 +427,63 @@ export async function installBackupNasOnDemandService(
         if (record?.pending && record.pending.artifactDigest !== vault.artifact.digest)
           throw Error('pending_unit_scope_conflict');
         await current();
+        if (mode === 'inspect') {
+          if (record?.pending) throw Error('claimed_service_stage');
+          const unclaimed = () => {
+            guard();
+            journal?.check();
+            if (
+              !journal &&
+              (fs.lstatSync(journalPath, { throwIfNoEntry: false }) ||
+                fs.lstatSync(destination, { throwIfNoEntry: false }))
+            )
+              throw Error('unclaimed_service_installation_changed');
+            const directory = fs.opendirSync('/proc/self/fd/' + units!.fd, { bufferSize: 32 });
+            let stage: string | undefined;
+            try {
+              let count = 0,
+                entry: fs.Dirent | null;
+              while ((entry = directory.readSync())) {
+                if (++count > 1024) throw Error('service_stage_bounds');
+                if (entry.name.startsWith('.nanoclaw-cos-backup-mount.')) {
+                  if (
+                    stage ||
+                    !/^\.nanoclaw-cos-backup-mount\.[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}\.tmp$/.test(
+                      entry.name,
+                    )
+                  )
+                    throw Error('ambiguous_service_stage');
+                  stage = entry.name;
+                }
+              }
+            } finally {
+              directory.closeSync();
+            }
+            guard();
+            if (!stage) throw Error('service_stage_missing');
+            return stage;
+          };
+          const stage = unclaimed(),
+            staged = open(units!, stage, 0o644);
+          if (staged.text !== definition.contents) throw Error('service_stage_content_changed');
+          resources.push(staged);
+          const unchanged = () => {
+            guard();
+            journal?.check();
+            for (const file of resources) file.check();
+            if (unclaimed() !== stage) throw Error('service_stage_changed');
+            manager();
+          };
+          await current();
+          unchanged();
+          assertResources = unchanged;
+          return backupNasInitializationResource({
+            kind: 'service-stage',
+            stageId: stage.slice('.nanoclaw-cos-backup-mount.'.length, -'.tmp'.length),
+            ...inode(staged.before),
+            contentDigest: hash(staged.text),
+          });
+        }
         if (!record?.pending && record?.current?.artifactDigest !== vault.artifact.digest) {
           const directory = fs.opendirSync('/proc/self/fd/' + units!.fd, { bufferSize: 32 });
           try {
@@ -486,7 +577,7 @@ export async function installBackupNasOnDemandService(
         fs.fsyncSync(control!.fd);
         await current();
         manager(true);
-        assertInstalled = () => {
+        assertResources = () => {
           guard();
           journal!.check();
           for (const file of resources) file.check();
@@ -504,12 +595,16 @@ export async function installBackupNasOnDemandService(
     );
     // The enclosing root lease performs a final native-authority await before returning.
     // Retain and recheck this operation's own unit/ownership descriptors through that cleanup.
-    if (!assertInstalled) throw Error('unit_installation_required');
-    assertInstalled();
+    if (!assertResources) throw Error('unit_resources_required');
+    assertResources();
     return result;
   } catch {
     // eslint-disable-next-line preserve-caught-error -- Root paths, private scope and manager/native diagnostics never enter receipts.
-    throw Error('backup_nas_service_installation_unavailable');
+    throw Error(
+      mode === 'inspect'
+        ? 'backup_nas_service_stage_observation_unavailable'
+        : 'backup_nas_service_installation_unavailable',
+    );
   } finally {
     for (const fd of descriptors) fs.closeSync(fd);
   }
