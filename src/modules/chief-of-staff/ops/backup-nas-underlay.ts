@@ -13,6 +13,12 @@ import {
   type BackupNasInitializationResource,
 } from './backup-nas-initialization-recovery-scope.js';
 import { observeBackupNasMount } from './backup-nas-kernel.js';
+import {
+  backupNasInitializationRetirementJournal,
+  transitionBackupNasInitializationRetirement,
+} from './backup-nas-initialization-retirement-state.js';
+import { withBackupNasInitializationRetirementJournal } from './backup-nas-initialization-retirement-journal.js';
+type RetirementResult = Awaited<ReturnType<typeof transitionBackupNasInitializationRetirement>>;
 
 type Paths = Readonly<{ configRoot: string; controlRoot: string; storageRoot: string; mount: string }>;
 export type BackupNasUnderlayControls = {
@@ -72,6 +78,18 @@ export function inspectBackupNasUnclaimedUnderlay(
 ): Promise<BackupNasInitializationResource> {
   return withBackupNasUnderlay(input, selected, controls, 'inspect');
 }
+/** Remove only the independently closed, empty, exact unclaimed directory under
+ * fresh resource-specific permission. Durable intent precedes the fixed rmdir;
+ * a retry may reconcile recorded absence without adopting any new mountpoint.
+ */
+export function retireBackupNasUnclaimedUnderlay(
+  input: VaultRootConfiguration,
+  selected: BackupNasRootConfiguration,
+  resource: BackupNasInitializationResource,
+  controls: BackupNasUnderlayControls,
+): Promise<RetirementResult> {
+  return withBackupNasUnderlay(input, selected, controls, 'retire', resource);
+}
 function withBackupNasUnderlay(
   input: VaultRootConfiguration,
   selected: BackupNasRootConfiguration,
@@ -84,12 +102,20 @@ function withBackupNasUnderlay(
   controls: BackupNasUnderlayControls,
   mode: 'inspect',
 ): Promise<BackupNasInitializationResource>;
+function withBackupNasUnderlay(
+  input: VaultRootConfiguration,
+  selected: BackupNasRootConfiguration,
+  controls: BackupNasUnderlayControls,
+  mode: 'retire',
+  resource: BackupNasInitializationResource,
+): Promise<RetirementResult>;
 async function withBackupNasUnderlay(
   input: VaultRootConfiguration,
   selected: BackupNasRootConfiguration,
   controls: BackupNasUnderlayControls,
-  mode: 'prepare' | 'inspect',
-): Promise<BackupNasMountJournal | BackupNasInitializationResource> {
+  mode: 'prepare' | 'inspect' | 'retire',
+  selectedResource?: BackupNasInitializationResource,
+): Promise<BackupNasMountJournal | BackupNasInitializationResource | RetirementResult> {
   const descriptors: number[] = [];
   let journalFd: number | undefined, underlayFd: number | undefined, finalObservation: (() => void) | undefined;
   try {
@@ -102,6 +128,8 @@ async function withBackupNasUnderlay(
     role();
     const vault = vaultRootConfiguration(input),
       nas = backupNasRootConfiguration(selected, vault);
+    const recovery = mode === 'retire' ? backupNasInitializationResource(selectedResource) : undefined;
+    if (recovery && recovery.kind !== 'closed-underlay') throw Error('closed_underlay_required');
     const scope = Object.freeze({
       configurationDigest: digest(nas),
       bindingDigest: digest({ host: nas.host, share: 'nanoclaw-cos-backups', mount: '/var/lib/nanoclaw-cos/nas' }),
@@ -254,6 +282,128 @@ async function withBackupNasUnderlay(
       const journal = '/proc/self/fd/' + control!.fd + '/nas-mount.json',
         point = '/proc/self/fd/' + storage!.fd + '/nas';
       const existing = fs.lstatSync(journal, { throwIfNoEntry: false });
+      if (mode === 'retire') {
+        if (!recovery || recovery.kind !== 'closed-underlay' || recovery.device !== storage!.before.dev)
+          throw Error('closed_underlay_required');
+        const retirementScope = Object.freeze({
+            nasDigest: scope.configurationDigest,
+            vaultStateDigest: vaultRootStateDigest(vault),
+            resource: recovery,
+          }),
+          retirementName = 'nas-initialization-retirement.' + digest(retirementScope) + '.json',
+          state = backupNasMountJournal(
+            {
+              contract: 'cos-backup-nas-mount-state/v1',
+              configurationDigest: scope.configurationDigest,
+              underlay: { device: recovery.device, inode: recovery.inode },
+              phase: 'closed',
+              attemptId: null,
+              mount: null,
+            },
+            scope,
+          );
+        let before: fs.Stats | undefined, removed: fs.Stats | undefined;
+        const namespace = () => {
+          guard();
+          bootstrap.check();
+          absent();
+          if (fs.lstatSync(journal, { throwIfNoEntry: false })) throw Error('underlay_claim_appeared');
+          const named = fs.lstatSync(point, { throwIfNoEntry: false });
+          if (removed) {
+            if (named) throw Error('retired_underlay_reappeared');
+            const stat = fs.fstatSync(underlayFd!);
+            if (
+              !stat.isDirectory() ||
+              stat.uid !== 0 ||
+              (stat.mode & 0o7777) !== 0 ||
+              stat.nlink !== 0 ||
+              stat.dev !== removed.dev ||
+              stat.ino !== removed.ino ||
+              stat.size !== removed.size ||
+              stat.mtimeMs !== removed.mtimeMs ||
+              stat.ctimeMs !== removed.ctimeMs
+            )
+              throw Error('removed_underlay_changed');
+          } else if (before) {
+            if (!named) throw Error('held_underlay_disappeared');
+            for (const stat of [named, fs.fstatSync(underlayFd!)]) {
+              if (
+                !stat.isDirectory() ||
+                stat.uid !== 0 ||
+                (stat.mode & 0o7777) !== 0 ||
+                stat.nlink !== 2 ||
+                stat.dev !== recovery.device ||
+                stat.ino !== recovery.inode ||
+                stat.dev !== storage!.before.dev ||
+                stat.mtimeMs !== before.mtimeMs ||
+                stat.ctimeMs !== before.ctimeMs
+              )
+                throw Error('held_underlay_changed');
+            }
+            if (fs.realpathSync(paths.mount) !== paths.mount || fs.readdirSync('/proc/self/fd/' + underlayFd).length)
+              throw Error('underlay_not_empty');
+            const actual = observeBackupNasMount(vault, nas, state, { mount: paths.mount, assertMemory: memory });
+            if (actual.state !== 'closed' || digest(actual.underlay) !== digest(state.underlay))
+              throw Error('underlay_not_closed');
+          }
+          guard();
+          bootstrap.check();
+          return named;
+        };
+        const observe = () => {
+          const named = namespace();
+          if (!named) {
+            fs.fsyncSync(storage!.fd);
+            return Object.freeze({ state: 'absent' as const });
+          }
+          if (!before) {
+            underlayFd = fs.openSync(point, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+            before = named;
+          }
+          namespace();
+          return Object.freeze({
+            state: 'present' as const,
+            resource: backupNasInitializationResource({ kind: 'closed-underlay', ...inode(before) }),
+          });
+        };
+        const assertRecovery = async () => {
+          namespace();
+          await current();
+          namespace();
+        };
+        return withBackupNasInitializationRetirementJournal(
+          retirementScope,
+          { controlFd: control!.fd, assertAuthority: assertRecovery, assertMemory: memory },
+          async (retirement) => {
+            const result = await transitionBackupNasInitializationRetirement(retirementScope, {
+              assertAuthority: retirement.assertCurrent,
+              readJournal: async () => retirement.readJournal(),
+              writeJournal: retirement.writeJournal,
+              observe: async () => observe(),
+              retire: async () => {
+                namespace();
+                lease.assertCurrent();
+                if (!before || observe().state !== 'present') throw Error('held_underlay_required');
+                fs.rmdirSync(point);
+                removed = fs.fstatSync(underlayFd!);
+                fs.fsyncSync(storage!.fd);
+                namespace();
+              },
+            });
+            const completion = metadata(control!, retirementName);
+            if (backupNasInitializationRetirementJournal(completion.value, retirementScope).phase !== 'retired')
+              throw Error('retirement_completion_required');
+            finalObservation = () => {
+              completion.check();
+              if (namespace()) throw Error('retirement_absence_required');
+              if (backupNasInitializationRetirementJournal(completion.value, retirementScope).phase !== 'retired')
+                throw Error('retirement_completion_required');
+            };
+            finalObservation();
+            return result;
+          },
+        );
+      }
       if (mode === 'inspect') {
         if (existing) throw Error('claimed_underlay_observation_denied');
         const before = fs.lstatSync(point);
@@ -393,7 +543,13 @@ async function withBackupNasUnderlay(
     return result;
   } catch {
     // eslint-disable-next-line preserve-caught-error -- Root resource paths, selected configuration and native-authority diagnostics remain private.
-    throw Error(mode === 'prepare' ? 'backup_nas_underlay_unavailable' : 'backup_nas_underlay_observation_unavailable');
+    throw Error(
+      mode === 'prepare'
+        ? 'backup_nas_underlay_unavailable'
+        : mode === 'inspect'
+          ? 'backup_nas_underlay_observation_unavailable'
+          : 'backup_nas_underlay_retirement_unavailable',
+    );
   } finally {
     try {
       if (journalFd !== undefined) fs.closeSync(journalFd);

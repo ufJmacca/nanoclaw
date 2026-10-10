@@ -6,7 +6,12 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { digest } from '../domain/contracts.js';
 import { vaultRootConfiguration } from './vault-root-config.js';
 import { vaultRootStateDigest } from './vault-root-state.js';
-import { prepareBackupNasUnderlay, inspectBackupNasUnclaimedUnderlay } from './backup-nas-underlay.js';
+import {
+  prepareBackupNasUnderlay,
+  inspectBackupNasUnclaimedUnderlay,
+  retireBackupNasUnclaimedUnderlay,
+} from './backup-nas-underlay.js';
+import { backupNasInitializationResource } from './backup-nas-initialization-recovery-scope.js';
 const roots: string[] = [];
 afterEach(() => {
   vi.restoreAllMocks();
@@ -73,6 +78,213 @@ function fixture() {
   };
   return { root, vault, nas, bootstrap, bootstrapFile, controls, mount, journal };
 }
+function retirementFixture() {
+  const f = fixture();
+  fs.mkdirSync(f.mount, { mode: 0 });
+  const stat = fs.lstatSync(f.mount),
+    resource = backupNasInitializationResource({ kind: 'closed-underlay', device: stat.dev, inode: stat.ino });
+  const scope = { nasDigest: digest(f.nas), vaultStateDigest: vaultRootStateDigest(f.vault), resource };
+  return {
+    ...f,
+    resource,
+    scope,
+    retirement: f.controls.paths.controlRoot + '/nas-initialization-retirement.' + digest(scope) + '.json',
+  };
+}
+const retirementDenied = /^backup_nas_underlay_retirement_unavailable$/;
+it('durably journals intent before removing only the observed empty closed unclaimed underlay', async () => {
+  const f = retirementFixture(),
+    bootstrap = fs.readFileSync(f.bootstrapFile),
+    original = fs.rmdirSync;
+  let effect = false;
+  vi.spyOn(fs, 'rmdirSync').mockImplementation((directory) => {
+    if (String(directory).endsWith('/nas')) {
+      effect = true;
+      expect(JSON.parse(fs.readFileSync(f.retirement, 'utf8'))).toEqual({
+        contract: 'cos-backup-nas-initialization-retirement/v1',
+        ...f.scope,
+        phase: 'retiring',
+      });
+    }
+    original(directory);
+  });
+  const result = await retireBackupNasUnclaimedUnderlay(f.vault, f.nas, f.resource, f.controls);
+  expect(effect).toBe(true);
+  expect(Object.isFrozen(result)).toBe(true);
+  expect(result).toEqual({
+    contract: 'cos-backup-nas-initialization-retirement-result/v1',
+    status: 'retired',
+    nasDigest: digest(f.nas),
+    vaultStateDigest: vaultRootStateDigest(f.vault),
+    resourceDigest: digest(f.resource),
+  });
+  expect(fs.existsSync(f.mount)).toBe(false);
+  expect(fs.existsSync(f.journal)).toBe(false);
+  expect(fs.readFileSync(f.bootstrapFile)).toEqual(bootstrap);
+  await prepareBackupNasUnderlay(f.vault, f.nas, f.controls);
+  expect(JSON.parse(fs.readFileSync(f.journal, 'utf8')).phase).toBe('closed');
+});
+it.each(['before-effect', 'after-effect', 'after-completion'])(
+  'reconciles %s interruption only with fresh permission without replaying a completed removal',
+  async (at) => {
+    const f = retirementFixture();
+    f.controls.assertAuthority.mockImplementation(async () => {
+      if (!fs.existsSync(f.retirement)) return;
+      const record = JSON.parse(fs.readFileSync(f.retirement, 'utf8'));
+      if (
+        at === 'before-effect' ||
+        (at === 'after-effect' && !fs.existsSync(f.mount)) ||
+        (at === 'after-completion' && record.phase === 'retired')
+      )
+        throw Error('PRIVATE_REVOKED');
+    });
+    await expect(retireBackupNasUnclaimedUnderlay(f.vault, f.nas, f.resource, f.controls)).rejects.toThrow(
+      retirementDenied,
+    );
+    expect(fs.existsSync(f.mount)).toBe(at === 'before-effect');
+    expect(JSON.parse(fs.readFileSync(f.retirement, 'utf8')).phase).toBe(
+      at === 'after-completion' ? 'retired' : 'retiring',
+    );
+    f.controls.assertAuthority.mockResolvedValue(undefined);
+    const rmdir = vi.spyOn(fs, 'rmdirSync');
+    expect((await retireBackupNasUnclaimedUnderlay(f.vault, f.nas, f.resource, f.controls)).status).toBe('retired');
+    expect(rmdir.mock.calls.filter(([directory]) => String(directory).endsWith('/nas'))).toHaveLength(
+      at === 'before-effect' ? 1 : 0,
+    );
+  },
+);
+it.each([
+  'inode',
+  'device',
+  'mode',
+  'owner',
+  'payload',
+  'symlink',
+  'missing',
+  'claimed',
+  'mounted',
+  'permission',
+  'memory',
+  'bootstrap',
+  'journal-scope',
+  'journal-mode',
+  'wrong-kind',
+  'selector',
+])('denies %s retirement and preserves the remaining underlay and claims', async (reason) => {
+  const f = retirementFixture();
+  let resource = f.resource;
+  if (reason === 'inode') {
+    fs.renameSync(f.mount, f.mount + '.keep');
+    fs.mkdirSync(f.mount, { mode: 0 });
+  }
+  if (reason === 'device') resource = { ...resource, device: 1 };
+  if (reason === 'mode') fs.chmodSync(f.mount, 0o700);
+  if (reason === 'owner') fs.chownSync(f.mount, 1000, 1000);
+  if (reason === 'payload') fs.writeFileSync(f.mount + '/payload', 'KEEP');
+  if (reason === 'symlink') {
+    fs.renameSync(f.mount, f.mount + '.keep');
+    fs.symlinkSync(f.mount + '.keep', f.mount);
+  }
+  if (reason === 'missing') fs.rmdirSync(f.mount);
+  if (reason === 'claimed') fs.writeFileSync(f.journal, 'KEEP', { mode: 0o600 });
+  if (reason === 'mounted') f.controls.isMounted.mockReturnValue(true);
+  if (reason === 'permission') f.controls.assertAuthority.mockRejectedValue(Error('PRIVATE_PERMISSION'));
+  if (reason === 'memory')
+    f.controls.assertMemory.mockImplementation(() => {
+      throw Error('PRIVATE_MEMORY');
+    });
+  if (reason === 'bootstrap') fs.writeFileSync(f.bootstrapFile, JSON.stringify({ ...f.bootstrap, phase: 'intent' }));
+  if (reason === 'journal-scope' || reason === 'journal-mode')
+    fs.writeFileSync(
+      f.retirement,
+      JSON.stringify({
+        contract: 'cos-backup-nas-initialization-retirement/v1',
+        ...f.scope,
+        nasDigest: reason === 'journal-scope' ? '0'.repeat(64) : f.scope.nasDigest,
+        phase: 'retiring',
+      }),
+      { mode: reason === 'journal-mode' ? 0o644 : 0o600 },
+    );
+  if (reason === 'wrong-kind')
+    resource = {
+      kind: 'configuration-stage',
+      stageId: randomUUID(),
+      device: 1,
+      inode: 2,
+      contentDigest: 'a'.repeat(64),
+    };
+  if (reason === 'selector') resource = { ...resource, path: '/tmp/foreign' } as unknown as typeof resource;
+  await expect(retireBackupNasUnclaimedUnderlay(f.vault, f.nas, resource, f.controls)).rejects.toThrow(
+    retirementDenied,
+  );
+  expect(fs.existsSync(f.mount)).toBe(reason !== 'missing');
+  if (reason === 'payload') expect(fs.readFileSync(f.mount + '/payload', 'utf8')).toBe('KEEP');
+  if (reason === 'claimed') expect(fs.readFileSync(f.journal, 'utf8')).toBe('KEEP');
+});
+it.each(['claim', 'inode', 'payload', 'mounted', 'parent'])(
+  'refuses %s changed after durable intent before the removal',
+  async (reason) => {
+    const f = retirementFixture();
+    let changed = false;
+    f.controls.assertAuthority.mockImplementation(async () => {
+      if (changed || !fs.existsSync(f.retirement)) return;
+      changed = true;
+      if (reason === 'claim') fs.writeFileSync(f.journal, 'KEEP', { mode: 0o600 });
+      if (reason === 'inode') {
+        fs.renameSync(f.mount, f.mount + '.keep');
+        fs.mkdirSync(f.mount, { mode: 0 });
+      }
+      if (reason === 'payload') fs.writeFileSync(f.mount + '/payload', 'KEEP');
+      if (reason === 'mounted') f.controls.isMounted.mockReturnValue(true);
+      if (reason === 'parent') {
+        fs.renameSync(f.controls.paths.storageRoot, f.controls.paths.storageRoot + '.keep');
+        fs.mkdirSync(f.controls.paths.storageRoot, { mode: 0o711 });
+      }
+    });
+    await expect(retireBackupNasUnclaimedUnderlay(f.vault, f.nas, f.resource, f.controls)).rejects.toThrow(
+      retirementDenied,
+    );
+    expect(changed).toBe(true);
+    expect(fs.existsSync(reason === 'parent' ? f.controls.paths.storageRoot + '.keep/nas' : f.mount)).toBe(true);
+  },
+);
+it.each(['resource', 'journal', 'claim'])('refuses a %s change during actual writer closure', async (reason) => {
+  const f = retirementFixture(),
+    close = fs.closeSync;
+  let changed = false;
+  vi.spyOn(fs, 'closeSync').mockImplementation((fd) => {
+    const file = fs.readlinkSync('/proc/self/fd/' + fd);
+    close(fd);
+    if (!changed && file.endsWith('/repository.lock')) {
+      changed = true;
+      if (reason === 'resource') fs.mkdirSync(f.mount, { mode: 0 });
+      if (reason === 'journal') {
+        const record = JSON.parse(fs.readFileSync(f.retirement, 'utf8'));
+        fs.writeFileSync(f.retirement, JSON.stringify({ ...record, phase: 'retiring' }));
+      }
+      if (reason === 'claim') fs.writeFileSync(f.journal, 'KEEP', { mode: 0o600 });
+    }
+  });
+  await expect(retireBackupNasUnclaimedUnderlay(f.vault, f.nas, f.resource, f.controls)).rejects.toThrow(
+    retirementDenied,
+  );
+  expect(changed).toBe(true);
+});
+it('keeps the empty mountpoint on a failed durable intent sync and safely resumes with fresh proof', async () => {
+  const f = retirementFixture(),
+    original = fs.fsyncSync;
+  const sync = vi.spyOn(fs, 'fsyncSync').mockImplementation((fd) => {
+    if (fs.existsSync(f.retirement)) throw Error('PRIVATE_SYNC');
+    original(fd);
+  });
+  await expect(retireBackupNasUnclaimedUnderlay(f.vault, f.nas, f.resource, f.controls)).rejects.toThrow(
+    retirementDenied,
+  );
+  expect(fs.existsSync(f.mount)).toBe(true);
+  sync.mockRestore();
+  await retireBackupNasUnclaimedUnderlay(f.vault, f.nas, f.resource, f.controls);
+  expect(fs.existsSync(f.mount)).toBe(false);
+});
 it('observes the exact closed unclaimed underlay under the root writer without claiming or repairing it', async () => {
   const s = fixture();
   fs.mkdirSync(s.mount, { mode: 0 });
