@@ -4,6 +4,7 @@ const f = vi.hoisted(() => ({
   readVault: vi.fn(),
   readNas: vi.fn(),
   artifact: vi.fn(),
+  artifactScope: vi.fn(),
   memory: vi.fn(),
   credential: vi.fn(),
   rootJournal: vi.fn(),
@@ -19,7 +20,10 @@ vi.mock('./backup-nas-root-config.js', async (original) => ({
   ...(await original<object>()),
   readBackupNasRootConfiguration: f.readNas,
 }));
-vi.mock('./vault-root-artifact.js', () => ({ verifyVaultRootArtifact: f.artifact }));
+vi.mock('./vault-root-artifact.js', () => ({
+  verifyVaultRootArtifact: f.artifact,
+  withVaultRootArtifact: f.artifactScope,
+}));
 vi.mock('./vault-memory.js', () => ({ verifyVaultMemory: f.memory }));
 vi.mock('./backup-smb-root-lease.js', () => ({ withRootBackupSmbCredentials: f.credential }));
 vi.mock('./backup-nas-root-journal.js', () => ({ withBackupNasRootJournal: f.rootJournal }));
@@ -80,7 +84,22 @@ function fixture(mounted = false, interrupted = false) {
   const abort = new AbortController();
   const credential = { fd: 42, signal: abort.signal, assertCurrent: vi.fn(async () => {}) },
     saved: BackupNasMountJournal[] = [];
-  let writerHeld = false;
+  let writerHeld = false,
+    artifactHeld = false;
+  f.artifactScope.mockImplementation(async (config, operation) => {
+    f.artifact(config);
+    artifactHeld = true;
+    try {
+      return await operation({
+        assertCurrent: () => {
+          expect(artifactHeld).toBe(true);
+          f.artifact(config);
+        },
+      });
+    } finally {
+      artifactHeld = false;
+    }
+  });
   f.readVault.mockReturnValue(vault);
   f.readNas.mockReturnValue(nas);
   f.credential.mockImplementation(async (_vault, _reference, operation) => operation(credential));
@@ -104,6 +123,7 @@ function fixture(mounted = false, interrupted = false) {
   });
   f.observe.mockImplementation(() => actual);
   f.mount.mockImplementation(async (_input, lease, destination) => {
+    expect(artifactHeld).toBe(true);
     expect(writerHeld).toBe(true);
     expect(lease).toBe(credential);
     destination('before');
@@ -111,6 +131,7 @@ function fixture(mounted = false, interrupted = false) {
     destination('after');
   });
   f.unmount.mockImplementation(async (_claim, _lease, destination) => {
+    expect(artifactHeld).toBe(true);
     expect(writerHeld).toBe(true);
     destination('before', claim);
     actual = { state: 'closed', underlay };
@@ -148,6 +169,7 @@ it('composes the fixed root metadata, sealed helper, live owner descriptor, jour
   expect(s.saved.map((value) => value.phase)).toEqual(['mounting', 'mounted']);
   expect(s.credential.assertCurrent.mock.calls.length).toBeGreaterThan(32);
   expect(f.artifact).toHaveBeenCalledWith(s.vault);
+  expect(f.artifactScope).toHaveBeenCalledTimes(1);
 });
 it('disconnects a recorded exact instance under current root authority without opening an owner credential', async () => {
   const s = fixture(true);

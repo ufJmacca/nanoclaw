@@ -7,8 +7,10 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { digest } from '../domain/contracts.js';
 import { vaultRootConfiguration } from './vault-root-config.js';
 import { withRootBackupSmbCredentials } from './backup-smb-root-lease.js';
+import * as artifact from './vault-root-artifact.js';
 const cleanups: (() => void)[] = [];
 afterEach(() => {
+  vi.restoreAllMocks();
   for (const cleanup of cleanups.splice(0)) cleanup();
 });
 function fixture(reason = '') {
@@ -164,6 +166,44 @@ it('retains the actual spawned owner descriptor through the repeated journal che
     s.controls,
   );
   expect(s.children[0].exitCode).toBe(0);
+});
+it('holds the default verified artifact scope until its actual owner child has terminated', async () => {
+  const s = fixture();
+  let active = false;
+  const current = vi.fn(() => {
+    if (!active) throw Error('FIXTURE_ARTIFACT_RELEASED');
+  });
+  const held = vi.spyOn(artifact, 'withVaultRootArtifact').mockImplementation(async (config, operation) => {
+    active = true;
+    try {
+      return await operation({
+        seal: {
+          contract: 'cos-vault-root-artifact/v1',
+          sourceCommit: config.artifact.sourceCommit,
+          sourceTree: config.artifact.sourceTree,
+          runtime: { name: 'node', version: '22.23.2', architecture: 'arm64' },
+          files: { node: { bytes: 1, sha256: 'a'.repeat(64) }, 'gateway.mjs': { bytes: 1, sha256: 'b'.repeat(64) } },
+        },
+        assertCurrent: current,
+      });
+    } finally {
+      expect(s.children[0].exitCode).toBe(0);
+      active = false;
+    }
+  });
+  const { verifyArtifact: _fixtureArtifact, ...controls } = s.controls;
+  await withRootBackupSmbCredentials(
+    s.config,
+    s.reference,
+    async (lease) => {
+      for (let index = 0; index < 40; index++) await lease.assertCurrent();
+      expect(active).toBe(true);
+    },
+    controls,
+  );
+  expect(held).toHaveBeenCalledTimes(1);
+  expect(current.mock.calls.length).toBeGreaterThan(40);
+  expect(active).toBe(false);
 });
 it.each(['role', 'memory', 'artifact', 'configuration', 'reference'])(
   'denies initial %s before spawning any credential process',

@@ -5,7 +5,7 @@ import { digest } from '../domain/contracts.js';
 import { BACKUP_SMB_MAX_CHALLENGES, backupSmbMessages, backupSmbOpenRequest } from './backup-smb-probe.js';
 import { writeRuntimeTestMessage } from './runtime-test-wire.js';
 import { verifyVaultMemory } from './vault-memory.js';
-import { verifyVaultRootArtifact } from './vault-root-artifact.js';
+import { verifyVaultRootArtifact, withVaultRootArtifact } from './vault-root-artifact.js';
 import {
   readVaultRootConfiguration,
   vaultRootConfiguration,
@@ -81,6 +81,28 @@ function readyMetadata(value: unknown, config: VaultRootConfiguration) {
  * Effects must honor the abort signal and await their owned subprocess termination.
  */
 export async function withRootBackupSmbCredentials<T>(
+  input: VaultRootConfiguration,
+  credentialReference: string,
+  operation: (lease: RootBackupSmbLease) => Promise<T>,
+  controls: RootBackupSmbControls = {},
+): Promise<T> {
+  try {
+    if (controls.verifyArtifact) return await rootBackupSmbSession(input, credentialReference, operation, controls);
+    return await withVaultRootArtifact(
+      input,
+      (artifact) =>
+        rootBackupSmbSession(input, credentialReference, operation, {
+          ...controls,
+          verifyArtifact: () => artifact.assertCurrent(),
+        }),
+      { assertMemory: controls.assertMemory, assertRole: controls.assertRole },
+    );
+  } catch {
+    // eslint-disable-next-line preserve-caught-error -- Artifact custody and root/owner effects remain private.
+    throw Error('backup_smb_root_lease_unavailable');
+  }
+}
+async function rootBackupSmbSession<T>(
   input: VaultRootConfiguration,
   credentialReference: string,
   operation: (lease: RootBackupSmbLease) => Promise<T>,
