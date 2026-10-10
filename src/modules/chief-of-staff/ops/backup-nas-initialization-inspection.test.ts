@@ -73,7 +73,7 @@ function fixture(kind: 'configuration-stage' | 'closed-underlay' | 'service-stag
   }
   const observe = async (
     _vault: typeof vault,
-    _nas: typeof nas,
+    _nas: Parameters<NonNullable<BackupNasInitializationInspectionControls['underlay']>>[1],
     controls: Pick<BackupNasInitializationInspectionControls, 'assertAuthority'>,
   ) => {
     await controls.assertAuthority();
