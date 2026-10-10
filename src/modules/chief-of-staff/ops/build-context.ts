@@ -20,6 +20,7 @@ const vaultFiles = new Set([
   ].map((name) => 'container/fixtures/vault/' + name),
   'scripts/cos-vault-fixture.sh',
   'scripts/cos-vault-keychain.swift',
+  'scripts/cos-backup-keychain.swift',
 ]);
 function allowed(name: string): boolean {
   const pieces = name.split('/');

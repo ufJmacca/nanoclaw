@@ -33,6 +33,7 @@ function fixture() {
     'container/fixtures/vault/unadmitted.mjs': 'UNADMITTED_VAULT_CANARY',
     'scripts/cos-vault-fixture.sh': 'host-only private pipe orchestration',
     'scripts/cos-vault-keychain.swift': 'trusted keychain code, never key bytes',
+    'scripts/cos-backup-keychain.swift': 'trusted backup credential code, never credential material',
     'scripts/unadmitted.sh': 'UNADMITTED_SCRIPT_CANARY',
     '.env': 'PRIVATE_ENV_CANARY',
     'data/v2.db': 'PRIVATE_STATE_CANARY',
@@ -110,6 +111,20 @@ it('exports only the admitted vault drivers from the same source and binds their
   f.git('add', '.');
   f.git('commit', '-qm', 'changed vault driver');
   const after = await prepareBuildContext(f.repo, f.git('rev-parse', 'HEAD'), path.join(f.root, 'vault-second'));
+  expect(after.buildInputDigest).not.toBe(before.buildInputDigest);
+  expect(after.workerAssetsDigest).toBe(before.workerAssetsDigest);
+});
+it('binds the host backup credential helper to committed source without changing worker assets', async () => {
+  const f = fixture(),
+    first = path.join(f.root, 'backup-first');
+  fs.writeFileSync(path.join(f.repo, 'scripts/cos-backup-keychain.swift'), 'UNCOMMITTED_CREDENTIAL_DRIVER');
+  const before = await prepareBuildContext(f.repo, f.commit, first);
+  expect(fs.readFileSync(path.join(first, 'scripts/cos-backup-keychain.swift'), 'utf8')).toBe(
+    'trusted backup credential code, never credential material',
+  );
+  f.git('add', '.');
+  f.git('commit', '-qm', 'changed credential driver');
+  const after = await prepareBuildContext(f.repo, f.git('rev-parse', 'HEAD'), path.join(f.root, 'backup-second'));
   expect(after.buildInputDigest).not.toBe(before.buildInputDigest);
   expect(after.workerAssetsDigest).toBe(before.workerAssetsDigest);
 });
