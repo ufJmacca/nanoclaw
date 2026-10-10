@@ -27,6 +27,35 @@ function fixture() {
 }
 const op = '9f99d9b4-4dac-423a-956c-afd953993c2d',
   next = '6ea53126-7177-469b-8bc1-cedd11635b79';
+it('observes delivery without initializing a queue or exposing captured file names', async () => {
+  const f = fixture();
+  expect(await f.queue.inspectDelivery('state')).toEqual({ items: [], lastRemoteCheckpointAt: null });
+  expect(fs.existsSync(f.root + '/state/backup-queue')).toBe(false);
+  await f.queue.capture('state', op, async (sink) => sink.write('private-name.json', Buffer.from('state')), 65536);
+  const delivery = await f.queue.inspectDelivery('state');
+  expect(delivery.items).toEqual([
+    expect.objectContaining({ kind: 'state', operationId: op, disposition: 'upload', bytes: expect.any(Number) }),
+  ]);
+  expect(JSON.stringify(delivery)).not.toContain('private-name');
+});
+it('holds failed captures instead of treating them as interrupted remote retirement', async () => {
+  const f = fixture();
+  await expect(
+    f.queue.capture(
+      'credentials',
+      op,
+      async (sink) => {
+        sink.write('partial.json', Buffer.from('partial'));
+        throw Error('interrupted capture');
+      },
+      65536,
+    ),
+  ).rejects.toThrow('backup_queue_unavailable');
+  expect((await f.queue.inspectDelivery('credentials')).items).toMatchObject([
+    { operationId: op, disposition: 'held' },
+  ]);
+  expect(fs.existsSync(f.root + '/credentials/backup-queue/' + op + '/data/partial.json')).toBe(true);
+});
 it('captures and verifies through the held self-descriptor used by the default vault accessor', async () => {
   const f = fixture();
   const queue = new BackupQueue('a'.repeat(64), async (_kind, operation) => {

@@ -55,8 +55,11 @@ export async function uploadVaultBackup(
   roots: CalendarStorageRoots,
   kind: BackupKind,
   operationId: string,
+  assertCaller: () => void = () => {},
 ): Promise<RemoteCheckpoint> {
   try {
+    if (typeof assertCaller !== 'function') throw Error('backup_caller_unverified');
+    assertCaller();
     if (
       !['state', 'credentials'].includes(kind) ||
       typeof operationId !== 'string' ||
@@ -126,6 +129,7 @@ export async function uploadVaultBackup(
         const profile = read(),
           profileDigest = digest(profile);
         const assertConfiguration = () => {
+          assertCaller();
           verifyVaultMemory();
           if (digest(verifyVaultStorage(roots)) !== digest(policy) || digest(read()) !== profileDigest)
             throw Error('backup_configuration_changed');

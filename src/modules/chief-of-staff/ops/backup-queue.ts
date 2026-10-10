@@ -32,6 +32,18 @@ export type BackupRetirementProof = {
   checkpoint: RemoteCheckpoint;
   assertCurrent(): void;
 };
+/** Delivery observations are not cleanup, restore or repository authority. */
+export type BackupDeliveryItem = {
+  kind: BackupKind;
+  operationId: string;
+  disposition: 'upload' | 'reconcile' | 'held';
+  createdAt: string;
+  bytes: number;
+};
+export type BackupDeliveryObservation = {
+  items: BackupDeliveryItem[];
+  lastRemoteCheckpointAt: string | null;
+};
 type Retirement = {
   contract: 'cos-backup-queue-retirement/v2';
   receipt: BackupQueueReceipt;
@@ -1167,6 +1179,37 @@ export class BackupQueue {
       false,
       async (root, device) => this.receipts(root, kind, device),
       async () => [],
+    );
+  }
+  /** A durable retirement intent selects its original ID for fresh remote
+   * readback. Other incomplete captures remain held. No payload is read or
+   * removed, and an absent queue is not initialized by background observation. */
+  async inspectDelivery(kind: BackupKind): Promise<BackupDeliveryObservation> {
+    return this.area(
+      kind,
+      false,
+      false,
+      async (root, device) => {
+        const receipts = this.receipts(root, kind, device),
+          intent = retirement(root, intentName, this.ownerDigest, kind, device),
+          ack = retirement(root, ackName, this.ownerDigest, kind, device);
+        return {
+          items: receipts.map((receipt) => ({
+            kind,
+            operationId: receipt.operationId,
+            disposition:
+              intent?.receipt.operationId === receipt.operationId
+                ? 'reconcile'
+                : receipt.state === 'pending'
+                  ? 'upload'
+                  : 'held',
+            createdAt: receipt.createdAt,
+            bytes: receipt.bytes,
+          })),
+          lastRemoteCheckpointAt: ack?.retired === true ? ack.remote.snapshotAt : null,
+        };
+      },
+      async () => ({ items: [], lastRemoteCheckpointAt: null }),
     );
   }
   async withPending<T>(

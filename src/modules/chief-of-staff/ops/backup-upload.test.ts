@@ -159,6 +159,35 @@ async function fixture() {
   });
   return { roots, areas, profile, file, queue, producer };
 }
+it('checks the background caller before artifact or NAS access', async () => {
+  const s = await fixture();
+  await expect(
+    uploadVaultBackup(s.roots, 'state', operationId, () => {
+      throw Error('caller closed');
+    }),
+  ).rejects.toThrow('backup_upload_unavailable');
+  expect(f.artifact).not.toHaveBeenCalled();
+  expect(f.nas).not.toHaveBeenCalled();
+  expect(await s.queue.pending('state')).toMatchObject([{ operationId, state: 'pending' }]);
+});
+it('rechecks the background caller after remote readback and before local retirement', async () => {
+  const s = await fixture();
+  let open = true;
+  const usage = await f.capacity();
+  f.capacity.mockClear();
+  f.capacity.mockResolvedValueOnce(usage).mockImplementationOnce(async () => {
+    open = false;
+    return usage;
+  });
+  await expect(
+    uploadVaultBackup(s.roots, 'state', operationId, () => {
+      if (!open) throw Error('caller closed');
+    }),
+  ).rejects.toThrow('backup_upload_unavailable');
+  expect(f.upload).toHaveBeenCalledOnce();
+  expect(await s.queue.pending('state')).toMatchObject([{ operationId, state: 'pending' }]);
+  expect(fs.existsSync(s.areas.staging + '/backup-queue/full/data/coordinated/remote.json')).toBe(true);
+});
 it('connects only installed vault, artifact, NAS, password and writer gates before transfer admission', async () => {
   const s = await fixture(),
     result = await uploadVaultBackup(s.roots, 'state', operationId);

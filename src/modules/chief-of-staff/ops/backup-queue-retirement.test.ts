@@ -303,6 +303,7 @@ it('resumes partial cleanup only after another fresh matching repository readbac
   expect(fs.existsSync(f.slot + '/data/a.json')).toBe(false);
   expect(fs.existsSync(f.slot + '/data/nested/b.json')).toBe(true);
   expect(await f.queue.pending('state')).toMatchObject([{ operationId: op, state: 'failed' }]);
+  expect((await f.queue.inspectDelivery('state')).items).toMatchObject([{ operationId: op, disposition: 'reconcile' }]);
   await expect(
     f.queue.capture(
       'state',
@@ -327,6 +328,7 @@ it('resumes partial cleanup only after another fresh matching repository readbac
   });
   expect(reverified).toBe(1);
   expect(await f.queue.pending('state')).toEqual([]);
+  expect(await f.queue.inspectDelivery('state')).toEqual({ items: [], lastRemoteCheckpointAt: '2026-10-11T00:00:00Z' });
 });
 it('does not treat a saved acknowledgement as authority to delete a new full slot', async () => {
   const f = await fixture();

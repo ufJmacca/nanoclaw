@@ -12,6 +12,7 @@ type TargetArguments =
   | { command: 'protected-release'; settings: string; releaseId: string; manifestHash: string }
   | { command: 'operations-maintenance'; settings: string; requestId: string; phase: 'hold' | 'release' }
   | { command: 'scheduled-backup'; settings: string; requestId: string }
+  | { command: 'upload-backups'; settings: string; requestId: string }
   | { command: 'runtime-test'; settings: string; owner: string }
   | { command: 'rollback'; settings: string; releaseId: string; fromReleaseId: string }
   | {
@@ -37,6 +38,7 @@ export function parseTargetArguments(args: string[]): TargetArguments {
       'protected-release',
       'operations-maintenance',
       'scheduled-backup',
+      'upload-backups',
     ].includes(command) ||
     rest.length % 2 !== 0
   )
@@ -81,7 +83,7 @@ export function parseTargetArguments(args: string[]): TargetArguments {
           phase: values['--phase'] as 'hold' | 'release',
         }
       : reject();
-  if (command === 'scheduled-backup')
+  if (command === 'scheduled-backup' || command === 'upload-backups')
     return Object.keys(values).length === 2 &&
       /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(values['--request-id'] ?? '')
       ? { command, settings: values['--settings'], requestId: values['--request-id'] }
@@ -169,6 +171,18 @@ export async function targetCommand(args: string[]): Promise<Record<string, unkn
   const binding = targetBinding(settings);
   const parent = path.dirname(settings.stateRoot);
   if (!fs.existsSync(parent)) throw new Error('target_state_parent_required');
+  if (request.command === 'upload-backups') {
+    const { uploadBackupJob } = await import('./backup-upload-job.js');
+    const { createBackupUploadJobEffects } = await import('./backup-upload-job-effects.js');
+    // The job owns a separate kernel lock. NAS waits must not hold the
+    // deployment/checkpoint operation lock or the credential publication lock.
+    return uploadBackupJob({
+      root: settings.stateRoot,
+      binding,
+      requestId: request.requestId,
+      effects: createBackupUploadJobEffects(settings, fileURLToPath(import.meta.url)),
+    });
+  }
   return withDeploymentLock(settings.stateRoot + '.operation.lock', async () => {
     if (request.command === 'scheduled-backup') {
       const { checkpointMaintenance } = await import('./checkpoint-maintenance.js');
@@ -383,6 +397,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
         'target_protection_conflict',
         'operations_maintenance_unverified',
         'operations_workers_active',
+        'backup_upload_locked',
+        'backup_upload_job_unavailable',
       ]);
       console.error(
         JSON.stringify({

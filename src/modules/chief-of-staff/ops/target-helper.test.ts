@@ -1,5 +1,25 @@
 import { expect, it } from 'vitest';
 import { parseTargetArguments } from './target-helper.js';
+it('admits only an independent upload job ID and rejects snapshot, NAS, retention and capture selectors', () => {
+  const args = [
+    'upload-backups',
+    '--settings',
+    '/home/pi/settings.json',
+    '--request-id',
+    '01234567-89ab-4def-8123-456789abcdef',
+  ];
+  expect(parseTargetArguments(args)).toEqual({ command: 'upload-backups', settings: args[2], requestId: args[4] });
+  for (const extra of [
+    ['--kind', 'state'],
+    ['--operation-id', args[4]],
+    ['--nas', '/mnt/foreign'],
+    ['--retention', 'all'],
+    ['--phase', 'hold'],
+    ['--owner', 'foreign'],
+  ])
+    expect(() => parseTargetArguments([...args, ...extra])).toThrow('invalid_target_arguments');
+  expect(() => parseTargetArguments([...args.slice(0, -1), 'latest'])).toThrow('invalid_target_arguments');
+});
 it('admits only a fixed scheduled checkpoint request, without account, capture-mode or upload arguments', () => {
   const args = [
     'scheduled-backup',
