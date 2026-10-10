@@ -1,8 +1,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { CalendarStorageRoots } from '../calendar/storage-policy.js';
-import { withVaultDirectory } from './vault-storage.js';
+import { digest } from '../domain/contracts.js';
+import { withVaultDirectory, verifyVaultStorage } from './vault-storage.js';
 import { verifyVaultMemory } from './vault-memory.js';
+import { readBackupCredentialInstallation } from './backup-credential-install.js';
 export type BackupPassword = Readonly<{ fd: number; assertCurrent(): void }>;
 /** Trusted transport only. The secret is read by Restic through an inherited descriptor;
  * this process never decodes it, copies it to an argument/environment variable or logs it. */
@@ -13,6 +15,7 @@ export async function withVaultResticPassword<T>(
   try {
     return await withVaultDirectory(roots, 'backup-credentials', async (directory) => {
       verifyVaultMemory();
+      const policy = verifyVaultStorage(roots);
       const alias = /^\/proc\/self\/fd\/\d+$/.test(directory);
       if (
         !path.isAbsolute(directory) ||
@@ -30,6 +33,11 @@ export async function withVaultResticPassword<T>(
         const root = fs.fstatSync(rootFd);
         if (!root.isDirectory() || root.uid !== process.getuid?.() || (root.mode & 0o777) !== 0o700)
           throw Error('unsafe_credential_directory');
+        const installation = readBackupCredentialInstallation(
+          '/proc/self/fd/' + rootFd,
+          roots,
+          policy.volume.filesystemUuid,
+        );
         const file = path.join('/proc/self/fd/' + rootFd, 'restic-password');
         fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
         const heldFd = fd,
@@ -39,6 +47,13 @@ export async function withVaultResticPassword<T>(
           try {
             if (!active) throw Error('released_credential');
             verifyVaultMemory();
+            if (
+              digest(verifyVaultStorage(roots)) !== digest(policy) ||
+              digest(
+                readBackupCredentialInstallation('/proc/self/fd/' + rootFd, roots, policy.volume.filesystemUuid),
+              ) !== digest(installation)
+            )
+              throw Error('credential_installation_changed');
             const stat = fs.fstatSync(heldFd),
               current = fs.lstatSync(file),
               currentRoot = fs.statSync(directory);
