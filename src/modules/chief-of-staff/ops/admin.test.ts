@@ -257,3 +257,26 @@ it('parses vault provisioning with only the bound owner scope', () => {
   );
   expect(() => parseAdminArguments(['vault-provision', '--scope', '../foreign'])).toThrow('invalid_admin_arguments');
 });
+it('parses backup credential installation metadata without accepting credential or destination overrides', () => {
+  const args = [
+    'backup-credentials-install',
+    '--scope',
+    'fixture',
+    '--request-id',
+    '48f99256-b105-4ee3-848c-00140c98151d',
+    '--credential-reference',
+    '319c6740-24ba-4d68-9d3c-a4d53c9607d1',
+  ];
+  expect(parseAdminArguments(args)).toEqual({
+    command: 'backup-credentials-install',
+    scopeId: 'fixture',
+    requestId: args[4],
+    credentialReference: args[6],
+  });
+  for (const extra of [
+    ['--password', 'PRIVATE_VALUE'],
+    ['--root', '/tmp/unsafe'],
+    ['--host', '192.0.2.99'],
+  ])
+    expect(() => parseAdminArguments([...args, ...extra])).toThrow('invalid_admin_arguments');
+});

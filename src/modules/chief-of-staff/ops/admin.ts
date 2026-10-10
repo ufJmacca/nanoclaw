@@ -22,6 +22,7 @@ import { contextAdminCommand, type ContextAdminArguments } from './context-admin
 import { parseOwnerControl } from './owner-controls.js';
 import { isOwnerExportCommand, parseOwnerExportArguments } from './owner-export-admin.js';
 import { vaultStatusCommand } from './vault-admin.js';
+import { parseBackupCredentialInstallArguments } from './backup-credential-admin.js';
 
 type AdminArguments =
   | { command: 'status' }
@@ -29,6 +30,7 @@ type AdminArguments =
   | { command: 'bind'; binding: BindingRequest }
   | ContextAdminArguments;
 export function parseAdminArguments(args: string[]): AdminArguments {
+  if (args[0] === 'backup-credentials-install') return parseBackupCredentialInstallArguments(args);
   if (args[0] === 'vault-provision' || args[0] === 'vault-install' || args[0] === 'vault-recovery-check') {
     if (args.length !== 3 || args[1] !== '--scope' || !/^[a-zA-Z0-9_-]{1,128}$/.test(args[2]))
       throw Error('invalid_admin_arguments');

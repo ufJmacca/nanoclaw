@@ -3,6 +3,37 @@ import { parseOwnerAdminArguments, selectedOwnerAdminProfile, ownerDatabasePrefl
 import { fixtureRelease } from '../../../contracts/chief-of-staff/release-fixture.js';
 import { DatabasePreflightError } from '../store/preflight.js';
 const request = ['owner-export', '--scope', 'fixture', '--request-id', '01234567-89ab-4def-8123-456789abcdef'];
+it('admits credential installation only through the retained owner helper and selected runtime profile', async () => {
+  const admin = [
+    'backup-credentials-install',
+    '--scope',
+    'fixture',
+    '--request-id',
+    '48f99256-b105-4ee3-848c-00140c98151d',
+    '--credential-reference',
+    '319c6740-24ba-4d68-9d3c-a4d53c9607d1',
+  ];
+  expect(parseOwnerAdminArguments(['--settings', '/home/pi/target.json', '--', ...admin])).toMatchObject({ admin });
+  const profile = { MATTERMOST_BOT_TOKEN: 'fixture-runtime' };
+  await expect(
+    selectedOwnerAdminProfile(admin[0], {
+      runtime: () => profile,
+      test: () => {
+        throw Error('test profile must not be read');
+      },
+    }),
+  ).resolves.toBe(profile);
+  expect(() =>
+    parseOwnerAdminArguments([
+      '--settings',
+      '/home/pi/target.json',
+      '--database-environment',
+      '/home/pi/foreign.env',
+      '--',
+      ...admin,
+    ]),
+  ).toThrow('invalid_owner_admin_arguments');
+});
 it('G01 installed vault health uses no database or external account credentials', async () => {
   expect(parseOwnerAdminArguments(['--settings', '/home/pi/target.json', '--', 'vault-status'])).toMatchObject({
     admin: ['vault-status'],

@@ -9,6 +9,7 @@ const commands = [
   'vault-provision',
   'vault-install',
   'vault-recovery-check',
+  'backup-credentials-install',
   'database-check',
   'status',
   'operator-status',

@@ -1,6 +1,7 @@
 import { policyAllowsBriefContext } from '../bridge/brief-context-renewal.js';
 import { runVaultProvisionAdmin, runVaultRecoveryAdmin } from './vault-owner-admin.js';
 import { runVaultInstallAdmin } from './vault-owner-install.js';
+import { runBackupCredentialInstallAdmin, type BackupCredentialInstallArguments } from './backup-credential-admin.js';
 /** Owner-run controls. Calendar sync may refresh its own tokens; no model calls or message sends. */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -63,6 +64,7 @@ import {
 } from './action-recovery-admin.js';
 
 export type ContextAdminArguments =
+  | BackupCredentialInstallArguments
   | { command: 'vault-provision'; scopeId: string }
   | { command: 'vault-install'; scopeId: string }
   | { command: 'vault-recovery-check'; scopeId: string }
@@ -210,6 +212,7 @@ export async function contextAdminCommand(
       'vault-provision',
       'vault-install',
       'vault-recovery-check',
+      'backup-credentials-install',
     ].includes(args.command)
   )
     return { status: 'disabled', live_model: 'not_verified' };
@@ -378,6 +381,18 @@ export async function contextAdminCommand(
         assertAuthority();
       };
       await check();
+      if (args.command === 'backup-credentials-install') {
+        return runBackupCredentialInstallAdmin({
+          args,
+          roots: {
+            targetRoot: root,
+            installationRoot: target.binding.installationRoot,
+            dataRoot: target.binding.dataRoot,
+          },
+          check,
+          assertAuthority,
+        });
+      }
       if (args.command === 'vault-install') {
         if (!vaultRelease) throw Error('vault_owner_installation_unavailable');
         return runVaultInstallAdmin({ root, target, maintenance, native, hostLease: lease, check, ...vaultRelease });
