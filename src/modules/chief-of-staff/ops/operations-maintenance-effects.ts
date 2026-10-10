@@ -41,6 +41,22 @@ export function createOperationsMaintenanceEffects(
   settings: DeploymentSettings,
   invokedHelper: string,
 ): OperationsMaintenanceEffects {
+  return maintenanceEffects(settings, invokedHelper, true);
+}
+/** The scheduled checkpoint holds target admission, preserving the native owner
+ * pause bit. Existing owner maintenance still requires the native pause.
+ */
+export function createScheduledMaintenanceEffects(
+  settings: DeploymentSettings,
+  invokedHelper: string,
+): OperationsMaintenanceEffects {
+  return maintenanceEffects(settings, invokedHelper, false);
+}
+function maintenanceEffects(
+  settings: DeploymentSettings,
+  invokedHelper: string,
+  requirePaused: boolean,
+): OperationsMaintenanceEffects {
   const binding = targetBinding(settings),
     commands = targetCommands(settings),
     central = path.join(settings.dataRoot, 'v2.db');
@@ -56,7 +72,8 @@ export function createOperationsMaintenanceEffects(
   const paused = () =>
     native((db) => {
       const rows = db.prepare('SELECT paused FROM cos_identity_boundaries LIMIT 2').all() as Array<{ paused: number }>;
-      if (rows.length !== 1 || rows[0].paused !== 1 || !manifest) throw new Error('operations_maintenance_unverified');
+      if (rows.length !== 1 || ![0, 1].includes(rows[0].paused) || (requirePaused && rows[0].paused !== 1) || !manifest)
+        throw new Error('operations_maintenance_unverified');
       assertNativeReleaseCompatibility(db, manifest);
     });
   const databaseCompatible = async () => {

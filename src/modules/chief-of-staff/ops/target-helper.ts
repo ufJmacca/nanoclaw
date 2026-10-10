@@ -11,6 +11,7 @@ type TargetArguments =
   | { command: 'programme-protect'; settings: string; completion: string }
   | { command: 'protected-release'; settings: string; releaseId: string; manifestHash: string }
   | { command: 'operations-maintenance'; settings: string; requestId: string; phase: 'hold' | 'release' }
+  | { command: 'scheduled-backup'; settings: string; requestId: string }
   | { command: 'runtime-test'; settings: string; owner: string }
   | { command: 'rollback'; settings: string; releaseId: string; fromReleaseId: string }
   | {
@@ -35,6 +36,7 @@ export function parseTargetArguments(args: string[]): TargetArguments {
       'programme-protect',
       'protected-release',
       'operations-maintenance',
+      'scheduled-backup',
     ].includes(command) ||
     rest.length % 2 !== 0
   )
@@ -78,6 +80,11 @@ export function parseTargetArguments(args: string[]): TargetArguments {
           requestId: values['--request-id'],
           phase: values['--phase'] as 'hold' | 'release',
         }
+      : reject();
+  if (command === 'scheduled-backup')
+    return Object.keys(values).length === 2 &&
+      /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(values['--request-id'] ?? '')
+      ? { command, settings: values['--settings'], requestId: values['--request-id'] }
       : reject();
   if (values['--completion'] || values['--request-id'] || values['--phase']) return reject();
   if (command === 'status')
@@ -163,6 +170,16 @@ export async function targetCommand(args: string[]): Promise<Record<string, unkn
   const parent = path.dirname(settings.stateRoot);
   if (!fs.existsSync(parent)) throw new Error('target_state_parent_required');
   return withDeploymentLock(settings.stateRoot + '.operation.lock', async () => {
+    if (request.command === 'scheduled-backup') {
+      const { checkpointMaintenance } = await import('./checkpoint-maintenance.js');
+      const { createCheckpointMaintenanceEffects } = await import('./checkpoint-maintenance-effects.js');
+      return checkpointMaintenance({
+        root: settings.stateRoot,
+        binding,
+        requestId: request.requestId,
+        effects: createCheckpointMaintenanceEffects(settings, fileURLToPath(import.meta.url), request.requestId),
+      });
+    }
     if (request.command === 'operations-maintenance') {
       const { operationsMaintenance } = await import('./operations-maintenance.js');
       const { createOperationsMaintenanceEffects } = await import('./operations-maintenance-effects.js');

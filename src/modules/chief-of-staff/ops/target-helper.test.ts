@@ -1,5 +1,24 @@
 import { expect, it } from 'vitest';
 import { parseTargetArguments } from './target-helper.js';
+it('admits only a fixed scheduled checkpoint request, without account, capture-mode or upload arguments', () => {
+  const args = [
+    'scheduled-backup',
+    '--settings',
+    '/home/pi/settings.json',
+    '--request-id',
+    '01234567-89ab-4def-8123-456789abcdef',
+  ];
+  expect(parseTargetArguments(args)).toEqual({ command: 'scheduled-backup', settings: args[2], requestId: args[4] });
+  for (const extra of [
+    ['--phase', 'release'],
+    ['--owner', 'foreign'],
+    ['--release-id', 'release-other'],
+    ['--capture-mode', 'unpaused'],
+    ['--upload', 'true'],
+  ])
+    expect(() => parseTargetArguments([...args, ...extra])).toThrow('invalid_target_arguments');
+  expect(() => parseTargetArguments([...args.slice(0, -1), 'latest'])).toThrow('invalid_target_arguments');
+});
 it('requires the exact manifest hash and rejects repair, binding and account flags for protected release completion', () => {
   const args = [
     'protected-release',
