@@ -4,6 +4,7 @@ import path from 'node:path';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { after, test } from 'node:test';
+import { BackupQueue } from '../../modules/chief-of-staff/ops/backup-queue.js';
 import {
   verifyResticBinary,
   verifyResticRepositoryIdentity,
@@ -137,6 +138,115 @@ test('an interrupted stdin upload leaves a checkable repository and no claimed c
     Buffer.from(canary),
   );
   assert.equal((JSON.parse(run(['snapshots', '--tag', 'cos-kind=retry'])) as unknown[]).length, 1);
+});
+test('a real command producer streams a verified PAX checkpoint through Restic and restores it in isolation', async () => {
+  const area = path.join(root, 'synthetic-vault');
+  fs.mkdirSync(area, { mode: 0o700 });
+  const queue = new BackupQueue('a'.repeat(64), async (_kind, operation) => operation(area));
+  const operationId = '9f99d9b4-4dac-423a-956c-afd953993c2d';
+  const longName = 'artifacts/' + 'a'.repeat(64) + '-' + 'b'.repeat(64) + '.blob';
+  await queue.capture(
+    'state',
+    operationId,
+    async (sink) => {
+      sink.write('coordinated/remote.json', Buffer.from(canary));
+      sink.write(longName, Buffer.alloc(150000, 0x41));
+    },
+    262144,
+  );
+  const data = path.join(area, 'backup-queue/full/data'),
+    receipt = path.join(area, 'backup-queue/full/receipt.json');
+  const moduleUrl = new URL('../../modules/chief-of-staff/ops/backup-archive.js', import.meta.url).href;
+  const producer = `import fs from 'node:fs'; import {streamBackupArchive} from ${JSON.stringify(moduleUrl)};
+    const receipt = JSON.parse(fs.readFileSync(${JSON.stringify(receipt)}, 'utf8'));
+    try { await streamBackupArchive(${JSON.stringify(data)}, receipt, bytes => new Promise((resolve, reject) => {
+      process.stdout.write(bytes, error => error ? reject(error) : resolve());
+    })); } catch { process.exitCode = 77; }`;
+  run([
+    'backup',
+    '--stdin-from-command',
+    '--stdin-filename',
+    'checkpoint.tar',
+    '--host',
+    'nanoclaw-cos-fixture',
+    '--tag',
+    'cos-kind=archive',
+    '--',
+    process.execPath,
+    '--input-type=module',
+    '-e',
+    producer,
+  ]);
+  const snapshots = JSON.parse(run(['snapshots', '--tag', 'cos-kind=archive'])) as Array<{ id: string }>;
+  assert.equal(snapshots.length, 1);
+  const bytes = execFileSync('/proc/self/fd/3', [...args, 'dump', snapshots[0].id, 'checkpoint.tar'], {
+    cwd: root,
+    env,
+    timeout: 30000,
+    maxBuffer: 1024 ** 2,
+    stdio: ['pipe', 'pipe', 'pipe', binaryFd, passwordFd, repositoryFd],
+  });
+  assert.equal(
+    execFileSync('/usr/bin/tar', ['--extract', '--to-stdout', '--file=-', 'payload/coordinated/remote.json'], {
+      input: bytes,
+      encoding: 'utf8',
+    }),
+    canary,
+  );
+  assert.deepEqual(
+    execFileSync('/usr/bin/tar', ['--extract', '--to-stdout', '--file=-', 'payload/' + longName], { input: bytes }),
+    Buffer.alloc(150000, 0x41),
+  );
+  const restoredReceipt = JSON.parse(
+    execFileSync('/usr/bin/tar', ['--extract', '--to-stdout', '--file=-', 'cos-backup-receipt.json'], {
+      input: bytes,
+      encoding: 'utf8',
+    }),
+  );
+  assert.equal(restoredReceipt.operationId, operationId);
+  const scan = (directory: string) => {
+    for (const name of fs.readdirSync(directory)) {
+      const file = path.join(directory, name),
+        stat = fs.lstatSync(file);
+      assert(!stat.isSymbolicLink());
+      if (stat.isDirectory()) scan(file);
+      else {
+        assert(stat.isFile());
+        const contents = fs.readFileSync(file);
+        for (const text of [canary, 'checkpoint.tar', longName, operationId])
+          assert(!contents.includes(Buffer.from(text)));
+      }
+    }
+  };
+  scan(repository);
+  run(['check', '--read-data']);
+  bytes.fill(0);
+});
+test('Restic rejects a command producer failure without recording an empty or partial checkpoint', () => {
+  const before = JSON.parse(run(['snapshots'])) as Array<{ id: string }>;
+  const producer = 'process.stdout.write(Buffer.alloc(65536, 0x41), () => { process.exitCode = 77; });';
+  assert.throws(() =>
+    run([
+      'backup',
+      '--stdin-from-command',
+      '--stdin-filename',
+      'failed-checkpoint.tar',
+      '--host',
+      'nanoclaw-cos-fixture',
+      '--tag',
+      'cos-kind=failed-producer',
+      '--',
+      process.execPath,
+      '-e',
+      producer,
+    ]),
+  );
+  assert.deepEqual(JSON.parse(run(['snapshots', '--tag', 'cos-kind=failed-producer'])), []);
+  assert.deepEqual(
+    (JSON.parse(run(['snapshots'])) as Array<{ id: string }>).map((snapshot) => snapshot.id),
+    before.map((snapshot) => snapshot.id),
+  );
+  run(['check', '--read-data']);
 });
 after(() => {
   for (const fd of [passwordFd, repositoryFd, binaryFd]) fs.closeSync(fd);
