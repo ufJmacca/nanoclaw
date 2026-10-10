@@ -45,6 +45,44 @@ func add(_ reference: String, _ kind: BackupSecret, _ material: Data) throws {
     request[kSecAttrLabel as String] = "NanoClaw CoS backup " + kind.rawValue
     guard SecItemAdd(request as CFDictionary, nil) == errSecSuccess else { throw BackupKeychainError.unavailable }
 }
+func readPrivatePassword(_ prompt: String) throws -> Data {
+    guard isatty(STDIN_FILENO) == 1, isatty(STDERR_FILENO) == 1 else {
+        throw BackupKeychainError.invalidArguments
+    }
+    var original = termios()
+    guard tcgetattr(STDIN_FILENO, &original) == 0 else { throw BackupKeychainError.unavailable }
+    var protected = original
+    protected.c_lflag &= ~tcflag_t(ECHO | ECHONL)
+    guard tcsetattr(STDIN_FILENO, TCSAFLUSH, &protected) == 0 else { throw BackupKeychainError.unavailable }
+    defer { _ = tcsetattr(STDIN_FILENO, TCSAFLUSH, &original) }
+    FileHandle.standardError.write(Data(prompt.utf8))
+    var material = Data(), byte: UInt8 = 0, completed = false
+    defer { byte = 0; if !completed { erase(&material) } }
+    while true {
+        guard read(STDIN_FILENO, &byte, 1) == 1 else { throw BackupKeychainError.unavailable }
+        if byte == 10 { break }
+        guard material.count < 64, byte != 0, byte != 13 else { throw BackupKeychainError.invalidMaterial }
+        material.append(byte)
+    }
+    FileHandle.standardError.write(Data("\n".utf8))
+    guard valid(material, .smb) else { throw BackupKeychainError.invalidMaterial }
+    completed = true
+    return material
+}
+func importSMB(_ reference: String) throws -> Bool {
+    // Private owner entry in their Terminal, never agent-supplied input or a pipe.
+    guard isatty(STDIN_FILENO) == 1, isatty(STDERR_FILENO) == 1 else {
+        throw BackupKeychainError.invalidArguments
+    }
+    if var existing = try retrieve(reference, .smb) { erase(&existing); return false }
+    var material = try readPrivatePassword("Enter the dedicated QNAP backup account password (hidden): ")
+    defer { erase(&material) }
+    var confirmation = try readPrivatePassword("Enter the same password again (hidden): ")
+    defer { erase(&confirmation) }
+    guard material == confirmation else { throw BackupKeychainError.invalidMaterial }
+    try add(reference, .smb, material)
+    return true
+}
 func ensureRestic(_ reference: String) throws -> Bool {
     // Do not create an orphan repository password before the dedicated account's
     // owner-entered recovery credential is available. Never overwrite an item.
@@ -131,11 +169,14 @@ do {
     let args = Array(CommandLine.arguments.dropFirst())
     if args == ["self-test"] { try selfTest() }
     else {
-        guard args.count == 2, ["ensure-restic", "check", "stream"].contains(args[0]),
+        guard args.count == 2, ["import-smb", "ensure-restic", "check", "stream"].contains(args[0]),
               let reference = UUID(uuidString: args[1]), reference.uuidString.lowercased() == args[1] else {
             throw BackupKeychainError.invalidArguments
         }
-        if args[0] == "ensure-restic" {
+        if args[0] == "import-smb" {
+            let created = try importSMB(args[1])
+            print(created ? "{\"smbRecovery\":\"created\"}" : "{\"smbRecovery\":\"present\"}")
+        } else if args[0] == "ensure-restic" {
             let created = try ensureRestic(args[1])
             print(created ? "{\"repositoryRecovery\":\"created\"}" : "{\"repositoryRecovery\":\"present\"}")
         } else if args[0] == "check" {

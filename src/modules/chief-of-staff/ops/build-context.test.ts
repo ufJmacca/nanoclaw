@@ -34,6 +34,7 @@ function fixture() {
     'scripts/cos-vault-fixture.sh': 'host-only private pipe orchestration',
     'scripts/cos-vault-keychain.swift': 'trusted keychain code, never key bytes',
     'scripts/cos-backup-keychain.swift': 'trusted backup credential code, never credential material',
+    'scripts/cos-backup-keychain-fixture.swift': 'disposable host-native credential entry fixture',
     'scripts/unadmitted.sh': 'UNADMITTED_SCRIPT_CANARY',
     '.env': 'PRIVATE_ENV_CANARY',
     'data/v2.db': 'PRIVATE_STATE_CANARY',
@@ -121,6 +122,9 @@ it('binds the host backup credential helper to committed source without changing
   const before = await prepareBuildContext(f.repo, f.commit, first);
   expect(fs.readFileSync(path.join(first, 'scripts/cos-backup-keychain.swift'), 'utf8')).toBe(
     'trusted backup credential code, never credential material',
+  );
+  expect(fs.readFileSync(path.join(first, 'scripts/cos-backup-keychain-fixture.swift'), 'utf8')).toBe(
+    'disposable host-native credential entry fixture',
   );
   f.git('add', '.');
   f.git('commit', '-qm', 'changed credential driver');
