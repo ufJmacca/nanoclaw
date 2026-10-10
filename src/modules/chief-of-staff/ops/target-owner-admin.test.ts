@@ -220,3 +220,35 @@ it('admits vault provisioning through the pinned owner helper with the selected 
     }),
   ).toBe(runtime);
 });
+
+it('G02 admits the fixed encrypted checkpoint through the retained helper with only its runtime profile', async () => {
+  const admin = [
+    'backup-checkpoint',
+    '--scope',
+    'fixture',
+    '--request-id',
+    '48f99256-b105-4ee3-848c-00140c98151d',
+    '--settings',
+    '/home/pi/target.json',
+  ];
+  expect(parseOwnerAdminArguments(['--settings', '/home/pi/target.json', '--', ...admin])).toMatchObject({ admin });
+  const runtime = { COS_PGPASSWORD: 'synthetic-runtime' };
+  await expect(
+    selectedOwnerAdminProfile('backup-checkpoint', {
+      runtime: () => runtime,
+      test: () => {
+        throw Error('test_profile_forbidden');
+      },
+    }),
+  ).resolves.toBe(runtime);
+  expect(() =>
+    parseOwnerAdminArguments([
+      '--settings',
+      '/home/pi/target.json',
+      '--database-environment',
+      '/home/pi/test.env',
+      '--',
+      ...admin,
+    ]),
+  ).toThrow('invalid_owner_admin_arguments');
+});

@@ -222,6 +222,7 @@ export async function contextAdminCommand(
       'owner-export',
       'export-purge',
       'operations-backup',
+      'backup-checkpoint',
       'operations-restore-check',
       'vault-provision',
       'vault-install',

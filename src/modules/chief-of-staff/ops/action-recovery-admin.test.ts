@@ -17,6 +17,7 @@ const f = vi.hoisted(() => ({
   missions: vi.fn(),
   calendar: vi.fn(),
   operations: vi.fn(),
+  vaultCapture: vi.fn(),
 }));
 vi.mock('./host-fingerprint.js', () => ({ machineFingerprint: () => 'a'.repeat(64) }));
 vi.mock('../store/preflight.js', async (original) => ({
@@ -28,6 +29,7 @@ vi.mock('../store/config.js', async (original) => ({
   parseDatabaseConfig: () => ({}),
 }));
 vi.mock('./target-action-backup.js', () => ({ backupTargetActionState: f.nativeBackup }));
+vi.mock('./backup-state-capture.js', () => ({ captureTargetVaultState: f.vaultCapture }));
 vi.mock('./coordinated-backup.js', async (original) => ({
   ...(await original<typeof import('./coordinated-backup.js')>()),
   verifyCoordinatedBackup: f.backup,
@@ -53,7 +55,7 @@ import { digest } from '../domain/contracts.js';
 import { MIGRATIONS, SCHEMA_VERSION } from '../store/migrations.js';
 import type { CoordinatedRestoreProof } from './coordinated-backup.js';
 import { recoveryReleaseForManifest } from './recovery-manifest.js';
-import { fixtureRelease } from '../../../contracts/chief-of-staff/release-fixture.js';
+import { fixtureRelease, fixtureVaultRelease } from '../../../contracts/chief-of-staff/release-fixture.js';
 it('S11-PG02 operations backup/restore require the bound settings and cannot select a live overwrite or restore admission', () => {
   const requestId = '11111111-1111-4111-8111-111111111111';
   expect(
@@ -496,3 +498,160 @@ it('S11-T03 an operations backup cannot claim an unrecorded release manifest as 
   ).rejects.toThrow('action_recovery_unavailable');
   expect(f.nativeBackup).not.toHaveBeenCalled();
 });
+
+async function checkpointFixture() {
+  const s = await fixture(),
+    manifest = fixtureVaultRelease('G02'),
+    release = recoveryReleaseForManifest(manifest);
+  const settings = {
+    version: 1,
+    target: 'pi',
+    sshAlias: 'fixture',
+    userHome: s.root,
+    installationRoot: s.roots.installationRoot,
+    dataRoot: s.roots.dataRoot,
+    stateRoot: s.roots.targetRoot,
+    releaseRoot: s.root + '/releases',
+    stagingRoot: s.root + '/staging',
+    sourceRoot: s.root + '/sources',
+    runtimeEnvironment: s.root + '/.config/runtime',
+    migrationEnvironment: s.root + '/.config/migration',
+    service: 'nano.service',
+    hostFingerprint: s.targetBinding.hostFingerprint,
+    databaseFingerprint: s.targetBinding.databaseFingerprint,
+  };
+  const releaseDirectory = path.join(settings.releaseRoot, release.releaseId),
+    deploymentDirectory = path.join(s.roots.targetRoot, 'releases', release.releaseId);
+  fs.mkdirSync(releaseDirectory, { recursive: true, mode: 0o700 });
+  fs.mkdirSync(deploymentDirectory, { recursive: true, mode: 0o700 });
+  writeAtomic(releaseDirectory, 'release.json', manifest);
+  writeAtomic(deploymentDirectory, 'deployment.json', {
+    version: 1,
+    releaseId: release.releaseId,
+    manifestDigest: release.manifestDigest,
+    bindingDigest: digest(s.targetBinding),
+    completed: ['source', 'artifacts', 'quiesce', 'backup', 'migrate', 'activate', 'health'],
+    pending: null,
+    status: 'healthy',
+  });
+  writeAtomic(s.roots.targetRoot, 'settings.json', settings);
+  const state = readPrivate<Record<string, unknown>>(path.join(s.roots.targetRoot, 'state.json'));
+  writeAtomic(s.roots.targetRoot, 'protected.json', { bindingDigest: digest(s.targetBinding), generation: 1 });
+  writeAtomic(s.roots.targetRoot, 'state.json', { ...state, lifecycle: 'protected', releaseId: release.releaseId });
+  const args = {
+    command: 'backup-checkpoint' as const,
+    scopeId: 'scope',
+    requestId: randomUUID(),
+    settingsFile: s.roots.targetRoot + '/settings.json',
+  };
+  const result = {
+    operationId: 'release-action-' + args.requestId,
+    queueOperationId: args.requestId,
+    status: 'queued',
+    targetBindingDigest: digest(s.targetBinding),
+    nativeBindingDigest: digest(s.binding),
+    journal: { installationDigest: s.witness.installationDigest, generation: s.witness.generation },
+    writerActivated: false,
+    admissionRestored: false,
+    snapshotDigest: 'b'.repeat(64),
+    operations: { release, manifestDigest: 'c'.repeat(64) },
+  };
+  f.vaultCapture.mockImplementation(async (_settings, _operationId, admin) => {
+    await admin.check();
+    return result;
+  });
+  return { ...s, settings, manifest, release, releaseDirectory, deploymentDirectory, args, result };
+}
+it('G02 parses the fixed owner checkpoint without any destination or source controls', () => {
+  const args = [
+    'backup-checkpoint',
+    '--scope',
+    'scope',
+    '--request-id',
+    randomUUID(),
+    '--settings',
+    '/private/target.json',
+  ];
+  expect(parseAdminArguments(args)).toEqual({
+    command: 'backup-checkpoint',
+    scopeId: 'scope',
+    requestId: args[4],
+    settingsFile: '/private/target.json',
+  });
+  expect(() => parseAdminArguments([...args, '--destination', '/tmp/plaintext'])).toThrow('invalid_admin_arguments');
+});
+it('G02 connects current recorded release and real owner leases to the encrypted checkpoint without plaintext staging', async () => {
+  const s = await checkpointFixture();
+  expect(await runActionRecoveryAdmin({ ...s.options, args: s.args })).toMatchObject({
+    status: 'backup_queued_verified_paused',
+    backup_operation_id: s.result.operationId,
+    queue_operation_id: s.args.requestId,
+    writer_enabled: false,
+    admission_restored: false,
+    remote_checkpoint: 'pending',
+    snapshot_digest: s.result.snapshotDigest,
+  });
+  expect(f.vaultCapture).toHaveBeenCalledWith(
+    s.settings,
+    s.result.operationId,
+    expect.objectContaining({ native: s.native, hostLease: s.hostLease, check: expect.any(Function) }),
+    s.release,
+  );
+  expect(f.nativeBackup).not.toHaveBeenCalled();
+  expect(f.connect).not.toHaveBeenCalled();
+  expect(fs.existsSync(path.join(s.roots.targetRoot, 'releases', s.result.operationId))).toBe(false);
+});
+it.each(['pending', 'failed', 'capturing'] as const)(
+  'G02 reports a %s slot as skipped without claiming a fresh or remote checkpoint',
+  async (slotState) => {
+    const s = await checkpointFixture(),
+      queueOperationId = randomUUID();
+    const { snapshotDigest: _snapshot, operations: _operations, ...base } = s.result;
+    f.vaultCapture.mockResolvedValue({ ...base, status: 'skipped_pending', queueOperationId, slotState });
+    const result = await runActionRecoveryAdmin({ ...s.options, args: s.args });
+    expect(result).toMatchObject({
+      status: 'backup_skipped_pending',
+      queue_operation_id: queueOperationId,
+      pending_state: slotState,
+      remote_checkpoint: 'pending',
+      admission_restored: false,
+    });
+    expect(result).not.toHaveProperty('snapshot_digest');
+    expect(result).not.toHaveProperty('operations_manifest_digest');
+  },
+);
+it.each(['unrecorded', 'old-release', 'changed-during-capture'] as const)(
+  'G02 refuses %s release provenance before acknowledging a checkpoint',
+  async (failure) => {
+    const s = await checkpointFixture();
+    if (failure === 'unrecorded') fs.unlinkSync(s.deploymentDirectory + '/deployment.json');
+    else if (failure === 'old-release') writeAtomic(s.releaseDirectory, 'release.json', fixtureVaultRelease('G01'));
+    else
+      f.vaultCapture.mockImplementation(async (_settings, _operationId, admin) => {
+        writeAtomic(s.releaseDirectory, 'release.json', {
+          ...s.manifest,
+          source: { ...s.manifest.source, tree: '9'.repeat(40) },
+        });
+        await admin.check();
+        return s.result;
+      });
+    await expect(runActionRecoveryAdmin({ ...s.options, args: s.args })).rejects.toThrow('action_recovery_unavailable');
+    if (failure !== 'changed-during-capture') expect(f.vaultCapture).not.toHaveBeenCalled();
+    expect(f.nativeBackup).not.toHaveBeenCalled();
+  },
+);
+it.each(['foreign-binding', 'writer-active', 'foreign-release', 'wrong-queue', 'missing-hash'] as const)(
+  'G02 refuses a %s capture receipt',
+  async (failure) => {
+    const s = await checkpointFixture();
+    const result = { ...s.result };
+    if (failure === 'foreign-binding') result.nativeBindingDigest = 'e'.repeat(64);
+    else if (failure === 'writer-active') result.writerActivated = true;
+    else if (failure === 'foreign-release')
+      result.operations = { ...result.operations, release: { ...s.release, releaseId: 'release-foreign' } };
+    else if (failure === 'wrong-queue') result.queueOperationId = randomUUID();
+    else result.snapshotDigest = '';
+    f.vaultCapture.mockResolvedValue(result);
+    await expect(runActionRecoveryAdmin({ ...s.options, args: s.args })).rejects.toThrow('action_recovery_unavailable');
+  },
+);

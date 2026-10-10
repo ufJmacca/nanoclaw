@@ -395,7 +395,7 @@ it('recovery requires the actual maintenance and native host leases, private own
   await expect(contextAdminCommand(args, env, dependencies)).rejects.toThrow('target_not_quiescent');
   expect(vi.mocked(runVaultRecoveryAdmin)).toHaveBeenCalledOnce();
 });
-it.each(['operations-backup', 'operations-restore-check'] as const)(
+it.each(['operations-backup', 'operations-restore-check', 'backup-checkpoint'] as const)(
   'S11-PG02 %s remains owner-accessible while model execution is disabled',
   async (command) => {
     fs.rmSync(state + '/codex-auth', { recursive: true });

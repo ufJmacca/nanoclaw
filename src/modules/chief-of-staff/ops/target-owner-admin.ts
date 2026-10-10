@@ -21,6 +21,7 @@ const commands = [
   'owner-export',
   'export-purge',
   'operations-backup',
+  'backup-checkpoint',
   'operations-restore-check',
 ];
 export function parseOwnerAdminArguments(args: string[]): {
