@@ -231,15 +231,24 @@ async function provisionRoot(identity, cryptoControls) {
 function run(tool, args) {
   verifyVaultMemory();
   const fullCapture = args.includes('/probe/probe-backup-capture.compiled.mjs');
+  const credentialJournal = args.includes('/probe/probe-backup-journal.mjs');
   const result = spawnSync(tool, args, {
     cwd: '/',
     env: { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', LANG: 'C', LC_ALL: 'C', NANOCLAW_COS_VAULT_FIXTURE: '1' },
     encoding: 'utf8',
-    stdio: ['ignore', 'pipe', fullCapture ? 'pipe' : 'ignore'],
-    timeout: 30000,
+    stdio: ['ignore', 'pipe', fullCapture || credentialJournal ? 'pipe' : 'ignore'],
+    timeout: credentialJournal ? 120000 : 30000,
     maxBuffer: 262144,
   });
   if (result.error || result.signal || result.status !== 0) {
+    if (credentialJournal) {
+      const file = '/home/fixture/.config/nanoclaw-cos/state/credential-journal-stage.json';
+      const stage = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')).stage : 'module_initialization';
+      assert.match(stage, /^[a-z_]{1,64}$/);
+      console.log(JSON.stringify({ credentialJournalFailureStage: stage,
+        code: result.error?.code === 'ETIMEDOUT' ? 'fixture_deadline' : 'fixture_process_failed',
+        location: result.stderr?.match(/\/probe\/probe-backup-journal\.mjs:[0-9]+:[0-9]+/)?.[0] ?? null }));
+    }
     if (fullCapture) {
       const file = '/home/fixture/.config/nanoclaw-cos/state/full-capture-stage.json';
       const stage = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')).stage : 'module_initialization';
