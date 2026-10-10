@@ -390,7 +390,76 @@ if (mode === 'unavailable') {
         assert.equal(captureHostFixture.connections, 2);
       } finally { releaseHostExecutionLease(native, nativeWriter); }
       scheduledCases++;
-      writeAtomic(stateRoot, 'full-capture-fixture.json', { queueOperationId: scheduledSnapshot.queueOperationId });
+      stage('capture_publication_recovery');
+      await finishMaintenance(stateRoot, binding, liveWriterLease, async () => true);
+      // Remove only the independently generated disposable fixture snapshot.
+      await withVaultDirectory(roots, 'staging', async (directory) => {
+        const full = directory + '/backup-queue/full', stat = fs.lstatSync(full);
+        assert.equal(stat.uid, 1000); assert.equal(stat.dev, fs.statSync('/case/vault').dev);
+        assert.equal(stat.mode & 0o7777, 0o700);
+        fs.rmSync(full, { recursive: true });
+      });
+      const failedRequestId = randomUUID(), failedOperationId = 'release-backup-' + failedRequestId;
+      let failedStarts = 0, failedStops = 0, failedCaptures = 0, recoveredHealthy = false, captureRecoveryCases = 0;
+      const failedEffects = {
+        ...checkpointEffects,
+        stopNative: async () => { failedStops++; },
+        startNative: async () => { failedStarts++; if (failedStarts === 1) throw Error('synthetic_start_interrupted'); },
+        healthy: async () => recoveredHealthy,
+        capture: async () => { failedCaptures++; return captureScheduledTargetVaultState(settings, failedOperationId, scheduledRecovery); },
+        verifyCapture: async () => { throw Error('must_not_verify_incomplete_capture'); },
+      };
+      const failedCheckpoint = () => checkpointMaintenance({ root: stateRoot, binding, requestId: failedRequestId, effects: failedEffects });
+      native.prepare('UPDATE cos_identity_boundaries SET paused=0').run();
+      const originalRename = fs.renameSync;
+      fs.renameSync = (from, to) => {
+        if (String(to).endsWith('/receipt.json')) throw Error('synthetic_capture_publication_failure');
+        return originalRename(from, to);
+      };
+      try { await assert.rejects(failedCheckpoint(), /synthetic_start_interrupted/); }
+      finally { fs.renameSync = originalRename; }
+      const failedLease = activeMaintenanceLease(stateRoot, binding);
+      assert.equal(admittedGeneration(stateRoot, binding), null);
+      assert.equal(failedCaptures, 1); assert.equal(failedStops, 1);
+      assert.equal(captureHostFixture.connections, 2);
+      await assert.rejects(queue.inspect('state'), /backup_queue_unavailable/);
+      const queueFingerprint = () => withVaultDirectory(roots, 'staging', async directory => {
+        const walk = root => fs.readdirSync(root).sort().map(name => {
+          const file = root + '/' + name, stat = fs.lstatSync(file);
+          assert.equal(stat.uid, 1000); assert.equal(stat.dev, fs.statSync('/case/vault').dev);
+          assert.equal(stat.isSymbolicLink(), false);
+          if (stat.isDirectory()) return { name, inode: stat.ino, entries: walk(file) };
+          assert.equal(stat.nlink, 1); assert.equal(stat.mode & 0o7777, 0o600); assert(stat.size <= 1024 ** 2);
+          return { name, inode: stat.ino, sha256: digest(fs.readFileSync(file)) };
+        });
+        return digest(walk(directory + '/backup-queue'));
+      });
+      const heldQueue = await queueFingerprint();
+      captureRecoveryCases++;
+      native.prepare('UPDATE cos_identity_boundaries SET paused=1').run();
+      await assert.rejects(failedCheckpoint(), /checkpoint_maintenance_unverified/);
+      assert.equal(admittedGeneration(stateRoot, binding), null);
+      assert.equal(failedStarts, 2); assert.equal(failedCaptures, 1);
+      assert.equal(await queueFingerprint(), heldQueue);
+      captureRecoveryCases++;
+      recoveredHealthy = true;
+      assert.equal((await failedCheckpoint()).status, 'backup_failed');
+      assert.equal(readTarget(stateRoot, binding).generation, failedLease.generation + 1);
+      assert.equal(native.prepare('SELECT paused FROM cos_identity_boundaries').get().paused, 1);
+      assert.deepEqual(native.prepare('SELECT * FROM ordinary_messages').all(), initial.messages);
+      assert.deepEqual(native.prepare('SELECT * FROM cos_model_budgets').all(), initial.budgets);
+      assert.equal(await queueFingerprint(), heldQueue);
+      captureRecoveryCases++;
+      assert.equal((await failedCheckpoint()).status, 'backup_failed');
+      assert.equal(failedStarts, 2); assert.equal(failedCaptures, 1); assert.equal(failedStops, 1);
+      assert.equal(await queueFingerprint(), heldQueue);
+      captureRecoveryCases++;
+      await assert.rejects(checkpointMaintenance({ root: stateRoot, binding, requestId: randomUUID(), effects: failedEffects }), /backup_queue_unavailable/);
+      assert.equal(failedStops, 1); assert.equal(failedCaptures, 1);
+      assert.equal(await queueFingerprint(), heldQueue);
+      assert.equal(captureHostFixture.connections, 2);
+      captureRecoveryCases++;
+      writeAtomic(stateRoot, 'full-capture-fixture.json', { queueOperationId: failedLease.nonce });
       const rootProof = fs.lstatSync('/case/vault/journals/.vault-canary');
       for (const key of ['dev','ino','uid','gid','mode','size','nlink','mtimeMs','ctimeMs'])
         assert.equal(rootProof[key], initial.rootCanary[key]);
@@ -401,6 +470,8 @@ if (mode === 'unavailable') {
           cases,
           scheduledCheckpoint: { status: 'passed', cases: scheduledCases, laterOwnerPausePreserved: true,
             actualNativeSqliteAndMaintenance: true, restartHealthBeforeAdmission: true, installedServiceManager: false },
+          interruptedCaptureServiceRecovery: { status: 'passed', cases: captureRecoveryCases,
+            unreadableQueuePreserved: true, laterOwnerPausePreserved: true, noRecapture: true, finalArtifact: false },
           encryptedVolume: 'actual_LUKS2_ext4',
           defaultMemoryAndStorageGuards: true,
           actualNativeOwnerGuards: true,
