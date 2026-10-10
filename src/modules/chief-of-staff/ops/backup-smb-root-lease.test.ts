@@ -235,6 +235,27 @@ it.each(['role', 'memory', 'artifact', 'configuration', 'reference'])(
     expect(s.controls.spawnOwner).not.toHaveBeenCalled();
   },
 );
+it('still waits for actual owner closure when Linux denies the owned termination signal', async () => {
+  const s = fixture('replace');
+  let closed = false;
+  const originalSpawn = s.controls.spawnOwner.getMockImplementation()!;
+  s.controls.spawnOwner.mockImplementation((command, args, options) => {
+    const child = originalSpawn(command, args, options);
+    child.once('close', () => {
+      closed = true;
+    });
+    return child;
+  });
+  const terminate = vi.spyOn(process, 'kill').mockImplementation((pid) => {
+    expect(pid).toBe(-s.children[0].pid!);
+    throw Object.assign(Error('PRIVATE_SIGNAL_DENIED'), { code: 'EPERM' });
+  });
+  await expect(withRootBackupSmbCredentials(s.config, s.reference, async () => {}, s.controls)).rejects.toThrow(
+    /^backup_smb_root_lease_unavailable$/,
+  );
+  expect(terminate).toHaveBeenCalledWith(-s.children[0].pid!, 'SIGTERM');
+  expect(closed).toBe(true);
+});
 it.each([
   'uuid',
   'descriptor',

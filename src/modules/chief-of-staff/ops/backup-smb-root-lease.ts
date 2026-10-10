@@ -127,8 +127,10 @@ async function rootBackupSmbSession<T>(
     if (!child?.pid || exited) return;
     try {
       process.kill(-child.pid, signal);
+      // eslint-disable-next-line no-catch-all/no-catch-all -- Signal failure aborts admission; cleanup must still await actual owner closure.
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+      // Signal denial must not skip the awaited close below or escape a timer callback.
+      if ((error as NodeJS.ErrnoException).code !== 'ESRCH') abort.abort();
     }
   };
   try {
