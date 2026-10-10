@@ -6,6 +6,74 @@ import { digest } from '../domain/contracts.js';
 import { writeAtomic } from './target-state.js';
 import { BACKUP_LIMITS, type BackupKind } from './backup-policy.js';
 import { verifyVaultStorage, withVaultDirectory } from './vault-storage.js';
+import type { RemoteCheckpoint } from './backup-restic-transfer.js';
+import { streamBackupArchive } from './backup-archive.js';
+import { BackupRepositoryWriter } from './backup-repository-lease.js';
+export type BackupRetirementRequest = {
+  receipt: BackupQueueReceipt;
+  archive: { bytes: number; sha256: string };
+  previous?: RemoteCheckpoint;
+};
+export type BackupRetirementProof = {
+  checkpoint: RemoteCheckpoint;
+  assertCurrent(): void;
+};
+type Retirement = {
+  contract: 'cos-backup-queue-retirement/v1';
+  receipt: BackupQueueReceipt;
+  remote: RemoteCheckpoint;
+  slot: { device: number; inode: number };
+  retiredAt: string | null;
+};
+const intentName = '.cos-retirement.json',
+  ackName = '.cos-last-ack.json';
+/** A reported publication failure removes only this call's still-held temporary
+ * inode. Canonical records and unexplained replacements are never removed here. */
+function publishRetirement(root: string, name: string, value: Retirement): void {
+  const bytes = Buffer.from(JSON.stringify(value) + '\n');
+  if (bytes.length > 1024 ** 2) throw Error('retirement_metadata_bounds');
+  const temporary = path.join(root, '.cos-publish-' + randomUUID() + '.tmp');
+  const fd = fs.openSync(
+    temporary,
+    fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW,
+    0o600,
+  );
+  const initial = fs.fstatSync(fd);
+  try {
+    fs.writeFileSync(fd, bytes);
+    fs.fsyncSync(fd);
+    fs.renameSync(temporary, path.join(root, name));
+    const directory = privateDirectory(root, initial.dev);
+    try {
+      fs.fsyncSync(directory);
+    } finally {
+      fs.closeSync(directory);
+    }
+  } finally {
+    bytes.fill(0);
+    try {
+      const current = fs.lstatSync(temporary, { throwIfNoEntry: false });
+      if (
+        current &&
+        current.dev === initial.dev &&
+        current.ino === initial.ino &&
+        current.uid === initial.uid &&
+        current.nlink === 1 &&
+        current.isFile()
+      ) {
+        fs.unlinkSync(temporary);
+        const directory = privateDirectory(root, initial.dev);
+        try {
+          fs.fsyncSync(directory);
+        } finally {
+          fs.closeSync(directory);
+        }
+      }
+    } finally {
+      fs.closeSync(fd);
+    }
+  }
+}
 export type BackupQueueReceipt = {
   format: 'cos-backup-queue/v1';
   ownerDigest: string;
@@ -93,15 +161,6 @@ function privateJson<T>(file: string, device: number): T {
     fs.closeSync(fd);
   }
 }
-function releaseQueueLock(rootFd: number, lockFd: number, nonce: string, device: number): void {
-  const owner = privateJson<{ nonce: string }>(path.join(pinned(lockFd), 'owner.json'), device);
-  const current = fs.lstatSync(path.join(pinned(rootFd), '.lock')),
-    held = fs.fstatSync(lockFd);
-  if (owner.nonce !== nonce || current.dev !== held.dev || current.ino !== held.ino)
-    throw Error('queue_lock_owner_changed');
-  fs.unlinkSync(path.join(pinned(lockFd), 'owner.json'));
-  fs.rmdirSync(path.join(pinned(rootFd), '.lock'));
-}
 function validName(name: string): boolean {
   const parts = name.split('/');
   return (
@@ -142,6 +201,220 @@ function checksum(file: string, expected: { bytes: number; sha256: string }, dev
     fs.closeSync(fd);
   }
 }
+function validateReceipt(value: BackupQueueReceipt, owner: string, kind: BackupKind, name?: string): void {
+  if (
+    !value ||
+    value.format !== 'cos-backup-queue/v1' ||
+    value.ownerDigest !== owner ||
+    value.kind !== kind ||
+    typeof value.operationId !== 'string' ||
+    !uuid(value.operationId) ||
+    (kind === 'credentials' && name !== undefined && value.operationId !== name) ||
+    !['capturing', 'pending', 'failed'].includes(value.state) ||
+    typeof value.createdAt !== 'string' ||
+    !Number.isFinite(Date.parse(value.createdAt)) ||
+    !Number.isSafeInteger(value.bytes) ||
+    value.bytes < 0 ||
+    !Number.isSafeInteger(value.maximumBytes) ||
+    value.maximumBytes < 16384 ||
+    value.maximumBytes > (kind === 'state' ? BACKUP_LIMITS.staging : BACKUP_LIMITS.credentials) ||
+    !Array.isArray(value.files) ||
+    value.files.length > 4096 ||
+    new Set(value.files.map((file) => file?.name)).size !== value.files.length ||
+    value.files.some(
+      (file) =>
+        !file ||
+        typeof file.name !== 'string' ||
+        !validName(file.name) ||
+        !Number.isSafeInteger(file.bytes) ||
+        file.bytes < 0 ||
+        typeof file.sha256 !== 'string' ||
+        !/^[a-f0-9]{64}$/.test(file.sha256),
+    )
+  )
+    throw Error('invalid_queue_receipt');
+}
+function validateRemote(
+  remote: RemoteCheckpoint,
+  receipt: BackupQueueReceipt,
+  archive: { bytes: number; sha256: string },
+): void {
+  if (
+    !remote ||
+    typeof remote !== 'object' ||
+    Array.isArray(remote) ||
+    Object.keys(remote).sort().join(',') !==
+      'archiveBytes,archiveSha256,contract,kind,operationId,ownerDigest,reconciled,repositoryId,snapshotAt,snapshotId,verifiedAt' ||
+    remote.contract !== 'cos-backup-remote-checkpoint/v1' ||
+    remote.kind !== receipt.kind ||
+    remote.operationId !== receipt.operationId ||
+    [remote.repositoryId, remote.ownerDigest, remote.snapshotId, remote.archiveSha256].some(
+      (value) => typeof value !== 'string' || !/^[a-f0-9]{64}$/.test(value),
+    ) ||
+    !Number.isSafeInteger(remote.archiveBytes) ||
+    remote.archiveBytes < 2048 ||
+    remote.archiveBytes >
+      (receipt.kind === 'state' ? BACKUP_LIMITS.staging : BACKUP_LIMITS.credentials) + 2 * 1024 ** 2 ||
+    remote.archiveBytes !== archive.bytes ||
+    remote.archiveSha256 !== archive.sha256 ||
+    typeof remote.reconciled !== 'boolean' ||
+    [remote.snapshotAt, remote.verifiedAt].some(
+      (value) => typeof value !== 'string' || !Number.isFinite(Date.parse(value)),
+    )
+  )
+    throw Error('invalid_remote_checkpoint');
+}
+function retirement(
+  root: string,
+  name: string,
+  owner: string,
+  kind: BackupKind,
+  device: number,
+): Retirement | undefined {
+  const file = path.join(root, name);
+  if (!fs.lstatSync(file, { throwIfNoEntry: false })) return undefined;
+  const value = privateJson<Retirement>(file, device);
+  if (
+    !value ||
+    typeof value !== 'object' ||
+    Array.isArray(value) ||
+    Object.keys(value).sort().join(',') !== 'contract,receipt,remote,retiredAt,slot' ||
+    value.contract !== 'cos-backup-queue-retirement/v1' ||
+    !value.slot ||
+    Object.keys(value.slot).sort().join(',') !== 'device,inode' ||
+    !Number.isSafeInteger(value.slot.device) ||
+    value.slot.device !== device ||
+    !Number.isSafeInteger(value.slot.inode) ||
+    value.slot.inode < 1 ||
+    (name === intentName
+      ? value.retiredAt !== null
+      : typeof value.retiredAt !== 'string' || !Number.isFinite(Date.parse(value.retiredAt)))
+  )
+    throw Error('invalid_retirement');
+  validateReceipt(value.receipt, owner, kind);
+  if (
+    value.receipt.state !== 'pending' ||
+    !value.receipt.files.length ||
+    value.receipt.bytes > value.receipt.maximumBytes
+  )
+    throw Error('invalid_retirement_receipt');
+  validateRemote(value.remote, value.receipt, {
+    bytes: value.remote?.archiveBytes,
+    sha256: value.remote?.archiveSha256,
+  });
+  return value;
+}
+/** Only originally declared files and their parent directories may be removed. Each
+ * mutation rechecks held descriptors and live proof; saved metadata grants no authority. */
+function retireSlot(
+  root: string,
+  metadata: Retirement,
+  device: number,
+  recovering: boolean,
+  assertCurrent: () => void,
+  erase: boolean,
+): void {
+  const location = path.join(root, metadata.receipt.kind === 'state' ? 'full' : metadata.receipt.operationId);
+  if (!fs.lstatSync(location, { throwIfNoEntry: false })) {
+    if (!recovering) throw Error('retirement_slot_missing');
+    return;
+  }
+  const slotFd = privateDirectory(location, device),
+    slot = pinned(slotFd);
+  const link = (fd: number, file: string) => {
+    const held = fs.fstatSync(fd),
+      current = fs.lstatSync(file);
+    if (held.dev !== current.dev || held.ino !== current.ino || held.uid !== current.uid || held.mode !== current.mode)
+      throw Error('retirement_directory_changed');
+  };
+  try {
+    const initial = fs.fstatSync(slotFd);
+    if (initial.dev !== metadata.slot.device || initial.ino !== metadata.slot.inode)
+      throw Error('retirement_slot_changed');
+    const receiptFile = path.join(slot, 'receipt.json');
+    const checkSlot = () => {
+      assertCurrent();
+      link(slotFd, location);
+      if (fs.readdirSync(slot).some((name) => !['data', 'receipt.json'].includes(name)))
+        throw Error('retirement_extra_slot_file');
+      if (fs.lstatSync(receiptFile, { throwIfNoEntry: false })) {
+        if (digest(privateJson(receiptFile, device)) !== digest(metadata.receipt))
+          throw Error('retirement_receipt_changed');
+      } else if (!recovering || fs.lstatSync(path.join(slot, 'data'), { throwIfNoEntry: false }))
+        throw Error('retirement_receipt_missing');
+    };
+    checkSlot();
+    const expected = new Map(metadata.receipt.files.map((file) => [file.name, file]));
+    const prefixes = new Set(
+      metadata.receipt.files.flatMap((file) =>
+        file.name
+          .split('/')
+          .slice(0, -1)
+          .map((_, index) =>
+            file.name
+              .split('/')
+              .slice(0, index + 1)
+              .join('/'),
+          ),
+      ),
+    );
+    const found = new Set<string>();
+    let visited = 0;
+    const walk = (file: string, prefix = '') => {
+      const fd = privateDirectory(file, device);
+      try {
+        for (const name of fs.readdirSync(pinned(fd)).sort()) {
+          if (++visited > 16384) throw Error('retirement_tree_bounds');
+          const relative = prefix ? prefix + '/' + name : name,
+            child = path.join(pinned(fd), name),
+            stat = fs.lstatSync(child);
+          if (!validName(relative) || stat.dev !== device || stat.uid !== process.getuid?.() || stat.isSymbolicLink())
+            throw Error('retirement_unsafe_file');
+          if (stat.isDirectory()) {
+            if (!prefixes.has(relative)) throw Error('retirement_extra_directory');
+            walk(child, relative);
+          } else {
+            const original = expected.get(relative);
+            if (!original) throw Error('retirement_extra_file');
+            checksum(child, original, device);
+            found.add(relative);
+            if (erase) {
+              checkSlot();
+              link(fd, file);
+              checksum(child, original, device);
+              fs.unlinkSync(child);
+              fs.fsyncSync(fd);
+            }
+          }
+        }
+        if (erase) {
+          checkSlot();
+          link(fd, file);
+          fs.rmdirSync(file);
+        }
+      } finally {
+        fs.closeSync(fd);
+      }
+    };
+    const data = path.join(slot, 'data');
+    if (fs.lstatSync(data, { throwIfNoEntry: false })) walk(data);
+    else if (!recovering) throw Error('retirement_data_missing');
+    if (!recovering && found.size !== expected.size) throw Error('retirement_missing_file');
+    if (erase) {
+      checkSlot();
+      if (fs.lstatSync(receiptFile, { throwIfNoEntry: false })) {
+        fs.unlinkSync(receiptFile);
+        fs.fsyncSync(slotFd);
+      }
+      assertCurrent();
+      link(slotFd, location);
+      if (fs.readdirSync(slot).length) throw Error('retirement_slot_not_empty');
+      fs.rmdirSync(location);
+    }
+  } finally {
+    fs.closeSync(slotFd);
+  }
+}
 /** The injected accessor is for synthetic fixtures. Installed construction below always verifies and pins the vault. */
 export class BackupQueue {
   constructor(
@@ -162,7 +435,7 @@ export class BackupQueue {
       return await this.access(kind, async (area) => {
         const areaFd = privateDirectory(area),
           device = fs.fstatSync(areaFd).dev;
-        let rootFd: number | undefined, lockFd: number | undefined, nonce: string | undefined;
+        let rootFd: number | undefined;
         try {
           const location = path.join(pinned(areaFd), 'backup-queue');
           if (!fs.lstatSync(location, { throwIfNoEntry: false })) {
@@ -180,23 +453,32 @@ export class BackupQueue {
             owner = privateJson(path.join(root, 'owner.json'), device);
           if (digest(owner) !== digest({ format: 'cos-backup-queue-owner/v1', ownerDigest: this.ownerDigest, kind }))
             throw Error('queue_owner_conflict');
+          const writerOwner = digest({ contract: 'cos-backup-queue-writer/v1', ownerDigest: this.ownerDigest, kind });
+          if (
+            fs.lstatSync(path.join(root, '.cos-writer.lock'), { throwIfNoEntry: false }) &&
+            digest(privateJson(path.join(root, '.cos-writer.lock'), device)) !==
+              digest({ contract: 'cos-backup-repository-writer/v1', ownerDigest: writerOwner })
+          )
+            throw Error('queue_writer_changed');
+          if (fs.lstatSync(path.join(root, '.lock'), { throwIfNoEntry: false }))
+            throw Error('legacy_queue_lock_requires_reconciliation');
           if (locked) {
-            fs.mkdirSync(path.join(root, '.lock'), { mode: 0o700 });
-            lockFd = privateDirectory(path.join(root, '.lock'), device);
-            nonce = randomUUID();
-            writeAtomic(pinned(lockFd), 'owner.json', { nonce, pid: process.pid });
+            const writer = new BackupRepositoryWriter(
+              writerOwner,
+              async (callback) => callback(root),
+              '.cos-writer.lock',
+            );
+            return await writer.exclusive(async (lease) => {
+              lease.assertCurrent();
+              const result = await operation(root, device);
+              lease.assertCurrent();
+              return result;
+            });
           }
           return await operation(root, device);
         } finally {
-          try {
-            if (lockFd !== undefined && rootFd !== undefined && nonce !== undefined) {
-              releaseQueueLock(rootFd, lockFd, nonce, device);
-            }
-          } finally {
-            if (lockFd !== undefined) fs.closeSync(lockFd);
-            if (rootFd !== undefined) fs.closeSync(rootFd);
-            fs.closeSync(areaFd);
-          }
+          if (rootFd !== undefined) fs.closeSync(rootFd);
+          fs.closeSync(areaFd);
         }
       });
     } catch {
@@ -205,10 +487,20 @@ export class BackupQueue {
     }
   }
   private receipts(root: string, kind: BackupKind, device: number): BackupQueueReceipt[] {
-    const names = fs.readdirSync(root).filter((name) => !['owner.json', '.lock'].includes(name));
+    const intent = retirement(root, intentName, this.ownerDigest, kind, device);
+    retirement(root, ackName, this.ownerDigest, kind, device);
+    const names = fs
+      .readdirSync(root)
+      .filter((name) => !['owner.json', '.lock', '.cos-writer.lock', intentName, ackName].includes(name));
     if (names.length > (kind === 'state' ? 1 : 1024)) throw Error('queue_bounds');
-    return names.sort().map((name) => {
+    const values = names.sort().map((name) => {
       if (kind === 'state' ? name !== 'full' : !uuid(name)) throw Error('queue_directory_conflict');
+      if (intent && name === (kind === 'state' ? 'full' : intent.receipt.operationId)) {
+        const current = fs.lstatSync(path.join(root, name));
+        if (current.dev !== intent.slot.device || current.ino !== intent.slot.inode)
+          throw Error('retirement_slot_changed');
+        return { ...intent.receipt, state: 'failed' as const };
+      }
       const fd = privateDirectory(path.join(root, name), device);
       let value: BackupQueueReceipt;
       try {
@@ -216,33 +508,12 @@ export class BackupQueue {
       } finally {
         fs.closeSync(fd);
       }
-      if (
-        !value ||
-        value.format !== 'cos-backup-queue/v1' ||
-        value.ownerDigest !== this.ownerDigest ||
-        value.kind !== kind ||
-        !uuid(value.operationId) ||
-        (kind === 'credentials' && value.operationId !== name) ||
-        !['capturing', 'pending', 'failed'].includes(value.state) ||
-        !Number.isSafeInteger(value.bytes) ||
-        value.bytes < 0 ||
-        !Number.isSafeInteger(value.maximumBytes) ||
-        value.maximumBytes < 16384 ||
-        value.maximumBytes > (kind === 'state' ? BACKUP_LIMITS.staging : BACKUP_LIMITS.credentials) ||
-        !Array.isArray(value.files) ||
-        value.files.length > 4096 ||
-        new Set(value.files.map((file) => file.name)).size !== value.files.length ||
-        value.files.some(
-          (file) =>
-            !validName(file.name) ||
-            !Number.isSafeInteger(file.bytes) ||
-            file.bytes < 0 ||
-            !/^[a-f0-9]{64}$/.test(file.sha256),
-        )
-      )
-        throw Error('invalid_queue_receipt');
+      validateReceipt(value, this.ownerDigest, kind, name);
       return value;
     });
+    if (intent && !values.some((value) => value.operationId === intent.receipt.operationId))
+      values.push({ ...intent.receipt, state: 'failed' });
+    return values;
   }
   async capture(
     kind: BackupKind,
@@ -255,6 +526,8 @@ export class BackupQueue {
       if (!uuid(operationId) || !Number.isSafeInteger(maximumBytes) || maximumBytes < 16384 || maximumBytes > limit)
         throw Error('capture_bounds');
       const previous = this.receipts(root, kind, device);
+      if (retirement(root, ackName, this.ownerDigest, kind, device)?.receipt.operationId === operationId)
+        throw Error('capture_already_retired');
       if (kind === 'state' && previous.length)
         return { status: 'skipped_pending' as const, kind, operationId: previous[0].operationId };
       const same = previous.find((receipt) => receipt.operationId === operationId);
@@ -402,6 +675,132 @@ export class BackupQueue {
   async pending(kind: BackupKind): Promise<BackupQueueReceipt[]> {
     return this.area(kind, false, false, async (root, device) => this.receipts(root, kind, device));
   }
+  /** A trusted uploader supplies fresh evidence for both the archive and its original
+   * receipt under live descriptor scopes; the stored intent alone is never authority. */
+  async retirePending(
+    kind: BackupKind,
+    operationId: string,
+    prove: (request: BackupRetirementRequest) => Promise<BackupRetirementProof>,
+  ): Promise<RemoteCheckpoint> {
+    return this.area(kind, false, false, async (root, device) => {
+      const rootIdentity = fs.statSync(root);
+      if (!uuid(operationId) || typeof prove !== 'function') throw Error('invalid_retirement_operation');
+      const intent = retirement(root, intentName, this.ownerDigest, kind, device);
+      const ack = retirement(root, ackName, this.ownerDigest, kind, device);
+      if (intent && intent.receipt.operationId !== operationId) throw Error('retirement_in_progress');
+      let metadata = intent ?? (ack?.receipt.operationId === operationId ? ack : undefined);
+      const initialMetadata = metadata && digest(metadata);
+      let supplied: BackupRetirementProof;
+      if (metadata) {
+        supplied = await prove(
+          structuredClone({
+            receipt: metadata.receipt,
+            archive: { bytes: metadata.remote.archiveBytes, sha256: metadata.remote.archiveSha256 },
+            previous: metadata.remote,
+          }),
+        );
+      } else {
+        const receipt = this.receipts(root, kind, device).find((value) => value.operationId === operationId);
+        if (!receipt || receipt.state !== 'pending') throw Error('pending_checkpoint_required');
+        const slotFd = privateDirectory(path.join(root, kind === 'state' ? 'full' : operationId), device);
+        let slot: Retirement['slot'];
+        try {
+          const stat = fs.fstatSync(slotFd);
+          slot = { device: stat.dev, inode: stat.ino };
+        } finally {
+          fs.closeSync(slotFd);
+        }
+        supplied = await this.withPending(kind, operationId, async (data, current) => {
+          if (digest(current) !== digest(receipt)) throw Error('retirement_receipt_changed');
+          const archive = await streamBackupArchive(data, current, async () => {});
+          const result = await prove(structuredClone({ receipt: current, archive }));
+          validateRemote(result.checkpoint, current, archive);
+          return result;
+        });
+        metadata = {
+          contract: 'cos-backup-queue-retirement/v1',
+          receipt: structuredClone(receipt),
+          remote: structuredClone(supplied.checkpoint),
+          slot,
+          retiredAt: null,
+        };
+      }
+      const remote = structuredClone(supplied.checkpoint);
+      validateRemote(remote, metadata.receipt, {
+        bytes: metadata.remote.archiveBytes,
+        sha256: metadata.remote.archiveSha256,
+      });
+      if (
+        initialMetadata &&
+        (remote.repositoryId !== metadata.remote.repositoryId ||
+          remote.ownerDigest !== metadata.remote.ownerDigest ||
+          remote.snapshotId !== metadata.remote.snapshotId ||
+          remote.snapshotAt !== metadata.remote.snapshotAt)
+      )
+        throw Error('remote_retirement_changed');
+      // Capture the live method separately: the serializable record never carries it.
+      const assertCurrent = supplied.assertCurrent.bind(supplied);
+      assertCurrent();
+      const selected = metadata;
+      return this.area(kind, false, true, async (lockedRoot, lockedDevice) => {
+        const currentRoot = fs.statSync(lockedRoot);
+        if (lockedDevice !== device || currentRoot.dev !== rootIdentity.dev || currentRoot.ino !== rootIdentity.ino)
+          throw Error('queue_device_changed');
+        const currentIntent = retirement(lockedRoot, intentName, this.ownerDigest, kind, device);
+        const currentAck = retirement(lockedRoot, ackName, this.ownerDigest, kind, device);
+        assertCurrent();
+        if (selected.retiredAt !== null) {
+          if (currentIntent || !currentAck || digest(currentAck) !== initialMetadata) throw Error('retirement_changed');
+          return remote;
+        }
+        if (intent ? !currentIntent || digest(currentIntent) !== initialMetadata : !!currentIntent)
+          throw Error('retirement_changed');
+        retireSlot(lockedRoot, selected, device, !!intent, assertCurrent, false);
+        if (!intent) {
+          const charge = Math.ceil((Buffer.byteLength(JSON.stringify(selected)) + 1) / 4096) * 4096;
+          const limit = kind === 'state' ? BACKUP_LIMITS.staging : BACKUP_LIMITS.credentials;
+          const availability = fs.statfsSync(lockedRoot, { bigint: true });
+          if (
+            charge > 1024 ** 2 ||
+            measure(lockedRoot, device) + charge + 8192 > limit ||
+            availability.bavail * availability.bsize < BigInt(charge + BACKUP_LIMITS.vaultReserve)
+          )
+            throw Error('retirement_capacity');
+          assertCurrent();
+          publishRetirement(lockedRoot, intentName, selected);
+        }
+        const durable = retirement(lockedRoot, intentName, this.ownerDigest, kind, device);
+        if (!durable || digest(durable) !== digest(selected)) throw Error('retirement_intent_changed');
+        retireSlot(
+          lockedRoot,
+          selected,
+          device,
+          !!intent,
+          () => {
+            assertCurrent();
+            if (digest(retirement(lockedRoot, intentName, this.ownerDigest, kind, device)) !== digest(selected))
+              throw Error('retirement_intent_changed');
+          },
+          true,
+        );
+        const rootFd = privateDirectory(lockedRoot, device);
+        try {
+          fs.fsyncSync(rootFd);
+          assertCurrent();
+          publishRetirement(lockedRoot, ackName, { ...selected, remote, retiredAt: new Date().toISOString() });
+          assertCurrent();
+          if (digest(retirement(lockedRoot, intentName, this.ownerDigest, kind, device)) !== digest(selected))
+            throw Error('retirement_intent_changed');
+          fs.unlinkSync(path.join(lockedRoot, intentName));
+          fs.fsyncSync(rootFd);
+        } finally {
+          fs.closeSync(rootFd);
+        }
+        return remote;
+      });
+    });
+  }
+
   /** Preflight preserves an uninitialized queue and refuses unsafe or unavailable storage. */
   async inspect(kind: BackupKind): Promise<BackupQueueReceipt[]> {
     return this.area(

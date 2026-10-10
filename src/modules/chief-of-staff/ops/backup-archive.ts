@@ -102,6 +102,18 @@ function identity(before: fs.Stats, after: fs.Stats, content = false): void {
   )
     throw Error('archive_file_changed');
 }
+/** Canonical first entry, used to authenticate durable cleanup metadata against
+ * remote bytes even when some local payload files have already been removed. */
+export function backupArchiveReceiptPrefix(receipt: BackupQueueReceipt): Buffer {
+  validate(receipt);
+  const metadata = Buffer.from(JSON.stringify(receipt) + '\n');
+  try {
+    if (metadata.length > 1024 ** 2) throw Error('archive_receipt_bounds');
+    return Buffer.concat([header('cos-backup-receipt.json', metadata.length), metadata]);
+  } finally {
+    metadata.fill(0);
+  }
+}
 /** Streams only declared immutable queue files. The emitter consumes borrowed bytes before resolving.
  * Production invokes this producer with Restic --stdin-from-command so any failure denies a snapshot. */
 export async function streamBackupArchive(

@@ -11,7 +11,6 @@ import { withSignedBackupRepository } from './backup-nas-access.js';
 import { withVaultResticPassword } from './backup-password.js';
 import { createVaultBackupRepositoryWriter } from './backup-repository-lease.js';
 import { createVaultBackupQueue } from './backup-queue.js';
-import { streamBackupArchive } from './backup-archive.js';
 import { readBackupCapacity } from './backup-capacity.js';
 import { BACKUP_LIMITS, admitBackupCapacity, type BackupKind, type BackupMountBinding } from './backup-policy.js';
 import { BackupResticTransfer, type RemoteCheckpoint } from './backup-restic-transfer.js';
@@ -50,7 +49,8 @@ function validateProfile(value: Profile, roots: CalendarStorageRoots, filesystem
 }
 /** Trusted installed uploader. The caller finishes maintenance and ordinary health before
  * dispatching this independent job. This boundary also refuses maintenance and a changed
- * target release. It never initializes a repository, repairs a mount or retires queue data. */
+ * target release. Queue retirement requires fresh remote readback and keeps a durable
+ * recovery intent. It never initializes a repository or repairs a mount. */
 export async function uploadVaultBackup(
   roots: CalendarStorageRoots,
   kind: BackupKind,
@@ -201,13 +201,22 @@ export async function uploadVaultBackup(
                   const writer = createVaultBackupRepositoryWriter(roots, profile.repositoryId),
                     queue = createVaultBackupQueue(roots);
                   return await writer.exclusive(async (lease) =>
-                    queue.withPending(kind, operationId, async (data, receipt) => {
+                    queue.retirePending(kind, operationId, async ({ receipt, archive, previous }) => {
                       if (
                         receipt.ownerDigest !==
                         digest({ targetDigest: policy.targetDigest, filesystemUuid: policy.volume.filesystemUuid })
                       )
                         throw Error('backup_queue_owner_changed');
-                      const archive = await streamBackupArchive(data, receipt, async () => {});
+                      const repositoryOwner = digest({
+                        targetDigest: policy.targetDigest,
+                        filesystemUuid: policy.volume.filesystemUuid,
+                        repositoryId: profile.repositoryId,
+                      });
+                      if (
+                        previous &&
+                        (previous.repositoryId !== profile.repositoryId || previous.ownerDigest !== repositoryOwner)
+                      )
+                        throw Error('backup_repository_owner_changed');
                       const transfer = new BackupResticTransfer({
                         binary,
                         repository,
@@ -215,11 +224,7 @@ export async function uploadVaultBackup(
                         cache,
                         writer: lease,
                         repositoryId: profile.repositoryId,
-                        ownerDigest: digest({
-                          targetDigest: policy.targetDigest,
-                          filesystemUuid: policy.volume.filesystemUuid,
-                          repositoryId: profile.repositoryId,
-                        }),
+                        ownerDigest: repositoryOwner,
                         producer: (selected, id) => [
                           process.execPath,
                           producer,
@@ -242,11 +247,22 @@ export async function uploadVaultBackup(
                             throw Error('backup_capacity_unavailable');
                         },
                       });
-                      const result = await transfer.upload(kind, operationId, archive);
+                      const result = previous
+                        ? await transfer.verify(kind, operationId, archive, receipt)
+                        : await transfer.upload(kind, operationId, archive);
                       const finalUsage = await readBackupCapacity(roots, repository);
                       admitBackupCapacity(finalUsage, { kind, bytes: 1 }, 'remote');
                       cache.assertCurrent();
-                      return result;
+                      return {
+                        checkpoint: result,
+                        assertCurrent() {
+                          lease.assertCurrent();
+                          binary.assertCurrent();
+                          repository.assertCurrent();
+                          password.assertCurrent();
+                          cache.assertCurrent();
+                        },
+                      };
                     }),
                   );
                 } finally {

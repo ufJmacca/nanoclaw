@@ -5,6 +5,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { digest } from '../domain/contracts.js';
 import { BackupQueue } from './backup-queue.js';
 import { BackupRepositoryWriter } from './backup-repository-lease.js';
+import type { RemoteCheckpoint } from './backup-restic-transfer.js';
 const f = vi.hoisted(() => ({
   vault: vi.fn(),
   access: vi.fn(),
@@ -18,6 +19,7 @@ const f = vi.hoisted(() => ({
   target: vi.fn(),
   transfer: vi.fn(),
   upload: vi.fn(),
+  verify: vi.fn(),
   deps: undefined as undefined | Record<string, unknown>,
 }));
 vi.mock('./vault-storage.js', () => ({ verifyVaultStorage: f.vault, withVaultDirectory: f.access }));
@@ -118,8 +120,9 @@ async function fixture() {
   );
   f.transfer.mockImplementation(function (options) {
     f.deps = options;
-    return { upload: f.upload };
+    return { upload: f.upload, verify: f.verify };
   });
+  let recorded: RemoteCheckpoint | undefined;
   f.upload.mockImplementation(async (kind, id, archive) => {
     const deps = f.deps! as unknown as {
       admitUpload(kind: string, bytes: number): Promise<void>;
@@ -128,7 +131,7 @@ async function fixture() {
     };
     deps.cache.assertCurrent();
     await deps.admitUpload(kind, archive.bytes);
-    return {
+    recorded = {
       contract: 'cos-backup-remote-checkpoint/v1',
       repositoryId: profile.repositoryId,
       ownerDigest: deps.ownerDigest,
@@ -141,6 +144,18 @@ async function fixture() {
       snapshotAt: new Date().toISOString(),
       verifiedAt: new Date().toISOString(),
     };
+    return recorded;
+  });
+  f.verify.mockImplementation(async (kind, id, archive) => {
+    if (
+      !recorded ||
+      recorded.kind !== kind ||
+      recorded.operationId !== id ||
+      recorded.archiveBytes !== archive.bytes ||
+      recorded.archiveSha256 !== archive.sha256
+    )
+      throw Error('fixture_remote_missing');
+    return { ...recorded, reconciled: true, verifiedAt: new Date().toISOString() };
   });
   return { roots, areas, profile, file, queue, producer };
 }
@@ -163,7 +178,37 @@ it('connects only installed vault, artifact, NAS, password and writer gates befo
     operationId,
   ]);
   expect(f.capacity).toHaveBeenCalledTimes(2);
-  expect((await s.queue.pending('state'))[0].state).toBe('pending'); // Retirement requires the next durable receipt step.
+  expect(await s.queue.pending('state')).toEqual([]);
+  const ack = JSON.parse(fs.readFileSync(s.areas.staging + '/backup-queue/.cos-last-ack.json', 'utf8'));
+  expect(ack.remote).toEqual(result);
+});
+it('reconciles interrupted cleanup with fresh verification and never invokes another upload', async () => {
+  const s = await fixture();
+  const unlink = fs.unlinkSync;
+  const fault = vi.spyOn(fs, 'unlinkSync').mockImplementation((file) => {
+    if (String(file).endsWith('/remote.json')) throw Error('interrupted');
+    return unlink(file);
+  });
+  await expect(uploadVaultBackup(s.roots, 'state', operationId)).rejects.toThrow(/^backup_upload_unavailable$/);
+  fault.mockRestore();
+  expect(await s.queue.pending('state')).toMatchObject([{ operationId, state: 'failed' }]);
+  f.verify.mockRejectedValueOnce(Error('NAS_OFFLINE'));
+  await expect(uploadVaultBackup(s.roots, 'state', operationId)).rejects.toThrow(/^backup_upload_unavailable$/);
+  const result = await uploadVaultBackup(s.roots, 'state', operationId);
+  expect(result.reconciled).toBe(true);
+  expect(f.upload).toHaveBeenCalledOnce();
+  expect(f.verify).toHaveBeenCalledTimes(2);
+  expect(await s.queue.pending('state')).toEqual([]);
+});
+it('freshly verifies a lost final response without touching a newer full checkpoint', async () => {
+  const s = await fixture();
+  await uploadVaultBackup(s.roots, 'state', operationId);
+  const next = '6ea53126-7177-469b-8bc1-cedd11635b79';
+  await s.queue.capture('state', next, async (sink) => sink.write('next.json', Buffer.from('next')), 65536);
+  await uploadVaultBackup(s.roots, 'state', operationId);
+  expect(f.upload).toHaveBeenCalledOnce();
+  expect(f.verify).toHaveBeenCalledOnce();
+  expect(await s.queue.pending('state')).toMatchObject([{ operationId: next, state: 'pending' }]);
 });
 it.each([
   'foreign-roots',

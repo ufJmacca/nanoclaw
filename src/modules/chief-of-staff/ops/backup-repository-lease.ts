@@ -18,8 +18,10 @@ export class BackupRepositoryWriter {
   constructor(
     private readonly ownerDigest: string,
     private readonly access: Access,
+    private readonly fileName: 'repository.lock' | '.cos-writer.lock' = 'repository.lock',
   ) {
-    if (!/^[a-f0-9]{64}$/.test(ownerDigest)) throw Error('backup_repository_unavailable');
+    if (!/^[a-f0-9]{64}$/.test(ownerDigest) || !['repository.lock', '.cos-writer.lock'].includes(fileName))
+      throw Error('backup_repository_unavailable');
   }
   async exclusive<T>(operation: (lease: BackupRepositoryLease) => Promise<T>): Promise<T> {
     try {
@@ -43,7 +45,7 @@ export class BackupRepositoryWriter {
           const rootStat = fs.fstatSync(rootFd);
           if (!rootStat.isDirectory() || rootStat.uid !== process.getuid?.() || (rootStat.mode & 0o777) !== 0o700)
             throw Error('unsafe_repository_lock');
-          const file = path.join(pinned(rootFd), 'repository.lock');
+          const file = path.join(pinned(rootFd), this.fileName);
           const expected = { contract: 'cos-backup-repository-writer/v1', ownerDigest: this.ownerDigest };
           if (!fs.lstatSync(file, { throwIfNoEntry: false })) {
             fd = fs.openSync(

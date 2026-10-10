@@ -7,6 +7,8 @@ import type { SignedBackupRepository } from './backup-nas-access.js';
 import type { BackupRepositoryLease } from './backup-repository-lease.js';
 import { BACKUP_LIMITS, type BackupKind } from './backup-policy.js';
 import { backupRepositoryHost, backupSnapshotTags } from './backup-retention.js';
+import type { BackupQueueReceipt } from './backup-queue.js';
+import { backupArchiveReceiptPrefix } from './backup-archive.js';
 type Descriptor = Readonly<{ fd: number; assertCurrent(): void }>;
 type Dependencies = {
   binary: VerifiedResticBinary;
@@ -195,15 +197,28 @@ export class BackupResticTransfer {
     }
   }
   /** Fresh readback only. Durable local metadata is never a repository lease. */
-  async verify(kind: BackupKind, operationId: string, input: Archive): Promise<RemoteCheckpoint> {
+  async verify(
+    kind: BackupKind,
+    operationId: string,
+    input: Archive,
+    expectedReceipt?: BackupQueueReceipt,
+  ): Promise<RemoteCheckpoint> {
+    let prefix: Buffer | undefined;
     try {
       const archive = verifiedInput(kind, operationId, input);
+      if (expectedReceipt) {
+        if (expectedReceipt.kind !== kind || expectedReceipt.operationId !== operationId)
+          throw Error('remote_receipt_conflict');
+        prefix = backupArchiveReceiptPrefix(structuredClone(expectedReceipt));
+      }
       const snapshot = await this.find(kind, operationId);
       if (!snapshot) throw Error('remote_checkpoint_missing');
-      return await this.readSnapshot(kind, operationId, archive, snapshot, true);
+      return await this.readSnapshot(kind, operationId, archive, snapshot, true, prefix);
     } catch {
       // eslint-disable-next-line preserve-caught-error -- Remote metadata and provider diagnostics remain private.
       throw Error('backup_transfer_unavailable');
+    } finally {
+      prefix?.fill(0);
     }
   }
   private async readSnapshot(
@@ -212,15 +227,26 @@ export class BackupResticTransfer {
     archive: Archive,
     snapshot: Snapshot,
     reconciled: boolean,
+    expectedPrefix?: Buffer,
   ): Promise<RemoteCheckpoint> {
     const hash = createHash('sha256');
     let bytes = 0;
     const output = await this.command(['dump', snapshot.id, 'checkpoint.tar'], archive.bytes, (chunk) => {
+      if (expectedPrefix && bytes < expectedPrefix.length) {
+        const length = Math.min(chunk.length, expectedPrefix.length - bytes);
+        if (!chunk.subarray(0, length).equals(expectedPrefix.subarray(bytes, bytes + length)))
+          throw Error('remote_receipt_changed');
+      }
       bytes += chunk.length;
       hash.update(chunk);
     });
     output.fill(0);
-    if (bytes !== archive.bytes || hash.digest('hex') !== archive.sha256) throw Error('remote_checkpoint_changed');
+    if (
+      bytes !== archive.bytes ||
+      hash.digest('hex') !== archive.sha256 ||
+      (expectedPrefix && bytes < expectedPrefix.length)
+    )
+      throw Error('remote_checkpoint_changed');
     this.current();
     return {
       contract: 'cos-backup-remote-checkpoint/v1',

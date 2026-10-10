@@ -80,7 +80,7 @@ const transferProducer = (operationId: string) => {
 const withTransfer = async <T>(
   expectedId: string,
   admitUpload: (kind: 'state' | 'credentials', bytes: number) => Promise<void>,
-  operation: (transfer: BackupResticTransfer) => Promise<T>,
+  operation: (transfer: BackupResticTransfer, assertCurrent: () => void) => Promise<T>,
   producer = transferProducer,
   timeoutMs = 900000,
 ) =>
@@ -113,7 +113,13 @@ const withTransfer = async <T>(
         admitUpload,
         timeoutMs,
       });
-      return operation(transfer);
+      return operation(transfer, () => {
+        writer.assertCurrent();
+        executable.assertCurrent();
+        assert(fs.fstatSync(passwordFd).isFile());
+        assert(fs.fstatSync(repositoryFd).isDirectory());
+        assert(fs.fstatSync(cacheFd).isDirectory());
+      });
     }),
   );
 const canary = 'COS_G02_SYNTHETIC_ENCRYPTION_CANARY_4f9b3716';
@@ -541,6 +547,25 @@ test('a completed writer or binary lifetime cannot be replayed as fresh verifica
     /^Error: backup_transfer_unavailable$/,
   );
 });
+test('fresh verification binds the original receipt to the authenticated archive before recovering cleanup', async () => {
+  const [receipt] = await transferQueue.pending('credentials');
+  assert.equal(receipt.operationId, transferOperation);
+  await withTransfer(
+    repositoryId,
+    async () => {
+      throw Error('must_not_upload');
+    },
+    async (transfer) => {
+      await transfer.verify('credentials', transferOperation, transferArchive, receipt);
+      const forged = structuredClone(receipt);
+      forged.files[0].name = 'credentials/foreign.json';
+      await assert.rejects(
+        transfer.verify('credentials', transferOperation, transferArchive, forged),
+        /^Error: backup_transfer_unavailable$/,
+      );
+    },
+  );
+});
 test('a mismatched remote archive cannot be acknowledged as a verified checkpoint', async () => {
   await assert.rejects(
     withTransfer(
@@ -649,6 +674,69 @@ test('real retention keeps 14 daily and four weekly checkpoints per kind without
     version: 2,
     id: repositoryId,
   });
+});
+test('real remote receipt verification recovers interrupted queue retirement and preserves a newer snapshot on replay', async () => {
+  const local = path.join(transferArea, 'backup-queue', transferOperation, 'data', 'credentials', 'canary.json');
+  const before = (JSON.parse(run(['snapshots'])) as Array<{ id: string }>).map((value) => value.id).sort();
+  await assert.rejects(
+    withTransfer(
+      repositoryId,
+      async () => {
+        throw Error('must_not_upload');
+      },
+      async (transfer, current) =>
+        transferQueue.retirePending('credentials', transferOperation, async (request) => ({
+          checkpoint: await transfer.verify('credentials', transferOperation, request.archive, request.receipt),
+          assertCurrent() {
+            current();
+            if (!fs.existsSync(local)) throw Error('synthetic_interruption_after_first_removal');
+          },
+        })),
+    ),
+    /^Error: backup_artifact_unverified$/,
+  );
+  assert(!fs.existsSync(local));
+  assert.equal((await transferQueue.pending('credentials'))[0].state, 'failed');
+  let fresh = 0;
+  const recovered = await withTransfer(
+    repositoryId,
+    async () => {
+      throw Error('must_not_upload');
+    },
+    async (transfer, current) =>
+      transferQueue.retirePending('credentials', transferOperation, async (request) => {
+        fresh++;
+        assert.equal(request.previous?.snapshotId, transferSnapshot);
+        return {
+          checkpoint: await transfer.verify('credentials', transferOperation, request.archive, request.receipt),
+          assertCurrent: current,
+        };
+      }),
+  );
+  assert.equal(fresh, 1);
+  assert.equal(recovered.snapshotId, transferSnapshot);
+  assert.deepEqual(await transferQueue.pending('credentials'), []);
+  const next = 'fcc02583-4134-45ad-9aab-6a975ffb53cb';
+  await transferQueue.capture(
+    'credentials',
+    next,
+    async (sink) => sink.write('next.json', Buffer.from('synthetic-newer-snapshot')),
+    65536,
+  );
+  await withTransfer(
+    repositoryId,
+    async () => {
+      throw Error('must_not_upload');
+    },
+    async (transfer, current) =>
+      transferQueue.retirePending('credentials', transferOperation, async (request) => ({
+        checkpoint: await transfer.verify('credentials', transferOperation, request.archive, request.receipt),
+        assertCurrent: current,
+      })),
+  );
+  assert.equal((await transferQueue.pending('credentials'))[0].operationId, next);
+  assert.deepEqual((JSON.parse(run(['snapshots'])) as Array<{ id: string }>).map((value) => value.id).sort(), before);
+  run(['check', '--read-data']);
 });
 after(() => {
   for (const fd of [passwordFd, repositoryFd, binaryFd, cacheFd]) fs.closeSync(fd);
