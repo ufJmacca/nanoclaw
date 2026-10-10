@@ -3,6 +3,10 @@ import { randomUUID } from 'node:crypto';
 import { vaultRootConfiguration, type VaultRootConfiguration } from './vault-root-config.js';
 import { backupNasSetupRequest, writeBackupNasSetupRequest } from './backup-nas-setup-wire.js';
 import { backupNasRecoveryRequest, writeBackupNasRecoveryRequest } from './backup-nas-recovery-wire.js';
+import {
+  backupNasInitializationRecoveryRequest,
+  writeBackupNasInitializationRecoveryRequest,
+} from './backup-nas-initialization-recovery-wire.js';
 import { runtimeTestMessages } from './runtime-test-wire.js';
 import { verifyVaultMemory } from './vault-memory.js';
 export type BackupNasProcessControls = {
@@ -12,13 +16,19 @@ export type BackupNasProcessControls = {
   stopUnit?(unit: string): boolean;
 };
 export function backupNasProcessInvocation(
-  kind: 'setup' | 'recovery' | 'inspection',
+  kind: 'setup' | 'recovery' | 'inspection' | 'initialization',
   input: VaultRootConfiguration,
   selected: unknown,
 ): { tool: string; unit: string; env: Record<string, string>; args: string[] } {
-  if (kind !== 'setup' && kind !== 'recovery' && kind !== 'inspection') throw Error('backup_nas_process_unavailable');
+  if (kind !== 'setup' && kind !== 'recovery' && kind !== 'inspection' && kind !== 'initialization')
+    throw Error('backup_nas_process_unavailable');
   const vault = vaultRootConfiguration(input),
-    request = kind === 'recovery' ? backupNasRecoveryRequest(selected, vault) : backupNasSetupRequest(selected, vault),
+    request =
+      kind === 'initialization'
+        ? backupNasInitializationRecoveryRequest(selected, vault)
+        : kind === 'recovery'
+          ? backupNasRecoveryRequest(selected, vault)
+          : backupNasSetupRequest(selected, vault),
     root = '/opt/nanoclaw-cos/vault/' + vault.artifact.digest;
   const unit = 'nanoclaw-cos-backup-' + kind + '-' + request.scope.operationId + '-' + randomUUID() + '.service',
     env = { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', LANG: 'C', LC_ALL: 'C' };
@@ -52,7 +62,9 @@ export function backupNasProcessInvocation(
         ? '--backup-configure'
         : kind === 'inspection'
           ? '--backup-inspect-initialization'
-          : '--backup-recover-unmount',
+          : kind === 'initialization'
+            ? '--backup-recover-initialization'
+            : '--backup-recover-unmount',
     ],
   };
 }
@@ -61,7 +73,7 @@ export function backupNasProcessInvocation(
  * only their generated unit and owned process group, and cannot acknowledge an operation.
  */
 export async function executeBackupNasProcess(
-  kind: 'setup' | 'recovery' | 'inspection',
+  kind: 'setup' | 'recovery' | 'inspection' | 'initialization',
   input: VaultRootConfiguration,
   selected: unknown,
   check: () => Promise<void>,
@@ -103,7 +115,11 @@ export async function executeBackupNasProcess(
     const memory = controls.assertMemory ?? verifyVaultMemory,
       vault = vaultRootConfiguration(input),
       request =
-        kind === 'recovery' ? backupNasRecoveryRequest(selected, vault) : backupNasSetupRequest(selected, vault),
+        kind === 'initialization'
+          ? backupNasInitializationRecoveryRequest(selected, vault)
+          : kind === 'recovery'
+            ? backupNasRecoveryRequest(selected, vault)
+            : backupNasSetupRequest(selected, vault),
       deadline = controls.deadlineMs ?? 95000,
       until = Date.now() + deadline;
     if (!Number.isSafeInteger(deadline) || deadline < 1 || deadline > 95000) throw Error('invalid_setup_deadline');
@@ -141,11 +157,20 @@ export async function executeBackupNasProcess(
     if (!child.stdin || !child.stdout) throw Error('setup_pipe_unavailable');
     child.stdin.on('error', () => {});
     await within(
-      kind !== 'recovery'
-        ? writeBackupNasSetupRequest(child.stdin, vault, backupNasSetupRequest(request, vault), { assertMemory: guard })
-        : writeBackupNasRecoveryRequest(child.stdin, vault, backupNasRecoveryRequest(request, vault), {
-            assertMemory: guard,
-          }),
+      kind === 'initialization'
+        ? writeBackupNasInitializationRecoveryRequest(
+            child.stdin,
+            vault,
+            backupNasInitializationRecoveryRequest(request, vault),
+            { assertMemory: guard },
+          )
+        : kind !== 'recovery'
+          ? writeBackupNasSetupRequest(child.stdin, vault, backupNasSetupRequest(request, vault), {
+              assertMemory: guard,
+            })
+          : writeBackupNasRecoveryRequest(child.stdin, vault, backupNasRecoveryRequest(request, vault), {
+              assertMemory: guard,
+            }),
     );
     child.stdin.end();
     let replies = 0;
