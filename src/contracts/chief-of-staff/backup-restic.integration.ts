@@ -6,6 +6,11 @@ import { execFileSync, spawn } from 'node:child_process';
 import { after, test } from 'node:test';
 import { BackupQueue } from '../../modules/chief-of-staff/ops/backup-queue.js';
 import {
+  backupRetentionArguments,
+  backupRepositoryHost,
+  backupSnapshotTags,
+} from '../../modules/chief-of-staff/ops/backup-retention.js';
+import {
   verifyResticBinary,
   verifyResticRepositoryIdentity,
 } from '../../modules/chief-of-staff/ops/restic-artifact.js';
@@ -27,7 +32,7 @@ const repositoryFd = fs.openSync(
   fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW,
 );
 const binaryFd = fs.openSync(binary, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
-const env = { PATH: '/usr/bin:/bin', LANG: 'C', LC_ALL: 'C' };
+const env = { PATH: '/usr/bin:/bin', LANG: 'C', LC_ALL: 'C', TZ: 'Australia/Sydney' };
 const args = ['--repo', '/proc/self/fd/5', '--password-file', '/proc/self/fd/4', '--no-cache', '--json'];
 const run = (operation: string[], input?: Buffer) =>
   execFileSync('/proc/self/fd/3', [...args, ...operation], {
@@ -247,6 +252,56 @@ test('Restic rejects a command producer failure without recording an empty or pa
     before.map((snapshot) => snapshot.id),
   );
   run(['check', '--read-data']);
+});
+test('real retention keeps 14 daily and four weekly checkpoints per kind without touching unrelated snapshots', () => {
+  const owner = 'a'.repeat(64),
+    host = backupRepositoryHost(owner);
+  const foreign = (JSON.parse(run(['snapshots'])) as Array<{ id: string }>).map((snapshot) => snapshot.id);
+  const selected = (kind: 'state' | 'credentials') =>
+    JSON.parse(run(['snapshots', '--host', host, '--tag', 'cos-owner=' + owner + ',cos-kind=' + kind])) as Array<{
+      id: string;
+    }>;
+  for (const [kindIndex, kind] of (['state', 'credentials'] as const).entries()) {
+    const dates = [
+      '2026-08-31 03:30:00',
+      ...Array.from({ length: 18 }, (_, day) => '2026-09-' + String(day + 10).padStart(2, '0') + ' 03:30:00'),
+    ];
+    if (kind === 'credentials') dates.push('2026-09-27 04:30:00');
+    for (const [index, time] of dates.entries()) {
+      const operationId = '0000000' + (kindIndex + 1) + '-0000-4000-8000-' + String(index + 1).padStart(12, '0');
+      run(
+        [
+          'backup',
+          '--stdin',
+          '--stdin-filename',
+          'checkpoint.tar',
+          '--host',
+          host,
+          '--time',
+          time,
+          ...backupSnapshotTags(owner, kind, operationId).flatMap((tag) => ['--tag', tag]),
+        ],
+        Buffer.from('synthetic-retention-checkpoint'),
+      );
+    }
+    assert.equal(selected(kind).length, dates.length);
+  }
+  run(backupRetentionArguments(owner, 'state', 'preview'));
+  assert.equal(selected('state').length, 19);
+  assert.equal(selected('credentials').length, 20);
+  run(backupRetentionArguments(owner, 'state', 'apply'));
+  assert.equal(selected('state').length, 16);
+  assert.equal(selected('credentials').length, 20);
+  run(backupRetentionArguments(owner, 'credentials', 'apply'));
+  assert.equal(selected('credentials').length, 16);
+  const retained = new Set((JSON.parse(run(['snapshots'])) as Array<{ id: string }>).map((snapshot) => snapshot.id));
+  for (const id of foreign) assert(retained.has(id));
+  run(['prune', '--max-repack-size', '16M']);
+  run(['check', '--read-data']);
+  assert.deepEqual(verifyResticRepositoryIdentity(run(['cat', 'config']), repositoryId), {
+    version: 2,
+    id: repositoryId,
+  });
 });
 after(() => {
   for (const fd of [passwordFd, repositoryFd, binaryFd]) fs.closeSync(fd);
