@@ -1,13 +1,16 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { afterEach, expect, it, vi } from 'vitest';
 import { digest } from '../domain/contracts.js';
 import { vaultRootConfiguration } from './vault-root-config.js';
 import { vaultRootStateDigest } from './vault-root-state.js';
 import { readBackupNasRootConfiguration } from './backup-nas-root-config.js';
-import { installBackupNasRootConfiguration } from './backup-nas-config-install.js';
+import {
+  installBackupNasRootConfiguration,
+  inspectBackupNasUnclaimedConfigurationStage,
+} from './backup-nas-config-install.js';
 import { prepareBackupNasUnderlay } from './backup-nas-underlay.js';
 const roots: string[] = [];
 afterEach(() => {
@@ -82,6 +85,123 @@ function fixture() {
   };
 }
 const denied = /^backup_nas_configuration_installation_unavailable$/;
+function stagedFixture() {
+  const f = fixture(),
+    stageId = randomUUID(),
+    stage = f.controls.paths.configRoot + '/.backup-nas.' + stageId + '.tmp',
+    text = JSON.stringify(f.nas) + '\n';
+  fs.writeFileSync(stage, text, { mode: 0o600 });
+  return { ...f, stageId, stage, text };
+}
+it('observes only the complete unclaimed configuration stage and preserves all resources without adopting it', async () => {
+  const f = stagedFixture(),
+    before = fs.lstatSync(f.stage),
+    bootstrap = fs.readFileSync(f.bootstrapFile),
+    result = await inspectBackupNasUnclaimedConfigurationStage(f.vault, f.nas, f.controls);
+  expect(result).toEqual({
+    kind: 'configuration-stage',
+    stageId: f.stageId,
+    device: before.dev,
+    inode: before.ino,
+    contentDigest: createHash('sha256').update(f.text).digest('hex'),
+  });
+  expect(Object.isFrozen(result)).toBe(true);
+  expect(fs.readFileSync(f.stage, 'utf8')).toBe(f.text);
+  expect(fs.lstatSync(f.stage).ino).toBe(before.ino);
+  expect(fs.readFileSync(f.bootstrapFile)).toEqual(bootstrap);
+  expect(fs.existsSync(f.file)).toBe(false);
+  expect(fs.existsSync(f.journal)).toBe(false);
+  await expect(installBackupNasRootConfiguration(f.vault, f.nas, f.controls)).rejects.toThrow(denied);
+});
+it.each([
+  'missing',
+  'mode',
+  'owner',
+  'symlink',
+  'hardlink',
+  'foreign-content',
+  'partial',
+  'oversized',
+  'two-stages',
+  'invalid-name',
+  'claimed',
+  'destination',
+  'bootstrap',
+  'permission',
+])('refuses %s configuration staging without changing it', async (reason) => {
+  const f = stagedFixture();
+  if (reason === 'missing') fs.unlinkSync(f.stage);
+  if (reason === 'mode') fs.chmodSync(f.stage, 0o644);
+  if (reason === 'owner') fs.chownSync(f.stage, 1000, 1000);
+  if (reason === 'symlink') {
+    fs.renameSync(f.stage, f.stage + '.original');
+    fs.symlinkSync(f.stage + '.original', f.stage);
+  }
+  if (reason === 'hardlink') fs.linkSync(f.stage, f.stage + '.linked');
+  if (reason === 'foreign-content')
+    fs.writeFileSync(f.stage, JSON.stringify({ ...f.nas, credentialReference: randomUUID() }) + '\n');
+  if (reason === 'partial') fs.writeFileSync(f.stage, '{');
+  if (reason === 'oversized') fs.writeFileSync(f.stage, 'x'.repeat(4097));
+  if (reason === 'two-stages')
+    fs.writeFileSync(f.controls.paths.configRoot + '/.backup-nas.' + randomUUID() + '.tmp', f.text, { mode: 0o600 });
+  if (reason === 'invalid-name') fs.renameSync(f.stage, f.controls.paths.configRoot + '/.backup-nas.foreign.tmp');
+  if (reason === 'claimed') fs.writeFileSync(f.journal, 'KEEP', { mode: 0o600 });
+  if (reason === 'destination') fs.writeFileSync(f.file, 'KEEP', { mode: 0o600 });
+  if (reason === 'bootstrap') fs.writeFileSync(f.bootstrapFile, 'KEEP');
+  if (reason === 'permission') f.controls.assertAuthority.mockRejectedValue(Error('PRIVATE_NATIVE'));
+  const before = fs.readdirSync(f.controls.paths.configRoot).sort();
+  await expect(inspectBackupNasUnclaimedConfigurationStage(f.vault, f.nas, f.controls)).rejects.toThrow(
+    /^backup_nas_configuration_stage_observation_unavailable$/,
+  );
+  expect(fs.readdirSync(f.controls.paths.configRoot).sort()).toEqual(before);
+  if (reason === 'claimed') expect(fs.readFileSync(f.journal, 'utf8')).toBe('KEEP');
+  if (reason === 'destination') expect(fs.readFileSync(f.file, 'utf8')).toBe('KEEP');
+});
+it.each(['inode', 'content', 'claim', 'another-stage', 'revocation'])(
+  'refuses %s during the fresh stage observation challenge',
+  async (reason) => {
+    const f = stagedFixture();
+    let checks = 0;
+    f.controls.assertAuthority.mockImplementation(async () => {
+      if (++checks !== 3) return;
+      if (reason === 'inode') {
+        fs.renameSync(f.stage, f.stage + '.original');
+        fs.writeFileSync(f.stage, f.text, { mode: 0o600 });
+      }
+      if (reason === 'content') fs.writeFileSync(f.stage, f.text + ' ');
+      if (reason === 'claim') fs.writeFileSync(f.journal, 'KEEP', { mode: 0o600 });
+      if (reason === 'another-stage')
+        fs.writeFileSync(f.controls.paths.configRoot + '/.backup-nas.' + randomUUID() + '.tmp', f.text, {
+          mode: 0o600,
+        });
+      if (reason === 'revocation') throw Error('PRIVATE_REVOKED');
+    });
+    await expect(inspectBackupNasUnclaimedConfigurationStage(f.vault, f.nas, f.controls)).rejects.toThrow(
+      /^backup_nas_configuration_stage_observation_unavailable$/,
+    );
+    expect(checks).toBeGreaterThanOrEqual(3);
+  },
+);
+it.each(['inode', 'claim'])('refuses a stage %s change during actual writer closure', async (reason) => {
+  const f = stagedFixture(),
+    close = fs.closeSync;
+  let changed = false;
+  vi.spyOn(fs, 'closeSync').mockImplementation((fd) => {
+    const file = fs.readlinkSync('/proc/self/fd/' + fd);
+    close(fd);
+    if (!changed && file.endsWith('/repository.lock')) {
+      changed = true;
+      if (reason === 'inode') {
+        fs.renameSync(f.stage, f.stage + '.original');
+        fs.writeFileSync(f.stage, f.text, { mode: 0o600 });
+      } else fs.writeFileSync(f.journal, 'KEEP', { mode: 0o600 });
+    }
+  });
+  await expect(inspectBackupNasUnclaimedConfigurationStage(f.vault, f.nas, f.controls)).rejects.toThrow(
+    /^backup_nas_configuration_stage_observation_unavailable$/,
+  );
+  expect(changed).toBe(true);
+});
 it('publishes durable private NAS metadata under the real root writer without changing accepted vault resources', async () => {
   const f = fixture(),
     before = fs.readFileSync(f.bootstrapFile);

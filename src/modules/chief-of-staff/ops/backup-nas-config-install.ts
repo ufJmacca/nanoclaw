@@ -1,12 +1,16 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { digest } from '../domain/contracts.js';
 import { vaultRootConfiguration, type VaultRootConfiguration } from './vault-root-config.js';
 import { vaultRootStateDigest } from './vault-root-state.js';
 import { backupNasRootConfiguration, type BackupNasRootConfiguration } from './backup-nas-root-config.js';
 import { BackupRepositoryWriter } from './backup-repository-lease.js';
 import { verifyVaultMemory } from './vault-memory.js';
+import {
+  backupNasInitializationResource,
+  type BackupNasInitializationResource,
+} from './backup-nas-initialization-recovery-scope.js';
 type Paths = Readonly<{ configRoot: string; controlRoot: string; storageRoot: string }>;
 export type BackupNasConfigurationInstallControls = {
   /** The installed caller must recheck the sealed helper, current configuration and actual native maintenance proof. */
@@ -33,12 +37,43 @@ const same = (stat: fs.Stats, claim: Inode) => stat.dev === claim.device && stat
  * before an exclusive hard-link publication; a retry never adopts an unclaimed file.
  * Every effect remains under the real root writer and a fresh native authority check.
  */
-export async function installBackupNasRootConfiguration(
+export function installBackupNasRootConfiguration(
   input: VaultRootConfiguration,
   selected: BackupNasRootConfiguration,
   controls: BackupNasConfigurationInstallControls,
 ): Promise<BackupNasRootConfiguration> {
+  return withBackupNasRootConfiguration(input, selected, controls, 'install');
+}
+/** Observe one complete unclaimed first-install stage. This grants no ownership,
+ * performs no publication or repair, and preserves accepted G01 resources.
+ */
+export function inspectBackupNasUnclaimedConfigurationStage(
+  input: VaultRootConfiguration,
+  selected: BackupNasRootConfiguration,
+  controls: BackupNasConfigurationInstallControls,
+): Promise<BackupNasInitializationResource> {
+  return withBackupNasRootConfiguration(input, selected, controls, 'inspect');
+}
+function withBackupNasRootConfiguration(
+  input: VaultRootConfiguration,
+  selected: BackupNasRootConfiguration,
+  controls: BackupNasConfigurationInstallControls,
+  mode: 'install',
+): Promise<BackupNasRootConfiguration>;
+function withBackupNasRootConfiguration(
+  input: VaultRootConfiguration,
+  selected: BackupNasRootConfiguration,
+  controls: BackupNasConfigurationInstallControls,
+  mode: 'inspect',
+): Promise<BackupNasInitializationResource>;
+async function withBackupNasRootConfiguration(
+  input: VaultRootConfiguration,
+  selected: BackupNasRootConfiguration,
+  controls: BackupNasConfigurationInstallControls,
+  mode: 'install' | 'inspect',
+): Promise<BackupNasRootConfiguration | BackupNasInitializationResource> {
   const descriptors = new Set<number>();
+  let finalObservation: (() => void) | undefined;
   const close = (fd: number) => {
     if (descriptors.delete(fd)) fs.closeSync(fd);
   };
@@ -184,7 +219,7 @@ export async function installBackupNasRootConfiguration(
         return result;
       },
     );
-    return await writer.exclusive(async (lease) => {
+    const result = await writer.exclusive(async (lease) => {
       const filename = 'nas-config-install.json',
         journalPath = filePath(control!, filename),
         destination = filePath(config!, 'backup-nas.json');
@@ -281,6 +316,59 @@ export async function installBackupNasRootConfiguration(
           vaultStateDigest: nas.vaultStateDigest,
         }) + '\n';
       await current();
+      if (mode === 'inspect') {
+        const unclaimed = () => {
+          guard();
+          bootstrap.check();
+          if (
+            fs.lstatSync(journalPath, { throwIfNoEntry: false }) ||
+            fs.lstatSync(destination, { throwIfNoEntry: false })
+          )
+            throw Error('unclaimed_configuration_stage_required');
+          const directory = fs.opendirSync('/proc/self/fd/' + config!.fd, { bufferSize: 32 });
+          let stage: string | undefined;
+          try {
+            let count = 0,
+              entry: fs.Dirent | null;
+            while ((entry = directory.readSync())) {
+              if (++count > 128) throw Error('stage_inspection_bounds');
+              if (entry.name.startsWith('.backup-nas.')) {
+                if (
+                  stage ||
+                  !/^\.backup-nas\.[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}\.tmp$/.test(
+                    entry.name,
+                  )
+                )
+                  throw Error('ambiguous_configuration_stage');
+                stage = entry.name;
+              }
+            }
+          } finally {
+            directory.closeSync();
+          }
+          guard();
+          if (!stage) throw Error('configuration_stage_missing');
+          return stage;
+        };
+        const stage = unclaimed(),
+          staged = open(config!, stage);
+        if (staged.text !== text || digest(backupNasRootConfiguration(staged.value, vault)) !== configurationDigest)
+          throw Error('configuration_stage_content_changed');
+        resources = [staged];
+        finalObservation = () => {
+          staged.check();
+          if (unclaimed() !== stage) throw Error('configuration_stage_changed');
+          staged.check();
+        };
+        await current();
+        finalObservation();
+        return backupNasInitializationResource({
+          kind: 'configuration-stage',
+          stageId: stage.slice('.backup-nas.'.length, -'.tmp'.length),
+          ...inode(staged.before),
+          contentDigest: createHash('sha256').update(staged.text).digest('hex'),
+        });
+      }
       let record: Installation;
       if (fs.lstatSync(journalPath, { throwIfNoEntry: false })) {
         journal = open(control!, filename);
@@ -398,9 +486,17 @@ export async function installBackupNasRootConfiguration(
       await current();
       return nas;
     });
+    // The writer's final native closure happens before this synchronous check.
+    // Keep every resource descriptor and the accepted bootstrap pinned until it passes.
+    finalObservation?.();
+    return result;
   } catch {
     // eslint-disable-next-line preserve-caught-error -- Private endpoints, paths and native-proof diagnostics are never installation receipts.
-    throw Error('backup_nas_configuration_installation_unavailable');
+    throw Error(
+      mode === 'inspect'
+        ? 'backup_nas_configuration_stage_observation_unavailable'
+        : 'backup_nas_configuration_installation_unavailable',
+    );
   } finally {
     for (const fd of descriptors) fs.closeSync(fd);
   }
