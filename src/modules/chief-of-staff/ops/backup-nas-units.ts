@@ -1,9 +1,8 @@
 import { isIP } from 'node:net';
-/** Root provisioning installs this on-demand unit only after its separate credential
- * admission service is installed and tested. It adds no dependency to the owner runtime.
- * Actual kernel signing, mount identity and repository admission remain mandatory.
+/** Fixed command definition only. A root caller supplies an admitted live descriptor
+ * as child fd 3 and independently admits the owned mountpoint before execution.
  */
-export function backupNasMountUnit(input: { host: string; userId: number; groupId: number }) {
+export function backupNasMountCommand(input: { host: string; userId: number; groupId: number }) {
   try {
     if (
       !input ||
@@ -24,11 +23,9 @@ export function backupNasMountUnit(input: { host: string; userId: number; groupI
       )
     )
       throw Error('private_lan_required');
-    const vault = 'var-lib-nanoclaw\\x2dcos-vault.mount';
-    const admission = 'nanoclaw-cos-backup-mount-admission.service';
     const options = [
       'rw',
-      'credentials=/var/lib/nanoclaw-cos/vault/backup-credentials/smb-credentials',
+      'credentials=/proc/self/fd/3',
       'vers=2.1',
       'sec=ntlmsspi',
       'uid=' + input.userId,
@@ -44,11 +41,36 @@ export function backupNasMountUnit(input: { host: string; userId: number; groupI
       'soft',
     ].join(',');
     return Object.freeze({
-      name: 'var-lib-nanoclaw\\x2dcos-nas.mount',
-      contents: `[Unit]\nDescription=NanoClaw CoS dedicated signed backup share\nWants=network-online.target\nRequires=${admission}\nBindsTo=${vault}\nAfter=network-online.target ${vault} ${admission}\nConditionPathIsMountPoint=/var/lib/nanoclaw-cos/vault\n\n[Mount]\nWhat=//${input.host}/nanoclaw-cos-backups\nWhere=/var/lib/nanoclaw-cos/nas\nType=cifs\nOptions=${options}\nDirectoryMode=0000\nTimeoutSec=20s\nLimitCORE=0\nMemorySwapMax=0\nUMask=0077\nStandardOutput=null\nStandardError=null\n`,
+      command: '/usr/sbin/mount.cifs',
+      args: Object.freeze(['//' + input.host + '/nanoclaw-cos-backups', '/var/lib/nanoclaw-cos/nas', '-o', options]),
     });
   } catch {
     // eslint-disable-next-line preserve-caught-error -- Selected private NAS endpoints never enter diagnostics.
+    throw Error('backup_nas_unit_unavailable');
+  }
+}
+/** No boot activation or main-runtime dependency. Installed dispatch, root-owned NAS
+ * configuration and mountpoint ownership must pass their separate tests before delivery.
+ */
+export function backupNasMountService(input: { artifactDigest: string }) {
+  try {
+    if (
+      !input ||
+      typeof input !== 'object' ||
+      Array.isArray(input) ||
+      Object.keys(input).join(',') !== 'artifactDigest' ||
+      typeof input.artifactDigest !== 'string' ||
+      !/^[a-f0-9]{64}$/.test(input.artifactDigest)
+    )
+      throw Error('invalid_nas_service');
+    const vault = 'var-lib-nanoclaw-cos-vault.mount'.replace('nanoclaw-cos', 'nanoclaw\\x2dcos'),
+      root = '/opt/nanoclaw-cos/vault/' + input.artifactDigest;
+    return Object.freeze({
+      name: 'nanoclaw-cos-backup-mount.service',
+      contents: `[Unit]\nDescription=NanoClaw CoS dedicated signed backup share\nWants=network-online.target\nBindsTo=${vault}\nAfter=network-online.target ${vault}\nConditionPathIsMountPoint=/var/lib/nanoclaw-cos/vault\n\n[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=${root}/node ${root}/gateway.mjs --backup-mount\nExecStop=${root}/node ${root}/gateway.mjs --backup-unmount\nTimeoutStartSec=30s\nTimeoutStopSec=10s\nKillMode=control-group\nLimitCORE=0\nMemorySwapMax=0\nUMask=0077\nStandardOutput=null\nStandardError=null\n`,
+    });
+  } catch {
+    // eslint-disable-next-line preserve-caught-error -- No caller-selected commands or credential paths enter the unit.
     throw Error('backup_nas_unit_unavailable');
   }
 }
