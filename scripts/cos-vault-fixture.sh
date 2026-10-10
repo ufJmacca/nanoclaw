@@ -4,7 +4,7 @@ set -euo pipefail
 umask 077
 [[ "$(uname -s)" == Darwin && ( $# == 2 || $# == 3 ) ]] || exit 1
 mode=$1 image=$2
-[[ "$mode" == kernel || "$mode" == helper || "$mode" == units ]] || exit 1
+[[ "$mode" == kernel || "$mode" == backup-kernel || "$mode" == helper || "$mode" == units ]] || exit 1
 [[ "$image" =~ ^sha256:[a-f0-9]{64}$ ]] || exit 1
 [[ -z "${DOCKER_HOST:-}${DOCKER_CONTEXT:-}${DOCKER_TLS_VERIFY:-}${DOCKER_CERT_PATH:-}" ]] || exit 1
 role=$(docker image inspect --format '{{index .Config.Labels "nanoclaw.release-role"}}' "$image")
@@ -25,8 +25,14 @@ actual_keychain=$(shasum -a256 "$3" | awk '{print $1}')
 dm_major=$(docker run --rm --pull=never --network=none --entrypoint /usr/local/bin/node "$image" \
   -e 'const f=require("fs");const m=f.readFileSync("/proc/devices","utf8").match(/^\s*(\d+)\s+device-mapper\s*$/m);if(!m)process.exit(1);process.stdout.write(m[1])')
 [[ "$dm_major" =~ ^[0-9]{1,4}$ ]] || exit 1
+backup_options=()
+if [[ "$mode" == backup-kernel ]]; then
+  # Inspect only a helper spawned inside this disposable container's private PID namespace.
+  backup_options=(--cap-add SYS_PTRACE -e NANOCLAW_COS_BACKUP_FIXTURE=1)
+fi
 # A fresh disposable Keychain item feeds the private pipe. Neither stream is logged or written to a key file.
 swift "$3" fixture-stream | docker run --rm -i --pull=never --network=none --cap-add SYS_ADMIN \
+  "${backup_options[@]}" \
   --device /dev/loop-control \
   --device-cgroup-rule 'b 7:* rwm' --device-cgroup-rule "b $dm_major:* rwm" \
   --device-cgroup-rule 'c 10:236 rwm' --device-cgroup-rule 'c 10:237 rwm' \

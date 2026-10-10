@@ -445,7 +445,23 @@ try {
   assert.equal(mounts.inspect(), 'matching');
   await mount();
   await mount();
+  if (process.env.NANOCLAW_COS_BACKUP_FIXTURE === '1') console.log('{"stage":"backup_vault_owner_capture"}');
   owner('capture');
+  if (process.env.NANOCLAW_COS_BACKUP_FIXTURE === '1') {
+    console.log('{"stage":"backup_vault_credential_installation"}');
+    run('/usr/bin/setpriv', [
+      '--clear-groups',
+      '--reuid=1000',
+      '--regid=1000',
+      process.execPath,
+      '/probe/probe-backup-credentials.mjs',
+      'install',
+    ]);
+    console.log('{"stage":"backup_vault_root_handoff"}');
+    const backup = JSON.parse(run(process.execPath, ['/probe/probe-backup-credentials.mjs', 'root']));
+    assert.equal(backup.backupVaultCredentialHandoff, 'passed');
+    console.log(JSON.stringify(backup));
+  }
   const beforeRecovery = recoveryOpens;
   assert.equal((await checkVaultRecovery(identity, rootPorts)).status, 'ready');
   assert.equal(recoveryOpens, beforeRecovery + 1);
