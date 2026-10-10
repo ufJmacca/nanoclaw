@@ -213,6 +213,7 @@ export function createVaultUnitInstaller(
     return result.status === 3 && result.output === systemNames.map(() => 'inactive\n').join('');
   };
   const active = () => {
+    if (inspect() !== 'matching') throw Error('claimed_units_required');
     const result = command('/usr/bin/systemctl', ['is-active', ...systemNames]);
     return result.status === 0 && result.output === systemNames.map(() => 'active\n').join('');
   };
@@ -235,6 +236,7 @@ export function createVaultUnitInstaller(
   return {
     inspect,
     inactive,
+    active,
     stopStorage: () => changeStorage('stop'),
     startStorage: () => changeStorage('start'),
     async install() {

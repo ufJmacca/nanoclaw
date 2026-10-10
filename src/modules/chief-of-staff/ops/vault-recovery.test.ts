@@ -31,9 +31,11 @@ function fixture() {
     openRecovery: vi.fn(async () => {
       events.push('recovery-open');
     }),
-    mountStorage: vi.fn(async () => {
-      events.push('mount');
-      mounted = true;
+    verifyRecoveryCanary: vi.fn(async () => {
+      events.push('private-readonly-canary');
+    }),
+    closeRecovery: vi.fn(async () => {
+      events.push('recovery-close');
     }),
     verifyCanary: vi.fn(async () => {
       events.push('canary');
@@ -60,13 +62,42 @@ it('closes the verified vault before recovery unlock, verifies the canary, and c
     volumeBytes: 1073741824,
     identityDigest: digest(f.identity),
   });
-  expect(f.events).toEqual(['canary', 'close', 'recovery-open', 'mount', 'canary', 'close', 'normal-start', 'canary']);
+  expect(f.events).toEqual([
+    'canary',
+    'close',
+    'recovery-open',
+    'private-readonly-canary',
+    'recovery-close',
+    'normal-start',
+    'canary',
+  ]);
 });
 it('can resume safely from a previously closed claimed vault without recreating any provisioned resource', async () => {
   const f = fixture();
   f.setClosed();
   await expect(checkVaultRecovery(f.identity, f.ports)).resolves.toMatchObject({ status: 'ready' });
   expect(f.events[0]).toBe('close');
+});
+it('checks the recovery canary away from mounts bound to the inactive normal unlock service', async () => {
+  const f = fixture();
+  const mountStorage = vi.fn(async () => {
+    throw Error('NORMAL_UNLOCK_INACTIVE');
+  });
+  const recovery = {
+    ...f.ports,
+    mountStorage,
+  };
+  await expect(checkVaultRecovery(f.identity, recovery)).resolves.toMatchObject({ status: 'ready' });
+  expect(mountStorage).not.toHaveBeenCalled();
+  expect(f.events).toEqual([
+    'canary',
+    'close',
+    'recovery-open',
+    'private-readonly-canary',
+    'recovery-close',
+    'normal-start',
+    'canary',
+  ]);
 });
 it.each(['foreign-journal', 'incomplete', 'wrong-key', 'memory', 'canary', 'withdrawal', 'normal-start', 'not-closed'])(
   'denies %s without reporting a recovery receipt',
@@ -90,7 +121,7 @@ it.each(['foreign-journal', 'incomplete', 'wrong-key', 'memory', 'canary', 'with
     if (['foreign-journal', 'incomplete', 'wrong-key', 'memory', 'canary'].includes(reason))
       expect(f.ports.closeStorage).not.toHaveBeenCalled();
     if (reason === 'withdrawal') {
-      expect(f.ports.mountStorage).not.toHaveBeenCalled();
+      expect(f.ports.verifyRecoveryCanary).not.toHaveBeenCalled();
       expect(f.ports.startStorage).not.toHaveBeenCalled();
     }
   },

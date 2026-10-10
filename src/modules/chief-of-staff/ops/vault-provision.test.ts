@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { expect, it } from 'vitest';
+import { expect, it, vi } from 'vitest';
 import { VAULT_BYTES, VAULT_FREE_FLOOR } from './vault-admission.js';
 import {
   provisionVault,
@@ -74,6 +74,10 @@ function fixture() {
       existing.add(step);
       if (step === 'allocate') free -= VAULT_BYTES;
     },
+    async activateStorage() {
+      expect(locked).toBe(true);
+      expect(journal).toMatchObject({ phase: 'complete', step: 'units' });
+    },
   };
   return {
     identity,
@@ -98,6 +102,21 @@ it('persists intent before every bounded step and verifies completion under its 
   await provisionVault(f.identity, f.ports);
   expect(f.applied).toHaveLength(VAULT_PROVISION_STEPS.length);
   expect(f.writes).toHaveLength(writes);
+});
+it('requires verified normal storage activation even after the provisioning journal is complete', async () => {
+  const f = fixture();
+  const activateStorage = vi.fn<() => Promise<void>>(async () => {
+    throw Error('NORMAL_STORAGE_NOT_READY');
+  });
+  const ports = { ...f.ports, activateStorage };
+  await expect(provisionVault(f.identity, ports)).rejects.toThrow('vault_provisioning_unavailable');
+  expect(f.writes.at(-1)).toMatchObject({ step: 'units', phase: 'complete' });
+  const effects = f.applied.length;
+  await expect(provisionVault(f.identity, ports)).rejects.toThrow('vault_provisioning_unavailable');
+  expect(f.applied).toHaveLength(effects);
+  activateStorage.mockResolvedValue(undefined);
+  await expect(provisionVault(f.identity, ports)).resolves.toMatchObject({ status: 'ready' });
+  expect(activateStorage).toHaveBeenCalledTimes(3);
 });
 it.each(['luks', 'filesystem'] as const)('reconciles a lost %s reply without replaying a format', async (step) => {
   const f = fixture(),

@@ -8,7 +8,13 @@ import { VAULT_DIRECTORIES } from './vault-storage.js';
 const temporary: string[] = [];
 afterEach(() => {
   vi.restoreAllMocks();
-  for (const root of temporary.splice(0)) fs.rmSync(root, { recursive: true, force: true });
+  for (const root of temporary.splice(0)) {
+    const control = root + '/control';
+    if (fs.existsSync(control))
+      for (const name of fs.readdirSync(control))
+        if (name.startsWith('recovery-')) fs.chmodSync(control + '/' + name, 0o700);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 function fixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vault-mounts-'));
@@ -98,6 +104,118 @@ function fixture() {
     mounts: createVaultMounts(paths, identity, owner, controls),
   };
 }
+async function recoveryFixture() {
+  const f = fixture();
+  await f.mounts.mount();
+  fs.writeFileSync(f.paths.vaultRoot + '/journals/canary', 'SYNTHETIC_ENCRYPTED_CANARY', { mode: 0o600 });
+  const original = fs.readFileSync(f.paths.stateRoot + '/mounts.json', 'utf8');
+  f.mounted.clear();
+  let recoveryRoot: string | undefined;
+  const lstat = vi.mocked(fs.lstatSync).getMockImplementation()!,
+    open = vi.mocked(fs.openSync).getMockImplementation()!,
+    readdir = vi.mocked(fs.readdirSync).getMockImplementation()!;
+  const encrypted = (file: fs.PathLike) =>
+    recoveryRoot && String(file).startsWith(recoveryRoot) && f.mounted.has(recoveryRoot)
+      ? f.paths.vaultRoot + String(file).slice(recoveryRoot.length)
+      : file;
+  const realpath = fs.realpathSync;
+  vi.spyOn(fs, 'realpathSync').mockImplementation(((file, options) =>
+    encrypted(file) !== file ? file : Reflect.apply(realpath, fs, [file, options])) as typeof fs.realpathSync);
+  vi.spyOn(fs, 'lstatSync').mockImplementation(((file, options) => {
+    const stat = lstat(encrypted(file), options);
+    if ([f.paths.vaultRoot, f.paths.calendarRoot].includes(String(file)) && stat)
+      return Object.assign(Object.create(Object.getPrototypeOf(stat)), stat, { mode: Number(stat.mode) & ~0o777 });
+    return stat;
+  }) as typeof fs.lstatSync);
+  vi.spyOn(fs, 'openSync').mockImplementation((file, flags, mode) => open(encrypted(file), flags, mode));
+  vi.spyOn(fs, 'readdirSync').mockImplementation(((file, options) => {
+    if ([f.paths.vaultRoot, f.paths.calendarRoot].includes(String(file))) return [];
+    if (String(file).startsWith(f.paths.stateRoot + '/recovery-') && !f.mounted.has(String(file))) return [];
+    return Reflect.apply(readdir, fs, [encrypted(file), options]);
+  }) as typeof fs.readdirSync);
+  const number = fs.statSync(f.root).dev;
+  const major = ((BigInt(number) >> 8n) & 0xfffn) | ((BigInt(number) >> 32n) & 0xfffff000n);
+  const minor = (BigInt(number) & 0xffn) | ((BigInt(number) >> 12n) & 0xffffff00n);
+  f.controls.run = vi.fn((command, args, descriptors) => {
+    if (command === '/usr/bin/umount') {
+      expect(args).toEqual([recoveryRoot]);
+      expect(descriptors).toHaveLength(0);
+      f.mounted.delete(recoveryRoot!);
+      return { status: 0, output: '' };
+    }
+    expect(command).toBe('/usr/bin/mount');
+    expect(args).toEqual(['-t', 'ext4', '-o', 'ro,noload,nosuid,nodev,noexec', '/proc/self/fd/3', '/proc/self/fd/4']);
+    recoveryRoot = fs.readlinkSync('/proc/self/fd/' + descriptors[1]);
+    expect(recoveryRoot).toMatch(new RegExp('^' + f.paths.stateRoot + '/recovery-'));
+    expect(fs.fstatSync(descriptors[1]).mode & 0o777).toBe(0);
+    f.mounted.set(recoveryRoot, {
+      target: recoveryRoot,
+      fstype: 'ext4',
+      fsroot: '/',
+      'maj:min': `${major}:${minor}`,
+      uuid: f.identity.filesystemUuid,
+      options: 'ro,norecovery,nosuid,nodev,noexec',
+    });
+    return { status: 0, output: '' };
+  });
+  f.mounts = createVaultMounts(f.paths, f.identity, f.owner, f.controls);
+  return { ...f, original };
+}
+it('reads a claimed canary through a fresh private read-only mount and leaves normal underlays closed', async () => {
+  const f = await recoveryFixture();
+  const result = await f.mounts.withRecoveryArea('journals', (fd) =>
+    fs.readFileSync(`/proc/self/fd/${fd}/canary`, 'utf8'),
+  );
+  expect(result).toBe('SYNTHETIC_ENCRYPTED_CANARY');
+  expect(f.mounts.closed()).toBe(true);
+  expect(f.mounted.size).toBe(0);
+  expect(fs.readdirSync(f.paths.stateRoot)).toEqual(['mounts.json']);
+  expect(fs.readFileSync(f.paths.stateRoot + '/mounts.json', 'utf8')).toBe(f.original);
+});
+it('unmounts only its private verified mount when canary verification fails', async () => {
+  const f = await recoveryFixture();
+  await expect(
+    f.mounts.withRecoveryArea('journals', () => {
+      throw Error('PRIVATE_CANARY');
+    }),
+  ).rejects.toThrow('vault_mounts_unavailable');
+  expect(f.mounted.size).toBe(0);
+  expect(f.mounts.closed()).toBe(true);
+  expect(fs.readdirSync(f.paths.stateRoot)).toEqual(['mounts.json']);
+});
+it.each(['writable', 'journal-replay', 'wrong-device', 'wrong-uuid', 'wrong-inode', 'withdrawal'])(
+  'denies %s before reading the recovery canary',
+  async (reason) => {
+    const f = await recoveryFixture(),
+      run = f.controls.run!;
+    f.controls.run = (command, args, descriptors) => {
+      const result = run(command, args, descriptors);
+      if (command === '/usr/bin/mount') {
+        const [file, proof] = [...f.mounted.entries()][0];
+        if (reason === 'writable') proof.options = 'rw,norecovery,nosuid,nodev,noexec';
+        if (reason === 'journal-replay') proof.options = 'ro,nosuid,nodev,noexec';
+        if (reason === 'wrong-device') proof['maj:min'] = '8:1';
+        if (reason === 'wrong-uuid') proof.uuid = randomUUID();
+        if (reason === 'wrong-inode') {
+          fs.renameSync(f.paths.vaultRoot + '/journals', f.paths.vaultRoot + '/journals-original');
+          fs.mkdirSync(f.paths.vaultRoot + '/journals', { mode: 0o700 });
+        }
+        if (reason === 'withdrawal')
+          f.controls.assertAuthority = async () => {
+            throw Error('PRIVATE_WITHDRAWAL');
+          };
+        expect(file).toMatch(/\/recovery-/);
+      }
+      return result;
+    };
+    f.mounts = createVaultMounts(f.paths, f.identity, f.owner, f.controls);
+    const canary = vi.fn();
+    await expect(f.mounts.withRecoveryArea('journals', canary)).rejects.toThrow('vault_mounts_unavailable');
+    expect(canary).not.toHaveBeenCalled();
+    expect(f.mounts.closed()).toBe(true);
+    expect(fs.readFileSync(f.paths.stateRoot + '/mounts.json', 'utf8')).toBe(f.original);
+  },
+);
 it('creates only claimed closed underlays, mounts pinned descriptors and initializes private encrypted areas once', async () => {
   const f = fixture();
   expect(f.mounts.inspect()).toBe('absent');

@@ -141,32 +141,32 @@ export function createVaultRootEffects(
         throw Error('canary_claim_conflict');
       return value;
     };
-    const canary = () =>
-      mounts.withArea('journals', (directoryFd) => {
-        const expected = claim(),
-          file = `/proc/self/fd/${directoryFd}/.vault-canary`,
-          stat = fs.lstatSync(file, { throwIfNoEntry: false });
-        if (!stat && !expected) return 'absent' as const;
-        if (!stat || !expected) throw Error('unclaimed_canary');
-        const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
-        try {
-          const current = fs.fstatSync(fd);
-          if (
-            !current.isFile() ||
-            current.uid !== process.getuid?.() ||
-            current.nlink !== 1 ||
-            (current.mode & 0o777) !== 0o600 ||
-            current.ino !== expected.inode ||
-            current.size !== Buffer.byteLength(text) ||
-            fs.readFileSync(fd, 'utf8') !== text ||
-            fs.lstatSync(file).ino !== current.ino
-          )
-            throw Error('canary_changed');
-        } finally {
-          fs.closeSync(fd);
-        }
-        return 'matching' as const;
-      });
+    const checkCanary = (directoryFd: number) => {
+      const expected = claim(),
+        file = `/proc/self/fd/${directoryFd}/.vault-canary`,
+        stat = fs.lstatSync(file, { throwIfNoEntry: false });
+      if (!stat && !expected) return 'absent' as const;
+      if (!stat || !expected) throw Error('unclaimed_canary');
+      const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+      try {
+        const current = fs.fstatSync(fd);
+        if (
+          !current.isFile() ||
+          current.uid !== process.getuid?.() ||
+          current.nlink !== 1 ||
+          (current.mode & 0o777) !== 0o600 ||
+          current.ino !== expected.inode ||
+          current.size !== Buffer.byteLength(text) ||
+          fs.readFileSync(fd, 'utf8') !== text ||
+          fs.lstatSync(file).ino !== current.ino
+        )
+          throw Error('canary_changed');
+      } finally {
+        fs.closeSync(fd);
+      }
+      return 'matching' as const;
+    };
+    const canary = () => mounts.withArea('journals', checkCanary);
     const createCanary = () => {
       if (canary() === 'matching') return;
       mounts.withArea('journals', (directoryFd) => {
@@ -194,7 +194,7 @@ export function createVaultRootEffects(
       });
       if (canary() !== 'matching') throw Error('canary_unverified');
     };
-    return { common, crypto, mounts, units, canary, createCanary };
+    return { common, crypto, mounts, units, canary, createCanary, checkCanary };
   }
   const current = () => {
     guard();
@@ -303,9 +303,64 @@ export function createVaultRootEffects(
       await assertAuthority();
       if (crypto.filesystemStatus() !== 'matching') throw Error('recovery_filesystem_unverified');
     },
-    async mountStorage() {
+    async verifyRecoveryCanary() {
       await assertAuthority();
-      await current().mounts.mount();
+      const { crypto, mounts, units, checkCanary } = current();
+      if (crypto.mappingStatus() !== 'matching' || !mounts.closed() || !units.inactive())
+        throw Error('recovery_storage_conflict');
+      await mounts.withRecoveryArea('journals', (fd) => {
+        if (checkCanary(fd) !== 'matching') throw Error('recovery_canary_unverified');
+      });
+      await assertAuthority();
+    },
+    async closeRecovery() {
+      await assertAuthority();
+      const { crypto, mounts, units } = current();
+      if (crypto.mappingStatus() !== 'matching' || !mounts.closed() || !units.inactive())
+        throw Error('recovery_storage_conflict');
+      crypto.close();
+      await assertAuthority();
+      if (crypto.mappingStatus() !== 'absent' || !mounts.closed() || !units.inactive())
+        throw Error('recovery_close_unverified');
+    },
+    async activateStorage() {
+      await assertAuthority();
+      if (controls.effects) return;
+      const { crypto, mounts, units, canary } = current();
+      if (
+        units.inspect() !== 'matching' ||
+        inspectVaultKey(paths, identity) !== 'matching' ||
+        inspectVaultAllocation(paths, identity) !== 'matching' ||
+        crypto.inspect() !== 'matching'
+      )
+        throw Error('normal_storage_claims_unverified');
+      const mapped = crypto.mappingStatus();
+      if (mapped === 'matching') {
+        if (crypto.filesystemStatus() !== 'matching') throw Error('filesystem_unverified');
+        const mounted = mounts.inspect() === 'matching';
+        if (!mounted && !mounts.closed()) throw Error('normal_storage_conflict');
+        if (mounted && units.active()) {
+          if (canary() !== 'matching') throw Error('canary_unverified');
+          return;
+        }
+        if (!units.inactive()) await units.stopStorage();
+        await assertAuthority();
+        if (!mounts.closed() || !units.inactive()) throw Error('closed_storage_required');
+        crypto.close();
+      } else if (mapped !== 'absent' || !mounts.closed() || !units.inactive()) {
+        throw Error('normal_storage_conflict');
+      }
+      await assertAuthority();
+      if (crypto.mappingStatus() !== 'absent') throw Error('closed_storage_required');
+      await units.startStorage();
+      await assertAuthority();
+      if (
+        crypto.mappingStatus() !== 'matching' ||
+        crypto.filesystemStatus() !== 'matching' ||
+        mounts.inspect() !== 'matching' ||
+        canary() !== 'matching'
+      )
+        throw Error('normal_storage_unverified');
       await assertAuthority();
     },
     async verifyCanary() {

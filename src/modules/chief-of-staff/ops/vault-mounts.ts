@@ -153,7 +153,7 @@ export function createVaultMounts(
     if (!same(guard(), state)) throw Error('mount_control_changed');
     writeAtomic(paths.stateRoot, filename, record);
   };
-  const proof = (file: string, fsroot: string, device: number) => {
+  const proof = (file: string, fsroot: string, device: number, readonly = false) => {
     const value = (controls.inspect ?? inspectKernel)(file);
     if (!value) return null;
     const number = BigInt(device),
@@ -166,7 +166,12 @@ export function createVaultMounts(
       value['maj:min'] !== `${major}:${minor}` ||
       (value.uuid != null && value.uuid !== identity.filesystemUuid) ||
       typeof value.options !== 'string' ||
-      ['rw', 'nosuid', 'nodev', 'noexec'].some((option) => !value.options.split(',').includes(option))
+      [readonly ? 'ro' : 'rw', 'nosuid', 'nodev', 'noexec'].some(
+        (option) => !value.options.split(',').includes(option),
+      ) ||
+      (readonly &&
+        (value.options.split(',').includes('rw') ||
+          !value.options.split(',').some((option) => ['noload', 'norecovery'].includes(option))))
     )
       throw Error('foreign_mount');
     if (directory(file).dev !== device) throw Error('mount_device_mismatch');
@@ -190,8 +195,8 @@ export function createVaultMounts(
       throw Error('foreign_mount_underlay');
     return stat;
   };
-  const checkArea = (key: string, record: Claim, device: number, complete = true) => {
-    const file = key === '@volume' ? paths.vaultRoot : path.join(paths.vaultRoot, key),
+  const checkArea = (key: string, record: Claim, device: number, complete = true, root = paths.vaultRoot) => {
+    const file = key === '@volume' ? root : path.join(root, key),
       entry = record.areas[key],
       stat = directory(file);
     // A dm minor can change after a cold open. The verified filesystem UUID and its inode identify persistent areas.
@@ -252,7 +257,7 @@ export function createVaultMounts(
     controls.assertMemory();
     guard();
   };
-  const run = (args: string[], descriptors: number[]) =>
+  const run = (args: string[], descriptors: number[], command = '/usr/bin/mount') =>
     safe(() => {
       const result = (
         controls.run ??
@@ -268,7 +273,7 @@ export function createVaultMounts(
           if (child.error || child.signal || child.status === null) throw Error('mount_command_unavailable');
           return { status: child.status, output: child.stdout ?? '' };
         })
-      )('/usr/bin/mount', args, descriptors);
+      )(command, args, descriptors);
       if (result.status !== 0 || typeof result.output !== 'string' || Buffer.byteLength(result.output) > 262144)
         throw Error('mount_command_failed');
     });
@@ -319,6 +324,119 @@ export function createVaultMounts(
       } catch {
         // eslint-disable-next-line preserve-caught-error -- Root effect paths and mount diagnostics cannot enter output.
         throw Error('vault_mounts_unavailable');
+      }
+    },
+    /** Independent recovery never mounts at paths bound to the inactive normal unlock service.
+     * The fresh private underlay belongs only to this invocation; existing directories are never adopted.
+     */
+    async withRecoveryArea<T>(area: VaultArea, operation: (fd: number) => T): Promise<T> {
+      let stateFd: number | undefined, underlayFd: number | undefined, mountedFd: number | undefined;
+      let file: string | undefined, created: Inode | undefined;
+      try {
+        await authority();
+        if (!VAULT_DIRECTORIES.includes(area)) throw Error('invalid_vault_area');
+        if (!controls.run && (process.platform !== 'linux' || process.arch !== 'arm64' || process.getuid?.() !== 0))
+          throw Error('root_process_required');
+        const state = inode(guard()),
+          record = read();
+        if (!record || !this.closed()) throw Error('closed_claimed_mounts_required');
+        stateFd = fs.openSync(
+          paths.stateRoot,
+          fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW,
+        );
+        if (!same(fs.fstatSync(stateFd), state)) throw Error('mount_control_changed');
+        const allocated = fs.mkdtempSync(`/proc/self/fd/${stateFd}/recovery-`);
+        file = path.join(paths.stateRoot, path.basename(allocated));
+        underlayFd = fs.openSync(allocated, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+        created = inode(fs.fstatSync(underlayFd));
+        fs.fchmodSync(underlayFd, 0);
+        fs.fsyncSync(stateFd);
+        const closed = () => {
+          if (
+            !same(guard(), state) ||
+            !same(fs.fstatSync(stateFd!), state) ||
+            !same(directory(file!), created!) ||
+            fs.lstatSync(file!).uid !== process.getuid?.() ||
+            (fs.lstatSync(file!).mode & 0o777) !== 0 ||
+            fs.readdirSync(file!).length ||
+            !same(fs.fstatSync(underlayFd!), created!)
+          )
+            throw Error('recovery_underlay_changed');
+        };
+        await authority();
+        closed();
+        controls.withMappedDevice((deviceFd, device) => {
+          controls.assertFilesystem();
+          if ((controls.inspect ?? inspectKernel)(file!)) throw Error('foreign_recovery_mount');
+          run(
+            ['-t', 'ext4', '-o', 'ro,noload,nosuid,nodev,noexec', '/proc/self/fd/3', '/proc/self/fd/4'],
+            [deviceFd, underlayFd!],
+          );
+          if (!proof(file!, '/', device, true)) throw Error('recovery_mount_missing');
+          const root = checkArea('@volume', record, device, true, file!);
+          mountedFd = fs.openSync(file!, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+          if (!same(fs.fstatSync(mountedFd), inode(root))) throw Error('recovery_mount_changed');
+        });
+        const closePrivateMount = async () => {
+          await authority();
+          controls.withMappedDevice((_deviceFd, device) => {
+            controls.assertFilesystem();
+            if (!proof(file!, '/', device, true) || !same(fs.fstatSync(mountedFd!), inode(directory(file!))))
+              throw Error('recovery_mount_changed');
+            // An open descriptor on the filesystem would make a normal unmount busy.
+            // Its parent and closed underlay remain pinned in this root-only administration directory.
+            fs.closeSync(mountedFd!);
+            mountedFd = undefined;
+            run([file!], [], '/usr/bin/umount');
+          });
+          await authority();
+          if ((controls.inspect ?? inspectKernel)(file!)) throw Error('recovery_mount_still_open');
+          closed();
+          fs.rmdirSync(`/proc/self/fd/${stateFd}/${path.basename(file!)}`);
+          fs.fsyncSync(stateFd!);
+          file = undefined;
+        };
+        try {
+          await authority();
+          return controls.withMappedDevice((_deviceFd, device) => {
+            controls.assertFilesystem();
+            if (
+              !same(guard(), state) ||
+              digest(read()) !== digest(record) ||
+              !this.closed() ||
+              !proof(file!, '/', device, true)
+            )
+              throw Error('recovery_mount_changed');
+            checkArea('@volume', record, device, true, file!);
+            const before = checkArea(area, record, device, true, file!),
+              child = path.join(file!, area);
+            const fd = fs.openSync(child, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+            try {
+              if (!same(fs.fstatSync(fd), inode(before))) throw Error('recovery_area_changed');
+              const result = operation(fd);
+              if (result && typeof (result as { then?: unknown }).then === 'function')
+                throw Error('synchronous_descriptor_operation_required');
+              controls.assertMemory();
+              if (
+                !same(fs.fstatSync(fd), inode(before)) ||
+                !proof(file!, '/', device, true) ||
+                !same(checkArea(area, record, device, true, file!), inode(before)) ||
+                digest(read()) !== digest(record)
+              )
+                throw Error('recovery_area_changed');
+              return result;
+            } finally {
+              fs.closeSync(fd);
+            }
+          });
+        } finally {
+          await closePrivateMount();
+        }
+      } catch {
+        // eslint-disable-next-line preserve-caught-error -- Private recovery paths and kernel diagnostics stay root-only.
+        throw Error('vault_mounts_unavailable');
+      } finally {
+        for (const fd of [mountedFd, underlayFd, stateFd]) if (fd !== undefined) fs.closeSync(fd);
       }
     },
     async mount() {

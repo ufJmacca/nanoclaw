@@ -42,6 +42,8 @@ export type VaultProvisionPorts = {
   writeJournal(record: VaultProvisionJournal): void;
   inspect(step: VaultProvisionStep, identity: VaultProvisionIdentity): Promise<'absent' | 'matching' | 'conflict'>;
   apply(step: VaultProvisionStep, identity: VaultProvisionIdentity): Promise<void>;
+  /** A completed file journal alone does not prove the normal unlock service owns the live mounts. */
+  activateStorage(): Promise<void>;
 };
 export async function provisionVault(
   identity: VaultProvisionIdentity,
@@ -97,6 +99,11 @@ export async function provisionVault(
           throw Error('vault_capacity_insufficient');
       };
       await space();
+      if (journal?.phase === 'complete') {
+        await authority();
+        await ports.activateStorage();
+        await authority();
+      }
       const first = journal ? VAULT_PROVISION_STEPS.indexOf(journal.step) + (journal.phase === 'intent' ? 0 : 1) : 0;
       for (const step of VAULT_PROVISION_STEPS.slice(0, first))
         if ((await ports.inspect(step, identity)) !== 'matching') throw Error('vault_completed_step_changed');
@@ -125,6 +132,8 @@ export async function provisionVault(
         journal = { ...journal, phase: step === 'units' ? 'complete' : 'applied' };
         ports.writeJournal(journal);
       }
+      await ports.activateStorage();
+      await authority();
       return { status: 'ready', volumeBytes: VAULT_BYTES, identityDigest: digest(identity) };
     });
   } catch {

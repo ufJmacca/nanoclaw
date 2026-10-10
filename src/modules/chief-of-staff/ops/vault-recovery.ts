@@ -9,7 +9,9 @@ export type VaultRecoveryPorts = Pick<
   inspectRecovery(): Promise<'mounted' | 'closed'>;
   closeStorage(): Promise<void>;
   openRecovery(): Promise<void>;
-  mountStorage(): Promise<void>;
+  /** Mounts privately read-only, checks the canary, then unmounts without activating the normal unlock unit. */
+  verifyRecoveryCanary(): Promise<void>;
+  closeRecovery(): Promise<void>;
   verifyCanary(): Promise<void>;
   startStorage(): Promise<void>;
 };
@@ -51,9 +53,9 @@ export async function checkVaultRecovery(
       };
       await close();
       await effect(() => ports.openRecovery());
-      await effect(() => ports.mountStorage());
-      await effect(() => ports.verifyCanary());
-      await close();
+      await effect(() => ports.verifyRecoveryCanary());
+      await effect(() => ports.closeRecovery());
+      if ((await ports.inspectRecovery()) !== 'closed') throw Error('vault_not_closed');
       await effect(() => ports.startStorage());
       if ((await ports.inspectRecovery()) !== 'mounted') throw Error('normal_storage_unavailable');
       await effect(() => ports.verifyCanary());

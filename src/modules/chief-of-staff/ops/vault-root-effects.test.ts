@@ -8,6 +8,9 @@ import { provisionVault, VAULT_PROVISION_STEPS } from './vault-provision.js';
 import { VAULT_BYTES, VAULT_FREE_FLOOR } from './vault-admission.js';
 import * as mountAdapter from './vault-mounts.js';
 import * as unitAdapter from './vault-unit-install.js';
+import * as cryptoAdapter from './vault-crypto.js';
+import * as keyAdapter from './vault-key.js';
+import * as allocationAdapter from './vault-allocation.js';
 const temporary: string[] = [];
 afterEach(() => {
   vi.restoreAllMocks();
@@ -155,3 +158,90 @@ it('gives each real adapter only its own path contract instead of the full root 
     ownerUnits: f.paths.ownerUnits,
   });
 });
+function activationFixture() {
+  const f = fixture();
+  delete f.controls.effects;
+  let mapped = true,
+    mounted = true,
+    active = false;
+  const crypto = {
+    inspect: vi.fn(() => 'matching'),
+    mappingStatus: vi.fn<() => 'matching' | 'absent' | 'conflict'>(() => (mapped ? 'matching' : 'absent')),
+    filesystemStatus: vi.fn(() => 'matching'),
+    close: vi.fn(() => {
+      mapped = false;
+    }),
+  };
+  const mounts = {
+    inspect: vi.fn(() => (mounted ? 'matching' : 'absent')),
+    closed: vi.fn(() => !mounted),
+    withArea: vi.fn(() => 'matching'),
+  };
+  const units = {
+    inspect: vi.fn(() => 'matching'),
+    active: vi.fn(() => active),
+    inactive: vi.fn(() => !active && !mounted),
+    stopStorage: vi.fn(async () => {
+      active = mounted = false;
+    }),
+    startStorage: vi.fn(async () => {
+      mapped = mounted = active = true;
+    }),
+  };
+  vi.spyOn(cryptoAdapter, 'createVaultCrypto').mockReturnValue(crypto as never);
+  vi.spyOn(mountAdapter, 'createVaultMounts').mockReturnValue(mounts as never);
+  vi.spyOn(unitAdapter, 'createVaultUnitInstaller').mockReturnValue(units as never);
+  vi.spyOn(keyAdapter, 'inspectVaultKey').mockReturnValue('matching');
+  vi.spyOn(allocationAdapter, 'inspectVaultAllocation').mockReturnValue('matching');
+  const ports = createVaultRootEffects(f.paths, f.identity, f.input, f.recovery, f.controls);
+  return {
+    ...f,
+    ports,
+    crypto,
+    mounts,
+    units,
+    setClosed: () => {
+      mounted = active = false;
+    },
+    setActive: () => {
+      mapped = mounted = active = true;
+    },
+  };
+}
+it('hands a provisioned manual mount to the fixed normal units before reporting readiness', async () => {
+  const f = activationFixture();
+  await f.ports.activateStorage();
+  expect(f.units.stopStorage).toHaveBeenCalledOnce();
+  expect(f.crypto.close).toHaveBeenCalledOnce();
+  expect(f.units.startStorage).toHaveBeenCalledOnce();
+  expect(f.mounts.withArea).toHaveBeenCalledWith('journals', expect.any(Function));
+  await f.ports.activateStorage();
+  expect(f.units.stopStorage).toHaveBeenCalledOnce();
+  expect(f.units.startStorage).toHaveBeenCalledOnce();
+});
+it('reconciles a claimed mapper whose normal underlays were closed by unit dependency handling', async () => {
+  const f = activationFixture();
+  f.setClosed();
+  await f.ports.activateStorage();
+  expect(f.units.stopStorage).not.toHaveBeenCalled();
+  expect(f.crypto.close).toHaveBeenCalledOnce();
+  expect(f.units.startStorage).toHaveBeenCalledOnce();
+});
+it.each(['foreign-mapper', 'changed-filesystem', 'revoked-after-stop'])(
+  'denies %s during normal activation',
+  async (reason) => {
+    const f = activationFixture();
+    if (reason === 'foreign-mapper') f.crypto.mappingStatus.mockReturnValue('conflict');
+    if (reason === 'changed-filesystem') f.crypto.filesystemStatus.mockReturnValue('conflict');
+    if (reason === 'revoked-after-stop')
+      f.units.stopStorage.mockImplementation(async () => {
+        f.setClosed();
+        f.controls.assertAuthority = async () => {
+          throw Error('PRIVATE_WITHDRAWAL');
+        };
+      });
+    await expect(f.ports.activateStorage()).rejects.toThrow();
+    expect(f.crypto.close).not.toHaveBeenCalled();
+    expect(f.units.startStorage).not.toHaveBeenCalled();
+  },
+);
