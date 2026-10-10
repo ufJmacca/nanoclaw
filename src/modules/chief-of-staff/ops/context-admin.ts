@@ -2,6 +2,7 @@ import { policyAllowsBriefContext } from '../bridge/brief-context-renewal.js';
 import { runVaultProvisionAdmin, runVaultRecoveryAdmin } from './vault-owner-admin.js';
 import { runVaultInstallAdmin } from './vault-owner-install.js';
 import { runBackupCredentialInstallAdmin, type BackupCredentialInstallArguments } from './backup-credential-admin.js';
+import { runBackupNasConfigureAdmin, type BackupNasConfigureArguments } from './backup-nas-owner-setup.js';
 /** Owner-run controls. Calendar sync may refresh its own tokens; no model calls or message sends. */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -65,6 +66,7 @@ import {
 
 export type ContextAdminArguments =
   | BackupCredentialInstallArguments
+  | BackupNasConfigureArguments
   | { command: 'vault-provision'; scopeId: string }
   | { command: 'vault-install'; scopeId: string }
   | { command: 'vault-recovery-check'; scopeId: string }
@@ -213,6 +215,7 @@ export async function contextAdminCommand(
       'vault-install',
       'vault-recovery-check',
       'backup-credentials-install',
+      'backup-nas-configure',
     ].includes(args.command)
   )
     return { status: 'disabled', live_model: 'not_verified' };
@@ -381,6 +384,19 @@ export async function contextAdminCommand(
         assertAuthority();
       };
       await check();
+      if (args.command === 'backup-nas-configure') {
+        if (!vaultRelease) throw Error('backup_nas_owner_setup_unavailable');
+        return runBackupNasConfigureAdmin({
+          args,
+          root,
+          target,
+          maintenance,
+          native,
+          hostLease: lease,
+          check,
+          release: vaultRelease.release,
+        });
+      }
       if (args.command === 'backup-credentials-install') {
         return runBackupCredentialInstallAdmin({
           args,

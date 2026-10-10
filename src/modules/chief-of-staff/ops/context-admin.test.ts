@@ -55,6 +55,12 @@ vi.mock('./backup-credential-admin.js', async () => ({
   runBackupCredentialInstallAdmin: vi.fn(),
 }));
 import { runBackupCredentialInstallAdmin } from './backup-credential-admin.js';
+vi.mock('./backup-nas-owner-setup.js', async () => ({
+  ...(await vi.importActual('./backup-nas-owner-setup.js')),
+  runBackupNasConfigureAdmin: vi.fn(),
+}));
+import { runBackupNasConfigureAdmin } from './backup-nas-owner-setup.js';
+import { fixtureVaultRelease } from '../../../contracts/chief-of-staff/release-fixture.js';
 import { assertHostExecutionLease } from '../../../db/host-execution-lease.js';
 import { connectCosHostStore } from '../host-store.js';
 import type { PriorityStore } from '../store/priorities.js';
@@ -93,6 +99,65 @@ const credentialArgs = {
   requestId: '48f99256-b105-4ee3-848c-00140c98151d',
   credentialReference: '319c6740-24ba-4d68-9d3c-a4d53c9607d1',
 };
+const nasArgs = {
+  command: 'backup-nas-configure' as const,
+  scopeId: 'fixture',
+  requestId: '48f99256-b105-4ee3-848c-00140c98151d',
+  host: '192.168.56.12',
+  credentialReference: '319c6740-24ba-4d68-9d3c-a4d53c9607d1',
+};
+it('routes NAS setup through actual paused native, private membership and maintenance checks while execution is disabled', async () => {
+  const release = fixtureVaultRelease('G02');
+  let retained!: () => Promise<void>;
+  vi.mocked(runBackupNasConfigureAdmin).mockImplementation(async (input) => {
+    expect(input.args).toEqual(nasArgs);
+    expect(input.release).toBe(release);
+    expect(input.root).toBe(state);
+    assertHostExecutionLease(input.native, input.hostLease);
+    await input.check();
+    retained = input.check;
+    return { status: 'configured' };
+  });
+  await expect(
+    contextAdminCommand(nasArgs, { ...env, COS_ENABLED: 'false' }, dependencies, {
+      release,
+      payloadRoot: '/fixture/payload',
+    }),
+  ).resolves.toMatchObject({ status: 'configured' });
+  expect(runBackupNasConfigureAdmin).toHaveBeenCalledOnce();
+  await expect(retained()).rejects.toThrow();
+});
+it.each(['membership', 'running', 'unpaused', 'maintenance', 'missing-release'])(
+  'refuses NAS setup with %s before invoking its owner permission',
+  async (reason) => {
+    if (reason === 'membership')
+      facts.mockResolvedValueOnce({
+        id: 'private',
+        type: 'P',
+        delete_at: 0,
+        members: ['bot', 'foreign'],
+        activeSubscription: true,
+      });
+    if (reason === 'running') quiescent.mockResolvedValueOnce(false);
+    if (reason === 'unpaused') {
+      const native = initDb(central);
+      native.exec('UPDATE cos_identity_boundaries SET paused=0');
+      closeDb();
+    }
+    if (reason === 'maintenance') fs.unlinkSync(state + '/maintenance.json');
+    await expect(
+      contextAdminCommand(
+        nasArgs,
+        env,
+        dependencies,
+        reason === 'missing-release'
+          ? undefined
+          : { release: fixtureVaultRelease('G02'), payloadRoot: '/fixture/payload' },
+      ),
+    ).rejects.toThrow();
+    expect(runBackupNasConfigureAdmin).not.toHaveBeenCalled();
+  },
+);
 it('routes credential installation through actual paused native, maintenance and private owner checks with execution disabled', async () => {
   let retained!: () => void;
   vi.mocked(runBackupCredentialInstallAdmin).mockImplementation(async (input) => {
@@ -315,6 +380,7 @@ afterEach(() => {
   fs.rmSync(root, { recursive: true, force: true });
   vi.restoreAllMocks();
   vi.mocked(runBackupCredentialInstallAdmin).mockReset();
+  vi.mocked(runBackupNasConfigureAdmin).mockReset();
   quiescent.mockResolvedValue(true);
   facts.mockResolvedValue({
     id: 'private',
