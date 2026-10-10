@@ -1,9 +1,10 @@
 import { afterEach, expect, it, vi } from 'vitest';
-const f = vi.hoisted(() => ({ gateway: vi.fn(), installer: vi.fn(), probe: vi.fn(), mount: vi.fn() }));
+const f = vi.hoisted(() => ({ gateway: vi.fn(), installer: vi.fn(), probe: vi.fn(), mount: vi.fn(), setup: vi.fn() }));
 vi.mock('./vault-root-gateway.js', () => ({ runVaultRootGateway: f.gateway }));
 vi.mock('./vault-root-installer.js', () => ({ runVaultRootInstaller: f.installer }));
 vi.mock('./backup-smb-probe.js', () => ({ runBackupSmbCredentialProbe: f.probe }));
 vi.mock('./backup-nas-root-runtime.js', () => ({ runBackupNasRootMount: f.mount }));
+vi.mock('./backup-nas-root-setup.js', () => ({ runBackupNasRootSetup: f.setup }));
 const originalArgv = process.argv,
   originalExitCode = process.exitCode;
 const tty = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY');
@@ -76,6 +77,20 @@ it.each(['mount', 'unmount'])(
     });
   },
 );
+it('routes only the exact private NAS configuration command to the owner-bound setup route', async () => {
+  f.setup.mockResolvedValue({ contract: 'fixture-backup-setup', status: 'configured' });
+  const result = await invoke(['--backup-configure']);
+  expect(f.setup).toHaveBeenCalledWith(process.stdin);
+  expect(f.gateway).not.toHaveBeenCalled();
+  expect(f.installer).not.toHaveBeenCalled();
+  expect(f.probe).not.toHaveBeenCalled();
+  expect(f.mount).not.toHaveBeenCalled();
+  expect(result).toEqual({
+    stdout: '{"contract":"fixture-backup-setup","status":"configured"}\n',
+    stderr: '',
+    exitCode: undefined,
+  });
+});
 it.each(
   [
     ['--root=/tmp'],
@@ -83,6 +98,7 @@ it.each(
     ['--install', '--root=/tmp'],
     ['--backup-mount', '--target=/tmp'],
     ['--backup-unmount', '--force'],
+    ['--backup-configure', '--host=192.168.56.13'],
     ['--probe'],
     ['--install', '--backup-credential-probe'],
   ].map((args) => ({ args })),
@@ -92,12 +108,20 @@ it.each(
   expect(f.installer).not.toHaveBeenCalled();
   expect(f.probe).not.toHaveBeenCalled();
   expect(f.mount).not.toHaveBeenCalled();
+  expect(f.setup).not.toHaveBeenCalled();
   expect(result.stdout).toBe('');
   expect(result.exitCode).toBe(1);
   expect(result.stderr).toMatch(/unavailable/);
 });
 it.each(
-  [[], ['--install'], ['--backup-credential-probe'], ['--backup-mount'], ['--backup-unmount']].map((args) => ({
+  [
+    [],
+    ['--install'],
+    ['--backup-credential-probe'],
+    ['--backup-mount'],
+    ['--backup-unmount'],
+    ['--backup-configure'],
+  ].map((args) => ({
     args,
   })),
 )('refuses interactive entry before reading any input for $args', async ({ args }) => {
@@ -106,6 +130,7 @@ it.each(
   expect(f.installer).not.toHaveBeenCalled();
   expect(f.probe).not.toHaveBeenCalled();
   expect(f.mount).not.toHaveBeenCalled();
+  expect(f.setup).not.toHaveBeenCalled();
   expect(result.exitCode).toBe(1);
 });
 it('emits only a fixed probe failure for private nested diagnostics', async () => {
@@ -117,4 +142,12 @@ it.each(['mount', 'unmount'])('emits only a fixed root backup failure for privat
   f.mount.mockRejectedValue(Error('PRIVATE_PASSWORD_OR_PATH'));
   const result = await invoke(['--backup-' + action]);
   expect(result).toEqual({ stdout: '', stderr: '{"code":"backup_nas_root_mount_unavailable"}\n', exitCode: 1 });
+});
+it('redacts private NAS setup failures into one fixed CLI result', async () => {
+  f.setup.mockRejectedValue(Error('PRIVATE_NAS_SOCKET_AND_TOKEN'));
+  expect(await invoke(['--backup-configure'])).toEqual({
+    stdout: '',
+    stderr: '{"code":"backup_nas_root_setup_unavailable"}\n',
+    exitCode: 1,
+  });
 });
