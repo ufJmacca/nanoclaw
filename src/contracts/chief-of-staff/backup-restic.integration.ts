@@ -5,6 +5,9 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { after, test } from 'node:test';
 import { BackupQueue } from '../../modules/chief-of-staff/ops/backup-queue.js';
+import { BackupResticTransfer } from '../../modules/chief-of-staff/ops/backup-restic-transfer.js';
+import { BackupRepositoryWriter } from '../../modules/chief-of-staff/ops/backup-repository-lease.js';
+import { streamQueuedBackup } from '../../modules/chief-of-staff/ops/backup-archive-producer.js';
 import {
   backupRetentionArguments,
   backupRepositoryHost,
@@ -46,6 +49,73 @@ const run = (operation: string[], input?: Buffer) =>
     stdio: ['pipe', 'pipe', 'pipe', binaryFd, passwordFd, repositoryFd],
   });
 let repositoryId: string;
+const transferOwner = 'c'.repeat(64),
+  transferOperation = '86419d8e-6444-49c4-b674-dfa8979eeed5';
+let transferArchive: { bytes: number; sha256: string }, transferSnapshot: string;
+const transferArea = path.join(root, 'transfer-queue'),
+  transferLock = path.join(root, 'transfer-lock'),
+  transferCache = path.join(root, 'transfer-cache');
+for (const directory of [transferArea, transferLock, transferCache]) fs.mkdirSync(directory, { mode: 0o700 });
+const cacheFd = fs.openSync(transferCache, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+const transferQueue = new BackupQueue('a'.repeat(64), async (_kind, operation) => operation(transferArea));
+const transferWriter = new BackupRepositoryWriter(transferOwner, async (operation) => operation(transferLock));
+const transferProducer = (operationId: string) => {
+  const queueUrl = new URL('../../modules/chief-of-staff/ops/backup-queue.js', import.meta.url).href;
+  const producerUrl = new URL('../../modules/chief-of-staff/ops/backup-archive-producer.js', import.meta.url).href;
+  return [
+    process.execPath,
+    '--input-type=module',
+    '-e',
+    `
+    import { BackupQueue } from ${JSON.stringify(queueUrl)};
+    import { streamQueuedBackup } from ${JSON.stringify(producerUrl)};
+    const queue = new BackupQueue('a'.repeat(64), async (_kind, operation) => operation(${JSON.stringify(transferArea)}));
+    try { await streamQueuedBackup(queue, 'credentials', ${JSON.stringify(operationId)}, bytes => new Promise((resolve, reject) => {
+      process.stdout.write(bytes, error => error ? reject(error) : resolve());
+    })); } catch { process.exitCode = 77; }
+  `,
+  ];
+};
+/** Transport compatibility only: these synthetic descriptors do not claim vault/CIFS admission. */
+const withTransfer = async <T>(
+  expectedId: string,
+  admitUpload: (kind: 'state' | 'credentials', bytes: number) => Promise<void>,
+  operation: (transfer: BackupResticTransfer) => Promise<T>,
+  producer = transferProducer,
+  timeoutMs = 900000,
+) =>
+  withVerifiedResticBinary(binary, async (executable) =>
+    transferWriter.exclusive(async (writer) => {
+      const transfer = new BackupResticTransfer({
+        binary: executable,
+        writer,
+        repositoryId: expectedId,
+        ownerDigest: transferOwner,
+        password: {
+          fd: passwordFd,
+          assertCurrent() {
+            assert(fs.fstatSync(passwordFd).isFile());
+          },
+        },
+        repository: {
+          fd: repositoryFd,
+          assertCurrent() {
+            assert(fs.fstatSync(repositoryFd).isDirectory());
+          },
+        },
+        cache: {
+          fd: cacheFd,
+          assertCurrent() {
+            assert(fs.fstatSync(cacheFd).isDirectory());
+          },
+        },
+        producer: (_kind, operationId) => producer(operationId),
+        admitUpload,
+        timeoutMs,
+      });
+      return operation(transfer);
+    }),
+  );
 const canary = 'COS_G02_SYNTHETIC_ENCRYPTION_CANARY_4f9b3716';
 test('official pinned ARM64 binary initializes repository v2 and binds its decrypted identity', () => {
   run(['init', '--repository-version', '2']);
@@ -313,6 +383,128 @@ test('Restic rejects a command producer failure without recording an empty or pa
   );
   run(['check', '--read-data']);
 });
+test('guarded transfer authenticates read-back and reconciles the same operation without uploading twice', async () => {
+  await transferQueue.capture(
+    'credentials',
+    transferOperation,
+    async (sink) => {
+      sink.write('credentials/canary.json', Buffer.from(canary));
+    },
+    131072,
+  );
+  transferArchive = await streamQueuedBackup(transferQueue, 'credentials', transferOperation, async () => {});
+  let admissions = 0;
+  await withTransfer(
+    repositoryId,
+    async (kind, bytes) => {
+      assert.equal(kind, 'credentials');
+      assert.equal(bytes, transferArchive.bytes);
+      admissions++;
+    },
+    async (transfer) => {
+      const first = await transfer.upload('credentials', transferOperation, transferArchive);
+      transferSnapshot = first.snapshotId;
+      assert.equal(first.archiveSha256, transferArchive.sha256);
+      assert.equal(first.archiveBytes, transferArchive.bytes);
+      assert.equal(first.reconciled, false);
+      const replay = await transfer.upload('credentials', transferOperation, transferArchive);
+      assert.equal(replay.snapshotId, first.snapshotId);
+      assert.equal(replay.reconciled, true);
+    },
+  );
+  assert.equal(admissions, 1);
+  const snapshots = JSON.parse(run(['snapshots', '--tag', 'cos-operation=' + transferOperation])) as unknown[];
+  assert.equal(snapshots.length, 1);
+  assert.equal((await transferQueue.pending('credentials'))[0].state, 'pending');
+  assert.deepEqual(fs.readdirSync(transferCache), []);
+});
+test('wrong repository identity and exhausted capacity refuse transfer before a new upload', async () => {
+  let admissions = 0;
+  await assert.rejects(
+    withTransfer(
+      '0'.repeat(64),
+      async () => {
+        admissions++;
+      },
+      (transfer) => transfer.upload('credentials', transferOperation, transferArchive),
+    ),
+    /^Error: backup_artifact_unverified$/,
+  );
+  assert.equal(admissions, 0);
+  const operationId = 'f84a7b2a-4f12-4b08-a9e5-31173b0c30cf';
+  await assert.rejects(
+    withTransfer(
+      repositoryId,
+      async () => {
+        admissions++;
+        throw Error('private capacity diagnostic');
+      },
+      (transfer) => transfer.upload('credentials', operationId, transferArchive),
+    ),
+    /^Error: backup_artifact_unverified$/,
+  );
+  assert.equal(admissions, 1);
+  assert.deepEqual(JSON.parse(run(['snapshots', '--tag', 'cos-operation=' + operationId])), []);
+});
+test('a mismatched remote archive cannot be acknowledged as a verified checkpoint', async () => {
+  await assert.rejects(
+    withTransfer(
+      repositoryId,
+      async () => {
+        throw Error('must not upload');
+      },
+      (transfer) => transfer.upload('credentials', transferOperation, { ...transferArchive, sha256: 'f'.repeat(64) }),
+    ),
+    /^Error: backup_artifact_unverified$/,
+  );
+  assert.equal((await transferQueue.pending('credentials'))[0].state, 'pending');
+  assert.equal(
+    (JSON.parse(run(['snapshots', '--tag', 'cos-operation=' + transferOperation])) as Array<{ id: string }>)[0].id,
+    transferSnapshot,
+  );
+});
+test('guarded transfer refuses a failed command producer and retains the queued source', async () => {
+  const operationId = 'f13a8f4d-a9c6-4e09-93e4-8a49d0c71794';
+  await assert.rejects(
+    withTransfer(
+      repositoryId,
+      async () => {},
+      (transfer) => transfer.upload('credentials', operationId, transferArchive),
+      () => [process.execPath, '-e', 'process.stdout.write(Buffer.alloc(65536), () => {process.exitCode=77;});'],
+    ),
+    /^Error: backup_artifact_unverified$/,
+  );
+  assert.deepEqual(JSON.parse(run(['snapshots', '--tag', 'cos-operation=' + operationId])), []);
+  assert.equal((await transferQueue.pending('credentials'))[0].state, 'pending');
+  run(['check', '--read-data']);
+});
+test('a stalled producer is terminated within the transfer deadline without leaving a live child or snapshot', async () => {
+  const operationId = 'ab95ee82-2a4d-478b-a0bd-df0215495f18';
+  const pidFile = path.join(root, 'stalled-producer-pid');
+  const code = `require('fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));
+    process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);`;
+  const started = Date.now();
+  await assert.rejects(
+    withTransfer(
+      repositoryId,
+      async () => {},
+      (transfer) => transfer.upload('credentials', operationId, transferArchive),
+      () => [process.execPath, '-e', code],
+      1000,
+    ),
+    /^Error: backup_artifact_unverified$/,
+  );
+  assert(Date.now() - started < 15000);
+  const pid = Number(fs.readFileSync(pidFile, 'utf8'));
+  assert(Number.isSafeInteger(pid) && pid > 1);
+  try {
+    const status = fs.readFileSync('/proc/' + pid + '/stat', 'utf8');
+    assert.match(status, /^\d+ \([^)]*\) Z /);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+  assert.deepEqual(JSON.parse(run(['snapshots', '--tag', 'cos-operation=' + operationId])), []);
+});
 test('real retention keeps 14 daily and four weekly checkpoints per kind without touching unrelated snapshots', () => {
   const owner = 'a'.repeat(64),
     host = backupRepositoryHost(owner);
@@ -364,6 +556,6 @@ test('real retention keeps 14 daily and four weekly checkpoints per kind without
   });
 });
 after(() => {
-  for (const fd of [passwordFd, repositoryFd, binaryFd]) fs.closeSync(fd);
+  for (const fd of [passwordFd, repositoryFd, binaryFd, cacheFd]) fs.closeSync(fd);
   fs.rmSync(root, { recursive: true, force: true });
 });
