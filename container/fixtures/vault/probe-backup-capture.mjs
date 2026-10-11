@@ -422,7 +422,7 @@ if (mode === 'unavailable') {
       assert.equal(admittedGeneration(stateRoot, binding), null);
       assert.equal(failedCaptures, 1); assert.equal(failedStops, 1);
       assert.equal(captureHostFixture.connections, 2);
-      await assert.rejects(queue.inspect('state'), /backup_queue_unavailable/);
+      assert.equal((await queue.inspect('state'))[0].state, 'capturing');
       const queueFingerprint = () => withVaultDirectory(roots, 'staging', async directory => {
         const walk = root => fs.readdirSync(root).sort().map(name => {
           const file = root + '/' + name, stat = fs.lstatSync(file);
@@ -454,12 +454,37 @@ if (mode === 'unavailable') {
       assert.equal(failedStarts, 2); assert.equal(failedCaptures, 1); assert.equal(failedStops, 1);
       assert.equal(await queueFingerprint(), heldQueue);
       captureRecoveryCases++;
-      await assert.rejects(checkpointMaintenance({ root: stateRoot, binding, requestId: randomUUID(), effects: failedEffects }), /backup_queue_unavailable/);
+      assert.equal((await checkpointMaintenance({ root: stateRoot, binding, requestId: randomUUID(), effects: failedEffects })).status, 'backup_skipped_pending');
       assert.equal(failedStops, 1); assert.equal(failedCaptures, 1);
       assert.equal(await queueFingerprint(), heldQueue);
       assert.equal(captureHostFixture.connections, 2);
       captureRecoveryCases++;
-      writeAtomic(stateRoot, 'full-capture-fixture.json', { queueOperationId: failedLease.nonce });
+      stage('owned_capture_reconciliation');
+      const assertCaptureRecovery = () => {
+        verifyVaultMemory(); verifyVaultStorage(roots);
+        const current = readTarget(stateRoot, binding);
+        assert.equal(current.releaseId, scheduledManifest.releaseId); assert.equal(current.lifecycle, 'protected');
+        assert.equal(admittedGeneration(stateRoot, binding), failedLease.generation + 1);
+        assert.equal(recoveredHealthy, true);
+      };
+      assert.equal((await queue.reconcileCapture('state', failedLease.nonce, assertCaptureRecovery)).status, 'capture_retired');
+      assert.equal((await queue.reconcileCapture('state', failedLease.nonce, assertCaptureRecovery)).status, 'capture_retired');
+      assert.deepEqual(await queue.inspect('state'), []);
+      assert.equal(native.prepare('SELECT paused FROM cos_identity_boundaries').get().paused, 1);
+      assert.deepEqual(native.prepare('SELECT * FROM ordinary_messages').all(), initial.messages);
+      assert.deepEqual(native.prepare('SELECT * FROM cos_model_budgets').all(), initial.budgets);
+      const recoveredRequest = randomUUID(), recoveredOperation = 'release-backup-' + recoveredRequest;
+      const recoveredCheckpoint = await checkpointMaintenance({root: stateRoot, binding, requestId: recoveredRequest, effects: {
+        ...checkpointEffects, healthy: async () => true,
+        capture: async () => captureScheduledTargetVaultState(settings, recoveredOperation, scheduledRecovery),
+        verifyCapture: async (_lease, expected) => verifyScheduledTargetVaultState(settings, recoveredOperation, scheduledRecovery, expected),
+      }});
+      assert.equal(recoveredCheckpoint.status, 'backup_queued');
+      assert.equal(captureHostFixture.connections, 3);
+      assert.equal(native.prepare('SELECT paused FROM cos_identity_boundaries').get().paused, 1);
+      assert.deepEqual(native.prepare('SELECT * FROM ordinary_messages').all(), initial.messages);
+      assert.deepEqual(native.prepare('SELECT * FROM cos_model_budgets').all(), initial.budgets);
+      writeAtomic(stateRoot, 'full-capture-fixture.json', { queueOperationId: recoveredCheckpoint.queueOperationId });
       const rootProof = fs.lstatSync('/case/vault/journals/.vault-canary');
       for (const key of ['dev','ino','uid','gid','mode','size','nlink','mtimeMs','ctimeMs'])
         assert.equal(rootProof[key], initial.rootCanary[key]);
@@ -471,7 +496,9 @@ if (mode === 'unavailable') {
           scheduledCheckpoint: { status: 'passed', cases: scheduledCases, laterOwnerPausePreserved: true,
             actualNativeSqliteAndMaintenance: true, restartHealthBeforeAdmission: true, installedServiceManager: false },
           interruptedCaptureServiceRecovery: { status: 'passed', cases: captureRecoveryCases,
-            unreadableQueuePreserved: true, laterOwnerPausePreserved: true, noRecapture: true, finalArtifact: false },
+            incompleteQueuePreservedDuringServiceRecovery: true, laterOwnerPausePreserved: true, noRecapture: true, finalArtifact: false },
+          ownedCaptureReconciliation: {status: 'passed', cases: 3, actualQueueAndKernelLock: true, freshVaultAndAdmissionRequired: true,
+            failedOwnedCopiesRetired: true, repeatIdempotent: true, laterCaptureQueued: true, nativeStatePreserved: true, manager: 'fixture'},
           encryptedVolume: 'actual_LUKS2_ext4',
           defaultMemoryAndStorageGuards: true,
           actualNativeOwnerGuards: true,
