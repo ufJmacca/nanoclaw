@@ -77,7 +77,9 @@ async function withVaultBackupRepository<T>(
       target = localTarget(roots.targetRoot, roots.installationRoot, roots.dataRoot);
     if (target.lifecycle !== 'protected' || target.maintenance !== false || !target.releaseId)
       throw Error('backup_target_not_ready');
-    return await withVaultDirectory(roots, 'backup-credentials', async (directory) => {
+    return await withVaultDirectory(roots, 'backup-credentials', async (directory, assertVault) => {
+      if (typeof assertVault !== 'function') throw Error('vault_scope_required');
+      assertVault();
       const alias = /^\/proc\/self\/fd\/\d+$/.test(directory);
       const rootFd = fs.openSync(
         directory,
@@ -137,8 +139,8 @@ async function withVaultBackupRepository<T>(
         const assertConfiguration = () => {
           assertCaller();
           verifyVaultMemory();
-          if (digest(verifyVaultStorage(roots)) !== digest(policy) || digest(read()) !== profileDigest)
-            throw Error('backup_configuration_changed');
+          assertVault();
+          if (digest(read()) !== profileDigest) throw Error('backup_configuration_changed');
           const current = localTarget(roots.targetRoot, roots.installationRoot, roots.dataRoot);
           if (
             current.lifecycle !== 'protected' ||
@@ -180,7 +182,9 @@ async function withVaultBackupRepository<T>(
         return await withVerifiedResticBinary(path.join(roots.installationRoot, 'libexec/restic'), async (binary) =>
           withSignedBackupRepository(profile.mount, async (repository) =>
             withVaultResticPassword(roots, async (password) =>
-              withVaultDirectory(roots, 'cache', async (cacheDirectory) => {
+              withVaultDirectory(roots, 'cache', async (cacheDirectory, assertCacheVault) => {
+                if (typeof assertCacheVault !== 'function') throw Error('vault_scope_required');
+                assertCacheVault();
                 const cacheAlias = /^\/proc\/self\/fd\/\d+$/.test(cacheDirectory);
                 const cacheFd = fs.openSync(
                   cacheDirectory,
@@ -192,6 +196,7 @@ async function withVaultBackupRepository<T>(
                     fd: cacheFd,
                     assertCurrent() {
                       assertConfiguration();
+                      assertCacheVault();
                       assertProducer();
                       const current = fs.statSync(cacheDirectory),
                         held = fs.fstatSync(cacheFd);

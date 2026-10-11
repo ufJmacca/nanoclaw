@@ -38,7 +38,9 @@ function fixture() {
   const statfs = fs.statfsSync;
   vi.spyOn(fs, 'statfsSync').mockImplementation((file, options) => {
     const value = statfs(file, options);
-    return { ...value, type: options?.bigint ? 0xfe534d42n : 0xfe534d42 } as ReturnType<typeof statfs>;
+    return String(file).startsWith('/proc/self/fd/') && fs.readlinkSync(String(file)).startsWith(mount)
+      ? ({ ...value, type: options?.bigint ? 0xfe534d42n : 0xfe534d42 } as ReturnType<typeof statfs>)
+      : value;
   });
   return {
     root,
@@ -47,6 +49,10 @@ function fixture() {
     inspect,
     replaceMount: () => {
       mountId++;
+      const read = fs.readFileSync;
+      vi.spyOn(fs, 'readFileSync').mockImplementation((file, options) =>
+        String(file).startsWith('/proc/self/fdinfo/') ? 'mnt_id:\t' + mountId + '\n' : read(file, options),
+      );
     },
     unsigned: () => {
       signed = false;
@@ -77,6 +83,19 @@ it('pins the dedicated signed CIFS repository and closes its descriptor after aw
   ]);
   expect(() => fs.fstatSync(fd)).toThrow();
   expect(() => check()).toThrow(/^backup_repository_mount_unverified$/);
+});
+it('rechecks the kernel mount and descriptors for every block without spawning repeated mount inspections', async () => {
+  const s = fixture();
+  await withSignedBackupRepository(
+    s.binding,
+    async (lease) => {
+      const before = s.inspect.mock.calls.length;
+      for (let index = 0; index < 12; index++) lease.assertCurrent();
+      expect(s.inspect.mock.calls.length).toBe(before);
+    },
+    s.inspect,
+  );
+  expect(s.inspect).toHaveBeenCalledTimes(2);
 });
 it('refuses a local underlay before calling any credential-bearing operation', async () => {
   const s = fixture(),

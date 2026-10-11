@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
 import { digest } from '../domain/contracts.js';
-const f = vi.hoisted(() => ({ access: vi.fn(), memory: vi.fn(), vault: vi.fn() }));
+const f = vi.hoisted(() => ({ access: vi.fn(), memory: vi.fn(), vault: vi.fn(), guard: vi.fn() }));
 vi.mock('./vault-storage.js', () => ({ withVaultDirectory: f.access, verifyVaultStorage: f.vault }));
 vi.mock('./vault-memory.js', () => ({ verifyVaultMemory: f.memory }));
 import { withVaultResticPassword } from './backup-password.js';
@@ -14,6 +14,7 @@ afterEach(() => {
   f.access.mockReset();
   f.memory.mockReset();
   f.vault.mockReset();
+  f.guard.mockReset();
   for (const root of temporary.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
 function fixture() {
@@ -32,9 +33,24 @@ function fixture() {
   fs.writeFileSync(marker, JSON.stringify(installation), { mode: 0o600 });
   f.vault.mockReturnValue({ volume: { filesystemUuid: installation.filesystemUuid } });
   fs.writeFileSync(file, 'synthetic-encryption-password-with-no-live-authority\n', { mode: 0o600 });
-  f.access.mockImplementation(async (_roots, _area, operation) => operation(root));
+  f.access.mockImplementation(async (_roots, _area, operation) => operation(root, f.guard));
   return { root, file, marker, installation };
 }
+it('requires a fresh vault guard for every assertion without repeating full topology subprocesses', async () => {
+  fixture();
+  await withVaultResticPassword(roots, async (password) => {
+    const before = f.vault.mock.calls.length,
+      guards = f.guard.mock.calls.length;
+    for (let index = 0; index < 12; index++) password.assertCurrent();
+    expect(f.vault.mock.calls.length).toBe(before);
+    expect(f.guard.mock.calls.length).toBe(guards + 12);
+    f.guard.mockImplementation(() => {
+      throw Error('PRIVATE_MOUNT_WITHDRAWN');
+    });
+    expect(() => password.assertCurrent()).toThrow(/^backup_password_unavailable$/);
+    f.guard.mockReset();
+  });
+});
 it('passes only a held private credential descriptor under the vault and memory gate', async () => {
   const s = fixture(),
     read = vi.spyOn(fs, 'readFileSync');

@@ -10,6 +10,7 @@ import {
 import { digest } from '../domain/contracts.js';
 import { readPrivate, writeAtomic } from './target-state.js';
 import { verifyVaultMemory } from './vault-memory.js';
+import { pinKernelMountTable } from './kernel-mount-guard.js';
 export const VAULT_DIRECTORIES = [
   'google',
   'google/calendar',
@@ -148,25 +149,66 @@ export function verifyVaultStorage(roots: CalendarStorageRoots, inspect: Storage
     throw new Error('vault_storage_unavailable');
   }
 }
-/** Credential callers use only this descriptor path during awaited reads/writes. */
+/** Credential callers use only this descriptor path during awaited reads/writes.
+ * The guard freshly verifies kernel mount continuity, all admitted directory
+ * identities, policy and memory protection without spawning tools per block.
+ * Full encryption/topology inspection remains mandatory at entry and exit. */
 export async function withVaultDirectory<T>(
   roots: CalendarStorageRoots,
   area: VaultArea,
-  operation: (directory: string) => Promise<T>,
+  operation: (directory: string, assertCurrent: () => void) => Promise<T>,
   inspect: StorageInspection = inspection,
   memory: () => void = verifyVaultMemory,
 ): Promise<T> {
-  let fd: number | undefined;
+  let fd: number | undefined,
+    active = false;
   try {
     if (!VAULT_DIRECTORIES.includes(area)) throw new Error('unknown_vault_area');
+    roots = Object.freeze({ ...roots });
     memory();
+    const assertKernel = pinKernelMountTable();
     const policy = verifyVaultStorage(roots, inspect),
       directory = path.join(policy.vaultRoot, area),
       before = privateRoot(directory);
     fd = fs.openSync(directory, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
     const pinned = fs.fstatSync(fd);
     if (pinned.dev !== before.dev || pinned.ino !== before.ino) throw new Error('vault_changed');
-    const result = await operation('/proc/self/fd/' + fd);
+    const directories = [
+      roots.targetRoot,
+      policy.vaultRoot,
+      ...VAULT_DIRECTORIES.map((area) => path.join(policy.vaultRoot, area)),
+      path.join(roots.targetRoot, 'calendar'),
+    ].map((file) => ({ file, stat: privateRoot(file) }));
+    const policyDigest = digest(policy);
+    active = true;
+    const assertCurrent = () => {
+      try {
+        if (!active) throw Error('vault_scope_released');
+        memory();
+        assertKernel();
+        if (digest(existingPolicy(roots)) !== policyDigest) throw Error('vault_policy_changed');
+        for (const { file, stat } of directories) {
+          const named = privateRoot(file);
+          if (named.dev !== stat.dev || named.ino !== stat.ino) throw Error('vault_directory_changed');
+        }
+        const held = fs.fstatSync(fd!);
+        if (
+          !held.isDirectory() ||
+          held.dev !== pinned.dev ||
+          held.ino !== pinned.ino ||
+          held.uid !== pinned.uid ||
+          (held.mode & 0o7777) !== 0o700
+        )
+          throw Error('vault_directory_changed');
+        assertKernel();
+      } catch {
+        // eslint-disable-next-line preserve-caught-error -- Streaming proofs include private policy paths and process diagnostics.
+        throw Error('vault_storage_unavailable');
+      }
+    };
+    assertCurrent();
+    const result = await operation('/proc/self/fd/' + fd, assertCurrent);
+    assertCurrent();
     const after = privateRoot(directory);
     if (
       after.dev !== pinned.dev ||
@@ -175,11 +217,13 @@ export async function withVaultDirectory<T>(
     )
       throw new Error('vault_changed');
     memory();
+    assertCurrent();
     return result;
   } catch {
     // eslint-disable-next-line preserve-caught-error -- Awaited credential operations may fail with secrets or private paths.
     throw new Error('vault_storage_unavailable');
   } finally {
+    active = false;
     if (fd !== undefined) fs.closeSync(fd);
   }
 }
@@ -200,8 +244,8 @@ export function vaultStorageStatus(
       areas: VAULT_DIRECTORIES.length,
       policyDigest: digest(policy),
     };
-  } catch {
     // eslint-disable-next-line no-catch-all/no-catch-all -- Status contains no private paths, account data or provider error bodies.
+  } catch {
     return { status: 'unavailable', googleCredentials: 'unavailable', code: 'vault_storage_unavailable' };
   }
 }

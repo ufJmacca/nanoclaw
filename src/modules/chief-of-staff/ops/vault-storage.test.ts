@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, expect, it } from 'vitest';
+import { afterEach, expect, it, vi } from 'vitest';
 import {
   VAULT_DIRECTORIES,
   configureVaultStorage,
@@ -54,7 +54,93 @@ function fixture() {
   };
 }
 afterEach(() => {
+  vi.restoreAllMocks();
   for (const root of cleanup.splice(0)) fs.rmSync(root, { recursive: true, force: true });
+});
+it('lends a fresh kernel and directory guard without repeating the full subprocess inspection for each chunk', async () => {
+  const f = fixture();
+  configureVaultStorage(f.roots, f.vault, f.inspect);
+  const inspect = vi.fn(f.inspect);
+  let check!: () => void;
+  await withVaultDirectory(
+    f.roots,
+    'staging',
+    async (_directory, current) => {
+      check = current;
+      expect(typeof current).toBe('function');
+      const before = inspect.mock.calls.length;
+      for (let index = 0; index < 12; index++) current();
+      expect(inspect.mock.calls.length).toBe(before);
+    },
+    inspect,
+    () => {},
+  );
+  expect(() => check()).toThrow(/^vault_storage_unavailable$/);
+});
+it.each(['area', 'policy', 'memory'])(
+  'withdraws its fresh streaming guard after an awaited %s change',
+  async (reason) => {
+    const f = fixture();
+    configureVaultStorage(f.roots, f.vault, f.inspect);
+    const memory = vi.fn();
+    let written = false;
+    await expect(
+      withVaultDirectory(
+        f.roots,
+        'staging',
+        async (directory, current) => {
+          await Promise.resolve();
+          if (reason === 'area') {
+            fs.renameSync(f.vault + '/backup-credentials', f.vault + '/old');
+            fs.mkdirSync(f.vault + '/backup-credentials', { mode: 0o700 });
+          }
+          if (reason === 'policy') fs.writeFileSync(f.roots.targetRoot + '/vault-storage.json', '{}');
+          if (reason === 'memory')
+            memory.mockImplementation(() => {
+              throw Error('PRIVATE_WITHDRAWN');
+            });
+          current();
+          fs.writeFileSync(directory + '/must-not-write', 'secret', { mode: 0o600 });
+          written = true;
+        },
+        f.inspect,
+        memory,
+      ),
+    ).rejects.toThrow(/^vault_storage_unavailable$/);
+    expect(written).toBe(false);
+    expect(fs.existsSync(f.vault + '/staging/must-not-write')).toBe(false);
+  },
+);
+it('withdraws the fresh guard on a kernel mount-table change before another private write', async () => {
+  const f = fixture();
+  configureVaultStorage(f.roots, f.vault, f.inspect);
+  const read = fs.readSync;
+  await expect(
+    withVaultDirectory(
+      f.roots,
+      'staging',
+      async (directory, current) => {
+        await Promise.resolve();
+        vi.spyOn(fs, 'readSync').mockImplementation(((
+          fd: number,
+          buffer: Buffer,
+          offset: number,
+          length: number,
+          position: number,
+        ) => {
+          if (!fs.readlinkSync('/proc/self/fd/' + fd).endsWith('/mountinfo'))
+            return Reflect.apply(read, fs, [fd, buffer, offset, length, position]);
+          if (position) return 0;
+          return Buffer.from('CHANGED_KERNEL_MOUNT_TABLE').copy(buffer, offset, 0, length);
+        }) as typeof fs.readSync);
+        current();
+        fs.writeFileSync(directory + '/must-not-write', 'private', { mode: 0o600 });
+      },
+      f.inspect,
+      () => {},
+    ),
+  ).rejects.toThrow(/^vault_storage_unavailable$/);
+  expect(fs.existsSync(f.vault + '/staging/must-not-write')).toBe(false);
 });
 it('pins every required encrypted area and the canonical Calendar credential path', () => {
   const f = fixture();

@@ -3,6 +3,7 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import type { StorageInspection } from '../calendar/storage-protection.js';
 import { verifySignedBackupMount, type BackupMountBinding } from './backup-policy.js';
+import { pinKernelMountTable } from './kernel-mount-guard.js';
 export type SignedBackupRepository = Readonly<{ fd: number; assertCurrent(): void }>;
 const pinned = (fd: number) => '/proc/self/fd/' + fd;
 // Linux fs/smb/client/smb2ops.c reports SMB2_SUPER_MAGIC from statfs, including SMB2.1.
@@ -46,6 +47,7 @@ export async function withSignedBackupRepository<T>(
     active = false;
   try {
     if (process.platform !== 'linux') throw Error('linux_required');
+    const assertKernel = pinKernelMountTable();
     const binding = Object.freeze({ ...input });
     const mountIdentity = () => {
       const text = inspect('/usr/bin/findmnt', [
@@ -87,13 +89,8 @@ export async function withSignedBackupRepository<T>(
     const assertCurrent = () => {
       try {
         if (!active) throw Error('released_repository_mount');
-        const currentMount = mountIdentity();
-        if (
-          currentMount.id !== initialMount.id ||
-          currentMount.bindingDigest !== initialMount.bindingDigest ||
-          fs.realpathSync(binding.mount) !== binding.mount
-        )
-          throw Error('mount_changed');
+        assertKernel();
+        if (fs.realpathSync(binding.mount) !== binding.mount) throw Error('mount_changed');
         for (const [fd, original, file] of [
           [heldMount, mountStat, binding.mount],
           [heldRepository, repositoryStat, path.join(binding.mount, 'restic')],
@@ -112,6 +109,7 @@ export async function withSignedBackupRepository<T>(
           )
             throw Error('repository_mount_changed');
         }
+        assertKernel();
       } catch {
         // eslint-disable-next-line preserve-caught-error -- NAS paths and kernel diagnostics never enter public status.
         throw Error('backup_repository_mount_unverified');
@@ -120,6 +118,10 @@ export async function withSignedBackupRepository<T>(
     const lease = Object.freeze({ fd: heldRepository, assertCurrent });
     lease.assertCurrent();
     const result = await operation(lease);
+    lease.assertCurrent();
+    const finalMount = mountIdentity();
+    if (finalMount.id !== initialMount.id || finalMount.bindingDigest !== initialMount.bindingDigest)
+      throw Error('mount_changed');
     lease.assertCurrent();
     return result;
   } catch {

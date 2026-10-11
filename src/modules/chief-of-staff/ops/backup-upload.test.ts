@@ -80,7 +80,7 @@ async function fixture() {
   };
   f.vault.mockReturnValue(policy);
   f.target.mockReturnValue({ lifecycle: 'protected', maintenance: false, releaseId: 'release-fixture' });
-  f.access.mockImplementation(async (_roots, area, callback) => callback(areas[area]));
+  f.access.mockImplementation(async (_roots, area, callback) => callback(areas[area], () => {}));
   const profile = {
     contract: 'cos-backup-repository/v1',
     rootsDigest: digest(roots),

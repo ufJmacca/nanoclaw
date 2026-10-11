@@ -13,7 +13,9 @@ export async function withVaultResticPassword<T>(
   operation: (password: BackupPassword) => Promise<T>,
 ): Promise<T> {
   try {
-    return await withVaultDirectory(roots, 'backup-credentials', async (directory) => {
+    return await withVaultDirectory(roots, 'backup-credentials', async (directory, assertVault) => {
+      if (typeof assertVault !== 'function') throw Error('vault_scope_required');
+      assertVault();
       verifyVaultMemory();
       const policy = verifyVaultStorage(roots);
       const alias = /^\/proc\/self\/fd\/\d+$/.test(directory);
@@ -48,12 +50,12 @@ export async function withVaultResticPassword<T>(
             if (!active) throw Error('released_credential');
             verifyVaultMemory();
             if (
-              digest(verifyVaultStorage(roots)) !== digest(policy) ||
               digest(
                 readBackupCredentialInstallation('/proc/self/fd/' + rootFd, roots, policy.volume.filesystemUuid),
               ) !== digest(installation)
             )
               throw Error('credential_installation_changed');
+            assertVault();
             const stat = fs.fstatSync(heldFd),
               current = fs.lstatSync(file),
               currentRoot = fs.statSync(directory);
