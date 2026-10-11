@@ -4,6 +4,21 @@ import path from 'node:path';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { after, test } from 'node:test';
+import type pg from 'pg';
+import Database from 'better-sqlite3';
+import { randomUUID } from 'node:crypto';
+import {
+  captureCoordinatedState,
+  verifyRecoveredCoordinatedState,
+} from '../../modules/chief-of-staff/ops/coordinated-backup.js';
+import {
+  capturePrivateHistory,
+  verifyRecoveredPrivateHistory,
+} from '../../modules/chief-of-staff/ops/private-history-backup.js';
+import { KnowledgeArtifacts } from '../../modules/chief-of-staff/knowledge/artifacts.js';
+import { ActionWitness, initializeActionWitness } from '../../modules/chief-of-staff/actions/witness.js';
+import { MIGRATIONS } from '../../modules/chief-of-staff/store/migrations.js';
+import { digest } from '../../modules/chief-of-staff/domain/contracts.js';
 import { BackupQueue } from '../../modules/chief-of-staff/ops/backup-queue.js';
 import { BackupResticTransfer } from '../../modules/chief-of-staff/ops/backup-restic-transfer.js';
 import { BackupRepositoryWriter } from '../../modules/chief-of-staff/ops/backup-repository-lease.js';
@@ -711,6 +726,180 @@ test('real remote recovery shares measured staging and the actual checkpoint wri
   assert.equal((await queue.pending('credentials'))[0].operationId, pendingId);
   assert.deepEqual(snapshotMetadata(), remoteBefore);
   assert.deepEqual(fs.readdirSync(transferCache), []);
+});
+test('real encrypted remote recovery validates coordinated native and history payloads without importing live authority', async () => {
+  const base = path.join(root, 'payload-recovery'),
+    staging = base + '/staging',
+    source = base + '/source';
+  fs.mkdirSync(base, { mode: 0o700 });
+  for (const directory of [staging, source, base + '/receipt', base + '/artifacts', base + '/artifact-staging'])
+    fs.mkdirSync(directory, { mode: 0o700 });
+  const native = new Database(source + '/native.db');
+  native.pragma('journal_mode=WAL');
+  native.exec(
+    "CREATE TABLE messages(body TEXT); INSERT INTO messages VALUES('old message'); CREATE TABLE model_counters(consumed INTEGER); INSERT INTO model_counters VALUES(3)",
+  );
+  const generation = randomUUID(),
+    conversation = source + '/conversations',
+    mission = source + '/missions-state';
+  fs.mkdirSync(conversation + '/' + generation + '/empty', { recursive: true, mode: 0o700 });
+  fs.mkdirSync(mission + '/missions/' + generation + '/provider/empty', { recursive: true, mode: 0o700 });
+  const history = conversation + '/' + generation + '/history.jsonl';
+  fs.writeFileSync(history, Buffer.alloc(150000, 0x41), { mode: 0o600 });
+  fs.writeFileSync(conversation + '/' + generation + '/auth.json', 'SYNTHETIC_CURRENT_AUTH', { mode: 0o600 });
+  fs.writeFileSync(mission + '/missions/' + generation + '/provider/history', 'SYNTHETIC_SPECIALIST_HISTORY', {
+    mode: 0o600,
+  });
+  const installation = digest('synthetic-payload-installation'),
+    owner = initializeActionWitness(base + '/effects', installation),
+    witness = new ActionWitness(base + '/effects', installation, owner.generation),
+    artifacts = new KnowledgeArtifacts(base + '/artifacts', base + '/artifact-staging'),
+    restriction = source + '/restriction.json';
+  fs.writeFileSync(restriction, '{"paused":false}', { mode: 0o600 });
+  const context = {
+    scopeId: 'synthetic-scope',
+    ownerId: 'owner',
+    agentGroupId: 'group',
+    sessionId: 'session',
+    ingressId: 'synthetic-recovery',
+  };
+  // PostgreSQL query responses are synthetic in this network-free component.
+  // Actual separately admitted database capture/readback is checked independently.
+  const query = async (sql: string, parameters?: string[]) => {
+    if (sql.includes('pg_try_advisory_lock')) return { rows: [{ locked: true }] };
+    if (sql.includes('to_regclass')) return { rows: [{ ledger: 'cos.schema_migrations' }] };
+    if (sql.includes('FROM cos.schema_migrations'))
+      return { rows: MIGRATIONS.map(({ version, checksum }) => ({ version, checksum })) };
+    if (sql.includes('SELECT owner_id,agent_group_id'))
+      return { rows: [{ owner_id: 'owner', agent_group_id: 'group' }] };
+    if (sql.includes('FROM pg_attribute'))
+      return {
+        rows: (parameters?.[0] === 'cos.scopes' ? ['id', 'owner_id', 'agent_group_id'] : ['scope_id']).map(
+          (attname) => ({ attname }),
+        ),
+      };
+    if (sql.includes('to_jsonb(t)'))
+      return {
+        rows: sql.includes('cos."scopes"')
+          ? [{ body: { id: 'synthetic-scope', owner_id: 'owner', agent_group_id: 'group' } }]
+          : [],
+      };
+    if (sql.includes('clock_timestamp')) return { rows: [{ now: new Date() }] };
+    return { rows: [] };
+  };
+  const operationId = '285cd0bd-2af0-49d0-a9e8-c47dd53c9a39',
+    queue = new BackupQueue('a'.repeat(64), async (_kind, callback) => callback(staging)),
+    options = {
+      client: { query } as unknown as pg.Client,
+      context,
+      databaseFingerprint: digest('synthetic-runtime-database'),
+      operationId,
+      receiptRoot: base + '/receipt',
+      nativeDatabases: [source + '/native.db'],
+      artifacts,
+      restrictionFiles: [restriction],
+      witness,
+      quiescent: async () => ({
+        generation: 1,
+        activeWorkers: 0 as const,
+        activeOperations: 0 as const,
+        nativeWriters: 0 as const,
+        effectsEnabled: false as const,
+      }),
+    };
+  try {
+    await queue.capture(
+      'state',
+      operationId,
+      async (sink) => {
+        await captureCoordinatedState(options, sink);
+        await capturePrivateHistory(conversation, sink, 'conversation');
+        await capturePrivateHistory(mission, sink, 'mission');
+      },
+      1024 ** 2,
+    );
+    const pending = await queue.pending('state');
+    native.exec("INSERT INTO messages VALUES('later message'); UPDATE model_counters SET consumed=4");
+    fs.appendFileSync(history, 'SYNTHETIC_CURRENT_LATER_HISTORY');
+    fs.writeFileSync(restriction, '{"paused":true}', { mode: 0o600 });
+    const before = {
+      messages: native.prepare('SELECT * FROM messages').all(),
+      counters: native.prepare('SELECT * FROM model_counters').all(),
+      history: fs.readFileSync(history),
+      restriction: fs.readFileSync(restriction),
+      journal: fs.readFileSync(witness.root + '/owner.json'),
+    };
+    const producer = () => [
+      process.execPath,
+      '--input-type=module',
+      '-e',
+      `
+      import { BackupQueue } from ${JSON.stringify(new URL('../../modules/chief-of-staff/ops/backup-queue.js', import.meta.url).href)};
+      import { streamQueuedBackup } from ${JSON.stringify(new URL('../../modules/chief-of-staff/ops/backup-archive-producer.js', import.meta.url).href)};
+      const queue = new BackupQueue('a'.repeat(64), async (_kind, callback) => callback(${JSON.stringify(staging)}));
+      await streamQueuedBackup(queue, 'state', ${JSON.stringify(operationId)}, bytes => new Promise((resolve, reject) => process.stdout.write(bytes, error => error ? reject(error) : resolve())));
+    `,
+    ];
+    const archive = await streamQueuedBackup(queue, 'state', operationId, async () => {});
+    await withTransfer(
+      repositoryId,
+      async () => {},
+      async (transfer) => {
+        await transfer.upload('state', operationId, archive);
+      },
+      producer,
+    );
+    const remoteBefore = snapshotMetadata();
+    await withTransfer(
+      repositoryId,
+      async () => {
+        throw Error('must_not_upload');
+      },
+      async (transfer, current) => {
+        await queue.withRestoreWorkspace(
+          randomUUID(),
+          current,
+          async (workspace) => {
+            const recovered = await transfer.restore('state', operationId, 'a'.repeat(64), workspace.sink, async () =>
+                workspace.assertCurrent(),
+              ),
+              checked = verifyRecoveredCoordinatedState(options, workspace, recovered.receipt.files);
+            assert.equal(checked.nativeDatabasesVerified, 1);
+            assert.equal(checked.admissionRestored, false);
+            assert.equal(checked.eventJournalRestored, false);
+            assert.equal(
+              verifyRecoveredPrivateHistory(workspace, recovered.receipt.files, conversation, 'conversation').bytes,
+              150000,
+            );
+            assert.equal(
+              verifyRecoveredPrivateHistory(workspace, recovered.receipt.files, mission, 'mission').files,
+              1,
+            );
+            workspace.withFileBytes('coordinated/sqlite/0/native.sqlite', 65536, (bytes) => {
+              const copy = new Database(bytes, { readonly: true });
+              try {
+                assert.deepEqual(copy.prepare('SELECT * FROM model_counters').all(), [{ consumed: 3 }]);
+              } finally {
+                copy.close();
+              }
+            });
+          },
+          64 * 1024 ** 2,
+        );
+      },
+    );
+    assert.deepEqual(native.prepare('SELECT * FROM messages').all(), before.messages);
+    assert.deepEqual(native.prepare('SELECT * FROM model_counters').all(), before.counters);
+    assert.deepEqual(fs.readFileSync(history), before.history);
+    assert.deepEqual(fs.readFileSync(restriction), before.restriction);
+    assert.deepEqual(fs.readFileSync(witness.root + '/owner.json'), before.journal);
+    assert.deepEqual(await queue.pending('state'), pending);
+    assert.deepEqual(fs.readdirSync(staging), ['backup-queue']);
+    assert.deepEqual(snapshotMetadata(), remoteBefore);
+    assert.deepEqual(fs.readdirSync(transferCache), []);
+  } finally {
+    native.close();
+  }
 });
 test('real restoration denies a foreign receipt owner and missing checkpoint without destination files or remote changes', async () => {
   const before = snapshotMetadata(),
