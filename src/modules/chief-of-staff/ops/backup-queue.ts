@@ -9,6 +9,8 @@ import { verifyVaultStorage, withVaultDirectory } from './vault-storage.js';
 import type { RemoteCheckpoint } from './backup-restic-transfer.js';
 import { streamBackupArchive } from './backup-archive.js';
 import { BackupRepositoryWriter } from './backup-repository-lease.js';
+import { readPinnedBackupStaging } from './backup-capacity.js';
+import { withIsolatedBackupRestore, type IsolatedBackupRestore } from './backup-restore-workspace.js';
 import {
   assertCaptureAvailable,
   captureJournalNames,
@@ -632,7 +634,7 @@ export class BackupQueue {
     kind: BackupKind,
     create: boolean,
     locked: boolean,
-    operation: (root: string, device: number, assertWriter: () => void) => Promise<T>,
+    operation: (root: string, device: number, assertWriter: () => void, area: string) => Promise<T>,
     absent?: () => Promise<T>,
   ): Promise<T> {
     try {
@@ -675,12 +677,12 @@ export class BackupQueue {
             );
             return await writer.exclusive(async (lease) => {
               lease.assertCurrent();
-              const result = await operation(root, device, lease.assertCurrent);
+              const result = await operation(root, device, lease.assertCurrent, pinned(areaFd));
               lease.assertCurrent();
               return result;
             });
           }
-          return await operation(root, device, () => {});
+          return await operation(root, device, () => {}, pinned(areaFd));
         } finally {
           if (rootFd !== undefined) fs.closeSync(rootFd);
           fs.closeSync(areaFd);
@@ -763,9 +765,66 @@ export class BackupQueue {
     produce: (sink: BackupSnapshotSink) => Promise<void>,
     maximumBytes = kind === 'state' ? BACKUP_LIMITS.staging : BACKUP_LIMITS.credentials,
   ) {
-    return this.area(kind, true, true, async (root, device) =>
-      this.captureLocked(root, device, kind, operationId, produce, maximumBytes),
+    return this.area(kind, true, true, async (root, device, _writer, area) =>
+      this.captureLocked(root, device, kind, operationId, produce, maximumBytes, kind === 'state' ? area : root),
     );
+  }
+  /** Installed access comes from the vault factory. Restore allocations share
+   * the full-checkpoint writer and measured staging limit; credentials retain
+   * their separate publication writer. No pending payload is changed or retired. */
+  async withRestoreWorkspace<T>(
+    requestId: string,
+    assertCaller: () => void,
+    operation: (scope: IsolatedBackupRestore) => Promise<T>,
+  ): Promise<T> {
+    try {
+      if (
+        !/^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(requestId) ||
+        typeof assertCaller !== 'function' ||
+        typeof operation !== 'function'
+      )
+        throw Error('restore_scope_required');
+      assertCaller();
+      return await this.area('state', true, true, async (root, device, assertWriter, area) => {
+        const initial = fs.statSync(root),
+          owner = { format: 'cos-backup-queue-owner/v1', ownerDigest: this.ownerDigest, kind: 'state' };
+        const current = () => {
+          assertCaller();
+          assertWriter();
+          const named = fs.lstatSync(path.join(area, 'backup-queue'));
+          if (
+            !named.isDirectory() ||
+            named.dev !== initial.dev ||
+            named.ino !== initial.ino ||
+            named.uid !== initial.uid ||
+            (named.mode & 0o7777) !== 0o700 ||
+            digest(privateJson(path.join(root, 'owner.json'), device)) !== digest(owner)
+          )
+            throw Error('restore_queue_changed');
+        };
+        current();
+        const before = digest(this.receipts(root, 'state', device)),
+          usage = readPinnedBackupStaging(area),
+          budget = Math.min(
+            BACKUP_LIMITS.staging - usage.bytes - BACKUP_LIMITS.vaultReserve - 8192,
+            usage.free - BACKUP_LIMITS.vaultReserve - 8192,
+          );
+        if (budget < 16384) throw Error('restore_staging_exhausted');
+        return await withIsolatedBackupRestore(area, requestId, budget, current, async (scope) => {
+          const result = await operation(scope);
+          current();
+          if (
+            digest(this.receipts(root, 'state', device)) !== before ||
+            readPinnedBackupStaging(area).bytes > BACKUP_LIMITS.staging
+          )
+            throw Error('restore_staging_changed');
+          return result;
+        });
+      });
+    } catch {
+      // eslint-disable-next-line preserve-caught-error -- Private queue, mount and restore diagnostics remain held behind a fixed category.
+      throw Error('backup_restore_workspace_unavailable');
+    }
   }
   private async captureLocked(
     root: string,
@@ -774,6 +833,7 @@ export class BackupQueue {
     operationId: string,
     produce: (sink: BackupSnapshotSink) => Promise<void>,
     maximumBytes: number,
+    capacityRoot = root,
   ) {
     const limit = kind === 'state' ? BACKUP_LIMITS.staging : BACKUP_LIMITS.credentials;
     if (!uuid(operationId) || !Number.isSafeInteger(maximumBytes) || maximumBytes < 16384 || maximumBytes > limit)
@@ -788,7 +848,9 @@ export class BackupQueue {
       if (same.state !== 'pending') throw Error('capture_interrupted');
       return { status: 'queued' as const, kind, operationId };
     }
-    const used = measure(root, device),
+    const measured = () =>
+      capacityRoot === root ? measure(root, device) : readPinnedBackupStaging(capacityRoot).bytes;
+    const used = measured(),
       budget = Math.min(maximumBytes, limit - used - 2 * 1024 ** 2 - 8192);
     if (budget < 16384) throw Error('capture_capacity');
     const location = path.join(root, kind === 'state' ? 'full' : operationId);
@@ -914,7 +976,7 @@ export class BackupQueue {
       receipt.bytes = measure(slot, device);
       journal.receipt(receipt);
       fs.fsyncSync(slotFd);
-      if (measure(root, device) > limit || measure(slot, device) > budget) throw Error('capture_capacity');
+      if (measured() > limit || measure(slot, device) > budget) throw Error('capture_capacity');
       return { status: 'queued' as const, kind, operationId };
     } catch {
       active = false;

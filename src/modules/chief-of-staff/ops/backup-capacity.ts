@@ -127,6 +127,19 @@ function free(root: string): number {
   if (!Number.isSafeInteger(bytes) || bytes < 0) throw Error('capacity_bounds');
   return bytes;
 }
+/** The caller holds the encrypted staging accessor and shared state writer.
+ * Measurement is not mount, restore or deletion authority. Ordinary paths are
+ * refused so installed callers cannot select a plaintext staging fallback. */
+export function readPinnedBackupStaging(directory: string): { bytes: number; free: number } {
+  try {
+    if (process.platform !== 'linux' || !/^\/proc\/self\/fd\/\d+$/.test(directory))
+      throw Error('held_staging_required');
+    return { bytes: measure(directory), free: free(directory) };
+  } catch {
+    // eslint-disable-next-line preserve-caught-error -- Private staging names and filesystem diagnostics are not capacity output.
+    throw Error('backup_capacity_unavailable');
+  }
+}
 /** Admission consumes measured usage, never receipt claims or a configured free-space value.
  * All local paths come from the protected vault accessor; the repository is already pinned
  * by signed NAS access. This reads metadata only and never acquires a queue writer lease. */
