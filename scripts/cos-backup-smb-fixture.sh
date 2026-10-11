@@ -52,11 +52,11 @@ for ((attempt=0;attempt<30;attempt++)); do
 done
 [[ "$ready" == true ]] || exit 1
 docker create --name "$client" --pull=never --network "$network" \
-  --read-only --cap-drop ALL --cap-add SYS_ADMIN --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER \
+  --read-only --cap-drop ALL --cap-add SYS_ADMIN --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add DAC_READ_SEARCH --cap-add FOWNER \
   --cap-add SETUID --cap-add SETGID --security-opt no-new-privileges \
   --ulimit core=0 --pids-limit 128 --memory 768m --memory-swap 768m \
   --tmpfs /run/fixture:rw,nosuid,nodev,noexec,size=128m,mode=700 \
-  --tmpfs /tmp:rw,nosuid,nodev,noexec,size=8m,mode=700 \
+  --tmpfs /tmp:rw,nosuid,nodev,noexec,size=8m,mode=700,uid=1000,gid=1000 \
   --tmpfs /var/lib/nanoclaw-cos:rw,nosuid,nodev,noexec,size=8m,mode=711 "$client_image" >/dev/null
 client_owned=true
 printf '{"serverImage":"%s","clientImage":"%s","testedHost":"%s","sourceCommit":"%s","sourceTree":"%s","internalNetwork":true,"hostPortsPublished":false,"hostDataMounted":false,"ownerCredentialsUsed":false}\n' \
