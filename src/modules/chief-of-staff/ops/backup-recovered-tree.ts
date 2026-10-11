@@ -77,6 +77,7 @@ function inventory(
   recordedDirectories: string[],
   maximumFile: number,
   maximumTotal: number,
+  maximumNodes = 4096,
 ) {
   if (
     !Array.isArray(recordedDirectories) ||
@@ -90,7 +91,7 @@ function inventory(
   if (entries.has(prefix)) throw Error('recovered_tree_graph');
   for (const entry of entries.values())
     if (entry.name.startsWith(prefix + '/')) files.set(entry.name.slice(prefix.length + 1), entry);
-  if (directories.size + files.size > 4096) throw Error('recovered_tree_bounds');
+  if (directories.size + files.size > maximumNodes) throw Error('recovered_tree_bounds');
   for (const name of [...directories, ...files.keys()]) {
     if (!nameValid(prefix, name) || (files.has(name) && directories.has(name))) throw Error('recovered_tree_name');
     const parts = name.split('/');
@@ -223,7 +224,7 @@ export function verifyRecoveredCalendarState(
       !bounded(receipt.bytes, 64 * 1024 ** 2)
     )
       throw Error('recovered_calendar_receipt');
-    const actual = inventory(scope, listed, 'calendar-state', receipt.directories, 1024 ** 2, 64 * 1024 ** 2);
+    const actual = inventory(scope, listed, 'calendar-state', receipt.directories, 1024 ** 2, 64 * 1024 ** 2, 8192);
     if (
       actual.sha256 !== receipt.sha256 ||
       actual.bytes !== receipt.bytes ||

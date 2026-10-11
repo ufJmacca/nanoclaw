@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import Database from 'better-sqlite3';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { afterEach, expect, it, vi } from 'vitest';
 import { digest } from '../domain/contracts.js';
 import { initializeTarget, writeAtomic } from './target-state.js';
@@ -43,7 +43,10 @@ vi.mock('./vault-storage.js', () => ({
   withVaultDirectory: async (_roots: unknown, area: string, operation: (directory: string) => Promise<unknown>) =>
     operation(f.areas[area]),
 }));
-vi.mock('./recovery-manifest.js', () => ({ captureOperationsState: f.capture }));
+vi.mock('./recovery-manifest.js', async (original) => ({
+  ...(await original<typeof import('./recovery-manifest.js')>()),
+  captureOperationsState: f.capture,
+}));
 vi.mock('../calendar/backup.js', () => ({ captureCalendarState: f.calendar }));
 const cleanup: Array<() => void> = [];
 function rootCanaryMetadataFixture(properties: Partial<fs.Stats> = {}) {
@@ -138,7 +141,7 @@ async function fixture(databaseFingerprint = 'd'.repeat(64), scopeId = 'scope', 
     channelId: 'private',
     agentGroupId: scopeId === 'scope' ? 'main' : scopeId,
     messagingGroupId: 'chat',
-    provider: 'codex',
+    provider: 'codex' as const,
     sessionId: 'main',
   };
   native.prepare('INSERT INTO sessions VALUES(?,?)').run('main', binding.agentGroupId);
@@ -640,6 +643,7 @@ it.runIf(process.env.COS_TEST_TARGET_ID !== undefined).each([false, true])(
           await vi.importActual<typeof import('./recovery-manifest.js')>('./recovery-manifest.js'),
         { verifyRecoveredPrivateHistory } = await import('./private-history-backup.js'),
         { verifyRecoveredCalendarState, verifyRecoveredForensicTree } = await import('./backup-recovered-tree.js'),
+        { verifyRecoveredTargetVaultState } = await import('./backup-recovered-state.js'),
         queue = createVaultBackupQueue(roots),
         chunks: Buffer[] = [];
       await queue.withPending('state', result.queueOperationId, async (directory, receipt) => {
@@ -729,6 +733,24 @@ it.runIf(process.env.COS_TEST_TARGET_ID !== undefined).each([false, true])(
               );
             }
             expect(fs.existsSync(workspace.directory + '/vault-journals/empty')).toBe(true);
+            const recovered = await verifyRecoveredTargetVaultState(
+              {
+                settings: s.settings,
+                binding: s.binding,
+                witness: s.witness,
+                queueOperationId: result.queueOperationId,
+                recovery: s.recovery,
+                expectedSnapshotDigest: result.snapshotDigest,
+                current: () => {},
+              },
+              workspace,
+              read.receipt.files,
+            );
+            expect(recovered.header).toEqual(header);
+            expect(recovered.snapshotDigest).toBe(result.snapshotDigest);
+            expect(recovered.operations).toEqual(operations);
+            expect(recovered.writerActivated).toBe(false);
+            expect(recovered.credentialsActivated).toBe(false);
           },
         );
       } finally {
@@ -738,6 +760,181 @@ it.runIf(process.env.COS_TEST_TARGET_ID !== undefined).each([false, true])(
       expect(fs.readFileSync(s.witness.root + '/owner.json')).toEqual(journal);
       expect(s.native.prepare('SELECT * FROM ordinary_messages').all()).toEqual(before.messages);
       expect(s.native.prepare('SELECT * FROM cos_model_budgets').all()).toEqual(before.budgets);
+      expect(fs.readdirSync(f.areas.staging)).toEqual(['backup-queue']);
+      // A valid older checkpoint remains checkable after normal resumption,
+      // context renewal and later owner/model state. None of those are imported.
+      const { finishMaintenance } = await import('./maintenance.js'),
+        { readPrivate } = await import('./target-state.js'),
+        { readBackupNativeInventory } = await import('./target-backup-native.js'),
+        laterBinding = { ...s.binding, sessionId: 'later-main' };
+      s.native.prepare('INSERT INTO sessions VALUES(?,?)').run(laterBinding.sessionId, laterBinding.agentGroupId);
+      s.native
+        .prepare('UPDATE cos_identity_boundaries SET session_id=?,binding=?,paused=1')
+        .run(laterBinding.sessionId, JSON.stringify(laterBinding));
+      s.native.exec(
+        "UPDATE cos_model_budgets SET consumed=4; INSERT INTO ordinary_messages VALUES('later','LATER_ORDINARY_MESSAGE')",
+      );
+      fs.writeFileSync(calendar + '/credentials/token.json', 'LATER_CURRENT_TOKEN', { mode: 0o600 });
+      fs.writeFileSync(s.witness.root + '/later-event.json', 'LATER_INDEPENDENT_EVENT', { mode: 0o600 });
+      await finishMaintenance(s.settings.stateRoot, targetBinding(s.settings), s.admin.maintenance, async () => true);
+      expect(readBackupNativeInventory(s.settings.dataRoot).binding).toEqual(laterBinding);
+      const laterState = readPrivate(s.settings.stateRoot + '/state.json'),
+        laterMessages = s.native.prepare('SELECT * FROM ordinary_messages').all(),
+        laterBudgets = s.native.prepare('SELECT * FROM cos_model_budgets').all(),
+        originalFiles = new Map<string, Buffer>();
+      await queue.withPending('state', result.queueOperationId, async (directory, receipt) => {
+        for (const entry of receipt.files) originalFiles.set(entry.name, fs.readFileSync(directory + '/' + entry.name));
+      });
+      const writeJson = (files: Map<string, Buffer>, name: string, value: unknown) =>
+        files.set(name, Buffer.from(JSON.stringify(value) + '\n'));
+      const json = <T>(files: Map<string, Buffer>, name: string): T =>
+        JSON.parse(files.get(name)!.toString('utf8')) as T;
+      const sha256 = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
+      type Header = import('./backup-recovered-state.js').RecoveredCaptureHeader;
+      type Change = (files: Map<string, Buffer>, header: Header) => void;
+      const runRecovered = async (change?: Change, withdraw = false) => {
+        const files = new Map(originalFiles),
+          h = structuredClone(header) as Header;
+        change?.(files, h);
+        writeJson(files, 'state-capture.json', h);
+        let admitted = true,
+          scheduledWithdrawal = false;
+        await queue.withRestoreWorkspace(
+          randomUUID(),
+          () => {},
+          async (workspace) => {
+            const entries = [];
+            for (const [name, bytes] of files) {
+              const output = await workspace.sink.open(name, bytes.length);
+              await output.write(Buffer.from(bytes));
+              await output.close();
+              entries.push({ name, bytes: bytes.length, sha256: sha256(bytes) });
+            }
+            const options = {
+              settings: s.settings,
+              binding: laterBinding,
+              witness: s.witness,
+              queueOperationId: result.queueOperationId,
+              recovery: s.recovery,
+              current() {
+                if (!admitted) throw Error('fixture_recovery_withdrawn');
+                expect(readPrivate(s.settings.stateRoot + '/state.json')).toEqual(laterState);
+                if (withdraw && !scheduledWithdrawal) {
+                  scheduledWithdrawal = true;
+                  queueMicrotask(() => {
+                    admitted = false;
+                  });
+                }
+              },
+            };
+            const check = verifyRecoveredTargetVaultState(options, workspace, entries);
+            if (change || withdraw) await expect(check).rejects.toThrow(/^target_vault_recovery_check_unavailable$/);
+            else {
+              const checked = await check;
+              expect(checked.header.maintenanceGeneration).toBeLessThan(
+                (laterState as { generation: number }).generation,
+              );
+              expect(checked.header.inputs.context.sessionId).toBe('main');
+              expect(checked.operations).toEqual(operations);
+              expect(checked.writerActivated).toBe(false);
+              expect(checked.credentialsActivated).toBe(false);
+            }
+          },
+        );
+      };
+      const changes: Change[] = [
+        (_files, h) => {
+          h.targetBindingDigest = 'f'.repeat(64);
+        },
+        (_files, h) => {
+          h.nativeBindingDigest = 'f'.repeat(64);
+        },
+        (_files, h) => {
+          h.journal.generation = randomUUID();
+        },
+        (_files, h) => {
+          Object.assign(h, { writerActivated: true });
+        },
+        (_files, h) => {
+          Object.assign(h, { admissionRestored: true });
+        },
+        (_files, h) => {
+          Object.assign(h, { unknown: 'unselected' });
+        },
+        (_files, h) => {
+          h.nativeDatabases++;
+          h.inputs.nativeDatabases.push(s.root + '/foreign.sqlite');
+        },
+        (_files, h) => {
+          h.inputs.restrictionFiles.push(s.root + '/foreign.json');
+        },
+        (_files, h) => {
+          h.inputs.context.ownerId = 'foreign-owner';
+        },
+        (_files, h) => {
+          h.operations.release.manifestDigest = 'f'.repeat(64);
+        },
+        (_files, h) => {
+          h.maintenanceGeneration++;
+        },
+        (files) => {
+          files.set('live-admission.json', Buffer.from('{"admitted":true}'));
+        },
+        (files) => {
+          files.set('vault-journals/.cos-canary', Buffer.from('UNLISTED_HOST_PROOF'));
+        },
+        (files) => {
+          files.set('calendar-state/credentials/token.json', Buffer.from('ALTERED_ARCHIVED_TOKEN'));
+        },
+        (files) => {
+          files.set('conversation-backup/history/' + generation + '/auth.json', Buffer.from('UNSELECTED_ACCESS'));
+        },
+        (files, h) => {
+          const r = json<import('./backup-recovered-tree.js').ForensicCaptureReceipt>(files, 'effects.capture.json'),
+            owner = {
+              format: 'cos-action-witness-owner/v1',
+              installationDigest: s.witness.installationDigest,
+              generation: randomUUID(),
+            };
+          writeJson(files, 'effects/owner.json', owner);
+          const entry = r.files.find((item) => item.name === 'owner.json')!;
+          r.bytes += files.get('effects/owner.json')!.length - entry.bytes;
+          entry.bytes = files.get('effects/owner.json')!.length;
+          entry.sha256 = sha256(files.get('effects/owner.json')!);
+          writeJson(files, 'effects.capture.json', r);
+          h.effectsDigest = digest(r);
+        },
+        (files, h) => {
+          const index = h.inputs.restrictionFiles.indexOf(s.settings.stateRoot + '/maintenance.json'),
+            name = 'coordinated/restrictions/' + index + '.json',
+            archived = json<Record<string, unknown>>(files, name),
+            receipt = json<import('./coordinated-backup.js').CoordinatedBackupReceipt>(
+              files,
+              'coordinated/manifest.json',
+            );
+          archived.generation = h.maintenanceGeneration + 1;
+          writeJson(files, name, archived);
+          receipt.restrictions[index].bytes = files.get(name)!.length;
+          receipt.restrictions[index].sha256 = sha256(files.get(name)!);
+          writeJson(files, 'coordinated/manifest.json', receipt);
+          h.checkpointDigest = digest(receipt);
+        },
+      ];
+      try {
+        await runRecovered();
+        for (const change of changes) await runRecovered(change);
+        await runRecovered(undefined, true);
+      } finally {
+        for (const bytes of originalFiles.values()) bytes.fill(0);
+      }
+      expect(readPrivate(s.settings.stateRoot + '/state.json')).toEqual(laterState);
+      expect(s.native.prepare('SELECT * FROM ordinary_messages').all()).toEqual(laterMessages);
+      expect(s.native.prepare('SELECT * FROM cos_model_budgets').all()).toEqual(laterBudgets);
+      expect(s.native.prepare('SELECT paused FROM cos_identity_boundaries').get()).toEqual({ paused: 1 });
+      expect(fs.readFileSync(calendar + '/credentials/token.json', 'utf8')).toBe('LATER_CURRENT_TOKEN');
+      expect(fs.readFileSync(s.witness.root + '/owner.json')).toEqual(journal);
+      expect(fs.readFileSync(s.witness.root + '/later-event.json', 'utf8')).toBe('LATER_INDEPENDENT_EVENT');
+      expect(await queue.pending('state')).toEqual(pending);
       expect(fs.readdirSync(f.areas.staging)).toEqual(['backup-queue']);
     } finally {
       if (!inserted) await admin.query('ROLLBACK');

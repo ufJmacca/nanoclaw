@@ -30,19 +30,26 @@ function fixture() {
       scope: Parameters<Parameters<typeof withIsolatedBackupRestore<T>>[4]>[0],
       entries: BackupQueueReceipt['files'],
     ) => Promise<T>,
+    maximumBytes = 1024 ** 2,
   ) => {
     const fd = fs.openSync(root, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY);
     try {
-      return await withIsolatedBackupRestore('/proc/self/fd/' + fd, randomUUID(), 1024 ** 2, guard, async (scope) => {
-        const entries: BackupQueueReceipt['files'] = [];
-        for (const [name, bytes] of Object.entries(files)) {
-          const file = await scope.sink.open(name, bytes.length);
-          await file.write(Buffer.from(bytes));
-          await file.close();
-          entries.push({ name, bytes: bytes.length, sha256: hash(bytes) });
-        }
-        return operation(scope, entries);
-      });
+      return await withIsolatedBackupRestore(
+        '/proc/self/fd/' + fd,
+        randomUUID(),
+        maximumBytes,
+        guard,
+        async (scope) => {
+          const entries: BackupQueueReceipt['files'] = [];
+          for (const [name, bytes] of Object.entries(files)) {
+            const file = await scope.sink.open(name, bytes.length);
+            await file.write(Buffer.from(bytes));
+            await file.close();
+            entries.push({ name, bytes: bytes.length, sha256: hash(bytes) });
+          }
+          return operation(scope, entries);
+        },
+      );
     } finally {
       fs.closeSync(fd);
       expect(fs.readFileSync(root + '/live', 'utf8')).toBe('LATER_TOKENS_DENIALS_JOURNALS_COUNTERS');
@@ -131,6 +138,34 @@ it('accepts an absent Calendar without creating a Calendar state root', async ()
     expect(fs.existsSync(scope.directory + '/calendar-state')).toBe(false);
   });
 });
+it('accepts the Calendar capture limit of 4096 directories alongside its selected file', async () => {
+  const f = fixture(),
+    t = calendar(f),
+    directories = ['credentials', ...Array.from({ length: 4095 }, (_, i) => 'd' + String(i).padStart(4, '0'))];
+  t.receipt.directories = directories;
+  const body = t.files()['calendar-state/credentials/token.json'];
+  t.receipt.sha256 = hash(
+    JSON.stringify(['credentials', 'directory']) +
+      '\n' +
+      JSON.stringify(['credentials/token.json', 'file', body.length, hash(body)]) +
+      '\n' +
+      directories
+        .slice(1)
+        .map((name) => JSON.stringify([name, 'directory']) + '\n')
+        .join(''),
+  );
+  await f.invoke(
+    t.files(),
+    async (scope, entries) => {
+      expect(verifyRecoveredCalendarState(scope, entries, { targetRoot: f.root, operationId: f.operationId })).toEqual(
+        t.receipt,
+      );
+      expect(fs.readdirSync(scope.directory + '/calendar-state')).toHaveLength(4096);
+    },
+    48 * 1024 ** 2,
+  );
+  expect(fs.readdirSync(f.root)).toEqual(['live']);
+}, 30000);
 it.each([
   'digest',
   'bytes',
