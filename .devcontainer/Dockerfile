@@ -28,6 +28,8 @@ RUN apt-get update \
         python3-venv \
         ripgrep \
         sudo \
+        systemd \
+        tzdata \
         unzip \
         xdg-utils \
     && rm -rf /var/lib/apt/lists/*
