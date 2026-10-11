@@ -173,7 +173,9 @@ export function packageResticReleaseArtifact(input: { binary: string; output: st
     verifyResticBinary(file);
     currentSource();
     currentParent();
-    const seal = fs.openSync(path.join(pending, 'artifact.json'), 'wx', 0o444);
+    // Create writable private output before sealing it. Shared Mac filesystems
+    // can retain the masked creation mode when only group read bits change.
+    const seal = fs.openSync(path.join(pending, 'artifact.json'), 'wx', 0o600);
     try {
       fs.writeFileSync(seal, JSON.stringify(RESTIC_ARTIFACT) + '\n');
       fs.fchmodSync(seal, 0o444);
@@ -189,6 +191,7 @@ export function packageResticReleaseArtifact(input: { binary: string; output: st
     }
     currentSource();
     currentParent();
+    verifyResticReleaseArtifactInput(pending);
     if (fs.lstatSync(input.output, { throwIfNoEntry: false })) throw Error('restic_package_output_exists');
     fs.renameSync(pending, input.output);
     pending = undefined;
