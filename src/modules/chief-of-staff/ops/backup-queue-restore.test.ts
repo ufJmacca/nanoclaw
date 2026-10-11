@@ -6,7 +6,18 @@ import { BackupQueue } from './backup-queue.js';
 import { BACKUP_LIMITS } from './backup-policy.js';
 const roots: string[] = [];
 afterEach(() => {
+  vi.restoreAllMocks();
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
+});
+it('reserves transport headroom from actual vault free space before allocating a recovery directory', async () => {
+  const f = fixture(),
+    body = vi.fn(async () => {});
+  vi.spyOn(fs, 'statfsSync').mockReturnValue({ bsize: 4096n, bavail: 4096n } as never);
+  await expect(f.queue.withRestoreWorkspace(requestId, f.guard, body, 64 * 1024 ** 2)).rejects.toThrow(
+    /^backup_restore_workspace_unavailable$/,
+  );
+  expect(body).not.toHaveBeenCalled();
+  expect(fs.readdirSync(f.root + '/state').some((name) => name.startsWith('.cos-restore-'))).toBe(false);
 });
 const owner = 'a'.repeat(64),
   requestId = '5f74b367-fd8f-449c-a832-dbe40cff9ae3',

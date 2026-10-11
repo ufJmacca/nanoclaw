@@ -13,7 +13,13 @@ import { createVaultBackupRepositoryWriter } from './backup-repository-lease.js'
 import { createVaultBackupQueue } from './backup-queue.js';
 import { readBackupCapacity } from './backup-capacity.js';
 import { BACKUP_LIMITS, admitBackupCapacity, type BackupKind, type BackupMountBinding } from './backup-policy.js';
-import { BackupResticTransfer, type RemoteCheckpoint, type BackupMaintenanceResult } from './backup-restic-transfer.js';
+import {
+  BackupResticTransfer,
+  type RemoteCheckpoint,
+  type BackupMaintenanceResult,
+  type BackupRemoteRestore,
+} from './backup-restic-transfer.js';
+import type { IsolatedBackupRestore } from './backup-restore-workspace.js';
 type Profile = {
   contract: 'cos-backup-repository/v1';
   rootsDigest: string;
@@ -56,7 +62,7 @@ type RepositoryScope = {
   assertCurrent(): void;
   transfer(admitUpload: (kind: BackupKind, bytes: number) => Promise<void>): BackupResticTransfer;
 };
-/** Private admitted scope shared by installed upload and retention. A caller
+/** Private admitted scope shared by installed upload, retention and recovery. A caller
  * cannot substitute a repository, password, binary, producer or writer. */
 async function withVaultBackupRepository<T>(
   roots: CalendarStorageRoots,
@@ -364,5 +370,88 @@ export async function maintainVaultBackups(
   } catch {
     // eslint-disable-next-line preserve-caught-error -- Repository, queue and capacity diagnostics remain private.
     throw Error('backup_maintenance_unavailable');
+  }
+}
+
+/** Installed recovery composition only. This creates a new encrypted staging
+ * workspace under the full-checkpoint writer and keeps the actual repository
+ * writer for readback and mandatory trusted validation. Recovered data grants
+ * no live admission; pending work and independent journals remain current. */
+export async function restoreVaultBackup<T>(
+  roots: CalendarStorageRoots,
+  kind: BackupKind,
+  operationId: string,
+  requestId: string,
+  assertCaller: () => void,
+  validate: (
+    scope: Pick<IsolatedBackupRestore, 'directory' | 'assertCurrent'>,
+    remote: BackupRemoteRestore,
+  ) => Promise<T>,
+): Promise<{ remote: BackupRemoteRestore; validation: T }> {
+  try {
+    const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
+    if (
+      !['state', 'credentials'].includes(kind) ||
+      typeof operationId !== 'string' ||
+      !uuid.test(operationId) ||
+      typeof requestId !== 'string' ||
+      !uuid.test(requestId) ||
+      typeof assertCaller !== 'function' ||
+      typeof validate !== 'function'
+    )
+      throw Error('restore_scope_required');
+    return await withVaultBackupRepository(roots, assertCaller, async (scope) => {
+      const transportReserve = 64 * 1024 ** 2;
+      const admit = async () => {
+        scope.assertCurrent();
+        const usage = await readBackupCapacity(roots, scope.repository);
+        scope.assertCurrent();
+        admitBackupCapacity(usage, { kind, bytes: 1 }, 'remote');
+        if (
+          usage.cache + transportReserve > BACKUP_LIMITS.cache ||
+          usage.vaultFree < transportReserve + BACKUP_LIMITS.vaultReserve
+        )
+          throw Error('backup_capacity_unavailable');
+      };
+      await admit();
+      return await scope.queue.withRestoreWorkspace(
+        requestId,
+        scope.assertCurrent,
+        async (workspace) => {
+          const transfer = scope.transfer(async () => {
+            throw Error('restore_cannot_upload');
+          });
+          const remote = await transfer.restore(kind, operationId, scope.queueOwnerDigest, workspace.sink, admit);
+          workspace.assertCurrent();
+          if (
+            remote.contract !== 'cos-backup-remote-restore/v1' ||
+            remote.repositoryId !== scope.repositoryId ||
+            remote.ownerDigest !== scope.ownerDigest ||
+            remote.kind !== kind ||
+            remote.operationId !== operationId ||
+            remote.receipt.ownerDigest !== scope.queueOwnerDigest ||
+            remote.receipt.kind !== kind ||
+            remote.receipt.operationId !== operationId
+          )
+            throw Error('backup_restore_identity_changed');
+          await admit();
+          workspace.assertCurrent();
+          const identity = digest(remote);
+          const validation = await validate(
+            Object.freeze({ directory: workspace.directory, assertCurrent: workspace.assertCurrent }),
+            remote,
+          );
+          workspace.assertCurrent();
+          if (digest(remote) !== identity) throw Error('backup_restore_evidence_changed');
+          await admit();
+          workspace.assertCurrent();
+          return { remote, validation };
+        },
+        transportReserve,
+      );
+    });
+  } catch {
+    // eslint-disable-next-line preserve-caught-error -- Recovered payload, credential, repository and validator diagnostics stay private.
+    throw Error('backup_restore_check_unavailable');
   }
 }

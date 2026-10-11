@@ -776,12 +776,16 @@ export class BackupQueue {
     requestId: string,
     assertCaller: () => void,
     operation: (scope: IsolatedBackupRestore) => Promise<T>,
+    transportReserve = 0,
   ): Promise<T> {
     try {
       if (
         !/^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(requestId) ||
         typeof assertCaller !== 'function' ||
-        typeof operation !== 'function'
+        typeof operation !== 'function' ||
+        !Number.isSafeInteger(transportReserve) ||
+        transportReserve < 0 ||
+        transportReserve > BACKUP_LIMITS.cache
       )
         throw Error('restore_scope_required');
       assertCaller();
@@ -807,7 +811,7 @@ export class BackupQueue {
           usage = readPinnedBackupStaging(area),
           budget = Math.min(
             BACKUP_LIMITS.staging - usage.bytes - BACKUP_LIMITS.vaultReserve - 8192,
-            usage.free - BACKUP_LIMITS.vaultReserve - 8192,
+            usage.free - BACKUP_LIMITS.vaultReserve - transportReserve - 8192,
           );
         if (budget < 16384) throw Error('restore_staging_exhausted');
         return await withIsolatedBackupRestore(area, requestId, budget, current, async (scope) => {

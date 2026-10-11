@@ -6,6 +6,8 @@ import { digest } from '../domain/contracts.js';
 import { BackupQueue } from './backup-queue.js';
 import { BackupRepositoryWriter } from './backup-repository-lease.js';
 import type { RemoteCheckpoint } from './backup-restic-transfer.js';
+import { streamBackupArchive } from './backup-archive.js';
+import { readBackupArchive } from './backup-archive-reader.js';
 const f = vi.hoisted(() => ({
   vault: vi.fn(),
   access: vi.fn(),
@@ -21,6 +23,7 @@ const f = vi.hoisted(() => ({
   upload: vi.fn(),
   verify: vi.fn(),
   maintain: vi.fn(),
+  restore: vi.fn(),
   deps: undefined as undefined | Record<string, unknown>,
 }));
 vi.mock('./vault-storage.js', () => ({ verifyVaultStorage: f.vault, withVaultDirectory: f.access }));
@@ -28,7 +31,10 @@ vi.mock('./vault-memory.js', () => ({ verifyVaultMemory: f.memory }));
 vi.mock('./restic-artifact.js', () => ({ withVerifiedResticBinary: f.artifact }));
 vi.mock('./backup-nas-access.js', () => ({ withSignedBackupRepository: f.nas }));
 vi.mock('./backup-password.js', () => ({ withVaultResticPassword: f.password }));
-vi.mock('./backup-capacity.js', () => ({ readBackupCapacity: f.capacity }));
+vi.mock('./backup-capacity.js', async (original) => ({
+  ...(await original<typeof import('./backup-capacity.js')>()),
+  readBackupCapacity: f.capacity,
+}));
 vi.mock('./target-identity.js', () => ({ localTarget: f.target }));
 vi.mock('./backup-queue.js', async (original) => ({
   ...(await original<typeof import('./backup-queue.js')>()),
@@ -39,7 +45,7 @@ vi.mock('./backup-repository-lease.js', async (original) => ({
   createVaultBackupRepositoryWriter: f.writer,
 }));
 vi.mock('./backup-restic-transfer.js', () => ({ BackupResticTransfer: f.transfer }));
-import { uploadVaultBackup, maintainVaultBackups } from './backup-upload.js';
+import { uploadVaultBackup, maintainVaultBackups, restoreVaultBackup } from './backup-upload.js';
 const temporary: string[] = [],
   held: number[] = [];
 const operationId = 'fe682c6d-d762-40fb-89e6-e0f1e34edfc0';
@@ -121,7 +127,7 @@ async function fixture() {
   );
   f.transfer.mockImplementation(function (options) {
     f.deps = options;
-    return { upload: f.upload, verify: f.verify, maintain: f.maintain };
+    return { upload: f.upload, verify: f.verify, maintain: f.maintain, restore: f.restore };
   });
   let recorded: RemoteCheckpoint | undefined;
   f.upload.mockImplementation(async (kind, id, archive) => {
@@ -170,8 +176,199 @@ async function fixture() {
       integrity: 'verified',
     };
   });
+  const parts: Buffer[] = [];
+  await queue.withPending('state', operationId, async (directory, receipt) =>
+    streamBackupArchive(directory, receipt, async (bytes) => {
+      parts.push(Buffer.from(bytes));
+    }),
+  );
+  const archive = Buffer.concat(parts);
+  for (const part of parts) part.fill(0);
+  f.restore.mockImplementation(async (kind, id, ownerDigest, sink, admit) => {
+    await admit();
+    const read = await readBackupArchive(
+      (async function* () {
+        yield Buffer.from(archive);
+      })(),
+      { kind, operationId: id, ownerDigest },
+      sink,
+      () => {},
+    );
+    await admit();
+    return {
+      contract: 'cos-backup-remote-restore/v1',
+      repositoryId: profile.repositoryId,
+      ownerDigest: lockOwner,
+      kind,
+      operationId: id,
+      snapshotId: 'c'.repeat(64),
+      snapshotAt: new Date().toISOString(),
+      archiveBytes: read.archiveBytes,
+      archiveSha256: read.archiveSha256,
+      verifiedAt: new Date().toISOString(),
+      receipt: read.receipt,
+    };
+  });
   return { roots, areas, profile, file, queue, producer };
 }
+const restoreRequest = '14d948fc-4d6d-4e88-851b-257b701b4088';
+it('recovers through the installed gates and actual shared writers, then validates only the new isolated files', async () => {
+  const s = await fixture(),
+    before = await s.queue.pending('state'),
+    guard = vi.fn();
+  const result = await restoreVaultBackup(
+    s.roots,
+    'state',
+    operationId,
+    restoreRequest,
+    guard,
+    async (scope, remote) => {
+      scope.assertCurrent();
+      expect(scope).not.toHaveProperty('sink');
+      expect(fs.readFileSync(scope.directory + '/coordinated/remote.json', 'utf8')).toBe('synthetic checkpoint');
+      expect(remote.receipt.ownerDigest).toBe(before[0].ownerDigest);
+      await expect(
+        s.queue.capture('state', '5b0d580b-f7bf-47c7-997a-ade6d328fa65', async () => {}, 65536),
+      ).rejects.toThrow(/^backup_queue_unavailable$/);
+      await expect(maintainVaultBackups(s.roots, guard)).rejects.toThrow(/^backup_maintenance_unavailable$/);
+      return { syntheticPayloadVerified: true };
+    },
+  );
+  expect(result.validation).toEqual({ syntheticPayloadVerified: true });
+  expect(result.remote).toMatchObject({
+    contract: 'cos-backup-remote-restore/v1',
+    operationId,
+    repositoryId: s.profile.repositoryId,
+  });
+  expect(f.restore).toHaveBeenCalledOnce();
+  expect(f.upload).not.toHaveBeenCalled();
+  expect(f.verify).not.toHaveBeenCalled();
+  expect(f.maintain).not.toHaveBeenCalled();
+  expect(await s.queue.pending('state')).toEqual(before);
+  expect(fs.readdirSync(s.areas.staging)).toEqual(['backup-queue']);
+  expect(guard).toHaveBeenCalled();
+});
+it.each(['caller', 'validator', 'request', 'checkpoint'])(
+  'requires bound %s before any installed factory or workspace',
+  async (reason) => {
+    const s = await fixture(),
+      validate = vi.fn(async () => {});
+    await expect(
+      restoreVaultBackup(
+        s.roots,
+        'state',
+        reason === 'checkpoint' ? '00000000-0000-0000-0000-000000000000' : operationId,
+        reason === 'request' ? '../outside' : restoreRequest,
+        reason === 'caller' ? (undefined as never) : () => {},
+        reason === 'validator' ? (undefined as never) : validate,
+      ),
+    ).rejects.toThrow(/^backup_restore_check_unavailable$/);
+    expect(f.artifact).not.toHaveBeenCalled();
+    expect(f.restore).not.toHaveBeenCalled();
+    expect(validate).not.toHaveBeenCalled();
+    expect(fs.readdirSync(s.areas.staging)).toEqual(['backup-queue']);
+  },
+);
+it('requires conservative measured cache and vault headroom before opening a restore workspace', async () => {
+  const s = await fixture();
+  f.capacity.mockResolvedValue({
+    staging: 4096,
+    cache: 96 * 1024 ** 2,
+    credentials: 4096,
+    repository: 4096,
+    nasFree: 2 ** 42,
+    vaultFree: 1024 ** 3,
+  });
+  await expect(
+    restoreVaultBackup(
+      s.roots,
+      'state',
+      operationId,
+      restoreRequest,
+      () => {},
+      async () => {},
+    ),
+  ).rejects.toThrow(/^backup_restore_check_unavailable$/);
+  expect(f.restore).not.toHaveBeenCalled();
+  expect(fs.readdirSync(s.areas.staging)).toEqual(['backup-queue']);
+});
+it('denies success when the trusted payload validator rejects without changing the pending checkpoint', async () => {
+  const s = await fixture(),
+    before = await s.queue.pending('state');
+  await expect(
+    restoreVaultBackup(
+      s.roots,
+      'state',
+      operationId,
+      restoreRequest,
+      () => {},
+      async () => {
+        throw Error('PRIVATE_NATIVE_CHECK_FAILED');
+      },
+    ),
+  ).rejects.toThrow(/^backup_restore_check_unavailable$/);
+  expect(await s.queue.pending('state')).toEqual(before);
+  expect(fs.readdirSync(s.areas.staging)).toEqual(['backup-queue']);
+});
+it.each(['capacity', 'target'])(
+  'rechecks %s after an awaited payload validator before reporting success',
+  async (reason) => {
+    const s = await fixture();
+    await expect(
+      restoreVaultBackup(
+        s.roots,
+        'state',
+        operationId,
+        restoreRequest,
+        () => {},
+        async () => {
+          await Promise.resolve();
+          if (reason === 'capacity')
+            f.capacity.mockResolvedValue({
+              staging: 4096,
+              cache: 129 * 1024 ** 2,
+              credentials: 4096,
+              repository: 4096,
+              nasFree: 2 ** 42,
+              vaultFree: 1024 ** 3,
+            });
+          else f.target.mockReturnValue({ lifecycle: 'protected', maintenance: true, releaseId: 'release-fixture' });
+        },
+      ),
+    ).rejects.toThrow(/^backup_restore_check_unavailable$/);
+    expect((await s.queue.pending('state'))[0].state).toBe('pending');
+    if (reason === 'target') expect(fs.readdirSync(s.areas.staging)).toContain('.cos-restore-' + restoreRequest);
+  },
+);
+it('refuses a withdrawn caller after readback and retains the new private residue', async () => {
+  const s = await fixture(),
+    guard = vi.fn();
+  await expect(
+    restoreVaultBackup(s.roots, 'state', operationId, restoreRequest, guard, async () => {
+      guard.mockImplementation(() => {
+        throw Error('PRIVATE_WITHDRAWN');
+      });
+    }),
+  ).rejects.toThrow(/^backup_restore_check_unavailable$/);
+  expect(fs.readdirSync(s.areas.staging)).toContain('.cos-restore-' + restoreRequest);
+  expect((await s.queue.pending('state'))[0].state).toBe('pending');
+});
+it('checks the returned repository and queue owner before invoking the trusted validator', async () => {
+  const s = await fixture(),
+    validate = vi.fn(async () => {});
+  f.restore.mockResolvedValue({
+    contract: 'cos-backup-remote-restore/v1',
+    repositoryId: 'e'.repeat(64),
+    ownerDigest: 'f'.repeat(64),
+    kind: 'state',
+    operationId,
+    receipt: { ownerDigest: 'f'.repeat(64), kind: 'state', operationId },
+  });
+  await expect(restoreVaultBackup(s.roots, 'state', operationId, restoreRequest, () => {}, validate)).rejects.toThrow(
+    /^backup_restore_check_unavailable$/,
+  );
+  expect(validate).not.toHaveBeenCalled();
+});
 it('maintains through the same admitted installed scopes without uploading or changing the local capture', async () => {
   const s = await fixture(),
     guard = vi.fn();
