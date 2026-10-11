@@ -639,6 +639,7 @@ it.runIf(process.env.COS_TEST_TARGET_ID !== undefined).each([false, true])(
         { verifyRecoveredOperationsState } =
           await vi.importActual<typeof import('./recovery-manifest.js')>('./recovery-manifest.js'),
         { verifyRecoveredPrivateHistory } = await import('./private-history-backup.js'),
+        { verifyRecoveredCalendarState, verifyRecoveredForensicTree } = await import('./backup-recovered-tree.js'),
         queue = createVaultBackupQueue(roots),
         chunks: Buffer[] = [];
       await queue.withPending('state', result.queueOperationId, async (directory, receipt) => {
@@ -716,6 +717,18 @@ it.runIf(process.env.COS_TEST_TARGET_ID !== undefined).each([false, true])(
             expect(
               verifyRecoveredPrivateHistory(workspace, read.receipt.files, s.settings.stateRoot, 'mission').files,
             ).toBe(1);
+            expect(
+              verifyRecoveredCalendarState(workspace, read.receipt.files, {
+                targetRoot: s.settings.stateRoot,
+                operationId: s.operationId,
+              }).files,
+            ).toBe(2);
+            for (const prefix of ['effects', 'vault-backup-credentials', 'vault-journals'] as const) {
+              expect(verifyRecoveredForensicTree(workspace, read.receipt.files, prefix)).toEqual(
+                JSON.parse(fs.readFileSync(data + '/' + prefix + '.capture.json', 'utf8')),
+              );
+            }
+            expect(fs.existsSync(workspace.directory + '/vault-journals/empty')).toBe(true);
           },
         );
       } finally {
