@@ -34,7 +34,7 @@ const fixture = () => ({
     MemorySwap: 768 * 1024 ** 2,
     PidsLimit: 128,
     Ulimits: [{ Name: 'core', Soft: 0, Hard: 0 }],
-    Tmpfs: { '/tmp': 'rw,nosuid,nodev,size=256m,mode=700,uid=1000,gid=1000' },
+    Tmpfs: { '/tmp': 'rw,nosuid,nodev,exec,size=256m,mode=700,uid=1000,gid=1000' },
   },
   report: [
     'TAP version 13',
@@ -74,6 +74,7 @@ it.each([
   'swap',
   'capability',
   'ram',
+  'ram-noexec',
   'skip',
 ])('refuses %s repository fixture evidence', (change) => {
   const value = fixture();
@@ -91,6 +92,7 @@ it.each([
   if (change === 'swap') value.scope.MemorySwap = -1;
   if (change === 'capability') Object.assign(value.scope, { CapAdd: ['ALL'] });
   if (change === 'ram') value.scope.Tmpfs['/tmp'] = 'rw,size=1g';
+  if (change === 'ram-noexec') value.scope.Tmpfs['/tmp'] = value.scope.Tmpfs['/tmp'].replace(',exec,', ',');
   if (change === 'skip') value.report = value.report.replace('# skipped 0', '# skipped 1');
   expect(() => verifyBackupRepositoryFixtureEvidence(serialize(value), identity)).toThrow(
     'backup_repository_release_evidence_unavailable',

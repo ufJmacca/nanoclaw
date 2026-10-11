@@ -30,9 +30,10 @@ scope="cos-g02-repository-${source_commit:0:8}-$$"
 owned=false
 cleanup() { [[ "$owned" != true ]] || docker rm -f "$scope" >/dev/null; }
 trap cleanup EXIT
+# The replacement test executes a verified copy of the public binary in private RAM.
 docker create --name "$scope" --pull=never --network=none --read-only --user 1000:1000 \
   --cap-drop ALL --security-opt no-new-privileges --ulimit core=0 --memory 768m --memory-swap 768m --pids-limit 128 \
-  --tmpfs /tmp:rw,nosuid,nodev,size=256m,mode=700,uid=1000,gid=1000 --workdir /tmp \
+  --tmpfs /tmp:rw,nosuid,nodev,exec,size=256m,mode=700,uid=1000,gid=1000 --workdir /tmp \
   -e HOME=/tmp -e COS_BACKUP_FIXTURE_BINARY=/release/libexec/restic "$image" --test --test-reporter=tap \
   /release/dist/contracts/chief-of-staff/backup-release-artifact.integration.js \
   /release/dist/contracts/chief-of-staff/backup-publication.integration.js \

@@ -337,6 +337,7 @@ test('a changed executable path is refused before any credential command', async
       /^Error: backup_artifact_unverified$/,
     );
     assert.equal(invoked, false);
+    assert.notEqual(fd, -1, 'copied executable must be admitted before testing path replacement');
     assert.throws(() => fs.fstatSync(fd), { code: 'EBADF' });
   } finally {
     fs.rmSync(copy, { force: true });

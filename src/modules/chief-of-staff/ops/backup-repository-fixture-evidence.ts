@@ -88,7 +88,7 @@ export function verifyBackupRepositoryFixtureEvidence(text: string, identity: Id
       !scope.Tmpfs ||
       typeof scope.Tmpfs !== 'object' ||
       Object.keys(scope.Tmpfs).join(',') !== '/tmp' ||
-      scope.Tmpfs['/tmp'] !== 'rw,nosuid,nodev,size=256m,mode=700,uid=1000,gid=1000'
+      scope.Tmpfs['/tmp'] !== 'rw,nosuid,nodev,exec,size=256m,mode=700,uid=1000,gid=1000'
     )
       throw Error('scope');
     const { actualRepositoryCases } = verifyBackupRepositoryReport(lines.join('\n'));
