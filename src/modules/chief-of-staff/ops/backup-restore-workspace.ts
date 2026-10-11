@@ -7,7 +7,12 @@ export type IsolatedBackupRestore = {
   directory: string;
   sink: BackupArchiveRestoreSink;
   assertCurrent(): void;
+  ensureDirectory(name: string): void;
+  inspectFile(name: string): { file: string; bytes: number; sha256: string };
+  /** Bytes are borrowed synchronously and wiped before this method returns. */
+  withFileBytes<T>(name: string, maximumBytes: number, use: (bytes: Buffer) => T): T;
 };
+export type BackupRestoreValidationScope = Omit<IsolatedBackupRestore, 'sink'>;
 type Node = { stat: fs.Stats; directory: boolean; sha256?: string };
 const pinned = (fd: number) => '/proc/self/fd/' + fd;
 function same(initial: fs.Stats, current: fs.Stats, directory: boolean): void {
@@ -135,14 +140,47 @@ export async function withIsolatedBackupRestore<T>(
         for (const fd of held.reverse()) fs.closeSync(fd);
       }
     };
+    const safeName = (name: string) =>
+      typeof name === 'string' &&
+      name.length <= 192 &&
+      name.split('/').length <= 8 &&
+      name.split('/').every((part) => /^(?:[A-Za-z0-9]|\.cos-)[A-Za-z0-9_.-]*$/.test(part));
+    const missingParents = (name: string) => {
+      const parts = name.split('/');
+      let missing = 0;
+      for (let i = 1; i < parts.length; i++) if (!nodes.has(parts.slice(0, i).join('/'))) missing++;
+      return missing;
+    };
+    const ensureDirectory = (name: string) => {
+      current();
+      if (!safeName(name) || closeFiles.size) throw Error('restore_directory_bounds');
+      const known = nodes.get(name),
+        missing = missingParents(name) + (known ? 0 : 1),
+        growth = missing * 8192;
+      if (nodes.size + missing > 8192) throw Error('restore_node_bounds');
+      capacity(growth);
+      used += growth;
+      // mkdir is exclusive. An unclaimed existing directory is never adopted.
+      parents(name, true, (parent, basename) => {
+        const pathname = path.join(pinned(parent), basename);
+        let node = known;
+        if (!node) {
+          fs.mkdirSync(pathname, { mode: 0o700 });
+          node = { stat: fs.lstatSync(pathname), directory: true };
+          nodes.set(name, node);
+          fs.fsyncSync(parent);
+        }
+        if (!node.directory || node.stat.dev !== stage.dev || node.stat.uid !== stage.uid)
+          throw Error('restore_directory_changed');
+        same(node.stat, fs.lstatSync(pathname), true);
+      });
+      current();
+    };
     const sink: BackupArchiveRestoreSink = {
       async open(name, bytes) {
         current();
         if (
-          typeof name !== 'string' ||
-          name.length > 192 ||
-          name.split('/').length > 8 ||
-          !name.split('/').every((part) => /^(?:[A-Za-z0-9]|\.cos-)[A-Za-z0-9_.-]*$/.test(part)) ||
+          !safeName(name) ||
           !Number.isSafeInteger(bytes) ||
           bytes < 0 ||
           bytes > maximumBytes ||
@@ -151,9 +189,7 @@ export async function withIsolatedBackupRestore<T>(
           closeFiles.size
         )
           throw Error('restore_file_bounds');
-        const parts = name.split('/');
-        let missing = 0;
-        for (let i = 1; i < parts.length; i++) if (!nodes.has(parts.slice(0, i).join('/'))) missing++;
+        const missing = missingParents(name);
         if (nodes.size + missing + 1 > 8192) throw Error('restore_node_bounds');
         const growth = Math.ceil(bytes / 4096) * 4096 + (missing + 1) * 8192;
         capacity(growth);
@@ -218,8 +254,72 @@ export async function withIsolatedBackupRestore<T>(
         };
       },
     };
+    const readContent = <U>(parent: number, basename: string, node: Node, use?: (bytes: Buffer) => U): U => {
+      if (!node.sha256) throw Error('restore_file_unclosed');
+      const pathname = path.join(pinned(parent), basename),
+        fd = fs.openSync(pathname, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK),
+        buffer = Buffer.alloc(use ? node.stat.size : 65536),
+        hash = createHash('sha256');
+      try {
+        same(node.stat, fs.fstatSync(fd), false);
+        for (let offset = 0; offset < node.stat.size; ) {
+          current();
+          const start = use ? offset : 0,
+            count = fs.readSync(fd, buffer, start, Math.min(65536, node.stat.size - offset), offset);
+          if (count < 1) throw Error('restore_file_short_read');
+          hash.update(buffer.subarray(start, start + count));
+          if (!use) buffer.fill(0);
+          current();
+          offset += count;
+        }
+        same(node.stat, fs.fstatSync(fd), false);
+        same(node.stat, fs.lstatSync(pathname), false);
+        if (hash.digest('hex') !== node.sha256) throw Error('restore_file_content_changed');
+        current();
+        const value = use?.(buffer);
+        current();
+        return value as U;
+      } finally {
+        buffer.fill(0);
+        fs.closeSync(fd);
+      }
+    };
+    const ownedFile = (name: string) => {
+      current();
+      const node = nodes.get(name);
+      if (!safeName(name) || !node || node.directory || !node.sha256 || closeFiles.size)
+        throw Error('restore_file_unverified');
+      return node;
+    };
+    const inspectFile = (name: string) => {
+      const node = ownedFile(name);
+      parents(name, false, (parent, basename) => readContent(parent, basename, node));
+      return { file: name, bytes: node.stat.size, sha256: node.sha256! };
+    };
+    const withFileBytes = <U>(name: string, maximumBytes: number, use: (bytes: Buffer) => U): U => {
+      const node = ownedFile(name);
+      if (
+        !Number.isSafeInteger(maximumBytes) ||
+        maximumBytes < 1 ||
+        maximumBytes > 64 * 1024 ** 2 ||
+        node.stat.size > maximumBytes ||
+        typeof use !== 'function'
+      )
+        throw Error('restore_reader_bounds');
+      return parents(name, false, (parent, basename) => readContent(parent, basename, node, use));
+    };
+    const checkContent = (parent: number, basename: string, node: Node) => {
+      if (!node.directory) readContent(parent, basename, node);
+    };
     try {
-      result = await operation({ directory: pinned(rootFd), sink, assertCurrent: current });
+      result = await operation({
+        directory: pinned(rootFd),
+        sink,
+        assertCurrent: current,
+        ensureDirectory,
+        inspectFile,
+        withFileBytes,
+      });
       current();
       capacity(0);
       if (closeFiles.size) throw Error('restore_files_unclosed');
@@ -228,31 +328,6 @@ export async function withIsolatedBackupRestore<T>(
       failed = true;
     }
     for (const close of [...closeFiles]) close();
-    const checkContent = (parent: number, basename: string, node: Node) => {
-      if (node.directory) return;
-      if (!node.sha256) throw Error('restore_file_unclosed');
-      const pathname = path.join(pinned(parent), basename),
-        fd = fs.openSync(pathname, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK),
-        buffer = Buffer.alloc(65536),
-        hash = createHash('sha256');
-      try {
-        same(node.stat, fs.fstatSync(fd), false);
-        for (let offset = 0; offset < node.stat.size; ) {
-          current();
-          const count = fs.readSync(fd, buffer, 0, Math.min(buffer.length, node.stat.size - offset), offset);
-          if (count < 1) throw Error('restore_file_short_read');
-          hash.update(buffer.subarray(0, count));
-          buffer.fill(0);
-          offset += count;
-        }
-        same(node.stat, fs.fstatSync(fd), false);
-        same(node.stat, fs.lstatSync(pathname), false);
-        if (hash.digest('hex') !== node.sha256) throw Error('restore_file_content_changed');
-      } finally {
-        buffer.fill(0);
-        fs.closeSync(fd);
-      }
-    };
     // Verify the complete graph before removing any node. Unknown children,
     // changed files and replacement parents hold the whole isolated destination.
     current();

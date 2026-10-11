@@ -225,6 +225,15 @@ it('recovers through the installed gates and actual shared writers, then validat
     async (scope, remote) => {
       scope.assertCurrent();
       expect(scope).not.toHaveProperty('sink');
+      expect(Object.isFrozen(scope)).toBe(true);
+      expect(scope.inspectFile('coordinated/remote.json')).toMatchObject({
+        file: 'coordinated/remote.json',
+        bytes: 20,
+      });
+      expect(scope.withFileBytes('coordinated/remote.json', 1024, (bytes) => bytes.toString())).toBe(
+        'synthetic checkpoint',
+      );
+      scope.ensureDirectory('conversation-backup/history/empty');
       expect(fs.readFileSync(scope.directory + '/coordinated/remote.json', 'utf8')).toBe('synthetic checkpoint');
       expect(remote.receipt.ownerDigest).toBe(before[0].ownerDigest);
       await expect(

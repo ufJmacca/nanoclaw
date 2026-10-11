@@ -58,6 +58,143 @@ it('does not accept an ordinary filesystem path in place of the trusted vault de
   }
   expect(fs.existsSync(f.destination)).toBe(false);
 });
+it('tracks private empty history directories without adopting residue and removes its complete graph', async () => {
+  const f = fixture();
+  let expired!: () => void;
+  await f.invoke(async (scope) => {
+    scope.ensureDirectory('conversation-backup/history/empty');
+    scope.ensureDirectory('conversation-backup/history/empty');
+    expect(fs.readdirSync(scope.directory + '/conversation-backup/history')).toEqual(['empty']);
+    expect(fs.statSync(scope.directory + '/conversation-backup/history/empty').mode & 0o7777).toBe(0o700);
+    expired = () => scope.ensureDirectory('later');
+  });
+  expect(fs.existsSync(f.destination)).toBe(false);
+  expect(() => expired()).toThrow();
+});
+it('charges missing empty directories before creating any of them', async () => {
+  const f = fixture();
+  await expect(f.invoke(async (scope) => scope.ensureDirectory('a/b'), 16384)).rejects.toThrow(
+    /^backup_restore_workspace_unavailable$/,
+  );
+  expect(fs.existsSync(f.destination)).toBe(false);
+});
+it('holds unclaimed empty-directory residue instead of adding it to the owned graph', async () => {
+  const f = fixture();
+  await expect(
+    f.invoke(async (scope) => {
+      fs.mkdirSync(scope.directory + '/foreign', { mode: 0o700 });
+      scope.ensureDirectory('foreign');
+    }),
+  ).rejects.toThrow(/^backup_restore_workspace_unavailable$/);
+  expect(fs.existsSync(f.destination + '/foreign')).toBe(true);
+});
+it.each(['../outside', '/outside', 'a//b', 'a/../b', 'a/.hidden'])(
+  'rejects unsafe directory name %s before mutation',
+  async (name) => {
+    const f = fixture();
+    await expect(f.invoke(async (scope) => scope.ensureDirectory(name))).rejects.toThrow(
+      /^backup_restore_workspace_unavailable$/,
+    );
+    expect(fs.existsSync(f.destination)).toBe(false);
+  },
+);
+it('reads only closed owned files, verifies streamed hashes and wipes borrowed validation buffers', async () => {
+  const f = fixture();
+  const payload = Buffer.alloc(150000, 0x41);
+  let retained!: Buffer, expired!: () => void;
+  await f.invoke(async (scope) => {
+    const file = await scope.sink.open('native/snapshot', payload.length);
+    for (let i = 0; i < payload.length; i += 65536) await file.write(payload.subarray(i, i + 65536));
+    expect(() => scope.withFileBytes('native/snapshot', payload.length, () => {})).toThrow();
+    await file.close();
+    const proof = scope.inspectFile('native/snapshot');
+    expect(proof).toMatchObject({
+      file: 'native/snapshot',
+      bytes: payload.length,
+      sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+    });
+    const result = scope.withFileBytes('native/snapshot', payload.length, (bytes) => {
+      retained = bytes;
+      expect(bytes).toEqual(payload);
+      return 'checked';
+    });
+    expect(result).toBe('checked');
+    expect(retained.every((byte) => byte === 0)).toBe(true);
+    expired = () => scope.inspectFile('native/snapshot');
+  }, 262144);
+  expect(f.guard.mock.calls.length).toBeGreaterThan(30);
+  expect(fs.existsSync(f.destination)).toBe(false);
+  expect(() => expired()).toThrow();
+});
+it('enforces the validation allocation limit before calling the reader', async () => {
+  const f = fixture();
+  let called = false;
+  await expect(
+    f.invoke(async (scope) => {
+      const file = await scope.sink.open('a', 6);
+      await file.write(Buffer.from('secret'));
+      await file.close();
+      scope.withFileBytes('a', 5, () => {
+        called = true;
+      });
+    }),
+  ).rejects.toThrow(/^backup_restore_workspace_unavailable$/);
+  expect(called).toBe(false);
+  expect(fs.existsSync(f.destination)).toBe(false);
+});
+it('wipes borrowed recovery bytes even when the validator fails', async () => {
+  const f = fixture();
+  let retained!: Buffer;
+  await expect(
+    f.invoke(async (scope) => {
+      const file = await scope.sink.open('a', 6);
+      await file.write(Buffer.from('secret'));
+      await file.close();
+      scope.withFileBytes('a', 6, (bytes) => {
+        retained = bytes;
+        throw Error('PRIVATE');
+      });
+    }),
+  ).rejects.toThrow(/^backup_restore_workspace_unavailable$/);
+  expect(retained.every((byte) => byte === 0)).toBe(true);
+  expect(fs.existsSync(f.destination)).toBe(false);
+});
+it('checks fresh caller permission after a synchronous validator and keeps withdrawn residue', async () => {
+  const f = fixture();
+  let retained!: Buffer;
+  await expect(
+    f.invoke(async (scope) => {
+      const file = await scope.sink.open('a', 6);
+      await file.write(Buffer.from('secret'));
+      await file.close();
+      scope.withFileBytes('a', 6, (bytes) => {
+        retained = bytes;
+        f.guard.mockImplementation(() => {
+          throw Error('PRIVATE');
+        });
+      });
+    }),
+  ).rejects.toThrow(/^backup_restore_workspace_unavailable$/);
+  expect(retained.every((byte) => byte === 0)).toBe(true);
+  expect(fs.readFileSync(f.destination + '/a', 'utf8')).toBe('secret');
+});
+it('denies edited owned content before the validation callback and holds the changed graph', async () => {
+  const f = fixture();
+  let called = false;
+  await expect(
+    f.invoke(async (scope) => {
+      const file = await scope.sink.open('a', 6);
+      await file.write(Buffer.from('secret'));
+      await file.close();
+      fs.writeFileSync(scope.directory + '/a', 'edited');
+      scope.withFileBytes('a', 6, () => {
+        called = true;
+      });
+    }),
+  ).rejects.toThrow(/^backup_restore_workspace_unavailable$/);
+  expect(called).toBe(false);
+  expect(fs.readFileSync(f.destination + '/a', 'utf8')).toBe('edited');
+});
 it('never adopts or overwrites an existing restore operation', async () => {
   const f = fixture();
   fs.mkdirSync(f.destination, { mode: 0o700 });

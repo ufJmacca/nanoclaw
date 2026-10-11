@@ -19,7 +19,7 @@ import {
   type BackupMaintenanceResult,
   type BackupRemoteRestore,
 } from './backup-restic-transfer.js';
-import type { IsolatedBackupRestore } from './backup-restore-workspace.js';
+import type { BackupRestoreValidationScope } from './backup-restore-workspace.js';
 type Profile = {
   contract: 'cos-backup-repository/v1';
   rootsDigest: string;
@@ -388,10 +388,7 @@ export async function restoreVaultBackup<T>(
   operationId: string,
   requestId: string,
   assertCaller: () => void,
-  validate: (
-    scope: Pick<IsolatedBackupRestore, 'directory' | 'assertCurrent'>,
-    remote: BackupRemoteRestore,
-  ) => Promise<T>,
+  validate: (scope: BackupRestoreValidationScope, remote: BackupRemoteRestore) => Promise<T>,
 ): Promise<{ remote: BackupRemoteRestore; validation: T }> {
   try {
     const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
@@ -443,7 +440,13 @@ export async function restoreVaultBackup<T>(
           workspace.assertCurrent();
           const identity = digest(remote);
           const validation = await validate(
-            Object.freeze({ directory: workspace.directory, assertCurrent: workspace.assertCurrent }),
+            Object.freeze({
+              directory: workspace.directory,
+              assertCurrent: workspace.assertCurrent,
+              ensureDirectory: workspace.ensureDirectory,
+              inspectFile: workspace.inspectFile,
+              withFileBytes: workspace.withFileBytes,
+            }),
             remote,
           );
           workspace.assertCurrent();
