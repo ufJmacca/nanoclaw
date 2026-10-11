@@ -26,6 +26,49 @@ function fixture() {
   };
   return { root, fd, guard, destination, invoke };
 }
+it('checks the complete owned payload graph between awaits without borrowing another payload copy', async () => {
+  const f = fixture();
+  let expired!: () => void;
+  await f.invoke(async (scope) => {
+    const file = await scope.sink.open('tree/file', 6);
+    await file.write(Buffer.from('secret'));
+    expect(() => scope.assertPayloadCurrent()).toThrow(/^backup_restore_payload_unavailable$/);
+    await file.close();
+    scope.ensureDirectory('empty');
+    scope.assertPayloadCurrent();
+    await Promise.resolve();
+    scope.assertPayloadCurrent();
+    expired = scope.assertPayloadCurrent;
+  });
+  expect(fs.existsSync(f.destination)).toBe(false);
+  expect(() => expired()).toThrow(/^backup_restore_payload_unavailable$/);
+});
+it.each(['content', 'missing', 'extra-file', 'extra-directory', 'parent', 'mode'])(
+  'refuses complete payload continuity after an awaited %s change',
+  async (kind) => {
+    const f = fixture();
+    await expect(
+      f.invoke(async (scope) => {
+        const file = await scope.sink.open('tree/file', 6);
+        await file.write(Buffer.from('secret'));
+        await file.close();
+        scope.assertPayloadCurrent();
+        await Promise.resolve();
+        if (kind === 'content') fs.writeFileSync(scope.directory + '/tree/file', 'forged');
+        if (kind === 'missing') fs.unlinkSync(scope.directory + '/tree/file');
+        if (kind === 'extra-file') fs.writeFileSync(scope.directory + '/unclaimed', 'PRIVATE', { mode: 0o600 });
+        if (kind === 'extra-directory') fs.mkdirSync(scope.directory + '/unclaimed', { mode: 0o700 });
+        if (kind === 'parent') {
+          fs.renameSync(scope.directory + '/tree', scope.directory + '/held');
+          fs.mkdirSync(scope.directory + '/tree', { mode: 0o700 });
+        }
+        if (kind === 'mode') fs.chmodSync(scope.directory + '/tree/file', 0o644);
+        expect(() => scope.assertPayloadCurrent()).toThrow(/^backup_restore_payload_unavailable$/);
+      }),
+    ).rejects.toThrow(/^backup_restore_workspace_unavailable$/);
+    expect(fs.existsSync(f.destination)).toBe(true);
+  },
+);
 it('writes only new private files through held descriptors and removes the verified isolated graph after checking', async () => {
   const f = fixture();
   let expired!: () => void;

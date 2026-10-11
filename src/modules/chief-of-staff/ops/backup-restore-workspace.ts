@@ -7,6 +7,9 @@ export type IsolatedBackupRestore = {
   directory: string;
   sink: BackupArchiveRestoreSink;
   assertCurrent(): void;
+  /** Check every owned node's identity and the complete directory inventory.
+   * Initial content hashes remain pinned; this does not allocate payload bytes. */
+  assertPayloadCurrent(): void;
   ensureDirectory(name: string): void;
   inspectFile(name: string): { file: string; bytes: number; sha256: string };
   /** Bytes are borrowed synchronously and wiped before this method returns. */
@@ -311,11 +314,42 @@ export async function withIsolatedBackupRestore<T>(
     const checkContent = (parent: number, basename: string, node: Node) => {
       if (!node.directory) readContent(parent, basename, node);
     };
+    const assertPayloadCurrent = () => {
+      try {
+        current();
+        if (closeFiles.size) throw Error('restore_files_unclosed');
+        const children = new Map<string, string[]>([['', []]]);
+        for (const [name, node] of nodes) {
+          if (node.directory) children.set(name, []);
+          else if (!node.sha256) throw Error('restore_file_unclosed');
+        }
+        for (const [name, node] of nodes) {
+          parents(name, false, (parent, basename) =>
+            same(node.stat, fs.lstatSync(path.join(pinned(parent), basename)), node.directory),
+          );
+          const parent = path.posix.dirname(name);
+          children.get(parent === '.' ? '' : parent)!.push(path.posix.basename(name));
+        }
+        for (const [name, expected] of children) {
+          const check = (fd: number) => {
+            if (fs.readdirSync(pinned(fd)).sort().join('\0') !== expected.sort().join('\0'))
+              throw Error('restore_graph_unowned');
+          };
+          if (name) parents(name + '/placeholder', false, check);
+          else check(rootFd!);
+        }
+        current();
+      } catch {
+        // eslint-disable-next-line preserve-caught-error -- Node continuity and graph diagnostics remain within the owned recovery scope.
+        throw Error('backup_restore_payload_unavailable');
+      }
+    };
     try {
       result = await operation({
         directory: pinned(rootFd),
         sink,
         assertCurrent: current,
+        assertPayloadCurrent,
         ensureDirectory,
         inspectFile,
         withFileBytes,

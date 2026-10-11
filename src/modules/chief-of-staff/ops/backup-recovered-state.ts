@@ -125,6 +125,7 @@ export async function verifyRecoveredTargetVaultState(
     const checkedScope: BackupRestoreValidationScope = {
         directory: scope.directory,
         assertCurrent: current,
+        assertPayloadCurrent: scope.assertPayloadCurrent,
         ensureDirectory: scope.ensureDirectory,
         inspectFile: scope.inspectFile,
         withFileBytes: scope.withFileBytes,

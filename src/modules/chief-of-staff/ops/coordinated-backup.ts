@@ -825,10 +825,10 @@ export async function restoreRecoveredCoordinatedTestScope(
       sandbox,
       reservation,
       async () => {
-        scope.assertCurrent();
+        scope.assertPayloadCurrent();
         if (digest(entries) !== inventoryDigest) throw Error('coordinated_restore_inventory_changed');
         await check();
-        scope.assertCurrent();
+        scope.assertPayloadCurrent();
         if (digest(entries) !== inventoryDigest) throw Error('coordinated_restore_inventory_changed');
       },
       async () => verifyRecoveredCoordinatedState(options, scope, entries),

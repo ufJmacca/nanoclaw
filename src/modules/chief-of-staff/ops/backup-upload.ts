@@ -443,6 +443,7 @@ export async function restoreVaultBackup<T>(
             Object.freeze({
               directory: workspace.directory,
               assertCurrent: workspace.assertCurrent,
+              assertPayloadCurrent: workspace.assertPayloadCurrent,
               ensureDirectory: workspace.ensureDirectory,
               inspectFile: workspace.inspectFile,
               withFileBytes: workspace.withFileBytes,
