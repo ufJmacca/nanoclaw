@@ -39,6 +39,12 @@ function fixture() {
     'scripts/cos-backup-keychain.swift': 'trusted backup credential code, never credential material',
     'scripts/cos-backup-keychain-fixture.swift': 'disposable host-native credential entry fixture',
     'scripts/cos-root-unit-fixture.sh': 'isolated root administration source fixture',
+    'container/fixtures/backup-smb/Dockerfile.server': 'pinned synthetic SMB server',
+    'container/fixtures/backup-smb/Dockerfile.client': 'immutable tested host CIFS client',
+    'container/fixtures/backup-smb/server.sh': 'dedicated synthetic account and share',
+    'container/fixtures/backup-smb/probe.mjs': 'actual signed kernel mount and encrypted transport',
+    'container/fixtures/backup-smb/unadmitted.mjs': 'UNADMITTED_SMB_CANARY',
+    'scripts/cos-backup-smb-fixture.sh': 'isolated internal network orchestration',
     'scripts/unadmitted.sh': 'UNADMITTED_SCRIPT_CANARY',
     '.env': 'PRIVATE_ENV_CANARY',
     'data/v2.db': 'PRIVATE_STATE_CANARY',
@@ -133,6 +139,26 @@ it('exports only the admitted vault drivers from the same source and binds their
   const after = await prepareBuildContext(f.repo, f.git('rev-parse', 'HEAD'), path.join(f.root, 'vault-second'));
   expect(after.buildInputDigest).not.toBe(before.buildInputDigest);
   expect(after.workerAssetsDigest).toBe(before.workerAssetsDigest);
+});
+it('exports only the exact signed SMB fixtures and binds committed transport checks into build identity', async () => {
+  const f = fixture(),
+    out = path.join(f.root, 'smb-first');
+  const first = await prepareBuildContext(f.repo, f.commit, out);
+  for (const name of [
+    'container/fixtures/backup-smb/Dockerfile.server',
+    'container/fixtures/backup-smb/Dockerfile.client',
+    'container/fixtures/backup-smb/server.sh',
+    'container/fixtures/backup-smb/probe.mjs',
+    'scripts/cos-backup-smb-fixture.sh',
+  ])
+    expect(fs.existsSync(path.join(out, name))).toBe(true);
+  expect(fs.existsSync(path.join(out, 'container/fixtures/backup-smb/unadmitted.mjs'))).toBe(false);
+  fs.writeFileSync(path.join(f.repo, 'container/fixtures/backup-smb/probe.mjs'), 'changed signed transport');
+  f.git('add', '.');
+  f.git('commit', '-qm', 'changed SMB fixture');
+  const second = await prepareBuildContext(f.repo, f.git('rev-parse', 'HEAD'), path.join(f.root, 'smb-second'));
+  expect(second.buildInputDigest).not.toBe(first.buildInputDigest);
+  expect(second.workerAssetsDigest).toBe(first.workerAssetsDigest);
 });
 it('binds the host backup credential helper to committed source without changing worker assets', async () => {
   const f = fixture(),

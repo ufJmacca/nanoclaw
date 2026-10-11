@@ -32,6 +32,11 @@ const vaultFiles = new Set([
   'scripts/cos-backup-keychain.swift',
   'scripts/cos-backup-keychain-fixture.swift',
   'scripts/cos-root-unit-fixture.sh',
+  'container/fixtures/backup-smb/Dockerfile.server',
+  'container/fixtures/backup-smb/Dockerfile.client',
+  'container/fixtures/backup-smb/server.sh',
+  'container/fixtures/backup-smb/probe.mjs',
+  'scripts/cos-backup-smb-fixture.sh',
 ]);
 function allowed(name: string): boolean {
   const pieces = name.split('/');
