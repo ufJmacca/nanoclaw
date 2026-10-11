@@ -769,11 +769,11 @@ test('capacity withdrawal and wrong repository identity refuse real retention wi
     maintainRepository(async () => {
       throw Error('fixture_capacity_exhausted');
     }),
-    /^Error: backup_maintenance_unavailable$/,
+    /^Error: backup_artifact_unverified$/,
   );
   await assert.rejects(
     maintainRepository(async () => {}, 'f'.repeat(64)),
-    /^Error: backup_maintenance_unavailable$/,
+    /^Error: backup_artifact_unverified$/,
   );
   assert.deepEqual(JSON.parse(run(['snapshots'])), JSON.parse(before));
 });
@@ -787,14 +787,19 @@ test('full data integrity failure refuses real maintenance before forgetting sna
     original = fs.readFileSync(file),
     changed = Buffer.from(original);
   const before = run(['snapshots']);
+  const mode = fs.statSync(file).mode & 0o777;
+  // Restic deliberately writes immutable read-only packs. Only this disposable
+  // synthetic fixture permits a byte change to exercise full data verification.
+  fs.chmodSync(file, 0o600);
   try {
     changed[0] ^= 1;
     fs.writeFileSync(file, changed);
-    await assert.rejects(maintainRepository(), /^Error: backup_maintenance_unavailable$/);
+    await assert.rejects(maintainRepository(), /^Error: backup_artifact_unverified$/);
     assert.deepEqual(JSON.parse(run(['snapshots'])), JSON.parse(before));
     assert.deepEqual(fs.readFileSync(file), changed);
   } finally {
     fs.writeFileSync(file, original);
+    fs.chmodSync(file, mode);
     original.fill(0);
     changed.fill(0);
   }
