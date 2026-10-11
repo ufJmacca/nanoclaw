@@ -42,8 +42,12 @@ for (const root of [config, units, settings.stateRoot, settings.installationRoot
 const manifest = fixtureVaultRelease('G02');
 const payload = settings.releaseRoot + '/' + manifest.releaseId + '/payload';
 fs.mkdirSync(payload + '/node/bin', { recursive: true, mode: 0o700 });
-fs.symlinkSync('/release/node/bin/node', payload + '/node/bin/node');
-fs.symlinkSync('/release/dist', payload + '/dist');
+// The installed command runs actual retained files. A symlinked entry has a
+// different argv path from its module URL and does not exercise its main route.
+fs.copyFileSync('/release/node/bin/node', payload + '/node/bin/node');
+fs.cpSync('/release/dist', payload + '/dist', { recursive: true });
+fs.copyFileSync('/release/package.json', payload + '/package.json');
+fs.symlinkSync('/release/node_modules', payload + '/node_modules');
 fs.writeFileSync(units + '/unrelated.service', '[Service]\nExecStart=/usr/bin/true\n', { mode: 0o600 });
 let current = true,
   proofs = 0;
