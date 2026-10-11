@@ -8,6 +8,7 @@ import { BackupQueue } from '../../modules/chief-of-staff/ops/backup-queue.js';
 import { BackupResticTransfer } from '../../modules/chief-of-staff/ops/backup-restic-transfer.js';
 import { BackupRepositoryWriter } from '../../modules/chief-of-staff/ops/backup-repository-lease.js';
 import { streamQueuedBackup } from '../../modules/chief-of-staff/ops/backup-archive-producer.js';
+import { withIsolatedBackupRestore } from '../../modules/chief-of-staff/ops/backup-restore-workspace.js';
 import {
   backupRetentionArguments,
   backupRepositoryHost,
@@ -610,6 +611,268 @@ test('fresh verification binds the original receipt to the authenticated archive
     },
   );
 });
+test('real remote restoration streams directly into new private files and retires only its verified isolated workspace', async () => {
+  const before = snapshotMetadata(),
+    staging = path.join(root, 'streamed-restore');
+  fs.mkdirSync(staging, { mode: 0o700 });
+  const fd = fs.openSync(staging, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+  try {
+    await withTransfer(
+      repositoryId,
+      async () => {
+        throw Error('must_not_upload');
+      },
+      async (transfer) =>
+        withIsolatedBackupRestore(
+          '/proc/self/fd/' + fd,
+          '5f74b367-fd8f-449c-a832-dbe40cff9ae3',
+          65536,
+          () => {},
+          async (scope) => {
+            const restored = await transfer.restore(
+              'credentials',
+              transferOperation,
+              'a'.repeat(64),
+              scope.sink,
+              async () => {},
+            );
+            assert.equal(restored.snapshotId, transferSnapshot);
+            assert.equal(restored.archiveBytes, transferArchive.bytes);
+            assert.equal(restored.archiveSha256, transferArchive.sha256);
+            assert.equal(fs.readFileSync(scope.directory + '/credentials/canary.json', 'utf8'), canary);
+            assert.equal(fs.statSync(scope.directory + '/credentials/canary.json').mode & 0o777, 0o600);
+            assert.equal(restored.receipt.ownerDigest, 'a'.repeat(64));
+          },
+        ),
+    );
+    assert.deepEqual(fs.readdirSync(staging), []);
+    assert.deepEqual(snapshotMetadata(), before);
+    assert.equal((await transferQueue.pending('credentials'))[0].operationId, transferOperation);
+    assert.deepEqual(fs.readdirSync(transferCache), []);
+  } finally {
+    fs.closeSync(fd);
+  }
+});
+test('real restoration denies a foreign receipt owner and missing checkpoint without destination files or remote changes', async () => {
+  const before = snapshotMetadata(),
+    staging = path.join(root, 'denied-restore');
+  fs.mkdirSync(staging, { mode: 0o700 });
+  const fd = fs.openSync(staging, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+  try {
+    for (const [op, owner] of [
+      [transferOperation, 'f'.repeat(64)],
+      ['3b86ed51-65c3-4a69-9f7d-21e1bf66291f', 'a'.repeat(64)],
+    ]) {
+      await assert.rejects(
+        withIsolatedBackupRestore(
+          '/proc/self/fd/' + fd,
+          '5f74b367-fd8f-449c-a832-dbe40cff9ae3',
+          65536,
+          () => {},
+          async (scope) =>
+            withTransfer(
+              repositoryId,
+              async () => {
+                throw Error('must_not_upload');
+              },
+              (transfer) => transfer.restore('credentials', op, owner, scope.sink, async () => {}),
+            ),
+        ),
+        /^Error: backup_restore_workspace_unavailable$/,
+      );
+      assert.deepEqual(fs.readdirSync(staging), []);
+    }
+    assert.deepEqual(snapshotMetadata(), before);
+  } finally {
+    fs.closeSync(fd);
+  }
+});
+test('real restoration refuses capacity withdrawn after its awaited repository identity without a completed destination', async () => {
+  const before = snapshotMetadata(),
+    staging = path.join(root, 'capacity-restore');
+  fs.mkdirSync(staging, { mode: 0o700 });
+  const fd = fs.openSync(staging, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+  let admissions = 0;
+  try {
+    await assert.rejects(
+      withIsolatedBackupRestore(
+        '/proc/self/fd/' + fd,
+        '5f74b367-fd8f-449c-a832-dbe40cff9ae3',
+        65536,
+        () => {},
+        async (scope) =>
+          withTransfer(
+            repositoryId,
+            async () => {
+              throw Error('must_not_upload');
+            },
+            (transfer) =>
+              transfer.restore('credentials', transferOperation, 'a'.repeat(64), scope.sink, async () => {
+                if (++admissions === 3) throw Error('synthetic_capacity_withdrawn');
+              }),
+          ),
+      ),
+      /^Error: backup_restore_workspace_unavailable$/,
+    );
+    assert.equal(admissions, 3);
+    assert.deepEqual(fs.readdirSync(staging), []);
+    assert.deepEqual(snapshotMetadata(), before);
+  } finally {
+    fs.closeSync(fd);
+  }
+});
+test('real restoration handles long PAX paths and empty files through bounded streaming sinks', async () => {
+  const op = 'ea948d0b-d06d-4335-94a1-e99b446d40a3',
+    name = 'artifacts/' + 'a'.repeat(64) + '-' + 'b'.repeat(64) + '.blob';
+  await transferQueue.capture(
+    'credentials',
+    op,
+    async (sink) => {
+      sink.write(name, Buffer.alloc(150000, 0x41));
+      sink.write('empty', Buffer.alloc(0));
+    },
+    262144,
+  );
+  const archive = await streamQueuedBackup(transferQueue, 'credentials', op, async () => {}),
+    staging = path.join(root, 'pax-restore');
+  fs.mkdirSync(staging, { mode: 0o700 });
+  const fd = fs.openSync(staging, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+  try {
+    await withTransfer(
+      repositoryId,
+      async () => {},
+      async (transfer, current) => {
+        await transfer.upload('credentials', op, archive);
+        await withIsolatedBackupRestore(
+          '/proc/self/fd/' + fd,
+          '5f74b367-fd8f-449c-a832-dbe40cff9ae3',
+          262144,
+          () => {},
+          async (scope) => {
+            const result = await transfer.restore('credentials', op, 'a'.repeat(64), scope.sink, async () => {});
+            assert.equal(result.archiveBytes, archive.bytes);
+            assert.equal(result.archiveSha256, archive.sha256);
+            assert.deepEqual(fs.readFileSync(scope.directory + '/' + name), Buffer.alloc(150000, 0x41));
+            assert.equal(fs.statSync(scope.directory + '/empty').size, 0);
+          },
+        );
+        await transferQueue.retirePending('credentials', op, async (request) => ({
+          checkpoint: await transfer.verify('credentials', op, request.archive, request.receipt),
+          assertCurrent: current,
+        }));
+      },
+    );
+    assert.deepEqual(fs.readdirSync(staging), []);
+    assert.deepEqual(
+      (await transferQueue.pending('credentials')).map((receipt) => receipt.operationId),
+      [transferOperation],
+    );
+  } finally {
+    fs.closeSync(fd);
+  }
+});
+test('real authenticated Restic data with noncanonical application framing is refused before file extraction', async () => {
+  const op = 'f32b1639-fb26-4627-b1d9-76b19c029c74';
+  run(
+    [
+      'backup',
+      '--stdin',
+      '--stdin-filename',
+      'checkpoint.tar',
+      '--host',
+      backupRepositoryHost(transferOwner),
+      ...backupSnapshotTags(transferOwner, 'credentials', op).flatMap((tag) => ['--tag', tag]),
+    ],
+    Buffer.alloc(2048, 0x41),
+  );
+  const before = snapshotMetadata(),
+    staging = path.join(root, 'framing-restore');
+  fs.mkdirSync(staging, { mode: 0o700 });
+  const fd = fs.openSync(staging, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+  try {
+    await assert.rejects(
+      withIsolatedBackupRestore(
+        '/proc/self/fd/' + fd,
+        '5f74b367-fd8f-449c-a832-dbe40cff9ae3',
+        65536,
+        () => {},
+        async (scope) =>
+          withTransfer(
+            repositoryId,
+            async () => {
+              throw Error('must_not_upload');
+            },
+            (transfer) => transfer.restore('credentials', op, 'a'.repeat(64), scope.sink, async () => {}),
+          ),
+      ),
+      /^Error: backup_restore_workspace_unavailable$/,
+    );
+    assert.deepEqual(fs.readdirSync(staging), []);
+    assert.deepEqual(snapshotMetadata(), before);
+  } finally {
+    fs.closeSync(fd);
+  }
+});
+test('real streaming restoration stops on scope withdrawal and holds only its new private residue', async () => {
+  const staging = path.join(root, 'withdrawn-restore'),
+    before = snapshotMetadata();
+  fs.mkdirSync(staging, { mode: 0o700 });
+  const fd = fs.openSync(staging, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+  let allowed = true,
+    writes = 0;
+  const guard = () => {
+    if (!allowed) throw Error('synthetic_scope_withdrawn');
+  };
+  try {
+    await assert.rejects(
+      withIsolatedBackupRestore(
+        '/proc/self/fd/' + fd,
+        '5f74b367-fd8f-449c-a832-dbe40cff9ae3',
+        65536,
+        guard,
+        async (scope) =>
+          withTransfer(
+            repositoryId,
+            async () => {
+              throw Error('must_not_upload');
+            },
+            (transfer) =>
+              transfer.restore(
+                'credentials',
+                transferOperation,
+                'a'.repeat(64),
+                {
+                  async open(name, bytes) {
+                    const file = await scope.sink.open(name, bytes);
+                    return {
+                      ...file,
+                      async write(chunk) {
+                        await file.write(chunk);
+                        writes++;
+                        allowed = false;
+                      },
+                    };
+                  },
+                },
+                async () => {},
+              ),
+            transferProducer,
+            900000,
+            guard,
+          ),
+      ),
+      /^Error: backup_restore_workspace_unavailable$/,
+    );
+    assert.equal(writes, 1);
+    assert.equal(
+      fs.readFileSync(staging + '/.cos-restore-5f74b367-fd8f-449c-a832-dbe40cff9ae3/credentials/canary.json', 'utf8'),
+      canary,
+    );
+    assert.deepEqual(snapshotMetadata(), before);
+  } finally {
+    fs.closeSync(fd);
+  }
+});
 test('a mismatched remote archive cannot be acknowledged as a verified checkpoint', async () => {
   await assert.rejects(
     withTransfer(
@@ -869,6 +1132,44 @@ test('real remote receipt verification recovers interrupted queue retirement and
   assert.equal((await transferQueue.pending('credentials'))[0].operationId, next);
   assert.deepEqual((JSON.parse(run(['snapshots'])) as Array<{ id: string }>).map((value) => value.id).sort(), before);
   run(['check', '--read-data']);
+});
+test('real restoration still recovers the original checkpoint after its queued plaintext source has been retired', async () => {
+  const staging = path.join(root, 'retired-source-restore'),
+    before = snapshotMetadata();
+  fs.mkdirSync(staging, { mode: 0o700 });
+  const fd = fs.openSync(staging, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+  assert(!fs.existsSync(path.join(transferArea, 'backup-queue', transferOperation, 'data')));
+  try {
+    await withTransfer(
+      repositoryId,
+      async () => {
+        throw Error('must_not_upload');
+      },
+      (transfer) =>
+        withIsolatedBackupRestore(
+          '/proc/self/fd/' + fd,
+          '5f74b367-fd8f-449c-a832-dbe40cff9ae3',
+          65536,
+          () => {},
+          async (scope) => {
+            const restored = await transfer.restore(
+              'credentials',
+              transferOperation,
+              'a'.repeat(64),
+              scope.sink,
+              async () => {},
+            );
+            assert.equal(restored.snapshotId, transferSnapshot);
+            assert.equal(restored.archiveSha256, transferArchive.sha256);
+            assert.equal(fs.readFileSync(scope.directory + '/credentials/canary.json', 'utf8'), canary);
+          },
+        ),
+    );
+    assert.deepEqual(fs.readdirSync(staging), []);
+    assert.deepEqual(snapshotMetadata(), before);
+  } finally {
+    fs.closeSync(fd);
+  }
 });
 after(() => {
   for (const fd of [passwordFd, repositoryFd, binaryFd, cacheFd]) fs.closeSync(fd);
