@@ -45,7 +45,7 @@ docker buildx ls --format '{{json .}}' > "$directory/builders.jsonl"
 cli builder "$id"
 deploy_cli() { docker exec -w /workspace "$dev" node --import tsx src/modules/chief-of-staff/ops/mac-deploy-cli.ts "$@"; }
 alias_name=$(deploy_cli alias)
-ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=15 "$alias_name" "$(deploy_cli preflight-command)" > "$directory/target-observation.json"
+ssh -4 -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=15 "$alias_name" "$(deploy_cli preflight-command)" > "$directory/target-observation.json"
 cli target "$id"
 builder=$(cli field "$id" builder)
 context=$(cli field "$id" context)
@@ -130,7 +130,7 @@ cli images "$id"
 host_image=$(cli field "$id" host-id)
 standard_image=$(cli field "$id" agent-standard-id)
 documents_image=$(cli field "$id" agent-documents-id)
-if [[ "$slice" == G01 ]]; then
+if [[ "$slice" == G01 || "$slice" == G02 ]]; then
   docker run --rm --pull=never --network=none "$host_image" --input-type=module \
     -e 'import fs from "node:fs";const root="/release/vault-artifacts";const names=fs.readdirSync(root);if(names.length!==1)process.exit(1);process.stdout.write(fs.readFileSync(root+"/"+names[0]+"/artifact.json","utf8"))' > "$directory/vault-artifact.json"
   cli vault-artifact "$id"
@@ -150,6 +150,19 @@ if [[ "$slice" == G01 ]]; then
   check vault_units bash "$directory/context/scripts/cos-vault-fixture.sh" units "$vault_image"
   check vault_kernel bash "$directory/context/scripts/cos-vault-fixture.sh" kernel "$vault_image" "$directory/context/scripts/cos-vault-keychain.swift"
   check vault_wire cli vault-wire "$id"
+fi
+if [[ "$slice" == G02 ]]; then
+  jobs_tag="nanoclaw-cos-backup-jobs-fixture:$id"
+  [[ "$(docker image inspect --format '{{.Id}}' "$vault_host")" == "$host_image" ]] || exit 1
+  docker --context "$context" buildx build --builder "$builder" --platform linux/arm64 --provenance=false --load \
+    --build-arg "HOST_IMAGE=$vault_host" --build-arg "HOST_IMAGE_ID=$host_image" \
+    --build-arg "SOURCE_COMMIT=$commit" --build-arg "SOURCE_TREE=$tree" \
+    -f "$directory/context/container/fixtures/backup-jobs/Dockerfile.release" -t "$jobs_tag" \
+    "$directory/context/container/fixtures/backup-jobs" > "$directory/backup-jobs-fixture-build.log" 2>&1
+  [[ "$(docker image inspect --format '{{.Id}}' "$vault_host")" == "$host_image" ]] || exit 1
+  docker image inspect "$jobs_tag" > "$directory/backup-jobs-fixture-inspect.json"
+  jobs_image=$(cli backup-job-fixture "$id")
+  check backup_units bash "$directory/context/scripts/cos-backup-jobs-fixture.sh" "$jobs_image"
 fi
 # Daemon-native paths are required for worker Unix sockets. Only this release's synthetic volume is used.
 volume="cos-${commit:0:8}-$stamp"
@@ -215,7 +228,7 @@ isolation_checks() {
 check image_isolation isolation_checks
 check agent_image agent_checks
 check host_image host_checks
-if [[ "$slice" == G01 ]]; then
+if [[ "$slice" == G01 || "$slice" == G02 ]]; then
   # Actual compiled native state, backed up while WAL pages are committed; no live stores are mounted.
   check protected_state docker run --rm --pull=never --network=none --read-only --user 1000:1000 \
     --tmpfs /tmp:rw,nosuid,nodev "$host_image" --test \

@@ -32,7 +32,7 @@ if [[ "$mode" == backup-kernel ]]; then
 fi
 # A fresh disposable Keychain item feeds the private pipe. Neither stream is logged or written to a key file.
 swift "$3" fixture-stream | docker run --rm -i --pull=never --network=none --cap-add SYS_ADMIN \
-  "${backup_options[@]}" \
+  ${backup_options[@]+"${backup_options[@]}"} \
   --device /dev/loop-control \
   --device-cgroup-rule 'b 7:* rwm' --device-cgroup-rule "b $dm_major:* rwm" \
   --device-cgroup-rule 'c 10:236 rwm' --device-cgroup-rule 'c 10:237 rwm' \

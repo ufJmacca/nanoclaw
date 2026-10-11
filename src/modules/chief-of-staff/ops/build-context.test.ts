@@ -47,6 +47,11 @@ function fixture() {
     'container/fixtures/backup-smb/probe.mjs': 'actual signed kernel mount and encrypted transport',
     'container/fixtures/backup-smb/unadmitted.mjs': 'UNADMITTED_SMB_CANARY',
     'scripts/cos-backup-smb-fixture.sh': 'isolated internal network orchestration',
+    'container/fixtures/backup-jobs/Dockerfile.release': 'immutable host-derived service-manager fixture',
+    'container/fixtures/backup-jobs/probe-release.mjs': 'actual compiled installer and manager probe',
+    'container/fixtures/backup-jobs/Dockerfile': 'UNADMITTED_MUTABLE_JOB_FIXTURE',
+    'container/fixtures/backup-jobs/unadmitted.mjs': 'UNADMITTED_JOB_CANARY',
+    'scripts/cos-backup-jobs-fixture.sh': 'isolated source-bound user-manager driver',
     'scripts/unadmitted.sh': 'UNADMITTED_SCRIPT_CANARY',
     '.env': 'PRIVATE_ENV_CANARY',
     'data/v2.db': 'PRIVATE_STATE_CANARY',
@@ -181,6 +186,25 @@ it('binds the host backup credential helper to committed source without changing
   f.git('add', '.');
   f.git('commit', '-qm', 'changed credential driver');
   const after = await prepareBuildContext(f.repo, f.git('rev-parse', 'HEAD'), path.join(f.root, 'backup-second'));
+  expect(after.buildInputDigest).not.toBe(before.buildInputDigest);
+  expect(after.workerAssetsDigest).toBe(before.workerAssetsDigest);
+});
+it('exports only immutable job-manager fixtures and binds their committed bytes', async () => {
+  const f = fixture(),
+    first = path.join(f.root, 'jobs-first');
+  const before = await prepareBuildContext(f.repo, f.commit, first);
+  for (const name of [
+    'container/fixtures/backup-jobs/Dockerfile.release',
+    'container/fixtures/backup-jobs/probe-release.mjs',
+    'scripts/cos-backup-jobs-fixture.sh',
+  ])
+    expect(fs.existsSync(path.join(first, name))).toBe(true);
+  for (const name of ['container/fixtures/backup-jobs/Dockerfile', 'container/fixtures/backup-jobs/unadmitted.mjs'])
+    expect(fs.existsSync(path.join(first, name))).toBe(false);
+  fs.writeFileSync(path.join(f.repo, 'container/fixtures/backup-jobs/probe-release.mjs'), 'changed real manager probe');
+  f.git('add', '.');
+  f.git('commit', '-qm', 'changed manager probe');
+  const after = await prepareBuildContext(f.repo, f.git('rev-parse', 'HEAD'), path.join(f.root, 'jobs-second'));
   expect(after.buildInputDigest).not.toBe(before.buildInputDigest);
   expect(after.workerAssetsDigest).toBe(before.workerAssetsDigest);
 });
