@@ -88,6 +88,34 @@ function paxPath(name: string): Buffer {
   while (length !== text.length + String(length).length) length = text.length + String(length).length;
   return Buffer.from(String(length) + text, 'ascii');
 }
+/** Canonical entry framing shared by the owned producer and restore reader.
+ * This produces bytes only; it grants no file or restore permission. */
+export function backupArchiveEntryPrefix(name: string, size: number, index: number): Buffer {
+  if (
+    typeof name !== 'string' ||
+    name.length > 200 ||
+    !name.split('/').every((part) => /^(?:[A-Za-z0-9]|\.cos-)[A-Za-z0-9_.-]*$/.test(part)) ||
+    !Number.isSafeInteger(size) ||
+    size < 0 ||
+    size > BACKUP_LIMITS.staging ||
+    !Number.isSafeInteger(index) ||
+    index < 0 ||
+    index > 4096
+  )
+    throw Error('archive_entry_bounds');
+  if (name.length <= 100) return header(name, size);
+  const pax = paxPath(name);
+  try {
+    return Buffer.concat([
+      header('PaxHeaders/' + index, pax.length, 'x'),
+      pax,
+      Buffer.alloc((512 - (pax.length % 512)) % 512),
+      header('PaxFile/' + index, size),
+    ]);
+  } finally {
+    pax.fill(0);
+  }
+}
 function identity(before: fs.Stats, after: fs.Stats, content = false): void {
   if (
     before.dev !== after.dev ||
@@ -149,17 +177,7 @@ export async function streamBackupArchive(
       if (size % 512) await owned(Buffer.alloc(512 - (size % 512)));
     };
     const entry = async (name: string, size: number, index: number) => {
-      if (name.length > 100) {
-        const pax = paxPath(name);
-        try {
-          await owned(header('PaxHeaders/' + index, pax.length, 'x'));
-          await send(pax);
-          await padding(pax.length);
-        } finally {
-          pax.fill(0);
-        }
-        await owned(header('PaxFile/' + index, size));
-      } else await owned(header(name, size));
+      await owned(backupArchiveEntryPrefix(name, size, index));
     };
     await entry('cos-backup-receipt.json', metadata.length, 0);
     for (let offset = 0; offset < metadata.length; offset += 65536)
