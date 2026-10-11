@@ -7,7 +7,8 @@ RUN rm -f /etc/apt/sources.list.d/debian.sources && \
     apt-get update && apt-get install -y --no-install-recommends cifs-utils=2:7.4-1 util-linux mount libstdc++6
 COPY --from=release /release /release
 COPY probe.mjs /fixture/probe.mjs
-RUN chmod 0555 /fixture && chmod 0444 /fixture/probe.mjs
+RUN chmod 0555 /fixture && chmod 0444 /fixture/probe.mjs && \
+    /release/node/bin/node --input-type=module -e 'if(process.platform!=="linux"||process.arch!=="arm64"||process.version!=="v22.23.2")process.exit(1);const {verifyResticReleasePayload}=await import("/release/dist/modules/chief-of-staff/ops/restic-release-payload.js");verifyResticReleasePayload("/release/libexec")'
 ARG SOURCE_COMMIT
 ARG SOURCE_TREE
 ARG HOST_IMAGE_ID

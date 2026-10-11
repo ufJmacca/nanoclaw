@@ -61,6 +61,10 @@ COPY --from=host-build /usr/local/bin/node /release/node/bin/node
 # Used only by trusted Mac final-image fixtures. The extracted Pi payload uses its existing host Docker CLI.
 COPY --from=docker-cli /usr/local/bin/docker /usr/bin/docker
 WORKDIR /release
+# Check the copied payload in the output layer as well as its builder input.
+# A storage fault must not publish an empty or changed runtime as a successful image.
+RUN test -s /release/node/bin/node && cmp /usr/local/bin/node /release/node/bin/node && \
+    /release/node/bin/node --input-type=module -e 'if(process.platform!=="linux"||process.arch!=="arm64"||process.version!=="v22.23.2")process.exit(1);const {default:Database}=await import("./node_modules/better-sqlite3/lib/index.js");const db=new Database(":memory:");if(db.prepare("select 1 as n").get().n!==1)process.exit(1);db.close()'
 ENTRYPOINT ["/release/node/bin/node"]
 CMD ["/release/dist/index.js"]
 
