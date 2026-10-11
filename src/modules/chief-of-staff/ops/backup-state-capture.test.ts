@@ -632,6 +632,76 @@ it.runIf(process.env.COS_TEST_TARGET_ID !== undefined).each([false, true])(
       expect(second.status).toBe('skipped_pending');
       expect(connections).toBe(1);
       expect(fs.existsSync(s.settings.stateRoot + '/releases')).toBe(false);
+      const { createVaultBackupQueue } = await import('./backup-queue.js'),
+        { streamBackupArchive } = await import('./backup-archive.js'),
+        { readBackupArchive } = await import('./backup-archive-reader.js'),
+        { verifyRecoveredCoordinatedState } = await import('./coordinated-backup.js'),
+        { verifyRecoveredPrivateHistory } = await import('./private-history-backup.js'),
+        queue = createVaultBackupQueue(roots),
+        chunks: Buffer[] = [];
+      await queue.withPending('state', result.queueOperationId, async (directory, receipt) => {
+        await streamBackupArchive(directory, receipt, async (bytes) => {
+          chunks.push(Buffer.from(bytes));
+        });
+      });
+      const archive = Buffer.concat(chunks),
+        pending = await queue.pending('state'),
+        header = JSON.parse(fs.readFileSync(data + '/state-capture.json', 'utf8')),
+        journal = fs.readFileSync(s.witness.root + '/owner.json');
+      try {
+        await queue.withRestoreWorkspace(
+          randomUUID(),
+          () => {},
+          async (workspace) => {
+            const source = {
+              async *[Symbol.asyncIterator]() {
+                for (let offset = 0; offset < archive.length; offset += 65536)
+                  yield Buffer.from(archive.subarray(offset, offset + 65536));
+              },
+            };
+            const read = await readBackupArchive(
+              source,
+              { ownerDigest: pending[0].ownerDigest, kind: 'state', operationId: result.queueOperationId },
+              workspace.sink,
+              workspace.assertCurrent,
+            );
+            const checked = verifyRecoveredCoordinatedState(
+              {
+                ...header.inputs,
+                operationId: s.operationId,
+                databaseFingerprint: fingerprint,
+                artifacts: { root: header.inputs.artifactsRoot },
+                witness: s.witness,
+              },
+              workspace,
+              read.receipt.files,
+            );
+            expect(checked.checkpoint.rows.records[0].title).toBe(sentinel);
+            expect(JSON.stringify(checked.checkpoint)).not.toContain(foreign);
+            expect(checked.checkpoint.rows.revocation_tombstones[0].kind).toBe('revoke');
+            expect(checked.admissionRestored).toBe(false);
+            expect(checked.eventJournalRestored).toBe(false);
+            expect(
+              verifyRecoveredPrivateHistory(
+                workspace,
+                read.receipt.files,
+                s.settings.stateRoot + '/conversations',
+                'conversation',
+              ).files,
+            ).toBe(1);
+            expect(
+              verifyRecoveredPrivateHistory(workspace, read.receipt.files, s.settings.stateRoot, 'mission').files,
+            ).toBe(1);
+          },
+        );
+      } finally {
+        archive.fill(0);
+      }
+      expect(await queue.pending('state')).toEqual(pending);
+      expect(fs.readFileSync(s.witness.root + '/owner.json')).toEqual(journal);
+      expect(s.native.prepare('SELECT * FROM ordinary_messages').all()).toEqual(before.messages);
+      expect(s.native.prepare('SELECT * FROM cos_model_budgets').all()).toEqual(before.budgets);
+      expect(fs.readdirSync(f.areas.staging)).toEqual(['backup-queue']);
     } finally {
       if (!inserted) await admin.query('ROLLBACK');
       else {

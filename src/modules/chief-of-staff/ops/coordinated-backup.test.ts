@@ -13,6 +13,8 @@ import {
   verifyCoordinatedLocalSandbox,
   verifyCoordinatedBackup,
   restoreCoordinatedTestScope,
+  verifyRecoveredCoordinatedState,
+  type CoordinatedBackupReceipt,
   type CoordinatedBackupOptions,
   type QuiescentCheckpoint,
 } from './coordinated-backup.js';
@@ -22,6 +24,9 @@ import { ActionWitness, initializeActionWitness } from '../actions/witness.js';
 import { MIGRATIONS, SCHEMA_VERSION } from '../store/migrations.js';
 import { digest } from '../domain/contracts.js';
 import { BackupQueue } from './backup-queue.js';
+import { streamBackupArchive } from './backup-archive.js';
+import { readBackupArchive } from './backup-archive-reader.js';
+import { createHash } from 'node:crypto';
 const roots: string[] = [];
 afterEach(() => {
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
@@ -100,6 +105,157 @@ function fixture() {
   };
   return { root, source, restriction, query, options, quiescent, archive: path.join(root, 'receipt', 'coordinated') };
 }
+async function recoveredFixture(
+  mutate?: (files: Map<string, Buffer>, receipt: CoordinatedBackupReceipt, f: ReturnType<typeof fixture>) => void,
+) {
+  const f = fixture(),
+    files = new Map<string, Buffer>();
+  const receipt = await captureCoordinatedState(f.options, {
+    write(name, bytes) {
+      files.set(name, Buffer.concat([files.get(name) ?? Buffer.alloc(0), bytes]));
+    },
+  });
+  mutate?.(files, receipt, f);
+  files.set('coordinated/manifest.json', Buffer.from(JSON.stringify(receipt) + '\n'));
+  fs.mkdirSync(f.root + '/queue-state', { mode: 0o700 });
+  const owner = 'a'.repeat(64),
+    queue = new BackupQueue(owner, async (_kind, callback) => callback(f.root + '/queue-state'));
+  await queue.capture(
+    'state',
+    f.options.operationId,
+    async (sink) => {
+      for (const [name, bytes] of files) sink.write(name, bytes);
+    },
+    1024 ** 2,
+  );
+  const chunks: Buffer[] = [];
+  await queue.withPending('state', f.options.operationId, async (directory, current) =>
+    streamBackupArchive(directory, current, async (bytes) => {
+      chunks.push(Buffer.from(bytes));
+    }),
+  );
+  const archive = Buffer.concat(chunks),
+    before = await queue.pending('state');
+  let diagnostic: unknown;
+  const recover = async (diagnostics = false) => {
+    try {
+      return await queue.withRestoreWorkspace(
+        randomUUID(),
+        () => {},
+        async (scope) => {
+          const source = {
+            async *[Symbol.asyncIterator]() {
+              for (let offset = 0; offset < archive.length; offset += 65536)
+                yield Buffer.from(archive.subarray(offset, offset + 65536));
+            },
+          };
+          const read = await readBackupArchive(
+            source,
+            { ownerDigest: owner, kind: 'state', operationId: f.options.operationId },
+            scope.sink,
+            scope.assertCurrent,
+          );
+          try {
+            return verifyRecoveredCoordinatedState(f.options, scope, read.receipt.files);
+          } catch (error) {
+            diagnostic = error;
+            throw error;
+          }
+        },
+      );
+    } catch (error) {
+      if (diagnostics && diagnostic) throw diagnostic;
+      throw error;
+    } finally {
+      expect(await queue.pending('state')).toEqual(before);
+    }
+  };
+  return { ...f, receipt, recover };
+}
+it('validates the recovered coordinated checkpoint directly through owned descriptors without copying or restoring authority', async () => {
+  const f = await recoveredFixture();
+  const native = fs.readFileSync(f.source),
+    restrictions = fs.readFileSync(f.restriction),
+    journal = fs.readFileSync(f.options.witness.root + '/owner.json'),
+    before = f.query.mock.calls.length;
+  const checked = await f.recover(true);
+  expect(checked.receipt).toEqual(f.receipt);
+  expect(checked.checkpoint.rows.scopes).toEqual([{ id: 'scope', owner_id: 'owner', agent_group_id: 'group' }]);
+  expect(checked).toMatchObject({ admissionRestored: false, eventJournalRestored: false, nativeDatabasesVerified: 1 });
+  expect(f.query.mock.calls.length).toBe(before);
+  expect(fs.readFileSync(f.source)).toEqual(native);
+  expect(fs.readFileSync(f.restriction)).toEqual(restrictions);
+  expect(fs.readFileSync(f.options.witness.root + '/owner.json')).toEqual(journal);
+  expect(fs.readdirSync(f.root + '/queue-state')).toEqual(['backup-queue']);
+});
+it.each([
+  'schema',
+  'context',
+  'inputs',
+  'journal',
+  'admission',
+  'unsafe-file',
+  'extra-file',
+  'foreign-table',
+  'foreign-scope',
+  'foreign-owner',
+  'native-corrupt',
+  'secret-restriction',
+])('rejects authenticated but invalid recovered coordinated payload %s', async (reason) => {
+  const f = await recoveredFixture((files, receipt) => {
+    if (reason === 'schema') receipt.schemaDigest = 'f'.repeat(64);
+    if (reason === 'context') receipt.contextDigest = 'f'.repeat(64);
+    if (reason === 'inputs') receipt.inputsDigest = 'f'.repeat(64);
+    if (reason === 'journal') receipt.journal.generation = randomUUID();
+    if (reason === 'admission') receipt.admissionRestored = true as never;
+    if (reason === 'unsafe-file') receipt.sqlite[0].file = '../../native.sqlite';
+    if (reason === 'extra-file') files.set('coordinated/unclaimed.json', Buffer.from('PRESERVE'));
+    if (['foreign-table', 'foreign-scope', 'foreign-owner'].includes(reason)) {
+      const checkpoint = JSON.parse(files.get('coordinated/remote.json')!.toString());
+      if (reason === 'foreign-table') {
+        checkpoint.rows.foreign = [];
+        checkpoint.columns.foreign = ['scope_id'];
+      }
+      if (reason === 'foreign-scope') checkpoint.rows.scopes[0].id = 'another-scope';
+      if (reason === 'foreign-owner') checkpoint.rows.scopes[0].owner_id = 'another-owner';
+      const bytes = Buffer.from(JSON.stringify(checkpoint) + '\n');
+      files.set('coordinated/remote.json', bytes);
+      receipt.remote = {
+        ...receipt.remote,
+        bytes: bytes.length,
+        sha256: createHash('sha256').update(bytes).digest('hex'),
+      };
+    }
+    if (reason === 'native-corrupt') {
+      const bytes = files.get('coordinated/' + receipt.sqlite[0].file)!;
+      bytes[100] = 0xff;
+      receipt.sqlite[0].sha256 = createHash('sha256').update(bytes).digest('hex');
+    }
+    if (reason === 'secret-restriction') {
+      const bytes = Buffer.from(JSON.stringify({ scopeId: 'scope', access_token: 'SYNTHETIC_PRIVATE' }));
+      files.set('coordinated/' + receipt.restrictions[0].file, bytes);
+      receipt.restrictions[0] = {
+        ...receipt.restrictions[0],
+        bytes: bytes.length,
+        sha256: createHash('sha256').update(bytes).digest('hex'),
+      };
+    }
+  });
+  await expect(f.recover()).rejects.toThrow(/^backup_restore_workspace_unavailable$/);
+  expect(fs.readdirSync(f.root + '/queue-state')).toEqual(['backup-queue']);
+});
+it('refuses recovery after the current independent journal changes and preserves the new journal', async () => {
+  const f = await recoveredFixture(),
+    file = f.options.witness.root + '/owner.json';
+  const next = {
+    format: 'cos-action-witness-owner/v1',
+    installationDigest: f.options.witness.installationDigest,
+    generation: randomUUID(),
+  };
+  fs.writeFileSync(file, JSON.stringify(next), { mode: 0o600 });
+  await expect(f.recover()).rejects.toThrow(/^backup_restore_workspace_unavailable$/);
+  expect(JSON.parse(fs.readFileSync(file, 'utf8'))).toEqual(next);
+});
 const sandboxConfig = {
   host: '10.0.0.2',
   port: 5432,

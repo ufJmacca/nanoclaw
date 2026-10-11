@@ -9,8 +9,9 @@ import type { KnowledgeArtifacts } from '../knowledge/artifacts.js';
 import type { ActionWitness } from '../actions/witness.js';
 import { MIGRATIONS, SCHEMA_VERSION, migrationStatus } from '../store/migrations.js';
 import { backupNativeDatabase } from './native-installation.js';
-import { captureNativeDatabase } from './backup-native.js';
-import type { BackupSnapshotSink } from './backup-queue.js';
+import { captureNativeDatabase, verifyRecoveredNativeDatabase } from './backup-native.js';
+import type { BackupSnapshotSink, BackupQueueReceipt } from './backup-queue.js';
+import type { BackupRestoreValidationScope } from './backup-restore-workspace.js';
 import { readPrivate, writeAtomic } from './target-state.js';
 import { artifactHash } from './release-artifacts.js';
 import { assertTestTarget } from '../store/preflight.js';
@@ -38,6 +39,7 @@ export type CoordinatedBackupOptions = {
 export type CoordinatedBackupIdentity = Omit<CoordinatedBackupOptions, 'client' | 'quiescent' | 'artifacts'> & {
   artifacts: Pick<KnowledgeArtifacts, 'root'>;
 };
+export type CoordinatedRecoveryIdentity = Omit<CoordinatedBackupIdentity, 'receiptRoot'>;
 export type ScopeCheckpoint = {
   format: 'cos-scoped-checkpoint/v1';
   scopeId: string;
@@ -91,7 +93,9 @@ export const CHECKPOINT_TABLES = [
   ),
 ].sort();
 const maximumRemoteBytes = 64 * 1024 * 1024;
-const inputsDigest = (options: CoordinatedBackupIdentity) =>
+const inputsDigest = (
+  options: Pick<CoordinatedRecoveryIdentity, 'nativeDatabases' | 'restrictionFiles' | 'artifacts'>,
+) =>
   digest({
     nativeDatabases: options.nativeDatabases,
     artifactsRoot: options.artifacts.root,
@@ -184,7 +188,7 @@ async function barrier(
   journalCurrent(options);
   return digest(value);
 }
-function journalCurrent(options: CoordinatedBackupIdentity) {
+function journalCurrent(options: Pick<CoordinatedRecoveryIdentity, 'witness'>) {
   // Validate the live independent journal. A backup never replaces or initializes it.
   directory(options.witness.root);
   const journal = readPrivate(path.join(options.witness.root, 'owner.json'));
@@ -200,6 +204,11 @@ function journalCurrent(options: CoordinatedBackupIdentity) {
 }
 function parameters(options: CoordinatedBackupIdentity) {
   directory(options.receiptRoot);
+  const root = path.join(options.receiptRoot, 'coordinated');
+  identityParameters(options, root);
+  return root;
+}
+function identityParameters(options: CoordinatedRecoveryIdentity, root?: string) {
   if (
     !/^[a-zA-Z0-9_-]{1,200}$/.test(options.context.scopeId) ||
     options.context.origin ||
@@ -211,7 +220,6 @@ function parameters(options: CoordinatedBackupIdentity) {
     options.restrictionFiles.length > 4096
   )
     throw new Error('invalid_coordinated_backup');
-  const root = path.join(options.receiptRoot, 'coordinated');
   for (const source of [
     ...options.nativeDatabases,
     ...options.restrictionFiles,
@@ -221,9 +229,7 @@ function parameters(options: CoordinatedBackupIdentity) {
     if (
       !path.isAbsolute(source) ||
       path.resolve(source) !== source ||
-      source === root ||
-      source.startsWith(root + '/') ||
-      root.startsWith(source + '/')
+      (root && (source === root || source.startsWith(root + '/') || root.startsWith(source + '/')))
     )
       throw new Error('unsafe_coordinated_backup');
   }
@@ -233,7 +239,6 @@ function parameters(options: CoordinatedBackupIdentity) {
     )
   )
     throw new Error('unsafe_coordinated_backup');
-  return root;
 }
 async function remoteSnapshot(
   options: Pick<CoordinatedBackupOptions, 'client' | 'context' | 'databaseFingerprint'>,
@@ -423,24 +428,7 @@ async function verify(options: CoordinatedBackupIdentity): Promise<CoordinatedBa
   journalCurrent(options);
   directory(root);
   const value = readPrivate<CoordinatedBackupReceipt>(path.join(root, 'manifest.json'), 1024 * 1024);
-  if (
-    value.format !== 'cos-coordinated-backup/v1' ||
-    value.operationId !== options.operationId ||
-    value.contextDigest !== digest(options.context) ||
-    value.inputsDigest !== inputsDigest(options) ||
-    value.databaseFingerprint !== options.databaseFingerprint ||
-    value.schemaVersion !== SCHEMA_VERSION ||
-    value.schemaDigest !== schemaDigest ||
-    value.admissionRestored !== false ||
-    digest(value.journal) !==
-      digest({ installationDigest: options.witness.installationDigest, generation: options.witness.generation }) ||
-    !Array.isArray(value.sqlite) ||
-    !Array.isArray(value.artifacts) ||
-    !Array.isArray(value.restrictions) ||
-    value.sqlite.length !== options.nativeDatabases.length ||
-    value.restrictions.length !== options.restrictionFiles.length
-  )
-    throw new Error('coordinated_backup_conflict');
+  receiptIdentity(options, value);
   const files = [value.remote, ...value.sqlite, ...value.artifacts, ...value.restrictions];
   if (files.length > 24097 || new Set(files.map((f) => f.file)).size !== files.length)
     throw new Error('coordinated_backup_conflict');
@@ -493,6 +481,27 @@ async function verify(options: CoordinatedBackupIdentity): Promise<CoordinatedBa
   };
   visit('', 0);
   return value;
+}
+function receiptIdentity(options: CoordinatedRecoveryIdentity, value: CoordinatedBackupReceipt) {
+  if (
+    !value ||
+    value.format !== 'cos-coordinated-backup/v1' ||
+    value.operationId !== options.operationId ||
+    value.contextDigest !== digest(options.context) ||
+    value.inputsDigest !== inputsDigest(options) ||
+    value.databaseFingerprint !== options.databaseFingerprint ||
+    value.schemaVersion !== SCHEMA_VERSION ||
+    value.schemaDigest !== schemaDigest ||
+    value.admissionRestored !== false ||
+    digest(value.journal) !==
+      digest({ installationDigest: options.witness.installationDigest, generation: options.witness.generation }) ||
+    !Array.isArray(value.sqlite) ||
+    !Array.isArray(value.artifacts) ||
+    !Array.isArray(value.restrictions) ||
+    value.sqlite.length !== options.nativeDatabases.length ||
+    value.restrictions.length !== options.restrictionFiles.length
+  )
+    throw new Error('coordinated_backup_conflict');
 }
 /** Read-only verification; no archived permission, context or deny journal is admitted. */
 export async function verifyCoordinatedBackup(options: CoordinatedBackupIdentity): Promise<CoordinatedBackupReceipt> {
@@ -583,6 +592,12 @@ function scopedCheckpoint(options: CoordinatedBackupIdentity, receipt: Coordinat
   const value = JSON.parse(
     privateBytes(path.join(parameters(options), 'remote.json'), maximumRemoteBytes).toString('utf8'),
   ) as ScopeCheckpoint;
+  return validateScopedCheckpoint(options, value);
+}
+function validateScopedCheckpoint(
+  options: Pick<CoordinatedRecoveryIdentity, 'context' | 'databaseFingerprint'>,
+  value: ScopeCheckpoint,
+): ScopeCheckpoint {
   const record = (x: unknown): x is Record<string, unknown> => !!x && typeof x === 'object' && !Array.isArray(x);
   if (
     !record(value) ||
@@ -629,6 +644,122 @@ function scopedCheckpoint(options: CoordinatedBackupIdentity, receipt: Coordinat
   )
     throw Error('coordinated_restore_conflict');
   return value;
+}
+/** Portable verification uses the already owned encrypted workspace, with no
+ * second payload copy or activation of archived restrictions or journals.
+ * A PostgreSQL import still requires separate test-target admission. */
+export function verifyRecoveredCoordinatedState(
+  options: CoordinatedRecoveryIdentity,
+  scope: BackupRestoreValidationScope,
+  entries: BackupQueueReceipt['files'],
+): {
+  receipt: CoordinatedBackupReceipt;
+  checkpoint: ScopeCheckpoint;
+  nativeDatabasesVerified: number;
+  admissionRestored: false;
+  eventJournalRestored: false;
+} {
+  try {
+    const current = () => {
+      scope.assertCurrent();
+      journalCurrent(options);
+      scope.assertCurrent();
+    };
+    current();
+    identityParameters(options);
+    if (
+      !Array.isArray(entries) ||
+      entries.length > 4096 ||
+      new Set(entries.map((item) => item.name)).size !== entries.length
+    )
+      throw Error('coordinated_recovery_bounds');
+    const selected = entries.filter((item) => item.name.startsWith('coordinated/')),
+      listed = new Map(selected.map((item) => [item.name, item]));
+    const checkFile = (item: FileReceipt, maximum: number) => {
+      current();
+      const entry = listed.get('coordinated/' + item.file);
+      if (
+        !item ||
+        Object.keys(item).sort().join(',') !== 'bytes,file,sha256' ||
+        typeof item.file !== 'string' ||
+        !/^(?:[A-Za-z0-9]|\.cos-)[A-Za-z0-9_.-]*(?:\/(?:[A-Za-z0-9]|\.cos-)[A-Za-z0-9_.-]*){0,6}$/.test(item.file) ||
+        !Number.isSafeInteger(item.bytes) ||
+        item.bytes < 0 ||
+        item.bytes > maximum ||
+        typeof item.sha256 !== 'string' ||
+        !/^[a-f0-9]{64}$/.test(item.sha256) ||
+        !entry ||
+        entry.bytes !== item.bytes ||
+        entry.sha256 !== item.sha256
+      )
+        throw Error('coordinated_recovery_file_changed');
+      const actual = scope.inspectFile(entry.name);
+      if (actual.bytes !== item.bytes || actual.sha256 !== item.sha256)
+        throw Error('coordinated_recovery_file_changed');
+      current();
+    };
+    const readJson = <T>(name: string, maximum: number): T =>
+      scope.withFileBytes(
+        'coordinated/' + name,
+        maximum,
+        (bytes) => JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) as T,
+      );
+    const metadata = listed.get('coordinated/manifest.json');
+    if (!metadata) throw Error('coordinated_recovery_manifest_missing');
+    const manifestFile = { file: 'manifest.json', bytes: metadata.bytes, sha256: metadata.sha256 };
+    checkFile(manifestFile, 1024 ** 2);
+    const receipt = readJson<CoordinatedBackupReceipt>('manifest.json', 1024 ** 2);
+    if (
+      !receipt ||
+      Object.keys(receipt).sort().join(',') !==
+        'admissionRestored,artifacts,barrierDigest,contextDigest,databaseFingerprint,format,inputsDigest,journal,operationId,remote,restrictions,schemaDigest,schemaVersion,sqlite' ||
+      typeof receipt.barrierDigest !== 'string' ||
+      !/^[a-f0-9]{64}$/.test(receipt.barrierDigest)
+    )
+      throw Error('coordinated_recovery_manifest_changed');
+    receiptIdentity(options, receipt);
+    const files = [receipt.remote, ...receipt.sqlite, ...receipt.artifacts, ...receipt.restrictions],
+      expectedNames = new Set(['coordinated/manifest.json', ...files.map((item) => 'coordinated/' + item.file)]);
+    if (
+      files.length > 4095 ||
+      expectedNames.size !== files.length + 1 ||
+      selected.length !== expectedNames.size ||
+      selected.some((item) => !expectedNames.has(item.name))
+    )
+      throw Error('coordinated_recovery_graph_changed');
+    if (receipt.remote.file !== 'remote.json') throw Error('coordinated_recovery_file_changed');
+    checkFile(receipt.remote, maximumRemoteBytes);
+    const checkpoint = validateScopedCheckpoint(options, readJson<ScopeCheckpoint>('remote.json', maximumRemoteBytes));
+    for (const [index, item] of receipt.sqlite.entries()) {
+      if (item.file !== 'sqlite/' + index + '/native.sqlite') throw Error('coordinated_recovery_native_changed');
+      checkFile(item, maximumRemoteBytes);
+      verifyRecoveredNativeDatabase(scope, { ...item, file: 'coordinated/' + item.file });
+    }
+    for (const [index, item] of receipt.restrictions.entries()) {
+      if (item.file !== 'restrictions/' + index + '.json') throw Error('coordinated_recovery_restriction_changed');
+      checkFile(item, 1024 ** 2);
+      if (!secretFree(readJson(item.file, 1024 ** 2))) throw Error('coordinated_recovery_credentials_excluded');
+    }
+    if (!receipt.artifacts.some((item) => item.file === 'artifacts/.cos-artifacts'))
+      throw Error('coordinated_recovery_artifacts_changed');
+    for (const item of receipt.artifacts) {
+      if (item.file !== 'artifacts/.cos-artifacts' && !/^artifacts\/[a-f0-9]{64}-[a-f0-9]{64}\.blob$/.test(item.file))
+        throw Error('coordinated_recovery_artifacts_changed');
+      checkFile(item, 1024 ** 2);
+    }
+    current();
+    checkFile(manifestFile, 1024 ** 2);
+    return {
+      receipt,
+      checkpoint,
+      nativeDatabasesVerified: receipt.sqlite.length,
+      admissionRestored: false,
+      eventJournalRestored: false,
+    };
+  } catch {
+    // eslint-disable-next-line preserve-caught-error -- Recovered rows, native files and current journal diagnostics remain private.
+    throw Error('coordinated_recovery_check_unavailable');
+  }
 }
 /** Import only a fresh owned scope into an independently admitted test database. Never update, clear or replace
  * an existing scope. A durable start reservation permits read-only reconciliation of an unknown commit.
