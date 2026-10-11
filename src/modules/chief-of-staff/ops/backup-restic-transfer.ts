@@ -6,7 +6,13 @@ import type { BackupPassword } from './backup-password.js';
 import type { SignedBackupRepository } from './backup-nas-access.js';
 import type { BackupRepositoryLease } from './backup-repository-lease.js';
 import { BACKUP_LIMITS, type BackupKind } from './backup-policy.js';
-import { backupRepositoryHost, backupSnapshotTags } from './backup-retention.js';
+import {
+  backupRepositoryHost,
+  backupSnapshotTags,
+  backupRetentionArguments,
+  backupSnapshotInventory,
+  parseBackupRetentionPreview,
+} from './backup-retention.js';
 import type { BackupQueueReceipt } from './backup-queue.js';
 import { backupArchiveReceiptPrefix } from './backup-archive.js';
 type Descriptor = Readonly<{ fd: number; assertCurrent(): void }>;
@@ -36,6 +42,15 @@ export type RemoteCheckpoint = {
   archiveSha256: string;
   reconciled: boolean;
   verifiedAt: string;
+};
+export type BackupMaintenanceResult = {
+  contract: 'cos-backup-repository-maintenance/v1';
+  status: 'backup_repository_maintained';
+  repositoryId: string;
+  ownerDigest: string;
+  state: { retained: number; removed: number };
+  credentials: { retained: number; removed: number };
+  integrity: 'verified';
 };
 const hex = /^[a-f0-9]{64}$/,
   uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
@@ -111,6 +126,7 @@ export class BackupResticTransfer {
         }
       };
       let expired = false,
+        withdrawn = false,
         killTimer: NodeJS.Timeout | undefined;
       const stop = () => {
         terminate('SIGTERM');
@@ -122,6 +138,16 @@ export class BackupResticTransfer {
         stop();
       }, o.timeoutMs ?? 900000);
       timer.unref();
+      const permissionTimer = setInterval(() => {
+        try {
+          this.current();
+          // eslint-disable-next-line no-catch-all/no-catch-all -- Any withdrawn descriptor or target proof terminates the private subprocess; the awaited command reports the fixed error.
+        } catch {
+          withdrawn = true;
+          stop();
+        }
+      }, 1000);
+      permissionTimer.unref();
       try {
         if (!child.stdout || !child.stderr) throw Error('transfer_pipe_required');
         child.stderr.on('data', (bytes: Buffer) => bytes.fill(0));
@@ -130,14 +156,14 @@ export class BackupResticTransfer {
           const data = chunk as Buffer;
           try {
             bytes += data.length;
-            if (expired || bytes > maximum) throw Error('transfer_output_bounds');
+            if (expired || withdrawn || bytes > maximum) throw Error('transfer_output_bounds');
             if (consume) consume(data);
             else chunks.push(Buffer.from(data));
           } finally {
             data.fill(0);
           }
         }
-        if (!(await closed) || expired) throw Error('transfer_command_failed');
+        if (!(await closed) || expired || withdrawn) throw Error('transfer_command_failed');
         this.current();
         return Buffer.concat(chunks);
       } catch {
@@ -147,6 +173,7 @@ export class BackupResticTransfer {
         throw Error('backup_transfer_unavailable');
       } finally {
         clearTimeout(timer);
+        clearInterval(permissionTimer);
         if (killTimer) clearTimeout(killTimer);
       }
     } catch {
@@ -156,12 +183,98 @@ export class BackupResticTransfer {
       for (const chunk of chunks) chunk.fill(0);
     }
   }
-  private async command(args: string[], maximum: number, consume?: (bytes: Buffer) => void): Promise<Buffer> {
+  /** Installed maintenance shares the live repository writer and admitted
+   * descriptor scopes. Policy previews select exact IDs; unrelated snapshot
+   * identities must survive every deletion and prune. No unlock or repair. */
+  async maintain(admit: () => Promise<void>): Promise<BackupMaintenanceResult> {
+    try {
+      if (typeof admit !== 'function') throw Error('maintenance_guard_required');
+      const execute = async (args: string[], maximum = 8 * 1024 ** 2) => {
+        this.current();
+        await admit();
+        this.current();
+        const bytes = await this.command(args, maximum, undefined, admit);
+        try {
+          await admit();
+          this.current();
+          return bytes;
+        } catch (error) {
+          bytes.fill(0);
+          throw error;
+        }
+      };
+      const discard = async (args: string[]) => {
+        const bytes = await execute(args);
+        bytes.fill(0);
+      };
+      const list = async () => {
+        const bytes = await execute(['snapshots']);
+        try {
+          return backupSnapshotInventory(bytes);
+        } finally {
+          bytes.fill(0);
+        }
+      };
+      await discard(['check', '--read-data', '--with-cache']);
+      const snapshots = await list(),
+        expected = new Set(snapshots.map((snapshot) => snapshot.id)),
+        plans = {} as Record<BackupKind, { keep: string[]; remove: string[] }>;
+      for (const kind of ['state', 'credentials'] as const) {
+        const bytes = await execute(backupRetentionArguments(this.options.ownerDigest, kind, 'preview'));
+        try {
+          plans[kind] = parseBackupRetentionPreview(bytes, this.options.ownerDigest, kind, snapshots);
+        } finally {
+          bytes.fill(0);
+        }
+      }
+      const unchanged = async () => {
+        const fresh = (await list()).map((snapshot) => snapshot.id).sort();
+        if (fresh.join(',') !== [...expected].sort().join(',')) throw Error('maintenance_inventory_changed');
+      };
+      for (const kind of ['state', 'credentials'] as const) {
+        const ids = plans[kind].remove;
+        for (let start = 0; start < ids.length; start += 128) {
+          await unchanged();
+          const batch = ids.slice(start, start + 128);
+          await discard(['forget', ...batch]);
+          for (const id of batch) expected.delete(id);
+          await unchanged();
+        }
+      }
+      await unchanged();
+      await discard(['prune', '--max-repack-size', '16M']);
+      await unchanged();
+      await discard(['check', '--read-data', '--with-cache']);
+      await unchanged();
+      return {
+        contract: 'cos-backup-repository-maintenance/v1',
+        status: 'backup_repository_maintained',
+        repositoryId: this.options.repositoryId,
+        ownerDigest: this.options.ownerDigest,
+        state: { retained: plans.state.keep.length, removed: plans.state.remove.length },
+        credentials: { retained: plans.credentials.keep.length, removed: plans.credentials.remove.length },
+        integrity: 'verified',
+      };
+    } catch {
+      // eslint-disable-next-line preserve-caught-error -- Repository data, IDs and command diagnostics remain private.
+      throw Error('backup_maintenance_unavailable');
+    }
+  }
+  private async command(
+    args: string[],
+    maximum: number,
+    consume?: (bytes: Buffer) => void,
+    admit?: () => Promise<void>,
+  ): Promise<Buffer> {
     const config = await this.run(['cat', 'config'], 65536);
     try {
       verifyResticRepositoryIdentity(config.toString('utf8'), this.options.repositoryId);
     } finally {
       config.fill(0);
+    }
+    if (admit) {
+      await admit();
+      this.current();
     }
     return this.run(args, maximum, consume);
   }

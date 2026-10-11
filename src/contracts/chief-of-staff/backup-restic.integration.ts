@@ -83,6 +83,7 @@ const withTransfer = async <T>(
   operation: (transfer: BackupResticTransfer, assertCurrent: () => void) => Promise<T>,
   producer = transferProducer,
   timeoutMs = 900000,
+  guard: () => void = () => {},
 ) =>
   withVerifiedResticBinary(binary, async (executable) =>
     transferWriter.exclusive(async (writer) => {
@@ -106,6 +107,7 @@ const withTransfer = async <T>(
         cache: {
           fd: cacheFd,
           assertCurrent() {
+            guard();
             assert(fs.fstatSync(cacheFd).isDirectory());
           },
         },
@@ -121,6 +123,46 @@ const withTransfer = async <T>(
         assert(fs.fstatSync(cacheFd).isDirectory());
       });
     }),
+  );
+const maintenanceOwner = 'a'.repeat(64),
+  maintenanceLock = path.join(root, 'maintenance-lock');
+fs.mkdirSync(maintenanceLock, { mode: 0o700 });
+const maintenanceWriter = new BackupRepositoryWriter(maintenanceOwner, async (operation) => operation(maintenanceLock));
+/** Real transport and kernel writer, synthetic repository credentials/scopes only. */
+const maintainRepository = (admit: () => Promise<void> = async () => {}, expectedId = repositoryId) =>
+  withVerifiedResticBinary(binary, async (executable) =>
+    maintenanceWriter.exclusive(async (writer) =>
+      new BackupResticTransfer({
+        binary: executable,
+        writer,
+        repositoryId: expectedId,
+        ownerDigest: maintenanceOwner,
+        password: {
+          fd: passwordFd,
+          assertCurrent() {
+            assert(fs.fstatSync(passwordFd).isFile());
+          },
+        },
+        repository: {
+          fd: repositoryFd,
+          assertCurrent() {
+            assert(fs.fstatSync(repositoryFd).isDirectory());
+          },
+        },
+        cache: {
+          fd: cacheFd,
+          assertCurrent() {
+            assert(fs.fstatSync(cacheFd).isDirectory());
+          },
+        },
+        producer() {
+          throw Error('maintenance_must_not_capture');
+        },
+        async admitUpload() {
+          throw Error('maintenance_must_not_upload');
+        },
+      }).maintain(admit),
+    ),
   );
 const canary = 'COS_G02_SYNTHETIC_ENCRYPTION_CANARY_4f9b3716';
 test('official pinned ARM64 binary initializes repository v2 and binds its decrypted identity', () => {
@@ -625,7 +667,46 @@ test('a stalled producer is terminated within the transfer deadline without leav
   }
   assert.deepEqual(JSON.parse(run(['snapshots', '--tag', 'cos-operation=' + operationId])), []);
 });
-test('real retention keeps 14 daily and four weekly checkpoints per kind without touching unrelated snapshots', () => {
+test('withdrawn live permission terminates a quiet real producer without waiting for its upload deadline', async () => {
+  const operationId = 'dfb0c89e-6362-4f94-a495-dc7bce4bba86',
+    pidFile = path.join(root, 'withdrawn-producer-pid');
+  let open = true,
+    timer: NodeJS.Timeout | undefined;
+  const code = `require('fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setInterval(() => {}, 1000);`;
+  const started = Date.now();
+  try {
+    await assert.rejects(
+      withTransfer(
+        repositoryId,
+        async () => {},
+        (transfer) => transfer.upload('credentials', operationId, transferArchive),
+        () => {
+          timer = setTimeout(() => {
+            open = false;
+          }, 1500);
+          return [process.execPath, '-e', code];
+        },
+        900000,
+        () => {
+          if (!open) throw Error('fixture_permission_withdrawn');
+        },
+      ),
+      /^Error: backup_artifact_unverified$/,
+    );
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+  assert(Date.now() - started < 15000);
+  const pid = Number(fs.readFileSync(pidFile, 'utf8'));
+  assert(Number.isSafeInteger(pid) && pid > 1);
+  try {
+    assert.match(fs.readFileSync('/proc/' + pid + '/stat', 'utf8'), /^\d+ \([^)]*\) Z /);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+  assert.deepEqual(JSON.parse(run(['snapshots', '--tag', 'cos-operation=' + operationId])), []);
+});
+test('real maintenance keeps 14 daily and four weekly checkpoints per kind without touching unrelated snapshots', async () => {
   const owner = 'a'.repeat(64),
     host = backupRepositoryHost(owner);
   const foreign = (JSON.parse(run(['snapshots'])) as Array<{ id: string }>).map((snapshot) => snapshot.id);
@@ -661,19 +742,63 @@ test('real retention keeps 14 daily and four weekly checkpoints per kind without
   run(backupRetentionArguments(owner, 'state', 'preview'));
   assert.equal(selected('state').length, 19);
   assert.equal(selected('credentials').length, 20);
-  run(backupRetentionArguments(owner, 'state', 'apply'));
+  const result = await maintainRepository();
+  assert.deepEqual(result.state, { retained: 16, removed: 3 });
+  assert.deepEqual(result.credentials, { retained: 16, removed: 4 });
+  assert.equal(result.integrity, 'verified');
   assert.equal(selected('state').length, 16);
-  assert.equal(selected('credentials').length, 20);
-  run(backupRetentionArguments(owner, 'credentials', 'apply'));
   assert.equal(selected('credentials').length, 16);
   const retained = new Set((JSON.parse(run(['snapshots'])) as Array<{ id: string }>).map((snapshot) => snapshot.id));
   for (const id of foreign) assert(retained.has(id));
-  run(['prune', '--max-repack-size', '16M']);
-  run(['check', '--read-data']);
+  assert.deepEqual(fs.readdirSync(transferCache), []);
   assert.deepEqual(verifyResticRepositoryIdentity(run(['cat', 'config']), repositoryId), {
     version: 2,
     id: repositoryId,
   });
+});
+test('real maintenance replay verifies unchanged retained snapshots without another deletion', async () => {
+  const before = (JSON.parse(run(['snapshots'])) as Array<{ id: string }>).map((s) => s.id).sort();
+  const result = await maintainRepository();
+  assert.deepEqual(result.state, { retained: 16, removed: 0 });
+  assert.deepEqual(result.credentials, { retained: 16, removed: 0 });
+  assert.deepEqual((JSON.parse(run(['snapshots'])) as Array<{ id: string }>).map((s) => s.id).sort(), before);
+});
+test('capacity withdrawal and wrong repository identity refuse real retention with all snapshot IDs intact', async () => {
+  const before = run(['snapshots']);
+  await assert.rejects(
+    maintainRepository(async () => {
+      throw Error('fixture_capacity_exhausted');
+    }),
+    /^Error: backup_maintenance_unavailable$/,
+  );
+  await assert.rejects(
+    maintainRepository(async () => {}, 'f'.repeat(64)),
+    /^Error: backup_maintenance_unavailable$/,
+  );
+  assert.deepEqual(JSON.parse(run(['snapshots'])), JSON.parse(before));
+});
+test('full data integrity failure refuses real maintenance before forgetting snapshots or pruning data', async () => {
+  const files = (directory: string): string[] =>
+    fs.readdirSync(directory).flatMap((name) => {
+      const file = path.join(directory, name);
+      return fs.lstatSync(file).isDirectory() ? files(file) : [file];
+    });
+  const file = files(path.join(repository, 'data'))[0],
+    original = fs.readFileSync(file),
+    changed = Buffer.from(original);
+  const before = run(['snapshots']);
+  try {
+    changed[0] ^= 1;
+    fs.writeFileSync(file, changed);
+    await assert.rejects(maintainRepository(), /^Error: backup_maintenance_unavailable$/);
+    assert.deepEqual(JSON.parse(run(['snapshots'])), JSON.parse(before));
+    assert.deepEqual(fs.readFileSync(file), changed);
+  } finally {
+    fs.writeFileSync(file, original);
+    original.fill(0);
+    changed.fill(0);
+  }
+  run(['check', '--read-data']);
 });
 test('real remote receipt verification recovers interrupted queue retirement and preserves a newer snapshot on replay', async () => {
   const local = path.join(transferArea, 'backup-queue', transferOperation, 'data', 'credentials', 'canary.json');
