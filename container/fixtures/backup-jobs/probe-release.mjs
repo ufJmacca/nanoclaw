@@ -56,12 +56,24 @@ const assertCurrent = async () => {
   if (!current) throw Error('fixture_scope_closed');
 };
 const controls = createBackupJobManagerControls(settings, assertCurrent);
+assert.deepEqual(await controls.inspectManager(), {
+  owned: true,
+  jobsIdle: true,
+  timersActive: false,
+  timersRunning: false,
+  definitionsLoaded: false,
+});
 const installer = createBackupJobInstaller(settings, manifest, controls);
 const first = await installer.install();
-assert.equal(first.phase, 'enabled');
+assert.equal(first.status, 'backup_jobs_enabled');
 assert((await controls.inspectManager()).definitionsLoaded);
 assert(!(await controls.inspectManager()).timersRunning);
-assert.equal((await installer.activate()).phase, 'active');
+for (const name of ['nanoclaw-cos-backup-capture.timer', 'nanoclaw-cos-backup-upload.timer']) {
+  const link = units + '/timers.target.wants/' + name;
+  assert(fs.lstatSync(link).isSymbolicLink());
+  assert([units + '/' + name, '../' + name].includes(fs.readlinkSync(link)));
+}
+assert.equal((await installer.activate()).status, 'backup_jobs_active');
 assert((await controls.inspectManager()).timersActive);
 await controls.stopTimers();
 assert(!(await controls.inspectManager()).timersRunning);
