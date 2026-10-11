@@ -9,6 +9,7 @@ import { BackupResticTransfer } from '../../modules/chief-of-staff/ops/backup-re
 import { BackupRepositoryWriter } from '../../modules/chief-of-staff/ops/backup-repository-lease.js';
 import { streamQueuedBackup } from '../../modules/chief-of-staff/ops/backup-archive-producer.js';
 import { withIsolatedBackupRestore } from '../../modules/chief-of-staff/ops/backup-restore-workspace.js';
+import { pinKernelMountTable } from '../../modules/chief-of-staff/ops/kernel-mount-guard.js';
 import {
   backupRetentionArguments,
   backupRepositoryHost,
@@ -652,6 +653,64 @@ test('real remote restoration streams directly into new private files and retire
   } finally {
     fs.closeSync(fd);
   }
+});
+test('real remote recovery shares measured staging and the actual checkpoint writer while preserving pending state', async () => {
+  const staging = path.join(root, 'shared-writer-restore'),
+    journals = path.join(root, 'shared-writer-journals');
+  for (const directory of [staging, journals]) fs.mkdirSync(directory, { mode: 0o700 });
+  const queue = new BackupQueue('a'.repeat(64), async (kind, operation) =>
+    operation(kind === 'state' ? staging : journals),
+  );
+  const pendingId = '51c35ef0-b3e2-4270-b642-3da99ea63f4c';
+  await queue.capture('state', pendingId, async (sink) => sink.write('current-state', Buffer.from('PRESERVE')), 65536);
+  const before = await queue.pending('state'),
+    remoteBefore = snapshotMetadata(),
+    currentKernel = pinKernelMountTable();
+  await withTransfer(
+    repositoryId,
+    async () => {
+      throw Error('must_not_upload');
+    },
+    async (transfer, current) =>
+      queue.withRestoreWorkspace(
+        '5f74b367-fd8f-449c-a832-dbe40cff9ae3',
+        () => {
+          currentKernel();
+          current();
+        },
+        async (scope) => {
+          const result = await transfer.restore(
+            'credentials',
+            transferOperation,
+            'a'.repeat(64),
+            scope.sink,
+            async () => {
+              scope.assertCurrent();
+              await assert.rejects(
+                queue.capture('state', 'f7d1e82b-0a13-4607-a81f-14a9fc442e1a', async () => {}, 65536),
+                /^Error: backup_queue_unavailable$/,
+              );
+            },
+          );
+          assert.equal(result.archiveSha256, transferArchive.sha256);
+          assert.equal(fs.readFileSync(scope.directory + '/credentials/canary.json', 'utf8'), canary);
+          await queue.capture(
+            'credentials',
+            pendingId,
+            async (sink) => sink.write('independent', Buffer.from('SYNTHETIC')),
+            65536,
+          );
+          assert.deepEqual(await queue.pending('state'), before);
+          scope.assertCurrent();
+        },
+        64 * 1024 ** 2,
+      ),
+  );
+  assert.deepEqual(fs.readdirSync(staging), ['backup-queue']);
+  assert.deepEqual(await queue.pending('state'), before);
+  assert.equal((await queue.pending('credentials'))[0].operationId, pendingId);
+  assert.deepEqual(snapshotMetadata(), remoteBefore);
+  assert.deepEqual(fs.readdirSync(transferCache), []);
 });
 test('real restoration denies a foreign receipt owner and missing checkpoint without destination files or remote changes', async () => {
   const before = snapshotMetadata(),
