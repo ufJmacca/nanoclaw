@@ -96,16 +96,21 @@ it('refuses a linked lease file without following or changing its target', async
 });
 it('releases the kernel lease after its owning process is killed without needing a stale-lock override', async () => {
   const f = fixture();
-  const moduleUrl = new URL('./backup-repository-lease.ts', import.meta.url).href;
+  const extension = import.meta.url.endsWith('.ts') ? 'ts' : 'js',
+    moduleUrl = new URL('./backup-repository-lease.' + extension, import.meta.url).href;
   const code = `import { BackupRepositoryWriter } from ${JSON.stringify(moduleUrl)};
     const writer = new BackupRepositoryWriter('a'.repeat(64), operation => operation(${JSON.stringify(f.root)}));
     await writer.exclusive(async lease => { lease.assertCurrent(); process.stdout.write('READY\\n');
       process.stdin.resume(); await new Promise(() => {}); });`;
-  const child = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', code], {
-    cwd: process.cwd(),
-    env: { PATH: '/usr/bin:/bin', LANG: 'C', LC_ALL: 'C' },
-    stdio: ['pipe', 'pipe', 'ignore'],
-  });
+  const child = spawn(
+    process.execPath,
+    [...(extension === 'ts' ? ['--import', 'tsx'] : []), '--input-type=module', '-e', code],
+    {
+      cwd: process.cwd(),
+      env: { PATH: '/usr/bin:/bin', LANG: 'C', LC_ALL: 'C' },
+      stdio: ['pipe', 'pipe', 'ignore'],
+    },
+  );
   const closed = new Promise<void>((resolve, reject) => {
     child.once('error', reject);
     child.once('close', () => resolve());

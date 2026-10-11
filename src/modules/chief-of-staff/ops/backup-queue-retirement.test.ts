@@ -430,7 +430,8 @@ it('fresh proof revocation during cleanup stops further deletion and remains rec
 });
 it('recovers after an actual process is killed during cleanup without stealing a stale lease', async () => {
   const f = await fixture();
-  const moduleUrl = new URL('./backup-queue.ts', import.meta.url).href;
+  const extension = import.meta.url.endsWith('.ts') ? 'ts' : 'js',
+    moduleUrl = new URL('./backup-queue.' + extension, import.meta.url).href;
   const code = `import fs from 'node:fs'; import { BackupQueue } from ${JSON.stringify(moduleUrl)};
     const root=${JSON.stringify(f.root)}, queue=new BackupQueue('a'.repeat(64),(kind,callback)=>callback(root+'/'+kind));
     await queue.retirePending('state',${JSON.stringify(op)},async request=>({ checkpoint: {
@@ -441,11 +442,15 @@ it('recovers after an actual process is killed during cleanup without stealing a
           fs.writeSync(1,'READY\\n'); Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0);
         }
       } }));`;
-  const child = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', code], {
-    cwd: process.cwd(),
-    env: { PATH: '/usr/bin:/bin', LANG: 'C', LC_ALL: 'C' },
-    stdio: ['ignore', 'pipe', 'ignore'],
-  });
+  const child = spawn(
+    process.execPath,
+    [...(extension === 'ts' ? ['--import', 'tsx'] : []), '--input-type=module', '-e', code],
+    {
+      cwd: process.cwd(),
+      env: { PATH: '/usr/bin:/bin', LANG: 'C', LC_ALL: 'C' },
+      stdio: ['ignore', 'pipe', 'ignore'],
+    },
+  );
   const closed = new Promise<void>((resolve, reject) => {
     child.once('error', reject);
     child.once('close', () => resolve());
@@ -489,7 +494,8 @@ it.each([
 ])('recovers metadata publication after an actual writer is killed at %s', async (scenario) => {
   const f = await fixture();
   const [target, stage] = scenario.split(':');
-  const moduleUrl = new URL('./backup-queue.ts', import.meta.url).href;
+  const extension = import.meta.url.endsWith('.ts') ? 'ts' : 'js',
+    moduleUrl = new URL('./backup-queue.' + extension, import.meta.url).href;
   const code = `import fs from 'node:fs'; import { BackupQueue } from ${JSON.stringify(moduleUrl)};
       const root=${JSON.stringify(f.root)}, stage=${JSON.stringify(stage)}, target=${JSON.stringify(target)};
       const pause=()=>{fs.writeSync(1,'READY\\n');Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0);};
@@ -515,11 +521,15 @@ it.each([
         contract:'cos-backup-remote-checkpoint/v1',repositoryId:'b'.repeat(64),ownerDigest:'c'.repeat(64),kind:'state',operationId:${JSON.stringify(op)},
         snapshotId:'d'.repeat(64),snapshotAt:'2026-10-11T00:00:00Z',archiveBytes:request.archive.bytes,archiveSha256:request.archive.sha256,
         reconciled:false,verifiedAt:new Date().toISOString()},assertCurrent(){}}));`;
-  const child = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', code], {
-    cwd: process.cwd(),
-    env: { PATH: '/usr/bin:/bin', LANG: 'C', LC_ALL: 'C' },
-    stdio: ['ignore', 'pipe', 'ignore'],
-  });
+  const child = spawn(
+    process.execPath,
+    [...(extension === 'ts' ? ['--import', 'tsx'] : []), '--input-type=module', '-e', code],
+    {
+      cwd: process.cwd(),
+      env: { PATH: '/usr/bin:/bin', LANG: 'C', LC_ALL: 'C' },
+      stdio: ['ignore', 'pipe', 'ignore'],
+    },
+  );
   const closed = new Promise<void>((resolve, reject) => {
     child.once('error', reject);
     child.once('close', () => resolve());

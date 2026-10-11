@@ -257,7 +257,8 @@ it.each(['empty', 'partial', 'before_rename', 'after_rename'])(
   'reconciles journal completion after an actual writer is killed at %s',
   async (stage) => {
     const f = fixture(),
-      moduleUrl = new URL('./backup-queue.ts', import.meta.url).href;
+      extension = import.meta.url.endsWith('.ts') ? 'ts' : 'js',
+      moduleUrl = new URL('./backup-queue.' + extension, import.meta.url).href;
     const code = `import fs from 'node:fs'; import { BackupQueue } from ${JSON.stringify(moduleUrl)};
       const root=${JSON.stringify(f.root)},stage=${JSON.stringify(stage)};
       const pause=()=>{fs.writeSync(1,'READY\\n');Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0);};
@@ -277,11 +278,15 @@ it.each(['empty', 'partial', 'before_rename', 'after_rename'])(
       const queue=new BackupQueue('a'.repeat(64),(_kind,callback)=>callback(root));
       await queue.recordCredential({sourceKind:'calendar_reader',sourceKey:'b'.repeat(64),generation:1,phase:'ready',
         files:[{name:'credential.json',bytes:Buffer.from('SYNTHETIC_CREDENTIAL_1_ready')}]},()=>{});`;
-    const child = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', code], {
-      cwd: process.cwd(),
-      env: { PATH: '/usr/bin:/bin', LANG: 'C', LC_ALL: 'C' },
-      stdio: ['ignore', 'pipe', 'ignore'],
-    });
+    const child = spawn(
+      process.execPath,
+      [...(extension === 'ts' ? ['--import', 'tsx'] : []), '--input-type=module', '-e', code],
+      {
+        cwd: process.cwd(),
+        env: { PATH: '/usr/bin:/bin', LANG: 'C', LC_ALL: 'C' },
+        stdio: ['ignore', 'pipe', 'ignore'],
+      },
+    );
     const closed = new Promise<string | null>((resolve, reject) => {
       child.once('error', reject);
       child.once('close', (_code, signal) => resolve(signal));

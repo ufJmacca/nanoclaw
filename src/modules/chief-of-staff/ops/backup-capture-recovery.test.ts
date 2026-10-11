@@ -161,7 +161,8 @@ it.each(['initial_receipt', 'partial_payload', 'before_pending_rename', 'after_p
   'reconciles the original capture after actual SIGKILL at %s',
   async (scenario) => {
     const f = fixture(),
-      module = new URL('./backup-queue.ts', import.meta.url).href;
+      extension = import.meta.url.endsWith('.ts') ? 'ts' : 'js',
+      module = new URL('./backup-queue.' + extension, import.meta.url).href;
     const code = `import fs from 'node:fs';import {BackupQueue} from ${JSON.stringify(module)};
       const scenario=${JSON.stringify(scenario)},pause=()=>{fs.writeSync(1,'READY\\n');Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0);};
       const write=fs.writeFileSync,rename=fs.renameSync;
@@ -169,11 +170,15 @@ it.each(['initial_receipt', 'partial_payload', 'before_pending_rename', 'after_p
       fs.renameSync=(from,to)=>{const pending=String(to).endsWith('/receipt.json')&&JSON.parse(fs.readFileSync(from,'utf8')).state==='pending';if(pending&&scenario==='before_pending_rename')pause();const result=rename(from,to);if(pending&&scenario==='after_pending_rename')pause();return result;};
       const queue=new BackupQueue('a'.repeat(64),(_,operation)=>operation(${JSON.stringify(f.root)}));
       await queue.capture('state',${JSON.stringify(f.operationId)},async sink=>{sink.write('first.json',Buffer.from('SYNTHETIC_FIRST'));if(scenario==='partial_payload')pause();sink.write('nested/second.json',Buffer.from('SYNTHETIC_SECOND'));},65536);`;
-    const child = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', code], {
-      cwd: process.cwd(),
-      env: { PATH: '/usr/bin:/bin', LANG: 'C', LC_ALL: 'C' },
-      stdio: ['ignore', 'pipe', 'ignore'],
-    });
+    const child = spawn(
+      process.execPath,
+      [...(extension === 'ts' ? ['--import', 'tsx'] : []), '--input-type=module', '-e', code],
+      {
+        cwd: process.cwd(),
+        env: { PATH: '/usr/bin:/bin', LANG: 'C', LC_ALL: 'C' },
+        stdio: ['ignore', 'pipe', 'ignore'],
+      },
+    );
     const closed = new Promise<NodeJS.Signals | null>((resolve, reject) => {
       child.once('error', reject);
       child.once('close', (_code, signal) => resolve(signal));
