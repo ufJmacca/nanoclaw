@@ -24,6 +24,8 @@ const vaultFiles = new Set([
     'probe-wire.mjs',
     'probe-config.mjs',
     'probe-artifact.mjs',
+    'probe-backup-credentials.mjs',
+    'probe-backup-journal.mjs',
   ].map((name) => 'container/fixtures/vault/' + name),
   'scripts/cos-vault-fixture.sh',
   'scripts/cos-vault-keychain.swift',
@@ -142,6 +144,7 @@ export async function prepareBuildContext(
     const workerAssetsDigest = assets.digest('hex');
     const info = JSON.stringify({ commit, tree: sourceTree, workerAssetsDigest }) + '\n';
     fs.writeFileSync(path.join(destination, 'build-info.json'), info, { flag: 'wx', mode: 0o644 });
+    fs.chmodSync(path.join(destination, 'build-info.json'), 0o644);
     build.update(info);
     return {
       sourceCommit: commit,

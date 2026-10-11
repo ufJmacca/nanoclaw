@@ -31,6 +31,8 @@ function fixture() {
     'container/CLAUDE.md': 'fixture instructions',
     'container/fixtures/vault/Dockerfile.release': 'immutable vault build',
     'container/fixtures/vault/probe-provision.mjs': 'synthetic kernel probe',
+    'container/fixtures/vault/probe-backup-credentials.mjs': 'synthetic encrypted credential probe',
+    'container/fixtures/vault/probe-backup-journal.mjs': 'synthetic encrypted credential journal probe',
     'container/fixtures/vault/unadmitted.mjs': 'UNADMITTED_VAULT_CANARY',
     'scripts/cos-vault-fixture.sh': 'host-only private pipe orchestration',
     'scripts/cos-vault-keychain.swift': 'trusted keychain code, never key bytes',
@@ -52,6 +54,18 @@ function fixture() {
   return { root, repo, git, commit: git('rev-parse', 'HEAD') };
 }
 describe('S01-REL03 pinned source-only build context', () => {
+  it('keeps the enclosing export private while its public build identity is readable under a private host umask', async () => {
+    const f = fixture(),
+      out = path.join(f.root, 'private-context'),
+      mask = process.umask(0o077);
+    try {
+      await prepareBuildContext(f.repo, f.commit, out);
+      expect(fs.statSync(out).mode & 0o777).toBe(0o700);
+      expect(fs.statSync(path.join(out, 'build-info.json')).mode & 0o777).toBe(0o644);
+    } finally {
+      process.umask(mask);
+    }
+  });
   it('exports only allowed committed bytes, excluding secrets, live state and host dependencies', async () => {
     const f = fixture(),
       out = path.join(f.root, 'context');
@@ -105,6 +119,8 @@ it('exports only the admitted vault drivers from the same source and binds their
   for (const name of [
     'container/fixtures/vault/Dockerfile.release',
     'container/fixtures/vault/probe-provision.mjs',
+    'container/fixtures/vault/probe-backup-credentials.mjs',
+    'container/fixtures/vault/probe-backup-journal.mjs',
     'scripts/cos-vault-fixture.sh',
     'scripts/cos-vault-keychain.swift',
   ])

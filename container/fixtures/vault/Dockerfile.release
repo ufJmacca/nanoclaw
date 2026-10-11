@@ -16,7 +16,7 @@ RUN chmod 0755 /opt/nanoclaw-cos/vault && \
     find /opt/nanoclaw-cos/vault -mindepth 1 -maxdepth 1 -type d -exec chmod 0555 {} + && \
     find /opt/nanoclaw-cos/vault -type f -name node -exec chmod 0555 {} + && \
     find /opt/nanoclaw-cos/vault -type f ! -name node -exec chmod 0444 {} +
-COPY probe.sh probe.mjs probe-authority.mjs probe-provision.mjs verify-units.mjs probe-wire.mjs probe-config.mjs probe-artifact.mjs probe-backup-credentials.mjs /probe/
+COPY probe.sh probe.mjs probe-authority.mjs probe-provision.mjs verify-units.mjs probe-wire.mjs probe-config.mjs probe-artifact.mjs probe-backup-credentials.mjs probe-backup-journal.mjs /probe/
 RUN chmod 0755 /probe && chmod 0644 /probe/*
 ARG SOURCE_COMMIT
 ARG HOST_IMAGE_ID
