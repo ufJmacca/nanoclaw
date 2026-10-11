@@ -905,8 +905,12 @@ test('real restore cleanup holds edited private content despite unchanged timest
             value.isFile() && value.ino === original.ino
               ? Object.assign(value, { mtimeMs: original.mtimeMs, ctimeMs: original.ctimeMs })
               : value;
-          fs.lstatSync = ((...args: unknown[]) => times(Reflect.apply(lstat, fs, args))) as typeof fs.lstatSync;
-          fs.fstatSync = ((...args: unknown[]) => times(Reflect.apply(fstat, fs, args))) as typeof fs.fstatSync;
+          Object.defineProperty(fs, 'lstatSync', {
+            value: (...args: unknown[]) => times(Reflect.apply(lstat, fs, args)),
+          });
+          Object.defineProperty(fs, 'fstatSync', {
+            value: (...args: unknown[]) => times(Reflect.apply(fstat, fs, args)),
+          });
         },
       ),
       /^Error: backup_restore_workspace_unavailable$/,
@@ -917,8 +921,8 @@ test('real restore cleanup holds edited private content despite unchanged timest
     );
     assert.deepEqual(snapshotMetadata(), before);
   } finally {
-    fs.lstatSync = lstat;
-    fs.fstatSync = fstat;
+    Object.defineProperty(fs, 'lstatSync', { value: lstat });
+    Object.defineProperty(fs, 'fstatSync', { value: fstat });
     fs.closeSync(fd);
   }
 });
