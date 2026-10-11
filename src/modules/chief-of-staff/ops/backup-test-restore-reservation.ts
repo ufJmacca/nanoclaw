@@ -227,7 +227,7 @@ export async function withPinnedBackupTestRestoreReservation<T>(
         return use();
       } catch {
         // eslint-disable-next-line preserve-caught-error -- Borrowed methods expose no private file, binding or mount diagnostics.
-        return unavailable();
+        throw Error('backup_test_restore_reservation_unavailable');
       }
     };
     const port: CoordinatedTestRestoreReservation = Object.freeze({
@@ -277,7 +277,7 @@ export async function withPinnedBackupTestRestoreReservation<T>(
     return result;
   } catch {
     // eslint-disable-next-line preserve-caught-error -- Import callbacks and retained reservation paths remain private.
-    return unavailable();
+    throw Error('backup_test_restore_reservation_unavailable');
   } finally {
     active = false;
     try {
