@@ -15,6 +15,7 @@ import {
 } from './backup-retention.js';
 import type { BackupQueueReceipt } from './backup-queue.js';
 import { backupArchiveReceiptPrefix } from './backup-archive.js';
+import { readBackupArchive, type BackupArchiveRestoreSink } from './backup-archive-reader.js';
 type Descriptor = Readonly<{ fd: number; assertCurrent(): void }>;
 type Dependencies = {
   binary: VerifiedResticBinary;
@@ -51,6 +52,12 @@ export type BackupMaintenanceResult = {
   state: { retained: number; removed: number };
   credentials: { retained: number; removed: number };
   integrity: 'verified';
+};
+/** Readback evidence only. It does not restore live admission, credentials,
+ * independent journals, model allowance or any runtime database rows. */
+export type BackupRemoteRestore = Omit<RemoteCheckpoint, 'contract' | 'reconciled'> & {
+  contract: 'cos-backup-remote-restore/v1';
+  receipt: BackupQueueReceipt;
 };
 const hex = /^[a-f0-9]{64}$/,
   uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
@@ -98,8 +105,7 @@ export class BackupResticTransfer {
     for (const scope of [o.binary, o.repository, o.password, o.cache])
       if (!Number.isSafeInteger(scope.fd) || scope.fd < 3) throw Error('invalid_transfer_descriptor');
   }
-  private async run(args: string[], maximum: number, consume?: (bytes: Buffer) => void): Promise<Buffer> {
-    const chunks: Buffer[] = [];
+  private async *output(args: string[], maximum: number): AsyncGenerator<Buffer> {
     try {
       this.current();
       const o = this.options;
@@ -127,6 +133,7 @@ export class BackupResticTransfer {
       };
       let expired = false,
         withdrawn = false,
+        completed = false,
         killTimer: NodeJS.Timeout | undefined;
       const stop = () => {
         terminate('SIGTERM');
@@ -157,21 +164,29 @@ export class BackupResticTransfer {
           try {
             bytes += data.length;
             if (expired || withdrawn || bytes > maximum) throw Error('transfer_output_bounds');
-            if (consume) consume(data);
-            else chunks.push(Buffer.from(data));
+            for (let offset = 0; offset < data.length; offset += 65536) {
+              this.current();
+              yield data.subarray(offset, offset + 65536);
+              this.current();
+              if (expired || withdrawn) throw Error('transfer_permission_withdrawn');
+            }
           } finally {
             data.fill(0);
           }
         }
         if (!(await closed) || expired || withdrawn) throw Error('transfer_command_failed');
         this.current();
-        return Buffer.concat(chunks);
+        completed = true;
       } catch {
         stop();
         await closed;
         // eslint-disable-next-line preserve-caught-error -- Stderr, paths, producer failures and command details remain private.
         throw Error('backup_transfer_unavailable');
       } finally {
+        if (!completed) {
+          stop();
+          await closed;
+        }
         clearTimeout(timer);
         clearInterval(permissionTimer);
         if (killTimer) clearTimeout(killTimer);
@@ -179,6 +194,16 @@ export class BackupResticTransfer {
     } catch {
       // eslint-disable-next-line preserve-caught-error -- Descriptor proof errors must not leak private host state.
       throw Error('backup_transfer_unavailable');
+    }
+  }
+  private async run(args: string[], maximum: number, consume?: (bytes: Buffer) => void): Promise<Buffer> {
+    const chunks: Buffer[] = [];
+    try {
+      for await (const bytes of this.output(args, maximum)) {
+        if (consume) consume(bytes);
+        else chunks.push(Buffer.from(bytes));
+      }
+      return Buffer.concat(chunks);
     } finally {
       for (const chunk of chunks) chunk.fill(0);
     }
@@ -299,7 +324,8 @@ export class BackupResticTransfer {
         snapshot.paths.length !== 1 ||
         snapshot.paths[0] !== '/checkpoint.tar' ||
         !Array.isArray(snapshot.tags) ||
-        snapshot.tags.length > 16 ||
+        snapshot.tags.length !== tags.length ||
+        new Set(snapshot.tags).size !== tags.length ||
         snapshot.tags.some((tag: unknown) => typeof tag !== 'string' || tag.length > 200) ||
         tags.some((tag) => !snapshot.tags.includes(tag))
       )
@@ -307,6 +333,71 @@ export class BackupResticTransfer {
       return { id: snapshot.id, time: snapshot.time };
     } finally {
       bytes.fill(0);
+    }
+  }
+  /** Fixed checkpoint selection and canonical parsing. Installed callers must
+   * hold the admitted repository scope and supply a fresh isolated vault sink;
+   * no generic Restic extraction or caller-selected path is exposed. */
+  async restore(
+    kind: BackupKind,
+    operationId: string,
+    queueOwnerDigest: string,
+    sink: BackupArchiveRestoreSink,
+    admit: () => Promise<void>,
+  ): Promise<BackupRemoteRestore> {
+    try {
+      if (
+        !['state', 'credentials'].includes(kind) ||
+        !uuid.test(operationId) ||
+        typeof queueOwnerDigest !== 'string' ||
+        !hex.test(queueOwnerDigest) ||
+        typeof sink?.open !== 'function' ||
+        typeof admit !== 'function'
+      )
+        throw Error('restore_scope_required');
+      const expected = Object.freeze({ kind, operationId, ownerDigest: queueOwnerDigest });
+      this.current();
+      await admit();
+      this.current();
+      const snapshot = await this.find(kind, operationId);
+      if (!snapshot) throw Error('remote_checkpoint_missing');
+      await admit();
+      this.current();
+      const config = await this.run(['cat', 'config'], 65536);
+      try {
+        verifyResticRepositoryIdentity(config.toString('utf8'), this.options.repositoryId);
+      } finally {
+        config.fill(0);
+      }
+      await admit();
+      this.current();
+      const decoded = await readBackupArchive(
+        this.output(
+          ['dump', snapshot.id, 'checkpoint.tar'],
+          (kind === 'state' ? BACKUP_LIMITS.staging : BACKUP_LIMITS.credentials) + 2 * 1024 ** 2,
+        ),
+        expected,
+        sink,
+        () => this.current(),
+      );
+      await admit();
+      this.current();
+      return {
+        contract: 'cos-backup-remote-restore/v1',
+        repositoryId: this.options.repositoryId,
+        ownerDigest: this.options.ownerDigest,
+        kind,
+        operationId,
+        snapshotId: snapshot.id,
+        snapshotAt: snapshot.time,
+        archiveBytes: decoded.archiveBytes,
+        archiveSha256: decoded.archiveSha256,
+        receipt: decoded.receipt,
+        verifiedAt: new Date().toISOString(),
+      };
+    } catch {
+      // eslint-disable-next-line preserve-caught-error -- Remote content, paths and transport failures remain private.
+      throw Error('backup_restore_unavailable');
     }
   }
   /** Fresh readback only. Durable local metadata is never a repository lease. */
