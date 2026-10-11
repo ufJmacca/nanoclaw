@@ -10,6 +10,13 @@ import type { RemoteCheckpoint } from './backup-restic-transfer.js';
 import { streamBackupArchive } from './backup-archive.js';
 import { BackupRepositoryWriter } from './backup-repository-lease.js';
 import {
+  assertCaptureAvailable,
+  captureJournalNames,
+  createCaptureJournal,
+  readCaptureJournal,
+  reconcileOwnedCapture,
+} from './backup-capture-journal.js';
+import {
   credentialEventName,
   credentialHead,
   credentialMetadata,
@@ -685,6 +692,8 @@ export class BackupQueue {
     }
   }
   private receipts(root: string, kind: BackupKind, device: number): BackupQueueReceipt[] {
+    const capture = readCaptureJournal(root, this.ownerDigest, kind),
+      captureNames = captureJournalNames(root, device);
     const intent = retirement(root, intentName, this.ownerDigest, kind, device);
     retirement(root, ackName, this.ownerDigest, kind, device);
     const temporary = new Set(publicationTemporaries(root, device));
@@ -695,8 +704,15 @@ export class BackupQueue {
       .readdirSync(root)
       .filter(
         (name) =>
-          !['owner.json', '.lock', '.cos-writer.lock', intentName, ackName, ...journals.names].includes(name) &&
-          !temporary.has(name),
+          ![
+            'owner.json',
+            '.lock',
+            '.cos-writer.lock',
+            intentName,
+            ackName,
+            ...journals.names,
+            ...captureNames,
+          ].includes(name) && !temporary.has(name),
       );
     if (names.length > (kind === 'state' ? 1 : 1024)) throw Error('queue_bounds');
     const values = names.sort().map((name) => {
@@ -710,7 +726,27 @@ export class BackupQueue {
       const fd = privateDirectory(path.join(root, name), device);
       let value: BackupQueueReceipt;
       try {
-        value = privateJson<BackupQueueReceipt>(path.join(pinned(fd), 'receipt.json'), device);
+        const receiptPath = path.join(pinned(fd), 'receipt.json');
+        if (
+          !fs.lstatSync(receiptPath, { throwIfNoEntry: false }) &&
+          capture &&
+          capture.phase !== 'retired' &&
+          fs.fstatSync(fd).dev === capture.directories[''].device &&
+          fs.fstatSync(fd).ino === capture.directories[''].inode &&
+          name === (kind === 'state' ? 'full' : capture.operationId)
+        )
+          value = {
+            format: 'cos-backup-queue/v1',
+            ownerDigest: this.ownerDigest,
+            kind,
+            operationId: capture.operationId,
+            state: 'capturing',
+            createdAt: capture.createdAt,
+            maximumBytes: capture.maximumBytes,
+            bytes: measure(pinned(fd), device),
+            files: [],
+          };
+        else value = privateJson<BackupQueueReceipt>(receiptPath, device);
       } finally {
         fs.closeSync(fd);
       }
@@ -753,9 +789,10 @@ export class BackupQueue {
       return { status: 'queued' as const, kind, operationId };
     }
     const used = measure(root, device),
-      budget = Math.min(maximumBytes, limit - used - 8192);
+      budget = Math.min(maximumBytes, limit - used - 2 * 1024 ** 2 - 8192);
     if (budget < 16384) throw Error('capture_capacity');
     const location = path.join(root, kind === 'state' ? 'full' : operationId);
+    assertCaptureAvailable(root, this.ownerDigest, kind);
     fs.mkdirSync(location, { mode: 0o700 });
     const slotFd = privateDirectory(location, device),
       slot = pinned(slotFd);
@@ -774,12 +811,14 @@ export class BackupQueue {
     const files = new Map<string, { fd: number; bytes: number; hash: ReturnType<typeof createHash> }>(),
       directories = new Map<string, number>();
     let active = true;
+    let journal: ReturnType<typeof createCaptureJournal> | undefined;
     try {
       fs.mkdirSync(path.join(slot, 'data'), { mode: 0o700 });
       const dataFd = privateDirectory(path.join(slot, 'data'), device),
         data = pinned(dataFd);
       directories.set('', dataFd);
-      writeAtomic(slot, 'receipt.json', receipt);
+      journal = createCaptureJournal(root, receipt, slotFd, dataFd);
+      journal.receipt(receipt);
       await produce({
         write: (name, bytes) => {
           if (!active || !validName(name) || !Buffer.isBuffer(bytes)) throw Error('invalid_capture_write');
@@ -818,6 +857,7 @@ export class BackupQueue {
             if (!directories.has(prefix)) {
               fs.mkdirSync(path.join(pinned(parent), part), { mode: 0o700 });
               directories.set(prefix, privateDirectory(path.join(pinned(parent), part), device));
+              journal!.directory(prefix, directories.get(prefix)!);
             }
             parent = directories.get(prefix)!;
           }
@@ -834,6 +874,7 @@ export class BackupQueue {
               hash: createHash('sha256'),
             };
             files.set(name, file);
+            journal!.file(name, file.fd, 0, createHash('sha256').digest('hex'));
           }
           const nextSize = file.bytes + bytes.length;
           const charge =
@@ -856,6 +897,8 @@ export class BackupQueue {
           }
           file.hash.update(bytes);
           file.bytes = nextSize;
+          fs.fsyncSync(file.fd);
+          journal!.file(name, file.fd, file.bytes, file.hash.copy().digest('hex'));
         },
       });
       active = false;
@@ -869,7 +912,7 @@ export class BackupQueue {
       for (const fd of directories.values()) fs.fsyncSync(fd);
       receipt.state = 'pending';
       receipt.bytes = measure(slot, device);
-      writeAtomic(slot, 'receipt.json', receipt);
+      journal.receipt(receipt);
       fs.fsyncSync(slotFd);
       if (measure(root, device) > limit || measure(slot, device) > budget) throw Error('capture_capacity');
       return { status: 'queued' as const, kind, operationId };
@@ -878,7 +921,7 @@ export class BackupQueue {
       receipt.state = 'failed';
       receipt.files = [];
       receipt.bytes = measure(slot, device);
-      writeAtomic(slot, 'receipt.json', receipt);
+      if (journal) journal.receipt(receipt);
       // eslint-disable-next-line preserve-caught-error -- A failed capture remains encrypted and occupies its owned slot.
       throw Error('capture_failed');
     } finally {
@@ -1035,6 +1078,17 @@ export class BackupQueue {
   }
   async pending(kind: BackupKind): Promise<BackupQueueReceipt[]> {
     return this.area(kind, false, false, async (root, device) => this.receipts(root, kind, device));
+  }
+  /** Trusted recovery only. Fresh caller permission and the actual queue writer
+   * lease are rechecked throughout; saved claims cannot authorize removal. */
+  async reconcileCapture(kind: BackupKind, operationId: string, guard: () => void) {
+    if (!uuid(operationId) || typeof guard !== 'function') throw Error('backup_queue_unavailable');
+    return this.area(kind, false, true, async (root, _device, writer) =>
+      reconcileOwnedCapture(root, this.ownerDigest, kind, operationId, () => {
+        writer();
+        guard();
+      }),
+    );
   }
   /** A trusted uploader supplies fresh evidence for both the archive and its original
    * receipt under live descriptor scopes; the stored intent alone is never authority. */

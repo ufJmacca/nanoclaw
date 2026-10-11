@@ -464,13 +464,9 @@ it.each(['initial_receipt', 'partial_payload', 'before_pending_rename', 'after_p
       expect(await f.invoke()).toEqual(result);
       expect(f.effects.startNative).toHaveBeenCalledOnce();
       expect(contents(area)).toEqual(beforeQueue);
-      await expect(checkpointMaintenance({ root: f.root, binding, requestId: randomUUID(), effects: f.effects }))[
-        scenario === 'initial_receipt' ? 'rejects' : 'resolves'
-      ].toMatchObject(
-        scenario === 'initial_receipt'
-          ? { message: 'backup_queue_unavailable' }
-          : { status: 'backup_skipped_pending', interrupted: false },
-      );
+      await expect(
+        checkpointMaintenance({ root: f.root, binding, requestId: randomUUID(), effects: f.effects }),
+      ).resolves.toMatchObject({ status: 'backup_skipped_pending', interrupted: false });
       expect(f.effects.stopNative).not.toHaveBeenCalled();
     } finally {
       child.kill('SIGKILL');
