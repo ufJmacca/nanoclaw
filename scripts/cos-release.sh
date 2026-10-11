@@ -3,12 +3,12 @@
 set -euo pipefail
 umask 077
 [[ "$(uname -s)" == Darwin ]] || { echo 'cos:release requires the Mac host' >&2; exit 1; }
-[[ ( $# == 6 || ( $# == 7 && "${7:-}" == --local-only ) ) && "$1" == --slice && ( "$2" == S11 || "$2" == G01 ) && "$3" == --target && "$4" == pi && "$5" == --db-profile ]] || {
-  echo 'Usage: cos:release --slice S11|G01 --target pi --db-profile test|runtime-disposable [--local-only]' >&2; exit 1;
+[[ ( $# == 6 || ( $# == 7 && "${7:-}" == --local-only ) ) && "$1" == --slice && ( "$2" == S11 || "$2" == G01 || "$2" == G02 ) && "$3" == --target && "$4" == pi && "$5" == --db-profile ]] || {
+  echo 'Usage: cos:release --slice S11|G01|G02 --target pi --db-profile test|runtime-disposable [--local-only]' >&2; exit 1;
 }
 slice=$2 profile=$6
 [[ "$profile" == test || "$profile" == runtime-disposable ]] || exit 1
-[[ "$slice" != G01 || "$profile" == test ]] || { echo 'G01 requires the separate admitted test profile.' >&2; exit 1; }
+[[ ( "$slice" != G01 && "$slice" != G02 ) || "$profile" == test ]] || { echo "$slice requires the separate admitted test profile." >&2; exit 1; }
 [[ -z "${DOCKER_HOST:-}${DOCKER_CONTEXT:-}${DOCKER_TLS_VERIFY:-}${DOCKER_CERT_PATH:-}${BUILDX_BUILDER:-}" ]] || {
   echo 'Explicit Docker endpoint overrides are not accepted for releases.' >&2; exit 1;
 }
@@ -152,6 +152,7 @@ if [[ "$slice" == G01 || "$slice" == G02 ]]; then
   check vault_wire cli vault-wire "$id"
 fi
 if [[ "$slice" == G02 ]]; then
+  check backup_capture bash "$directory/context/scripts/cos-vault-fixture.sh" backup-capture-kernel "$vault_image" "$directory/context/scripts/cos-vault-keychain.swift" "$test_directory/test.env" "$test_directory/ca.pem"
   check backup_credentials bash "$directory/context/scripts/cos-vault-fixture.sh" backup-kernel "$vault_image" "$directory/context/scripts/cos-vault-keychain.swift"
   # One complete real repository run supplies the three separately validated
   # local gates. Preserve its actual output rather than rerunning destructive
@@ -196,6 +197,8 @@ volume_root=$(docker volume inspect --format '{{.Mountpoint}}' "$volume")
 docker run --rm --pull=never --network=none --user 0:0 --mount "type=volume,src=$volume,dst=/fixture" \
   --entrypoint node "$fixture_image" -e 'const f=require("fs");for(const p of ["/fixture","/fixture/.cos-plan-state","/fixture/s"]){f.mkdirSync(p,{recursive:true,mode:448});f.chmodSync(p,448);f.chownSync(p,1000,1000)}'
 host_checks() {
+  local backup_host_selection=()
+  if [[ "$slice" == G02 ]]; then backup_host_selection=(-e COS_BACKUP_FIXTURE_BINARY=/release/libexec/restic); fi
   docker run --rm --pull=never --network=none "$host_image" --input-type=module \
     -e 'import {payloadDigest} from "/release/dist/modules/chief-of-staff/ops/payload.js";console.log(await payloadDigest("/release"))' > "$directory/payload.sha256" || return
   local payload_digest
@@ -217,6 +220,7 @@ host_checks() {
       continue
     fi
     docker run --rm --pull=never --user 1000:1000 --group-add 0 \
+      ${backup_host_selection[@]+"${backup_host_selection[@]}"} \
       --env-file "$test_directory/test.env" \
       --mount "type=bind,src=$test_directory/ca.pem,dst=/fixture/ca.pem,readonly" \
       --mount "type=volume,src=$volume,dst=/release/.cos-plan-state,volume-subpath=.cos-plan-state" \

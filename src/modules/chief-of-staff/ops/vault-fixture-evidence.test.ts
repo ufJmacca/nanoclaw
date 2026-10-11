@@ -33,6 +33,13 @@ it('keeps the inherited kernel gate separate from the explicitly selected backup
     'vault_wire_evidence_unavailable',
   );
 });
+it('requires explicit selection of the separate actual capture kernel run', () => {
+  const records = evidence();
+  Object.assign(records[0], { mode: 'backup-capture-kernel' });
+  expect(() => verifyVaultWireEvidence(records, source, image)).toThrow();
+  expect(() => verifyVaultWireEvidence(records, source, image, 'backup-kernel')).toThrow();
+  expect(() => verifyVaultWireEvidence(records, source, image, 'backup-capture-kernel')).not.toThrow();
+});
 it.each(['source', 'image', 'missing-wire', 'disk-key', 'recovery', 'kernel', 'duplicate', 'keychain'])(
   'denies %s evidence instead of manufacturing a separate wire pass',
   (reason) => {

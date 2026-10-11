@@ -33,6 +33,8 @@ function fixture() {
     'container/fixtures/vault/probe-provision.mjs': 'synthetic kernel probe',
     'container/fixtures/vault/probe-backup-credentials.mjs': 'synthetic encrypted credential probe',
     'container/fixtures/vault/probe-backup-journal.mjs': 'synthetic encrypted credential journal probe',
+    'container/fixtures/vault/probe-backup-postgres.mjs':
+      'compiled actual test database inside encrypted kernel storage',
     'container/fixtures/vault/unadmitted.mjs': 'UNADMITTED_VAULT_CANARY',
     'scripts/cos-vault-fixture.sh': 'host-only private pipe orchestration',
     'scripts/cos-vault-keychain.swift': 'trusted keychain code, never key bytes',
@@ -209,21 +211,23 @@ it('exports only immutable job-manager fixtures and binds their committed bytes'
   expect(after.buildInputDigest).not.toBe(before.buildInputDigest);
   expect(after.workerAssetsDigest).toBe(before.workerAssetsDigest);
 });
-it.each(['scripts/cos-source-fixture.sh', 'scripts/cos-release.sh', 'scripts/cos-backup-repository-fixture.sh'])(
-  'binds committed %s bytes without exporting arbitrary scripts or changing worker assets',
-  async (script) => {
-    const f = fixture(),
-      before = await prepareBuildContext(f.repo, f.commit, path.join(f.root, 'first'));
-    expect(fs.existsSync(path.join(f.root, 'first', script))).toBe(true);
-    fs.writeFileSync(path.join(f.repo, script), 'changed public host driver');
-    f.git('add', '.');
-    f.git('commit', '-qm', 'changed host driver');
-    const after = await prepareBuildContext(f.repo, f.git('rev-parse', 'HEAD'), path.join(f.root, 'second'));
-    expect(after.buildInputDigest).not.toBe(before.buildInputDigest);
-    expect(after.workerAssetsDigest).toBe(before.workerAssetsDigest);
-    expect(fs.existsSync(path.join(f.root, 'second/scripts/unadmitted.sh'))).toBe(false);
-  },
-);
+it.each([
+  'scripts/cos-source-fixture.sh',
+  'scripts/cos-release.sh',
+  'scripts/cos-backup-repository-fixture.sh',
+  'container/fixtures/vault/probe-backup-postgres.mjs',
+])('binds committed %s bytes without exporting arbitrary scripts or changing worker assets', async (script) => {
+  const f = fixture(),
+    before = await prepareBuildContext(f.repo, f.commit, path.join(f.root, 'first'));
+  expect(fs.existsSync(path.join(f.root, 'first', script))).toBe(true);
+  fs.writeFileSync(path.join(f.repo, script), 'changed public host driver');
+  f.git('add', '.');
+  f.git('commit', '-qm', 'changed host driver');
+  const after = await prepareBuildContext(f.repo, f.git('rev-parse', 'HEAD'), path.join(f.root, 'second'));
+  expect(after.buildInputDigest).not.toBe(before.buildInputDigest);
+  expect(after.workerAssetsDigest).toBe(before.workerAssetsDigest);
+  expect(fs.existsSync(path.join(f.root, 'second/scripts/unadmitted.sh'))).toBe(false);
+});
 describe('S01-REL02 Mac-local builder', () => {
   const good = {
     clientPlatform: 'darwin',

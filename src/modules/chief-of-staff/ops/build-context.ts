@@ -26,6 +26,7 @@ const vaultFiles = new Set([
     'probe-artifact.mjs',
     'probe-backup-credentials.mjs',
     'probe-backup-journal.mjs',
+    'probe-backup-postgres.mjs',
   ].map((name) => 'container/fixtures/vault/' + name),
   'scripts/cos-vault-fixture.sh',
   'scripts/cos-vault-keychain.swift',

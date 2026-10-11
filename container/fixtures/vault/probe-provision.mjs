@@ -15,6 +15,7 @@ import { vaultUnits } from '/code/modules/chief-of-staff/ops/vault-units.js';
 import { checkVaultAuthority } from '/code/modules/chief-of-staff/ops/vault-authority.js';
 import { runtimeTestMessages, writeRuntimeTestMessage } from '/code/modules/chief-of-staff/ops/runtime-test-wire.js';
 import { writeVaultRootRequest } from '/code/modules/chief-of-staff/ops/vault-root-wire.js';
+import { selectedFixtureEnvironment } from '/code/contracts/chief-of-staff/fixture-database.js';
 const mapping = `cos-vault-fixture-${randomUUID()}`;
 const paths = {
   stateRoot: '/case/control',
@@ -232,12 +233,14 @@ function run(tool, args) {
   verifyVaultMemory();
   const fullCapture = args.includes('/probe/probe-backup-capture.compiled.mjs');
   const credentialJournal = args.includes('/probe/probe-backup-journal.mjs');
+  const postgresCapture = args.includes('/probe/probe-backup-postgres.mjs');
   const result = spawnSync(tool, args, {
     cwd: '/',
-    env: { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', LANG: 'C', LC_ALL: 'C', NANOCLAW_COS_VAULT_FIXTURE: '1' },
+    env: { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', LANG: 'C', LC_ALL: 'C', NANOCLAW_COS_VAULT_FIXTURE: '1',
+      ...(postgresCapture ? selectedFixtureEnvironment(process.env,true) : {}) },
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', fullCapture || credentialJournal ? 'pipe' : 'ignore'],
-    timeout: credentialJournal ? 120000 : 30000,
+    timeout: postgresCapture ? 300000 : credentialJournal ? 120000 : 30000,
     maxBuffer: 262144,
   });
   if (result.error || result.signal || result.status !== 0) {
@@ -480,6 +483,11 @@ try {
   await mount();
   if (process.env.NANOCLAW_COS_BACKUP_FIXTURE === '1') console.log('{"stage":"backup_vault_owner_capture"}');
   owner('capture');
+  if (process.env.NANOCLAW_COS_BACKUP_POSTGRES_FIXTURE === '1') {
+    console.log('{"stage":"backup_encrypted_postgres_capture"}');
+    const capture=JSON.parse(run('/usr/bin/setpriv',['--clear-groups','--reuid=1000','--regid=1000',process.execPath,'/probe/probe-backup-postgres.mjs']));
+    assert.equal(capture.encryptedPostgresCapture,'passed');console.log(JSON.stringify(capture));
+  }
   if (process.env.NANOCLAW_COS_BACKUP_FIXTURE === '1') {
     console.log('{"stage":"backup_vault_credential_installation"}');
     run('/usr/bin/setpriv', [
