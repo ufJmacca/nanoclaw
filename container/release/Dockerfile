@@ -1,5 +1,6 @@
 # Mac-only Linux/ARM64 release build. Context is exported from an exact Git commit.
 # Debian snapshot pinning: https://snapshot.debian.org/#usage
+ARG RELEASE_FLAVOUR=standard
 FROM docker@sha256:1c27de1f16ee894e6389586d8b58391f4b941f768cb5520cd2970c72d38a8e84 AS docker-cli
 
 FROM node@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5 AS tooling
@@ -34,11 +35,28 @@ RUN if [ "$RELEASE_SLICE" = G01 ] || [ "$RELEASE_SLICE" = G02 ]; then \
       rm /build/vault-gateway.mjs; \
     fi
 
+# G02 receives only the separately verified public binary/seal build context.
+# Ordinary releases do not evaluate this stage or include backup credentials.
+FROM scratch AS backup-artifact-input
+FROM host-build AS host-build-standard
+FROM host-build AS host-build-backup
+COPY --from=backup-artifact-input /restic /build/libexec/restic
+COPY --from=backup-artifact-input /artifact.json /build/libexec/artifact.json
+RUN node --input-type=module -e 'import {verifyResticReleasePayload} from "./dist/modules/chief-of-staff/ops/restic-release-payload.js";verifyResticReleasePayload("/build/libexec")'
+
+FROM host-build-${RELEASE_FLAVOUR} AS host-build-selected
+ARG RELEASE_SLICE=S11
+RUN case "$RELEASE_SLICE" in \
+      G02) node --input-type=module -e 'import {verifyResticReleasePayload} from "./dist/modules/chief-of-staff/ops/restic-release-payload.js";verifyResticReleasePayload("/build/libexec")' ;; \
+      G01|S11) test ! -e /build/libexec/restic ;; \
+      *) exit 1 ;; \
+    esac
+
 FROM tooling AS host
 ARG SOURCE_COMMIT
 ARG WORKER_ASSETS_DIGEST
 LABEL org.opencontainers.image.revision=$SOURCE_COMMIT nanoclaw.worker-assets=$WORKER_ASSETS_DIGEST nanoclaw.release-role=host
-COPY --from=host-build /build /release
+COPY --from=host-build-selected /build /release
 COPY --from=host-build /usr/local/bin/node /release/node/bin/node
 # Used only by trusted Mac final-image fixtures. The extracted Pi payload uses its existing host Docker CLI.
 COPY --from=docker-cli /usr/local/bin/docker /usr/bin/docker
