@@ -176,13 +176,14 @@ it('refuses an oversized checkpoint before changing either programme ledger', ()
   expect(fs.readFileSync(f.root + '/execution.json')).toEqual(original);
   expect(fs.readFileSync(f.root + '/google-mail-storage-execution.json')).toEqual(extension);
 });
-it.each(['mode', 'hardlink', 'symlink', 'root-mode', 'oversized', 'invalid-utf8'])(
+it.each(['mode', 'special-mode', 'hardlink', 'symlink', 'root-mode', 'oversized', 'invalid-utf8'])(
   'refuses a private extension ledger with unsafe %s evidence without updating history',
   (reason) => {
     const f = fixture(),
       file = f.root + '/google-mail-storage-execution.json',
       original = fs.readFileSync(f.root + '/execution.json');
     if (reason === 'mode') fs.chmodSync(file, 0o644);
+    if (reason === 'special-mode') fs.chmodSync(file, 0o4600);
     if (reason === 'hardlink') fs.linkSync(file, f.root + '/linked.json');
     if (reason === 'symlink') {
       fs.renameSync(file, f.root + '/actual.json');
@@ -231,7 +232,9 @@ it.each(['truncate', 'append', 'same-size-edit', 'mode', 'owner', 'hardlink'])(
       original = fs.readFileSync(f.root + '/execution.json'),
       extension = fs.readFileSync(file),
       actualRead = fs.readSync,
-      actualStat = fs.fstatSync;
+      actualStat = fs.fstatSync,
+      actualPathStat = fs.lstatSync,
+      initial = fs.lstatSync(file);
     let withdrawn = false;
     vi.spyOn(fs, 'readSync').mockImplementation(((...args: Parameters<typeof fs.readSync>) => {
       const count = Reflect.apply(actualRead, fs, args);
@@ -247,10 +250,18 @@ it.each(['truncate', 'append', 'same-size-edit', 'mode', 'owner', 'hardlink'])(
     }) as typeof fs.readSync);
     vi.spyOn(fs, 'fstatSync').mockImplementation(((fd: number) => {
       const stat = actualStat(fd);
+      if (reason === 'same-size-edit' && stat.ino === initial.ino)
+        Object.assign(stat, { mtimeMs: initial.mtimeMs, ctimeMs: initial.ctimeMs });
       return withdrawn && reason === 'owner' && stat.size === extension.length
         ? Object.assign(stat, { uid: stat.uid + 1 })
         : stat;
     }) as typeof fs.fstatSync);
+    vi.spyOn(fs, 'lstatSync').mockImplementation(((...args: Parameters<typeof fs.lstatSync>) => {
+      const stat = Reflect.apply(actualPathStat, fs, args);
+      if (reason === 'same-size-edit' && stat?.ino === initial.ino)
+        Object.assign(stat, { mtimeMs: initial.mtimeMs, ctimeMs: initial.ctimeMs });
+      return stat;
+    }) as typeof fs.lstatSync);
     expect(() => readExtensionRelease(f.root, true)).toThrow('extension_release_not_admitted');
     expect(withdrawn).toBe(true);
     expect(fs.readFileSync(f.root + '/execution.json')).toEqual(original);
