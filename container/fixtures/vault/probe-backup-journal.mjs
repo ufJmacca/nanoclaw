@@ -63,7 +63,7 @@ await assert.rejects(revoked.token('journal-fixture', revokedBinding, revokedRef
 assert.throws(() => opened.fences.assertOpen('journal-fixture', revokedBinding), /calendar_auth_revoked/);
 assert.equal((await queue.pending('credentials')).length, 8); cases++;
 
-for (const stage of ['empty', 'partial', 'before_rename', 'after_rename']) {
+for (const stage of ['empty', 'partial', 'before_rename', 'after_rename', 'initial_receipt', 'partial_payload', 'before_pending_rename', 'after_pending_rename']) {
   writeAtomic(roots.targetRoot, 'credential-journal-stage.json', { stage: 'killed_' + stage });
   const sourceKey = digest({ stage, fixture: 'encrypted-credential-journal' }), primary = '/case/vault/backup-credentials/journal-source-' + stage + '.json';
   fs.writeFileSync(primary, JSON.stringify({ synthetic: true, stage }) + '\n', { flag: 'wx', mode: 0o600 });
@@ -74,15 +74,19 @@ for (const stage of ['empty', 'partial', 'before_rename', 'after_rename']) {
     import { createVaultCredentialJournal } from '/code/modules/chief-of-staff/ops/backup-credential-journal.js';
     import { verifyVaultMemory } from '/code/modules/chief-of-staff/ops/vault-memory.js';
     const stage=${JSON.stringify(stage)},primary=${JSON.stringify(primary)},identity=${JSON.stringify(identity)};
-    const write=fs.writeFileSync,rename=fs.renameSync;
+    const write=fs.writeFileSync,rename=fs.renameSync,open=fs.openSync;
     const pause=()=>{fs.writeSync(1,'READY\\n');Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0);};
     fs.writeFileSync=(file,bytes,...options)=>{
+      if(stage==='initial_receipt' && typeof file==='number' && String(bytes).startsWith('{"format":"cos-backup-queue/v1"'))pause();
       if(typeof file==='number' && Buffer.isBuffer(bytes) && bytes.toString().startsWith('{"contract":"cos-backup-credential-head/v1"')) {
         if(stage==='empty')pause();if(stage==='partial'){write(file,bytes.subarray(0,Math.floor(bytes.length/2)),...options);pause();}
       }return write(file,bytes,...options);
     };
+    fs.openSync=(file,...options)=>{if(stage==='partial_payload' && String(file).endsWith('/credential-event.json'))pause();return open(file,...options);};
     fs.renameSync=(from,to)=>{const selected=/\\/.cos-credential-[a-f0-9]{64}\\.json$/.test(String(to));
-      if(selected && stage==='before_rename')pause();const result=rename(from,to);if(selected && stage==='after_rename')pause();return result;};
+      const pending=String(to).endsWith('/receipt.json')&&JSON.parse(fs.readFileSync(from,'utf8')).state==='pending';
+      if((selected && stage==='before_rename') || (pending && stage==='before_pending_rename'))pause();
+      const result=rename(from,to);if((selected && stage==='after_rename') || (pending && stage==='after_pending_rename'))pause();return result;};
     const bytes=fs.readFileSync(primary);try { await createVaultCredentialJournal(${JSON.stringify(roots)})({sourceKind:'backup_repository',
       sourceKey:${JSON.stringify(sourceKey)},generation:1,phase:'ready',files:[{name:'credential.json',bytes}]},
       ()=>{verifyVaultMemory();if(digest(fs.readFileSync(primary,'utf8'))!==identity)throw Error('fixture_primary_changed');}); }
@@ -98,11 +102,15 @@ for (const stage of ['empty', 'partial', 'before_rename', 'after_rename']) {
     });
     await assert.rejects(journal({ ...change, sourceKey: digest({ sourceKey, competing: true }) }, guard), /backup_credential_journal_unavailable/);
     child.kill('SIGKILL'); assert.equal(await closed, 'SIGKILL');
-    const before = (await queue.pending('credentials')).length;
+    const observed = await queue.pending('credentials'), before = observed.length,
+      selected = observed.find(receipt => receipt.operationId === JSON.parse(fs.readFileSync('/case/vault/journals/backup-queue/.cos-capture.json', 'utf8')).operationId),
+      payload = '/case/vault/journals/backup-queue/' + selected.operationId + '/data/credential.json',
+      payloadInode = fs.lstatSync(payload, { throwIfNoEntry: false })?.ino;
     await assert.rejects(journal(change, () => { throw Error('fixture_source_withdrawn'); }), /backup_credential_journal_unavailable/);
     assert.equal((await queue.pending('credentials')).length, before);
     await journal(change, guard); await journal(change, guard);
     assert.equal((await queue.pending('credentials')).length, before);
+    if (['before_pending_rename', 'after_pending_rename'].includes(stage)) assert.equal(fs.statSync(payload).ino, payloadInode);
     assert.deepEqual(fs.readdirSync('/case/vault/journals/backup-queue').filter(name => /^\.cos-credential-.*\.tmp$/.test(name)), []);
     cases++;
   } finally { child.kill('SIGKILL'); await closed; bytes.fill(0); }
@@ -116,9 +124,9 @@ try {
 } finally { fs.closeSync(fd); }
 const currentCanary = fs.lstatSync(canary);
 for (const key of ['dev', 'ino', 'uid', 'gid', 'mode', 'nlink', 'size', 'mtimeMs', 'ctimeMs']) assert.equal(currentCanary[key], originalCanary[key]);
-assert.equal((await queue.pending('credentials')).length, 12);
+assert.equal((await queue.pending('credentials')).length, 16);
 stage('complete');
-console.log(JSON.stringify({ encryptedCredentialJournal: 'passed', cases, actualKilledWriters: 4,
+console.log(JSON.stringify({ encryptedCredentialJournal: 'passed', cases, actualKilledWriters: 8, actualCaptureKilledWriters: 4, actualHeadKilledWriters: 4,
   actualEncryptedVault: true, compiledProductionQueue: true, defaultReaderAndBackupOwner: true,
   productionMemoryAndStorageOverrides: false, rootProofBytesRead: false,
   oauth: 'fixture', remoteRepository: 'metadata-only-fixture', remoteUpload: 'not_exercised', syntheticCredentialsOnly: true }));

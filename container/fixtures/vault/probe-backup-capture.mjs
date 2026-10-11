@@ -22,6 +22,7 @@ import { createVaultBackupQueue } from '../../../src/modules/chief-of-staff/ops/
 import { openKnowledgeArtifacts } from '../../../src/modules/chief-of-staff/knowledge/config.js';
 import { captureHostFixture } from './backup-capture-host.mjs';
 import { checkpointMaintenance } from '../../../src/modules/chief-of-staff/ops/checkpoint-maintenance.js';
+import { uploadBackupJob } from '../../../src/modules/chief-of-staff/ops/backup-upload-job.js';
 import { recoveryReleaseForManifest } from '../../../src/modules/chief-of-staff/ops/recovery-manifest.js';
 import { fixtureVaultRelease } from '../../../src/contracts/chief-of-staff/release-fixture.js';
 
@@ -467,7 +468,16 @@ if (mode === 'unavailable') {
         assert.equal(admittedGeneration(stateRoot, binding), failedLease.generation + 1);
         assert.equal(recoveredHealthy, true);
       };
-      assert.equal((await queue.reconcileCapture('state', failedLease.nonce, assertCaptureRecovery)).status, 'capture_retired');
+      const delivery = await uploadBackupJob({ root: stateRoot, binding, requestId: randomUUID(), effects: {
+        verify: async () => scheduledManifest, healthy: async () => recoveredHealthy,
+        reconcile: async (kind, assertCurrent) => queue.reconcileIncompleteCapture(kind, () => { assertCurrent(); assertCaptureRecovery(); }),
+        inspect: kind => queue.inspectDelivery(kind),
+        mount: async () => { throw Error('synthetic_nas_offline'); },
+        upload: async () => { throw Error('must_not_upload_without_mount'); },
+      }});
+      assert.equal(delivery.status, 'backup_upload_failed');
+      assert.equal(delivery.state.held, 0); assert.equal(delivery.state.pending, 0);
+      assert.equal(delivery.credentials.pending, 16); assert.equal(delivery.uploaded, 0);
       assert.equal((await queue.reconcileCapture('state', failedLease.nonce, assertCaptureRecovery)).status, 'capture_retired');
       assert.deepEqual(await queue.inspect('state'), []);
       assert.equal(native.prepare('SELECT paused FROM cos_identity_boundaries').get().paused, 1);
@@ -498,7 +508,8 @@ if (mode === 'unavailable') {
           interruptedCaptureServiceRecovery: { status: 'passed', cases: captureRecoveryCases,
             incompleteQueuePreservedDuringServiceRecovery: true, laterOwnerPausePreserved: true, noRecapture: true, finalArtifact: false },
           ownedCaptureReconciliation: {status: 'passed', cases: 3, actualQueueAndKernelLock: true, freshVaultAndAdmissionRequired: true,
-            failedOwnedCopiesRetired: true, repeatIdempotent: true, laterCaptureQueued: true, nativeStatePreserved: true, manager: 'fixture'},
+            failedOwnedCopiesRetired: true, repeatIdempotent: true, laterCaptureQueued: true, nativeStatePreserved: true, automaticUploadJobRecovery: true,
+            pendingCredentialsRetainedOnNasOutage: 16, manager: 'fixture'},
           encryptedVolume: 'actual_LUKS2_ext4',
           defaultMemoryAndStorageGuards: true,
           actualNativeOwnerGuards: true,
