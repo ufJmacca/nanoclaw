@@ -5,7 +5,14 @@ import { promisify } from 'node:util';
 import { createHash } from 'node:crypto';
 import { safeHostEnvironment } from '../../../host-environment.js';
 const execute = promisify(execFile);
-const rootFiles = new Set(['package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', '.npmrc', 'tsconfig.json']);
+const rootFiles = new Set([
+  'package.json',
+  'pnpm-lock.yaml',
+  'pnpm-workspace.yaml',
+  '.npmrc',
+  'tsconfig.json',
+  'vitest.config.ts',
+]);
 const vaultFiles = new Set([
   'container/fixtures/vault/Dockerfile.release',
   ...[
@@ -22,6 +29,7 @@ const vaultFiles = new Set([
   'scripts/cos-vault-keychain.swift',
   'scripts/cos-backup-keychain.swift',
   'scripts/cos-backup-keychain-fixture.swift',
+  'scripts/cos-root-unit-fixture.sh',
 ]);
 function allowed(name: string): boolean {
   const pieces = name.split('/');

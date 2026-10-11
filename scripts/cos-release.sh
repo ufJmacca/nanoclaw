@@ -74,7 +74,9 @@ check() {
   fi
 }
 root_checks() {
-  docker exec "$dev" pnpm test &&
+  docker exec "$dev" node -e 'if(process.getuid?.()!==1000)process.exit(1)' &&
+  docker exec "$dev" pnpm test --maxWorkers=2 &&
+  bash "$directory/context/scripts/cos-root-unit-fixture.sh" "$dev" "$directory/context" &&
   docker exec "$dev" pnpm typecheck &&
   docker exec "$dev" pnpm build &&
   docker exec "$dev" pnpm lint &&

@@ -22,6 +22,7 @@ function fixture() {
     'package.json': '{}',
     'pnpm-lock.yaml': 'fixture-lock',
     'tsconfig.json': '{}',
+    'vitest.config.ts': 'public test identity selection',
     'src/index.ts': 'console.log("fixture")',
     'container/agent-runner/src/index.ts': 'fixture runner',
     'container/agent-runner/fixtures/cos-subscription-capability.ts': 'offline native protocol fixture',
@@ -35,6 +36,7 @@ function fixture() {
     'scripts/cos-vault-keychain.swift': 'trusted keychain code, never key bytes',
     'scripts/cos-backup-keychain.swift': 'trusted backup credential code, never credential material',
     'scripts/cos-backup-keychain-fixture.swift': 'disposable host-native credential entry fixture',
+    'scripts/cos-root-unit-fixture.sh': 'isolated root administration source fixture',
     'scripts/unadmitted.sh': 'UNADMITTED_SCRIPT_CANARY',
     '.env': 'PRIVATE_ENV_CANARY',
     'data/v2.db': 'PRIVATE_STATE_CANARY',
@@ -63,6 +65,7 @@ describe('S01-REL03 pinned source-only build context', () => {
     ).toBe('offline native protocol fixture');
     expect(fs.existsSync(path.join(out, 'container/agent-runner/fixtures/unadmitted.ts'))).toBe(false);
     expect(result.sourceCommit).toBe(f.commit);
+    expect(fs.readFileSync(path.join(out, 'vitest.config.ts'), 'utf8')).toBe('public test identity selection');
     expect(result.sourceTree).toBe(f.git('rev-parse', f.commit + '^{tree}'));
     for (const denied of ['.env', 'data', 'container/agent-runner/node_modules', 'src/private.key'])
       expect(fs.existsSync(path.join(out, denied))).toBe(false);
@@ -125,6 +128,9 @@ it('binds the host backup credential helper to committed source without changing
   );
   expect(fs.readFileSync(path.join(first, 'scripts/cos-backup-keychain-fixture.swift'), 'utf8')).toBe(
     'disposable host-native credential entry fixture',
+  );
+  expect(fs.readFileSync(path.join(first, 'scripts/cos-root-unit-fixture.sh'), 'utf8')).toBe(
+    'isolated root administration source fixture',
   );
   f.git('add', '.');
   f.git('commit', '-qm', 'changed credential driver');
