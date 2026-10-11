@@ -14,6 +14,7 @@ type TargetArguments =
   | { command: 'scheduled-backup'; settings: string; requestId: string }
   | { command: 'upload-backups'; settings: string; requestId: string }
   | { command: 'install-backup-jobs'; settings: string }
+  | { command: 'reconcile-backup-capture'; settings: string; requestId: string; kind: 'state' | 'credentials' }
   | { command: 'runtime-test'; settings: string; owner: string }
   | { command: 'rollback'; settings: string; releaseId: string; fromReleaseId: string }
   | {
@@ -41,6 +42,7 @@ export function parseTargetArguments(args: string[]): TargetArguments {
       'scheduled-backup',
       'upload-backups',
       'install-backup-jobs',
+      'reconcile-backup-capture',
     ].includes(command) ||
     rest.length % 2 !== 0
   )
@@ -59,6 +61,7 @@ export function parseTargetArguments(args: string[]): TargetArguments {
         '--completion',
         '--request-id',
         '--phase',
+        '--kind',
       ].includes(rest[i]) ||
       !rest[i + 1] ||
       values[rest[i]]
@@ -90,7 +93,18 @@ export function parseTargetArguments(args: string[]): TargetArguments {
       /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(values['--request-id'] ?? '')
       ? { command, settings: values['--settings'], requestId: values['--request-id'] }
       : reject();
-  if (values['--completion'] || values['--request-id'] || values['--phase']) return reject();
+  if (command === 'reconcile-backup-capture')
+    return Object.keys(values).length === 3 &&
+      ['state', 'credentials'].includes(values['--kind']) &&
+      /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(values['--request-id'] ?? '')
+      ? {
+          command,
+          settings: values['--settings'],
+          requestId: values['--request-id'],
+          kind: values['--kind'] as 'state' | 'credentials',
+        }
+      : reject();
+  if (values['--completion'] || values['--request-id'] || values['--phase'] || values['--kind']) return reject();
   if (command === 'status' || command === 'install-backup-jobs')
     return Object.keys(values).length === 1 ? { command, settings: values['--settings'] } : reject();
   if (command === 'runtime-test') {
@@ -176,6 +190,10 @@ export async function targetCommand(args: string[]): Promise<Record<string, unkn
   if (request.command === 'install-backup-jobs') {
     const { configureTargetBackupJobs } = await import('./backup-job-configure.js');
     return configureTargetBackupJobs(settings, fileURLToPath(import.meta.url));
+  }
+  if (request.command === 'reconcile-backup-capture') {
+    const { reconcileTargetBackupCapture } = await import('./backup-capture-reconcile.js');
+    return reconcileTargetBackupCapture(settings, fileURLToPath(import.meta.url), request.kind, request.requestId);
   }
   if (request.command === 'upload-backups') {
     const { uploadBackupJob } = await import('./backup-upload-job.js');
@@ -407,6 +425,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
         'backup_upload_job_unavailable',
         'backup_job_installation_busy',
         'backup_job_installation_unavailable',
+        'backup_capture_recovery_busy',
+        'backup_capture_recovery_unavailable',
       ]);
       console.error(
         JSON.stringify({

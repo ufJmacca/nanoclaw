@@ -1019,6 +1019,18 @@ export class BackupQueue {
         assertCurrent();
         const metadata = credentialMetadata(root, device, this.ownerDigest),
           old = metadata.heads.find((head) => credentialSource(head.event) === credentialSource(event));
+        // A retry belongs to this exact deterministic event and the still-current
+        // primary credential owner. It cannot clean another source's capture or
+        // replace a remote retirement operation with local cleanup.
+        if (!old || credentialOrder(old.event) < credentialOrder(event)) {
+          const capture = readCaptureJournal(root, this.ownerDigest, 'credentials');
+          if (capture?.operationId === event.operationId && ['capturing', 'retiring'].includes(capture.phase)) {
+            const intent = retirement(root, intentName, this.ownerDigest, 'credentials', device);
+            if (intent?.receipt.operationId === event.operationId) throw Error('credential_pending_interrupted');
+            await reconcileOwnedCapture(root, this.ownerDigest, 'credentials', event.operationId, assertCurrent);
+            assertCurrent();
+          }
+        }
         const receipts = this.receipts(root, 'credentials', device),
           same = receipts.find((receipt) => receipt.operationId === event.operationId);
         if (old && credentialOrder(old.event) >= credentialOrder(event)) {
@@ -1088,6 +1100,34 @@ export class BackupQueue {
         writer();
         guard();
       }),
+    );
+  }
+  /** The installed background owner may recover only the current authenticated
+   * incomplete capture. Read its journal before delivery inspection, so a known
+   * partial deletion can finish without requiring a still-complete slot. */
+  async reconcileIncompleteCapture(kind: BackupKind, guard: () => void) {
+    if (typeof guard !== 'function') throw Error('backup_queue_unavailable');
+    const idle = () => {
+      guard();
+      return { status: 'capture_recovery_idle' as const, kind };
+    };
+    return this.area(
+      kind,
+      false,
+      true,
+      async (root, _device, writer) => {
+        const assertCurrent = () => {
+          writer();
+          guard();
+        };
+        assertCurrent();
+        const capture = readCaptureJournal(root, this.ownerDigest, kind);
+        if (!capture || !['capturing', 'retiring'].includes(capture.phase)) return idle();
+        const intent = retirement(root, intentName, this.ownerDigest, kind, fs.statSync(root).dev);
+        if (intent?.receipt.operationId === capture.operationId) throw Error('capture_remote_retirement_pending');
+        return reconcileOwnedCapture(root, this.ownerDigest, kind, capture.operationId, assertCurrent);
+      },
+      async () => idle(),
     );
   }
   /** A trusted uploader supplies fresh evidence for both the archive and its original

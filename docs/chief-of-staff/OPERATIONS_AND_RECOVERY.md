@@ -227,6 +227,38 @@ ordinary NanoClaw data and messaging must remain intact. Release the held
 operation using its original maintenance UUID after the checks pass. These
 commands grant no Google, Calendar writer or model authority.
 
+## Recover an interrupted G02 backup copy
+
+This procedure requires a verified, healthy G02 payload, reopened target
+admission and the existing vault memory restrictions. It is pending installed
+acceptance; the current G01 payload cannot run it. Use the retained payload and
+settings recorded for that G02 release.
+
+The hourly upload job first reconciles the queue's current owned incomplete
+capture. A completed pending snapshot stays queued. An authenticated incomplete
+copy can be removed, or a fully written pending receipt can be completed without
+recapturing its payload. This local step needs no NAS connection. An interrupted
+service checkpoint must first finish its recorded service recovery and restore
+healthy admission. Queue recovery does not release maintenance or restart it.
+
+For an explicit owner retry, run the target helper with the same capture ID:
+
+```sh
+cos_target reconcile-backup-capture --kind state --request-id CAPTURE_UUID
+```
+
+Use `credentials` for a credential capture. Run the helper under the scoped core
+and swap restrictions described above. `capture_retired` acknowledges removal
+of that known incomplete copy; `capture_pending` preserves its completed
+snapshot for upload. A credential owner's ordinary retry also heals its exact
+deterministic event under fresh primary-state permission, without repeating an
+OAuth exchange.
+
+Changed bytes or file identities, unknown files, missing ownership claims and
+live writers prevent cleanup. Leave those copies intact for investigation.
+Neither the saved capture claim nor a queue status grants permission to restore
+primary state or remove a completed pending backup.
+
 ## Rotate credentials
 
 Use the hold procedure before changing client credentials. An unreachable old

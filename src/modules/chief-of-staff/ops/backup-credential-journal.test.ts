@@ -35,6 +35,64 @@ function fixture() {
     },
   };
 }
+it.each(['payload', 'pending-publication'] as const)(
+  'retries the same credential event after %s failure under fresh primary authority',
+  async (phase) => {
+    const f = fixture();
+    const open = fs.openSync,
+      rename = fs.renameSync;
+    const create = vi.spyOn(fs, 'openSync').mockImplementation((file, ...args) => {
+      if (phase === 'payload' && String(file).endsWith('/credential-event.json'))
+        throw Error('PRIVATE_CAPTURE_FAILURE');
+      return open(file, ...args);
+    });
+    const publish = vi.spyOn(fs, 'renameSync').mockImplementation((from, to) => {
+      if (
+        phase === 'pending-publication' &&
+        String(to).endsWith('/receipt.json') &&
+        JSON.parse(fs.readFileSync(from, 'utf8')).state === 'pending'
+      )
+        throw Error('PRIVATE_CAPTURE_FAILURE');
+      return rename(from, to);
+    });
+    await expect(f.queue.recordCredential(event(), () => {})).rejects.toThrow('backup_queue_unavailable');
+    create.mockRestore();
+    publish.mockRestore();
+    const prior = (await f.queue.pending('credentials'))[0],
+      payload = f.root + '/backup-queue/' + prior.operationId + '/data/credential.json',
+      inode = fs.statSync(payload).ino,
+      guard = vi.fn(() => {});
+    expect(await f.rebuild().recordCredential(event(), guard)).toEqual({
+      status: 'recorded',
+      operationId: prior.operationId,
+    });
+    expect(guard).toHaveBeenCalled();
+    expect((await f.queue.pending('credentials')).map((receipt) => receipt.operationId)).toEqual([prior.operationId]);
+    expect(fs.readFileSync(payload, 'utf8')).toBe('SYNTHETIC_CREDENTIAL_1_ready');
+    if (phase === 'pending-publication') expect(fs.statSync(payload).ino).toBe(inode);
+    expect(await f.rebuild().recordCredential(event(), guard)).toMatchObject({ operationId: prior.operationId });
+  },
+);
+it('preserves an interrupted credential copy when fresh primary authority is withdrawn', async () => {
+  const f = fixture(),
+    open = fs.openSync;
+  const fault = vi.spyOn(fs, 'openSync').mockImplementation((file, ...args) => {
+    if (String(file).endsWith('/credential-event.json')) throw Error('capture failure');
+    return open(file, ...args);
+  });
+  await expect(f.queue.recordCredential(event(), () => {})).rejects.toThrow('backup_queue_unavailable');
+  fault.mockRestore();
+  const id = (await f.queue.pending('credentials'))[0].operationId,
+    payload = f.root + '/backup-queue/' + id + '/data/credential.json',
+    before = fs.statSync(payload).ino;
+  await expect(
+    f.rebuild().recordCredential(event(), () => {
+      throw Error('primary withdrawn');
+    }),
+  ).rejects.toThrow('backup_queue_unavailable');
+  expect(fs.statSync(payload).ino).toBe(before);
+  expect(fs.readFileSync(payload, 'utf8')).toBe('SYNTHETIC_CREDENTIAL_1_ready');
+});
 const prove = async (request: BackupRetirementRequest) => ({
   checkpoint: {
     contract: 'cos-backup-remote-checkpoint/v1' as const,

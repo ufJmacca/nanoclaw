@@ -29,6 +29,34 @@ function fixture() {
     );
   return { root, queue, operationId, failed, slot: root + '/backup-queue/full', guard: vi.fn(() => {}) };
 }
+it('automatic recovery does not initialize an absent queue or remove a pending snapshot', async () => {
+  const f = fixture();
+  await expect(f.queue.reconcileIncompleteCapture('state', f.guard)).resolves.toMatchObject({
+    status: 'capture_recovery_idle',
+  });
+  expect(fs.existsSync(f.root + '/backup-queue')).toBe(false);
+  await f.queue.capture('state', f.operationId, async (sink) => sink.write('ready.json', Buffer.from('READY')), 65536);
+  await expect(f.queue.reconcileIncompleteCapture('state', f.guard)).resolves.toMatchObject({
+    status: 'capture_recovery_idle',
+  });
+  expect(fs.readFileSync(f.slot + '/data/ready.json', 'utf8')).toBe('READY');
+});
+it('automatic recovery resumes known partial deletion without relying on the delivery observation', async () => {
+  const f = fixture();
+  await expect(f.failed()).rejects.toThrow('backup_queue_unavailable');
+  const remove = fs.rmdirSync;
+  const fault = vi.spyOn(fs, 'rmdirSync').mockImplementation((file, ...args) => {
+    remove(file, ...args);
+    if (String(file).endsWith('/data')) throw Error('lost directory removal result');
+  });
+  await expect(f.queue.reconcileCapture('state', f.operationId, f.guard)).rejects.toThrow('backup_queue_unavailable');
+  fault.mockRestore();
+  expect((await f.queue.inspectDelivery('state')).items).toMatchObject([{ disposition: 'held' }]);
+  await expect(f.queue.reconcileIncompleteCapture('state', f.guard)).resolves.toMatchObject({
+    status: 'capture_retired',
+  });
+  expect((await f.queue.inspectDelivery('state')).items).toEqual([]);
+});
 it('retires only an owned incomplete capture under fresh caller authority and permits a later capture', async () => {
   const f = fixture();
   await expect(f.failed()).rejects.toThrow('backup_queue_unavailable');

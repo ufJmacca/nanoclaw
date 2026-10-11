@@ -6,10 +6,11 @@ import { createScheduledMaintenanceEffects } from './operations-maintenance-effe
 import { createVaultBackupQueue } from './backup-queue.js';
 import { uploadVaultBackup } from './backup-upload.js';
 import { verifyVaultMemory } from './vault-memory.js';
+import { verifyTargetPaths } from './target-host.js';
 const execute = promisify(execFile);
-/** Installed background ports use only readonly service verification and the
- * existing fixed root mount helper. Repository initialization, recovery,
- * credentials, maintenance and native start/stop are not job capabilities. */
+/** Installed background ports verify the service, recover owned incomplete
+ * copies and use the fixed root mount helper. Repository initialization, mount
+ * recovery, primary credentials, maintenance and native start/stop are excluded. */
 export function createBackupUploadJobEffects(
   settings: DeploymentSettings,
   invokedHelper: string,
@@ -29,6 +30,16 @@ export function createBackupUploadJobEffects(
     async inspect(kind) {
       verifyVaultMemory();
       return createVaultBackupQueue(roots).inspectDelivery(kind);
+    },
+    async reconcile(kind, assertCurrent) {
+      const guard = () => {
+        assertCurrent();
+        verifyVaultMemory();
+        verifyTargetPaths(settings, 0);
+      };
+      guard();
+      await createVaultBackupQueue(roots).reconcileIncompleteCapture(kind, guard);
+      guard();
     },
     async mount(assertCurrent) {
       try {

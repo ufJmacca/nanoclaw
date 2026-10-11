@@ -1,5 +1,30 @@
 import { expect, it } from 'vitest';
 import { parseTargetArguments } from './target-helper.js';
+it('admits only an existing capture kind and stable ID for owner recovery', () => {
+  const args = [
+    'reconcile-backup-capture',
+    '--settings',
+    '/home/pi/target.json',
+    '--kind',
+    'state',
+    '--request-id',
+    '01234567-89ab-4def-8123-456789abcdef',
+  ];
+  expect(parseTargetArguments(args)).toEqual({
+    command: args[0],
+    settings: args[2],
+    kind: 'state',
+    requestId: args[6],
+  });
+  for (const invalid of [
+    [...args.slice(0, 4), 'all', ...args.slice(5)],
+    [...args.slice(0, -1), 'latest'],
+    [...args, '--owner', 'foreign'],
+    [...args, '--path', '/tmp/copy'],
+    ['status', '--settings', args[2], '--kind', 'state'],
+  ])
+    expect(() => parseTargetArguments(invalid)).toThrow('invalid_target_arguments');
+});
 it('admits only fixed backup-job installation without unit, mode, root or credential selectors', () => {
   const args = ['install-backup-jobs', '--settings', '/home/pi/target.json'];
   expect(parseTargetArguments(args)).toEqual({ command: 'install-backup-jobs', settings: args[2] });

@@ -66,6 +66,9 @@ function fixture() {
     verify: vi.fn(async () => manifest),
     healthy: vi.fn(async () => true),
     inspect: vi.fn(async (kind: BackupKind) => structuredClone(queues[kind])),
+    reconcile: vi.fn(async (_kind: BackupKind, assertCurrent: () => void) => {
+      assertCurrent();
+    }),
     mount: vi.fn(async (assertCurrent: () => void) => {
       assertCurrent();
       events.push('mount');
@@ -89,6 +92,45 @@ function fixture() {
   const invoke = () => uploadBackupJob({ root, binding, requestId, effects });
   return { root, binding, manifest, queues, effects, events, native, requestId, add, invoke };
 }
+it('recovers local captures before observing delivery, then uploads recovered pending work', async () => {
+  const f = fixture(),
+    id = f.add('state', 'held'),
+    before = f.native.serialize();
+  f.effects.inspect.mockImplementation(async (kind) => {
+    expect(f.effects.reconcile).toHaveBeenCalledWith(kind, expect.any(Function));
+    return structuredClone(f.queues[kind]);
+  });
+  f.effects.reconcile.mockImplementation(async (kind, assertCurrent) => {
+    assertCurrent();
+    f.queues[kind].items.forEach((item) => {
+      item.disposition = 'upload';
+    });
+  });
+  expect(await f.invoke()).toMatchObject({ status: 'backup_uploaded', uploaded: 1, state: { held: 0, pending: 0 } });
+  expect(f.effects.upload).toHaveBeenCalledWith('state', id, expect.any(Function));
+  expect(f.native.serialize().equals(before)).toBe(true);
+});
+it('retains unverifiable local captures while continuing delivery of separate pending work', async () => {
+  const f = fixture();
+  f.add('state', 'held');
+  f.add('credentials');
+  f.effects.reconcile.mockImplementation(async (kind, assertCurrent) => {
+    assertCurrent();
+    if (kind === 'state') throw Error('PRIVATE_COPY_CONFLICT');
+  });
+  expect(await f.invoke()).toMatchObject({ status: 'backup_uploaded', uploaded: 1, state: { held: 1 } });
+  expect(f.effects.reconcile).toHaveBeenCalledTimes(2);
+});
+it('refuses withdrawn admission during local recovery before observing or mounting', async () => {
+  const f = fixture();
+  f.effects.reconcile.mockImplementationOnce(async (_kind, assertCurrent) => {
+    writeAtomic(f.root, 'state.json', { ...readTarget(f.root, f.binding), maintenance: true });
+    assertCurrent();
+  });
+  await expect(f.invoke()).rejects.toThrow('backup_upload_job_unavailable');
+  expect(f.effects.inspect).not.toHaveBeenCalled();
+  expect(f.effects.mount).not.toHaveBeenCalled();
+});
 it('reports capture age without treating a later upload as newer captured data', async () => {
   const f = fixture();
   Object.assign(f.queues.state, {

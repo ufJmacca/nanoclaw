@@ -11,6 +11,7 @@ export type BackupUploadJobEffects = {
   verify(): Promise<ReleaseManifest>;
   healthy(): Promise<boolean>;
   inspect(kind: BackupKind): Promise<BackupDeliveryObservation>;
+  reconcile(kind: BackupKind, assertCurrent: () => void): Promise<unknown>;
   mount(assertCurrent: () => void): Promise<void>;
   upload(kind: BackupKind, operationId: string, assertCurrent: () => void): Promise<unknown>;
 };
@@ -125,6 +126,16 @@ export async function uploadBackupJob(input: {
         return values;
       };
       await healthy();
+      for (const kind of kinds) {
+        await healthy();
+        try {
+          await effects.reconcile(kind, assertCurrent);
+          // eslint-disable-next-line no-catch-all/no-catch-all -- An unverifiable copy remains held; separate pending work can continue only under fresh scope and healthy release checks.
+        } catch {
+          assertCurrent();
+        }
+        await healthy();
+      }
       let values = await inspect(),
         uploaded = 0;
       const save = (status: string) => {
