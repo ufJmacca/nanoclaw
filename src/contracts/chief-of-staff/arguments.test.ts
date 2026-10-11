@@ -146,7 +146,23 @@ it('G01 regresses the completed programme using only the admitted separate test 
   expect(() => parseFixtureArguments(['--slice', 'G01', '--db-profile', 'runtime-disposable'])).toThrow(
     'explicit_supported_slice_and_profile_required',
   );
-  expect(() => parseFixtureArguments(['--slice', 'G02', '--db-profile', 'test'])).toThrow(
+  expect(() => parseFixtureArguments(['--slice', 'G03', '--db-profile', 'test'])).toThrow(
+    'explicit_supported_slice_and_profile_required',
+  );
+});
+it('G02 regresses the protected programme and demonstrates encrypted recovery using only the separate test profile', () => {
+  const args = parseFixtureArguments(['--slice', 'G02', '--db-profile', 'test']);
+  expect(fixtureFiles(args)).toEqual([
+    ...fixtureFiles({ slice: 'G01', demo: false }),
+    'backup-restic.integration',
+    'backup-publication.integration',
+  ]);
+  expect(fixtureFiles({ ...args, demo: true })).toEqual([
+    ...fixtureFiles({ slice: 'G01', demo: true }),
+    'backup-restic.integration',
+    'backup-publication.integration',
+  ]);
+  expect(() => parseFixtureArguments(['--slice', 'G02', '--db-profile', 'runtime-disposable'])).toThrow(
     'explicit_supported_slice_and_profile_required',
   );
 });

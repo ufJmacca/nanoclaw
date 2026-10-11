@@ -297,13 +297,19 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
           COS_FIXTURE_HOST_ROOT: hostRoot,
           COS_FIXTURE_IMAGE: image,
           COS_FIXTURE_RUNNER_VOLUME: volume,
+          ...(plan.slice === 'G02'
+            ? { COS_BACKUP_FIXTURE_BINARY: path.join(root, 'backup-artifact-input/restic') }
+            : {}),
         },
         stdio: 'inherit',
-        timeout: ['S10', 'S11', 'G01', 'G02'].includes(plan.slice)
-          ? 960000
-          : ['S06', 'S07', 'S08', 'S09'].includes(plan.slice)
-            ? 660000
-            : 180000,
+        timeout:
+          plan.slice === 'G02'
+            ? 1260000
+            : ['S10', 'S11', 'G01'].includes(plan.slice)
+              ? 960000
+              : ['S06', 'S07', 'S08', 'S09'].includes(plan.slice)
+                ? 660000
+                : 180000,
       },
     );
     if (result.status !== 0) throw new Error('local_fixture_failed');

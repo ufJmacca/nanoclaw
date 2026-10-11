@@ -1,5 +1,5 @@
 type FixtureArguments = {
-  slice: 'S01' | 'S02' | 'S03' | 'S04' | 'S05' | 'S06' | 'S07' | 'S08' | 'S09' | 'S10' | 'S11' | 'G01';
+  slice: 'S01' | 'S02' | 'S03' | 'S04' | 'S05' | 'S06' | 'S07' | 'S08' | 'S09' | 'S10' | 'S11' | 'G01' | 'G02';
   demo: boolean;
   profile: 'test' | 'runtime-disposable';
 };
@@ -15,11 +15,11 @@ export function parseFixtureArguments(args: string[]): FixtureArguments {
   const demo = values.get('--demo') === true,
     profile = values.get('--db-profile');
   if (
-    !['S01', 'S02', 'S03', 'S04', 'S05', 'S06', 'S07', 'S08', 'S09', 'S10', 'S11', 'G01'].includes(
+    !['S01', 'S02', 'S03', 'S04', 'S05', 'S06', 'S07', 'S08', 'S09', 'S10', 'S11', 'G01', 'G02'].includes(
       String(values.get('--slice')),
     ) ||
     !['test', 'runtime-disposable'].includes(String(profile)) ||
-    (values.get('--slice') === 'G01' && profile !== 'test') ||
+    (['G01', 'G02'].includes(String(values.get('--slice'))) && profile !== 'test') ||
     (demo && values.get('--fixture') !== true) ||
     (!demo && values.has('--fixture'))
   )
@@ -32,6 +32,12 @@ export function parseFixtureArguments(args: string[]): FixtureArguments {
 }
 
 export function fixtureFiles(args: Pick<FixtureArguments, 'slice' | 'demo'>): string[] {
+  if (args.slice === 'G02')
+    return [
+      ...fixtureFiles({ slice: 'G01', demo: args.demo }),
+      'backup-restic.integration',
+      'backup-publication.integration',
+    ];
   // Vault helper/kernel/unit/wire checks have their own immutable release gates; regress every prior database/native contract here.
   if (args.slice === 'G01') return fixtureFiles({ slice: 'S11', demo: args.demo });
   if (args.slice === 'S11')
