@@ -3,6 +3,41 @@ import { parseOwnerAdminArguments, selectedOwnerAdminProfile, ownerDatabasePrefl
 import { fixtureRelease } from '../../../contracts/chief-of-staff/release-fixture.js';
 import { DatabasePreflightError } from '../store/preflight.js';
 const request = ['owner-export', '--scope', 'fixture', '--request-id', '01234567-89ab-4def-8123-456789abcdef'];
+it('admits complete encrypted recovery only with its explicit separate test environment', async () => {
+  const admin = [
+    'backup-restore-check',
+    '--scope',
+    'fixture',
+    '--request-id',
+    '01234567-89ab-4def-8123-456789abcdef',
+    '--backup-operation-id',
+    '48f99256-b105-4ee3-848c-00140c98151d',
+    '--backup-release',
+    'release-fixture',
+    '--snapshot-digest',
+    'a'.repeat(64),
+  ];
+  expect(
+    parseOwnerAdminArguments([
+      '--settings',
+      '/home/pi/target.json',
+      '--database-environment',
+      '/home/pi/test.env',
+      '--',
+      ...admin,
+    ]),
+  ).toMatchObject({ admin, databaseEnvironment: '/home/pi/test.env' });
+  expect(() => parseOwnerAdminArguments(['--settings', '/home/pi/target.json', '--', ...admin])).toThrow();
+  const test = { COS_TEST_TARGET_ID: 'fixture-test' };
+  await expect(
+    selectedOwnerAdminProfile('backup-restore-check', {
+      runtime: () => {
+        throw Error('runtime_must_not_be_forwarded');
+      },
+      test: () => test,
+    }),
+  ).resolves.toBe(test);
+});
 it.each([
   'backup-nas-configure',
   'backup-nas-recover-unmount',

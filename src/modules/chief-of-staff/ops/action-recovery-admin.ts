@@ -130,7 +130,7 @@ const fields = (value: unknown, keys: string[]): value is Record<string, unknown
   !Array.isArray(value) &&
   Object.keys(value).sort().join(',') === [...keys].sort().join(',');
 const hash = (value: unknown) => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
-function recordedRelease(settings: DeploymentSettings, id: string | null, current = false): RecoveryRelease {
+export function recordedRelease(settings: DeploymentSettings, id: string | null, current = false): RecoveryRelease {
   if (!id || !/^release-[a-zA-Z0-9_-]{1,120}$/.test(id)) throw Error('action_recovery_unavailable');
   const release = recoveryReleaseForManifest(readJson(path.join(settings.releaseRoot, id, 'release.json'))),
     deployment = readJson(path.join(settings.stateRoot, 'releases', id, 'deployment.json'));

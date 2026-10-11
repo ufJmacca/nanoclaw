@@ -179,3 +179,65 @@ it('closes the runtime client when selected test admission fails without leaking
   expect(use).not.toHaveBeenCalled();
   expect(f.runtime.end).toHaveBeenCalledOnce();
 });
+it.skipIf(!process.env.COS_TEST_TARGET_ID)(
+  'refuses an actual admitted test database selected again under a runtime connection alias',
+  async () => {
+    const { connectChecked: connect } =
+        await vi.importActual<typeof import('../store/preflight.js')>('../store/preflight.js'),
+      keys = [
+        'HOST',
+        'PORT',
+        'DATABASE',
+        'SSLMODE',
+        'SSLROOTCERT',
+        '_ALLOW_PLAINTEXT',
+        '_MIGRATION_USER',
+        '_MIGRATION_PASSWORD',
+      ].map((suffix) => 'COS_TEST_PG' + suffix),
+      selected: NodeJS.ProcessEnv = {};
+    for (const key of [...keys, 'COS_TEST_TARGET_ID'])
+      if (process.env[key] !== undefined) selected[key] = process.env[key];
+    // Both actual connections are to the separately admitted test database.
+    // The runtime source/profile is an explicit read-only admission fixture.
+    const source = await connect(selected, 'test', 'migration');
+    const sourceEnd = vi.spyOn(source, 'end');
+    let destination: pg.Client | undefined;
+    let destinationClosed = () => false;
+    try {
+      destination = await connect(selected, 'test', 'migration');
+      const destinationEnd = vi.spyOn(destination, 'end');
+      destinationClosed = () => destinationEnd.mock.calls.length > 0;
+      const runtimeEnv: NodeJS.ProcessEnv = {};
+      for (const key of keys)
+        if (selected[key] !== undefined) runtimeEnv[key.replace('COS_TEST_PG', 'COS_PG')] = selected[key];
+      runtimeEnv.COS_PGHOST = 'alias-db.lan';
+      runtimeEnv.COS_PGUSER = selected.COS_TEST_PG_MIGRATION_USER;
+      runtimeEnv.COS_PGPASSWORD = selected.COS_TEST_PG_MIGRATION_PASSWORD;
+      const sourceConfig = parseDatabaseConfig(runtimeEnv, 'runtime'),
+        settings = {
+          runtimeEnvironment: '/fixture/source-test.env',
+          databaseFingerprint: await databaseFingerprint(source, sourceConfig),
+        } as DeploymentSettings;
+      expect(await databaseFingerprint(destination, parseDatabaseConfig(selected, 'test', 'migration'))).not.toBe(
+        settings.databaseFingerprint,
+      );
+      ports.runtimeEnv.mockReturnValue(runtimeEnv);
+      ports.testEnv.mockReturnValue(selected);
+      ports.runtime.mockResolvedValue(source);
+      ports.test.mockResolvedValue(destination);
+      const use = vi.fn();
+      await expect(withSeparateBackupTestDatabase(settings, '/fixture/test.env', () => {}, use)).rejects.toThrow(
+        /^backup_test_database_separation_unavailable$/,
+      );
+      expect(use).not.toHaveBeenCalled();
+      expect(sourceEnd).toHaveBeenCalledOnce();
+      expect(destinationEnd).toHaveBeenCalledOnce();
+    } finally {
+      await Promise.allSettled([
+        ...(sourceEnd.mock.calls.length ? [] : [source.end()]),
+        ...(destination && !destinationClosed() ? [destination.end()] : []),
+      ]);
+    }
+  },
+  30000,
+);
