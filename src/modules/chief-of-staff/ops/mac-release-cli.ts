@@ -29,6 +29,7 @@ import { validateBuildTargetObservation } from './mac-deploy.js';
 import { packageResticReleaseArtifact, verifyResticReleaseArtifactInput } from './restic-release-package.js';
 import { validateResticArtifactSeal } from './restic-artifact.js';
 import { verifyBackupJobFixtureImage, verifyBackupJobFixtureEvidence } from './backup-job-fixture-evidence.js';
+import { verifyBackupSmbFixtureImages, verifyBackupSmbFixtureEvidence } from './backup-smb-fixture-evidence.js';
 
 export const BUILD_TARGETS = ['host', 'agent-standard', 'agent-documents'] as const;
 type BuildTarget = (typeof BUILD_TARGETS)[number];
@@ -165,6 +166,19 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
     );
     writeAtomic(root, 'backup-jobs-fixture.json', { image, hostImage, source: plan.source });
     return image;
+  }
+  if (operation === 'backup-smb-fixture' && !values.length) {
+    if (plan.slice !== 'G02') throw Error('backup_release_required');
+    const [hostImage] = releaseCheckImageIds(plan.images, 'backup_mount');
+    const images = verifyBackupSmbFixtureImages(
+      readPrivate(path.join(root, 'backup-smb-server-inspect.json')),
+      readPrivate(path.join(root, 'backup-smb-client-inspect.json')),
+      plan.source.commit,
+      plan.source.tree,
+      hostImage,
+    );
+    writeAtomic(root, 'backup-smb-fixture.json', { ...images, hostImage, source: plan.source });
+    return images.clientImage;
   }
   if (operation === 'vault-fixture' && !values.length) {
     if (!['G01', 'G02'].includes(plan.slice) || !plan.vaultArtifact) throw Error('vault_release_required');
@@ -372,6 +386,38 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
     if (!requiredReleaseChecks(plan.slice).includes(name) || !['0', '1'].includes(status))
       throw new Error('invalid_check_result');
     const imageIds = releaseCheckImageIds(plan.images, name);
+    if (name === 'backup_mount' && status === '0') {
+      const fixture = readPrivate<{
+        serverImage: string;
+        clientImage: string;
+        hostImage: string;
+        source: ReleaseManifest['source'];
+      }>(path.join(root, 'backup-smb-fixture.json'));
+      if (fixture.hostImage !== imageIds[0] || digest(fixture.source) !== digest(plan.source))
+        throw Error('backup_smb_fixture_identity_mismatch');
+      const file = path.join(root, 'backup_mount.log'),
+        stat = fs.lstatSync(file);
+      if (
+        !stat.isFile() ||
+        stat.nlink !== 1 ||
+        stat.uid !== process.getuid?.() ||
+        (stat.mode & 0o7777) !== 0o600 ||
+        stat.size > 262144
+      )
+        throw Error('backup_smb_fixture_evidence_unavailable');
+      const records = fs
+        .readFileSync(file, 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+      verifyBackupSmbFixtureEvidence(records, {
+        sourceCommit: plan.source.commit,
+        sourceTree: plan.source.tree,
+        hostImage: imageIds[0],
+        serverImage: fixture.serverImage,
+        clientImage: fixture.clientImage,
+      });
+    }
     if (name === 'backup_units' && status === '0') {
       const fixture = readPrivate<{ image: string; hostImage: string; source: ReleaseManifest['source'] }>(
         path.join(root, 'backup-jobs-fixture.json'),

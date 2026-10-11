@@ -152,6 +152,24 @@ if [[ "$slice" == G01 || "$slice" == G02 ]]; then
   check vault_wire cli vault-wire "$id"
 fi
 if [[ "$slice" == G02 ]]; then
+  smb_server_tag="nanoclaw-cos-backup-smb-server:$id"
+  smb_client_tag="nanoclaw-cos-backup-smb-client:$id"
+  [[ "$(docker image inspect --format '{{.Id}}' "$vault_host")" == "$host_image" ]] || exit 1
+  docker --context "$context" buildx build --builder "$builder" --platform linux/arm64 --provenance=false --load \
+    --build-arg "SOURCE_COMMIT=$commit" --build-arg "SOURCE_TREE=$tree" \
+    -f "$directory/context/container/fixtures/backup-smb/Dockerfile.server" -t "$smb_server_tag" \
+    "$directory/context/container/fixtures/backup-smb" > "$directory/backup-smb-server-build.log" 2>&1
+  docker --context "$context" buildx build --builder "$builder" --platform linux/arm64 --provenance=false --load \
+    --build-arg "HOST_IMAGE=$vault_host" --build-arg "HOST_IMAGE_ID=$host_image" \
+    --build-arg "SOURCE_COMMIT=$commit" --build-arg "SOURCE_TREE=$tree" \
+    -f "$directory/context/container/fixtures/backup-smb/Dockerfile.client" -t "$smb_client_tag" \
+    "$directory/context/container/fixtures/backup-smb" > "$directory/backup-smb-client-build.log" 2>&1
+  [[ "$(docker image inspect --format '{{.Id}}' "$vault_host")" == "$host_image" ]] || exit 1
+  docker image inspect "$smb_server_tag" > "$directory/backup-smb-server-inspect.json"
+  docker image inspect "$smb_client_tag" > "$directory/backup-smb-client-inspect.json"
+  smb_server_image=$(docker image inspect --format '{{.Id}}' "$smb_server_tag")
+  smb_client_image=$(cli backup-smb-fixture "$id")
+  check backup_mount bash "$directory/context/scripts/cos-backup-smb-fixture.sh" "$smb_server_image" "$smb_client_image"
   jobs_tag="nanoclaw-cos-backup-jobs-fixture:$id"
   [[ "$(docker image inspect --format '{{.Id}}' "$vault_host")" == "$host_image" ]] || exit 1
   docker --context "$context" buildx build --builder "$builder" --platform linux/arm64 --provenance=false --load \
