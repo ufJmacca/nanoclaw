@@ -8,6 +8,14 @@ import type pg from 'pg';
 import Database from 'better-sqlite3';
 import { createHash, randomUUID } from 'node:crypto';
 import { verifyRecoveredTargetVaultState } from '../../modules/chief-of-staff/ops/backup-recovered-state.js';
+import { restoreRecoveredCoordinatedTestScope } from '../../modules/chief-of-staff/ops/coordinated-backup.js';
+import { withPinnedBackupTestRestoreReservation } from '../../modules/chief-of-staff/ops/backup-test-restore-reservation.js';
+import { databaseFingerprint, databasePhysicalFingerprint } from '../../modules/chief-of-staff/ops/target-identity.js';
+import { parseBackupOwnerRestoreArguments } from '../../modules/chief-of-staff/ops/backup-owner-restore-arguments.js';
+import {
+  parseOwnerAdminArguments,
+  selectedOwnerAdminProfile,
+} from '../../modules/chief-of-staff/ops/target-owner-admin.js';
 import type { DeploymentSettings } from '../../modules/chief-of-staff/ops/deployment-settings.js';
 import { targetBinding } from '../../modules/chief-of-staff/ops/target-host.js';
 import { initializeTarget, readPrivate, writeAtomic } from '../../modules/chief-of-staff/ops/target-state.js';
@@ -198,6 +206,73 @@ const maintainRepository = (admit: () => Promise<void> = async () => {}, expecte
     ),
   );
 const canary = 'COS_G02_SYNTHETIC_ENCRYPTION_CANARY_4f9b3716';
+test('compiled recovery rejects connection aliases as evidence of database separation and accepts only fixed owner selections', async () => {
+  const client = {
+      query: async () => ({
+        rows: [
+          { database: 'synthetic-test', database_oid: '12345', server_address: '192.168.56.20', server_port: 5432 },
+        ],
+      }),
+    } as unknown as pg.Client,
+    original = {
+      host: 'fixture-db.lan',
+      port: 5432,
+      database: 'synthetic-test',
+      ssl: { rejectUnauthorized: true, ca: 'synthetic-ca' },
+    },
+    alias = {
+      ...original,
+      host: 'alias-db.lan',
+      port: 6543,
+      ssl: { rejectUnauthorized: true, ca: 'other-synthetic-ca' },
+    };
+  assert.notEqual(await databaseFingerprint(client, original), await databaseFingerprint(client, alias));
+  assert.equal(await databasePhysicalFingerprint(client, original), await databasePhysicalFingerprint(client, alias));
+  const args = [
+    'backup-restore-check',
+    '--scope',
+    'synthetic-scope',
+    '--request-id',
+    randomUUID(),
+    '--backup-operation-id',
+    randomUUID(),
+    '--backup-release',
+    'release-synthetic',
+    '--snapshot-digest',
+    'a'.repeat(64),
+  ];
+  assert.equal(parseBackupOwnerRestoreArguments(args).command, 'backup-restore-check');
+  assert.deepEqual(
+    parseOwnerAdminArguments([
+      '--settings',
+      '/synthetic/settings.json',
+      '--database-environment',
+      '/synthetic/test.env',
+      '--',
+      ...args,
+    ]),
+    { settings: '/synthetic/settings.json', databaseEnvironment: '/synthetic/test.env', admin: args },
+  );
+  assert.throws(
+    () => parseOwnerAdminArguments(['--settings', '/synthetic/settings.json', '--', ...args]),
+    /^Error: invalid_owner_admin_arguments$/,
+  );
+  const test = { COS_TEST_TARGET_ID: 'synthetic-test' };
+  assert.equal(
+    await selectedOwnerAdminProfile('backup-restore-check', {
+      runtime: () => {
+        throw Error('runtime_profile_must_not_be_forwarded');
+      },
+      test: () => test,
+    }),
+    test,
+  );
+  assert.throws(
+    () => parseBackupOwnerRestoreArguments([...args, '--root', '/foreign']),
+    /^Error: invalid_owner_admin_arguments$/,
+  );
+  assert.throws(() => parseBackupOwnerRestoreArguments(args.slice(0, -2)), /^Error: invalid_owner_admin_arguments$/);
+});
 test('official pinned ARM64 binary initializes repository v2 and binds its decrypted identity', () => {
   run(['init', '--repository-version', '2']);
   const config = run(['cat', 'config']);
@@ -943,6 +1018,8 @@ test('real encrypted remote recovery validates the complete captured payload wit
   };
   const recovery = { releaseId: 'release-current', manifestDigest: 'c'.repeat(64), software: recoveryOptions.software };
   let capturedHeader!: import('../../modules/chief-of-staff/ops/backup-recovered-state.js').RecoveredCaptureHeader;
+  const restoreRequest = randomUUID(),
+    liveReservation = staging + '/.cos-test-restore-' + restoreRequest + '.json';
   try {
     await queue.capture(
       'state',
@@ -1175,6 +1252,191 @@ test('real encrypted remote recovery validates the complete captured payload wit
                 copy.close();
               }
             });
+            // The encrypted transport and durable reservation are real. This
+            // network-free component uses a synthetic receiving SQL protocol;
+            // actual separate-database import/readback is verified independently.
+            let inserts = 0,
+              loseAck = true,
+              transactionWrites = false,
+              transactionRows: Array<Record<string, unknown>> | undefined;
+            const committedRows: Array<Record<string, unknown>> = [];
+            const testClient = {
+              query: async (sql: string, values?: string[]) => {
+                if (sql.includes('cos_admin.target_identity'))
+                  return {
+                    rows: [
+                      {
+                        target_id: 'fixture-admitted-test',
+                        purpose: 'test',
+                        writable: false,
+                        schema_writable: false,
+                        owner_member: false,
+                      },
+                    ],
+                  };
+                if (sql.includes('current_database()'))
+                  return {
+                    rows: [
+                      {
+                        database: 'fixture-test',
+                        database_oid: '54321',
+                        server_address: '192.168.56.20',
+                        server_port: 5432,
+                      },
+                    ],
+                  };
+                if (sql === 'BEGIN' || sql.startsWith('BEGIN ISOLATION')) {
+                  assert.equal(transactionRows, undefined);
+                  transactionRows = structuredClone(committedRows);
+                  transactionWrites = false;
+                  return { rows: [] };
+                }
+                if (sql === 'ROLLBACK') {
+                  transactionRows = undefined;
+                  transactionWrites = false;
+                  return { rows: [] };
+                }
+                if (sql === 'COMMIT') {
+                  assert(transactionRows);
+                  committedRows.splice(0, committedRows.length, ...transactionRows);
+                  transactionRows = undefined;
+                  const unknown = transactionWrites && loseAck;
+                  transactionWrites = false;
+                  if (unknown) {
+                    loseAck = false;
+                    throw Error('SYNTHETIC_COMMIT_ACK_LOST');
+                  }
+                  return { rows: [] };
+                }
+                const selected = transactionRows ?? committedRows;
+                if (sql.startsWith('INSERT INTO cos.')) {
+                  assert(sql.startsWith('INSERT INTO cos."scopes"'));
+                  assert(transactionRows);
+                  assert.equal(selected.length, 0);
+                  transactionRows.push(...JSON.parse(values![0]));
+                  transactionWrites = true;
+                  inserts++;
+                  return { rows: [] };
+                }
+                if (sql.startsWith('SELECT id FROM cos.scopes'))
+                  return { rows: selected.filter((row) => row.id === values?.[0]).map(({ id }) => ({ id })) };
+                if (sql.includes('SELECT owner_id,agent_group_id'))
+                  return {
+                    rows: selected
+                      .filter((row) => row.id === values?.[0])
+                      .map(({ owner_id, agent_group_id }) => ({ owner_id, agent_group_id })),
+                  };
+                if (sql.includes('to_jsonb(t)'))
+                  return {
+                    rows: sql.includes('cos."scopes"')
+                      ? selected.filter((row) => row.id === values?.[0]).map((body) => ({ body }))
+                      : [],
+                  };
+                return query(sql, values);
+              },
+            } as unknown as pg.Client;
+            const stageFd = fs.openSync(
+                staging,
+                fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW,
+              ),
+              guard = () => {
+                current();
+                workspace.assertPayloadCurrent();
+              },
+              restoreIdentity = {
+                context,
+                databaseFingerprint: settings.databaseFingerprint,
+                operationId: releaseOperationId,
+                nativeDatabases: options.nativeDatabases,
+                restrictionFiles: options.restrictionFiles,
+                artifacts,
+                witness,
+              },
+              sandbox = {
+                client: testClient,
+                config: {
+                  host: 'fixture-test.lan',
+                  port: 5432,
+                  database: 'fixture-test',
+                  ssl: { rejectUnauthorized: true },
+                },
+                testTargetId: 'fixture-admitted-test',
+              };
+            try {
+              const expiredCheck = await withPinnedBackupTestRestoreReservation(
+                '/proc/self/fd/' + stageFd,
+                {
+                  requestId: restoreRequest,
+                  targetDigest: digest(initial.binding),
+                  repositoryId: recovered.repositoryId,
+                  repositoryOwnerDigest: recovered.ownerDigest,
+                  queueOwnerDigest: recovered.receipt.ownerDigest,
+                  operationId,
+                  snapshotId: recovered.snapshotId,
+                  archiveSha256: recovered.archiveSha256,
+                  archiveBytes: recovered.archiveBytes,
+                  snapshotDigest: instructions.snapshotDigest,
+                  checkpointDigest: capturedHeader.checkpointDigest,
+                  sourceDatabaseFingerprint: settings.databaseFingerprint,
+                  scopeId: binding.scopeId,
+                  journal: { installationDigest: witness.installationDigest, generation: witness.generation },
+                },
+                guard,
+                async (reservation) => {
+                  const restore = () =>
+                    restoreRecoveredCoordinatedTestScope(
+                      restoreIdentity,
+                      workspace,
+                      recovered.receipt.files,
+                      sandbox,
+                      reservation,
+                      async () => guard(),
+                    );
+                  await assert.rejects(restore(), /^Error: coordinated_test_restore_unavailable$/);
+                  assert.equal(inserts, 1);
+                  assert.deepEqual(committedRows, [
+                    { id: binding.scopeId, owner_id: binding.ownerId, agent_group_id: binding.agentGroupId },
+                  ]);
+                  assert.equal(fs.existsSync(liveReservation), true);
+                  const beforeReservation = fs.readFileSync(liveReservation),
+                    result = await restore();
+                  assert.equal(result.inserted, false);
+                  assert.equal(result.admissionRestored, false);
+                  assert.equal(result.eventJournalRestored, false);
+                  assert.equal(inserts, 1);
+                  assert.deepEqual(fs.readFileSync(liveReservation), beforeReservation);
+                  const originalTestRows = structuredClone(committedRows);
+                  try {
+                    committedRows[0].owner_id = 'foreign';
+                    await assert.rejects(restore(), /^Error: coordinated_test_restore_unavailable$/);
+                    assert.equal(inserts, 1);
+                    assert.deepEqual(fs.readFileSync(liveReservation), beforeReservation);
+                  } finally {
+                    // Reset only this synthetic receiving protocol, never a real database or live source.
+                    committedRows.splice(0, committedRows.length, ...originalTestRows);
+                  }
+                  const again = await verifyRecoveredTargetVaultState(
+                    {
+                      settings,
+                      binding: laterBinding,
+                      witness,
+                      queueOperationId: operationId,
+                      recovery,
+                      expectedSnapshotDigest: instructions.snapshotDigest,
+                      current,
+                    },
+                    workspace,
+                    recovered.receipt.files,
+                  );
+                  assert.equal(again.snapshotDigest, instructions.snapshotDigest);
+                  guard();
+                  return reservation.assertCurrent;
+                },
+              );
+              assert.throws(() => expiredCheck(), /^Error: backup_test_restore_reservation_unavailable$/);
+            } finally {
+              fs.closeSync(stageFd);
+            }
           },
           64 * 1024 ** 2,
         );
@@ -1190,7 +1452,7 @@ test('real encrypted remote recovery validates the complete captured payload wit
     assert.deepEqual(native.prepare('SELECT binding,paused FROM cos_identity_boundaries').get(), before.binding);
     assert.equal((readPrivate(source + '/state.json') as { maintenance: boolean }).maintenance, false);
     assert.deepEqual(await queue.pending('state'), pending);
-    assert.deepEqual(fs.readdirSync(staging), ['backup-queue']);
+    assert.deepEqual(fs.readdirSync(staging).sort(), [path.basename(liveReservation), 'backup-queue'].sort());
     assert.deepEqual(snapshotMetadata(), remoteBefore);
     assert.deepEqual(fs.readdirSync(transferCache), []);
   } finally {
