@@ -8,16 +8,16 @@ import type pg from 'pg';
 import Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
 import {
-  captureCoordinatedState,
-  verifyRecoveredCoordinatedState,
-} from '../../modules/chief-of-staff/ops/coordinated-backup.js';
+  captureOperationsState,
+  verifyRecoveredOperationsState,
+} from '../../modules/chief-of-staff/ops/recovery-manifest.js';
 import {
   capturePrivateHistory,
   verifyRecoveredPrivateHistory,
 } from '../../modules/chief-of-staff/ops/private-history-backup.js';
 import { KnowledgeArtifacts } from '../../modules/chief-of-staff/knowledge/artifacts.js';
 import { ActionWitness, initializeActionWitness } from '../../modules/chief-of-staff/actions/witness.js';
-import { MIGRATIONS } from '../../modules/chief-of-staff/store/migrations.js';
+import { MIGRATIONS, SCHEMA_VERSION } from '../../modules/chief-of-staff/store/migrations.js';
 import { digest } from '../../modules/chief-of-staff/domain/contracts.js';
 import { BackupQueue } from '../../modules/chief-of-staff/ops/backup-queue.js';
 import { BackupResticTransfer } from '../../modules/chief-of-staff/ops/backup-restic-transfer.js';
@@ -807,12 +807,23 @@ test('real encrypted remote recovery validates coordinated native and history pa
         effectsEnabled: false as const,
       }),
     };
+  const recoveryOptions = {
+    base: options,
+    software: {
+      sourceCommit: '1'.repeat(40),
+      sourceTree: '2'.repeat(40),
+      hostPayloadSha256: '3'.repeat(64),
+      schemaVersion: SCHEMA_VERSION,
+      nativeSchemaVersion: 22,
+    },
+    externalCheckpoint: { kind: 'application_scope_logical' as const },
+  };
   try {
     await queue.capture(
       'state',
       operationId,
       async (sink) => {
-        await captureCoordinatedState(options, sink);
+        await captureOperationsState(recoveryOptions, sink);
         await capturePrivateHistory(conversation, sink, 'conversation');
         await capturePrivateHistory(mission, sink, 'mission');
       },
@@ -863,10 +874,20 @@ test('real encrypted remote recovery validates coordinated native and history pa
             const recovered = await transfer.restore('state', operationId, 'a'.repeat(64), workspace.sink, async () =>
                 workspace.assertCurrent(),
               ),
-              checked = verifyRecoveredCoordinatedState(options, workspace, recovered.receipt.files);
+              instructions = await verifyRecoveredOperationsState(
+                recoveryOptions,
+                workspace,
+                recovered.receipt.files,
+                1,
+              ),
+              checked = instructions.coordinated;
             assert.equal(checked.nativeDatabasesVerified, 1);
             assert.equal(checked.admissionRestored, false);
             assert.equal(checked.eventJournalRestored, false);
+            assert.equal(instructions.operations.admissionRestored, false);
+            assert.equal(instructions.operations.effectsEnabled, false);
+            assert.deepEqual(instructions.operations.revocations, []);
+            assert.deepEqual(instructions.operations.nativeDenials, []);
             assert.equal(
               verifyRecoveredPrivateHistory(workspace, recovered.receipt.files, conversation, 'conversation').bytes,
               150000,
