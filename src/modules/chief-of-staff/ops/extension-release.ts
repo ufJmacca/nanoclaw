@@ -1,6 +1,7 @@
 import path from 'node:path';
 import fs from 'node:fs';
-import { readPrivate, writeAtomic } from './target-state.js';
+import { writeAtomic } from './target-state.js';
+import { readProgrammeLedger, PROGRAMME_LEDGER_MAXIMUM_BYTES } from './programme-ledger.js';
 /** Completed history may be exposed as root-owned by Docker's Mac filesystem. It is read-only here. */
 function completedProgramme<T>(file: string): T {
   const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
@@ -71,10 +72,7 @@ export function readExtensionRelease(root: string, forRelease = false): Extensio
       previous.pi_smoke_status !== 'passed'
     )
       throw Error('original_programme_acceptance_required');
-    const ledger = readPrivate<ExtensionReleaseState>(
-      path.join(root, 'google-mail-storage-execution.json'),
-      1024 * 1024,
-    );
+    const ledger = readProgrammeLedger<ExtensionReleaseState>(path.join(root, 'google-mail-storage-execution.json'));
     if (
       !ledger ||
       ledger.contract !== 'cos-google-mail-storage-execution/v1' ||
@@ -138,5 +136,7 @@ export function readExtensionRelease(root: string, forRelease = false): Extensio
 export function checkpointExtensionRelease(root: string, patch: Record<string, unknown>): void {
   const ledger = readExtensionRelease(root);
   Object.assign(ledger.slices[ledger.active_slice], patch, { checkpoint_at: new Date().toISOString() });
+  if (Buffer.byteLength(JSON.stringify(ledger) + '\n') > PROGRAMME_LEDGER_MAXIMUM_BYTES)
+    throw Error('extension_release_not_admitted');
   writeAtomic(root, 'google-mail-storage-execution.json', ledger);
 }

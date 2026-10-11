@@ -4,6 +4,7 @@ import path from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
 import { readExtensionRelease, checkpointExtensionRelease } from './extension-release.js';
 import { readReleaseExecution, checkpointReleaseExecution } from './mac-release.js';
+import { readPrivate } from './target-state.js';
 const roots: string[] = [];
 afterEach(() => {
   vi.restoreAllMocks();
@@ -120,6 +121,141 @@ it('admits G02 only after reviewed matching G01 acceptance and checkpoints only 
   expect(saved.unknown).toEqual(f.extension.unknown);
   expect(fs.readFileSync(f.root + '/execution.json')).toEqual(original);
 });
+it('routes G02 release admission and checkpoints only to its reviewed extension ledger', () => {
+  const f = fixture();
+  completedG01(f);
+  const original = fs.readFileSync(f.root + '/execution.json'),
+    g01 = structuredClone(f.extension.slices.G01);
+  expect(readReleaseExecution(f.root, 'G02', true)).toEqual(f.extension);
+  checkpointReleaseExecution(f.root, 'G02', { release_status: 'g02_fixture_pending' });
+  const saved = JSON.parse(fs.readFileSync(f.root + '/google-mail-storage-execution.json', 'utf8'));
+  expect(saved.slices.G02.release_status).toBe('g02_fixture_pending');
+  expect(saved.slices.G01).toEqual(g01);
+  expect(fs.readFileSync(f.root + '/execution.json')).toEqual(original);
+});
+it('retains additive private programme history above the target receipt ceiling', () => {
+  const f = fixture();
+  completedG01(f);
+  Object.assign(f.extension.unknown, { history: 'x'.repeat(1024 * 1024) });
+  f.save();
+  const original = fs.readFileSync(f.root + '/execution.json'),
+    g01 = structuredClone(f.extension.slices.G01);
+  expect(readExtensionRelease(f.root, true)).toEqual(f.extension);
+  checkpointExtensionRelease(f.root, { release_status: 'large_history_retained' });
+  const saved = JSON.parse(fs.readFileSync(f.root + '/google-mail-storage-execution.json', 'utf8'));
+  expect(saved.unknown).toEqual(f.extension.unknown);
+  expect(saved.slices.G01).toEqual(g01);
+  expect(saved.slices.G02.release_status).toBe('large_history_retained');
+  expect(fs.readFileSync(f.root + '/execution.json')).toEqual(original);
+  expect(() => readPrivate(f.root + '/google-mail-storage-execution.json', 8 * 1024 * 1024)).toThrow(
+    'unsafe_target_state',
+  );
+});
+it('accepts the bounded programme ceiling and refuses growth before the atomic checkpoint', () => {
+  const f = fixture();
+  Object.assign(f.extension.unknown, { history: '' });
+  const base = Buffer.byteLength(JSON.stringify(f.extension));
+  Object.assign(f.extension.unknown, { history: 'x'.repeat(8 * 1024 * 1024 - base) });
+  f.save();
+  const file = f.root + '/google-mail-storage-execution.json',
+    bytes = fs.readFileSync(file);
+  expect(bytes.length).toBe(8 * 1024 * 1024);
+  expect(readExtensionRelease(f.root, true)).toEqual(f.extension);
+  expect(() => checkpointExtensionRelease(f.root, { release_status: 'must_not_grow' })).toThrow(
+    'extension_release_not_admitted',
+  );
+  expect(fs.readFileSync(file).equals(bytes)).toBe(true);
+});
+it('refuses an oversized checkpoint before changing either programme ledger', () => {
+  const f = fixture(),
+    original = fs.readFileSync(f.root + '/execution.json'),
+    extension = fs.readFileSync(f.root + '/google-mail-storage-execution.json');
+  expect(() => checkpointExtensionRelease(f.root, { oversized: 'x'.repeat(8 * 1024 * 1024) })).toThrow(
+    'extension_release_not_admitted',
+  );
+  expect(fs.readFileSync(f.root + '/execution.json')).toEqual(original);
+  expect(fs.readFileSync(f.root + '/google-mail-storage-execution.json')).toEqual(extension);
+});
+it.each(['mode', 'hardlink', 'symlink', 'root-mode', 'oversized', 'invalid-utf8'])(
+  'refuses a private extension ledger with unsafe %s evidence without updating history',
+  (reason) => {
+    const f = fixture(),
+      file = f.root + '/google-mail-storage-execution.json',
+      original = fs.readFileSync(f.root + '/execution.json');
+    if (reason === 'mode') fs.chmodSync(file, 0o644);
+    if (reason === 'hardlink') fs.linkSync(file, f.root + '/linked.json');
+    if (reason === 'symlink') {
+      fs.renameSync(file, f.root + '/actual.json');
+      fs.symlinkSync(f.root + '/actual.json', file);
+    }
+    if (reason === 'root-mode') fs.chmodSync(f.root, 0o755);
+    if (reason === 'oversized') fs.writeFileSync(file, 'x'.repeat(8 * 1024 * 1024 + 1));
+    if (reason === 'invalid-utf8') {
+      const bytes = fs.readFileSync(file),
+        marker = bytes.indexOf(Buffer.from('retain'));
+      bytes[marker] = 0xff;
+      fs.writeFileSync(file, bytes);
+    }
+    const bytes = fs.readFileSync(file);
+    expect(() => readExtensionRelease(f.root, true)).toThrow('extension_release_not_admitted');
+    expect(() => checkpointExtensionRelease(f.root, { release_status: 'must_not_write' })).toThrow(
+      'extension_release_not_admitted',
+    );
+    expect(fs.readFileSync(f.root + '/execution.json')).toEqual(original);
+    expect(fs.readFileSync(file).equals(bytes)).toBe(true);
+  },
+);
+it('refuses a programme file replaced during its bounded read', () => {
+  const f = fixture(),
+    file = f.root + '/google-mail-storage-execution.json',
+    original = fs.readFileSync(f.root + '/execution.json'),
+    extension = fs.readFileSync(file),
+    actual = fs.readSync;
+  vi.spyOn(fs, 'readSync').mockImplementation(((...args: Parameters<typeof fs.readSync>) => {
+    const count = Reflect.apply(actual, fs, args);
+    if (count === extension.length) {
+      fs.renameSync(file, f.root + '/retained.json');
+      fs.writeFileSync(file, extension, { mode: 0o600 });
+    }
+    return count;
+  }) as typeof fs.readSync);
+  expect(() => readExtensionRelease(f.root, true)).toThrow('extension_release_not_admitted');
+  expect(fs.readFileSync(f.root + '/execution.json')).toEqual(original);
+  expect(fs.readFileSync(file)).toEqual(extension);
+});
+it.each(['truncate', 'append', 'same-size-edit', 'mode', 'owner', 'hardlink'])(
+  'refuses programme %s withdrawal during its bounded read',
+  (reason) => {
+    const f = fixture(),
+      file = f.root + '/google-mail-storage-execution.json',
+      original = fs.readFileSync(f.root + '/execution.json'),
+      extension = fs.readFileSync(file),
+      actualRead = fs.readSync,
+      actualStat = fs.fstatSync;
+    let withdrawn = false;
+    vi.spyOn(fs, 'readSync').mockImplementation(((...args: Parameters<typeof fs.readSync>) => {
+      const count = Reflect.apply(actualRead, fs, args);
+      if (!withdrawn && count === extension.length) {
+        withdrawn = true;
+        if (reason === 'truncate') fs.truncateSync(file, extension.length - 1);
+        if (reason === 'append') fs.appendFileSync(file, ' ');
+        if (reason === 'same-size-edit') fs.writeFileSync(file, Buffer.alloc(extension.length, 0x20));
+        if (reason === 'mode') fs.chmodSync(file, 0o644);
+        if (reason === 'hardlink') fs.linkSync(file, f.root + '/linked.json');
+      }
+      return count;
+    }) as typeof fs.readSync);
+    vi.spyOn(fs, 'fstatSync').mockImplementation(((fd: number) => {
+      const stat = actualStat(fd);
+      return withdrawn && reason === 'owner' && stat.size === extension.length
+        ? Object.assign(stat, { uid: stat.uid + 1 })
+        : stat;
+    }) as typeof fs.fstatSync);
+    expect(() => readExtensionRelease(f.root, true)).toThrow('extension_release_not_admitted');
+    expect(withdrawn).toBe(true);
+    expect(fs.readFileSync(f.root + '/execution.json')).toEqual(original);
+  },
+);
 it.each([
   'incomplete',
   'unreviewed',
