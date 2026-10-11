@@ -33,10 +33,10 @@ cleanup() {
   [[ "$network_owned" != true ]] || docker network rm "$network" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
-docker network create --internal --driver bridge --subnet 172.29.253.0/29 --label "nanoclaw.cos-fixture=$scope" "$network" >/dev/null
+docker network create --internal --driver bridge --label "nanoclaw.cos-fixture=$scope" "$network" >/dev/null
 network_owned=true
 [[ "$(docker network inspect --format '{{.Internal}}' "$network")" == true ]] || exit 1
-docker create --name "$server" --pull=never --network "$network" --ip 172.29.253.2 \
+docker create --name "$server" --pull=never --network "$network" --network-alias cos-backup-smb-server \
   --read-only --cap-drop ALL --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER --cap-add FSETID \
   --cap-add SETUID --cap-add SETGID --cap-add NET_BIND_SERVICE --security-opt no-new-privileges \
   --ulimit core=0 --pids-limit 128 --memory 384m --memory-swap 384m \
@@ -51,7 +51,7 @@ for ((attempt=0;attempt<30;attempt++)); do
   sleep 1
 done
 [[ "$ready" == true ]] || exit 1
-docker create --name "$client" --pull=never --network "$network" --ip 172.29.253.3 \
+docker create --name "$client" --pull=never --network "$network" \
   --read-only --cap-drop ALL --cap-add SYS_ADMIN --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER \
   --cap-add SETUID --cap-add SETGID --security-opt no-new-privileges \
   --ulimit core=0 --pids-limit 128 --memory 768m --memory-swap 768m \
