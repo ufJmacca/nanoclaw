@@ -13,11 +13,14 @@ import {
   verifyCoordinatedLocalSandbox,
   verifyCoordinatedBackup,
   restoreCoordinatedTestScope,
+  restoreRecoveredCoordinatedTestScope,
   verifyRecoveredCoordinatedState,
   type CoordinatedBackupReceipt,
   type CoordinatedBackupOptions,
   type QuiescentCheckpoint,
 } from './coordinated-backup.js';
+import type { BackupRestoreValidationScope } from './backup-restore-workspace.js';
+import type { BackupQueueReceipt } from './backup-queue.js';
 import { databaseFingerprint } from './target-identity.js';
 import { KnowledgeArtifacts } from '../knowledge/artifacts.js';
 import { ActionWitness, initializeActionWitness } from '../actions/witness.js';
@@ -137,7 +140,10 @@ async function recoveredFixture(
   const archive = Buffer.concat(chunks),
     before = await queue.pending('state');
   let diagnostic: unknown;
-  const recover = async (diagnostics = false) => {
+  const restore = async <T>(
+    use: (scope: BackupRestoreValidationScope, entries: BackupQueueReceipt['files']) => T | Promise<T>,
+    diagnostics = false,
+  ) => {
     try {
       return await queue.withRestoreWorkspace(
         randomUUID(),
@@ -156,7 +162,7 @@ async function recoveredFixture(
             scope.assertCurrent,
           );
           try {
-            return verifyRecoveredCoordinatedState(f.options, scope, read.receipt.files);
+            return await use(scope, read.receipt.files);
           } catch (error) {
             diagnostic = error;
             throw error;
@@ -170,7 +176,9 @@ async function recoveredFixture(
       expect(await queue.pending('state')).toEqual(before);
     }
   };
-  return { ...f, receipt, recover };
+  const recover = (diagnostics = false) =>
+    restore((scope, entries) => verifyRecoveredCoordinatedState(f.options, scope, entries), diagnostics);
+  return { ...f, receipt, recover, restore };
 }
 it('validates the recovered coordinated checkpoint directly through owned descriptors without copying or restoring authority', async () => {
   const f = await recoveredFixture();
@@ -262,6 +270,166 @@ const sandboxConfig = {
   database: 'fixture',
   ssl: { rejectUnauthorized: true, ca: 'FIXTURE_CA' },
 };
+function liveRestoreReservation() {
+  let record: unknown;
+  const assertCurrent = vi.fn(),
+    read = vi.fn(() => record),
+    create = vi.fn((value: unknown) => {
+      if (record !== undefined) throw Error('fixture_reservation_exists');
+      record = structuredClone(value);
+    });
+  return { assertCurrent, read, create, replace: (value: unknown) => (record = value) };
+}
+it('imports the owned recovered checkpoint through the insert-only core without a second payload copy', async () => {
+  const f = await recoveredFixture(),
+    reservation = liveRestoreReservation(),
+    before = fs.readFileSync(f.source),
+    journal = fs.readFileSync(f.options.witness.root + '/owner.json');
+  f.query.mockClear();
+  const result = await f.restore((scope, entries) =>
+    restoreRecoveredCoordinatedTestScope(
+      f.options,
+      scope,
+      entries,
+      { client: f.options.client, config: sandboxConfig, testTargetId: 'fixture-protected-test' },
+      reservation,
+      async () => {},
+    ),
+  );
+  expect(result).toMatchObject({ inserted: true, admissionRestored: false, eventJournalRestored: false });
+  expect(reservation.create).toHaveBeenCalledOnce();
+  expect(reservation.read()).toMatchObject({ checkpointDigest: digest(f.receipt), scopeId: 'scope' });
+  expect(f.query.mock.calls.filter(([sql]) => sql.startsWith('INSERT INTO cos.'))).toHaveLength(1);
+  expect(f.query.mock.calls.filter(([sql]) => /^(UPDATE|DELETE|TRUNCATE|DROP|ALTER|CREATE)/.test(sql))).toEqual([]);
+  expect(fs.readFileSync(f.source)).toEqual(before);
+  expect(fs.readFileSync(f.options.witness.root + '/owner.json')).toEqual(journal);
+  expect(fs.readdirSync(f.root + '/queue-state')).toEqual(['backup-queue']);
+  expect(fs.existsSync(f.archive)).toBe(false);
+});
+it.each(['same-database', 'foreign-scope', 'marker', 'columns', 'foreign-reservation', 'late-authority'])(
+  'refuses %s owned recovery before inserting a scoped row',
+  async (kind) => {
+    const f = await recoveredFixture((files, receipt, fixture) => {
+      if (kind !== 'same-database') return;
+      // Explicit synthetic source identity uses the selected fixture target fingerprint.
+      const fingerprint = digest({
+        host: sandboxConfig.host,
+        port: sandboxConfig.port,
+        identity: { database: 'fixture', database_oid: '123', server_address: '10.0.0.2', server_port: 5432 },
+        transport: sandboxConfig.ssl,
+      });
+      fixture.options.databaseFingerprint = fingerprint;
+      receipt.databaseFingerprint = fingerprint;
+      const checkpoint = JSON.parse(files.get('coordinated/remote.json')!.toString());
+      checkpoint.databaseFingerprint = fingerprint;
+      const bytes = Buffer.from(JSON.stringify(checkpoint) + '\n');
+      files.set('coordinated/remote.json', bytes);
+      receipt.remote = {
+        file: 'remote.json',
+        bytes: bytes.length,
+        sha256: createHash('sha256').update(bytes).digest('hex'),
+      };
+    });
+    const reservation = liveRestoreReservation(),
+      original = f.query.getMockImplementation()!;
+    if (kind === 'foreign-reservation') reservation.replace({ format: 'archive-reservation', scopeId: 'scope' });
+    f.query.mockImplementation(async (sql, values) => {
+      if (kind === 'foreign-scope' && sql.startsWith('SELECT id FROM cos.scopes')) return { rows: [{ id: 'scope' }] };
+      if (kind === 'marker' && sql.includes('FROM cos_admin.target_identity')) return { rows: [] };
+      if (kind === 'columns' && sql.includes('FROM pg_attribute')) return { rows: [{ attname: 'foreign' }] };
+      return original(sql, values);
+    });
+    let checks = 0;
+    await expect(
+      f.restore(
+        (scope, entries) =>
+          restoreRecoveredCoordinatedTestScope(
+            f.options,
+            scope,
+            entries,
+            { client: f.options.client, config: sandboxConfig, testTargetId: 'fixture-protected-test' },
+            reservation,
+            async () => {
+              if (kind === 'late-authority' && ++checks >= 2) throw Error('PRIVATE_WITHDRAWN');
+            },
+          ),
+        true,
+      ),
+    ).rejects.toThrow(/^coordinated_test_restore_unavailable$/);
+    expect(
+      f.query.mock.calls.filter(([sql]) => /^(INSERT|UPDATE|DELETE|TRUNCATE|DROP|ALTER|CREATE)/.test(sql)),
+    ).toEqual([]);
+    expect(reservation.create).not.toHaveBeenCalled();
+  },
+);
+it('reconciles an unknown recovered-checkpoint commit using the live reservation and complete readback', async () => {
+  const f = await recoveredFixture(),
+    reservation = liveRestoreReservation(),
+    original = f.query.getMockImplementation()!;
+  let installed = false,
+    loseAck = true;
+  f.query.mockImplementation(async (sql, values) => {
+    if (sql.startsWith('SELECT id FROM cos.scopes')) return { rows: installed ? [{ id: 'scope' }] : [] };
+    if (sql.startsWith('INSERT INTO cos.')) installed = true;
+    if (sql === 'COMMIT' && loseAck) {
+      loseAck = false;
+      throw Error('PRIVATE_UNKNOWN_COMMIT');
+    }
+    return original(sql, values);
+  });
+  const run = () =>
+    f.restore(
+      (scope, entries) =>
+        restoreRecoveredCoordinatedTestScope(
+          f.options,
+          scope,
+          entries,
+          { client: f.options.client, config: sandboxConfig, testTargetId: 'fixture-protected-test' },
+          reservation,
+          async () => {},
+        ),
+      true,
+    );
+  await expect(run()).rejects.toThrow(/^coordinated_test_restore_unavailable$/);
+  expect(reservation.read()).toMatchObject({ checkpointDigest: digest(f.receipt) });
+  expect(await run()).toMatchObject({ inserted: false, admissionRestored: false, eventJournalRestored: false });
+  expect(reservation.create).toHaveBeenCalledOnce();
+  expect(f.query.mock.calls.filter(([sql]) => sql.startsWith('INSERT INTO cos.'))).toHaveLength(1);
+});
+it.each(['caller', 'reservation'])(
+  'refuses %s withdrawal during the awaited savepoint before inserting recovered rows',
+  async (kind) => {
+    const f = await recoveredFixture(),
+      reservation = liveRestoreReservation(),
+      original = f.query.getMockImplementation()!;
+    let withdrawn = false;
+    f.query.mockImplementation(async (sql, values) => {
+      if (sql === 'SAVEPOINT cos_sandbox_restore') {
+        withdrawn = true;
+        if (kind === 'reservation') reservation.replace({ foreign: true });
+      }
+      return original(sql, values);
+    });
+    await expect(
+      f.restore(
+        (scope, entries) =>
+          restoreRecoveredCoordinatedTestScope(
+            f.options,
+            scope,
+            entries,
+            { client: f.options.client, config: sandboxConfig, testTargetId: 'fixture-protected-test' },
+            reservation,
+            async () => {
+              if (kind === 'caller' && withdrawn) throw Error('PRIVATE_WITHDRAWN');
+            },
+          ),
+        true,
+      ),
+    ).rejects.toThrow(/^coordinated_test_restore_unavailable$/);
+    expect(f.query.mock.calls.filter(([sql]) => sql.startsWith('INSERT INTO cos.'))).toEqual([]);
+    expect(f.query.mock.calls.some(([sql]) => sql === 'ROLLBACK')).toBe(true);
+  },
+);
 it('G02 captures coordinated bytes directly into a queue and preserves the existing receipt reader', async () => {
   const f = fixture(),
     files = new Map<string, Buffer>();
