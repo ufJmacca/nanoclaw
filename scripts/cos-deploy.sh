@@ -31,7 +31,7 @@ lock="$root/.cos-plan-state/delivery.lock"
 mkdir "$lock" || { echo 'Another delivery owns the Mac lock; reconcile it before retrying.' >&2; exit 1; }
 printf '%s\n' "$$" > "$lock/pid"
 trap 'rm -f "$lock/pid"; rmdir "$lock"' EXIT
-ssh_options=(-o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3)
+ssh_options=(-4 -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3)
 remote() {
   [[ $# == 1 && -n "$1" ]] || { echo 'Empty remote command refused.' >&2; return 1; }
   ssh "${ssh_options[@]}" "$alias_name" "$1"
@@ -62,7 +62,7 @@ id=${directory##*/}
 cli verify "$id"
 # Close disposal before target/migration/health repair can delay the final release.
 slice=$(cli field "$id" slice)
-if [[ "$slice" != G01 ]]; then bash scripts/cos-protect-programme.sh --release-manifest "$manifest"; fi
+if [[ "$slice" != G01 && "$slice" != G02 ]]; then bash scripts/cos-protect-programme.sh --release-manifest "$manifest"; fi
 remote "$(cli preflight-command)" > "$directory/target-observation.json"
 cli target-check "$id"
 command=$(cli protected-release-command "$id")

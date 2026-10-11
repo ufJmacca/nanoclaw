@@ -96,7 +96,7 @@ export function validateReleaseTargetObservation(
 ): TargetState | null {
   const manifest = validateReleaseManifest(input),
     state = validateTargetObservation(settings, value, true);
-  if (manifest.slice === 'G01' && (state?.lifecycle !== 'protected' || !state.releaseId))
+  if (['G01', 'G02'].includes(manifest.slice) && (state?.lifecycle !== 'protected' || !state.releaseId))
     throw Error('protected_extension_target_required');
   return state;
 }
