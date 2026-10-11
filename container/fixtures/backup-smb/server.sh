@@ -4,7 +4,7 @@ umask 077
 # /run/fixture is private disposable RAM. This well-known password has synthetic authority only.
 root=/run/fixture
 chmod 0711 "$root"
-mkdir "$root/allowed" "$root/denied" "$root/private" "$root/state" "$root/cache" "$root/lock" "$root/run"
+mkdir "$root/allowed" "$root/denied" "$root/private" "$root/state" "$root/cache" "$root/lock" "$root/run" "$root/ncalrpc"
 chown 1000:1000 "$root/allowed"
 chmod 0700 "$root/allowed" "$root/denied" "$root/private"
 cat > "$root/smb.conf" <<'CONF'
@@ -31,6 +31,7 @@ state directory = /run/fixture/state
 cache directory = /run/fixture/cache
 lock directory = /run/fixture/lock
 pid directory = /run/fixture/run
+ncalrpc dir = /run/fixture/ncalrpc
 [nanoclaw-cos-backups]
 path = /run/fixture/allowed
 valid users = nanoclaw-cos-backup
@@ -45,7 +46,7 @@ guest ok = no
 read only = yes
 CONF
 printf '%s\n%s\n' 'public-synthetic-smb-fixture-password' 'public-synthetic-smb-fixture-password' |
-  /usr/bin/smbpasswd --configfile="$root/smb.conf" -s -a nanoclaw-cos-backup > /dev/null
+  /usr/bin/smbpasswd -c "$root/smb.conf" -s -a nanoclaw-cos-backup > /dev/null
 /usr/bin/testparm -s "$root/smb.conf" > "$root/effective.conf" 2> "$root/config-diagnostics"
 touch "$root/ready"
 exec /usr/sbin/smbd --foreground --no-process-group --configfile="$root/smb.conf" > "$root/daemon-output" 2>&1
