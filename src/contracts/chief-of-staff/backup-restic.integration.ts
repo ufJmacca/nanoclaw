@@ -48,6 +48,8 @@ const run = (operation: string[], input?: Buffer) =>
     maxBuffer: 1024 ** 2,
     stdio: ['pipe', 'pipe', 'pipe', binaryFd, passwordFd, repositoryFd],
   });
+const snapshotMetadata = () =>
+  (JSON.parse(run(['snapshots'])) as Array<{ id: string }>).sort((a, b) => a.id.localeCompare(b.id));
 let repositoryId: string;
 const transferOwner = 'c'.repeat(64),
   transferOperation = '86419d8e-6444-49c4-b674-dfa8979eeed5';
@@ -764,7 +766,7 @@ test('real maintenance replay verifies unchanged retained snapshots without anot
   assert.deepEqual((JSON.parse(run(['snapshots'])) as Array<{ id: string }>).map((s) => s.id).sort(), before);
 });
 test('capacity withdrawal and wrong repository identity refuse real retention with all snapshot IDs intact', async () => {
-  const before = run(['snapshots']);
+  const before = snapshotMetadata();
   await assert.rejects(
     maintainRepository(async () => {
       throw Error('fixture_capacity_exhausted');
@@ -775,7 +777,7 @@ test('capacity withdrawal and wrong repository identity refuse real retention wi
     maintainRepository(async () => {}, 'f'.repeat(64)),
     /^Error: backup_artifact_unverified$/,
   );
-  assert.deepEqual(JSON.parse(run(['snapshots'])), JSON.parse(before));
+  assert.deepEqual(snapshotMetadata(), before);
 });
 test('full data integrity failure refuses real maintenance before forgetting snapshots or pruning data', async () => {
   const files = (directory: string): string[] =>
@@ -786,7 +788,7 @@ test('full data integrity failure refuses real maintenance before forgetting sna
   const file = files(path.join(repository, 'data'))[0],
     original = fs.readFileSync(file),
     changed = Buffer.from(original);
-  const before = run(['snapshots']);
+  const before = snapshotMetadata();
   const mode = fs.statSync(file).mode & 0o777;
   // Restic deliberately writes immutable read-only packs. Only this disposable
   // synthetic fixture permits a byte change to exercise full data verification.
@@ -795,7 +797,7 @@ test('full data integrity failure refuses real maintenance before forgetting sna
     changed[0] ^= 1;
     fs.writeFileSync(file, changed);
     await assert.rejects(maintainRepository(), /^Error: backup_artifact_unverified$/);
-    assert.deepEqual(JSON.parse(run(['snapshots'])), JSON.parse(before));
+    assert.deepEqual(snapshotMetadata(), before);
     assert.deepEqual(fs.readFileSync(file), changed);
   } finally {
     fs.writeFileSync(file, original);
