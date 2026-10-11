@@ -6,17 +6,31 @@ import { execFileSync, spawn } from 'node:child_process';
 import { after, test } from 'node:test';
 import type pg from 'pg';
 import Database from 'better-sqlite3';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { verifyRecoveredTargetVaultState } from '../../modules/chief-of-staff/ops/backup-recovered-state.js';
+import type { DeploymentSettings } from '../../modules/chief-of-staff/ops/deployment-settings.js';
+import { targetBinding } from '../../modules/chief-of-staff/ops/target-host.js';
+import { initializeTarget, readPrivate, writeAtomic } from '../../modules/chief-of-staff/ops/target-state.js';
 import {
-  captureOperationsState,
-  verifyRecoveredOperationsState,
-} from '../../modules/chief-of-staff/ops/recovery-manifest.js';
+  beginMaintenance,
+  confirmQuiescence,
+  finishMaintenance,
+} from '../../modules/chief-of-staff/ops/maintenance.js';
+import { initializeTargetActionWitness } from '../../modules/chief-of-staff/actions/host-ownership.js';
+import { openKnowledgeArtifacts } from '../../modules/chief-of-staff/knowledge/config.js';
+import { captureCalendarState } from '../../modules/chief-of-staff/calendar/backup.js';
+import { configureCalendarStorage } from '../../modules/chief-of-staff/calendar/storage-policy.js';
+import type { StorageInspection } from '../../modules/chief-of-staff/calendar/storage-protection.js';
+import type { BackupSnapshotSink } from '../../modules/chief-of-staff/ops/backup-queue.js';
+import type {
+  ForensicCapturePrefix,
+  ForensicCaptureReceipt,
+} from '../../modules/chief-of-staff/ops/backup-recovered-tree.js';
+import { captureOperationsState } from '../../modules/chief-of-staff/ops/recovery-manifest.js';
 import {
   capturePrivateHistory,
   verifyRecoveredPrivateHistory,
 } from '../../modules/chief-of-staff/ops/private-history-backup.js';
-import { KnowledgeArtifacts } from '../../modules/chief-of-staff/knowledge/artifacts.js';
-import { ActionWitness, initializeActionWitness } from '../../modules/chief-of-staff/actions/witness.js';
 import { MIGRATIONS, SCHEMA_VERSION } from '../../modules/chief-of-staff/store/migrations.js';
 import { digest } from '../../modules/chief-of-staff/domain/contracts.js';
 import { BackupQueue } from '../../modules/chief-of-staff/ops/backup-queue.js';
@@ -727,21 +741,64 @@ test('real remote recovery shares measured staging and the actual checkpoint wri
   assert.deepEqual(snapshotMetadata(), remoteBefore);
   assert.deepEqual(fs.readdirSync(transferCache), []);
 });
-test('real encrypted remote recovery validates coordinated native and history payloads without importing live authority', async () => {
+test('real encrypted remote recovery validates the complete captured payload without importing live authority', async () => {
   const base = path.join(root, 'payload-recovery'),
     staging = base + '/staging',
     source = base + '/source';
   fs.mkdirSync(base, { mode: 0o700 });
-  for (const directory of [staging, source, base + '/receipt', base + '/artifacts', base + '/artifact-staging'])
+  for (const directory of [staging, base + '/backup-credentials', base + '/journals', base + '/calendar-backups'])
     fs.mkdirSync(directory, { mode: 0o700 });
-  const native = new Database(source + '/native.db');
+  const settings: DeploymentSettings = {
+    version: 1,
+    target: 'pi',
+    sshAlias: 'fixture',
+    hostFingerprint: 'a'.repeat(64),
+    databaseFingerprint: digest('synthetic-runtime-database'),
+    service: 'nano.service',
+    userHome: base,
+    installationRoot: base + '/app',
+    dataRoot: base + '/app/data',
+    stateRoot: source,
+    releaseRoot: base + '/releases',
+    stagingRoot: staging,
+    sourceRoot: base + '/sources',
+    runtimeEnvironment: base + '/.config/runtime',
+    migrationEnvironment: base + '/.config/migration',
+  };
+  fs.mkdirSync(settings.dataRoot, { recursive: true, mode: 0o700 });
+  const initial = initializeTarget(source, targetBinding(settings)),
+    operationId = '285cd0bd-2af0-49d0-a9e8-c47dd53c9a39',
+    releaseOperationId = 'release-action-' + operationId;
+  writeAtomic(source, 'protected.json', { bindingDigest: digest(initial.binding), generation: initial.generation });
+  writeAtomic(source, 'state.json', { ...initial, lifecycle: 'protected', releaseId: 'release-current' });
+  const maintenance = beginMaintenance(source, initial.binding, releaseOperationId, 'deployment');
+  await confirmQuiescence(source, initial.binding, maintenance, async () => ({
+    activeCoordinators: 0,
+    activeDatabaseOperations: 0,
+  }));
+  const binding = {
+    scopeId: 'synthetic-scope',
+    ownerId: 'owner',
+    botId: 'bot',
+    instanceId: 'fixture',
+    channelId: 'private',
+    agentGroupId: 'group',
+    messagingGroupId: 'chat',
+    provider: 'codex' as const,
+    sessionId: 'session',
+  };
+  const native = new Database(settings.dataRoot + '/v2.db');
   native.pragma('journal_mode=WAL');
   native.exec(
-    "CREATE TABLE messages(body TEXT); INSERT INTO messages VALUES('old message'); CREATE TABLE model_counters(consumed INTEGER); INSERT INTO model_counters VALUES(3)",
+    "CREATE TABLE messages(body TEXT); INSERT INTO messages VALUES('old message'); CREATE TABLE model_counters(consumed INTEGER); INSERT INTO model_counters VALUES(3); CREATE TABLE sessions(id TEXT,agent_group_id TEXT); CREATE TABLE cos_identity_boundaries(scope_id TEXT,agent_group_id TEXT,messaging_group_id TEXT,session_id TEXT,binding TEXT,paused INTEGER)",
   );
+  native.prepare('INSERT INTO sessions VALUES(?,?)').run(binding.sessionId, binding.agentGroupId);
+  native
+    .prepare('INSERT INTO cos_identity_boundaries VALUES(?,?,?,?,?,1)')
+    .run(binding.scopeId, binding.agentGroupId, binding.messagingGroupId, binding.sessionId, JSON.stringify(binding));
   const generation = randomUUID(),
     conversation = source + '/conversations',
-    mission = source + '/missions-state';
+    mission = source;
   fs.mkdirSync(conversation + '/' + generation + '/empty', { recursive: true, mode: 0o700 });
   fs.mkdirSync(mission + '/missions/' + generation + '/provider/empty', { recursive: true, mode: 0o700 });
   const history = conversation + '/' + generation + '/history.jsonl';
@@ -750,18 +807,85 @@ test('real encrypted remote recovery validates coordinated native and history pa
   fs.writeFileSync(mission + '/missions/' + generation + '/provider/history', 'SYNTHETIC_SPECIALIST_HISTORY', {
     mode: 0o600,
   });
-  const installation = digest('synthetic-payload-installation'),
-    owner = initializeActionWitness(base + '/effects', installation),
-    witness = new ActionWitness(base + '/effects', installation, owner.generation),
-    artifacts = new KnowledgeArtifacts(base + '/artifacts', base + '/artifact-staging'),
-    restriction = source + '/restriction.json';
-  fs.writeFileSync(restriction, '{"paused":false}', { mode: 0o600 });
+  const witness = initializeTargetActionWitness(source, digest(initial.binding)),
+    artifacts = openKnowledgeArtifacts(source, [settings.installationRoot, settings.dataRoot]),
+    restriction = source + '/state.json';
+  for (const directory of [witness.root, base + '/backup-credentials', base + '/journals'])
+    fs.mkdirSync(directory + '/empty', { mode: 0o700 });
+  fs.writeFileSync(base + '/backup-credentials/smb-credentials', 'SYNTHETIC_SMB_PASSWORD', { mode: 0o600 });
+  fs.writeFileSync(base + '/backup-credentials/restic-password', 'SYNTHETIC_RESTIC_PASSWORD', { mode: 0o600 });
+  fs.writeFileSync(base + '/journals/credential-event.json', '{"event":"synthetic"}', { mode: 0o600 });
+  const roots = { targetRoot: source, installationRoot: settings.installationRoot, dataRoot: settings.dataRoot },
+    calendar = source + '/calendar';
+  for (const directory of [calendar, calendar + '/credentials', calendar + '/access-denials', calendar + '/empty'])
+    fs.mkdirSync(directory, { mode: 0o700 });
+  fs.writeFileSync(calendar + '/credentials/token.json', 'SYNTHETIC_ARCHIVED_CALENDAR_TOKEN', { mode: 0o600 });
+  fs.writeFileSync(calendar + '/access-denials/denial.json', 'SYNTHETIC_ARCHIVED_CALENDAR_DENIAL', { mode: 0o600 });
+  // Storage inspection and process admission are explicit fixture boundaries.
+  // The Calendar producer, native files, owned recovery and encrypted transport are real.
+  const inspect: StorageInspection = (command, args) =>
+    JSON.stringify(
+      command.endsWith('/findmnt')
+        ? {
+            filesystems: [
+              {
+                target: args[args.indexOf('--target') + 1],
+                source: '/dev/mapper/private',
+                fstype: 'ext4',
+                'maj:min': '253:0',
+                uuid: 'fixture-private-volume',
+              },
+            ],
+          }
+        : {
+            blockdevices: [
+              { name: '/dev/mapper/private', type: 'crypt', 'maj:min': '253:0', uuid: 'fixture-private-volume' },
+            ],
+          },
+    );
+  configureCalendarStorage(roots, base + '/calendar-backups', inspect);
+  // These three portable forensic receipts describe only named synthetic files.
+  // Actual default forensic producers are covered by the separate database capture checks.
+  const captureForensicFixture = (
+    prefix: ForensicCapturePrefix,
+    directory: string,
+    sink: BackupSnapshotSink,
+  ): ForensicCaptureReceipt => {
+    const files = fs
+      .readdirSync(directory)
+      .sort()
+      .filter((name) => name !== 'empty')
+      .map((name) => {
+        const bytes = fs.readFileSync(directory + '/' + name);
+        try {
+          sink.write(prefix + '/' + name, bytes);
+          return { name, bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') };
+        } finally {
+          bytes.fill(0);
+        }
+      });
+    const receipt: ForensicCaptureReceipt = {
+      contract: 'cos-private-tree-capture/v1',
+      prefix,
+      bytes: files.reduce((sum, item) => sum + item.bytes, 0),
+      files,
+      directories: ['empty'],
+      excluded: [],
+    };
+    const bytes = Buffer.from(JSON.stringify(receipt) + '\n');
+    try {
+      sink.write(prefix + '.capture.json', bytes);
+    } finally {
+      bytes.fill(0);
+    }
+    return receipt;
+  };
   const context = {
     scopeId: 'synthetic-scope',
     ownerId: 'owner',
     agentGroupId: 'group',
     sessionId: 'session',
-    ingressId: 'synthetic-recovery',
+    ingressId: 'operator-backup-' + releaseOperationId,
   };
   // PostgreSQL query responses are synthetic in this network-free component.
   // Actual separately admitted database capture/readback is checked independently.
@@ -787,20 +911,19 @@ test('real encrypted remote recovery validates coordinated native and history pa
     if (sql.includes('clock_timestamp')) return { rows: [{ now: new Date() }] };
     return { rows: [] };
   };
-  const operationId = '285cd0bd-2af0-49d0-a9e8-c47dd53c9a39',
-    queue = new BackupQueue('a'.repeat(64), async (_kind, callback) => callback(staging)),
+  const queue = new BackupQueue('a'.repeat(64), async (_kind, callback) => callback(staging)),
     options = {
       client: { query } as unknown as pg.Client,
       context,
       databaseFingerprint: digest('synthetic-runtime-database'),
-      operationId,
-      receiptRoot: base + '/receipt',
-      nativeDatabases: [source + '/native.db'],
+      operationId: releaseOperationId,
+      receiptRoot: source + '/actions',
+      nativeDatabases: [settings.dataRoot + '/v2.db'],
       artifacts,
-      restrictionFiles: [restriction],
+      restrictionFiles: [restriction, source + '/maintenance.json'],
       witness,
       quiescent: async () => ({
-        generation: 1,
+        generation: maintenance.generation,
         activeWorkers: 0 as const,
         activeOperations: 0 as const,
         nativeWriters: 0 as const,
@@ -818,27 +941,85 @@ test('real encrypted remote recovery validates coordinated native and history pa
     },
     externalCheckpoint: { kind: 'application_scope_logical' as const },
   };
+  const recovery = { releaseId: 'release-current', manifestDigest: 'c'.repeat(64), software: recoveryOptions.software };
+  let capturedHeader!: import('../../modules/chief-of-staff/ops/backup-recovered-state.js').RecoveredCaptureHeader;
   try {
     await queue.capture(
       'state',
       operationId,
       async (sink) => {
-        await captureOperationsState(recoveryOptions, sink);
-        await capturePrivateHistory(conversation, sink, 'conversation');
-        await capturePrivateHistory(mission, sink, 'mission');
+        const captured = await captureOperationsState(recoveryOptions, sink),
+          conversations = await capturePrivateHistory(conversation, sink, 'conversation'),
+          missions = await capturePrivateHistory(mission, sink, 'mission'),
+          effects = captureForensicFixture('effects', witness.root, sink),
+          credentials = captureForensicFixture('vault-backup-credentials', base + '/backup-credentials', sink),
+          journals = captureForensicFixture('vault-journals', base + '/journals', sink),
+          calendarReceipt = await captureCalendarState(
+            {
+              roots,
+              operationId: releaseOperationId,
+              receiptRoot: source + '/actions',
+              check: async () => {},
+              inspect,
+              memory: () => {},
+            },
+            sink,
+          );
+        capturedHeader = {
+          contract: 'cos-target-vault-capture/v1',
+          operationId: releaseOperationId,
+          queueOperationId: operationId,
+          targetBindingDigest: digest(initial.binding),
+          nativeBindingDigest: digest(binding),
+          journal: { installationDigest: witness.installationDigest, generation: witness.generation },
+          maintenanceGeneration: maintenance.generation,
+          nativeDatabases: options.nativeDatabases.length,
+          checkpointDigest: digest(captured.checkpoint),
+          conversationDigest: digest(conversations),
+          missionDigest: digest(missions),
+          calendarDigest: digest(calendarReceipt),
+          effectsDigest: digest(effects),
+          backupCredentialsDigest: digest(credentials),
+          credentialJournalsDigest: digest(journals),
+          inputs: {
+            context,
+            nativeDatabases: options.nativeDatabases,
+            restrictionFiles: options.restrictionFiles,
+            artifactsRoot: artifacts.root,
+          },
+          operations: { release: recovery, manifestDigest: digest(captured.operations) },
+          writerActivated: false,
+          admissionRestored: false,
+        };
+        const bytes = Buffer.from(JSON.stringify(capturedHeader) + '\n');
+        try {
+          sink.write('state-capture.json', bytes);
+        } finally {
+          bytes.fill(0);
+        }
       },
       1024 ** 2,
     );
     const pending = await queue.pending('state');
     native.exec("INSERT INTO messages VALUES('later message'); UPDATE model_counters SET consumed=4");
     fs.appendFileSync(history, 'SYNTHETIC_CURRENT_LATER_HISTORY');
-    fs.writeFileSync(restriction, '{"paused":true}', { mode: 0o600 });
+    await finishMaintenance(source, initial.binding, maintenance, async () => true);
+    const laterBinding = { ...binding, sessionId: 'later-session' };
+    native.prepare('INSERT INTO sessions VALUES(?,?)').run(laterBinding.sessionId, laterBinding.agentGroupId);
+    native
+      .prepare('UPDATE cos_identity_boundaries SET session_id=?,binding=?,paused=1')
+      .run(laterBinding.sessionId, JSON.stringify(laterBinding));
+    fs.writeFileSync(calendar + '/credentials/token.json', 'SYNTHETIC_LATER_CALENDAR_TOKEN', { mode: 0o600 });
+    fs.writeFileSync(witness.root + '/later-event.json', 'SYNTHETIC_LATER_EFFECT', { mode: 0o600 });
     const before = {
       messages: native.prepare('SELECT * FROM messages').all(),
       counters: native.prepare('SELECT * FROM model_counters').all(),
       history: fs.readFileSync(history),
       restriction: fs.readFileSync(restriction),
       journal: fs.readFileSync(witness.root + '/owner.json'),
+      token: fs.readFileSync(calendar + '/credentials/token.json'),
+      effect: fs.readFileSync(witness.root + '/later-event.json'),
+      binding: native.prepare('SELECT binding,paused FROM cos_identity_boundaries').get(),
     };
     const producer = () => [
       process.execPath,
@@ -874,13 +1055,103 @@ test('real encrypted remote recovery validates coordinated native and history pa
             const recovered = await transfer.restore('state', operationId, 'a'.repeat(64), workspace.sink, async () =>
                 workspace.assertCurrent(),
               ),
-              instructions = await verifyRecoveredOperationsState(
-                recoveryOptions,
+              instructions = await verifyRecoveredTargetVaultState(
+                {
+                  settings,
+                  binding: laterBinding,
+                  witness,
+                  queueOperationId: operationId,
+                  recovery,
+                  expectedSnapshotDigest: digest(capturedHeader),
+                  current,
+                },
                 workspace,
                 recovered.receipt.files,
-                1,
               ),
               checked = instructions.coordinated;
+            assert.equal(instructions.credentialsActivated, false);
+            assert.equal(instructions.writerActivated, false);
+            assert.deepEqual(instructions.header, capturedHeader);
+            assert.equal(fs.existsSync(workspace.directory + '/calendar-state/empty'), true);
+            assert.equal(fs.existsSync(workspace.directory + '/vault-journals/empty'), true);
+            assert.equal(fs.existsSync(workspace.directory + '/vault-journals/.vault-canary'), false);
+            await assert.rejects(
+              verifyRecoveredTargetVaultState(
+                {
+                  settings,
+                  binding: laterBinding,
+                  witness,
+                  queueOperationId: operationId,
+                  recovery: { ...recovery, manifestDigest: 'd'.repeat(64) },
+                  current,
+                },
+                workspace,
+                recovered.receipt.files,
+              ),
+              /^Error: target_vault_recovery_check_unavailable$/,
+            );
+            let permitted = true,
+              withdrawalQueued = false;
+            await assert.rejects(
+              verifyRecoveredTargetVaultState(
+                {
+                  settings,
+                  binding: laterBinding,
+                  witness,
+                  queueOperationId: operationId,
+                  recovery,
+                  current() {
+                    current();
+                    if (!permitted) throw Error('synthetic_owner_withdrawn');
+                    if (!withdrawalQueued) {
+                      withdrawalQueued = true;
+                      queueMicrotask(() => {
+                        permitted = false;
+                      });
+                    }
+                  },
+                },
+                workspace,
+                recovered.receipt.files,
+              ),
+              /^Error: target_vault_recovery_check_unavailable$/,
+            );
+            assert.equal(withdrawalQueued, true);
+            let journalChanged = false;
+            try {
+              await assert.rejects(
+                verifyRecoveredTargetVaultState(
+                  {
+                    settings,
+                    binding: laterBinding,
+                    witness,
+                    queueOperationId: operationId,
+                    recovery,
+                    current() {
+                      current();
+                      if (!journalChanged) {
+                        journalChanged = true;
+                        queueMicrotask(() =>
+                          writeAtomic(witness.root, 'owner.json', {
+                            format: 'cos-action-witness-owner/v1',
+                            installationDigest: witness.installationDigest,
+                            generation: randomUUID(),
+                          }),
+                        );
+                      }
+                    },
+                  },
+                  workspace,
+                  recovered.receipt.files,
+                ),
+                /^Error: target_vault_recovery_check_unavailable$/,
+              );
+            } finally {
+              // Only this isolated synthetic fixture journal is reset for its final preservation checks.
+              writeAtomic(witness.root, 'owner.json', JSON.parse(before.journal.toString('utf8')));
+            }
+            assert.equal(journalChanged, true);
+            workspace.assertCurrent();
             assert.equal(checked.nativeDatabasesVerified, 1);
             assert.equal(checked.admissionRestored, false);
             assert.equal(checked.eventJournalRestored, false);
@@ -914,6 +1185,10 @@ test('real encrypted remote recovery validates coordinated native and history pa
     assert.deepEqual(fs.readFileSync(history), before.history);
     assert.deepEqual(fs.readFileSync(restriction), before.restriction);
     assert.deepEqual(fs.readFileSync(witness.root + '/owner.json'), before.journal);
+    assert.deepEqual(fs.readFileSync(calendar + '/credentials/token.json'), before.token);
+    assert.deepEqual(fs.readFileSync(witness.root + '/later-event.json'), before.effect);
+    assert.deepEqual(native.prepare('SELECT binding,paused FROM cos_identity_boundaries').get(), before.binding);
+    assert.equal((readPrivate(source + '/state.json') as { maintenance: boolean }).maintenance, false);
     assert.deepEqual(await queue.pending('state'), pending);
     assert.deepEqual(fs.readdirSync(staging), ['backup-queue']);
     assert.deepEqual(snapshotMetadata(), remoteBefore);
