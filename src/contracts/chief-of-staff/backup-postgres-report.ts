@@ -25,7 +25,7 @@ export function verifyBackupPostgresReport(text: string): { actualDatabaseCases:
       value.success !== true ||
       value.numPassedTests !== 6 ||
       value.numFailedTests !== 0 ||
-      value.numRuntimeErrorTestSuites !== 0 ||
+      value.numFailedTestSuites !== 0 ||
       !Array.isArray(value.testResults) ||
       value.testResults.length !== BACKUP_POSTGRES_FILES.length
     )
@@ -38,7 +38,7 @@ export function verifyBackupPostgresReport(text: string): { actualDatabaseCases:
         throw Error('file');
       if (
         file.assertionResults.some(
-          (result: { status?: unknown }) => !result || !['passed', 'pending'].includes(String(result.status)),
+          (result: { status?: unknown }) => !result || !['passed', 'skipped'].includes(String(result.status)),
         )
       )
         throw Error('assertion');

@@ -11,6 +11,7 @@ test('the compiled ARM64 host captures and imports through the separate admitted
   assert.equal(process.versions.node, '22.23.2');
   assert.equal(process.getuid?.(), 1000);
   assert.equal(process.env.COS_FIXTURE_DATABASE_PROFILE, 'test');
+  assert.equal(JSON.parse(fs.readFileSync('/release/node_modules/vitest/package.json', 'utf8')).version, '4.1.4');
   const selected = selectedFixtureEnvironment(process.env, true);
   assert(selected.COS_TEST_TARGET_ID);
   assert.equal(selected.COS_TEST_PGSSLMODE, 'verify-full');
