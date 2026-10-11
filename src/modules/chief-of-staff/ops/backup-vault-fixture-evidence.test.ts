@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { verifyBackupVaultCredentialEvidence } from './backup-vault-fixture-evidence.js';
+import {
+  verifyBackupVaultCredentialEvidence,
+  verifyBackupCredentialReleaseEvidence,
+} from './backup-vault-fixture-evidence.js';
 
 const source = 'a'.repeat(40),
   tree = 'b'.repeat(40);
@@ -69,4 +72,86 @@ describe('encrypted-vault credential fixture evidence', () => {
       verifyBackupVaultCredentialEvidence([{ ...evidence, privateDiagnostic: 'unexpected' }], source, tree),
     ).toThrow();
   });
+});
+
+const identity = {
+  sourceCommit: source,
+  sourceTree: tree,
+  hostImage: 'sha256:' + 'c'.repeat(64),
+  fixtureImage: 'sha256:' + 'd'.repeat(64),
+};
+const releaseRecords = () => [
+  { vaultFixtureImage: identity.fixtureImage, sourceCommit: source, mode: 'backup-kernel' },
+  evidence,
+  { rootRecoveryWire: 'passed', liveOwnerProof: 'verified', realRecoverySlot: 'verified', recoveryKeyOnDisk: false },
+  { rootOrchestration: 'passed' },
+  {
+    kernelVault: 'passed',
+    volumeBytes: 1073741824,
+    bootKeyRemoved: true,
+    recoveredCanary: true,
+    wrongKeyDenied: true,
+    mountRaceDenied: true,
+    plaintextFallback: false,
+    memoryProtection: 'verified',
+    recoveryKeyOnDisk: false,
+    keychainRecovery: 'verified',
+  },
+  {
+    encryptedCredentialJournal: 'passed',
+    cases: 13,
+    actualKilledWriters: 8,
+    actualCaptureKilledWriters: 4,
+    actualHeadKilledWriters: 4,
+    actualEncryptedVault: true,
+    compiledProductionQueue: true,
+    defaultReaderAndBackupOwner: true,
+    productionMemoryAndStorageOverrides: false,
+    rootProofBytesRead: false,
+    oauth: 'fixture',
+    remoteRepository: 'metadata-only-fixture',
+    remoteUpload: 'not_exercised',
+    syntheticCredentialsOnly: true,
+  },
+];
+it('requires real kernel recovery, the credential process boundary and all journal interruptions for the local release gate', () => {
+  expect(verifyBackupCredentialReleaseEvidence(releaseRecords(), identity)).toEqual({
+    status: 'passed',
+    credentialCases: 8,
+    journalCases: 13,
+    actualKilledWriters: 8,
+    installedAcceptance: false,
+  });
+});
+it.each([
+  'component-only',
+  'missing-journal',
+  'duplicate',
+  'mode',
+  'source',
+  'host',
+  'kernel',
+  'wire',
+  'killed-writers',
+  'journal-count',
+  'override',
+  'remote-claim',
+])('refuses %s credential release evidence', (change) => {
+  const rows: Record<string, unknown>[] = releaseRecords(),
+    selected = { ...identity };
+  if (change === 'component-only') rows.splice(0, rows.length, evidence);
+  if (change === 'missing-journal') rows.pop();
+  if (change === 'duplicate') rows.push(rows[5]);
+  if (change === 'mode') rows[0].mode = 'kernel';
+  if (change === 'source') selected.sourceTree = 'f'.repeat(40);
+  if (change === 'host') selected.hostImage = selected.fixtureImage;
+  if (change === 'kernel') rows[4].memoryProtection = 'not_exercised';
+  if (change === 'wire') rows[2].realRecoverySlot = 'fixture';
+  if (change === 'killed-writers') rows[5].actualKilledWriters = 7;
+  if (change === 'journal-count') rows[5].cases = 12;
+  if (change === 'override') rows[5].productionMemoryAndStorageOverrides = true;
+  if (change === 'remote-claim') rows[5].remoteUpload = 'passed';
+  expect(() => verifyBackupCredentialReleaseEvidence(rows, selected)).toThrow(
+    'backup_credential_release_evidence_unavailable',
+  );
 });

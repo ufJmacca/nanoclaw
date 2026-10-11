@@ -152,6 +152,7 @@ if [[ "$slice" == G01 || "$slice" == G02 ]]; then
   check vault_wire cli vault-wire "$id"
 fi
 if [[ "$slice" == G02 ]]; then
+  check backup_credentials bash "$directory/context/scripts/cos-vault-fixture.sh" backup-kernel "$vault_image" "$directory/context/scripts/cos-vault-keychain.swift"
   # One complete real repository run supplies the three separately validated
   # local gates. Preserve its actual output rather than rerunning destructive
   # fixture publication and retention merely to create duplicate receipts.

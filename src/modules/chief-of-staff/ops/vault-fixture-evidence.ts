@@ -21,13 +21,19 @@ export function verifyVaultFixtureImage(value: unknown, sourceCommit: string, ho
     throw Error('vault_fixture_identity_mismatch');
   return entry.Id;
 }
-export function verifyVaultWireEvidence(records: unknown[], sourceCommit: string, fixtureImage: string): void {
+export function verifyVaultWireEvidence(
+  records: unknown[],
+  sourceCommit: string,
+  fixtureImage: string,
+  expectedMode: 'kernel' | 'backup-kernel' = 'kernel',
+): void {
   const deny = (): never => {
     throw Error('vault_wire_evidence_unavailable');
   };
   if (
     !Array.isArray(records) ||
     records.length > 256 ||
+    !['kernel', 'backup-kernel'].includes(expectedMode) ||
     !/^[a-f0-9]{40}$/.test(sourceCommit) ||
     !/^sha256:[a-f0-9]{64}$/.test(fixtureImage)
   )
@@ -46,7 +52,7 @@ export function verifyVaultWireEvidence(records: unknown[], sourceCommit: string
   if (
     header.vaultFixtureImage !== fixtureImage ||
     header.sourceCommit !== sourceCommit ||
-    header.mode !== 'kernel' ||
+    header.mode !== expectedMode ||
     wire.rootRecoveryWire !== 'passed' ||
     wire.liveOwnerProof !== 'verified' ||
     wire.realRecoverySlot !== 'verified' ||

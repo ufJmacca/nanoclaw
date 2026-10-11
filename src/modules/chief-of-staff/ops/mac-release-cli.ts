@@ -31,6 +31,7 @@ import { validateResticArtifactSeal } from './restic-artifact.js';
 import { verifyBackupJobFixtureImage, verifyBackupJobFixtureEvidence } from './backup-job-fixture-evidence.js';
 import { verifyBackupSmbFixtureImages, verifyBackupSmbFixtureEvidence } from './backup-smb-fixture-evidence.js';
 import { verifyBackupRepositoryFixtureEvidence } from './backup-repository-fixture-evidence.js';
+import { verifyBackupCredentialReleaseEvidence } from './backup-vault-fixture-evidence.js';
 
 export const BUILD_TARGETS = ['host', 'agent-standard', 'agent-documents'] as const;
 type BuildTarget = (typeof BUILD_TARGETS)[number];
@@ -387,6 +388,34 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
     if (!requiredReleaseChecks(plan.slice).includes(name) || !['0', '1'].includes(status))
       throw new Error('invalid_check_result');
     const imageIds = releaseCheckImageIds(plan.images, name);
+    if (name === 'backup_credentials' && status === '0') {
+      const fixture = readPrivate<{ image: string; hostImage: string; source: ReleaseManifest['source'] }>(
+        path.join(root, 'vault-fixture.json'),
+      );
+      if (fixture.hostImage !== imageIds[0] || digest(fixture.source) !== digest(plan.source))
+        throw Error('vault_fixture_identity_mismatch');
+      const file = path.join(root, 'backup_credentials.log'),
+        stat = fs.lstatSync(file);
+      if (
+        !stat.isFile() ||
+        stat.nlink !== 1 ||
+        stat.uid !== process.getuid?.() ||
+        (stat.mode & 0o7777) !== 0o600 ||
+        stat.size > 512 * 1024
+      )
+        throw Error('backup_credential_release_evidence_unavailable');
+      const records = fs
+        .readFileSync(file, 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+      verifyBackupCredentialReleaseEvidence(records, {
+        sourceCommit: plan.source.commit,
+        sourceTree: plan.source.tree,
+        hostImage: imageIds[0],
+        fixtureImage: fixture.image,
+      });
+    }
     if (['backup_transfer', 'backup_retention', 'backup_recovery'].includes(name) && status === '0') {
       const file = path.join(root, name + '.log'),
         stat = fs.lstatSync(file);

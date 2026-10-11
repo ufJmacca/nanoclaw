@@ -24,6 +24,15 @@ function evidence() {
 it('accepts wire evidence only from the same successful immutable kernel fixture', () => {
   expect(() => verifyVaultWireEvidence(evidence(), source, image)).not.toThrow();
 });
+it('keeps the inherited kernel gate separate from the explicitly selected backup kernel run', () => {
+  const records = evidence();
+  Object.assign(records[0], { mode: 'backup-kernel' });
+  expect(() => verifyVaultWireEvidence(records, source, image)).toThrow('vault_wire_evidence_unavailable');
+  expect(() => verifyVaultWireEvidence(records, source, image, 'backup-kernel')).not.toThrow();
+  expect(() => verifyVaultWireEvidence(evidence(), source, image, 'backup-kernel')).toThrow(
+    'vault_wire_evidence_unavailable',
+  );
+});
 it.each(['source', 'image', 'missing-wire', 'disk-key', 'recovery', 'kernel', 'duplicate', 'keychain'])(
   'denies %s evidence instead of manufacturing a separate wire pass',
   (reason) => {

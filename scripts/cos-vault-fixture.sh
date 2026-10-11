@@ -10,6 +10,10 @@ mode=$1 image=$2
 role=$(docker image inspect --format '{{index .Config.Labels "nanoclaw.release-role"}}' "$image")
 source_commit=$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$image")
 [[ "$role" == vault-fixture && "$source_commit" =~ ^[a-f0-9]{40}$ ]] || exit 1
+[[ "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$image")" == linux/arm64 ]] || exit 1
+expected_driver=$(git show "$source_commit:scripts/cos-vault-fixture.sh" | shasum -a256 | awk '{print $1}')
+actual_driver=$(shasum -a256 "${BASH_SOURCE[0]}" | awk '{print $1}')
+[[ "$actual_driver" == "$expected_driver" ]] || exit 1
 printf '{"vaultFixtureImage":"%s","sourceCommit":"%s","mode":"%s"}\n' "$image" "$source_commit" "$mode"
 if [[ "$mode" == helper || "$mode" == units ]]; then
   [[ $# == 2 ]] || exit 1
