@@ -20,6 +20,7 @@ const f = vi.hoisted(() => ({
   transfer: vi.fn(),
   upload: vi.fn(),
   verify: vi.fn(),
+  maintain: vi.fn(),
   deps: undefined as undefined | Record<string, unknown>,
 }));
 vi.mock('./vault-storage.js', () => ({ verifyVaultStorage: f.vault, withVaultDirectory: f.access }));
@@ -38,7 +39,7 @@ vi.mock('./backup-repository-lease.js', async (original) => ({
   createVaultBackupRepositoryWriter: f.writer,
 }));
 vi.mock('./backup-restic-transfer.js', () => ({ BackupResticTransfer: f.transfer }));
-import { uploadVaultBackup } from './backup-upload.js';
+import { uploadVaultBackup, maintainVaultBackups } from './backup-upload.js';
 const temporary: string[] = [],
   held: number[] = [];
 const operationId = 'fe682c6d-d762-40fb-89e6-e0f1e34edfc0';
@@ -120,7 +121,7 @@ async function fixture() {
   );
   f.transfer.mockImplementation(function (options) {
     f.deps = options;
-    return { upload: f.upload, verify: f.verify };
+    return { upload: f.upload, verify: f.verify, maintain: f.maintain };
   });
   let recorded: RemoteCheckpoint | undefined;
   f.upload.mockImplementation(async (kind, id, archive) => {
@@ -157,8 +158,87 @@ async function fixture() {
       throw Error('fixture_remote_missing');
     return { ...recorded, reconciled: true, verifiedAt: new Date().toISOString() };
   });
+  f.maintain.mockImplementation(async (admit) => {
+    await admit();
+    return {
+      contract: 'cos-backup-repository-maintenance/v1',
+      status: 'backup_repository_maintained',
+      repositoryId: profile.repositoryId,
+      ownerDigest: lockOwner,
+      state: { retained: 1, removed: 0 },
+      credentials: { retained: 0, removed: 0 },
+      integrity: 'verified',
+    };
+  });
   return { roots, areas, profile, file, queue, producer };
 }
+it('maintains through the same admitted installed scopes without uploading or changing the local capture', async () => {
+  const s = await fixture(),
+    guard = vi.fn();
+  expect(await maintainVaultBackups(s.roots, guard)).toMatchObject({
+    status: 'backup_repository_maintained',
+    repositoryId: s.profile.repositoryId,
+    integrity: 'verified',
+  });
+  expect(guard).toHaveBeenCalled();
+  expect(f.maintain).toHaveBeenCalledOnce();
+  expect(f.upload).not.toHaveBeenCalled();
+  expect(f.verify).not.toHaveBeenCalled();
+  expect(await s.queue.pending('state')).toMatchObject([{ operationId, state: 'pending' }]);
+});
+it('refuses retention while a durable upload retirement still requires its original remote snapshot', async () => {
+  const s = await fixture(),
+    unlink = fs.unlinkSync;
+  const fault = vi.spyOn(fs, 'unlinkSync').mockImplementation((file) => {
+    if (String(file).endsWith('/remote.json')) throw Error('interrupted');
+    return unlink(file);
+  });
+  try {
+    await expect(uploadVaultBackup(s.roots, 'state', operationId)).rejects.toThrow('backup_upload_unavailable');
+  } finally {
+    fault.mockRestore();
+  }
+  await expect(maintainVaultBackups(s.roots, () => {})).rejects.toThrow(/^backup_maintenance_unavailable$/);
+  expect(f.maintain).not.toHaveBeenCalled();
+  expect(await s.queue.inspectDelivery('state')).toMatchObject({ items: [{ operationId, disposition: 'reconcile' }] });
+});
+it('requires bounded prune headroom and checks the live caller after measuring capacity', async () => {
+  const s = await fixture(),
+    usage = await f.capacity();
+  f.capacity.mockResolvedValue({ ...usage, repository: 20 * 1024 ** 3 - 64 * 1024 ** 2 });
+  await expect(maintainVaultBackups(s.roots, () => {})).rejects.toThrow(/^backup_maintenance_unavailable$/);
+  expect(f.maintain).not.toHaveBeenCalled();
+  let open = true;
+  f.capacity.mockImplementation(async () => {
+    open = false;
+    return usage;
+  });
+  await expect(
+    maintainVaultBackups(s.roots, () => {
+      if (!open) throw Error('private withdrawal');
+    }),
+  ).rejects.toThrow(/^backup_maintenance_unavailable$/);
+  expect(f.maintain).not.toHaveBeenCalled();
+});
+it.each(['cache', 'vault'])('refuses maintenance without local %s headroom for temporary packs', async (area) => {
+  const s = await fixture(),
+    usage = await f.capacity();
+  f.capacity.mockResolvedValue({
+    ...usage,
+    ...(area === 'cache' ? { cache: 96 * 1024 ** 2 } : { vaultFree: 1024 ** 2 }),
+  });
+  await expect(maintainVaultBackups(s.roots, () => {})).rejects.toThrow(/^backup_maintenance_unavailable$/);
+  expect(f.maintain).not.toHaveBeenCalled();
+});
+it('refuses maintenance when the target enters maintenance during a repository command', async () => {
+  const s = await fixture();
+  f.maintain.mockImplementation(async (admit) => {
+    await admit();
+    f.target.mockReturnValue({ lifecycle: 'protected', maintenance: true, releaseId: 'release-fixture' });
+    await admit();
+  });
+  await expect(maintainVaultBackups(s.roots, () => {})).rejects.toThrow(/^backup_maintenance_unavailable$/);
+});
 it('checks the background caller before artifact or NAS access', async () => {
   const s = await fixture();
   await expect(

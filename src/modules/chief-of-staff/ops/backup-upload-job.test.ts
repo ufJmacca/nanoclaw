@@ -79,6 +79,18 @@ function fixture() {
       queues[kind].items = queues[kind].items.filter((item) => item.operationId !== id);
       queues[kind].lastRemoteCheckpointAt = '2026-10-11T00:00:00Z';
     }),
+    maintain: vi.fn(async (assertCurrent: () => void) => {
+      assertCurrent();
+      return {
+        contract: 'cos-backup-repository-maintenance/v1' as const,
+        status: 'backup_repository_maintained' as const,
+        repositoryId: 'c'.repeat(64),
+        ownerDigest: 'd'.repeat(64),
+        state: { retained: 1, removed: 0 },
+        credentials: { retained: 1, removed: 0 },
+        integrity: 'verified' as const,
+      };
+    }),
   };
   const add = (
     kind: BackupKind,
@@ -89,9 +101,101 @@ function fixture() {
     queues[kind].items.push(item);
     return item.operationId;
   };
-  const invoke = () => uploadBackupJob({ root, binding, requestId, effects });
+  const invoke = (mode?: 'deliver' | 'maintain') => uploadBackupJob({ root, binding, requestId, effects, mode });
   return { root, binding, manifest, queues, effects, events, native, requestId, add, invoke };
 }
+it('performs daily integrity and retention after delivery, and retains the verified time across idle runs', async () => {
+  const f = fixture();
+  f.add('state');
+  expect(await f.invoke()).toMatchObject({
+    status: 'backup_uploaded',
+    maintenance: { status: 'verified', lastVerifiedAt: expect.any(String) },
+  });
+  expect(f.effects.maintain).toHaveBeenCalledOnce();
+  const recorded = readPrivate<{ verifiedAt: string }>(f.root + '/backup-maintenance-status.json');
+  expect(await f.invoke()).toMatchObject({
+    status: 'backup_upload_idle',
+    maintenance: { lastVerifiedAt: recorded.verifiedAt },
+  });
+  f.add('credentials');
+  expect(await f.invoke()).toMatchObject({ maintenance: { status: 'not_due', lastVerifiedAt: recorded.verifiedAt } });
+  expect(f.effects.maintain).toHaveBeenCalledOnce();
+});
+it('permits an owner integrity check with an empty queue under the independent uploader lock', async () => {
+  const f = fixture(),
+    before = f.native.serialize();
+  expect(await f.invoke('maintain')).toMatchObject({
+    status: 'backup_maintenance_verified',
+    uploaded: 0,
+    maintenance: { status: 'verified' },
+  });
+  expect(f.effects.mount).toHaveBeenCalledOnce();
+  expect(f.effects.maintain).toHaveBeenCalledOnce();
+  expect(f.effects.upload).not.toHaveBeenCalled();
+  expect(f.effects.reconcile).not.toHaveBeenCalled();
+  expect(f.native.serialize().equals(before)).toBe(true);
+});
+it('protects pending remote reconciliation from an owner retention request', async () => {
+  const f = fixture();
+  f.add('credentials', 'reconcile');
+  expect(await f.invoke('maintain')).toMatchObject({
+    status: 'backup_maintenance_held',
+    maintenance: { status: 'held' },
+  });
+  expect(f.effects.mount).not.toHaveBeenCalled();
+  expect(f.effects.maintain).not.toHaveBeenCalled();
+});
+it('reports failed integrity separately after successful delivery without recording verification or exposing diagnostics', async () => {
+  const f = fixture();
+  f.add('state');
+  f.effects.maintain.mockRejectedValueOnce(Error('PRIVATE_REPOSITORY_DATA'));
+  const result = await f.invoke();
+  expect(result).toMatchObject({
+    status: 'backup_uploaded_maintenance_failed',
+    uploaded: 1,
+    maintenance: { status: 'failed', lastVerifiedAt: null },
+    state: { pending: 0 },
+  });
+  expect(fs.existsSync(f.root + '/backup-maintenance-status.json')).toBe(false);
+  expect(JSON.stringify(result)).not.toContain('PRIVATE');
+});
+it('checks new integrity after 24 hours and refuses changed target admission during maintenance', async () => {
+  const f = fixture();
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime('2026-10-11T00:00:00Z');
+  await f.invoke('maintain');
+  vi.setSystemTime('2026-10-12T00:00:01Z');
+  f.add('state');
+  expect(await f.invoke()).toMatchObject({ maintenance: { status: 'verified' } });
+  expect(f.effects.maintain).toHaveBeenCalledTimes(2);
+  f.effects.maintain.mockImplementationOnce(async (guard) => {
+    writeAtomic(f.root, 'state.json', { ...readTarget(f.root, f.binding), maintenance: true });
+    guard();
+    throw Error('unreachable');
+  });
+  await expect(f.invoke('maintain')).rejects.toThrow('backup_upload_job_unavailable');
+});
+it('does not use a future or another release verification to defer a fresh check', async () => {
+  const f = fixture();
+  writeAtomic(f.root, 'backup-maintenance-status.json', {
+    contract: 'cos-backup-maintenance-status/v1',
+    releaseId: f.manifest.releaseId,
+    bindingDigest: digest(f.binding),
+    verifiedAt: '2099-01-01T00:00:00Z',
+  });
+  f.add('state');
+  expect(await f.invoke()).toMatchObject({ maintenance: { status: 'verified' } });
+  expect(f.effects.maintain).toHaveBeenCalledOnce();
+  writeAtomic(f.root, 'backup-maintenance-status.json', {
+    contract: 'cos-backup-maintenance-status/v1',
+    releaseId: 'release-another',
+    bindingDigest: digest(f.binding),
+    verifiedAt: new Date().toISOString(),
+  });
+  f.add('state');
+  await f.invoke();
+  expect(f.effects.maintain).toHaveBeenCalledTimes(2);
+});
 it('recovers local captures before observing delivery, then uploads recovered pending work', async () => {
   const f = fixture(),
     id = f.add('state', 'held'),

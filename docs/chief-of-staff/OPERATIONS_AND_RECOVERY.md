@@ -256,6 +256,44 @@ OAuth exchange.
 
 Changed bytes or file identities, unknown files, missing ownership claims and
 live writers prevent cleanup. Leave those copies intact for investigation.
+
+## Check G02 repository integrity and retention
+
+This procedure requires a healthy, admitted G02 release and the signed NAS
+mount. It is pending installed acceptance. The current G01 release cannot run
+it. Use the retained G02 helper and settings under the scoped core and swap
+restrictions described above.
+
+```sh
+cos_target maintain-backups --request-id REQUEST_UUID
+```
+
+The command checks all repository data, applies the fixed policy of 14 daily
+and four weekly snapshots separately to state and credentials, prunes with a
+16 MiB repack input limit, then checks all data again. Selection requires the
+current repository, owner, kind and archive path. Only the exact snapshot IDs
+authenticated by the preview can be forgotten; unrelated snapshots must survive.
+The pinned tool's [retention policy](https://raw.githubusercontent.com/restic/restic/v0.19.1/doc/060_forget.rst)
+defines daily and weekly groups; the retained count can be fewer than 18 when
+groups overlap. An interrupted upload that still needs its original remote
+snapshot prevents maintenance until upload reconciliation finishes.
+
+The hourly uploader runs this maintenance after successful delivery, at most
+once every 24 hours. Empty or held-only queues do not contact the NAS. The owner
+command can check an otherwise idle repository. Both operations use the same
+uploader lock and the repository's kernel writer, without pausing CoS or holding
+its checkpoint operation lock during a NAS wait.
+
+`backup-maintenance-status.json` records the last completed check for the current
+release and target binding. It is frequency evidence, not permission to access
+or delete backups. Upload status reports this time separately from capture and
+delivery ages. `backup_uploaded_maintenance_failed` means delivery succeeded
+but maintenance failed; it must not be presented as verified integrity. Failed
+checks leave the previous verification time intact. Repository identity,
+capacity, pending retirement and live vault/target scopes are checked again
+before each maintenance command. A changed inventory stops further deletion or
+pruning. These operations do not unlock stale Restic locks, repair corruption,
+initialize a repository or restore data.
 Neither the saved capture claim nor a queue status grants permission to restore
 primary state or remove a completed pending backup.
 

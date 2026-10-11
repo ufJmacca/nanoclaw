@@ -1,5 +1,25 @@
 import { expect, it } from 'vitest';
 import { parseTargetArguments } from './target-helper.js';
+it('admits a fixed owner maintenance request without repository, restore, retention or kind selectors', () => {
+  const args = [
+    'maintain-backups',
+    '--settings',
+    '/home/pi/settings.json',
+    '--request-id',
+    '01234567-89ab-4def-8123-456789abcdef',
+  ];
+  expect(parseTargetArguments(args)).toEqual({ command: args[0], settings: args[2], requestId: args[4] });
+  for (const extra of [
+    ['--kind', 'state'],
+    ['--repository', '/mnt/other'],
+    ['--retention', 'all'],
+    ['--restore', '/tmp/restore'],
+    ['--owner', 'other'],
+    ['--phase', 'hold'],
+  ])
+    expect(() => parseTargetArguments([...args, ...extra])).toThrow('invalid_target_arguments');
+  expect(() => parseTargetArguments([...args.slice(0, -1), 'latest'])).toThrow('invalid_target_arguments');
+});
 it('admits only an existing capture kind and stable ID for owner recovery', () => {
   const args = [
     'reconcile-backup-capture',

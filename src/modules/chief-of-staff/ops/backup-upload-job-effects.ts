@@ -4,7 +4,7 @@ import type { DeploymentSettings } from './deployment-settings.js';
 import type { BackupUploadJobEffects } from './backup-upload-job.js';
 import { createScheduledMaintenanceEffects } from './operations-maintenance-effects.js';
 import { createVaultBackupQueue } from './backup-queue.js';
-import { uploadVaultBackup } from './backup-upload.js';
+import { uploadVaultBackup, maintainVaultBackups } from './backup-upload.js';
 import { verifyVaultMemory } from './vault-memory.js';
 import { verifyTargetPaths } from './target-host.js';
 const execute = promisify(execFile);
@@ -59,5 +59,6 @@ export function createBackupUploadJobEffects(
       }
     },
     upload: (kind, operationId, assertCurrent) => uploadVaultBackup(roots, kind, operationId, assertCurrent),
+    maintain: (assertCurrent) => maintainVaultBackups(roots, assertCurrent),
   };
 }

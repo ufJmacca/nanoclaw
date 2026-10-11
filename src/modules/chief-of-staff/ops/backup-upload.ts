@@ -7,13 +7,13 @@ import { verifyVaultStorage, withVaultDirectory } from './vault-storage.js';
 import { verifyVaultMemory } from './vault-memory.js';
 import { localTarget } from './target-identity.js';
 import { withVerifiedResticBinary } from './restic-artifact.js';
-import { withSignedBackupRepository } from './backup-nas-access.js';
+import { withSignedBackupRepository, type SignedBackupRepository } from './backup-nas-access.js';
 import { withVaultResticPassword } from './backup-password.js';
 import { createVaultBackupRepositoryWriter } from './backup-repository-lease.js';
 import { createVaultBackupQueue } from './backup-queue.js';
 import { readBackupCapacity } from './backup-capacity.js';
 import { BACKUP_LIMITS, admitBackupCapacity, type BackupKind, type BackupMountBinding } from './backup-policy.js';
-import { BackupResticTransfer, type RemoteCheckpoint } from './backup-restic-transfer.js';
+import { BackupResticTransfer, type RemoteCheckpoint, type BackupMaintenanceResult } from './backup-restic-transfer.js';
 type Profile = {
   contract: 'cos-backup-repository/v1';
   rootsDigest: string;
@@ -47,25 +47,25 @@ function validateProfile(value: Profile, roots: CalendarStorageRoots, filesystem
   )
     throw Error('invalid_backup_profile');
 }
-/** Trusted installed uploader. The caller finishes maintenance and ordinary health before
- * dispatching this independent job. This boundary also refuses maintenance and a changed
- * target release. Queue retirement requires fresh remote readback and keeps a durable
- * recovery intent. It never initializes a repository or repairs a mount. */
-export async function uploadVaultBackup(
+type RepositoryScope = {
+  queue: ReturnType<typeof createVaultBackupQueue>;
+  repository: SignedBackupRepository;
+  repositoryId: string;
+  ownerDigest: string;
+  queueOwnerDigest: string;
+  assertCurrent(): void;
+  transfer(admitUpload: (kind: BackupKind, bytes: number) => Promise<void>): BackupResticTransfer;
+};
+/** Private admitted scope shared by installed upload and retention. A caller
+ * cannot substitute a repository, password, binary, producer or writer. */
+async function withVaultBackupRepository<T>(
   roots: CalendarStorageRoots,
-  kind: BackupKind,
-  operationId: string,
-  assertCaller: () => void = () => {},
-): Promise<RemoteCheckpoint> {
+  assertCaller: () => void,
+  operation: (scope: RepositoryScope) => Promise<T>,
+): Promise<T> {
   try {
     if (typeof assertCaller !== 'function') throw Error('backup_caller_unverified');
     assertCaller();
-    if (
-      !['state', 'credentials'].includes(kind) ||
-      typeof operationId !== 'string' ||
-      !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(operationId)
-    )
-      throw Error('invalid_backup_operation');
     verifyVaultMemory();
     const policy = verifyVaultStorage(roots),
       target = localTarget(roots.targetRoot, roots.installationRoot, roots.dataRoot);
@@ -204,71 +204,54 @@ export async function uploadVaultBackup(
                   cache.assertCurrent();
                   const writer = createVaultBackupRepositoryWriter(roots, profile.repositoryId),
                     queue = createVaultBackupQueue(roots);
-                  return await writer.exclusive(async (lease) =>
-                    queue.retirePending(kind, operationId, async ({ receipt, archive, previous }) => {
-                      if (
-                        receipt.ownerDigest !==
-                        digest({ targetDigest: policy.targetDigest, filesystemUuid: policy.volume.filesystemUuid })
-                      )
-                        throw Error('backup_queue_owner_changed');
-                      const repositoryOwner = digest({
+                  return await writer.exclusive(async (lease) => {
+                    const repositoryOwner = digest({
+                      targetDigest: policy.targetDigest,
+                      filesystemUuid: policy.volume.filesystemUuid,
+                      repositoryId: profile.repositoryId,
+                    });
+                    const assertCurrent = () => {
+                      lease.assertCurrent();
+                      binary.assertCurrent();
+                      repository.assertCurrent();
+                      password.assertCurrent();
+                      cache.assertCurrent();
+                    };
+                    assertCurrent();
+                    const result = await operation({
+                      queue,
+                      repository,
+                      repositoryId: profile.repositoryId,
+                      ownerDigest: repositoryOwner,
+                      queueOwnerDigest: digest({
                         targetDigest: policy.targetDigest,
                         filesystemUuid: policy.volume.filesystemUuid,
-                        repositoryId: profile.repositoryId,
-                      });
-                      if (
-                        previous &&
-                        (previous.repositoryId !== profile.repositoryId || previous.ownerDigest !== repositoryOwner)
-                      )
-                        throw Error('backup_repository_owner_changed');
-                      const transfer = new BackupResticTransfer({
-                        binary,
-                        repository,
-                        password,
-                        cache,
-                        writer: lease,
-                        repositoryId: profile.repositoryId,
-                        ownerDigest: repositoryOwner,
-                        producer: (selected, id) => [
-                          process.execPath,
-                          producer,
-                          roots.targetRoot,
-                          roots.installationRoot,
-                          roots.dataRoot,
-                          selected,
-                          id,
-                        ],
-                        admitUpload: async (selected, bytes) => {
-                          cache.assertCurrent();
-                          if (selected !== kind || bytes !== archive.bytes) throw Error('backup_archive_changed');
-                          const usage = await readBackupCapacity(roots, repository);
-                          admitBackupCapacity(usage, { kind, bytes: receipt.bytes }, 'remote');
-                          const reserve = archive.bytes * 2 + 4 * 1024 ** 2;
-                          if (
-                            usage.repository + reserve > BACKUP_LIMITS.repository ||
-                            usage.nasFree - reserve < BACKUP_LIMITS.nasFreeFloor
-                          )
-                            throw Error('backup_capacity_unavailable');
-                        },
-                      });
-                      const result = previous
-                        ? await transfer.verify(kind, operationId, archive, receipt)
-                        : await transfer.upload(kind, operationId, archive);
-                      const finalUsage = await readBackupCapacity(roots, repository);
-                      admitBackupCapacity(finalUsage, { kind, bytes: 1 }, 'remote');
-                      cache.assertCurrent();
-                      return {
-                        checkpoint: result,
-                        assertCurrent() {
-                          lease.assertCurrent();
-                          binary.assertCurrent();
-                          repository.assertCurrent();
-                          password.assertCurrent();
-                          cache.assertCurrent();
-                        },
-                      };
-                    }),
-                  );
+                      }),
+                      assertCurrent,
+                      transfer: (admitUpload) =>
+                        new BackupResticTransfer({
+                          binary,
+                          repository,
+                          password,
+                          cache,
+                          writer: lease,
+                          repositoryId: profile.repositoryId,
+                          ownerDigest: repositoryOwner,
+                          producer: (selected, id) => [
+                            process.execPath,
+                            producer,
+                            roots.targetRoot,
+                            roots.installationRoot,
+                            roots.dataRoot,
+                            selected,
+                            id,
+                          ],
+                          admitUpload,
+                        }),
+                    });
+                    assertCurrent();
+                    return result;
+                  });
                 } finally {
                   fs.closeSync(cacheFd);
                 }
@@ -286,6 +269,100 @@ export async function uploadVaultBackup(
     });
   } catch {
     // eslint-disable-next-line preserve-caught-error -- Profile fields, NAS addresses, paths and secret command errors remain private.
+    throw Error('backup_repository_scope_unavailable');
+  }
+}
+
+/** Independent upload after fresh retained-service admission. Retirement keeps
+ * its original remote recovery intent and requires fresh readback. */
+export async function uploadVaultBackup(
+  roots: CalendarStorageRoots,
+  kind: BackupKind,
+  operationId: string,
+  assertCaller: () => void = () => {},
+): Promise<RemoteCheckpoint> {
+  try {
+    if (
+      !['state', 'credentials'].includes(kind) ||
+      typeof operationId !== 'string' ||
+      !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(operationId)
+    )
+      throw Error('invalid_backup_operation');
+    return await withVaultBackupRepository(roots, assertCaller, async (scope) =>
+      scope.queue.retirePending(kind, operationId, async ({ receipt, archive, previous }) => {
+        scope.assertCurrent();
+        if (receipt.ownerDigest !== scope.queueOwnerDigest) throw Error('backup_queue_owner_changed');
+        if (previous && (previous.repositoryId !== scope.repositoryId || previous.ownerDigest !== scope.ownerDigest))
+          throw Error('backup_repository_owner_changed');
+        const transfer = scope.transfer(async (selected, bytes) => {
+          scope.assertCurrent();
+          if (selected !== kind || bytes !== archive.bytes) throw Error('backup_archive_changed');
+          const usage = await readBackupCapacity(roots, scope.repository);
+          scope.assertCurrent();
+          admitBackupCapacity(usage, { kind, bytes: receipt.bytes }, 'remote');
+          const reserve = archive.bytes * 2 + 4 * 1024 ** 2;
+          if (
+            usage.repository + reserve > BACKUP_LIMITS.repository ||
+            usage.nasFree - reserve < BACKUP_LIMITS.nasFreeFloor
+          )
+            throw Error('backup_capacity_unavailable');
+        });
+        const result = previous
+          ? await transfer.verify(kind, operationId, archive, receipt)
+          : await transfer.upload(kind, operationId, archive);
+        const finalUsage = await readBackupCapacity(roots, scope.repository);
+        scope.assertCurrent();
+        admitBackupCapacity(finalUsage, { kind, bytes: 1 }, 'remote');
+        return { checkpoint: result, assertCurrent: scope.assertCurrent };
+      }),
+    );
+  } catch {
+    // eslint-disable-next-line preserve-caught-error -- Private profile, queue and provider diagnostics stay out of owner status.
     throw Error('backup_upload_unavailable');
+  }
+}
+
+/** Fixed repository maintenance never captures, repairs or removes local work.
+ * Pending remote reconciliation protects its original snapshot from retention. */
+export async function maintainVaultBackups(
+  roots: CalendarStorageRoots,
+  assertCaller: () => void,
+): Promise<BackupMaintenanceResult> {
+  try {
+    return await withVaultBackupRepository(roots, assertCaller, async (scope) => {
+      const admit = async () => {
+        scope.assertCurrent();
+        for (const kind of ['state', 'credentials'] as const) {
+          const delivery = await scope.queue.inspectDelivery(kind);
+          scope.assertCurrent();
+          if (delivery.items.some((entry) => entry.disposition === 'reconcile'))
+            throw Error('backup_retirement_pending');
+        }
+        const usage = await readBackupCapacity(roots, scope.repository);
+        scope.assertCurrent();
+        admitBackupCapacity(usage, { kind: 'state', bytes: 1 }, 'remote');
+        // Fixed 16 MiB repack input plus conservative metadata/pack headroom.
+        const reserve = 132 * 1024 ** 2,
+          localReserve = 64 * 1024 ** 2;
+        if (
+          usage.repository + reserve > BACKUP_LIMITS.repository ||
+          usage.nasFree - reserve < BACKUP_LIMITS.nasFreeFloor ||
+          usage.cache + localReserve > BACKUP_LIMITS.cache ||
+          usage.vaultFree < localReserve + BACKUP_LIMITS.vaultReserve
+        )
+          throw Error('backup_capacity_unavailable');
+      };
+      await admit();
+      const result = await scope
+        .transfer(async () => {
+          throw Error('maintenance_cannot_upload');
+        })
+        .maintain(admit);
+      scope.assertCurrent();
+      return result;
+    });
+  } catch {
+    // eslint-disable-next-line preserve-caught-error -- Repository, queue and capacity diagnostics remain private.
+    throw Error('backup_maintenance_unavailable');
   }
 }

@@ -9,6 +9,7 @@ const f = vi.hoisted(() => ({
   reconcile: vi.fn(),
   paths: vi.fn(),
   upload: vi.fn(),
+  maintain: vi.fn(),
   exec: vi.fn(),
 }));
 vi.mock('./vault-memory.js', () => ({ verifyVaultMemory: f.memory }));
@@ -19,7 +20,7 @@ vi.mock('./backup-queue.js', () => ({
   createVaultBackupQueue: () => ({ inspectDelivery: f.inspect, reconcileIncompleteCapture: f.reconcile }),
 }));
 vi.mock('./target-host.js', () => ({ verifyTargetPaths: f.paths }));
-vi.mock('./backup-upload.js', () => ({ uploadVaultBackup: f.upload }));
+vi.mock('./backup-upload.js', () => ({ uploadVaultBackup: f.upload, maintainVaultBackups: f.maintain }));
 vi.mock('node:child_process', () => ({ execFile: f.exec }));
 import { createBackupUploadJobEffects } from './backup-upload-job-effects.js';
 afterEach(() => vi.resetAllMocks());
@@ -38,6 +39,17 @@ function fixture() {
   f.inspect.mockResolvedValue({ items: [], lastRemoteCheckpointAt: null });
   return createBackupUploadJobEffects(settings, '/fixture/target-helper.js');
 }
+it('connects maintenance to the fixed admitted repository wrapper with its live caller guard', async () => {
+  const effects = fixture(),
+    guard = vi.fn();
+  await effects.maintain(guard);
+  expect(f.maintain).toHaveBeenCalledWith(
+    { targetRoot: settings.stateRoot, installationRoot: settings.installationRoot, dataRoot: settings.dataRoot },
+    guard,
+  );
+  expect(f.exec).not.toHaveBeenCalled();
+  expect(f.upload).not.toHaveBeenCalled();
+});
 it('uses guarded local recovery without invoking the NAS or a credential producer', async () => {
   const effects = fixture(),
     guard = vi.fn();

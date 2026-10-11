@@ -1,12 +1,14 @@
+import fs from 'node:fs';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { digest } from '../domain/contracts.js';
 import { BACKUP_LIMITS, type BackupKind } from './backup-policy.js';
 import type { BackupDeliveryItem, BackupDeliveryObservation } from './backup-queue.js';
+import type { BackupMaintenanceResult } from './backup-restic-transfer.js';
 import { withDeploymentLock } from './deployment-lock.js';
 import { admittedGeneration } from './maintenance.js';
 import { validateReleaseManifest, type ReleaseManifest } from './release-manifest.js';
-import { readTarget, writeAtomic, type TargetBinding } from './target-state.js';
+import { readPrivate, readTarget, writeAtomic, type TargetBinding } from './target-state.js';
 export type BackupUploadJobEffects = {
   verify(): Promise<ReleaseManifest>;
   healthy(): Promise<boolean>;
@@ -14,6 +16,7 @@ export type BackupUploadJobEffects = {
   reconcile(kind: BackupKind, assertCurrent: () => void): Promise<unknown>;
   mount(assertCurrent: () => void): Promise<void>;
   upload(kind: BackupKind, operationId: string, assertCurrent: () => void): Promise<unknown>;
+  maintain(assertCurrent: () => void): Promise<BackupMaintenanceResult>;
 };
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
 const kinds = ['state', 'credentials'] as const;
@@ -78,10 +81,17 @@ export async function uploadBackupJob(input: {
   binding: TargetBinding;
   requestId: string;
   effects: BackupUploadJobEffects;
+  mode?: 'deliver' | 'maintain';
 }): Promise<Record<string, unknown>> {
   try {
-    const { root, binding, requestId, effects } = input;
-    if (!uuid.test(requestId) || !path.isAbsolute(root) || path.resolve(root) !== root)
+    const { root, binding, requestId, effects } = input,
+      mode = input.mode ?? 'deliver';
+    if (
+      !uuid.test(requestId) ||
+      !path.isAbsolute(root) ||
+      path.resolve(root) !== root ||
+      !['deliver', 'maintain'].includes(mode)
+    )
       throw Error('backup_upload_job_unavailable');
     return await withDeploymentLock(root + '.backup-upload.lock', async () => {
       const manifest = validateReleaseManifest(await effects.verify()),
@@ -126,7 +136,7 @@ export async function uploadBackupJob(input: {
         return values;
       };
       await healthy();
-      for (const kind of kinds) {
+      for (const kind of mode === 'deliver' ? kinds : []) {
         await healthy();
         try {
           await effects.reconcile(kind, assertCurrent);
@@ -138,6 +148,70 @@ export async function uploadBackupJob(input: {
       }
       let values = await inspect(),
         uploaded = 0;
+      let lastVerifiedAt: string | null = null;
+      const statusFile = path.join(root, 'backup-maintenance-status.json'),
+        statusStat = fs.lstatSync(statusFile, { throwIfNoEntry: false });
+      if (statusStat) {
+        if (!statusStat.isFile() || statusStat.nlink !== 1 || statusStat.size > 4096)
+          throw Error('backup_upload_job_unavailable');
+        const saved = readPrivate<Record<string, unknown>>(statusFile, 4096);
+        if (
+          Object.keys(saved).sort().join(',') !== 'bindingDigest,contract,releaseId,verifiedAt' ||
+          saved.contract !== 'cos-backup-maintenance-status/v1' ||
+          !timestamp(saved.verifiedAt)
+        )
+          throw Error('backup_upload_job_unavailable');
+        if (
+          saved.releaseId === manifest.releaseId &&
+          saved.bindingDigest === digest(binding) &&
+          Date.parse(saved.verifiedAt) <= Date.now()
+        )
+          lastVerifiedAt = saved.verifiedAt;
+      }
+      let maintenanceStatus: 'not_attempted' | 'not_due' | 'verified' | 'held' | 'failed' = 'not_attempted';
+      const maintain = async () => {
+        if (kinds.some((kind) => values[kind].items.some((item) => item.disposition === 'reconcile'))) {
+          maintenanceStatus = 'held';
+          return;
+        }
+        if (mode === 'deliver' && lastVerifiedAt && Date.now() - Date.parse(lastVerifiedAt) < 24 * 60 * 60 * 1000) {
+          maintenanceStatus = 'not_due';
+          return;
+        }
+        await healthy();
+        const result = await effects.maintain(assertCurrent);
+        assertCurrent();
+        if (
+          !result ||
+          result.contract !== 'cos-backup-repository-maintenance/v1' ||
+          result.status !== 'backup_repository_maintained' ||
+          result.integrity !== 'verified' ||
+          !/^[a-f0-9]{64}$/.test(result.repositoryId) ||
+          !/^[a-f0-9]{64}$/.test(result.ownerDigest) ||
+          kinds.some(
+            (kind) =>
+              !result[kind] ||
+              !Number.isSafeInteger(result[kind].retained) ||
+              result[kind].retained < 0 ||
+              result[kind].retained > 18 ||
+              !Number.isSafeInteger(result[kind].removed) ||
+              result[kind].removed < 0 ||
+              result[kind].removed > 8192,
+          )
+        )
+          throw Error('backup_upload_job_unavailable');
+        await healthy();
+        const verifiedAt = new Date().toISOString();
+        writeAtomic(root, 'backup-maintenance-status.json', {
+          contract: 'cos-backup-maintenance-status/v1',
+          releaseId: manifest.releaseId,
+          bindingDigest: digest(binding),
+          verifiedAt,
+        });
+        assertCurrent();
+        lastVerifiedAt = verifiedAt;
+        maintenanceStatus = 'verified';
+      };
       const save = (status: string) => {
         assertScope();
         const result = {
@@ -148,6 +222,7 @@ export async function uploadBackupJob(input: {
           bindingDigest: digest(binding),
           observedAt: new Date().toISOString(),
           uploaded,
+          maintenance: { status: maintenanceStatus, lastVerifiedAt },
           state: backlog(values.state),
           credentials: backlog(values.credentials),
         };
@@ -155,6 +230,14 @@ export async function uploadBackupJob(input: {
         assertScope();
         return result;
       };
+      const maintenanceOutcome = () =>
+        save(
+          maintenanceStatus === 'verified'
+            ? 'backup_maintenance_verified'
+            : maintenanceStatus === 'held'
+              ? 'backup_maintenance_held'
+              : 'backup_maintenance_failed',
+        );
       const selected = kinds
         .flatMap((kind) => values[kind].items)
         .filter((item) => item.disposition !== 'held')
@@ -165,6 +248,26 @@ export async function uploadBackupJob(input: {
             a.kind.localeCompare(b.kind) ||
             a.operationId.localeCompare(b.operationId),
         );
+      if (mode === 'maintain') {
+        if (selected.some((item) => item.disposition === 'reconcile')) {
+          maintenanceStatus = 'held';
+          return save('backup_maintenance_held');
+        }
+        save('backup_maintenance_running');
+        try {
+          await healthy();
+          await effects.mount(assertCurrent);
+          assertCurrent();
+          values = await inspect();
+          await maintain();
+          // eslint-disable-next-line no-catch-all/no-catch-all -- Retention diagnostics remain private; a failed check never updates the verification time.
+        } catch {
+          assertScope();
+          maintenanceStatus = 'failed';
+        }
+        values = await inspect();
+        return maintenanceOutcome();
+      }
       if (!selected.length)
         return save(kinds.some((kind) => values[kind].items.length) ? 'backup_upload_held' : 'backup_upload_idle');
       save('backup_upload_running');
@@ -185,7 +288,23 @@ export async function uploadBackupJob(input: {
         failed = true;
       }
       values = await inspect();
-      return save(failed ? 'backup_upload_failed' : 'backup_uploaded');
+      if (!failed && uploaded > 0) {
+        try {
+          await maintain();
+          // eslint-disable-next-line no-catch-all/no-catch-all -- Successfully delivered snapshots remain acknowledged; integrity failure is reported separately.
+        } catch {
+          assertScope();
+          maintenanceStatus = 'failed';
+        }
+        values = await inspect();
+      }
+      return save(
+        failed
+          ? 'backup_upload_failed'
+          : maintenanceStatus === 'failed'
+            ? 'backup_uploaded_maintenance_failed'
+            : 'backup_uploaded',
+      );
     });
   } catch (error) {
     // eslint-disable-next-line preserve-caught-error -- Only the fixed lock category may leave this trusted background job.
