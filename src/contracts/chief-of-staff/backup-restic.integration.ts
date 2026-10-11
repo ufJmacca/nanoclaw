@@ -58,6 +58,21 @@ import {
   withVerifiedResticBinary,
 } from '../../modules/chief-of-staff/ops/restic-artifact.js';
 // Synthetic fixtures only. Runtime uploads also require the vault/memory, NAS mount and repository leases.
+const extension = import.meta.url.endsWith('.ts') ? 'ts' : 'js',
+  // Producers inherit the measured backup cache as TMPDIR; the source loader
+  // must not leave its own files there or add a wrapper process around writers.
+  childImports =
+    extension === 'ts'
+      ? [
+          '--import',
+          'data:text/javascript,' +
+            encodeURIComponent(
+              `process.env.TSX_DISABLE_CACHE='1';await import(${JSON.stringify(import.meta.resolve('tsx'))});`,
+            ),
+        ]
+      : [];
+const moduleUrl = (name: string) =>
+  new URL('../../modules/chief-of-staff/ops/' + name + '.' + extension, import.meta.url).href;
 const binary = process.env.COS_BACKUP_FIXTURE_BINARY;
 if (!binary) throw Error('backup_fixture_artifact_required');
 verifyResticBinary(binary);
@@ -101,10 +116,11 @@ const cacheFd = fs.openSync(transferCache, fs.constants.O_RDONLY | fs.constants.
 const transferQueue = new BackupQueue('a'.repeat(64), async (_kind, operation) => operation(transferArea));
 const transferWriter = new BackupRepositoryWriter(transferOwner, async (operation) => operation(transferLock));
 const transferProducer = (operationId: string) => {
-  const queueUrl = new URL('../../modules/chief-of-staff/ops/backup-queue.js', import.meta.url).href;
-  const producerUrl = new URL('../../modules/chief-of-staff/ops/backup-archive-producer.js', import.meta.url).href;
+  const queueUrl = moduleUrl('backup-queue');
+  const producerUrl = moduleUrl('backup-archive-producer');
   return [
     process.execPath,
+    ...childImports,
     '--input-type=module',
     '-e',
     `
@@ -445,9 +461,9 @@ test('a real command producer streams a verified PAX checkpoint through Restic a
     },
     262144,
   );
-  const moduleUrl = new URL('../../modules/chief-of-staff/ops/backup-archive-producer.js', import.meta.url).href;
-  const queueUrl = new URL('../../modules/chief-of-staff/ops/backup-queue.js', import.meta.url).href;
-  const producer = `import {streamQueuedBackup} from ${JSON.stringify(moduleUrl)};
+  const producerUrl = moduleUrl('backup-archive-producer');
+  const queueUrl = moduleUrl('backup-queue');
+  const producer = `import {streamQueuedBackup} from ${JSON.stringify(producerUrl)};
     import {BackupQueue} from ${JSON.stringify(queueUrl)};
     const queue = new BackupQueue('a'.repeat(64), async (_kind, operation) => operation(${JSON.stringify(area)}));
     try { await streamQueuedBackup(queue, 'state', ${JSON.stringify(operationId)}, bytes => new Promise((resolve, reject) => {
@@ -464,6 +480,7 @@ test('a real command producer streams a verified PAX checkpoint through Restic a
     'cos-kind=archive',
     '--',
     process.execPath,
+    ...childImports,
     '--input-type=module',
     '-e',
     producer,
@@ -1100,11 +1117,12 @@ test('real encrypted remote recovery validates the complete captured payload wit
     };
     const producer = () => [
       process.execPath,
+      ...childImports,
       '--input-type=module',
       '-e',
       `
-      import { BackupQueue } from ${JSON.stringify(new URL('../../modules/chief-of-staff/ops/backup-queue.js', import.meta.url).href)};
-      import { streamQueuedBackup } from ${JSON.stringify(new URL('../../modules/chief-of-staff/ops/backup-archive-producer.js', import.meta.url).href)};
+      import { BackupQueue } from ${JSON.stringify(moduleUrl('backup-queue'))};
+      import { streamQueuedBackup } from ${JSON.stringify(moduleUrl('backup-archive-producer'))};
       const queue = new BackupQueue('a'.repeat(64), async (_kind, callback) => callback(${JSON.stringify(staging)}));
       await streamQueuedBackup(queue, 'state', ${JSON.stringify(operationId)}, bytes => new Promise((resolve, reject) => process.stdout.write(bytes, error => error ? reject(error) : resolve())));
     `,

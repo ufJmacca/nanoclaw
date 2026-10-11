@@ -48,11 +48,26 @@ assert.match(repositoryId, /^[a-f0-9]{64}$/);
 const owner = 'c'.repeat(64),
   queue = new BackupQueue('a'.repeat(64), async (_kind, operation) => operation(area));
 const writer = new BackupRepositoryWriter(owner, async (operation) => operation(lock));
-const queueUrl = new URL('../../modules/chief-of-staff/ops/backup-queue.js', import.meta.url).href,
-  transferUrl = new URL('../../modules/chief-of-staff/ops/backup-restic-transfer.js', import.meta.url).href,
-  writerUrl = new URL('../../modules/chief-of-staff/ops/backup-repository-lease.js', import.meta.url).href,
-  binaryUrl = new URL('../../modules/chief-of-staff/ops/restic-artifact.js', import.meta.url).href,
-  producerUrl = new URL('../../modules/chief-of-staff/ops/backup-archive-producer.js', import.meta.url).href;
+const extension = import.meta.url.endsWith('.ts') ? 'ts' : 'js',
+  // Producers inherit the measured backup cache as TMPDIR; the source loader
+  // must not leave its own files there or add a wrapper process around writers.
+  childImports =
+    extension === 'ts'
+      ? [
+          '--import',
+          'data:text/javascript,' +
+            encodeURIComponent(
+              `process.env.TSX_DISABLE_CACHE='1';await import(${JSON.stringify(import.meta.resolve('tsx'))});`,
+            ),
+        ]
+      : [];
+const moduleUrl = (name: string) =>
+  new URL('../../modules/chief-of-staff/ops/' + name + '.' + extension, import.meta.url).href;
+const queueUrl = moduleUrl('backup-queue'),
+  transferUrl = moduleUrl('backup-restic-transfer'),
+  writerUrl = moduleUrl('backup-repository-lease'),
+  binaryUrl = moduleUrl('restic-artifact'),
+  producerUrl = moduleUrl('backup-archive-producer');
 function descriptor(fd: number, file: string, directory: boolean) {
   const initial = fs.fstatSync(fd);
   return {
@@ -106,6 +121,7 @@ async function withTransfer<T>(
           assert(allowUpload);
           return [
             process.execPath,
+            ...childImports,
             '--input-type=module',
             '-e',
             `import {BackupQueue} from ${JSON.stringify(queueUrl)}; import {streamQueuedBackup} from ${JSON.stringify(producerUrl)};
@@ -168,7 +184,7 @@ for (const scenario of stages)
       await queue.retirePending('state',${JSON.stringify(operationId)},async request=>({
         checkpoint:await transfer.verify('state',${JSON.stringify(operationId)},request.archive,request.receipt),assertCurrent:current}));
     }));`;
-    const child = spawn(process.execPath, ['--input-type=module', '-e', code], {
+    const child = spawn(process.execPath, [...childImports, '--input-type=module', '-e', code], {
       env,
       stdio: ['ignore', 'pipe', 'pipe', passwordFd, repositoryFd, cacheFd],
     });
