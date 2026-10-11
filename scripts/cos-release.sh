@@ -88,12 +88,17 @@ runner_checks() {
 }
 check root root_checks
 check runner runner_checks
-source scripts/cos-source-fixture.sh
+source "$directory/context/scripts/cos-source-fixture.sh"
 source_fixture() {
   local mode=$1
+  local backup_selection=()
+  if [[ "$slice" == G02 ]]; then
+    cli backup-input "$id" || return
+    backup_selection=(G02)
+  fi
   if [[ "$mode" == demo ]]; then set -- --demo --fixture; else set --; fi
   if [[ "$profile" == test ]]; then
-    prepare_source_fixture "$dev" "$id-$mode" "$directory/context" "$fixture_image" "$runner_volume" || return
+    prepare_source_fixture "$dev" "$id-$mode" "$directory/context" "$fixture_image" "$runner_volume" ${backup_selection[@]+"${backup_selection[@]}"} || return
     "${source_fixture_driver[@]}" --env-file "$test_directory/test.env" \
       --mount "type=bind,src=$test_directory/ca.pem,dst=/selected-ca.pem,readonly" \
       -e COS_TEST_PGSSLROOTCERT=/selected-ca.pem \
@@ -109,9 +114,14 @@ check slice source_fixture slice
 check demo source_fixture demo
 for target in host agent-standard agent-documents; do
   tag=$(cli field "$id" "$target-tag")
+  backup_build=()
+  if [[ "$slice" == G02 && "$target" == host ]]; then
+    cli backup-input "$id"
+    backup_build=(--build-arg RELEASE_FLAVOUR=backup --build-context "backup-artifact-input=$directory/backup-artifact-input")
+  fi
   printf 'Building Linux/ARM64 %s\n' "$target"
   docker --context "$context" buildx build --builder "$builder" --platform linux/arm64 --provenance=false \
-    --load --target "$target" --build-arg "SOURCE_COMMIT=$commit" --build-arg "SOURCE_TREE=$tree" --build-arg "RELEASE_SLICE=$slice" --build-arg "WORKER_ASSETS_DIGEST=$assets" \
+    --load --target "$target" ${backup_build[@]+"${backup_build[@]}"} --build-arg "SOURCE_COMMIT=$commit" --build-arg "SOURCE_TREE=$tree" --build-arg "RELEASE_SLICE=$slice" --build-arg "WORKER_ASSETS_DIGEST=$assets" \
     -f "$directory/context/container/release/Dockerfile" -t "$tag" "$directory/context" \
     > "$directory/$target-build.log" 2>&1
   docker --context "$context" image inspect "$tag" > "$directory/$target-inspect.json"

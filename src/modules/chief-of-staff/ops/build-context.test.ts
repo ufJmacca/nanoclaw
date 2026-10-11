@@ -39,6 +39,8 @@ function fixture() {
     'scripts/cos-backup-keychain.swift': 'trusted backup credential code, never credential material',
     'scripts/cos-backup-keychain-fixture.swift': 'disposable host-native credential entry fixture',
     'scripts/cos-root-unit-fixture.sh': 'isolated root administration source fixture',
+    'scripts/cos-source-fixture.sh': 'public source-only Docker fixture driver',
+    'scripts/cos-release.sh': 'source-pinned host release coordinator',
     'container/fixtures/backup-smb/Dockerfile.server': 'pinned synthetic SMB server',
     'container/fixtures/backup-smb/Dockerfile.client': 'immutable tested host CIFS client',
     'container/fixtures/backup-smb/server.sh': 'dedicated synthetic account and share',
@@ -129,6 +131,8 @@ it('exports only the admitted vault drivers from the same source and binds their
     'container/fixtures/vault/probe-backup-journal.mjs',
     'scripts/cos-vault-fixture.sh',
     'scripts/cos-vault-keychain.swift',
+    'scripts/cos-source-fixture.sh',
+    'scripts/cos-release.sh',
   ])
     expect(fs.existsSync(path.join(first, name))).toBe(true);
   for (const name of ['container/fixtures/vault/unadmitted.mjs', 'scripts/unadmitted.sh'])
@@ -180,6 +184,20 @@ it('binds the host backup credential helper to committed source without changing
   expect(after.buildInputDigest).not.toBe(before.buildInputDigest);
   expect(after.workerAssetsDigest).toBe(before.workerAssetsDigest);
 });
+it.each(['scripts/cos-source-fixture.sh', 'scripts/cos-release.sh'])(
+  'binds committed %s bytes without exporting arbitrary scripts or changing worker assets',
+  async (script) => {
+    const f = fixture(),
+      before = await prepareBuildContext(f.repo, f.commit, path.join(f.root, 'first'));
+    fs.writeFileSync(path.join(f.repo, script), 'changed public host driver');
+    f.git('add', '.');
+    f.git('commit', '-qm', 'changed host driver');
+    const after = await prepareBuildContext(f.repo, f.git('rev-parse', 'HEAD'), path.join(f.root, 'second'));
+    expect(after.buildInputDigest).not.toBe(before.buildInputDigest);
+    expect(after.workerAssetsDigest).toBe(before.workerAssetsDigest);
+    expect(fs.existsSync(path.join(f.root, 'second/scripts/unadmitted.sh'))).toBe(false);
+  },
+);
 describe('S01-REL02 Mac-local builder', () => {
   const good = {
     clientPlatform: 'darwin',

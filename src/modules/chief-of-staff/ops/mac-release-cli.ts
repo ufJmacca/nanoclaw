@@ -26,7 +26,8 @@ import {
 import { imageConfigurations } from './image-archive.js';
 import { artifactHash, verifyReleaseBundle } from './release-artifacts.js';
 import { validateBuildTargetObservation } from './mac-deploy.js';
-import { packageResticReleaseArtifact } from './restic-release-package.js';
+import { packageResticReleaseArtifact, verifyResticReleaseArtifactInput } from './restic-release-package.js';
+import { validateResticArtifactSeal } from './restic-artifact.js';
 
 export const BUILD_TARGETS = ['host', 'agent-standard', 'agent-documents'] as const;
 type BuildTarget = (typeof BUILD_TARGETS)[number];
@@ -146,6 +147,12 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
     return;
   }
   const { root, plan } = checkedPlan(id);
+  if (operation === 'backup-input' && !values.length) {
+    if (plan.slice !== 'G02') throw Error('backup_release_required');
+    validateResticArtifactSeal(plan.backupArtifact);
+    verifyResticReleaseArtifactInput(path.join(root, 'backup-artifact-input'));
+    return;
+  }
   if (operation === 'vault-fixture' && !values.length) {
     if (!['G01', 'G02'].includes(plan.slice) || !plan.vaultArtifact) throw Error('vault_release_required');
     const host = plan.images.find((image) => image.role === 'host');
@@ -277,6 +284,10 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
       !/^[a-zA-Z0-9_.-]+$/.test(volume)
     )
       throw new Error('invalid_fixture_configuration');
+    if (plan.slice === 'G02') {
+      validateResticArtifactSeal(plan.backupArtifact);
+      verifyResticReleaseArtifactInput(path.join(root, 'backup-artifact-input'));
+    }
     const selected = selectTestEnvironment(readEnvFile([...TEST_ENVIRONMENT_KEYS]), path.join(testRoot(id), 'ca.pem'));
     const result = spawnSync(
       process.execPath,

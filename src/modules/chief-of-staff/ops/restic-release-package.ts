@@ -1,7 +1,86 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { RESTIC_ARTIFACT, verifyResticBinary } from './restic-artifact.js';
+import { RESTIC_ARTIFACT, validateResticArtifactSeal, verifyResticBinary } from './restic-artifact.js';
+
+/** Recheck the fixed public build input before a source fixture or image build
+ * mounts it. The enclosing release remains private and is never mounted here.
+ */
+export function verifyResticReleaseArtifactInput(directory: string): typeof RESTIC_ARTIFACT {
+  let root: number | undefined, seal: number | undefined;
+  try {
+    if (typeof directory !== 'string' || !path.isAbsolute(directory) || fs.realpathSync(directory) !== directory)
+      throw Error('canonical_input_required');
+    root = fs.openSync(directory, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+    const initial = fs.fstatSync(root),
+      heldRoot = root;
+    if (!initial.isDirectory() || initial.uid !== process.getuid?.() || (initial.mode & 0o7777) !== 0o700)
+      throw Error('private_input_required');
+    const current = () => {
+      for (const stat of [fs.fstatSync(heldRoot), fs.lstatSync(directory)])
+        if (
+          stat.dev !== initial.dev ||
+          stat.ino !== initial.ino ||
+          stat.uid !== initial.uid ||
+          stat.mode !== initial.mode ||
+          stat.mtimeMs !== initial.mtimeMs ||
+          stat.ctimeMs !== initial.ctimeMs
+        )
+          throw Error('release_input_changed');
+      if (
+        fs.realpathSync(directory) !== directory ||
+        fs.readdirSync(directory).sort().join(',') !== 'artifact.json,restic'
+      )
+        throw Error('unexpected_release_input');
+    };
+    current();
+    const sealPath = path.join(directory, 'artifact.json'),
+      binary = path.join(directory, 'restic');
+    seal = fs.openSync(sealPath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+    const before = fs.fstatSync(seal),
+      heldSeal = seal;
+    if (
+      !before.isFile() ||
+      before.uid !== initial.uid ||
+      before.nlink !== 1 ||
+      (before.mode & 0o7777) !== 0o444 ||
+      before.size < 1 ||
+      before.size > 4096
+    )
+      throw Error('unsafe_release_seal');
+    const currentSeal = () => {
+      current();
+      for (const stat of [fs.fstatSync(heldSeal), fs.lstatSync(sealPath)])
+        if (
+          stat.dev !== before.dev ||
+          stat.ino !== before.ino ||
+          stat.uid !== before.uid ||
+          stat.nlink !== before.nlink ||
+          stat.mode !== before.mode ||
+          stat.size !== before.size ||
+          stat.mtimeMs !== before.mtimeMs ||
+          stat.ctimeMs !== before.ctimeMs
+        )
+          throw Error('release_seal_changed');
+    };
+    currentSeal();
+    const bytes = Buffer.alloc(before.size + 1),
+      count = fs.readSync(seal, bytes, 0, bytes.length, 0);
+    if (count !== before.size) throw Error('release_seal_changed');
+    validateResticArtifactSeal(JSON.parse(bytes.subarray(0, count).toString('utf8')));
+    const executable = fs.lstatSync(binary);
+    if (executable.uid !== initial.uid || (executable.mode & 0o7777) !== 0o555) throw Error('unsafe_release_binary');
+    verifyResticBinary(binary);
+    currentSeal();
+    return RESTIC_ARTIFACT;
+  } catch {
+    // eslint-disable-next-line preserve-caught-error -- Private paths and executable diagnostics stay out of status output.
+    throw Error('restic_release_input_unavailable');
+  } finally {
+    if (seal !== undefined) fs.closeSync(seal);
+    if (root !== undefined) fs.closeSync(root);
+  }
+}
 
 /** Mac devcontainer build input: a public pinned executable, never a credential path. */
 export function packageResticReleaseArtifact(input: { binary: string; output: string }): typeof RESTIC_ARTIFACT {
