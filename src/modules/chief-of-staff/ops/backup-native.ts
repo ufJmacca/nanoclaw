@@ -3,6 +3,7 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import Database from 'better-sqlite3';
 import type { BackupSnapshotSink } from './backup-queue.js';
+import type { BackupRestoreValidationScope } from './backup-restore-workspace.js';
 
 export type NativeSnapshotReceipt = {
   format: 'cos-native-snapshot/v1';
@@ -12,6 +13,47 @@ export type NativeSnapshotReceipt = {
   sha256: string;
   at: string;
 };
+/** A trusted recovered-file receipt is checked against the owned workspace and
+ * deserialized read-only in memory. No live database or SQLite sidecar is opened. */
+export function verifyRecoveredNativeDatabase(
+  scope: BackupRestoreValidationScope,
+  receipt: Pick<NativeSnapshotReceipt, 'file' | 'bytes' | 'sha256'>,
+) {
+  try {
+    scope.assertCurrent();
+    if (
+      !receipt ||
+      typeof receipt.file !== 'string' ||
+      !receipt.file.endsWith('/native.sqlite') ||
+      !Number.isSafeInteger(receipt.bytes) ||
+      receipt.bytes < 512 ||
+      receipt.bytes > 64 * 1024 ** 2 ||
+      typeof receipt.sha256 !== 'string' ||
+      !/^[a-f0-9]{64}$/.test(receipt.sha256)
+    )
+      throw Error('native_recovery_bounds');
+    const expected = { file: receipt.file, bytes: receipt.bytes, sha256: receipt.sha256 },
+      actual = scope.inspectFile(expected.file);
+    if (JSON.stringify(actual) !== JSON.stringify(expected)) throw Error('native_recovery_identity_changed');
+    scope.withFileBytes(expected.file, 64 * 1024 ** 2, (bytes) => {
+      if (bytes.subarray(0, 16).toString('binary') !== 'SQLite format 3\0' || bytes[18] !== 1 || bytes[19] !== 1)
+        throw Error('native_recovery_invalid');
+      scope.assertCurrent();
+      const copy = new Database(bytes, { readonly: true });
+      try {
+        if (copy.pragma('quick_check', { simple: true }) !== 'ok') throw Error('native_recovery_invalid');
+        scope.assertCurrent();
+      } finally {
+        copy.close();
+      }
+    });
+    scope.assertCurrent();
+    return Object.freeze({ ...expected, writerActivated: false as const });
+  } catch {
+    // eslint-disable-next-line preserve-caught-error -- Native contents and SQLite diagnostics remain private recovery evidence.
+    throw Error('native_recovery_check_unavailable');
+  }
+}
 function sameFile(before: fs.Stats, after: fs.Stats): void {
   if (before.dev !== after.dev || before.ino !== after.ino || before.uid !== after.uid)
     throw Error('native_source_changed');

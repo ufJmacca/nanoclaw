@@ -5,13 +5,37 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { readPrivate, writeAtomic } from './target-state.js';
-import type { BackupSnapshotSink } from './backup-queue.js';
+import type { BackupSnapshotSink, BackupQueueReceipt } from './backup-queue.js';
+import type { BackupRestoreValidationScope } from './backup-restore-workspace.js';
 import { BACKUP_LIMITS } from './backup-policy.js';
 
 type Receipt = { version: 1; source: string; present: boolean; sha256: string; files: number; bytes: number };
 type Profile = 'conversation' | 'mission';
+type CapturedHistoryReceipt = Receipt & { directories: string[] };
 const generation = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const maximumBytes = 4 * 1024 * 1024 * 1024;
+function capturedDirectory(name: string, profile: Profile, names: Set<string>) {
+  if (
+    typeof name !== 'string' ||
+    name.length > 170 ||
+    name.split('/').length > 6 ||
+    !name.split('/').every((part) => /^(?:[A-Za-z0-9]|\.cos-)[A-Za-z0-9_.-]*$/.test(part))
+  )
+    throw Error('invalid_history_directory');
+  const parts = name.split('/');
+  if (profile === 'conversation') {
+    if (!generation.test(parts[0])) throw Error('invalid_history_directory');
+  } else if (parts[0] === 'mission-purges') {
+    if (parts.length !== 1) throw Error('invalid_history_directory');
+  } else if (
+    parts[0] !== 'missions' ||
+    (parts.length >= 2 && !generation.test(parts[1])) ||
+    (parts.length >= 3 && !['context', 'provider'].includes(parts[2]))
+  )
+    throw Error('invalid_history_directory');
+  for (let index = 1; index < parts.length; index++)
+    if (!names.has(parts.slice(0, index).join('/'))) throw Error('incomplete_history_directories');
+}
 type Capture = {
   maximumBytes: number;
   check(relative: string): void;
@@ -225,6 +249,144 @@ export async function capturePrivateHistory(
     throw Error('private_history_capture_unavailable');
   }
 }
+/** Verify only the portable captured history under an admitted held workspace.
+ * Reconstructed directories are owned and charged by that workspace. The v1
+ * checksum remains unchanged; no context, credential or live admission is imported. */
+export function verifyRecoveredPrivateHistory(
+  scope: BackupRestoreValidationScope,
+  entries: BackupQueueReceipt['files'],
+  source: string,
+  profile: Profile,
+): CapturedHistoryReceipt {
+  try {
+    scope.assertCurrent();
+    if (
+      !['conversation', 'mission'].includes(profile) ||
+      typeof source !== 'string' ||
+      !path.isAbsolute(source) ||
+      path.resolve(source) !== source ||
+      !Array.isArray(entries) ||
+      entries.length > 4096 ||
+      new Set(entries.map((item) => item.name)).size !== entries.length
+    )
+      throw Error('history_recovery_bounds');
+    const root = profile + '-backup',
+      prefix = root + '/history/',
+      metadata = root + '/receipt.json',
+      metadataEntry = entries.find((item) => item.name === metadata);
+    const checkEntry = (entry: BackupQueueReceipt['files'][number]) => {
+      if (
+        !entry ||
+        !Number.isSafeInteger(entry.bytes) ||
+        entry.bytes < 0 ||
+        entry.bytes > BACKUP_LIMITS.staging ||
+        typeof entry.sha256 !== 'string' ||
+        !/^[a-f0-9]{64}$/.test(entry.sha256)
+      )
+        throw Error('history_recovery_file_bounds');
+      const actual = scope.inspectFile(entry.name);
+      if (actual.bytes !== entry.bytes || actual.sha256 !== entry.sha256) throw Error('history_recovery_changed');
+    };
+    if (!metadataEntry || metadataEntry.bytes > 1024 ** 2) throw Error('history_recovery_metadata_missing');
+    checkEntry(metadataEntry);
+    const receipt = scope.withFileBytes(metadata, 1024 ** 2, (bytes) =>
+      JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)),
+    ) as CapturedHistoryReceipt;
+    if (
+      !receipt ||
+      Object.keys(receipt).sort().join(',') !== 'bytes,directories,files,present,sha256,source,version' ||
+      receipt.version !== 1 ||
+      receipt.source !== source ||
+      typeof receipt.present !== 'boolean' ||
+      !Number.isSafeInteger(receipt.files) ||
+      receipt.files < 0 ||
+      receipt.files > 4096 ||
+      !Number.isSafeInteger(receipt.bytes) ||
+      receipt.bytes < 0 ||
+      receipt.bytes > BACKUP_LIMITS.staging ||
+      typeof receipt.sha256 !== 'string' ||
+      !/^[a-f0-9]{64}$/.test(receipt.sha256) ||
+      !Array.isArray(receipt.directories) ||
+      receipt.directories.length > 4096 ||
+      new Set(receipt.directories).size !== receipt.directories.length ||
+      (!receipt.present && (receipt.directories.length || receipt.files || receipt.bytes))
+    )
+      throw Error('invalid_history_receipt');
+    const directories = new Set(receipt.directories);
+    for (const name of directories) capturedDirectory(name, profile, directories);
+    const files = new Map<string, BackupQueueReceipt['files'][number]>();
+    for (const entry of entries.filter((item) => item.name.startsWith(root + '/'))) {
+      if (entry.name === metadata) continue;
+      if (!entry.name.startsWith(prefix)) throw Error('history_recovery_unselected');
+      const relative = entry.name.slice(prefix.length),
+        parts = relative.split('/');
+      if (
+        relative.length > 170 ||
+        parts.length > 6 ||
+        !parts.every((part) => /^(?:[A-Za-z0-9]|\.cos-)[A-Za-z0-9_.-]*$/.test(part)) ||
+        directories.has(relative)
+      )
+        throw Error('history_recovery_file_bounds');
+      if (profile === 'conversation') {
+        if (
+          !generation.test(parts[0]) ||
+          parts.length < 2 ||
+          (parts.length === 2 && (parts[1] === 'auth.json' || parts[1].startsWith('.auth-')))
+        )
+          throw Error('history_recovery_unselected');
+      } else if (parts[0] === 'mission-purges') {
+        if (parts.length !== 2 || !parts[1].endsWith('.json') || !generation.test(parts[1].slice(0, -5)))
+          throw Error('history_recovery_unselected');
+      } else if (/^(?:mission-delegation|team-admission)-[a-f0-9]{64}\.json$/.test(parts[0])) {
+        if (parts.length !== 1) throw Error('history_recovery_unselected');
+      } else if (
+        parts[0] !== 'missions' ||
+        parts.length < 4 ||
+        !generation.test(parts[1]) ||
+        !['context', 'provider'].includes(parts[2]) ||
+        (parts.length === 4 && parts[2] === 'provider' && (parts[3] === 'auth.json' || parts[3].startsWith('.auth-')))
+      )
+        throw Error('history_recovery_unselected');
+      for (let i = 1; i < parts.length; i++)
+        if (!directories.has(parts.slice(0, i).join('/'))) throw Error('incomplete_history_directories');
+      files.set(relative, entry);
+    }
+    if (directories.size + files.size > 4096 || files.size !== receipt.files) throw Error('history_recovery_bounds');
+    const hash = createHash('sha256');
+    let bytes = 0;
+    const children = new Map<string, string[]>();
+    for (const name of [...directories, ...files.keys()]) {
+      const parent = path.posix.dirname(name),
+        list = children.get(parent) ?? [];
+      list.push(name);
+      children.set(parent, list);
+    }
+    const visit = (name: string) => {
+      scope.assertCurrent();
+      if (directories.has(name)) {
+        hash.update(JSON.stringify([name, 'directory']) + '\n');
+        for (const child of (children.get(name) ?? []).sort()) visit(child);
+      } else {
+        const entry = files.get(name)!;
+        checkEntry(entry);
+        bytes += entry.bytes;
+        if (bytes > BACKUP_LIMITS.staging) throw Error('history_recovery_bounds');
+        hash.update(JSON.stringify([name, 'file', entry.bytes, entry.sha256]) + '\n');
+      }
+    };
+    for (const name of (children.get('.') ?? []).sort()) visit(name);
+    if (hash.digest('hex') !== receipt.sha256 || bytes !== receipt.bytes) throw Error('history_recovery_changed');
+    // Mutation begins only after names, selection and the original v1 checksum pass.
+    scope.ensureDirectory(prefix.slice(0, -1));
+    for (const name of [...directories].sort()) scope.ensureDirectory(prefix + name);
+    checkEntry(metadataEntry);
+    scope.assertCurrent();
+    return receipt;
+  } catch {
+    // eslint-disable-next-line preserve-caught-error -- History, source paths and recovery diagnostics are private.
+    throw Error('private_history_recovery_check_unavailable');
+  }
+}
 /** Recreate recorded empty directories in an admitted isolated recovery root, then run the v1
  * hash verifier. This does not import a context, change credentials or restore execution authority. */
 export async function restoreCapturedHistoryDirectories(source: string, receiptRoot: string, profile: Profile) {
@@ -262,28 +424,7 @@ export async function restoreCapturedHistoryDirectories(source: string, receiptR
     )
       throw Error('invalid_history_receipt');
     const names = new Set(receipt.directories);
-    for (const name of names) {
-      if (
-        typeof name !== 'string' ||
-        name.length > 170 ||
-        name.split('/').length > 6 ||
-        !name.split('/').every((part) => /^(?:[A-Za-z0-9]|\.cos-)[A-Za-z0-9_.-]*$/.test(part))
-      )
-        throw Error('invalid_history_directory');
-      const parts = name.split('/');
-      if (profile === 'conversation') {
-        if (!generation.test(parts[0])) throw Error('invalid_history_directory');
-      } else if (parts[0] === 'mission-purges') {
-        if (parts.length !== 1) throw Error('invalid_history_directory');
-      } else if (
-        parts[0] !== 'missions' ||
-        (parts.length >= 2 && !generation.test(parts[1])) ||
-        (parts.length >= 3 && !['context', 'provider'].includes(parts[2]))
-      )
-        throw Error('invalid_history_directory');
-      for (let index = 1; index < parts.length; index++)
-        if (!names.has(parts.slice(0, index).join('/'))) throw Error('incomplete_history_directories');
-    }
+    for (const name of names) capturedDirectory(name, profile, names);
     const history = path.join(snapshot, 'history');
     if (!fs.lstatSync(history, { throwIfNoEntry: false })) fs.mkdirSync(history, { mode: 0o700 });
     directory(history, profile, true);
