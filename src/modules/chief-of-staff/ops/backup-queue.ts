@@ -43,6 +43,8 @@ export type BackupDeliveryItem = {
 export type BackupDeliveryObservation = {
   items: BackupDeliveryItem[];
   lastRemoteCheckpointAt: string | null;
+  /** Older observation ports may omit this; omission never establishes freshness. */
+  lastAcknowledgedCaptureAt?: string | null;
 };
 type Retirement = {
   contract: 'cos-backup-queue-retirement/v2';
@@ -1207,9 +1209,10 @@ export class BackupQueue {
             bytes: receipt.bytes,
           })),
           lastRemoteCheckpointAt: ack?.retired === true ? ack.remote.snapshotAt : null,
+          lastAcknowledgedCaptureAt: ack?.retired === true ? ack.receipt.createdAt : null,
         };
       },
-      async () => ({ items: [], lastRemoteCheckpointAt: null }),
+      async () => ({ items: [], lastRemoteCheckpointAt: null, lastAcknowledgedCaptureAt: null }),
     );
   }
   async withPending<T>(

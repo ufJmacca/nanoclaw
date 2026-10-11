@@ -23,10 +23,13 @@ function observation(value: BackupDeliveryObservation, kind: BackupKind): Backup
     !value ||
     typeof value !== 'object' ||
     Array.isArray(value) ||
-    Object.keys(value).sort().join(',') !== 'items,lastRemoteCheckpointAt' ||
+    !['items,lastRemoteCheckpointAt', 'items,lastAcknowledgedCaptureAt,lastRemoteCheckpointAt'].includes(
+      Object.keys(value).sort().join(','),
+    ) ||
     !Array.isArray(value.items) ||
     value.items.length > (kind === 'state' ? 1 : 1025) ||
-    (value.lastRemoteCheckpointAt !== null && !timestamp(value.lastRemoteCheckpointAt))
+    (value.lastRemoteCheckpointAt !== null && !timestamp(value.lastRemoteCheckpointAt)) ||
+    (value.lastAcknowledgedCaptureAt != null && !timestamp(value.lastAcknowledgedCaptureAt))
   )
     throw Error('backup_upload_job_unavailable');
   const ids = new Set<string>();
@@ -62,6 +65,7 @@ function backlog(value: BackupDeliveryObservation) {
       ? pending.map((item) => item.createdAt).sort((a, b) => Date.parse(a) - Date.parse(b))[0]
       : null,
     lastRemoteCheckpointAt: value.lastRemoteCheckpointAt,
+    lastAcknowledgedCaptureAt: value.lastAcknowledgedCaptureAt ?? null,
   };
 }
 /** Independent background job: no service stop/start, native pause, capture,

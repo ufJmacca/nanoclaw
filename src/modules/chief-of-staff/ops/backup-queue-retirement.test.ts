@@ -87,6 +87,18 @@ it('preserves unrelated credential snapshots and the separate full checkpoint', 
   expect(await f.queue.pending('credentials')).toMatchObject([{ operationId: next, state: 'pending' }]);
   expect(await f.queue.pending('state')).toMatchObject([{ operationId: next, state: 'pending' }]);
 });
+it('reports the acknowledged capture age separately from a later upload time', async () => {
+  const f = await fixture();
+  const file = f.slot + '/receipt.json',
+    receipt = JSON.parse(fs.readFileSync(file, 'utf8'));
+  receipt.createdAt = '2026-10-01T00:00:00Z';
+  fs.writeFileSync(file, JSON.stringify(receipt) + '\n');
+  await f.queue.retirePending('state', op, prove);
+  expect(await f.queue.inspectDelivery('state')).toMatchObject({
+    lastAcknowledgedCaptureAt: '2026-10-01T00:00:00Z',
+    lastRemoteCheckpointAt: '2026-10-11T00:00:00Z',
+  });
+});
 it('does not hold the publication lock while waiting for remote evidence', async () => {
   const f = await fixture('credentials');
   let entered!: () => void, resume!: () => void;
@@ -328,7 +340,11 @@ it('resumes partial cleanup only after another fresh matching repository readbac
   });
   expect(reverified).toBe(1);
   expect(await f.queue.pending('state')).toEqual([]);
-  expect(await f.queue.inspectDelivery('state')).toEqual({ items: [], lastRemoteCheckpointAt: '2026-10-11T00:00:00Z' });
+  expect(await f.queue.inspectDelivery('state')).toMatchObject({
+    items: [],
+    lastRemoteCheckpointAt: '2026-10-11T00:00:00Z',
+    lastAcknowledgedCaptureAt: expect.any(String),
+  });
 });
 it('does not treat a saved acknowledgement as authority to delete a new full slot', async () => {
   const f = await fixture();

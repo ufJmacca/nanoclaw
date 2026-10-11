@@ -29,7 +29,11 @@ const op = '9f99d9b4-4dac-423a-956c-afd953993c2d',
   next = '6ea53126-7177-469b-8bc1-cedd11635b79';
 it('observes delivery without initializing a queue or exposing captured file names', async () => {
   const f = fixture();
-  expect(await f.queue.inspectDelivery('state')).toEqual({ items: [], lastRemoteCheckpointAt: null });
+  expect(await f.queue.inspectDelivery('state')).toEqual({
+    items: [],
+    lastRemoteCheckpointAt: null,
+    lastAcknowledgedCaptureAt: null,
+  });
   expect(fs.existsSync(f.root + '/state/backup-queue')).toBe(false);
   await f.queue.capture('state', op, async (sink) => sink.write('private-name.json', Buffer.from('state')), 65536);
   const delivery = await f.queue.inspectDelivery('state');

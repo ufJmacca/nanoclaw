@@ -89,6 +89,16 @@ function fixture() {
   const invoke = () => uploadBackupJob({ root, binding, requestId, effects });
   return { root, binding, manifest, queues, effects, events, native, requestId, add, invoke };
 }
+it('reports capture age without treating a later upload as newer captured data', async () => {
+  const f = fixture();
+  Object.assign(f.queues.state, {
+    lastAcknowledgedCaptureAt: '2026-10-01T00:00:00Z',
+    lastRemoteCheckpointAt: '2026-10-11T00:00:00Z',
+  });
+  expect(await f.invoke()).toMatchObject({
+    state: { lastAcknowledgedCaptureAt: '2026-10-01T00:00:00Z', lastRemoteCheckpointAt: '2026-10-11T00:00:00Z' },
+  });
+});
 it('stops starting work after the job deadline and records the retained backlog under still-current admission', async () => {
   const f = fixture();
   f.add('state');
