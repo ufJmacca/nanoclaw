@@ -873,6 +873,55 @@ test('real streaming restoration stops on scope withdrawal and holds only its ne
     fs.closeSync(fd);
   }
 });
+test('real restore cleanup holds edited private content despite unchanged timestamp observations', async () => {
+  const staging = path.join(root, 'edited-restore'),
+    before = snapshotMetadata();
+  fs.mkdirSync(staging, { mode: 0o700 });
+  const fd = fs.openSync(staging, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW),
+    lstat = fs.lstatSync,
+    fstat = fs.fstatSync;
+  try {
+    await assert.rejects(
+      withIsolatedBackupRestore(
+        '/proc/self/fd/' + fd,
+        '5f74b367-fd8f-449c-a832-dbe40cff9ae3',
+        65536,
+        () => {},
+        async (scope) => {
+          await withTransfer(
+            repositoryId,
+            async () => {
+              throw Error('must_not_upload');
+            },
+            (transfer) =>
+              transfer.restore('credentials', transferOperation, 'a'.repeat(64), scope.sink, async () => {}),
+          );
+          const pathname = scope.directory + '/credentials/canary.json',
+            original = fs.statSync(pathname);
+          fs.writeFileSync(pathname, Buffer.alloc(Buffer.byteLength(canary), 0x41));
+          // Simulate a filesystem clock that cannot distinguish these adjacent writes.
+          // File I/O, encrypted transport and content verification remain real.
+          const times = (value: fs.Stats) =>
+            value.isFile() && value.ino === original.ino
+              ? Object.assign(value, { mtimeMs: original.mtimeMs, ctimeMs: original.ctimeMs })
+              : value;
+          fs.lstatSync = ((...args: unknown[]) => times(Reflect.apply(lstat, fs, args))) as typeof fs.lstatSync;
+          fs.fstatSync = ((...args: unknown[]) => times(Reflect.apply(fstat, fs, args))) as typeof fs.fstatSync;
+        },
+      ),
+      /^Error: backup_restore_workspace_unavailable$/,
+    );
+    assert.deepEqual(
+      fs.readFileSync(staging + '/.cos-restore-5f74b367-fd8f-449c-a832-dbe40cff9ae3/credentials/canary.json'),
+      Buffer.alloc(Buffer.byteLength(canary), 0x41),
+    );
+    assert.deepEqual(snapshotMetadata(), before);
+  } finally {
+    fs.lstatSync = lstat;
+    fs.fstatSync = fstat;
+    fs.closeSync(fd);
+  }
+});
 test('a mismatched remote archive cannot be acknowledged as a verified checkpoint', async () => {
   await assert.rejects(
     withTransfer(

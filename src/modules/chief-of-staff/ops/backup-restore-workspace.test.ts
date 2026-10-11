@@ -203,3 +203,26 @@ it('denies short, oversized and duplicate output rather than returning an incomp
     expect(fs.existsSync(f.destination)).toBe(false);
   }
 });
+it('holds changed content even when the filesystem reports unchanged file timestamps', async () => {
+  const f = fixture();
+  await expect(
+    f.invoke(async (scope) => {
+      const file = await scope.sink.open('a', 6);
+      await file.write(Buffer.from('secret'));
+      await file.close();
+      const before = fs.statSync(scope.directory + '/a');
+      fs.writeFileSync(scope.directory + '/a', 'EDITED');
+      const keepTimes = (value: fs.Stats) =>
+        value.isFile() && value.ino === before.ino
+          ? Object.assign(value, { mtimeMs: before.mtimeMs, ctimeMs: before.ctimeMs })
+          : value;
+      const lstat = fs.lstatSync,
+        fstat = fs.fstatSync;
+      vi.spyOn(fs, 'lstatSync').mockImplementation(((...args: unknown[]) =>
+        keepTimes(Reflect.apply(lstat, fs, args))) as typeof fs.lstatSync);
+      vi.spyOn(fs, 'fstatSync').mockImplementation(((...args: unknown[]) =>
+        keepTimes(Reflect.apply(fstat, fs, args))) as typeof fs.fstatSync);
+    }),
+  ).rejects.toThrow(/^backup_restore_workspace_unavailable$/);
+  expect(fs.readFileSync(f.destination + '/a', 'utf8')).toBe('EDITED');
+});

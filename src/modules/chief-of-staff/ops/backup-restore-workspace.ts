@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import type { BackupArchiveRestoreSink } from './backup-archive-reader.js';
 import { BACKUP_LIMITS } from './backup-policy.js';
 export type IsolatedBackupRestore = {
@@ -7,7 +8,7 @@ export type IsolatedBackupRestore = {
   sink: BackupArchiveRestoreSink;
   assertCurrent(): void;
 };
-type Node = { stat: fs.Stats; directory: boolean };
+type Node = { stat: fs.Stats; directory: boolean; sha256?: string };
 const pinned = (fd: number) => '/proc/self/fd/' + fd;
 function same(initial: fs.Stats, current: fs.Stats, directory: boolean): void {
   if (
@@ -164,12 +165,14 @@ export async function withIsolatedBackupRestore<T>(
           ),
         );
         const known: Node = { stat: fs.fstatSync(fd), directory: false };
+        const content = createHash('sha256');
         nodes.set(name, known);
         used += growth;
         let written = 0,
           closed = false;
         const close = () => {
           if (!closed) {
+            known.sha256 = content.digest('hex');
             closed = true;
             fs.closeSync(fd);
             closeFiles.delete(close);
@@ -195,6 +198,7 @@ export async function withIsolatedBackupRestore<T>(
             while (offset < chunk.length) {
               const count = fs.writeSync(fd, chunk, offset, chunk.length - offset, written);
               if (count < 1) throw Error('restore_short_write');
+              content.update(chunk.subarray(offset, offset + count));
               written += count;
               offset += count;
               known.stat = fs.fstatSync(fd);
@@ -224,12 +228,38 @@ export async function withIsolatedBackupRestore<T>(
       failed = true;
     }
     for (const close of [...closeFiles]) close();
+    const checkContent = (parent: number, basename: string, node: Node) => {
+      if (node.directory) return;
+      if (!node.sha256) throw Error('restore_file_unclosed');
+      const pathname = path.join(pinned(parent), basename),
+        fd = fs.openSync(pathname, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK),
+        buffer = Buffer.alloc(65536),
+        hash = createHash('sha256');
+      try {
+        same(node.stat, fs.fstatSync(fd), false);
+        for (let offset = 0; offset < node.stat.size; ) {
+          current();
+          const count = fs.readSync(fd, buffer, 0, Math.min(buffer.length, node.stat.size - offset), offset);
+          if (count < 1) throw Error('restore_file_short_read');
+          hash.update(buffer.subarray(0, count));
+          buffer.fill(0);
+          offset += count;
+        }
+        same(node.stat, fs.fstatSync(fd), false);
+        same(node.stat, fs.lstatSync(pathname), false);
+        if (hash.digest('hex') !== node.sha256) throw Error('restore_file_content_changed');
+      } finally {
+        buffer.fill(0);
+        fs.closeSync(fd);
+      }
+    };
     // Verify the complete graph before removing any node. Unknown children,
     // changed files and replacement parents hold the whole isolated destination.
     current();
     for (const [name, node] of nodes)
       parents(name, false, (parent, basename) => {
         same(node.stat, fs.lstatSync(path.join(pinned(parent), basename)), node.directory);
+        checkContent(parent, basename, node);
       });
     const directories = ['', ...[...nodes].filter(([, node]) => node.directory).map(([name]) => name)];
     for (const directoryName of directories) {
@@ -248,6 +278,7 @@ export async function withIsolatedBackupRestore<T>(
       parents(name, false, (parent, basename) => {
         const pathname = path.join(pinned(parent), basename);
         same(node.stat, fs.lstatSync(pathname), node.directory);
+        checkContent(parent, basename, node);
         if (node.directory) fs.rmdirSync(pathname);
         else fs.unlinkSync(pathname);
         fs.fsyncSync(parent);
