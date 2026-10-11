@@ -13,6 +13,7 @@ type TargetArguments =
   | { command: 'operations-maintenance'; settings: string; requestId: string; phase: 'hold' | 'release' }
   | { command: 'scheduled-backup'; settings: string; requestId: string }
   | { command: 'upload-backups'; settings: string; requestId: string }
+  | { command: 'install-backup-jobs'; settings: string }
   | { command: 'runtime-test'; settings: string; owner: string }
   | { command: 'rollback'; settings: string; releaseId: string; fromReleaseId: string }
   | {
@@ -39,6 +40,7 @@ export function parseTargetArguments(args: string[]): TargetArguments {
       'operations-maintenance',
       'scheduled-backup',
       'upload-backups',
+      'install-backup-jobs',
     ].includes(command) ||
     rest.length % 2 !== 0
   )
@@ -89,7 +91,7 @@ export function parseTargetArguments(args: string[]): TargetArguments {
       ? { command, settings: values['--settings'], requestId: values['--request-id'] }
       : reject();
   if (values['--completion'] || values['--request-id'] || values['--phase']) return reject();
-  if (command === 'status')
+  if (command === 'status' || command === 'install-backup-jobs')
     return Object.keys(values).length === 1 ? { command, settings: values['--settings'] } : reject();
   if (command === 'runtime-test') {
     if (Object.keys(values).length !== 2 || !/^[a-zA-Z0-9_-]{1,120}$/.test(values['--owner'] ?? '')) return reject();
@@ -171,6 +173,10 @@ export async function targetCommand(args: string[]): Promise<Record<string, unkn
   const binding = targetBinding(settings);
   const parent = path.dirname(settings.stateRoot);
   if (!fs.existsSync(parent)) throw new Error('target_state_parent_required');
+  if (request.command === 'install-backup-jobs') {
+    const { configureTargetBackupJobs } = await import('./backup-job-configure.js');
+    return configureTargetBackupJobs(settings, fileURLToPath(import.meta.url));
+  }
   if (request.command === 'upload-backups') {
     const { uploadBackupJob } = await import('./backup-upload-job.js');
     const { createBackupUploadJobEffects } = await import('./backup-upload-job-effects.js');
@@ -399,6 +405,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
         'operations_workers_active',
         'backup_upload_locked',
         'backup_upload_job_unavailable',
+        'backup_job_installation_busy',
+        'backup_job_installation_unavailable',
       ]);
       console.error(
         JSON.stringify({

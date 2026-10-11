@@ -1,5 +1,16 @@
 import { expect, it } from 'vitest';
 import { parseTargetArguments } from './target-helper.js';
+it('admits only fixed backup-job installation without unit, mode, root or credential selectors', () => {
+  const args = ['install-backup-jobs', '--settings', '/home/pi/target.json'];
+  expect(parseTargetArguments(args)).toEqual({ command: 'install-backup-jobs', settings: args[2] });
+  for (const extra of [
+    ['--request-id', '01234567-89ab-4def-8123-456789abcdef'],
+    ['--phase', 'release'],
+    ['--unit', 'foreign.service'],
+    ['--owner', 'foreign'],
+  ])
+    expect(() => parseTargetArguments([...args, ...extra])).toThrow('invalid_target_arguments');
+});
 it('admits only an independent upload job ID and rejects snapshot, NAS, retention and capture selectors', () => {
   const args = [
     'upload-backups',
