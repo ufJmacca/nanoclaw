@@ -26,6 +26,7 @@ const f = vi.hoisted(() => ({
   calendar: vi.fn(),
   memory: vi.fn(),
   connect: vi.fn(),
+  restore: vi.fn(),
   areas: {} as Record<string, string>,
 }));
 vi.mock('./host-fingerprint.js', () => ({ machineFingerprint: () => 'a'.repeat(64) }));
@@ -40,9 +41,20 @@ vi.mock('./vault-storage.js', () => ({
     targetDigest: 'a'.repeat(64),
     volume: { filesystemUuid: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' },
   }),
-  withVaultDirectory: async (_roots: unknown, area: string, operation: (directory: string) => Promise<unknown>) =>
-    operation(f.areas[area]),
+  withVaultDirectory: async (
+    _roots: unknown,
+    area: string,
+    operation: (directory: string, current: () => void) => Promise<unknown>,
+  ) => {
+    const fd = fs.openSync(f.areas[area], fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+    try {
+      return await operation('/proc/self/fd/' + fd, () => {});
+    } finally {
+      fs.closeSync(fd);
+    }
+  },
 }));
+vi.mock('./backup-upload.js', () => ({ restoreVaultBackup: f.restore }));
 vi.mock('./recovery-manifest.js', async (original) => ({
   ...(await original<typeof import('./recovery-manifest.js')>()),
   captureOperationsState: f.capture,
@@ -949,6 +961,211 @@ it.runIf(process.env.COS_TEST_TARGET_ID !== undefined).each([false, true])(
         await admin.query('COMMIT');
       }
       await admin.end();
+    }
+  },
+  60000,
+);
+
+it.runIf(process.env.COS_TEST_TARGET_ID !== undefined)(
+  'imports a complete real-producer capture through the default recovery composition into the admitted separate test database',
+  async () => {
+    const { connectFixtureDatabase, fixtureDatabaseConfig, fixtureProfile } =
+        await import('../../../contracts/chief-of-staff/fixture-database.js'),
+      { captureOperationsState } =
+        await vi.importActual<typeof import('./recovery-manifest.js')>('./recovery-manifest.js'),
+      { captureCalendarState } = await vi.importActual<typeof import('../calendar/backup.js')>('../calendar/backup.js'),
+      { createVaultBackupQueue } = await import('./backup-queue.js'),
+      { streamBackupArchive } = await import('./backup-archive.js'),
+      { readBackupArchive } = await import('./backup-archive-reader.js'),
+      { restoreTargetVaultBackupTestScope } = await import('./backup-target-restore.js'),
+      { finishMaintenance } = await import('./maintenance.js');
+    expect(fixtureProfile()).toBe('test');
+    const admin = await connectFixtureDatabase(process.env, 'migration'),
+      config = await fixtureDatabaseConfig(process.env, 'migration'),
+      seed = 'complete-seed-' + randomUUID(),
+      destination = 'complete-import-' + randomUUID(),
+      created = new Set<string>();
+    let locked = false;
+    try {
+      expect((await admin.query('SELECT pg_try_advisory_lock(73101002) AS locked')).rows[0].locked).toBe(true);
+      locked = true;
+      await admin.query("SET TIME ZONE 'UTC'");
+      await admin.query(
+        "INSERT INTO cos.scopes(id,owner_id,instance_id,channel_id,agent_group_id,status) VALUES($1,'owner','fixture',$1,$1,'active')",
+        [seed],
+      );
+      created.add(seed);
+      await admin.query(
+        "INSERT INTO cos.records(id,scope_id,kind,title,description,lifecycle,version,provenance) VALUES($1,$2,'goal','SYNTHETIC_FULL_CAPTURE','synthetic','active',1,'{}')",
+        ['record-' + seed, seed],
+      );
+      const sourceRows = async (table: string) =>
+        (
+          await admin.query(
+            `SELECT to_jsonb(t) AS body FROM cos."${table}" t WHERE "${table === 'scopes' ? 'id' : 'scope_id'}"=$1`,
+            [seed],
+          )
+        ).rows.map(({ body }) => {
+          if (table === 'scopes')
+            return { ...body, id: destination, channel_id: destination, agent_group_id: destination };
+          return { ...body, scope_id: destination, ...(table === 'records' ? { id: 'record-' + destination } : {}) };
+        });
+      // Source scope and fingerprint are an explicit foreign-source transport
+      // fixture. Actual selected test DB admission, columns, import and readback
+      // are real; no runtime profile is available to this test.
+      const source = {
+        query: async (sql: string, values?: unknown[]) => {
+          if (sql.includes('SELECT owner_id,agent_group_id'))
+            return { rows: [{ owner_id: 'owner', agent_group_id: destination }] };
+          if (sql.includes('to_jsonb(t)')) {
+            const table = /FROM cos\."([a-z_]+)"/.exec(sql)?.[1];
+            if (!table) throw Error('fixture_table_required');
+            return { rows: (await sourceRows(table)).map((body) => ({ body })) };
+          }
+          return admin.query(sql, values);
+        },
+        end: async () => {},
+      };
+      const s = await fixture(digest('complete explicit foreign-source fixture'), destination),
+        roots = {
+          targetRoot: s.settings.stateRoot,
+          installationRoot: s.settings.installationRoot,
+          dataRoot: s.settings.dataRoot,
+        };
+      s.native.exec(
+        "CREATE TABLE ordinary_messages(id TEXT PRIMARY KEY,body TEXT); INSERT INTO ordinary_messages VALUES('old','SYNTHETIC_OLD_MESSAGE'); CREATE TABLE cos_model_budgets(activation_id TEXT,consumed INTEGER); INSERT INTO cos_model_budgets VALUES('synthetic',3)",
+      );
+      f.capture.mockImplementation(captureOperationsState);
+      f.calendar.mockImplementation(captureCalendarState); // Actual absent-Calendar producer.
+      f.connect.mockResolvedValue(source);
+      const captured = await captureTargetVaultState(s.settings, s.operationId, s.admin, s.recovery);
+      expect(captured.status).toBe('queued');
+      if (captured.status !== 'queued') throw Error('fixture_capture_required');
+      await finishMaintenance(s.settings.stateRoot, targetBinding(s.settings), s.admin.maintenance, async () => true);
+      s.native.exec(
+        "INSERT INTO ordinary_messages VALUES('later','SYNTHETIC_LATER_MESSAGE'); UPDATE cos_model_budgets SET consumed=4",
+      );
+      const laterBinding = { ...s.binding, sessionId: 'renewed-main' };
+      s.native.prepare('INSERT INTO sessions VALUES(?,?)').run(laterBinding.sessionId, laterBinding.agentGroupId);
+      s.native
+        .prepare('UPDATE cos_identity_boundaries SET session_id=?,binding=?,paused=1')
+        .run(laterBinding.sessionId, JSON.stringify(laterBinding));
+      const preserved = {
+          messages: s.native.prepare('SELECT * FROM ordinary_messages ORDER BY id').all(),
+          budgets: s.native.prepare('SELECT * FROM cos_model_budgets').all(),
+          binding: s.native.prepare('SELECT * FROM cos_identity_boundaries').all(),
+          journal: fs.readFileSync(s.witness.root + '/owner.json'),
+        },
+        queue = createVaultBackupQueue(roots),
+        chunks: Buffer[] = [];
+      await queue.withPending('state', captured.queueOperationId, async (directory, receipt) =>
+        streamBackupArchive(directory, receipt, async (bytes) => {
+          chunks.push(Buffer.from(bytes));
+        }),
+      );
+      const archive = Buffer.concat(chunks),
+        pending = await queue.pending('state'),
+        requestId = randomUUID();
+      f.restore.mockImplementation(async (_roots, kind, operationId, request, current, validate) =>
+        queue.withRestoreWorkspace(request, current, async (workspace) => {
+          const data = {
+              async *[Symbol.asyncIterator]() {
+                for (let offset = 0; offset < archive.length; offset += 65536)
+                  yield Buffer.from(archive.subarray(offset, offset + 65536));
+              },
+            },
+            recovered = await readBackupArchive(
+              data,
+              { ownerDigest: pending[0].ownerDigest, kind, operationId },
+              workspace.sink,
+              current,
+            ),
+            remote = {
+              contract: 'cos-backup-remote-restore/v1',
+              repositoryId: digest('fixture repository'),
+              ownerDigest: digest('fixture repository owner'),
+              kind,
+              operationId,
+              snapshotId: digest('fixture snapshot'),
+              snapshotAt: pending[0].createdAt,
+              archiveBytes: archive.length,
+              archiveSha256: createHash('sha256').update(archive).digest('hex'),
+              verifiedAt: '2026-10-11T00:00:00.000Z',
+              receipt: recovered.receipt,
+            };
+          return { remote, validation: await validate(workspace, remote) };
+        }),
+      );
+      let loseAck = true,
+        inserts = 0;
+      const testClient = {
+        query: async (sql: string, values?: unknown[]) => {
+          if (sql.startsWith('INSERT INTO cos.')) inserts++;
+          const result = await admin.query(sql, values);
+          if (sql === 'COMMIT' && loseAck) {
+            loseAck = false;
+            throw Error('PRIVATE_UNKNOWN_COMMIT');
+          }
+          return result;
+        },
+      } as unknown as import('pg').Client;
+      const run = () =>
+        restoreTargetVaultBackupTestScope(
+          {
+            settings: s.settings,
+            binding: laterBinding,
+            witness: s.witness,
+            queueOperationId: captured.queueOperationId,
+            recovery: s.recovery,
+            expectedSnapshotDigest: captured.snapshotDigest,
+            current: () => {},
+          },
+          requestId,
+          { client: testClient, config, testTargetId: process.env.COS_TEST_TARGET_ID ?? '' },
+        );
+      await expect(run()).rejects.toThrow(/^target_vault_test_restore_unavailable$/);
+      if ((await admin.query('SELECT id FROM cos.scopes WHERE id=$1', [destination])).rows.length)
+        created.add(destination);
+      expect(created.has(destination)).toBe(true);
+      expect(inserts).toBe(3); // One rolled-back FK savepoint attempt, two successful tables.
+      const reservation = f.areas.staging + '/.cos-test-restore-' + requestId + '.json',
+        before = fs.readFileSync(reservation);
+      const result = await run();
+      expect(result.validation).toMatchObject({
+        inserted: false,
+        snapshotDigest: captured.snapshotDigest,
+        admissionRestored: false,
+        eventJournalRestored: false,
+        credentialsActivated: false,
+        writerActivated: false,
+      });
+      expect(inserts).toBe(3);
+      expect(fs.readFileSync(reservation)).toEqual(before);
+      expect(
+        (await admin.query('SELECT count(*)::integer AS n FROM cos.records WHERE scope_id=$1', [destination])).rows[0]
+          .n,
+      ).toBe(1);
+      expect(await queue.pending('state')).toEqual(pending);
+      expect(s.native.prepare('SELECT * FROM ordinary_messages ORDER BY id').all()).toEqual(preserved.messages);
+      expect(s.native.prepare('SELECT * FROM cos_model_budgets').all()).toEqual(preserved.budgets);
+      expect(s.native.prepare('SELECT * FROM cos_identity_boundaries').all()).toEqual(preserved.binding);
+      expect(fs.readFileSync(s.witness.root + '/owner.json')).toEqual(preserved.journal);
+      expect(fs.readdirSync(f.areas.staging).some((name) => name.startsWith('.cos-restore-'))).toBe(false);
+      archive.fill(0);
+    } finally {
+      try {
+        for (const scope of created) {
+          expect(scope).toMatch(/^complete-(seed|import)-[a-f0-9-]{36}$/);
+          await admin.query('DELETE FROM cos.records WHERE scope_id=$1', [scope]);
+          await admin.query("DELETE FROM cos.scopes WHERE id=$1 AND owner_id='owner' AND agent_group_id=$1", [scope]);
+        }
+      } finally {
+        try {
+          if (locked) await admin.query('SELECT pg_advisory_unlock(73101002)');
+        } finally {
+          await admin.end();
+        }
+      }
     }
   },
   60000,
