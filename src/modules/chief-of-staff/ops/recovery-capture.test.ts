@@ -7,12 +7,16 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { digest } from '../domain/contracts.js';
 import { SCHEMA_VERSION } from '../store/migrations.js';
 import type { CoordinatedBackupOptions, CoordinatedBackupReceipt } from './coordinated-backup.js';
-import { captureOperationsState, type RecoverySoftware } from './recovery-manifest.js';
-const f = vi.hoisted(() => ({ capture: vi.fn(), legacy: vi.fn() }));
+import { captureOperationsState, verifyRecoveredOperationsState, type RecoverySoftware } from './recovery-manifest.js';
+import { withIsolatedBackupRestore } from './backup-restore-workspace.js';
+import { ActionWitness, initializeActionWitness } from '../actions/witness.js';
+const f = vi.hoisted(() => ({ capture: vi.fn(), legacy: vi.fn(), recovered: vi.fn(), current: vi.fn() }));
 vi.mock('./coordinated-backup.js', () => ({
   captureCoordinatedState: f.capture,
   backupCoordinatedState: f.legacy,
   verifyCoordinatedBackup: f.legacy,
+  verifyRecoveredCoordinatedState: f.recovered,
+  assertCoordinatedRecoveryIdentity: f.current,
 }));
 const roots: string[] = [];
 afterEach(() => {
@@ -152,6 +156,126 @@ it('captures a portable recovery manifest directly with the exact streamed datab
   expect(bytes.toString()).not.toContain('foreign');
   expect(fs.readdirSync(s.root)).toEqual([]);
   expect(f.legacy).not.toHaveBeenCalled();
+});
+async function recoverFixture(change?: (s: ReturnType<typeof fixture>) => void, guard: () => void = () => {}) {
+  const s = fixture(),
+    capture = await captureOperationsState(s.options, s.sink);
+  const owner = initializeActionWitness(s.root + '/live-journal', 'f'.repeat(64));
+  s.options.base = {
+    ...s.base,
+    databaseFingerprint: s.receipt.databaseFingerprint,
+    nativeDatabases: [s.root + '/live-native.db'],
+    restrictionFiles: [],
+    artifacts: { root: s.root + '/live-artifacts' } as CoordinatedBackupOptions['artifacts'],
+    witness: new ActionWitness(s.root + '/live-journal', 'f'.repeat(64), owner.generation),
+  };
+  change?.(s);
+  f.recovered.mockReturnValue({
+    receipt: s.receipt,
+    checkpoint: s.snapshot,
+    nativeDatabasesVerified: 1,
+    admissionRestored: false,
+    eventJournalRestored: false,
+  });
+  const stage = s.root + '/isolated-stage';
+  fs.mkdirSync(stage, { mode: 0o700 });
+  const fd = fs.openSync(stage, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+  let error: unknown;
+  try {
+    const result = await withIsolatedBackupRestore(
+      '/proc/self/fd/' + fd,
+      '5f74b367-fd8f-449c-a832-dbe40cff9ae3',
+      262144,
+      guard,
+      async (scope) => {
+        const entries = [];
+        for (const [name, bytes] of s.output) {
+          const file = await scope.sink.open(name, bytes.length);
+          for (let i = 0; i < bytes.length; i += 65536) await file.write(bytes.subarray(i, i + 65536));
+          await file.close();
+          entries.push({ name, bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') });
+        }
+        try {
+          return await verifyRecoveredOperationsState(s.options, scope, entries, 7);
+        } catch (caught) {
+          error = caught;
+          throw caught;
+        }
+      },
+    );
+    return { s, capture, result, stage };
+  } catch (caught) {
+    if (error) throw error;
+    throw caught;
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+it('recomputes recovery instructions from owned recovered bytes without importing native denials or tombstones', async () => {
+  const { s, capture, result, stage } = await recoverFixture();
+  expect(result.operations).toEqual(capture.operations);
+  expect(result.operations.nativeDenials).toHaveLength(1);
+  expect(result.operations.revocations).toEqual([{ sourceId: 'source', kind: 'revoke', version: 2 }]);
+  expect(result.operations.effectsEnabled).toBe(false);
+  expect(result.operations.admissionRestored).toBe(false);
+  expect(JSON.stringify(result.operations)).not.toContain('PRIVATE_SOURCE_PROSE');
+  expect(JSON.stringify(result.operations)).not.toContain('foreign');
+  expect(fs.readdirSync(stage)).toEqual([]);
+  expect(f.legacy).not.toHaveBeenCalled();
+  expect(s.output.has('capture-fixture.operations.json')).toBe(true);
+});
+it.each([
+  'revocations',
+  'denials',
+  'software',
+  'generation',
+  'admission',
+  'effects',
+  'external-checkpoint',
+  'unknown-field',
+])('refuses altered recovery instructions %s even when authenticated as archive bytes', async (reason) => {
+  await expect(
+    recoverFixture((s) => {
+      const file = 'capture-fixture.operations.json',
+        value = JSON.parse(s.output.get(file)!.toString());
+      if (reason === 'revocations') value.revocations = [];
+      if (reason === 'denials') value.nativeDenials = [];
+      if (reason === 'software') value.software.sourceCommit = '9'.repeat(40);
+      if (reason === 'generation') value.backupGeneration = 8;
+      if (reason === 'admission') value.admissionRestored = true;
+      if (reason === 'effects') value.effectsEnabled = true;
+      if (reason === 'external-checkpoint') value.externalCheckpoint.referenceDigest = '9'.repeat(64);
+      if (reason === 'unknown-field') value.activateCredential = true;
+      s.output.set(file, Buffer.from(JSON.stringify(value) + '\n'));
+    }),
+  ).rejects.toThrow(/^operations_recovery_check_unavailable$/);
+});
+it('refuses a coordinated receipt changed while its native recovery projection is awaited', async () => {
+  let fired = false;
+  await expect(
+    recoverFixture(undefined, () => {
+      if (!fired && f.recovered.mock.results.length) {
+        fired = true;
+        const proof = f.recovered.mock.results.at(-1)!.value;
+        proof.receipt.contextDigest = '0'.repeat(64);
+      }
+    }),
+  ).rejects.toThrow(/^operations_recovery_check_unavailable$/);
+});
+it('refreshes independent journal admission after the recovery projection is awaited', async () => {
+  let queued = false;
+  await expect(
+    recoverFixture(undefined, () => {
+      if (!queued && f.recovered.mock.results.length) {
+        queued = true;
+        queueMicrotask(() => {
+          f.current.mockImplementation(() => {
+            throw Error('PRIVATE_JOURNAL_CHANGED');
+          });
+        });
+      }
+    }),
+  ).rejects.toThrow(/^operations_recovery_check_unavailable$/);
 });
 it('rejects missing and mismatched native snapshot bytes before publishing recovery metadata', async () => {
   const s = fixture();

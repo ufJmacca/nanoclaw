@@ -11,6 +11,9 @@ import {
   type CoordinatedBackupIdentity,
   type CoordinatedBackupOptions,
   type CoordinatedBackupReceipt,
+  type CoordinatedRecoveryIdentity,
+  verifyRecoveredCoordinatedState,
+  assertCoordinatedRecoveryIdentity,
   type QuiescentCheckpoint,
   type ScopeCheckpoint,
 } from './coordinated-backup.js';
@@ -18,7 +21,8 @@ import { withDeploymentLock } from './deployment-lock.js';
 import { artifactHash } from './release-artifacts.js';
 import { readPrivate, writeAtomic } from './target-state.js';
 import { validateReleaseManifest } from './release-manifest.js';
-import type { BackupSnapshotSink } from './backup-queue.js';
+import type { BackupSnapshotSink, BackupQueueReceipt } from './backup-queue.js';
+import type { BackupRestoreValidationScope } from './backup-restore-workspace.js';
 
 export type RecoverySoftware = {
   sourceCommit: string;
@@ -87,6 +91,21 @@ function exact(value: object, fields: string[]) {
   return Object.keys(value).sort().join(',') === fields.sort().join(',');
 }
 function parameters(options: RecoveryIdentity) {
+  portableParameters(options);
+  const { base } = options;
+  if (
+    !path.isAbsolute(base.receiptRoot) ||
+    path.resolve(base.receiptRoot) !== base.receiptRoot ||
+    fs.realpathSync(base.receiptRoot) !== base.receiptRoot
+  )
+    throw Error('invalid_operations_backup');
+  const stat = fs.lstatSync(base.receiptRoot);
+  if (!stat.isDirectory() || stat.uid !== process.getuid?.() || (stat.mode & 0o777) !== 0o700)
+    throw Error('invalid_operations_backup');
+  return path.join(base.receiptRoot, base.operationId + '.operations.json');
+}
+type PortableRecoveryIdentity = Omit<RecoveryIdentity, 'base'> & { base: CoordinatedRecoveryIdentity };
+function portableParameters(options: PortableRecoveryIdentity) {
   const { base, software, externalCheckpoint } = options;
   if (
     !software ||
@@ -105,16 +124,9 @@ function parameters(options: RecoveryIdentity) {
     externalCheckpoint.kind !== 'application_scope_logical' ||
     (externalCheckpoint.referenceDigest !== undefined && !hex.test(externalCheckpoint.referenceDigest)) ||
     !/^[a-zA-Z0-9_-]{1,160}$/.test(base.operationId) ||
-    !identifier.test(base.context.scopeId) ||
-    !path.isAbsolute(base.receiptRoot) ||
-    path.resolve(base.receiptRoot) !== base.receiptRoot ||
-    fs.realpathSync(base.receiptRoot) !== base.receiptRoot
+    !identifier.test(base.context.scopeId)
   )
     throw Error('invalid_operations_backup');
-  const stat = fs.lstatSync(base.receiptRoot);
-  if (!stat.isDirectory() || stat.uid !== process.getuid?.() || (stat.mode & 0o777) !== 0o700)
-    throw Error('invalid_operations_backup');
-  return path.join(base.receiptRoot, base.operationId + '.operations.json');
 }
 function epoch(value: QuiescentCheckpoint) {
   if (
@@ -281,6 +293,91 @@ async function projection(
   };
 }
 /** Verify immutable recovery evidence offline. It neither restores state nor admits archived permissions. */
+/** Recompute the forensic recovery projection directly from owned recovered
+ * snapshots. Archived denials, journals and revocations never become live authority. */
+export async function verifyRecoveredOperationsState(
+  options: PortableRecoveryIdentity,
+  scope: BackupRestoreValidationScope,
+  entries: BackupQueueReceipt['files'],
+  generation: number,
+): Promise<{ coordinated: ReturnType<typeof verifyRecoveredCoordinatedState>; operations: OperationsBackupManifest }> {
+  const captured: StreamProjection = { sqlite: new Map() };
+  try {
+    scope.assertCurrent();
+    portableParameters(options);
+    const configuration = () =>
+        digest({
+          software: options.software,
+          externalCheckpoint: options.externalCheckpoint,
+          operationId: options.base.operationId,
+          context: options.base.context,
+          databaseFingerprint: options.base.databaseFingerprint,
+          nativeDatabases: options.base.nativeDatabases,
+          restrictionFiles: options.base.restrictionFiles,
+          artifactsRoot: options.base.artifacts.root,
+          journal: {
+            installationDigest: options.base.witness.installationDigest,
+            generation: options.base.witness.generation,
+          },
+          generation,
+        }),
+      initial = configuration(),
+      coordinated = verifyRecoveredCoordinatedState(options.base, scope, entries),
+      receipt = coordinated.receipt,
+      receiptDigest = digest(receipt),
+      checkpointDigest = digest(coordinated.checkpoint);
+    const current = () => {
+      scope.assertCurrent();
+      portableParameters(options);
+      assertCoordinatedRecoveryIdentity(options.base);
+      if (configuration() !== initial || digest(receipt) !== receiptDigest) throw Error('operations_recovery_changed');
+    };
+    current();
+    captured.remote = {
+      bytes: receipt.remote.bytes,
+      sha256: receipt.remote.sha256,
+      checkpoint: coordinated.checkpoint,
+    };
+    for (const item of receipt.sqlite) {
+      current();
+      const file = 'coordinated/' + item.file,
+        actual = scope.inspectFile(file);
+      if (actual.bytes !== item.bytes || actual.sha256 !== item.sha256) throw Error('operations_recovery_changed');
+      const rows = scope.withFileBytes(file, 64 * 1024 ** 2, (bytes) => {
+        const db = new Database(bytes, { readonly: true });
+        try {
+          if (db.pragma('quick_check', { simple: true }) !== 'ok') throw Error('operations_recovery_invalid');
+          return denialRows(db, options.base.context.scopeId);
+        } finally {
+          db.close();
+        }
+      });
+      captured.sqlite.set(item.file, { bytes: item.bytes, sha256: item.sha256, rows });
+      current();
+    }
+    const manifest = scope.withFileBytes(
+      options.base.operationId + '.operations.json',
+      1024 ** 2,
+      (bytes) => JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) as OperationsBackupManifest,
+    );
+    const expected = await projection(
+      { ...options, base: { ...options.base, receiptRoot: scope.directory } },
+      receipt,
+      generation,
+      captured,
+    );
+    current();
+    if (digest(manifest) !== digest(expected) || digest(coordinated.checkpoint) !== checkpointDigest)
+      throw Error('operations_recovery_changed');
+    return { coordinated, operations: expected };
+  } catch {
+    // eslint-disable-next-line preserve-caught-error -- Native denials, revocation details and recovered diagnostic data remain private.
+    throw Error('operations_recovery_check_unavailable');
+  } finally {
+    captured.remote = undefined;
+    captured.sqlite.clear();
+  }
+}
 export async function verifyOperationsBackup(options: RecoveryIdentity): Promise<OperationsBackupManifest> {
   try {
     const file = parameters(options),

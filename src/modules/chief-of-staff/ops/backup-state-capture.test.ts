@@ -636,6 +636,8 @@ it.runIf(process.env.COS_TEST_TARGET_ID !== undefined).each([false, true])(
         { streamBackupArchive } = await import('./backup-archive.js'),
         { readBackupArchive } = await import('./backup-archive-reader.js'),
         { verifyRecoveredCoordinatedState } = await import('./coordinated-backup.js'),
+        { verifyRecoveredOperationsState } =
+          await vi.importActual<typeof import('./recovery-manifest.js')>('./recovery-manifest.js'),
         { verifyRecoveredPrivateHistory } = await import('./private-history-backup.js'),
         queue = createVaultBackupQueue(roots),
         chunks: Buffer[] = [];
@@ -681,6 +683,28 @@ it.runIf(process.env.COS_TEST_TARGET_ID !== undefined).each([false, true])(
             expect(checked.checkpoint.rows.revocation_tombstones[0].kind).toBe('revoke');
             expect(checked.admissionRestored).toBe(false);
             expect(checked.eventJournalRestored).toBe(false);
+            const recoveredOperations = await verifyRecoveredOperationsState(
+              {
+                base: {
+                  ...header.inputs,
+                  operationId: s.operationId,
+                  databaseFingerprint: fingerprint,
+                  artifacts: { root: header.inputs.artifactsRoot },
+                  witness: s.witness,
+                },
+                software: s.recovery.software,
+                externalCheckpoint: { kind: 'application_scope_logical' },
+              },
+              workspace,
+              read.receipt.files,
+              header.maintenanceGeneration,
+            );
+            expect(recoveredOperations.operations).toEqual(operations);
+            expect(recoveredOperations.operations.revocations).toEqual([
+              { sourceId: 'source-' + scope, kind: 'revoke', version: 2 },
+            ]);
+            expect(recoveredOperations.operations.admissionRestored).toBe(false);
+            expect(recoveredOperations.operations.effectsEnabled).toBe(false);
             expect(
               verifyRecoveredPrivateHistory(
                 workspace,

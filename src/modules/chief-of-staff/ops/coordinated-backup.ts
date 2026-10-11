@@ -40,6 +40,17 @@ export type CoordinatedBackupIdentity = Omit<CoordinatedBackupOptions, 'client' 
   artifacts: Pick<KnowledgeArtifacts, 'root'>;
 };
 export type CoordinatedRecoveryIdentity = Omit<CoordinatedBackupIdentity, 'receiptRoot'>;
+/** Current independent journal checks for an already admitted recovery caller.
+ * This is read-only identity continuity, never restored permission. */
+export function assertCoordinatedRecoveryIdentity(options: CoordinatedRecoveryIdentity): void {
+  try {
+    identityParameters(options);
+    journalCurrent(options);
+  } catch {
+    // eslint-disable-next-line preserve-caught-error -- Current private binding and journal diagnostics stay in the trusted recovery process.
+    throw Error('coordinated_recovery_identity_unavailable');
+  }
+}
 export type ScopeCheckpoint = {
   format: 'cos-scoped-checkpoint/v1';
   scopeId: string;
