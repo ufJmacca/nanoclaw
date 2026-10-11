@@ -26,6 +26,7 @@ import {
 import { imageConfigurations } from './image-archive.js';
 import { artifactHash, verifyReleaseBundle } from './release-artifacts.js';
 import { validateBuildTargetObservation } from './mac-deploy.js';
+import { packageResticReleaseArtifact } from './restic-release-package.js';
 
 export const BUILD_TARGETS = ['host', 'agent-standard', 'agent-documents'] as const;
 type BuildTarget = (typeof BUILD_TARGETS)[number];
@@ -35,6 +36,23 @@ type Plan = Omit<ReleaseManifest, 'checks'> & {
   builder?: string;
   context?: string;
 };
+export function releaseCheckImageIds(
+  images: ReadonlyArray<Pick<ReleaseManifest['images'][number], 'role' | 'id'>>,
+  name: string,
+): string[] {
+  const hostOnly = name.startsWith('vault_') || name.startsWith('backup_'),
+    allImages = name.includes('image') || name === 'protected_state';
+  if (!hostOnly && !allImages) return [];
+  if (
+    images.length !== BUILD_TARGETS.length ||
+    new Set(images.map((image) => image.id)).size !== BUILD_TARGETS.length ||
+    images.some((image) => !/^sha256:[a-f0-9]{64}$/.test(image.id)) ||
+    images.filter((image) => image.role === 'host').length !== 1 ||
+    images.filter((image) => image.role === 'agent').length !== 2
+  )
+    throw Error('image_identity_required');
+  return (hostOnly ? images.filter((image) => image.role === 'host') : images).map((image) => image.id);
+}
 function releaseRoot(id: string): string {
   if (!/^release-[a-f0-9]{12}-[0-9]{14}$/.test(id)) throw new Error('invalid_local_release');
   const root = path.resolve('.cos-plan-state/releases', id);
@@ -74,20 +92,21 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
   if (operation === 'init' && values.length === 3) {
     const [commit, fetchRef, slice] = values;
     // Only the current implemented slice may create a new release; historical manifests remain readable.
-    if ((slice !== 'S11' && slice !== 'G01') || Number(SCHEMA_VERSION) !== 18)
+    if (!['S11', 'G01', 'G02'].includes(slice) || Number(SCHEMA_VERSION) !== 18)
       throw new Error('current_release_slice_required');
     if (!/^[a-f0-9]{40}$/.test(commit) || !/^refs\/heads\/[a-zA-Z0-9_./-]+$/.test(fetchRef) || fetchRef.includes('..'))
       throw new Error('invalid_candidate_source');
     const root = releaseRoot(id);
     if (fs.existsSync(path.join(root, 'plan.json'))) throw new Error('release_already_exists');
     const target = deploymentSettings(readPrivate(path.resolve('.cos-plan-state/deployment-target.json')));
-    if (readReleaseExecution(path.resolve('.cos-plan-state'), slice, true).active_slice !== slice)
+    const selectedSlice = slice as ReleaseManifest['slice'];
+    if (readReleaseExecution(path.resolve('.cos-plan-state'), selectedSlice, true).active_slice !== slice)
       throw new Error('active_slice_required');
     const metadata = await prepareBuildContext(process.cwd(), commit, path.join(root, 'context'));
     const plan: Plan = {
       contract: 'cos-release/v1',
       releaseId: id,
-      slice,
+      slice: selectedSlice,
       platform: 'linux/arm64',
       source: {
         repository: 'ufJmacca/nanoclaw',
@@ -107,6 +126,14 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
       images: [],
       checks: {},
       targetDigest: digest(target),
+      ...(slice === 'G02'
+        ? {
+            backupArtifact: packageResticReleaseArtifact({
+              binary: path.resolve('.cos-plan-state/g02-restic-0.19.1/restic'),
+              output: path.join(root, 'backup-artifact-input'),
+            }),
+          }
+        : {}),
     };
     writeAtomic(root, 'plan.json', plan);
     checkedPlan(id);
@@ -120,7 +147,7 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
   }
   const { root, plan } = checkedPlan(id);
   if (operation === 'vault-fixture' && !values.length) {
-    if (plan.slice !== 'G01' || !plan.vaultArtifact) throw Error('vault_release_required');
+    if (!['G01', 'G02'].includes(plan.slice) || !plan.vaultArtifact) throw Error('vault_release_required');
     const host = plan.images.find((image) => image.role === 'host');
     if (!host) throw Error('image_identity_required');
     const image = verifyVaultFixtureImage(
@@ -137,7 +164,7 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
     return image;
   }
   if (operation === 'vault-wire' && !values.length) {
-    if (plan.slice !== 'G01') throw Error('vault_release_required');
+    if (!['G01', 'G02'].includes(plan.slice)) throw Error('vault_release_required');
     const file = path.join(root, 'vault_kernel.log'),
       stat = fs.lstatSync(file);
     if (
@@ -158,7 +185,7 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
     return;
   }
   if (operation === 'vault-artifact' && !values.length) {
-    if (plan.slice !== 'G01') throw Error('vault_release_required');
+    if (!['G01', 'G02'].includes(plan.slice)) throw Error('vault_release_required');
     const seal = vaultRootArtifactSeal(readPrivate(path.join(root, 'vault-artifact.json'), 4096));
     if (
       seal.sourceCommit !== plan.source.commit ||
@@ -272,7 +299,7 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
           COS_FIXTURE_RUNNER_VOLUME: volume,
         },
         stdio: 'inherit',
-        timeout: ['S10', 'S11'].includes(plan.slice)
+        timeout: ['S10', 'S11', 'G01', 'G02'].includes(plan.slice)
           ? 960000
           : ['S06', 'S07', 'S08', 'S09'].includes(plan.slice)
             ? 660000
@@ -314,20 +341,12 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
     const [name, status] = values;
     if (!requiredReleaseChecks(plan.slice).includes(name) || !['0', '1'].includes(status))
       throw new Error('invalid_check_result');
-    if (
-      (name.includes('image') || name.startsWith('vault_') || name === 'protected_state') &&
-      plan.images.length !== BUILD_TARGETS.length
-    )
-      throw new Error('image_identity_required');
+    const imageIds = releaseCheckImageIds(plan.images, name);
     plan.checks[name] = {
       status: status === '0' ? 'passed' : 'failed',
       at: new Date().toISOString(),
       sourceCommit: plan.source.commit,
-      imageIds: name.startsWith('vault_')
-        ? plan.images.filter((image) => image.role === 'host').map((image) => image.id)
-        : name.includes('image') || name === 'protected_state'
-          ? plan.images.map((image) => image.id)
-          : [],
+      imageIds,
     };
     writeAtomic(root, 'plan.json', plan);
     checkpointReleaseExecution(path.resolve('.cos-plan-state'), plan.slice, { release_local_checks: plan.checks });
