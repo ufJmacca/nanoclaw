@@ -1122,6 +1122,7 @@ it.runIf(process.env.COS_TEST_TARGET_ID !== undefined)(
           },
           requestId,
           { client: testClient, config, testTargetId: process.env.COS_TEST_TARGET_ID ?? '' },
+          async () => {}, // Foreign source identity/admission is an explicit fixture in this combined case.
         );
       await expect(run()).rejects.toThrow(/^target_vault_test_restore_unavailable$/);
       if ((await admin.query('SELECT id FROM cos.scopes WHERE id=$1', [destination])).rows.length)

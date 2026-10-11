@@ -23,11 +23,17 @@ export async function restoreTargetVaultBackupTestScope(
   options: RecoveredTargetVaultIdentity,
   requestId: string,
   sandbox: { client: pg.Client; config: PoolConfig; testTargetId: string },
+  checkDatabase: () => Promise<void>,
 ) {
   let active = false;
   try {
     const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
-    if (!uuid.test(requestId) || !uuid.test(options.queueOperationId) || typeof options.current !== 'function')
+    if (
+      !uuid.test(requestId) ||
+      !uuid.test(options.queueOperationId) ||
+      typeof options.current !== 'function' ||
+      typeof checkDatabase !== 'function'
+    )
       throw Error('restore_owner_required');
     const settings = Object.freeze({ ...deploymentSettings(options.settings) }),
       targetDigest = digest(targetBinding(settings)),
@@ -80,6 +86,8 @@ export async function restoreTargetVaultBackupTestScope(
       caller();
       assertCoordinatedRecoveryIdentity(identity);
     };
+    current();
+    await checkDatabase();
     current();
     return await withVaultDirectory(roots, 'staging', async (staging, assertVault) => {
       const vaultCurrent = () => {
@@ -180,10 +188,15 @@ export async function restoreTargetVaultBackupTestScope(
                 remote.receipt.files,
                 sandbox,
                 reservation,
-                async () => payloadCurrent(),
+                async () => {
+                  payloadCurrent();
+                  await checkDatabase();
+                  payloadCurrent();
+                },
               );
               payloadCurrent();
               await verifyComplete(snapshotDigest);
+              await checkDatabase();
               payloadCurrent();
               return {
                 ...restored,

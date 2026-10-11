@@ -60,6 +60,7 @@ function fixture() {
     queueOperationId = randomUUID(),
     requestId = randomUUID(),
     current = vi.fn(),
+    databaseGuard = vi.fn().mockResolvedValue(undefined),
     vaultGuard = vi.fn(),
     scopeGuard = vi.fn(),
     payloadGuard = vi.fn(),
@@ -187,7 +188,8 @@ function fixture() {
     vaultGuard,
     scopeGuard,
     payloadGuard,
-    run: () => restoreTargetVaultBackupTestScope(options, requestId, sandbox),
+    databaseGuard,
+    run: () => restoreTargetVaultBackupTestScope(options, requestId, sandbox, databaseGuard),
   };
 }
 it('requires complete capture verification and binds the live reservation before importing, then verifies again before acknowledgement', async () => {
@@ -312,9 +314,27 @@ it('expires the owner and payload callbacks after the admitted operation ends', 
 });
 it('refuses an invalid stable request before entering vault or repository access', async () => {
   const s = fixture();
-  await expect(restoreTargetVaultBackupTestScope(s.options, '../foreign', s.sandbox)).rejects.toThrow(
+  await expect(restoreTargetVaultBackupTestScope(s.options, '../foreign', s.sandbox, s.databaseGuard)).rejects.toThrow(
     /^target_vault_test_restore_unavailable$/,
   );
   expect(f.vault).not.toHaveBeenCalled();
   expect(f.remote).not.toHaveBeenCalled();
+});
+
+it('requires separate live database admission before vault access', async () => {
+  const s = fixture();
+  s.databaseGuard.mockRejectedValue(Error('PRIVATE_DATABASE_WITHDRAWAL'));
+  await expect(s.run()).rejects.toThrow(/^target_vault_test_restore_unavailable$/);
+  expect(s.databaseGuard).toHaveBeenCalledOnce();
+  expect(f.vault).not.toHaveBeenCalled();
+});
+it('rechecks separate live databases during the importer permission callback', async () => {
+  const s = fixture();
+  f.importer.mockImplementation(async (_identity, _scope, _entries, _sandbox, _reservation, check) => {
+    s.databaseGuard.mockRejectedValue(Error('PRIVATE_DATABASE_WITHDRAWAL'));
+    await check();
+    throw Error('import_must_not_continue');
+  });
+  await expect(s.run()).rejects.toThrow(/^target_vault_test_restore_unavailable$/);
+  expect(s.databaseGuard).toHaveBeenCalledTimes(2);
 });
