@@ -30,6 +30,7 @@ import { packageResticReleaseArtifact, verifyResticReleaseArtifactInput } from '
 import { validateResticArtifactSeal } from './restic-artifact.js';
 import { verifyBackupJobFixtureImage, verifyBackupJobFixtureEvidence } from './backup-job-fixture-evidence.js';
 import { verifyBackupSmbFixtureImages, verifyBackupSmbFixtureEvidence } from './backup-smb-fixture-evidence.js';
+import { verifyBackupRepositoryFixtureEvidence } from './backup-repository-fixture-evidence.js';
 
 export const BUILD_TARGETS = ['host', 'agent-standard', 'agent-documents'] as const;
 type BuildTarget = (typeof BUILD_TARGETS)[number];
@@ -386,6 +387,23 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
     if (!requiredReleaseChecks(plan.slice).includes(name) || !['0', '1'].includes(status))
       throw new Error('invalid_check_result');
     const imageIds = releaseCheckImageIds(plan.images, name);
+    if (['backup_transfer', 'backup_retention', 'backup_recovery'].includes(name) && status === '0') {
+      const file = path.join(root, name + '.log'),
+        stat = fs.lstatSync(file);
+      if (
+        !stat.isFile() ||
+        stat.nlink !== 1 ||
+        stat.uid !== process.getuid?.() ||
+        (stat.mode & 0o7777) !== 0o600 ||
+        stat.size > 1024 ** 2
+      )
+        throw Error('backup_repository_release_evidence_unavailable');
+      verifyBackupRepositoryFixtureEvidence(fs.readFileSync(file, 'utf8'), {
+        sourceCommit: plan.source.commit,
+        sourceTree: plan.source.tree,
+        hostImage: imageIds[0],
+      });
+    }
     if (name === 'backup_mount' && status === '0') {
       const fixture = readPrivate<{
         serverImage: string;

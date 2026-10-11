@@ -152,6 +152,12 @@ if [[ "$slice" == G01 || "$slice" == G02 ]]; then
   check vault_wire cli vault-wire "$id"
 fi
 if [[ "$slice" == G02 ]]; then
+  # One complete real repository run supplies the three separately validated
+  # local gates. Preserve its actual output rather than rerunning destructive
+  # fixture publication and retention merely to create duplicate receipts.
+  check backup_transfer bash "$directory/context/scripts/cos-backup-repository-fixture.sh" "$host_image"
+  check backup_retention cat "$directory/backup_transfer.log"
+  check backup_recovery cat "$directory/backup_transfer.log"
   smb_server_tag="nanoclaw-cos-backup-smb-server:$id"
   smb_client_tag="nanoclaw-cos-backup-smb-client:$id"
   [[ "$(docker image inspect --format '{{.Id}}' "$vault_host")" == "$host_image" ]] || exit 1

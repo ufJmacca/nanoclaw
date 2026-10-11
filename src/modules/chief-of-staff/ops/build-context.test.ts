@@ -41,6 +41,7 @@ function fixture() {
     'scripts/cos-root-unit-fixture.sh': 'isolated root administration source fixture',
     'scripts/cos-source-fixture.sh': 'public source-only Docker fixture driver',
     'scripts/cos-release.sh': 'source-pinned host release coordinator',
+    'scripts/cos-backup-repository-fixture.sh': 'immutable host encrypted repository fixture driver',
     'container/fixtures/backup-smb/Dockerfile.server': 'pinned synthetic SMB server',
     'container/fixtures/backup-smb/Dockerfile.client': 'immutable tested host CIFS client',
     'container/fixtures/backup-smb/server.sh': 'dedicated synthetic account and share',
@@ -208,11 +209,12 @@ it('exports only immutable job-manager fixtures and binds their committed bytes'
   expect(after.buildInputDigest).not.toBe(before.buildInputDigest);
   expect(after.workerAssetsDigest).toBe(before.workerAssetsDigest);
 });
-it.each(['scripts/cos-source-fixture.sh', 'scripts/cos-release.sh'])(
+it.each(['scripts/cos-source-fixture.sh', 'scripts/cos-release.sh', 'scripts/cos-backup-repository-fixture.sh'])(
   'binds committed %s bytes without exporting arbitrary scripts or changing worker assets',
   async (script) => {
     const f = fixture(),
       before = await prepareBuildContext(f.repo, f.commit, path.join(f.root, 'first'));
+    expect(fs.existsSync(path.join(f.root, 'first', script))).toBe(true);
     fs.writeFileSync(path.join(f.repo, script), 'changed public host driver');
     f.git('add', '.');
     f.git('commit', '-qm', 'changed host driver');
