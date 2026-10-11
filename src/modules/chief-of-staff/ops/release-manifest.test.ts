@@ -9,6 +9,7 @@ import {
 import { INITIAL_CHECKSUM, MIGRATIONS } from '../store/migrations.js';
 import { digest } from '../domain/contracts.js';
 import type { VaultRootArtifactSeal } from './vault-root-artifact.js';
+import { RESTIC_ARTIFACT } from './restic-artifact.js';
 const sha = 'a'.repeat(40),
   tree = 'b'.repeat(40),
   image = 'sha256:' + 'c'.repeat(64),
@@ -25,6 +26,7 @@ const backupChecks = [
 function backupManifest() {
   const value = vaultManifest();
   value.slice = 'G02';
+  Object.assign(value, { backupArtifact: RESTIC_ARTIFACT });
   value.previousReleaseIds = ['release-reviewed-g01'];
   for (const name of backupChecks)
     value.checks[name] = {
@@ -91,6 +93,18 @@ it('G02 requires every backup and inherited vault gate for the same sealed ARM64
   expect(supportsReleaseSchema(checked, 17, 22)).toBe(false);
   expect(supportsReleaseSchema(checked, 18, 21)).toBe(false);
 });
+it.each(['absent', 'version', 'platform', 'bytes', 'sha256', 'compressedSha256', 'unexpected'])(
+  'G02 refuses a %s backup executable seal despite otherwise complete checks',
+  (reason) => {
+    const value = backupManifest() as unknown as Record<string, unknown>,
+      artifact: Record<string, unknown> = { ...RESTIC_ARTIFACT };
+    value.backupArtifact = artifact;
+    if (reason === 'absent') delete value.backupArtifact;
+    else if (reason === 'unexpected') artifact.path = '/arbitrary/executable';
+    else artifact[reason] = reason === 'bytes' ? RESTIC_ARTIFACT.bytes + 1 : 'different';
+    expect(() => validateReleaseManifest(value)).toThrow('release_not_transferable');
+  },
+);
 it.each(backupChecks)('G02 denies incomplete or differently bound %s final-image evidence', (name) => {
   for (const patch of [
     { status: 'failed' },

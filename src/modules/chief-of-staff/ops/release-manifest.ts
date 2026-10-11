@@ -18,6 +18,7 @@ import { STRATEGY_CHECKSUM } from '../store/strategy-schema.js';
 import { STRATEGY_CHAIN_CHECKSUM } from '../store/strategy-chain-schema.js';
 import { digest } from '../domain/contracts.js';
 import { vaultRootArtifactSeal, type VaultRootArtifactSeal } from './vault-root-artifact.js';
+import { validateResticArtifactSeal, type RESTIC_ARTIFACT } from './restic-artifact.js';
 export const REQUIRED_RELEASE_CHECKS = [
   'root',
   'runner',
@@ -53,6 +54,7 @@ export type ReleaseManifest = {
   releaseId: string;
   slice: 'S01' | 'S02' | 'S03' | 'S04' | 'S05' | 'S06' | 'S07' | 'S08' | 'S09' | 'S10' | 'S11' | 'G01' | 'G02';
   vaultArtifact?: { digest: string; seal: VaultRootArtifactSeal };
+  backupArtifact?: typeof RESTIC_ARTIFACT;
   platform: 'linux/arm64';
   source: {
     repository: 'ufJmacca/nanoclaw';
@@ -191,6 +193,14 @@ export function validateReleaseManifest(value: unknown): ReleaseManifest {
     if (image.role === 'host') hosts++;
   }
   if (hosts !== 1 || !object(value.checks)) return reject();
+  if (value.slice === 'G02') {
+    try {
+      validateResticArtifactSeal(value.backupArtifact);
+      // eslint-disable-next-line no-catch-all/no-catch-all -- Invalid pinned executable identity denies release admission.
+    } catch {
+      return reject();
+    }
+  }
   if (value.slice === 'G01' || value.slice === 'G02') {
     try {
       const artifact = value.vaultArtifact;
