@@ -11,6 +11,8 @@ RUN rm -f /etc/apt/sources.list.d/debian.sources && \
     mv cryptsetup-bin_*.deb /var/cache/apt/archives/ && rmdir /fixture-download
 COPY --from=release /release/node/bin/node /usr/local/bin/node
 COPY --from=release /release/dist /code
+COPY --from=release /release/node_modules /node_modules
+RUN node --input-type=module -e 'await import("/code/modules/chief-of-staff/calendar/credentials.js");await import("/code/modules/chief-of-staff/calendar/config.js")'
 COPY --from=release /release/vault-artifacts /opt/nanoclaw-cos/vault
 RUN chmod 0755 /opt/nanoclaw-cos/vault && \
     find /opt/nanoclaw-cos/vault -mindepth 1 -maxdepth 1 -type d -exec chmod 0555 {} + && \
