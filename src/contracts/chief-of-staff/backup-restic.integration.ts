@@ -414,10 +414,14 @@ test('official pinned ARM64 binary initializes repository v2 and binds its decry
             dataRoot: ports.roots.dataRoot,
           };
         helper.releaseId = 'release-initialization-repair';
-  helper.source = { ...helper.source, commit: '2'.repeat(40), tree: '3'.repeat(40) };
-  const repairSeal = { ...helper.vaultArtifact!.seal, sourceCommit: helper.source.commit, sourceTree: helper.source.tree };
-  helper.vaultArtifact = { digest: digest(repairSeal), seal: repairSeal };
-  for (const check of Object.values(helper.checks)) check.sourceCommit = helper.source.commit;
+        helper.source = { ...helper.source, commit: '2'.repeat(40), tree: '3'.repeat(40) };
+        const repairSeal = {
+          ...helper.vaultArtifact!.seal,
+          sourceCommit: helper.source.commit,
+          sourceTree: helper.source.tree,
+        };
+        helper.vaultArtifact = { digest: digest(repairSeal), seal: repairSeal };
+        for (const check of Object.values(helper.checks)) check.sourceCommit = helper.source.commit;
         helper.previousReleaseIds = [runtime.releaseId];
         initializeTarget(jobRoot, binding);
         const state = protectTarget(jobRoot, binding);
