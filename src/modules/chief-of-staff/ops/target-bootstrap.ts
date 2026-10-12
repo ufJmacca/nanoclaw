@@ -14,6 +14,7 @@ import { machineFingerprint } from './host-fingerprint.js';
 import { withDeploymentLock } from './deployment-lock.js';
 import { syncPinnedSource } from './source-sync.js';
 import { extractCarrierPayload } from './carrier-extraction.js';
+import { installResticRuntimeArtifact } from './restic-runtime-install.js';
 
 export type BootstrapDocker = (args: string[]) => Promise<string>;
 function privateDirectory(directory: string): void {
@@ -71,6 +72,7 @@ export async function prepareTargetArtifacts(
   try {
     await verifyLoadedImages(manifest, inspect);
     loaded = true;
+    // eslint-disable-next-line no-catch-all/no-catch-all -- Missing or mismatched images must pass verification after loading the authenticated archive.
   } catch {
     /* Missing or mismatched images must still pass verification after loading the authenticated archive. */
   }
@@ -85,6 +87,7 @@ export async function prepareTargetArtifacts(
     let container: unknown;
     try {
       container = JSON.parse(await docker(['container', 'inspect', name]))[0];
+      // eslint-disable-next-line no-catch-all/no-catch-all -- A missing carrier may be created only with the fixed name and rechecked identity below.
     } catch {
       container = undefined;
     }
@@ -137,6 +140,23 @@ export async function prepareTargetArtifacts(
   } else {
     fs.copyFileSync(manifestFile, destination, fs.constants.COPYFILE_EXCL);
     fs.chmodSync(destination, 0o600);
+  }
+  if (manifest.slice === 'G02') {
+    const check = () => {
+      privateDirectory(release);
+      if (digest(validateReleaseManifest(readPrivate(manifestFile))) !== digest(manifest))
+        throw Error('release_manifest_mismatch');
+    };
+    const installed = await withDeploymentLock(settings.stateRoot + '.backup-upload.lock', () =>
+      installResticRuntimeArtifact({ installationRoot: settings.installationRoot, payload, manifest, check }),
+    );
+    check();
+    writeAtomic(release, 'runtime-artifact.json', {
+      contract: 'cos-backup-runtime-artifact/v1',
+      ...installed,
+      verifiedBySourceCommit: manifest.source.commit,
+      verifiedBySourceTree: manifest.source.tree,
+    });
   }
   return { releaseId: manifest.releaseId, payload, hostPayloadDigest: manifest.hostPayloadDigest };
 }
