@@ -34,10 +34,10 @@ const cli = (a: ReturnType<typeof args>) => [
   '--credential-reference',
   a.credentialReference,
 ];
-function fixture() {
+function fixture(selectedRoot = os.homedir() + '/.config/nanoclaw-cos/state') {
   const selected = args(),
     release = fixtureVaultRelease('G02'),
-    root = os.homedir() + '/.config/nanoclaw-cos/state',
+    root = selectedRoot,
     nonce = randomUUID(),
     binding = {
       hostFingerprint: 'a'.repeat(64),
@@ -118,6 +118,7 @@ function fixture() {
       };
     },
   );
+  const publishSelection = vi.fn<NonNullable<BackupNasConfigureControls['publishSelection']>>(async () => {});
   const controls: BackupNasConfigureControls = {
     assertMemory: memory,
     readConfiguration,
@@ -125,8 +126,56 @@ function fixture() {
     openAuthority,
     invoke,
   };
-  return { vault, nas, input, proof, controls, readConfiguration, readTarget, memory, openAuthority, invoke };
+  Object.assign(controls, { publishSelection });
+  return {
+    vault,
+    nas,
+    input,
+    proof,
+    controls,
+    readConfiguration,
+    readTarget,
+    memory,
+    openAuthority,
+    invoke,
+    publishSelection,
+  };
 }
+it('publishes the configured NAS selection only after the exact root installation receipt is verified', async () => {
+  const f = fixture();
+  expect((await runBackupNasConfigureAdmin(f.input, f.controls)).status).toBe('configured');
+  expect(f.publishSelection).toHaveBeenCalledOnce();
+  expect(f.publishSelection.mock.calls[0]?.[0]).toEqual({
+    contract: 'cos-backup-nas-selection/v1',
+    targetDigest: f.vault.identity.targetDigest,
+    nas: f.nas,
+  });
+  const denied = fixture();
+  denied.invoke.mockResolvedValue({ status: 'configured' });
+  await expect(runBackupNasConfigureAdmin(denied.input, denied.controls)).rejects.toThrow(
+    'backup_nas_owner_setup_unavailable',
+  );
+  expect(denied.publishSelection).not.toHaveBeenCalled();
+});
+it('the owner setup command publishes through the default filesystem boundary', async () => {
+  const root = fs.mkdtempSync(path.join(os.homedir(), '.cos-nas-setup-'));
+  fs.chmodSync(root, 0o700);
+  try {
+    const f = fixture(root);
+    delete f.controls.publishSelection;
+    expect((await runBackupNasConfigureAdmin(f.input, f.controls)).status).toBe('configured');
+    const file = path.join(root, 'backup-nas-selection.json');
+    expect(JSON.parse(fs.readFileSync(file, 'utf8'))).toEqual({
+      contract: 'cos-backup-nas-selection/v1',
+      targetDigest: f.vault.identity.targetDigest,
+      nas: f.nas,
+    });
+    expect(fs.statSync(file).mode & 0o777).toBe(0o600);
+    expect(f.proof.authority.close).toHaveBeenCalledOnce();
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
 it('parses NAS metadata while rejecting destination, command and credential-value selectors', () => {
   const a = args();
   expect(parseBackupNasConfigureArguments(cli(a))).toEqual(a);

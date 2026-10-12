@@ -33,6 +33,7 @@ import {
 } from './backup-nas-initialization-recovery-wire.js';
 import { executeBackupNasInitializationRecovery } from './backup-nas-initialization-recovery-process.js';
 import { withBackupNasInitializationProgress } from './backup-nas-initialization-progress.js';
+import { backupNasSelection, publishBackupNasSelection, type BackupNasSelection } from './backup-nas-selection.js';
 export { backupNasSetupInvocation } from './backup-nas-setup-process.js';
 type NasAdminCommand =
   | 'backup-nas-configure'
@@ -57,6 +58,7 @@ type NasAdminControls<R> = {
   readTarget?: (root: string, binding: TargetState['binding']) => TargetState;
   openAuthority?: typeof openProtectedBackupNasSetupAuthority;
   invoke?(vault: VaultRootConfiguration, request: R, check: () => Promise<void>): Promise<unknown>;
+  publishSelection?(selection: BackupNasSelection, check: () => Promise<void>): Promise<void>;
 };
 export type BackupNasConfigureArguments = NasAdminArguments<'backup-nas-configure'>;
 export type BackupNasConfigureInput = NasAdminInput<BackupNasConfigureArguments>;
@@ -595,6 +597,21 @@ async function runProtectedNasAdmin<C extends NasAdminCommand, R>(
       )
         throw Error('setup_root_receipt_conflict');
       verified = Object.freeze(expected);
+      if (args.command === 'backup-nas-configure') {
+        const selection = backupNasSelection(
+          {
+            contract: 'cos-backup-nas-selection/v1',
+            targetDigest: vault.identity.targetDigest,
+            nas,
+          },
+          vault,
+        );
+        await current();
+        await (controls.publishSelection
+          ? controls.publishSelection(selection, current)
+          : publishBackupNasSelection(input.root, selection, args.requestId, current));
+        await current();
+      }
     }
     // eslint-disable-next-line no-catch-all/no-catch-all -- Only status is retained while private authority and configuration descriptors close.
   } catch {
