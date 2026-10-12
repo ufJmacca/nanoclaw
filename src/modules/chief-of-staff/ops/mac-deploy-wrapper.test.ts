@@ -165,6 +165,31 @@ it('runs ordinary delivery with no recovery argument', () => {
   expect(remote.at(-1)).toBe('activate ' + id);
   expect(remote[0]).toBe('protection');
 });
+it.each([
+  ['G01', false],
+  ['G01', true],
+  ['G02', false],
+  ['G02', true],
+] as const)('%s protects the actual deployment process for recovery=%s', (slice, recovery) => {
+  const { result, id, remote } = invoke(recovery, 0, slice);
+  expect(result.status, result.stderr).toBe(0);
+  expect(remote.at(-1)).toBe(
+    'systemd-run --user --quiet --pipe --wait --collect ' +
+      '--unit=nanoclaw-cos-deploy-' +
+      id +
+      '.service ' +
+      '--property=LimitCORE=0 --property=MemorySwapMax=0 --property=RuntimeMaxSec=1900 -- ' +
+      '/usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C LC_ALL=C ' +
+      'activate ' +
+      id +
+      (recovery ? ' release-failed' : ''),
+  );
+});
+it.each(['G01', 'G02'])('%s refuses an empty command before starting a protected unit', (slice) => {
+  const { result, remote } = invoke(false, 2, slice);
+  expect(result.status).not.toBe(0);
+  expect(remote.at(-1)).toBe('bootstrap prepare');
+});
 it('finishes the verified protected current release without replaying normal deployment or archive preparation', () => {
   const { result, args, remote } = invoke(false, 4);
   expect(result.status, result.stderr).toBe(0);
