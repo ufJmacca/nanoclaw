@@ -47,7 +47,7 @@ if [[ "$mode" == backup-capture-kernel ]]; then
   done
   [[ "$(stat -f %z "$4")" -le 65536 && "$(stat -f %z "$5")" -le 1048576 ]] || exit 1
   keys=$(cut -d= -f1 "$4" | LC_ALL=C sort | tr '\n' ',')
-  [[ "$keys" == 'COS_TEST_PGDATABASE,COS_TEST_PGHOST,COS_TEST_PGPASSWORD,COS_TEST_PGPORT,COS_TEST_PGSSLROOTCERT,COS_TEST_PGSSLMODE,COS_TEST_PGUSER,COS_TEST_PG_MIGRATION_PASSWORD,COS_TEST_PG_MIGRATION_USER,COS_TEST_TARGET_ID,' ]] || exit 1
+  [[ "$keys" == 'COS_TEST_PGDATABASE,COS_TEST_PGHOST,COS_TEST_PGPASSWORD,COS_TEST_PGPORT,COS_TEST_PGSSLMODE,COS_TEST_PGSSLROOTCERT,COS_TEST_PGUSER,COS_TEST_PG_MIGRATION_PASSWORD,COS_TEST_PG_MIGRATION_USER,COS_TEST_TARGET_ID,' ]] || exit 1
   fixture_network=bridge
   capture_options=(--env-file "$4" --mount "type=bind,src=$5,dst=/selected-ca.pem,readonly" \
     -e COS_TEST_PGSSLROOTCERT=/selected-ca.pem -e COS_FIXTURE_DATABASE_PROFILE=test -e NANOCLAW_COS_BACKUP_POSTGRES_FIXTURE=1)
