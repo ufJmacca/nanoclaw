@@ -127,7 +127,8 @@ function parseNasAdminArguments<C extends NasAdminCommand>(command: C, args: str
     credentialReference: values['--credential-reference'],
   };
 }
-function openOwnerConfiguration(root: string) {
+/** Read-only held owner configuration; installed callers select the bound target root. */
+export function openOwnerConfiguration(root: string) {
   const parent = fs.lstatSync(root),
     parentFd = fs.openSync(root, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
   let fd: number | undefined;

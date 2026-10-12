@@ -1,5 +1,24 @@
 import { expect, it } from 'vitest';
 import { parseTargetArguments } from './target-helper.js';
+it('admits only fixed repository initialization and rejects destination, password and repair selectors', () => {
+  const args = [
+    'initialize-backups',
+    '--settings',
+    '/home/pi/settings.json',
+    '--request-id',
+    '01234567-89ab-4def-8123-456789abcdef',
+  ];
+  expect(parseTargetArguments(args)).toEqual({ command: 'initialize-backups', settings: args[2], requestId: args[4] });
+  for (const extra of [
+    ['--repository', '/mnt/foreign'],
+    ['--host', '192.168.1.4'],
+    ['--password', 'secret'],
+    ['--repair', 'true'],
+    ['--owner', 'foreign'],
+    ['--kind', 'state'],
+  ])
+    expect(() => parseTargetArguments([...args, ...extra])).toThrow('invalid_target_arguments');
+});
 it('admits a fixed owner maintenance request without repository, restore, retention or kind selectors', () => {
   const args = [
     'maintain-backups',

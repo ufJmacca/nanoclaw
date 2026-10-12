@@ -14,6 +14,7 @@ type TargetArguments =
   | { command: 'scheduled-backup'; settings: string; requestId: string }
   | { command: 'upload-backups'; settings: string; requestId: string }
   | { command: 'maintain-backups'; settings: string; requestId: string }
+  | { command: 'initialize-backups'; settings: string; requestId: string }
   | { command: 'install-backup-jobs'; settings: string }
   | { command: 'reconcile-backup-capture'; settings: string; requestId: string; kind: 'state' | 'credentials' }
   | { command: 'runtime-test'; settings: string; owner: string }
@@ -43,6 +44,7 @@ export function parseTargetArguments(args: string[]): TargetArguments {
       'scheduled-backup',
       'upload-backups',
       'maintain-backups',
+      'initialize-backups',
       'install-backup-jobs',
       'reconcile-backup-capture',
     ].includes(command) ||
@@ -90,7 +92,12 @@ export function parseTargetArguments(args: string[]): TargetArguments {
           phase: values['--phase'] as 'hold' | 'release',
         }
       : reject();
-  if (command === 'scheduled-backup' || command === 'upload-backups' || command === 'maintain-backups')
+  if (
+    command === 'scheduled-backup' ||
+    command === 'upload-backups' ||
+    command === 'maintain-backups' ||
+    command === 'initialize-backups'
+  )
     return Object.keys(values).length === 2 &&
       /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(values['--request-id'] ?? '')
       ? { command, settings: values['--settings'], requestId: values['--request-id'] }
@@ -196,6 +203,15 @@ export async function targetCommand(args: string[]): Promise<Record<string, unkn
   if (request.command === 'reconcile-backup-capture') {
     const { reconcileTargetBackupCapture } = await import('./backup-capture-reconcile.js');
     return reconcileTargetBackupCapture(settings, fileURLToPath(import.meta.url), request.kind, request.requestId);
+  }
+  if (request.command === 'initialize-backups') {
+    const { initializeBackupJob, createBackupInitializationEffects } = await import('./backup-initialize-job.js');
+    return initializeBackupJob({
+      root: settings.stateRoot,
+      binding,
+      requestId: request.requestId,
+      effects: createBackupInitializationEffects(settings, fileURLToPath(import.meta.url)),
+    });
   }
   if (request.command === 'upload-backups' || request.command === 'maintain-backups') {
     const { uploadBackupJob } = await import('./backup-upload-job.js');

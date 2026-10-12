@@ -257,6 +257,43 @@ OAuth exchange.
 Changed bytes or file identities, unknown files, missing ownership claims and
 live writers prevent cleanup. Leave those copies intact for investigation.
 
+## Initialize the G02 backup repository
+
+Use only a verified, healthy G02 payload with reopened target admission. First
+complete the owner-authorized credential installation and NAS configuration
+under their existing maintenance procedure. Verified NAS setup saves private
+destination metadata; release that maintenance operation before initialization.
+The reviewed G01 payload cannot run this command. Installed acceptance is pending.
+
+Keep the request UUID in private operator records. Run the fixed target helper
+with the same memory restrictions used for credential-bearing operations:
+
+```sh
+cos_backup_target() {
+  systemd-run --user --quiet --pipe --wait --collect \
+    --property=LimitCORE=0 --property=MemorySwapMax=0 \
+    --property=RuntimeMaxSec=1900 -- \
+    /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C LC_ALL=C \
+    "$COS_OPERATOR_PAYLOAD/node/bin/node" \
+    "$COS_OPERATOR_PAYLOAD/dist/modules/chief-of-staff/ops/target-helper.js" \
+    "$@" --settings "$COS_OPERATOR_SETTINGS"
+}
+cos_backup_target initialize-backups --request-id REQUEST_UUID
+```
+
+Initialization uses the verified fixed NAS destination and installed credential
+reference, admits the actual signed SMB2.1 mount and measured capacity, then
+claims only a new `restic` directory. It verifies authenticated repository v2
+configuration and all repository data before publishing the private binding.
+It shares the upload/retention lock and keeps the service running during NAS
+waits. No destination, password, adoption, repair or overwrite flag exists.
+
+Repeat the same UUID after a lost reply. A completed, authenticated attempt can
+bind its original repository without initializing twice. An unclaimed directory,
+incomplete utility result or changed file remains held; preserve it for inspection.
+`backup_repository_initialized` and `backup_repository_bound` establish this
+repository binding only. They do not prove a checkpoint or isolated restore.
+
 ## Check G02 repository integrity and retention
 
 This procedure requires a healthy, admitted G02 release and the signed NAS
