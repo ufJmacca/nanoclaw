@@ -43,12 +43,15 @@ const object = (value: unknown): value is Record<string, unknown> =>
 const maximumSafe = BigInt(Number.MAX_SAFE_INTEGER);
 const maximumInode = (1n << 64n) - 1n;
 const inode = (stat: fs.BigIntStats): Inode => {
-  if (stat.dev < 0n || stat.dev > maximumSafe || stat.ino < 1n || stat.ino > maximumInode)
-    throw Error('initialization_inode_bounds');
+  // Node's native bigint stat buffer exposes high-bit Linux ino_t values as
+  // signed int64. Normalize that representation, never persisted journal data.
+  if (stat.ino < -(1n << 63n) || stat.ino > maximumInode) throw Error('initialization_inode_bounds');
+  const value = stat.ino < 0n ? BigInt.asUintN(64, stat.ino) : stat.ino;
+  if (stat.dev < 0n || stat.dev > maximumSafe || value < 1n) throw Error('initialization_inode_bounds');
   return Object.freeze({
     device: Number(stat.dev),
     // Preserve the existing representation for legacy safe identities.
-    inode: stat.ino <= maximumSafe ? Number(stat.ino) : stat.ino.toString(),
+    inode: value <= maximumSafe ? Number(value) : value.toString(),
   });
 };
 const validInode = (value: unknown): boolean =>
