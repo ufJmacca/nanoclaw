@@ -257,3 +257,25 @@ it('accepts only fixed target operations, canonical private settings, and exact 
   ])
     expect(() => parseTargetArguments(args)).toThrow('invalid_target_arguments');
 });
+
+it('admits only staged initialization repair with a stable request, without activation or scope overrides', () => {
+  const args = [
+    'repair-initialize-backups',
+    '--settings',
+    '/home/pi/target.json',
+    '--request-id',
+    '01234567-89ab-4def-8123-456789abcdef',
+  ];
+  expect(parseTargetArguments(args)).toEqual({ command: args[0], settings: args[2], requestId: args[4] });
+  for (const extra of [
+    ['--release-id', 'release-other'],
+    ['--repository', '/mnt/other'],
+    ['--binding', '/home/pi/other.json'],
+    ['--owner', 'other'],
+    ['--kind', 'state'],
+    ['--phase', 'hold'],
+    ['--recover-from', 'release-failed'],
+    ['--password', 'private'],
+  ])
+    expect(() => parseTargetArguments([...args, ...extra])).toThrow('invalid_target_arguments');
+});

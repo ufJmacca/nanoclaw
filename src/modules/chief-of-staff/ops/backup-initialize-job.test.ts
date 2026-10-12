@@ -8,6 +8,7 @@ import { digest } from '../domain/contracts.js';
 import { initializeTarget, protectTarget, readTarget, writeAtomic } from './target-state.js';
 import { withDeploymentLock } from './deployment-lock.js';
 import { initializeBackupJob, type BackupInitializationEffects } from './backup-initialize-job.js';
+import { initializeBackupRepair } from './backup-initialization-repair.js';
 const temporary: string[] = [];
 afterEach(() => {
   vi.restoreAllMocks();
@@ -118,4 +119,56 @@ it('an invalid repository acknowledgement cannot be reported as successful initi
   const f = fixture();
   f.effects.initialize.mockResolvedValue({ status: 'backup_repository_initialized' });
   await expect(initializeBackupJob(f)).rejects.toThrow('backup_repository_initialization_unavailable');
+});
+
+it('repairs initialization with separate helper provenance while preserving admission and an occupied checkpoint', async () => {
+  const f = fixture(),
+    helper = fixtureVaultRelease('G02');
+  helper.releaseId = 'release-repair';
+  helper.source = { ...helper.source, commit: '2'.repeat(40), tree: '3'.repeat(40) };
+  const repairSeal = {
+    ...helper.vaultArtifact!.seal,
+    sourceCommit: helper.source.commit,
+    sourceTree: helper.source.tree,
+  };
+  helper.vaultArtifact = { digest: digest(repairSeal), seal: repairSeal };
+  for (const check of Object.values(helper.checks)) check.sourceCommit = helper.source.commit;
+  helper.previousReleaseIds = [f.manifest.releaseId];
+  const before = fs.readFileSync(f.root + '/state.json');
+  writeAtomic(f.root, 'pending-checkpoint.json', { operationId: 'retained', bytes: 2121728 });
+  const pending = fs.readFileSync(f.root + '/pending-checkpoint.json'),
+    effects = { ...f.effects, verifyRepair: vi.fn(async () => ({ runtime: f.manifest, helper })) };
+  const result = await initializeBackupRepair({ ...f, effects });
+  expect(result.status).toBe('backup_repository_initialized');
+  expect(result.releaseId).toBe(f.manifest.releaseId);
+  expect(result.runtimeSource).toEqual(f.manifest.source);
+  expect(result.helperSource).toEqual(helper.source);
+  expect(result.helperReleaseId).toBe(helper.releaseId);
+  expect(result.activation).toBe('not_performed');
+  expect(fs.readFileSync(f.root + '/state.json')).toEqual(before);
+  expect(fs.readFileSync(f.root + '/pending-checkpoint.json')).toEqual(pending);
+  expect(f.effects.initialize).toHaveBeenCalledOnce();
+});
+it('cannot initialize when the staged repair proof changes during the NAS mount wait', async () => {
+  const f = fixture(),
+    helper = fixtureVaultRelease('G02');
+  helper.releaseId = 'release-repair';
+  helper.source = { ...helper.source, commit: '2'.repeat(40), tree: '3'.repeat(40) };
+  const repairSeal = {
+    ...helper.vaultArtifact!.seal,
+    sourceCommit: helper.source.commit,
+    sourceTree: helper.source.tree,
+  };
+  helper.vaultArtifact = { digest: digest(repairSeal), seal: repairSeal };
+  for (const check of Object.values(helper.checks)) check.sourceCommit = helper.source.commit;
+  helper.previousReleaseIds = [f.manifest.releaseId];
+  const effects = { ...f.effects, verifyRepair: vi.fn(async () => ({ runtime: f.manifest, helper })) };
+  f.effects.mount.mockImplementation(async () => {
+    effects.verifyRepair.mockResolvedValue({
+      runtime: f.manifest,
+      helper: { ...helper, releaseId: 'release-replacement' },
+    });
+  });
+  await expect(initializeBackupRepair({ ...f, effects })).rejects.toThrow('backup_initialization_repair_unavailable');
+  expect(f.effects.initialize).not.toHaveBeenCalled();
 });

@@ -18,7 +18,12 @@ import {
 } from '../../modules/chief-of-staff/ops/target-owner-admin.js';
 import type { DeploymentSettings } from '../../modules/chief-of-staff/ops/deployment-settings.js';
 import { targetBinding } from '../../modules/chief-of-staff/ops/target-host.js';
-import { initializeTarget, readPrivate, writeAtomic } from '../../modules/chief-of-staff/ops/target-state.js';
+import {
+  initializeTarget,
+  protectTarget,
+  readPrivate,
+  writeAtomic,
+} from '../../modules/chief-of-staff/ops/target-state.js';
 import {
   beginMaintenance,
   confirmQuiescence,
@@ -45,6 +50,8 @@ import { BackupQueue } from '../../modules/chief-of-staff/ops/backup-queue.js';
 import { BackupResticTransfer } from '../../modules/chief-of-staff/ops/backup-restic-transfer.js';
 import { BackupResticInitializer } from '../../modules/chief-of-staff/ops/backup-restic-initialize.js';
 import { initializePinnedBackupRepository } from '../../modules/chief-of-staff/ops/backup-repository-initialize.js';
+import { initializeBackupRepair } from '../../modules/chief-of-staff/ops/backup-initialization-repair.js';
+import { fixtureVaultRelease } from './release-fixture.js';
 import { BackupRepositoryWriter } from '../../modules/chief-of-staff/ops/backup-repository-lease.js';
 import { streamQueuedBackup } from '../../modules/chief-of-staff/ops/backup-archive-producer.js';
 import { withIsolatedBackupRestore } from '../../modules/chief-of-staff/ops/backup-restore-workspace.js';
@@ -393,7 +400,83 @@ test('official pinned ARM64 binary initializes repository v2 and binds its decry
         assert.match(repositoryId, /^[a-f0-9]{64}$/);
         const profile = path.join(directory, 'backup-repository.json'),
           profileInode = fs.lstatSync(profile).ino;
-        const replay = await initializePinnedBackupRepository({ ...ports, operationId: randomUUID() });
+        // Exercise the same guarded repair job in the source and immutable
+        // host suites with the real pinned utility and authenticated repository.
+        // NAS/vault admission and source identities here remain synthetic.
+        const runtime = fixtureVaultRelease('G02'),
+          helper = fixtureVaultRelease('G02'),
+          jobRoot = root + '/repair-job-state',
+          binding = {
+            hostFingerprint: 'a'.repeat(64),
+            databaseFingerprint: 'b'.repeat(64),
+            service: 'fixture.service',
+            installationRoot: ports.roots.installationRoot,
+            dataRoot: ports.roots.dataRoot,
+          };
+        helper.releaseId = 'release-initialization-repair';
+  helper.source = { ...helper.source, commit: '2'.repeat(40), tree: '3'.repeat(40) };
+  const repairSeal = { ...helper.vaultArtifact!.seal, sourceCommit: helper.source.commit, sourceTree: helper.source.tree };
+  helper.vaultArtifact = { digest: digest(repairSeal), seal: repairSeal };
+  for (const check of Object.values(helper.checks)) check.sourceCommit = helper.source.commit;
+        helper.previousReleaseIds = [runtime.releaseId];
+        initializeTarget(jobRoot, binding);
+        const state = protectTarget(jobRoot, binding);
+        writeAtomic(jobRoot, 'maintenance.json', {
+          version: 1,
+          bindingDigest: digest(binding),
+          nonce: randomUUID(),
+          owner: 'fixture',
+          purpose: 'deployment',
+          generation: state.generation,
+          phase: 'complete',
+          reopen: true,
+        });
+        writeAtomic(jobRoot, 'state.json', {
+          ...state,
+          releaseId: runtime.releaseId,
+          maintenance: false,
+          maintenanceHistory: true,
+          generation: state.generation + 1,
+        });
+        const pendingRoot = root + '/initialization-pending';
+        fs.mkdirSync(pendingRoot, { mode: 0o700 });
+        const pending = new BackupQueue('a'.repeat(64), async (_kind, work) => work(pendingRoot)),
+          pendingId = randomUUID();
+        await pending.capture(
+          'state',
+          pendingId,
+          async (sink) => {
+            await sink.write('state.json', Buffer.from('synthetic-checkpoint-must-survive-repair'));
+          },
+          65536,
+        );
+        const queueBefore = await pending.inspect('state'),
+          stateBefore = fs.readFileSync(jobRoot + '/state.json');
+        const replay = await initializeBackupRepair({
+          root: jobRoot,
+          binding,
+          requestId: randomUUID(),
+          effects: {
+            verifyRepair: async () => ({ runtime, helper }),
+            healthy: async () => true,
+            mount: async (guard) => guard(),
+            initialize: async (_manifest, operationId, guard, current) => {
+              guard();
+              await current();
+              const selected = await initializePinnedBackupRepository({ ...ports, operationId });
+              guard();
+              await current();
+              return selected;
+            },
+          },
+        });
+        assert.equal(replay.releaseId, runtime.releaseId);
+        assert.equal(replay.helperReleaseId, helper.releaseId);
+        assert.equal(replay.activation, 'not_performed');
+        assert.deepEqual(replay.runtimeSource, runtime.source);
+        assert.deepEqual(replay.helperSource, helper.source);
+        assert.deepEqual(await pending.inspect('state'), queueBefore);
+        assert.deepEqual(fs.readFileSync(jobRoot + '/state.json'), stateBefore);
         assert.equal(replay.status, 'backup_repository_bound');
         assert.equal(replay.repositoryId, repositoryId);
         assert.equal(creates, 1);
