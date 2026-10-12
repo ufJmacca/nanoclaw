@@ -16,7 +16,7 @@ import { withVaultResticPassword } from './backup-password.js';
 import { BackupRepositoryWriter } from './backup-repository-lease.js';
 import { BackupResticInitializer } from './backup-restic-initialize.js';
 import { initializePinnedBackupRepository } from './backup-repository-initialize.js';
-import { readBackupCapacity } from './backup-capacity.js';
+import { readBackupInitializationCapacity } from './backup-capacity.js';
 import { BACKUP_LIMITS, admitBackupCapacity } from './backup-policy.js';
 const pinned = (fd: number) => '/proc/self/fd/' + fd;
 /** Installed composition only. No path, repository, credential, utility, role or
@@ -194,7 +194,7 @@ export async function initializeVaultBackups(input: {
                     password.assertCurrent();
                     await input.check();
                     cache.assertCurrent();
-                    const capacity = await readBackupCapacity(roots, share);
+                    const capacity = await readBackupInitializationCapacity(roots, share);
                     admitBackupCapacity(capacity, { kind: 'credentials', bytes: 1 });
                     if (capacity.vaultFree < BACKUP_LIMITS.vaultReserve + 16384)
                       throw Error('initialization_capacity_unavailable');

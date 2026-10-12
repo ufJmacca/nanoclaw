@@ -150,28 +150,70 @@ export async function readBackupCapacity(
   try {
     if (process.platform !== 'linux') throw Error('linux_required');
     repository.assertCurrent();
-    let vaultFree = Number.MAX_SAFE_INTEGER;
-    const usage: Record<string, number> = {};
-    for (const area of ['staging', 'cache', 'journals'] as const)
-      usage[area] = await withVaultDirectory(roots, area, async (directory) => {
-        const bytes = measure(directory, undefined, 0, { count: 0 }, area === 'journals');
-        vaultFree = Math.min(vaultFree, free(directory));
-        return bytes;
-      });
+    const local = await localCapacity(roots);
     const directory = pinned(repository.fd),
       remote = measure(directory),
       nasFree = free(directory);
     repository.assertCurrent();
     return {
-      staging: usage.staging,
-      cache: usage.cache,
-      credentials: usage.journals,
+      ...local,
       repository: remote,
       nasFree,
-      vaultFree,
     };
   } catch {
     // eslint-disable-next-line preserve-caught-error -- File names, private paths and NAS errors remain private.
+    throw Error('backup_capacity_unavailable');
+  }
+}
+
+async function localCapacity(roots: CalendarStorageRoots) {
+  let vaultFree = Number.MAX_SAFE_INTEGER;
+  const usage: Record<string, number> = {};
+  for (const area of ['staging', 'cache', 'journals'] as const)
+    usage[area] = await withVaultDirectory(roots, area, async (directory) => {
+      const bytes = measure(directory, undefined, 0, { count: 0 }, area === 'journals');
+      vaultFree = Math.min(vaultFree, free(directory));
+      return bytes;
+    });
+  return { staging: usage.staging, cache: usage.cache, credentials: usage.journals, vaultFree };
+}
+
+/** Before creation, the fixed restic child consumes zero repository space. NAS
+ * snapshots and other sibling resources are outside this repository's quota.
+ * An existing child is measured without claiming or adopting it; initialization
+ * still requires its separate durable ownership journal. */
+export async function readBackupInitializationCapacity(
+  roots: CalendarStorageRoots,
+  share: SignedBackupRepository,
+): Promise<BackupCapacity> {
+  try {
+    if (process.platform !== 'linux') throw Error('linux_required');
+    share.assertCurrent();
+    const directory = pinned(share.fd),
+      child = path.join(directory, 'restic'),
+      parent = fs.fstatSync(share.fd),
+      before = fs.lstatSync(child, { throwIfNoEntry: false });
+    const local = await localCapacity(roots);
+    share.assertCurrent();
+    const remote = before ? measure(child, parent.dev) : 0,
+      nasFree = free(directory),
+      current = fs.lstatSync(child, { throwIfNoEntry: false });
+    if (
+      before
+        ? !current ||
+          current.dev !== before.dev ||
+          current.ino !== before.ino ||
+          current.mode !== before.mode ||
+          current.uid !== before.uid ||
+          current.mtimeMs !== before.mtimeMs ||
+          current.ctimeMs !== before.ctimeMs
+        : current !== undefined
+    )
+      throw Error('initialization_repository_changed');
+    share.assertCurrent();
+    return { ...local, repository: remote, nasFree };
+  } catch {
+    // eslint-disable-next-line preserve-caught-error -- Fixed scope status only; no private NAS names or filesystem diagnostics escape.
     throw Error('backup_capacity_unavailable');
   }
 }

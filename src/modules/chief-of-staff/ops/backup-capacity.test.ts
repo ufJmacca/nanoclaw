@@ -4,7 +4,7 @@ import path from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
 const f = vi.hoisted(() => ({ access: vi.fn() }));
 vi.mock('./vault-storage.js', () => ({ withVaultDirectory: f.access }));
-import { readBackupCapacity } from './backup-capacity.js';
+import { readBackupCapacity, readBackupInitializationCapacity } from './backup-capacity.js';
 const temporary: string[] = [],
   held: number[] = [];
 const roots = { targetRoot: '/synthetic/state', installationRoot: '/synthetic/install', dataRoot: '/synthetic/data' };
@@ -36,6 +36,42 @@ function fixture() {
   } as fs.BigIntStatsFs);
   return { areas, repository, check };
 }
+it.each([false, true])('initialization counts only the fixed repository with existing=%s', async (existing) => {
+  const s = fixture();
+  fs.mkdirSync(s.areas.repository + '/@Recently-Snapshot', { mode: 0o500 });
+  let expected = 0;
+  if (existing) {
+    const child = s.areas.repository + '/restic';
+    fs.mkdirSync(child, { mode: 0o700 });
+    fs.writeFileSync(child + '/config', 'synthetic encrypted repository config', { mode: 0o600 });
+    const fd = fs.openSync(child, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY);
+    held.push(fd);
+    expected = (await readBackupCapacity(roots, { fd, assertCurrent: s.repository.assertCurrent })).repository;
+  }
+  await expect(readBackupInitializationCapacity(roots, s.repository)).resolves.toMatchObject({ repository: expected });
+  await expect(readBackupCapacity(roots, s.repository)).rejects.toThrow('backup_capacity_unavailable');
+  expect(fs.statSync(s.areas.repository + '/@Recently-Snapshot').mode & 0o777).toBe(0o500);
+});
+it.each(['symlink', 'file', 'directory-mode', 'file-mode', 'withdrawn-share'])(
+  'initialization still rejects an unsafe fixed repository: %s',
+  async (reason) => {
+    const s = fixture(),
+      child = s.areas.repository + '/restic';
+    fs.mkdirSync(s.areas.repository + '/@Recently-Snapshot', { mode: 0o500 });
+    if (reason === 'file') fs.writeFileSync(child, 'unrelated', { mode: 0o600 });
+    else if (reason === 'symlink') fs.symlinkSync(s.areas.staging, child);
+    else {
+      fs.mkdirSync(child, { mode: 0o700 });
+      if (reason === 'directory-mode') fs.chmodSync(child, 0o755);
+      if (reason === 'file-mode') fs.writeFileSync(child + '/config', 'synthetic', { mode: 0o644 });
+    }
+    if (reason === 'withdrawn-share')
+      s.check.mockImplementation(() => {
+        throw Error('withdrawn');
+      });
+    await expect(readBackupInitializationCapacity(roots, s.repository)).rejects.toThrow('backup_capacity_unavailable');
+  },
+);
 it('counts allocated files and directory metadata without reading any payload contents', async () => {
   const s = fixture();
   fs.writeFileSync(path.join(s.areas.staging, 'checkpoint'), Buffer.alloc(100000), { mode: 0o600 });

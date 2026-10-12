@@ -28,7 +28,7 @@ vi.mock('./restic-artifact.js', async (original) => ({
   withVerifiedResticBinary: f.binary,
 }));
 vi.mock('./backup-password.js', () => ({ withVaultResticPassword: f.password }));
-vi.mock('./backup-capacity.js', () => ({ readBackupCapacity: f.capacity }));
+vi.mock('./backup-capacity.js', () => ({ readBackupInitializationCapacity: f.capacity }));
 vi.mock('./backup-restic-initialize.js', () => ({ BackupResticInitializer: f.initializer }));
 vi.mock('./backup-nas-access.js', () => ({
   withSignedBackupShare: f.share,
