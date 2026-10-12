@@ -21,7 +21,7 @@ function privateDirectory(stat: fs.Stats, device?: number): void {
   if (
     !stat.isDirectory() ||
     stat.uid !== process.getuid?.() ||
-    (stat.mode & 0o777) !== 0o700 ||
+    (stat.mode & 0o7777) !== 0o700 ||
     (device !== undefined && stat.dev !== device)
   )
     throw Error('unsafe_repository_directory');
@@ -34,16 +34,14 @@ function descriptorMountId(fd: number): number {
   if (matches.length !== 1 || !Number.isSafeInteger(id) || id < 1) throw Error('mount_id_required');
   return id;
 }
-/** Opens only the fixed restic child of an existing dedicated share. This never mounts,
- * creates or repairs a path, and never reads a password before admitting the kernel mount.
- * The caller additionally verifies the decrypted repository ID and owns the writer lease. */
-export async function withSignedBackupRepository<T>(
+/** Admits only an existing dedicated signed share. No directory or mount is
+ * created here; initialization additionally holds its own live writer and claim. */
+export async function withSignedBackupShare<T>(
   input: BackupMountBinding,
-  operation: (repository: SignedBackupRepository) => Promise<T>,
+  operation: (share: SignedBackupRepository) => Promise<T>,
   inspect: StorageInspection = inspection,
 ): Promise<T> {
   let mountFd: number | undefined,
-    repositoryFd: number | undefined,
     active = false;
   try {
     if (process.platform !== 'linux') throw Error('linux_required');
@@ -77,26 +75,17 @@ export async function withSignedBackupRepository<T>(
       descriptorMountId(heldMount) !== initialMount.id
     )
       throw Error('mount_changed');
-    repositoryFd = fs.openSync(
-      path.join(pinned(heldMount), 'restic'),
-      fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW,
-    );
-    const heldRepository = repositoryFd,
-      repositoryStat = fs.fstatSync(heldRepository);
-    privateDirectory(repositoryStat, mountStat.dev);
-    if (descriptorMountId(heldRepository) !== initialMount.id) throw Error('nested_repository_mount');
     active = true;
     const assertCurrent = () => {
       try {
         if (!active) throw Error('released_repository_mount');
         assertKernel();
         if (fs.realpathSync(binding.mount) !== binding.mount) throw Error('mount_changed');
-        for (const [fd, original, file] of [
-          [heldMount, mountStat, binding.mount],
-          [heldRepository, repositoryStat, path.join(binding.mount, 'restic')],
-        ] as const) {
-          const current = fs.lstatSync(file),
-            held = fs.fstatSync(fd);
+        {
+          const fd = heldMount,
+            original = mountStat,
+            current = fs.lstatSync(binding.mount),
+            held = fs.fstatSync(heldMount);
           privateDirectory(current, mountStat.dev);
           privateDirectory(held, mountStat.dev);
           if (
@@ -115,7 +104,7 @@ export async function withSignedBackupRepository<T>(
         throw Error('backup_repository_mount_unverified');
       }
     };
-    const lease = Object.freeze({ fd: heldRepository, assertCurrent });
+    const lease = Object.freeze({ fd: heldMount, assertCurrent });
     lease.assertCurrent();
     const result = await operation(lease);
     lease.assertCurrent();
@@ -129,10 +118,61 @@ export async function withSignedBackupRepository<T>(
     throw Error('backup_repository_mount_unverified');
   } finally {
     active = false;
-    try {
-      if (repositoryFd !== undefined) fs.closeSync(repositoryFd);
-    } finally {
-      if (mountFd !== undefined) fs.closeSync(mountFd);
-    }
+    if (mountFd !== undefined) fs.closeSync(mountFd);
   }
+}
+
+/** Opens the fixed existing restic child, without creating or repairing it. */
+export async function withPinnedBackupRepository<T>(
+  share: SignedBackupRepository,
+  operation: (repository: SignedBackupRepository) => Promise<T>,
+): Promise<T> {
+  let fd: number | undefined,
+    active = false;
+  try {
+    share.assertCurrent();
+    const file = path.join(pinned(share.fd), 'restic'),
+      parent = fs.fstatSync(share.fd),
+      mountId = descriptorMountId(share.fd);
+    fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+    const held = fd,
+      initial = fs.fstatSync(held);
+    active = true;
+    const assertCurrent = () => {
+      try {
+        if (!active) throw Error('released_repository');
+        share.assertCurrent();
+        for (const stat of [fs.fstatSync(held), fs.lstatSync(file)]) {
+          privateDirectory(stat, parent.dev);
+          if (stat.dev !== initial.dev || stat.ino !== initial.ino) throw Error('repository_changed');
+        }
+        if (fs.statfsSync(pinned(held), { bigint: true }).type !== smb2 || descriptorMountId(held) !== mountId)
+          throw Error('nested_repository_mount');
+        share.assertCurrent();
+      } catch {
+        // eslint-disable-next-line preserve-caught-error -- Private repository paths and kernel diagnostics stay inside the scope.
+        throw Error('backup_repository_mount_unverified');
+      }
+    };
+    const repository = Object.freeze({ fd: held, assertCurrent });
+    repository.assertCurrent();
+    const result = await operation(repository);
+    repository.assertCurrent();
+    return result;
+  } catch {
+    // eslint-disable-next-line preserve-caught-error -- Callback diagnostics can contain credentials.
+    throw Error('backup_repository_mount_unverified');
+  } finally {
+    active = false;
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+}
+/** Existing transport keeps the same read-only access contract and final mount
+ * inspection. Initialization uses the separately admitted share scope above. */
+export async function withSignedBackupRepository<T>(
+  input: BackupMountBinding,
+  operation: (repository: SignedBackupRepository) => Promise<T>,
+  inspect: StorageInspection = inspection,
+): Promise<T> {
+  return withSignedBackupShare(input, (share) => withPinnedBackupRepository(share, operation), inspect);
 }

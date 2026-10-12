@@ -79,6 +79,7 @@ const records = () => [
     unrelatedShareDenied: true,
     actualPinnedRestic: true,
     actualEncryptedRepositoryV2: true,
+    actualGuardedInitialization: true,
     actualReadDataCheck: true,
     actualIsolatedRamRestore: true,
     releasedLeaseDenied: true,
@@ -97,6 +98,11 @@ const records = () => [
     deniedShareUnchanged: true,
   },
 ];
+it('requires actual guarded repository initialization in the signed kernel fixture', () => {
+  const selected: Record<string, unknown>[] = records();
+  delete selected[2].actualGuardedInitialization;
+  expect(() => verifyBackupSmbFixtureEvidence(selected, identity)).toThrow('backup_smb_fixture_evidence_unavailable');
+});
 it('registers only the two source-bound ARM64 transport fixtures carrying the selected host', () => {
   expect(
     verifyBackupSmbFixtureImages(

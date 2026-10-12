@@ -4,7 +4,14 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { resolve4 } from 'node:dns/promises';
 import { backupNasMountCommand } from '/release/dist/modules/chief-of-staff/ops/backup-nas-units.js';
 import { verifySignedBackupMount } from '/release/dist/modules/chief-of-staff/ops/backup-policy.js';
-import { withSignedBackupRepository } from '/release/dist/modules/chief-of-staff/ops/backup-nas-access.js';
+import {
+  withSignedBackupRepository,
+  withSignedBackupShare,
+} from '/release/dist/modules/chief-of-staff/ops/backup-nas-access.js';
+import { initializePinnedBackupRepository } from '/release/dist/modules/chief-of-staff/ops/backup-repository-initialize.js';
+import { BackupResticInitializer } from '/release/dist/modules/chief-of-staff/ops/backup-restic-initialize.js';
+import { BackupRepositoryWriter } from '/release/dist/modules/chief-of-staff/ops/backup-repository-lease.js';
+import { randomUUID } from 'node:crypto';
 import {
   withVerifiedResticBinary,
   verifyResticRepositoryIdentity,
@@ -40,15 +47,95 @@ async function owner() {
   assert.equal(process.getgid(), 1000);
   assert.deepEqual(process.getgroups(), [1000]);
   assert.equal(fs.statfsSync(ram, { bigint: true }).type, 0x01021994n);
-  fs.mkdirSync(mount + '/restic', { mode: 0o700 });
   const password = ram + '/owner/password';
   fs.writeFileSync(password, 'public-synthetic-restic-fixture-password\n', { mode: 0o600 });
   const passwordFd = fs.openSync(password, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
   const restore = ram + '/owner/restore';
   fs.mkdirSync(restore, { mode: 0o700 });
+  const directory = ram + '/owner/metadata',
+    cacheDirectory = ram + '/owner/cache',
+    writerDirectory = ram + '/owner/writer';
+  for (const folder of [directory, cacheDirectory, writerDirectory]) fs.mkdirSync(folder, { mode: 0o700 });
+  const cacheFd = fs.openSync(
+    cacheDirectory,
+    fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW,
+  );
   try {
     phase = 'pinned_executable';
     await withVerifiedResticBinary(binary, async (executable) => {
+      phase = 'guarded_repository_initialization';
+      const writer = new BackupRepositoryWriter('a'.repeat(64), async (work) => work(writerDirectory));
+      const initialized = await withSignedBackupShare(binding, async (share) =>
+        writer.exclusive(async (writerLease) => {
+          const check = async () => {
+            share.assertCurrent();
+            writerLease.assertCurrent();
+            executable.assertCurrent();
+          };
+          let creates = 0;
+          const ports = {
+            roots: {
+              targetRoot: '/home/fixture/state',
+              installationRoot: '/home/fixture/install',
+              dataRoot: '/home/fixture/data',
+            },
+            filesystemUuid: randomUUID(),
+            credentialReference: randomUUID(),
+            operationId: randomUUID(),
+            mount: binding,
+            directory,
+            share,
+            writer: writerLease,
+            check,
+            restic: (repository) => {
+              const utility = new BackupResticInitializer(
+                {
+                  binary: executable,
+                  repository,
+                  writer: writerLease,
+                  password: {
+                    fd: passwordFd,
+                    assertCurrent() {
+                      assert(fs.fstatSync(passwordFd).isFile());
+                    },
+                  },
+                  cache: {
+                    fd: cacheFd,
+                    assertCurrent() {
+                      assert(fs.fstatSync(cacheFd).isDirectory());
+                    },
+                  },
+                },
+                check,
+              );
+              return {
+                identify: () => utility.identify(),
+                create: async () => {
+                  creates++;
+                  await utility.create();
+                  throw Error('SYNTHETIC_LOST_INITIALIZATION_ACK');
+                },
+              };
+            },
+          };
+          await assert.rejects(
+            initializePinnedBackupRepository(ports),
+            /^Error: backup_repository_initialization_unavailable$/,
+          );
+          const inode = fs.statSync(mount + '/restic').ino;
+          const result = await initializePinnedBackupRepository(ports);
+          assert.equal(result.status, 'backup_repository_initialized');
+          assert.equal(creates, 1);
+          assert.equal(fs.statSync(mount + '/restic').ino, inode);
+          const profileInode = fs.statSync(directory + '/backup-repository.json').ino;
+          const replay = await initializePinnedBackupRepository({ ...ports, operationId: randomUUID() });
+          assert.equal(replay.status, 'backup_repository_bound');
+          assert.equal(replay.repositoryId, result.repositoryId);
+          assert.equal(creates, 1);
+          assert.equal(fs.statSync(directory + '/backup-repository.json').ino, profileInode);
+          return { id: result.repositoryId };
+        }),
+      );
       let released;
       phase = 'signed_repository';
       await withSignedBackupRepository(binding, async (repository) => {
@@ -74,7 +161,6 @@ async function owner() {
           return out;
         };
         phase = 'encrypted_repository_initialization';
-        const initialized = JSON.parse(run(['init', '--repository-version', '2']));
         assert.match(initialized.id, /^[a-f0-9]{64}$/);
         const config = run(['cat', 'config']);
         verifyResticRepositoryIdentity(config, initialized.id);
@@ -115,6 +201,7 @@ async function owner() {
       assert.throws(() => released.assertCurrent(), /^Error: backup_repository_mount_unverified$/);
     });
   } finally {
+    fs.closeSync(cacheFd);
     fs.closeSync(passwordFd);
     fs.rmSync(password);
   }
@@ -204,6 +291,7 @@ async function root() {
         unrelatedShareDenied: true,
         actualPinnedRestic: true,
         actualEncryptedRepositoryV2: true,
+        actualGuardedInitialization: true,
         actualReadDataCheck: true,
         actualIsolatedRamRestore: true,
         releasedLeaseDenied: true,

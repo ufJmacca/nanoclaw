@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
-import { withSignedBackupRepository } from './backup-nas-access.js';
+import { withSignedBackupRepository, withSignedBackupShare, withPinnedBackupRepository } from './backup-nas-access.js';
 const temporary: string[] = [];
 afterEach(() => {
   vi.restoreAllMocks();
@@ -59,6 +59,25 @@ function fixture() {
     },
   };
 }
+it('admits an empty signed share without creating a repository or reading a credential', async () => {
+  const s = fixture();
+  fs.rmdirSync(path.join(s.mount, 'restic'));
+  let fd = -1;
+  await withSignedBackupShare(
+    s.binding,
+    async (share) => {
+      fd = share.fd;
+      expect(fs.readlinkSync('/proc/self/fd/' + fd)).toBe(s.mount);
+      await expect(withPinnedBackupRepository(share, async () => {})).rejects.toThrow(
+        'backup_repository_mount_unverified',
+      );
+      share.assertCurrent();
+      expect(fs.readdirSync(s.mount)).toEqual([]);
+    },
+    s.inspect,
+  );
+  expect(() => fs.fstatSync(fd)).toThrow();
+});
 it('pins the dedicated signed CIFS repository and closes its descriptor after awaited work', async () => {
   const s = fixture();
   let fd = -1,

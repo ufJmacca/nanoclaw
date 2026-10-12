@@ -43,6 +43,8 @@ import { MIGRATIONS, SCHEMA_VERSION } from '../../modules/chief-of-staff/store/m
 import { digest } from '../../modules/chief-of-staff/domain/contracts.js';
 import { BackupQueue } from '../../modules/chief-of-staff/ops/backup-queue.js';
 import { BackupResticTransfer } from '../../modules/chief-of-staff/ops/backup-restic-transfer.js';
+import { BackupResticInitializer } from '../../modules/chief-of-staff/ops/backup-restic-initialize.js';
+import { initializePinnedBackupRepository } from '../../modules/chief-of-staff/ops/backup-repository-initialize.js';
 import { BackupRepositoryWriter } from '../../modules/chief-of-staff/ops/backup-repository-lease.js';
 import { streamQueuedBackup } from '../../modules/chief-of-staff/ops/backup-archive-producer.js';
 import { withIsolatedBackupRestore } from '../../modules/chief-of-staff/ops/backup-restore-workspace.js';
@@ -78,17 +80,15 @@ if (!binary) throw Error('backup_fixture_artifact_required');
 verifyResticBinary(binary);
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-restic-fixture-'));
 fs.chmodSync(root, 0o700);
-const repository = path.join(root, 'repository'),
+const share = path.join(root, 'initialization-share'),
+  repository = path.join(share, 'restic'),
   restore = path.join(root, 'restore');
-fs.mkdirSync(repository, { mode: 0o700 });
+fs.mkdirSync(share, { mode: 0o700 });
 fs.mkdirSync(restore, { mode: 0o700 });
 const password = path.join(root, 'fixture-password');
 fs.writeFileSync(password, 'synthetic-fixture-password-no-live-authority\n', { mode: 0o600 });
 const passwordFd = fs.openSync(password, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
-const repositoryFd = fs.openSync(
-  repository,
-  fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW,
-);
+let repositoryFd: number;
 const binaryFd = fs.openSync(binary, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
 const env = { PATH: '/usr/bin:/bin', LANG: 'C', LC_ALL: 'C', TZ: 'Australia/Sydney' };
 const args = ['--repo', '/proc/self/fd/5', '--password-file', '/proc/self/fd/4', '--no-cache', '--json'];
@@ -289,10 +289,122 @@ test('compiled recovery rejects connection aliases as evidence of database separ
   );
   assert.throws(() => parseBackupOwnerRestoreArguments(args.slice(0, -2)), /^Error: invalid_owner_admin_arguments$/);
 });
-test('official pinned ARM64 binary initializes repository v2 and binds its decrypted identity', () => {
-  run(['init', '--repository-version', '2']);
+test('official pinned ARM64 binary initializes repository v2 and binds its decrypted identity', async () => {
+  const directory = path.join(root, 'initialization-metadata'),
+    lock = path.join(root, 'initialization-lock');
+  for (const folder of [directory, lock]) fs.mkdirSync(folder, { mode: 0o700 });
+  const shareFd = fs.openSync(share, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW),
+    before = fs.fstatSync(shareFd);
+  const shareScope = {
+    fd: shareFd,
+    assertCurrent() {
+      const stat = fs.lstatSync(share);
+      assert.equal(stat.ino, before.ino);
+      assert.equal(stat.dev, before.dev);
+      assert.equal(stat.mode & 0o777, 0o700);
+    },
+  };
+  let creates = 0;
+  try {
+    await withVerifiedResticBinary(binary, async (executable) =>
+      new BackupRepositoryWriter('1'.repeat(64), async (work) => work(lock)).exclusive(async (writer) => {
+        const check = async () => {
+          shareScope.assertCurrent();
+          writer.assertCurrent();
+          executable.assertCurrent();
+        };
+        const ports = {
+          roots: { targetRoot: root + '/state', installationRoot: root + '/install', dataRoot: root + '/data' },
+          filesystemUuid: randomUUID(),
+          credentialReference: randomUUID(),
+          operationId: randomUUID(),
+          mount: { host: '192.168.56.12', share: 'nanoclaw-cos-backups' as const, mount: share },
+          directory,
+          share: shareScope,
+          writer,
+          check,
+          // This repository suite models NAS/vault admission; the signed-kernel
+          // gate exercises the same engine through its default admission port.
+          openRepository: async <T>(
+            _share: typeof shareScope,
+            work: (scope: { fd: number; assertCurrent(): void }) => Promise<T>,
+          ) => {
+            const fd = fs.openSync(
+                repository,
+                fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW,
+              ),
+              initial = fs.fstatSync(fd);
+            try {
+              return await work({
+                fd,
+                assertCurrent() {
+                  shareScope.assertCurrent();
+                  const stat = fs.lstatSync(repository);
+                  assert.equal(stat.ino, initial.ino);
+                  assert.equal(stat.dev, initial.dev);
+                  assert.equal(stat.mode & 0o777, 0o700);
+                },
+              });
+            } finally {
+              fs.closeSync(fd);
+            }
+          },
+          restic: (selected: { fd: number; assertCurrent(): void }) => {
+            const utility = new BackupResticInitializer(
+              {
+                binary: executable,
+                writer,
+                repository: selected,
+                password: {
+                  fd: passwordFd,
+                  assertCurrent() {
+                    assert(fs.fstatSync(passwordFd).isFile());
+                  },
+                },
+                cache: {
+                  fd: cacheFd,
+                  assertCurrent() {
+                    assert(fs.fstatSync(cacheFd).isDirectory());
+                  },
+                },
+              },
+              check,
+            );
+            return {
+              identify: () => utility.identify(),
+              create: async () => {
+                creates++;
+                await utility.create();
+                throw Error('SYNTHETIC_LOST_INITIALIZATION_ACK');
+              },
+            };
+          },
+        };
+        await assert.rejects(
+          initializePinnedBackupRepository(ports),
+          /^Error: backup_repository_initialization_unavailable$/,
+        );
+        const original = fs.lstatSync(repository).ino;
+        const result = await initializePinnedBackupRepository(ports);
+        assert.equal(result.status, 'backup_repository_initialized');
+        assert.equal(creates, 1);
+        assert.equal(fs.lstatSync(repository).ino, original);
+        repositoryId = result.repositoryId as string;
+        assert.match(repositoryId, /^[a-f0-9]{64}$/);
+        const profile = path.join(directory, 'backup-repository.json'),
+          profileInode = fs.lstatSync(profile).ino;
+        const replay = await initializePinnedBackupRepository({ ...ports, operationId: randomUUID() });
+        assert.equal(replay.status, 'backup_repository_bound');
+        assert.equal(replay.repositoryId, repositoryId);
+        assert.equal(creates, 1);
+        assert.equal(fs.lstatSync(profile).ino, profileInode);
+      }),
+    );
+  } finally {
+    fs.closeSync(shareFd);
+  }
+  repositoryFd = fs.openSync(repository, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
   const config = run(['cat', 'config']);
-  repositoryId = (JSON.parse(config) as { id: string }).id;
   assert.deepEqual(verifyResticRepositoryIdentity(config, repositoryId), { version: 2, id: repositoryId });
   assert.throws(() => verifyResticRepositoryIdentity(config, 'f'.repeat(64)), /^Error: backup_repository_unverified$/);
 });
@@ -2050,6 +2162,6 @@ test('real restoration still recovers the original checkpoint after its queued p
   }
 });
 after(() => {
-  for (const fd of [passwordFd, repositoryFd, binaryFd, cacheFd]) fs.closeSync(fd);
+  for (const fd of [passwordFd, repositoryFd, binaryFd, cacheFd]) if (fd !== undefined) fs.closeSync(fd);
   fs.rmSync(root, { recursive: true, force: true });
 });

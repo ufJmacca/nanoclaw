@@ -133,6 +133,7 @@ export function verifyBackupSmbFixtureEvidence(records: unknown[], identity: Ide
       'unrelatedShareDenied',
       'actualPinnedRestic',
       'actualEncryptedRepositoryV2',
+      'actualGuardedInitialization',
       'actualReadDataCheck',
       'actualIsolatedRamRestore',
       'releasedLeaseDenied',
