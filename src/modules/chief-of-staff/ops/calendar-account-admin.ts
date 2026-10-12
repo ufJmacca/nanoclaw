@@ -24,6 +24,7 @@ import {
   calendarAdminOperation as operation,
 } from './calendar-admin.js';
 import { writeAtomic } from './target-state.js';
+import type { CredentialJournal } from './backup-credential-event.js';
 
 export type CalendarAccountArguments =
   | { command: 'calendar-setup'; scopeId: string; requestId: string; backupRoot: string }
@@ -110,6 +111,7 @@ type Dependencies = {
   connect?: typeof connectCosHostStore;
   inspect?: StorageInspection;
   memory?: () => void;
+  credentialJournal?: CredentialJournal;
   fetch?: OAuthTransport['fetch'];
   display?(authorizationUrl: string): void | Promise<void>;
 };
@@ -184,7 +186,7 @@ async function configure(
       }
     }
   }
-  openCalendarCredentials(roots, d.inspect, d.memory);
+  openCalendarCredentials(roots, d.inspect, d.memory, d.credentialJournal);
   await backup('after');
   await o.check();
   if (digest(setupState(roots, clientAt(roots), d.inspect).expected) !== digest(expected))
@@ -211,7 +213,7 @@ export async function runCalendarAccountAdmin(o: Options, d: Dependencies = {}):
   const client = clientAt(roots),
     setup = setupState(roots, client, d.inspect);
   if (setup.existing?.phase !== 'ready') throw new Error('calendar_setup_required');
-  const owner = openCalendarCredentials(roots, d.inspect, d.memory);
+  const owner = openCalendarCredentials(roots, d.inspect, d.memory, d.credentialJournal);
   owner.fences.assertOpen(binding.scopeId, args.bindingId);
   // One binding identity owns one authorization attempt/selection forever. Reconnect uses a new identity.
   const journal = operation(roots, args.bindingId, {

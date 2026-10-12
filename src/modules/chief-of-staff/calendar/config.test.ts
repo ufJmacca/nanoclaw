@@ -10,6 +10,8 @@ import { CalendarAccessFences } from './access-fences.js';
 import { CalendarCredentialOwner } from './credentials.js';
 import { configureCalendarStorage } from './storage-policy.js';
 import type { StorageInspection } from './storage-protection.js';
+import { BackupQueue } from '../ops/backup-queue.js';
+import type { CredentialJournal } from '../ops/backup-credential-event.js';
 vi.mock('../ops/vault-memory.js', () => ({ verifyVaultMemory: vi.fn() }));
 const roots: string[] = [];
 const fixtureRoots = (root: string) => ({
@@ -101,6 +103,44 @@ it('refuses private credential files when no verified storage policy exists', ()
   const root = setup();
   configure(root, false);
   expect(() => openCalendarCredentials(root, [])).toThrow('calendar_configuration_unavailable');
+});
+it('records synthetic credential changes in the real bounded queue through an explicit fixture journal', async () => {
+  const root = setup(),
+    journalRoot = setup(),
+    binding = randomUUID(),
+    reference = randomUUID();
+  configure(root);
+  const queue = new BackupQueue('a'.repeat(64), async (_kind, operation) => operation(journalRoot));
+  const journal: CredentialJournal = async (change, assertState) => {
+    await queue.recordCredential(change, assertState);
+  };
+  const owner = openConfiguredCalendar(fixtureRoots(root), inspect, undefined, journal);
+  await owner.credentials.install('scope', binding, reference, {
+    accessToken: 'SYNTHETIC_TOKEN',
+    refreshToken: 'SYNTHETIC_REFRESH',
+    expiresAt: Date.now() + 3600000,
+    refreshExpiresAt: null,
+    scopes: [GOOGLE_EVENT_READ_SCOPE],
+  });
+  expect(await queue.pending('credentials')).toHaveLength(1);
+  await owner.credentials.inspect('scope', binding, reference);
+  expect(await queue.pending('credentials')).toHaveLength(1);
+});
+it('keeps the production journal mandatory when no fixture journal is explicitly supplied', async () => {
+  const root = setup(),
+    binding = randomUUID(),
+    reference = randomUUID();
+  configure(root);
+  const owner = openConfiguredCalendar(fixtureRoots(root), inspect);
+  await expect(
+    owner.credentials.install('scope', binding, reference, {
+      accessToken: 'SYNTHETIC_TOKEN',
+      refreshToken: 'SYNTHETIC_REFRESH',
+      expiresAt: Date.now() + 3600000,
+      refreshExpiresAt: null,
+      scopes: [GOOGLE_EVENT_READ_SCOPE],
+    }),
+  ).rejects.toThrow('calendar_credentials_unavailable');
 });
 it('requires explicit calendar enablement', () => {
   expect(calendarSettings({})).toEqual({ enabled: false });

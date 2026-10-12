@@ -26,6 +26,8 @@ import { runCalendarAdmin } from '../../modules/chief-of-staff/ops/calendar-admi
 import { writeAtomic } from '../../modules/chief-of-staff/ops/target-state.js';
 import type { StorageInspection } from '../../modules/chief-of-staff/calendar/storage-protection.js';
 import type { CosBinding } from '../../cos-boundary.js';
+import { BackupQueue } from '../../modules/chief-of-staff/ops/backup-queue.js';
+import type { CredentialJournal } from '../../modules/chief-of-staff/ops/backup-credential-event.js';
 const scope = 'calendar-evidence-' + randomUUID();
 const context: KnowledgeContext = {
   scopeId: scope,
@@ -179,6 +181,14 @@ test('S03 operator flow: explicit loopback link, selected sync, stable retry and
           },
     );
   const requests: string[] = [];
+  const credentialJournalRoot = path.join(fixtureRoot, 'credential-journal');
+  fs.mkdirSync(credentialJournalRoot, { mode: 0o700 });
+  // Storage inspection is synthetic in this operator fixture. The actual
+  // encrypted-volume gate exercises the production vault journal separately.
+  const credentialQueue = new BackupQueue('a'.repeat(64), async (_kind, operation) => operation(credentialJournalRoot));
+  const credentialJournal: CredentialJournal = async (change, assertState) => {
+    await credentialQueue.recordCredential(change, assertState);
+  };
   const transport = async (url: string, init: RequestInit) => {
     requests.push(url);
     if (url === 'https://oauth2.googleapis.com/token') {
@@ -202,6 +212,7 @@ test('S03 operator flow: explicit loopback link, selected sync, stable retry and
   const dependencies = {
     inspect,
     memory: () => {}, // Offline synthetic storage fixture; actual kernel memory checks have their own gate.
+    credentialJournal,
     fetch: transport,
     connect,
     artifacts: () => artifacts,
@@ -249,6 +260,7 @@ test('S03 operator flow: explicit loopback link, selected sync, stable retry and
   assert.equal((await runCalendarAccountAdmin({ ...options, args: link }, dependencies)).status, 'ok');
   assert.equal((await runCalendarAccountAdmin({ ...options, args: link }, dependencies)).status, 'ok');
   assert.equal(requests.length, 1);
+  assert.equal((await credentialQueue.pending('credentials')).length, 1);
   writeAtomic(roots.targetRoot, 'sync.json', { calendarId: 'selected', window });
   const sync = {
     command: 'calendar-sync' as const,
@@ -260,6 +272,7 @@ test('S03 operator flow: explicit loopback link, selected sync, stable retry and
   assert.equal((await runCalendarAdmin({ ...options, args: sync }, dependencies)).status, 'ok');
   assert.equal((await runCalendarAdmin({ ...options, args: sync }, dependencies)).status, 'ok');
   assert.equal(requests.length, 2);
+  assert.equal((await credentialQueue.pending('credentials')).length, 1);
   const [snapshot] = (
     await pool.query('SELECT status FROM cos.calendar_snapshots WHERE scope_id=$1 AND id=$2', [scope, sync.requestId])
   ).rows;

@@ -10,6 +10,7 @@ import type { StorageInspection } from './storage-protection.js';
 import { digest } from '../domain/contracts.js';
 import { verifyVaultMemory } from '../ops/vault-memory.js';
 import { createVaultCredentialJournal } from '../ops/backup-credential-journal.js';
+import type { CredentialJournal } from '../ops/backup-credential-event.js';
 export function calendarSettings(env: NodeJS.ProcessEnv): { enabled: boolean } {
   const enabled = env.COS_CALENDAR_ENABLED ?? 'false';
   if (!['true', 'false'].includes(enabled)) throw new DatabaseConfigurationError('COS_CALENDAR_ENABLED');
@@ -40,13 +41,17 @@ export function openCalendarFences(roots: CalendarStorageRoots, inspect?: Storag
     throw new Error('calendar_configuration_unavailable');
   }
 }
-/** Runtime opens existing protected host state only. Operator setup owns initialization and storage-protection verification. */
+/** Runtime opens existing protected host state only. Operator setup owns initialization
+ * and storage verification. The journal argument is a code-only fixture seam;
+ * installed callers always use the encrypted vault journal. */
 export function openCalendarCredentials(
   roots: CalendarStorageRoots,
   inspect?: StorageInspection,
   memory: () => void = verifyVaultMemory,
+  journal?: CredentialJournal,
 ): { fences: CalendarAccessFences; credentials: CalendarCredentialOwner; verifyStorage(): void } {
   try {
+    if (journal !== undefined && typeof journal !== 'function') throw new Error('invalid_credential_journal');
     memory();
     const { targetRoot, installationRoot, dataRoot } = roots;
     privateDirectory(targetRoot);
@@ -79,7 +84,7 @@ export function openCalendarCredentials(
       fences,
       {},
       guard,
-      createVaultCredentialJournal(roots, memory),
+      journal ?? createVaultCredentialJournal(roots, memory),
     );
     if (digest(verifyCalendarStorage(roots, inspect)) !== digest(protection))
       throw new Error('calendar_storage_changed');
