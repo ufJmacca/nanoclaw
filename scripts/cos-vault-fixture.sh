@@ -19,7 +19,10 @@ if [[ "$mode" == helper || "$mode" == units ]]; then
   [[ $# == 2 ]] || exit 1
   probe=probe-artifact.mjs
   [[ "$mode" != units ]] || probe=verify-units.mjs
-  exec docker run --rm --pull=never --network=none --ulimit core=0 --memory 256m --memory-swap 256m \
+  fixture_memory=256m
+  # The sealed installer runs concurrent Node processes and materializes runtime copies.
+  [[ "$mode" != helper ]] || fixture_memory=512m
+  exec docker run --rm --pull=never --network=none --ulimit core=0 --memory "$fixture_memory" --memory-swap "$fixture_memory" \
     -e NANOCLAW_COS_VAULT_FIXTURE=1 --entrypoint /usr/local/bin/node "$image" "/probe/$probe"
 fi
 [[ ( $# == 3 || ( "$mode" == backup-capture-kernel && $# == 5 ) ) && -f "$3" && ! -L "$3" ]] || exit 1
