@@ -103,6 +103,46 @@ it('pins the dedicated signed CIFS repository and closes its descriptor after aw
   expect(() => fs.fstatSync(fd)).toThrow();
   expect(() => check()).toThrow(/^backup_repository_mount_unverified$/);
 });
+it('rejects distinct 64-bit repository inodes even when their JavaScript numbers collide', async () => {
+  const s = fixture(),
+    original = 11453233246511605176n;
+  let named = original,
+    blocked = false;
+  const fstat = fs.fstatSync,
+    lstat = fs.lstatSync;
+  vi.spyOn(fs, 'fstatSync').mockImplementation((fd, options) => {
+    const value = fstat(fd, options);
+    return fs.readlinkSync('/proc/self/fd/' + fd) === s.mount + '/restic'
+      ? (Object.assign(Object.create(Object.getPrototypeOf(value)), value, {
+          ino: options?.bigint ? original : Number(original),
+        }) as ReturnType<typeof fstat>)
+      : value;
+  });
+  vi.spyOn(fs, 'lstatSync').mockImplementation((file, options) => {
+    const value = lstat(file, options);
+    return value && String(file).endsWith('/restic')
+      ? (Object.assign(Object.create(Object.getPrototypeOf(value)), value, {
+          ino: options?.bigint ? named : Number(named),
+        }) as ReturnType<typeof lstat>)
+      : value;
+  });
+  await withSignedBackupRepository(
+    s.binding,
+    async (repository) => {
+      named = original + 1n;
+      try {
+        repository.assertCurrent();
+      } catch (error) {
+        if (!(error instanceof Error) || error.message !== 'backup_repository_mount_unverified') throw error;
+        blocked = true;
+      }
+      named = original;
+    },
+    s.inspect,
+  );
+  expect(Number(original + 1n)).toBe(Number(original));
+  expect(blocked).toBe(true);
+});
 it('rechecks the kernel mount and descriptors for every block without spawning repeated mount inspections', async () => {
   const s = fixture();
   await withSignedBackupRepository(

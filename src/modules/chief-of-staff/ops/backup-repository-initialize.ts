@@ -25,7 +25,7 @@ export type BackupRepositoryInitializationPorts = {
     work: (repository: SignedBackupRepository) => Promise<T>,
   ): Promise<T>;
 };
-type Inode = Readonly<{ device: number; inode: number }>;
+type Inode = Readonly<{ device: number; inode: number | string }>;
 type Journal = Readonly<{
   contract: 'cos-backup-repository-initialization/v1';
   bindingDigest: string;
@@ -40,7 +40,24 @@ const uuid = (value: unknown) =>
 const hash = (value: unknown) => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 const object = (value: unknown): value is Record<string, unknown> =>
   !!value && typeof value === 'object' && !Array.isArray(value);
-const inode = (stat: fs.Stats): Inode => Object.freeze({ device: stat.dev, inode: stat.ino });
+const maximumSafe = BigInt(Number.MAX_SAFE_INTEGER);
+const maximumInode = (1n << 64n) - 1n;
+const inode = (stat: fs.BigIntStats): Inode => {
+  if (stat.dev < 0n || stat.dev > maximumSafe || stat.ino < 1n || stat.ino > maximumInode)
+    throw Error('initialization_inode_bounds');
+  return Object.freeze({
+    device: Number(stat.dev),
+    // Preserve the existing representation for legacy safe identities.
+    inode: stat.ino <= maximumSafe ? Number(stat.ino) : stat.ino.toString(),
+  });
+};
+const validInode = (value: unknown): boolean =>
+  typeof value === 'number'
+    ? Number.isSafeInteger(value) && value > 0
+    : typeof value === 'string' &&
+      /^[1-9][0-9]{0,19}$/.test(value) &&
+      BigInt(value) > maximumSafe &&
+      BigInt(value) <= maximumInode;
 const pinned = (fd: number) => '/proc/self/fd/' + fd;
 function validateJournal(value: unknown, bindingDigest: string): Journal {
   const identity = (input: unknown) =>
@@ -48,8 +65,7 @@ function validateJournal(value: unknown, bindingDigest: string): Journal {
     Object.keys(input).sort().join(',') === 'device,inode' &&
     Number.isSafeInteger(input.device) &&
     Number(input.device) >= 0 &&
-    Number.isSafeInteger(input.inode) &&
-    Number(input.inode) > 0;
+    validInode(input.inode);
   if (
     !object(value) ||
     Object.keys(value).sort().join(',') !== 'bindingDigest,contract,operationId,phase,repository,repositoryId,share' ||
@@ -113,6 +129,7 @@ export async function initializePinnedBackupRepository(
     const heldDirectory = directoryFd,
       parent = fs.fstatSync(heldDirectory),
       shareStat = fs.fstatSync(input.share.fd),
+      shareIdentity = inode(fs.fstatSync(input.share.fd, { bigint: true })),
       bindingDigest = digest({
         rootsDigest: digest(input.roots),
         filesystemUuid: input.filesystemUuid,
@@ -251,7 +268,7 @@ export async function initializePinnedBackupRepository(
         bindingDigest,
         operationId: input.operationId,
         phase: 'reserved',
-        share: inode(shareStat),
+        share: shareIdentity,
         repository: null,
         repositoryId: null,
       };
@@ -260,7 +277,7 @@ export async function initializePinnedBackupRepository(
     } else record = validateJournal(journalValue, bindingDigest);
     if (record.phase !== 'bound' && record.operationId !== input.operationId)
       throw Error('initialization_operation_conflict');
-    if (record.phase !== 'bound' && digest(record.share) !== digest(inode(shareStat)))
+    if (record.phase !== 'bound' && digest(record.share) !== digest(shareIdentity))
       throw Error('initialization_share_changed');
     const persist = async (next: Journal) => {
       await current();
@@ -275,12 +292,12 @@ export async function initializePinnedBackupRepository(
       fs.mkdirSync(resticPath, { mode: 0o700 });
       fs.fsyncSync(input.share.fd);
       await current();
-      const stat = fs.lstatSync(resticPath);
+      const stat = fs.lstatSync(resticPath, { bigint: true });
       if (
         !stat.isDirectory() ||
-        stat.uid !== process.getuid?.() ||
-        (stat.mode & 0o7777) !== 0o700 ||
-        stat.dev !== shareStat.dev
+        stat.uid !== BigInt(process.getuid!()) ||
+        (stat.mode & 0o7777n) !== 0o700n ||
+        stat.dev !== BigInt(shareStat.dev)
       )
         throw Error('unsafe_created_repository');
       await persist({ ...record, phase: 'claimed', repository: inode(stat) });
@@ -291,7 +308,7 @@ export async function initializePinnedBackupRepository(
         repository.assertCurrent();
         await current();
         repository.assertCurrent();
-        if (!wasBound && digest(inode(fs.fstatSync(repository.fd))) !== digest(record.repository))
+        if (!wasBound && digest(inode(fs.fstatSync(repository.fd, { bigint: true }))) !== digest(record.repository))
           throw Error('initialization_repository_changed');
       };
       await check();

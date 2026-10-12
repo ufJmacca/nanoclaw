@@ -110,6 +110,34 @@ it('creates the fixed directory once and binds only its authenticated repository
     expect(create).toHaveBeenCalledOnce();
     expect(fs.statSync(file).ino).toBe(inode);
   }));
+it('records the exact unsigned 64-bit NAS inode and reconciles it without another initialization', async () =>
+  fixture(async (input, create) => {
+    const inode = 11453233246511605176n;
+    const fstat = fs.fstatSync,
+      lstat = fs.lstatSync;
+    vi.spyOn(fs, 'fstatSync').mockImplementation((fd, options) => {
+      const value = fstat(fd, options);
+      return fs.readlinkSync('/proc/self/fd/' + fd) === input.mount.mount + '/restic'
+        ? (Object.assign(Object.create(Object.getPrototypeOf(value)), value, {
+            ino: options?.bigint ? inode : Number(inode),
+          }) as ReturnType<typeof fstat>)
+        : value;
+    });
+    vi.spyOn(fs, 'lstatSync').mockImplementation((file, options) => {
+      const value = lstat(file, options);
+      return value && String(file).endsWith('/restic')
+        ? (Object.assign(Object.create(Object.getPrototypeOf(value)), value, {
+            ino: options?.bigint ? inode : Number(inode),
+          }) as ReturnType<typeof lstat>)
+        : value;
+    });
+    expect((await initializePinnedBackupRepository(input)).status).toBe('backup_repository_initialized');
+    const journal = JSON.parse(fs.readFileSync(input.directory + '/backup-repository-initialization.json', 'utf8'));
+    expect(journal.repository.inode).toBe(inode.toString());
+    expect(typeof journal.share.inode).toBe('number');
+    expect((await initializePinnedBackupRepository(input)).status).toBe('backup_repository_bound');
+    expect(create).toHaveBeenCalledOnce();
+  }));
 it('reconciles a lost initialization acknowledgement by reading the original repository, without initializing again', async () =>
   fixture(async (input, create, identify) => {
     create.mockImplementationOnce(async () => {
@@ -125,6 +153,28 @@ it('reconciles a lost initialization acknowledgement by reading the original rep
     expect(identify).toHaveBeenCalled();
     expect(fs.statSync(input.mount.mount + '/restic').ino).toBe(inode);
   }));
+it.each([
+  Number(11453233246511605176n),
+  '11453233246511605176\n',
+  '18446744073709551616',
+  '011453233246511605176',
+  '-1',
+  '0',
+])('holds a journal with a noncanonical or out-of-range inode %j', async (changed) =>
+  fixture(async (input, create) => {
+    await initializePinnedBackupRepository(input);
+    const file = input.directory + '/backup-repository-initialization.json';
+    const journal = JSON.parse(fs.readFileSync(file, 'utf8'));
+    journal.repository.inode = changed;
+    fs.writeFileSync(file, JSON.stringify(journal));
+    const profile = fs.readFileSync(input.directory + '/backup-repository.json');
+    await expect(initializePinnedBackupRepository(input)).rejects.toThrow(
+      'backup_repository_initialization_unavailable',
+    );
+    expect(fs.readFileSync(input.directory + '/backup-repository.json')).toEqual(profile);
+    expect(create).toHaveBeenCalledOnce();
+  }),
+);
 it('preserves an unclaimed existing repository and unrelated share content', async () =>
   fixture(async (input, create) => {
     fs.mkdirSync(input.mount.mount + '/restic', { mode: 0o700 });

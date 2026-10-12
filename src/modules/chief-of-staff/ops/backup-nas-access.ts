@@ -17,11 +17,11 @@ const inspection: StorageInspection = (command, args) =>
     maxBuffer: 262144,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
-function privateDirectory(stat: fs.Stats, device?: number): void {
+function privateDirectory(stat: fs.BigIntStats, device?: bigint): void {
   if (
     !stat.isDirectory() ||
-    stat.uid !== process.getuid?.() ||
-    (stat.mode & 0o7777) !== 0o700 ||
+    stat.uid !== BigInt(process.getuid!()) ||
+    (stat.mode & 0o7777n) !== 0o700n ||
     (device !== undefined && stat.dev !== device)
   )
     throw Error('unsafe_repository_directory');
@@ -62,11 +62,11 @@ export async function withSignedBackupShare<T>(
     };
     const initialMount = mountIdentity();
     if (fs.realpathSync(binding.mount) !== binding.mount) throw Error('linked_mount');
-    const before = fs.lstatSync(binding.mount);
+    const before = fs.lstatSync(binding.mount, { bigint: true });
     privateDirectory(before);
     mountFd = fs.openSync(binding.mount, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
     const heldMount = mountFd,
-      mountStat = fs.fstatSync(heldMount);
+      mountStat = fs.fstatSync(heldMount, { bigint: true });
     privateDirectory(mountStat);
     if (
       before.dev !== mountStat.dev ||
@@ -84,8 +84,8 @@ export async function withSignedBackupShare<T>(
         {
           const fd = heldMount,
             original = mountStat,
-            current = fs.lstatSync(binding.mount),
-            held = fs.fstatSync(heldMount);
+            current = fs.lstatSync(binding.mount, { bigint: true }),
+            held = fs.fstatSync(heldMount, { bigint: true });
           privateDirectory(current, mountStat.dev);
           privateDirectory(held, mountStat.dev);
           if (
@@ -132,17 +132,17 @@ export async function withPinnedBackupRepository<T>(
   try {
     share.assertCurrent();
     const file = path.join(pinned(share.fd), 'restic'),
-      parent = fs.fstatSync(share.fd),
+      parent = fs.fstatSync(share.fd, { bigint: true }),
       mountId = descriptorMountId(share.fd);
     fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
     const held = fd,
-      initial = fs.fstatSync(held);
+      initial = fs.fstatSync(held, { bigint: true });
     active = true;
     const assertCurrent = () => {
       try {
         if (!active) throw Error('released_repository');
         share.assertCurrent();
-        for (const stat of [fs.fstatSync(held), fs.lstatSync(file)]) {
+        for (const stat of [fs.fstatSync(held, { bigint: true }), fs.lstatSync(file, { bigint: true })]) {
           privateDirectory(stat, parent.dev);
           if (stat.dev !== initial.dev || stat.ino !== initial.ino) throw Error('repository_changed');
         }
