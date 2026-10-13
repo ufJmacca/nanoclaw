@@ -16,6 +16,7 @@ type TargetArguments =
   | { command: 'maintain-backups'; settings: string; requestId: string }
   | { command: 'initialize-backups'; settings: string; requestId: string }
   | { command: 'repair-initialize-backups'; settings: string; requestId: string }
+  | { command: 'repair-upload-backups'; settings: string; requestId: string }
   | { command: 'install-backup-jobs'; settings: string }
   | { command: 'reconcile-backup-capture'; settings: string; requestId: string; kind: 'state' | 'credentials' }
   | { command: 'runtime-test'; settings: string; owner: string }
@@ -47,6 +48,7 @@ export function parseTargetArguments(args: string[]): TargetArguments {
       'maintain-backups',
       'initialize-backups',
       'repair-initialize-backups',
+      'repair-upload-backups',
       'install-backup-jobs',
       'reconcile-backup-capture',
     ].includes(command) ||
@@ -99,7 +101,8 @@ export function parseTargetArguments(args: string[]): TargetArguments {
     command === 'upload-backups' ||
     command === 'maintain-backups' ||
     command === 'initialize-backups' ||
-    command === 'repair-initialize-backups'
+    command === 'repair-initialize-backups' ||
+    command === 'repair-upload-backups'
   )
     return Object.keys(values).length === 2 &&
       /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(values['--request-id'] ?? '')
@@ -226,16 +229,24 @@ export async function targetCommand(args: string[]): Promise<Record<string, unkn
       effects: createBackupInitializationEffects(settings, fileURLToPath(import.meta.url)),
     });
   }
-  if (request.command === 'upload-backups' || request.command === 'maintain-backups') {
+  if (
+    request.command === 'upload-backups' ||
+    request.command === 'maintain-backups' ||
+    request.command === 'repair-upload-backups'
+  ) {
     const { uploadBackupJob } = await import('./backup-upload-job.js');
     const { createBackupUploadJobEffects } = await import('./backup-upload-job-effects.js');
+    const { createBackupUploadRepairEffects } = await import('./backup-upload-repair.js');
     // The job owns a separate kernel lock. NAS waits must not hold the
     // deployment/checkpoint operation lock or the credential publication lock.
     return uploadBackupJob({
       root: settings.stateRoot,
       binding,
       requestId: request.requestId,
-      effects: createBackupUploadJobEffects(settings, fileURLToPath(import.meta.url)),
+      effects:
+        request.command === 'repair-upload-backups'
+          ? createBackupUploadRepairEffects(settings, fileURLToPath(import.meta.url))
+          : createBackupUploadJobEffects(settings, fileURLToPath(import.meta.url)),
       mode: request.command === 'maintain-backups' ? 'maintain' : 'deliver',
     });
   }

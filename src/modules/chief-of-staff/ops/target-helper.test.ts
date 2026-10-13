@@ -279,3 +279,16 @@ it('admits only staged initialization repair with a stable request, without acti
   ])
     expect(() => parseTargetArguments([...args, ...extra])).toThrow('invalid_target_arguments');
 });
+
+it('parses a fixed prepared upload repair without accepting a source, repository or credential override', () => {
+  const args = [
+    'repair-upload-backups',
+    '--settings',
+    '/synthetic/target.json',
+    '--request-id',
+    '01234567-89ab-4def-8123-456789abcdef',
+  ];
+  expect(parseTargetArguments(args)).toEqual({ command: args[0], settings: args[2], requestId: args[4] });
+  for (const option of ['--source', '--repository', '--password-file', '--mode'])
+    expect(() => parseTargetArguments([...args, option, '/synthetic/other'])).toThrow('invalid_target_arguments');
+});

@@ -15,9 +15,9 @@ import {
 import { targetBinding } from './target-host.js';
 import { verifyVaultMemory } from './vault-memory.js';
 
-/** A prepared, fully tested G02 payload may repair initialization against a
- * separately verified healthy G02 runtime. This proof grants no activation,
- * migration, checkpoint retirement, service pause or other administration. */
+/** Verify a prepared, fully tested G02 repair against a separately verified
+ * healthy G02 runtime. Provenance alone grants no effects: initialization and
+ * upload callers retain their separate admission and repository authority. */
 export async function verifyBackupInitializationRepair(
   settings: { releaseRoot: string; stagingRoot: string; sourceRoot: string; stateRoot: string },
   binding: TargetBinding,
