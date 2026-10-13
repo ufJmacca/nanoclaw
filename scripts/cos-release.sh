@@ -208,6 +208,8 @@ host_checks() {
     --input-type=module -e 'await import("/release/bootstrap.mjs"); const {default:D}=await import("/release/node_modules/better-sqlite3/lib/index.js");const d=new D(":memory:");if(d.prepare("select 1 as n").get().n!==1)process.exit(1);d.close()' || return
   if [[ "$slice" == G02 ]]; then
     docker run --rm --pull=never --network=none --read-only --cap-drop=ALL --security-opt=no-new-privileges \
+      --user 1000:1000 --memory 256m --memory-swap 256m --ulimit core=0 \
+      --tmpfs /tmp:rw,nosuid,nodev,noexec,size=8m,mode=700,uid=1000,gid=1000 \
       --entrypoint /release/node/bin/node "$host_image" --test \
       /release/dist/contracts/chief-of-staff/image-archive-storage.integration.js || return
   fi
