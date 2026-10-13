@@ -121,6 +121,71 @@ it('denies unavailable vault access with a fixed error', async () => {
   });
   await expect(readBackupCapacity(roots, s.repository)).rejects.toThrow(/^backup_capacity_unavailable$/);
 });
+it('counts Restic owner-read-only files at initialization and after binding without changing their permissions', async () => {
+  const s = fixture(),
+    child = s.areas.repository + '/restic';
+  fs.mkdirSync(child, { mode: 0o700 });
+  fs.mkdirSync(child + '/keys', { mode: 0o700 });
+  for (const name of ['config', 'keys/synthetic-key'])
+    fs.writeFileSync(child + '/' + name, 'synthetic encrypted repository data', { mode: 0o400 });
+  const fd = fs.openSync(child, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY);
+  held.push(fd);
+  const read = vi.spyOn(fs, 'readFileSync'),
+    chmod = vi.spyOn(fs, 'chmodSync'),
+    capacity = await readBackupCapacity(roots, { fd, assertCurrent: s.repository.assertCurrent });
+  expect(capacity.repository).toBeGreaterThanOrEqual(16384);
+  await expect(readBackupInitializationCapacity(roots, s.repository)).resolves.toMatchObject({
+    repository: capacity.repository,
+  });
+  for (const name of ['config', 'keys/synthetic-key'])
+    expect(fs.statSync(child + '/' + name).mode & 0o7777).toBe(0o400);
+  expect(read).not.toHaveBeenCalled();
+  expect(chmod).not.toHaveBeenCalled();
+});
+it.each(['staging', 'cache', 'journals'])(
+  'owner-read-only repository support does not admit %s files',
+  async (area) => {
+    const s = fixture();
+    fs.writeFileSync(s.areas[area] + '/synthetic', 'synthetic local data', { mode: 0o400 });
+    await expect(readBackupCapacity(roots, s.repository)).rejects.toThrow(/^backup_capacity_unavailable$/);
+    await expect(readBackupInitializationCapacity(roots, s.repository)).rejects.toThrow(
+      /^backup_capacity_unavailable$/,
+    );
+  },
+);
+it.each([0o000, 0o200, 0o440, 0o444, 0o640, 0o644, 0o2400, 0o4600])(
+  'repository read-only support refuses unsafe file mode %s',
+  async (mode) => {
+    const s = fixture(),
+      child = s.areas.repository + '/restic';
+    fs.mkdirSync(child, { mode: 0o700 });
+    const file = child + '/config';
+    fs.writeFileSync(file, 'synthetic encrypted repository data', { mode: 0o600 });
+    fs.chmodSync(file, mode);
+    const fd = fs.openSync(child, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY);
+    held.push(fd);
+    await expect(readBackupCapacity(roots, { fd, assertCurrent: s.repository.assertCurrent })).rejects.toThrow(
+      /^backup_capacity_unavailable$/,
+    );
+    await expect(readBackupInitializationCapacity(roots, s.repository)).rejects.toThrow(
+      /^backup_capacity_unavailable$/,
+    );
+  },
+);
+it.each(['symlink', 'hardlink'])('repository read-only support refuses %s files', async (kind) => {
+  const s = fixture(),
+    child = s.areas.repository + '/restic';
+  fs.mkdirSync(child, { mode: 0o700 });
+  fs.writeFileSync(child + '/config', 'synthetic encrypted data', { mode: 0o400 });
+  if (kind === 'symlink') fs.symlinkSync(child + '/config', child + '/other');
+  else fs.linkSync(child + '/config', child + '/other');
+  const fd = fs.openSync(child, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY);
+  held.push(fd);
+  await expect(readBackupCapacity(roots, { fd, assertCurrent: s.repository.assertCurrent })).rejects.toThrow(
+    /^backup_capacity_unavailable$/,
+  );
+  await expect(readBackupInitializationCapacity(roots, s.repository)).rejects.toThrow(/^backup_capacity_unavailable$/);
+});
 function rootProof(file: string) {
   const lstat = fs.lstatSync,
     fstat = fs.fstatSync,

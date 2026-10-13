@@ -12,7 +12,13 @@ function allocated(stat: fs.Stats): number {
   if (!Number.isSafeInteger(bytes)) throw Error('capacity_bounds');
   return bytes;
 }
-function measure(root: string, device?: number, depth = 0, visited = { count: 0 }, vaultProof = false): number {
+function measure(
+  root: string,
+  device?: number,
+  depth = 0,
+  visited = { count: 0 },
+  policy: { vaultProof?: boolean; repositoryFiles?: boolean } = {},
+): number {
   const alias = /^\/proc\/self\/fd\/\d+$/.test(root);
   const heldChild = device !== undefined && /^\/proc\/self\/fd\/\d+\/[^/]+$/.test(root);
   if (
@@ -48,7 +54,7 @@ function measure(root: string, device?: number, depth = 0, visited = { count: 0 
         throw Error('capacity_tree_bounds');
       const file = path.join(pinned(fd), name),
         stat = fs.lstatSync(file);
-      if (vaultProof && depth === 0 && name === '.vault-canary') {
+      if (policy.vaultProof && depth === 0 && name === '.vault-canary') {
         if (
           !stat.isFile() ||
           stat.dev !== before.dev ||
@@ -86,8 +92,15 @@ function measure(root: string, device?: number, depth = 0, visited = { count: 0 
       }
       if (stat.isSymbolicLink() || stat.uid !== before.uid || stat.dev !== before.dev)
         throw Error('unsafe_capacity_file');
-      if (stat.isDirectory()) total += measure(file, before.dev, depth + 1, visited);
-      else if (stat.isFile() && stat.nlink === 1 && (stat.mode & 0o777) === 0o600) {
+      if (stat.isDirectory())
+        total += measure(file, before.dev, depth + 1, visited, { repositoryFiles: policy.repositoryFiles });
+      // Restic makes committed ciphertext read-only. This permission is valid
+      // only within its pinned repository; local vault files remain 0600.
+      else if (
+        stat.isFile() &&
+        stat.nlink === 1 &&
+        ((stat.mode & 0o7777) === 0o600 || (policy.repositoryFiles && (stat.mode & 0o7777) === 0o400))
+      ) {
         total += allocated(stat);
         const after = fs.lstatSync(file);
         if (
@@ -152,7 +165,7 @@ export async function readBackupCapacity(
     repository.assertCurrent();
     const local = await localCapacity(roots);
     const directory = pinned(repository.fd),
-      remote = measure(directory),
+      remote = measure(directory, undefined, 0, { count: 0 }, { repositoryFiles: true }),
       nasFree = free(directory);
     repository.assertCurrent();
     return {
@@ -171,7 +184,7 @@ async function localCapacity(roots: CalendarStorageRoots) {
   const usage: Record<string, number> = {};
   for (const area of ['staging', 'cache', 'journals'] as const)
     usage[area] = await withVaultDirectory(roots, area, async (directory) => {
-      const bytes = measure(directory, undefined, 0, { count: 0 }, area === 'journals');
+      const bytes = measure(directory, undefined, 0, { count: 0 }, { vaultProof: area === 'journals' });
       vaultFree = Math.min(vaultFree, free(directory));
       return bytes;
     });
@@ -195,7 +208,7 @@ export async function readBackupInitializationCapacity(
       before = fs.lstatSync(child, { throwIfNoEntry: false });
     const local = await localCapacity(roots);
     share.assertCurrent();
-    const remote = before ? measure(child, parent.dev) : 0,
+    const remote = before ? measure(child, parent.dev, 0, { count: 0 }, { repositoryFiles: true }) : 0,
       nasFree = free(directory),
       current = fs.lstatSync(child, { throwIfNoEntry: false });
     if (
