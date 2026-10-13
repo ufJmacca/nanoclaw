@@ -153,8 +153,17 @@ export async function verifyRecoveredTargetVaultState(
       current();
       return value;
     };
+    // Predeployment captures use the candidate's release ID. Their archived
+    // maintenance owner, queue nonce and prior release must agree below.
     const header = read<RecoveredCaptureHeader>('state-capture.json'),
-      snapshotDigest = digest(header);
+      snapshotDigest = digest(header),
+      operatorCapture = header.operationId === 'release-action-' + options.queueOperationId,
+      leaseOwnedCapture =
+        typeof header.operationId === 'string' &&
+        /^release-[a-zA-Z0-9_-]{1,120}$/.test(header.operationId) &&
+        !header.operationId.startsWith('release-action-') &&
+        (!header.operationId.startsWith('release-backup-') ||
+          uuid.test(header.operationId.slice('release-backup-'.length)));
     if (
       !exact(header, [
         'contract',
@@ -179,11 +188,7 @@ export async function verifyRecoveredTargetVaultState(
       ]) ||
       header.contract !== 'cos-target-vault-capture/v1' ||
       typeof header.operationId !== 'string' ||
-      !(
-        header.operationId === 'release-action-' + options.queueOperationId ||
-        (header.operationId.startsWith('release-backup-') &&
-          uuid.test(header.operationId.slice('release-backup-'.length)))
-      ) ||
+      !(operatorCapture || leaseOwnedCapture) ||
       header.queueOperationId !== options.queueOperationId ||
       header.targetBindingDigest !== bindingDigest ||
       !hex.test(header.nativeBindingDigest) ||
@@ -314,8 +319,10 @@ export async function verifyRecoveredTargetVaultState(
       archivedMaintenance.purpose !== 'deployment' ||
       archivedMaintenance.bindingDigest !== bindingDigest ||
       archivedMaintenance.phase !== 'quiescent' ||
-      (header.operationId.startsWith('release-backup-') &&
-        (archivedMaintenance.owner !== header.operationId || archivedMaintenance.nonce !== header.queueOperationId)) ||
+      (leaseOwnedCapture &&
+        (archivedMaintenance.owner !== header.operationId ||
+          archivedMaintenance.nonce !== header.queueOperationId ||
+          archivedState?.releaseId !== options.recovery.releaseId)) ||
       !archivedState ||
       archivedState.lifecycle !== 'protected' ||
       archivedState.maintenance !== true ||

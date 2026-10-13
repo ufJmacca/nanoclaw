@@ -1033,8 +1033,11 @@ test('real remote recovery shares measured staging and the actual checkpoint wri
   assert.deepEqual(snapshotMetadata(), remoteBefore);
   assert.deepEqual(fs.readdirSync(transferCache), []);
 });
-test('real encrypted remote recovery validates the complete captured payload without importing live authority', async () => {
-  const base = path.join(root, 'payload-recovery'),
+async function completeCapturedPayloadRecovery(
+  captureMode: 'operator' | 'predeployment',
+  mismatch?: 'owner' | 'nonce' | 'source-release',
+) {
+  const base = path.join(root, 'payload-recovery-' + captureMode + (mismatch ? '-' + mismatch : '')),
     staging = base + '/staging',
     source = base + '/source';
   fs.mkdirSync(base, { mode: 0o700 });
@@ -1059,11 +1062,23 @@ test('real encrypted remote recovery validates the complete captured payload wit
   };
   fs.mkdirSync(settings.dataRoot, { recursive: true, mode: 0o700 });
   const initial = initializeTarget(source, targetBinding(settings)),
-    operationId = '285cd0bd-2af0-49d0-a9e8-c47dd53c9a39',
-    releaseOperationId = 'release-action-' + operationId;
+    operatorOperationId = '285cd0bd-2af0-49d0-a9e8-c47dd53c9a39',
+    releaseOperationId =
+      captureMode === 'operator' ? 'release-action-' + operatorOperationId : 'release-ded6909b6b4f-20261013093014';
   writeAtomic(source, 'protected.json', { bindingDigest: digest(initial.binding), generation: initial.generation });
-  writeAtomic(source, 'state.json', { ...initial, lifecycle: 'protected', releaseId: 'release-current' });
-  const maintenance = beginMaintenance(source, initial.binding, releaseOperationId, 'deployment');
+  writeAtomic(source, 'state.json', {
+    ...initial,
+    lifecycle: 'protected',
+    releaseId: mismatch === 'source-release' ? 'release-foreign-source' : 'release-current',
+  });
+  const maintenance = beginMaintenance(
+    source,
+    initial.binding,
+    mismatch === 'owner' ? 'release-foreign-owner' : releaseOperationId,
+    'deployment',
+  );
+  const operationId =
+    captureMode === 'operator' ? operatorOperationId : mismatch === 'nonce' ? randomUUID() : maintenance.nonce;
   await confirmQuiescence(source, initial.binding, maintenance, async () => ({
     activeCoordinators: 0,
     activeDatabaseOperations: 0,
@@ -1233,7 +1248,11 @@ test('real encrypted remote recovery validates the complete captured payload wit
     },
     externalCheckpoint: { kind: 'application_scope_logical' as const },
   };
-  const recovery = { releaseId: 'release-current', manifestDigest: 'c'.repeat(64), software: recoveryOptions.software };
+  const recovery = {
+    releaseId: 'release-current',
+    manifestDigest: 'c'.repeat(64),
+    software: recoveryOptions.software,
+  };
   let capturedHeader!: import('../../modules/chief-of-staff/ops/backup-recovered-state.js').RecoveredCaptureHeader;
   const restoreRequest = randomUUID(),
     liveReservation = staging + '/.cos-test-restore-' + restoreRequest + '.json';
@@ -1337,6 +1356,53 @@ test('real encrypted remote recovery validates the complete captured payload wit
       producer,
     );
     const remoteBefore = snapshotMetadata();
+    if (mismatch) {
+      let identityDenied = false;
+      await assert.rejects(
+        withTransfer(
+          repositoryId,
+          async () => {
+            throw Error('must_not_upload');
+          },
+          async (transfer, current) =>
+            queue.withRestoreWorkspace(randomUUID(), current, async (workspace) => {
+              const recovered = await transfer.restore('state', operationId, 'a'.repeat(64), workspace.sink, async () =>
+                workspace.assertCurrent(),
+              );
+              try {
+                await verifyRecoveredTargetVaultState(
+                  {
+                    settings,
+                    binding: laterBinding,
+                    witness,
+                    queueOperationId: operationId,
+                    recovery,
+                    expectedSnapshotDigest: digest(capturedHeader),
+                    current,
+                  },
+                  workspace,
+                  recovered.receipt.files,
+                );
+              } catch (error) {
+                assert.equal((error as Error).message, 'target_vault_recovery_check_unavailable');
+                identityDenied = true;
+                throw error;
+              }
+              throw Error('foreign_capture_identity_accepted');
+            }),
+        ),
+        /^Error: backup_artifact_unverified$/,
+      );
+      assert.equal(identityDenied, true);
+      assert.deepEqual(native.prepare('SELECT * FROM messages').all(), before.messages);
+      assert.deepEqual(native.prepare('SELECT * FROM model_counters').all(), before.counters);
+      assert.deepEqual(fs.readFileSync(witness.root + '/owner.json'), before.journal);
+      assert.deepEqual(native.prepare('SELECT binding,paused FROM cos_identity_boundaries').get(), before.binding);
+      assert.deepEqual(await queue.pending('state'), pending);
+      assert.deepEqual(fs.readdirSync(staging), ['backup-queue']);
+      assert.deepEqual(snapshotMetadata(), remoteBefore);
+      return;
+    }
     await withTransfer(
       repositoryId,
       async () => {
@@ -1362,7 +1428,21 @@ test('real encrypted remote recovery validates the complete captured payload wit
                 },
                 workspace,
                 recovered.receipt.files,
-              ),
+              ).catch((error: unknown) => {
+                console.log(
+                  JSON.stringify({
+                    fixture: 'complete-capture-recovery',
+                    captureMode,
+                    stage: 'recovered-state-verifier',
+                    status: 'failed',
+                    code:
+                      error instanceof Error && error.message === 'target_vault_recovery_check_unavailable'
+                        ? error.message
+                        : 'fixed_fixture_verification_failure',
+                  }),
+                );
+                throw error;
+              }),
               checked = instructions.coordinated;
             assert.equal(instructions.credentialsActivated, false);
             assert.equal(instructions.writerActivated, false);
@@ -1676,7 +1756,15 @@ test('real encrypted remote recovery validates the complete captured payload wit
   } finally {
     native.close();
   }
-});
+}
+for (const captureMode of ['operator', 'predeployment'] as const) {
+  test(`real encrypted ${captureMode} recovery validates the complete captured payload without importing live authority`, () =>
+    completeCapturedPayloadRecovery(captureMode));
+}
+for (const mismatch of ['owner', 'nonce', 'source-release'] as const) {
+  test(`real encrypted predeployment recovery refuses an authentic archive with a foreign ${mismatch}`, () =>
+    completeCapturedPayloadRecovery('predeployment', mismatch));
+}
 test('real restoration denies a foreign receipt owner and missing checkpoint without destination files or remote changes', async () => {
   const before = snapshotMetadata(),
     staging = path.join(root, 'denied-restore');
