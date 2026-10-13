@@ -25,6 +25,7 @@ const f = vi.hoisted(() => ({
   maintain: vi.fn(),
   restore: vi.fn(),
   deps: undefined as undefined | Record<string, unknown>,
+  producerFile: '',
 }));
 vi.mock('./vault-storage.js', () => ({ verifyVaultStorage: f.vault, withVaultDirectory: f.access }));
 vi.mock('./vault-memory.js', () => ({ verifyVaultMemory: f.memory }));
@@ -45,6 +46,7 @@ vi.mock('./backup-repository-lease.js', async (original) => ({
   createVaultBackupRepositoryWriter: f.writer,
 }));
 vi.mock('./backup-restic-transfer.js', () => ({ BackupResticTransfer: f.transfer }));
+vi.mock('./backup-producer-file.js', () => ({ backupProducerFile: () => f.producerFile }));
 import { uploadVaultBackup, maintainVaultBackups, restoreVaultBackup } from './backup-upload.js';
 const temporary: string[] = [],
   held: number[] = [];
@@ -74,6 +76,7 @@ async function fixture() {
   const producer = path.join(roots.installationRoot, 'dist/modules/chief-of-staff/ops/backup-archive-producer.js');
   fs.mkdirSync(path.dirname(producer), { recursive: true, mode: 0o700 });
   fs.writeFileSync(producer, '// synthetic fixture; never executed', { mode: 0o500 });
+  f.producerFile = producer;
   const policy = {
     targetDigest: digest(roots.targetRoot),
     volume: { filesystemUuid: '11111111-1111-4111-8111-111111111111' },
@@ -603,3 +606,27 @@ it.each(['profile', 'producer', 'maintenance'])(
     expect((await s.queue.pending('state'))[0].state).toBe('pending');
   },
 );
+
+it('selects the verified helper payload producer when the data installation has no compiled dist directory', async () => {
+  const s = await fixture(),
+    oldProducer = path.join(s.roots.installationRoot, 'dist/modules/chief-of-staff/ops/backup-archive-producer.js'),
+    retained = path.join(
+      path.dirname(s.roots.installationRoot),
+      'retained-payload/dist/modules/chief-of-staff/ops/backup-archive-producer.js',
+    );
+  fs.mkdirSync(path.dirname(retained), { recursive: true, mode: 0o700 });
+  fs.renameSync(oldProducer, retained);
+  fs.rmSync(path.join(s.roots.installationRoot, 'dist'), { recursive: true });
+  f.producerFile = retained;
+  await expect(uploadVaultBackup(s.roots, 'state', operationId)).resolves.toMatchObject({ operationId });
+  expect((f.deps!.producer as (kind: string, id: string) => string[])('state', operationId)).toEqual([
+    process.execPath,
+    retained,
+    s.roots.targetRoot,
+    s.roots.installationRoot,
+    s.roots.dataRoot,
+    'state',
+    operationId,
+  ]);
+  expect(fs.existsSync(path.join(s.roots.installationRoot, 'dist'))).toBe(false);
+});

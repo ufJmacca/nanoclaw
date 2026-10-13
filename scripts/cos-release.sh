@@ -212,6 +212,11 @@ host_checks() {
       --tmpfs /tmp:rw,nosuid,nodev,noexec,size=8m,mode=700,uid=1000,gid=1000 \
       --entrypoint /release/node/bin/node "$host_image" --test \
       /release/dist/contracts/chief-of-staff/image-archive-storage.integration.js || return
+    docker run --rm --pull=never --network=none --read-only --cap-drop=ALL --security-opt=no-new-privileges \
+      --user 1000:1000 --memory 256m --memory-swap 256m --ulimit core=0 \
+      --tmpfs /tmp:rw,nosuid,nodev,noexec,size=8m,mode=700,uid=1000,gid=1000 \
+      --entrypoint /release/node/bin/node "$host_image" --test \
+      /release/dist/contracts/chief-of-staff/backup-producer.fixture.js || return
   fi
   docker run --rm --pull=never --network=none --read-only --user 1000:1000 \
     --tmpfs /tmp:rw,nosuid,nodev -w /tmp "$host_image" --test \

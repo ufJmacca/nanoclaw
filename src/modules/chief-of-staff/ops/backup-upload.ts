@@ -12,6 +12,7 @@ import { withVaultResticPassword } from './backup-password.js';
 import { createVaultBackupRepositoryWriter } from './backup-repository-lease.js';
 import { createVaultBackupQueue } from './backup-queue.js';
 import { readBackupCapacity } from './backup-capacity.js';
+import { backupProducerFile } from './backup-producer-file.js';
 import { BACKUP_LIMITS, admitBackupCapacity, type BackupKind, type BackupMountBinding } from './backup-policy.js';
 import {
   BackupResticTransfer,
@@ -150,10 +151,7 @@ async function withVaultBackupRepository<T>(
           )
             throw Error('backup_target_changed');
         };
-        const producer = path.join(
-          roots.installationRoot,
-          'dist/modules/chief-of-staff/ops/backup-archive-producer.js',
-        );
+        const producer = backupProducerFile();
         const producerStat = fs.lstatSync(producer);
         if (
           !producerStat.isFile() ||
