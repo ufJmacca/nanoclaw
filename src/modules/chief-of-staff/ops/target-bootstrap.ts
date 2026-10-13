@@ -15,6 +15,7 @@ import { withDeploymentLock } from './deployment-lock.js';
 import { syncPinnedSource } from './source-sync.js';
 import { extractCarrierPayload } from './carrier-extraction.js';
 import { installResticRuntimeArtifact } from './restic-runtime-install.js';
+import { readImageArchiveStorage, assertImageImportSpace } from './image-archive-storage.js';
 
 export type BootstrapDocker = (args: string[]) => Promise<string>;
 function privateDirectory(directory: string): void {
@@ -205,9 +206,10 @@ export async function bootstrapCommand(args: string[]): Promise<Record<string, u
     writeAtomic(stage, 'source.json', source);
     if (command === 'source') return { status: 'source_verified', releaseId, commit: source.commit, tree: source.tree };
     const bundle = await verifyReleaseBundle(stage, manifestHash);
-    const required = fs.statSync(bundle.archiveFile).size * 3 + 512 * 1024 * 1024,
-      disk = fs.statfsSync(settings.userHome);
-    if (disk.bavail * disk.bsize < required) throw new Error('insufficient_target_disk');
+    const host = manifest.images.find((image) => image.role === 'host')!;
+    const storage = await readImageArchiveStorage(bundle.archiveFile, bundle.archiveHash, host.configurationId);
+    const disk = fs.statfsSync(settings.userHome);
+    assertImageImportSpace(disk.bavail * disk.bsize, storage);
     const docker: BootstrapDocker = async (params) =>
       (
         await promisify(execFile)('/usr/bin/docker', ['--host=unix:///var/run/docker.sock', ...params], {

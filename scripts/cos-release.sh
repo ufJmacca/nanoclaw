@@ -206,6 +206,11 @@ host_checks() {
   [[ "$payload_digest" =~ ^[a-f0-9]{64}$ ]] || return 1
   docker run --rm --pull=never --network=none --entrypoint /release/node/bin/node "$host_image" \
     --input-type=module -e 'await import("/release/bootstrap.mjs"); const {default:D}=await import("/release/node_modules/better-sqlite3/lib/index.js");const d=new D(":memory:");if(d.prepare("select 1 as n").get().n!==1)process.exit(1);d.close()' || return
+  if [[ "$slice" == G02 ]]; then
+    docker run --rm --pull=never --network=none --read-only --cap-drop=ALL --security-opt=no-new-privileges \
+      --entrypoint /release/node/bin/node "$host_image" --test \
+      /release/dist/contracts/chief-of-staff/image-archive-storage.integration.js || return
+  fi
   docker run --rm --pull=never --network=none --read-only --user 1000:1000 \
     --tmpfs /tmp:rw,nosuid,nodev -w /tmp "$host_image" --test \
     /release/src/contracts/chief-of-staff/subscription-operator.integration.mjs || return

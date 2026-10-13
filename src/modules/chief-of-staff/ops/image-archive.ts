@@ -7,15 +7,26 @@ export type SavedImage = {
   architecture: string;
   labels: Record<string, string>;
 };
-/** Reads Docker save metadata only. Layer bytes are streamed past; nothing is extracted or executed. */
-export async function imageConfigurations(source: AsyncIterable<Uint8Array>): Promise<SavedImage[]> {
+export type ArchiveFileObserver = (
+  name: string,
+  size: number,
+) => {
+  write(chunk: Uint8Array): Promise<void>;
+  finish(): Promise<void>;
+};
+/** Reads Docker save metadata without extraction or execution. Optional trusted
+ * sizing observes the same bounded stream, never a second filesystem copy. */
+export async function imageConfigurations(
+  source: AsyncIterable<Uint8Array>,
+  observer?: ArchiveFileObserver,
+): Promise<SavedImage[]> {
   const iterator = source[Symbol.asyncIterator]();
   let buffer = Buffer.alloc(0),
     consumed = 0;
   const reject = (): never => {
     throw new Error('invalid_image_archive');
   };
-  const read = async (size: number, capture = true): Promise<Buffer> => {
+  const read = async (size: number, capture = true, sink?: ReturnType<ArchiveFileObserver>): Promise<Buffer> => {
     const result: Buffer[] = [];
     while (size > 0) {
       if (!buffer.length) {
@@ -25,6 +36,7 @@ export async function imageConfigurations(source: AsyncIterable<Uint8Array>): Pr
       }
       const count = Math.min(size, buffer.length);
       if (capture) result.push(buffer.subarray(0, count));
+      await sink?.write(buffer.subarray(0, count));
       buffer = buffer.subarray(count);
       size -= count;
       consumed += count;
@@ -73,13 +85,16 @@ export async function imageConfigurations(source: AsyncIterable<Uint8Array>): Pr
       type = header[156];
     if (![0, 48, 53].includes(type)) return reject();
     const capture = type !== 53 && size <= 4 * 1024 * 1024;
-    const bytes = await read(size, capture);
+    const sink = type === 53 ? undefined : observer?.(name, size);
+    const bytes = await read(size, capture, sink);
+    await sink?.finish();
     await read((512 - (size % 512)) % 512, false);
     if (!capture) continue;
     let value: Record<string, unknown>;
     try {
       value = JSON.parse(bytes.toString('utf8'));
-    } catch {
+    } catch (error) {
+      if (!(error instanceof SyntaxError)) throw error;
       if (name === 'manifest.json') return reject();
       continue;
     }
