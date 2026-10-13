@@ -1,4 +1,4 @@
-import { expect, it } from 'vitest';
+import { expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
 import { gzipSync } from 'node:zlib';
 import fs from 'node:fs';
@@ -138,6 +138,39 @@ it('binds measured sizes to the complete held compressed archive hash and refuse
     fs.writeFileSync(file, archive.subarray(0, -8));
     await expect(readImageArchiveStorage(file, sha(archive), f.hostConfigurationId)).rejects.toThrow();
   } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+it('cannot let delayed stream cleanup close an unrelated reused descriptor after measurement returns', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-size-close-'));
+  const close = fs.close.bind(fs),
+    pending: Array<() => Promise<void>> = [];
+  let sibling: number | undefined;
+  const spy = vi.spyOn(fs, 'close').mockImplementation((fd, callback) => {
+    pending.push(
+      () =>
+        new Promise<void>((resolve) =>
+          close(fd, (error) => {
+            callback?.(error);
+            resolve();
+          }),
+        ),
+    );
+  });
+  try {
+    const f = fixture(),
+      archive = gzipSync(f.bytes),
+      file = root + '/images.tar.gz';
+    fs.writeFileSync(file, archive, { mode: 0o600 });
+    fs.writeFileSync(root + '/retained', 'retain', { mode: 0o600 });
+    await readImageArchiveStorage(file, sha(archive), f.hostConfigurationId);
+    sibling = fs.openSync(root + '/retained', 'r');
+    for (const finish of pending.splice(0)) await finish();
+    expect(fs.readFileSync(sibling, 'utf8')).toBe('retain');
+  } finally {
+    spy.mockRestore();
+    for (const finish of pending.splice(0)) await finish();
+    if (sibling !== undefined && fs.existsSync('/proc/self/fd/' + sibling)) fs.closeSync(sibling);
     fs.rmSync(root, { recursive: true, force: true });
   }
 });

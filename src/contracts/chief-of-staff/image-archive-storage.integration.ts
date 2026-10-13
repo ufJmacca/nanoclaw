@@ -2,9 +2,13 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createHash } from 'node:crypto';
 import { gzipSync } from 'node:zlib';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import {
   measureImageArchiveStorage,
   assertImageImportSpace,
+  readImageArchiveStorage,
 } from '../../modules/chief-of-staff/ops/image-archive-storage.js';
 
 function tar(files: Record<string, Buffer | string>) {
@@ -68,4 +72,39 @@ test('G02 compiled helper refuses corrupted layer compression and wrong saved ho
   await assert.rejects(measureImageArchiveStorage(chunks(bad.bytes), bad.host));
   const good = archive();
   await assert.rejects(measureImageArchiveStorage(chunks(good.bytes), 'sha256:' + '0'.repeat(64)));
+});
+test('G02 compiled file reader finishes cleanup without closing a reused unrelated descriptor', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-size-close-'));
+  const originalClose = fs.close,
+    pending: Array<() => Promise<void>> = [];
+  let sibling: number | undefined;
+  const delayedClose = (fd: number, callback?: fs.NoParamCallback) => {
+    pending.push(
+      () =>
+        new Promise<void>((resolve) =>
+          originalClose(fd, (error) => {
+            callback?.(error);
+            resolve();
+          }),
+        ),
+    );
+  };
+  fs.close = Object.assign(delayedClose, { __promisify__: originalClose.__promisify__ });
+  try {
+    const f = archive(),
+      compressed = gzipSync(f.bytes),
+      file = root + '/images.tar.gz';
+    fs.writeFileSync(file, compressed, { mode: 0o600 });
+    fs.writeFileSync(root + '/retained', 'retain', { mode: 0o600 });
+    const measured = await readImageArchiveStorage(file, hash(compressed), f.host);
+    assert.equal(measured.snapshotBytes, f.expanded);
+    sibling = fs.openSync(root + '/retained', 'r');
+    for (const finish of pending.splice(0)) await finish();
+    assert.equal(fs.readFileSync(sibling, 'utf8'), 'retain');
+  } finally {
+    fs.close = originalClose;
+    for (const finish of pending.splice(0)) await finish();
+    if (sibling !== undefined && fs.existsSync('/proc/self/fd/' + sibling)) fs.closeSync(sibling);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });

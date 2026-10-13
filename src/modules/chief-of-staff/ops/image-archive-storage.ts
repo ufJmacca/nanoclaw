@@ -211,7 +211,13 @@ export async function readImageArchiveStorage(file: string, expectedHash: string
     )
       return reject();
     const hash = createHash('sha256');
-    source = fs.createReadStream(file, { fd, autoClose: false });
+    // Destroying a ReadStream closes even a borrowed descriptor. Keep sole
+    // ownership here so asynchronous cleanup cannot close a reused descriptor.
+    source = fs.createReadStream(file, {
+      fd,
+      autoClose: false,
+      fs: { read: fs.read, close: (_descriptor, callback) => callback(null) },
+    });
     hashed = new Transform({
       transform(chunk, _encoding, done) {
         hash.update(chunk);
@@ -235,10 +241,13 @@ export async function readImageArchiveStorage(file: string, expectedHash: string
       return reject();
     return measured;
   } finally {
+    const closed =
+      source && !source.closed ? new Promise<void>((resolve) => source!.once('close', resolve)) : Promise.resolve();
     source?.destroy();
     hashed?.destroy();
     expanded?.destroy();
     if (copying) await copying.catch(() => {});
+    await closed;
     fs.closeSync(fd);
   }
 }
