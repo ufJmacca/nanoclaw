@@ -230,9 +230,9 @@ commands grant no Google, Calendar writer or model authority.
 ## Recover an interrupted G02 backup copy
 
 This procedure requires a verified, healthy G02 payload, reopened target
-admission and the existing vault memory restrictions. It is pending installed
-acceptance; the current G01 payload cannot run it. Use the retained payload and
-settings recorded for that G02 release.
+admission and the existing vault memory restrictions. Use the retained payload and settings recorded for the verified G02 release.
+Actual delivery and remaining acceptance are recorded in
+[the G02 receipt](evidence/G02.md).
 
 The hourly upload job first reconciles the queue's current owned incomplete
 capture. A completed pending snapshot stays queued. An authenticated incomplete
@@ -263,7 +263,9 @@ Use only a verified, healthy G02 payload with reopened target admission. First
 complete the owner-authorized credential installation and NAS configuration
 under their existing maintenance procedure. Verified NAS setup saves private
 destination metadata; release that maintenance operation before initialization.
-The reviewed G01 payload cannot run this command. Installed acceptance is pending.
+The reviewed G01 payload cannot run this command. Use the
+[G02 receipt](evidence/G02.md) to distinguish actual repository binding from
+checkpoint and isolated restore acceptance.
 
 Keep the request UUID in private operator records. Run the fixed target helper
 with the same memory restrictions used for credential-bearing operations:
@@ -297,9 +299,9 @@ repository binding only. They do not prove a checkpoint or isolated restore.
 ## Check G02 repository integrity and retention
 
 This procedure requires a healthy, admitted G02 release and the signed NAS
-mount. It is pending installed acceptance. The current G01 release cannot run
-it. Use the retained G02 helper and settings under the scoped core and swap
-restrictions described above.
+mount. Use the retained G02 helper and settings under the scoped core and swap
+restrictions described above. Current installed results are recorded in
+[the G02 receipt](evidence/G02.md).
 
 ```sh
 cos_target maintain-backups --request-id REQUEST_UUID
