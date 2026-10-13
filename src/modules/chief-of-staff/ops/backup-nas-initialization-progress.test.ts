@@ -29,6 +29,23 @@ function fixture() {
     file = path.join(root, 'nas-initialization-progress.' + digest(scope) + '.json');
   return { root, scope, resource, observed, input, file };
 }
+it('refuses an unsupported architecture before checking authority or publishing progress', async () => {
+  const f = fixture(),
+    architecture = Object.getOwnPropertyDescriptor(process, 'arch')!,
+    operation = vi.fn(async () => true);
+  try {
+    Object.defineProperty(process, 'arch', { ...architecture, value: 'x64' });
+    await expect(withBackupNasInitializationProgress(f.input, operation)).rejects.toThrow(
+      /^backup_nas_initialization_progress_unavailable$/,
+    );
+    expect(f.input.check).not.toHaveBeenCalled();
+    expect(operation).not.toHaveBeenCalled();
+    expect(fs.readdirSync(f.root)).toEqual([]);
+  } finally {
+    Object.defineProperty(process, 'arch', architecture);
+    fs.rmSync(f.root, { recursive: true, force: true });
+  }
+});
 it('durably retains exact observed metadata and completion across fresh invocations', async () => {
   const f = fixture();
   try {
