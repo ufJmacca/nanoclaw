@@ -3,12 +3,12 @@
 set -euo pipefail
 umask 077
 [[ "$(uname -s)" == Darwin ]] || { echo 'cos:release requires the Mac host' >&2; exit 1; }
-[[ ( $# == 6 || ( $# == 7 && "${7:-}" == --local-only ) ) && "$1" == --slice && ( "$2" == S11 || "$2" == G01 ) && "$3" == --target && "$4" == pi && "$5" == --db-profile ]] || {
-  echo 'Usage: cos:release --slice S11|G01 --target pi --db-profile test|runtime-disposable [--local-only]' >&2; exit 1;
+[[ ( $# == 6 || ( $# == 7 && "${7:-}" == --local-only ) ) && "$1" == --slice && ( "$2" == S11 || "$2" == G01 || "$2" == G02 ) && "$3" == --target && "$4" == pi && "$5" == --db-profile ]] || {
+  echo 'Usage: cos:release --slice S11|G01|G02 --target pi --db-profile test|runtime-disposable [--local-only]' >&2; exit 1;
 }
 slice=$2 profile=$6
 [[ "$profile" == test || "$profile" == runtime-disposable ]] || exit 1
-[[ "$slice" != G01 || "$profile" == test ]] || { echo 'G01 requires the separate admitted test profile.' >&2; exit 1; }
+[[ ( "$slice" != G01 && "$slice" != G02 ) || "$profile" == test ]] || { echo "$slice requires the separate admitted test profile." >&2; exit 1; }
 [[ -z "${DOCKER_HOST:-}${DOCKER_CONTEXT:-}${DOCKER_TLS_VERIFY:-}${DOCKER_CERT_PATH:-}${BUILDX_BUILDER:-}" ]] || {
   echo 'Explicit Docker endpoint overrides are not accepted for releases.' >&2; exit 1;
 }
@@ -45,7 +45,7 @@ docker buildx ls --format '{{json .}}' > "$directory/builders.jsonl"
 cli builder "$id"
 deploy_cli() { docker exec -w /workspace "$dev" node --import tsx src/modules/chief-of-staff/ops/mac-deploy-cli.ts "$@"; }
 alias_name=$(deploy_cli alias)
-ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=15 "$alias_name" "$(deploy_cli preflight-command)" > "$directory/target-observation.json"
+ssh -4 -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=15 "$alias_name" "$(deploy_cli preflight-command)" > "$directory/target-observation.json"
 cli target "$id"
 builder=$(cli field "$id" builder)
 context=$(cli field "$id" context)
@@ -74,7 +74,9 @@ check() {
   fi
 }
 root_checks() {
-  docker exec "$dev" pnpm test &&
+  docker exec "$dev" node -e 'if(process.getuid?.()!==1000)process.exit(1)' &&
+  docker exec "$dev" pnpm test --maxWorkers=2 &&
+  bash "$directory/context/scripts/cos-root-unit-fixture.sh" "$dev" "$directory/context" &&
   docker exec "$dev" pnpm typecheck &&
   docker exec "$dev" pnpm build &&
   docker exec "$dev" pnpm lint &&
@@ -86,12 +88,17 @@ runner_checks() {
 }
 check root root_checks
 check runner runner_checks
-source scripts/cos-source-fixture.sh
+source "$directory/context/scripts/cos-source-fixture.sh"
 source_fixture() {
   local mode=$1
+  local backup_selection=()
+  if [[ "$slice" == G02 ]]; then
+    cli backup-input "$id" || return
+    backup_selection=(G02)
+  fi
   if [[ "$mode" == demo ]]; then set -- --demo --fixture; else set --; fi
   if [[ "$profile" == test ]]; then
-    prepare_source_fixture "$dev" "$id-$mode" "$directory/context" "$fixture_image" "$runner_volume" || return
+    prepare_source_fixture "$dev" "$id-$mode" "$directory/context" "$fixture_image" "$runner_volume" ${backup_selection[@]+"${backup_selection[@]}"} || return
     "${source_fixture_driver[@]}" --env-file "$test_directory/test.env" \
       --mount "type=bind,src=$test_directory/ca.pem,dst=/selected-ca.pem,readonly" \
       -e COS_TEST_PGSSLROOTCERT=/selected-ca.pem \
@@ -107,9 +114,14 @@ check slice source_fixture slice
 check demo source_fixture demo
 for target in host agent-standard agent-documents; do
   tag=$(cli field "$id" "$target-tag")
+  backup_build=()
+  if [[ "$slice" == G02 && "$target" == host ]]; then
+    cli backup-input "$id"
+    backup_build=(--build-arg RELEASE_FLAVOUR=backup --build-context "backup-artifact-input=$directory/backup-artifact-input")
+  fi
   printf 'Building Linux/ARM64 %s\n' "$target"
   docker --context "$context" buildx build --builder "$builder" --platform linux/arm64 --provenance=false \
-    --load --target "$target" --build-arg "SOURCE_COMMIT=$commit" --build-arg "SOURCE_TREE=$tree" --build-arg "RELEASE_SLICE=$slice" --build-arg "WORKER_ASSETS_DIGEST=$assets" \
+    --load --target "$target" ${backup_build[@]+"${backup_build[@]}"} --build-arg "SOURCE_COMMIT=$commit" --build-arg "SOURCE_TREE=$tree" --build-arg "RELEASE_SLICE=$slice" --build-arg "WORKER_ASSETS_DIGEST=$assets" \
     -f "$directory/context/container/release/Dockerfile" -t "$tag" "$directory/context" \
     > "$directory/$target-build.log" 2>&1
   docker --context "$context" image inspect "$tag" > "$directory/$target-inspect.json"
@@ -118,7 +130,7 @@ cli images "$id"
 host_image=$(cli field "$id" host-id)
 standard_image=$(cli field "$id" agent-standard-id)
 documents_image=$(cli field "$id" agent-documents-id)
-if [[ "$slice" == G01 ]]; then
+if [[ "$slice" == G01 || "$slice" == G02 ]]; then
   docker run --rm --pull=never --network=none "$host_image" --input-type=module \
     -e 'import fs from "node:fs";const root="/release/vault-artifacts";const names=fs.readdirSync(root);if(names.length!==1)process.exit(1);process.stdout.write(fs.readFileSync(root+"/"+names[0]+"/artifact.json","utf8"))' > "$directory/vault-artifact.json"
   cli vault-artifact "$id"
@@ -139,6 +151,45 @@ if [[ "$slice" == G01 ]]; then
   check vault_kernel bash "$directory/context/scripts/cos-vault-fixture.sh" kernel "$vault_image" "$directory/context/scripts/cos-vault-keychain.swift"
   check vault_wire cli vault-wire "$id"
 fi
+if [[ "$slice" == G02 ]]; then
+  check backup_capture bash "$directory/context/scripts/cos-vault-fixture.sh" backup-capture-kernel "$vault_image" "$directory/context/scripts/cos-vault-keychain.swift" "$test_directory/test.env" "$test_directory/ca.pem"
+  check backup_credentials bash "$directory/context/scripts/cos-vault-fixture.sh" backup-kernel "$vault_image" "$directory/context/scripts/cos-vault-keychain.swift"
+  # One complete real repository run supplies the three separately validated
+  # local gates. Preserve its actual output rather than rerunning destructive
+  # fixture publication and retention merely to create duplicate receipts.
+  check backup_transfer bash "$directory/context/scripts/cos-backup-repository-fixture.sh" "$host_image"
+  check backup_retention cat "$directory/backup_transfer.log"
+  check backup_recovery cat "$directory/backup_transfer.log"
+  smb_server_tag="nanoclaw-cos-backup-smb-server:$id"
+  smb_client_tag="nanoclaw-cos-backup-smb-client:$id"
+  [[ "$(docker image inspect --format '{{.Id}}' "$vault_host")" == "$host_image" ]] || exit 1
+  docker --context "$context" buildx build --builder "$builder" --platform linux/arm64 --provenance=false --load \
+    --build-arg "SOURCE_COMMIT=$commit" --build-arg "SOURCE_TREE=$tree" \
+    -f "$directory/context/container/fixtures/backup-smb/Dockerfile.server" -t "$smb_server_tag" \
+    "$directory/context/container/fixtures/backup-smb" > "$directory/backup-smb-server-build.log" 2>&1
+  docker --context "$context" buildx build --builder "$builder" --platform linux/arm64 --provenance=false --load \
+    --build-arg "HOST_IMAGE=$vault_host" --build-arg "HOST_IMAGE_ID=$host_image" \
+    --build-arg "SOURCE_COMMIT=$commit" --build-arg "SOURCE_TREE=$tree" \
+    -f "$directory/context/container/fixtures/backup-smb/Dockerfile.client" -t "$smb_client_tag" \
+    "$directory/context/container/fixtures/backup-smb" > "$directory/backup-smb-client-build.log" 2>&1
+  [[ "$(docker image inspect --format '{{.Id}}' "$vault_host")" == "$host_image" ]] || exit 1
+  docker image inspect "$smb_server_tag" > "$directory/backup-smb-server-inspect.json"
+  docker image inspect "$smb_client_tag" > "$directory/backup-smb-client-inspect.json"
+  smb_server_image=$(docker image inspect --format '{{.Id}}' "$smb_server_tag")
+  smb_client_image=$(cli backup-smb-fixture "$id")
+  check backup_mount bash "$directory/context/scripts/cos-backup-smb-fixture.sh" "$smb_server_image" "$smb_client_image"
+  jobs_tag="nanoclaw-cos-backup-jobs-fixture:$id"
+  [[ "$(docker image inspect --format '{{.Id}}' "$vault_host")" == "$host_image" ]] || exit 1
+  docker --context "$context" buildx build --builder "$builder" --platform linux/arm64 --provenance=false --load \
+    --build-arg "HOST_IMAGE=$vault_host" --build-arg "HOST_IMAGE_ID=$host_image" \
+    --build-arg "SOURCE_COMMIT=$commit" --build-arg "SOURCE_TREE=$tree" \
+    -f "$directory/context/container/fixtures/backup-jobs/Dockerfile.release" -t "$jobs_tag" \
+    "$directory/context/container/fixtures/backup-jobs" > "$directory/backup-jobs-fixture-build.log" 2>&1
+  [[ "$(docker image inspect --format '{{.Id}}' "$vault_host")" == "$host_image" ]] || exit 1
+  docker image inspect "$jobs_tag" > "$directory/backup-jobs-fixture-inspect.json"
+  jobs_image=$(cli backup-job-fixture "$id")
+  check backup_units bash "$directory/context/scripts/cos-backup-jobs-fixture.sh" "$jobs_image"
+fi
 # Daemon-native paths are required for worker Unix sockets. Only this release's synthetic volume is used.
 volume="cos-${commit:0:8}-$stamp"
 docker volume create --label "nanoclaw.cos-fixture=$id" "$volume" > "$directory/fixture-volume.txt"
@@ -146,6 +197,8 @@ volume_root=$(docker volume inspect --format '{{.Mountpoint}}' "$volume")
 docker run --rm --pull=never --network=none --user 0:0 --mount "type=volume,src=$volume,dst=/fixture" \
   --entrypoint node "$fixture_image" -e 'const f=require("fs");for(const p of ["/fixture","/fixture/.cos-plan-state","/fixture/s"]){f.mkdirSync(p,{recursive:true,mode:448});f.chmodSync(p,448);f.chownSync(p,1000,1000)}'
 host_checks() {
+  local backup_host_selection=()
+  if [[ "$slice" == G02 ]]; then backup_host_selection=(-e COS_BACKUP_FIXTURE_BINARY=/release/libexec/restic); fi
   docker run --rm --pull=never --network=none "$host_image" --input-type=module \
     -e 'import {payloadDigest} from "/release/dist/modules/chief-of-staff/ops/payload.js";console.log(await payloadDigest("/release"))' > "$directory/payload.sha256" || return
   local payload_digest
@@ -153,6 +206,18 @@ host_checks() {
   [[ "$payload_digest" =~ ^[a-f0-9]{64}$ ]] || return 1
   docker run --rm --pull=never --network=none --entrypoint /release/node/bin/node "$host_image" \
     --input-type=module -e 'await import("/release/bootstrap.mjs"); const {default:D}=await import("/release/node_modules/better-sqlite3/lib/index.js");const d=new D(":memory:");if(d.prepare("select 1 as n").get().n!==1)process.exit(1);d.close()' || return
+  if [[ "$slice" == G02 ]]; then
+    docker run --rm --pull=never --network=none --read-only --cap-drop=ALL --security-opt=no-new-privileges \
+      --user 1000:1000 --memory 256m --memory-swap 256m --ulimit core=0 \
+      --tmpfs /tmp:rw,nosuid,nodev,noexec,size=8m,mode=700,uid=1000,gid=1000 \
+      --entrypoint /release/node/bin/node "$host_image" --test \
+      /release/dist/contracts/chief-of-staff/image-archive-storage.integration.js || return
+    docker run --rm --pull=never --network=none --read-only --cap-drop=ALL --security-opt=no-new-privileges \
+      --user 1000:1000 --memory 256m --memory-swap 256m --ulimit core=0 \
+      --tmpfs /tmp:rw,nosuid,nodev,noexec,size=8m,mode=700,uid=1000,gid=1000 \
+      --entrypoint /release/node/bin/node "$host_image" --test \
+      /release/dist/contracts/chief-of-staff/backup-producer.fixture.js || return
+  fi
   docker run --rm --pull=never --network=none --read-only --user 1000:1000 \
     --tmpfs /tmp:rw,nosuid,nodev -w /tmp "$host_image" --test \
     /release/src/contracts/chief-of-staff/subscription-operator.integration.mjs || return
@@ -167,6 +232,7 @@ host_checks() {
       continue
     fi
     docker run --rm --pull=never --user 1000:1000 --group-add 0 \
+      ${backup_host_selection[@]+"${backup_host_selection[@]}"} \
       --env-file "$test_directory/test.env" \
       --mount "type=bind,src=$test_directory/ca.pem,dst=/fixture/ca.pem,readonly" \
       --mount "type=volume,src=$volume,dst=/release/.cos-plan-state,volume-subpath=.cos-plan-state" \
@@ -203,7 +269,7 @@ isolation_checks() {
 check image_isolation isolation_checks
 check agent_image agent_checks
 check host_image host_checks
-if [[ "$slice" == G01 ]]; then
+if [[ "$slice" == G01 || "$slice" == G02 ]]; then
   # Actual compiled native state, backed up while WAL pages are committed; no live stores are mounted.
   check protected_state docker run --rm --pull=never --network=none --read-only --user 1000:1000 \
     --tmpfs /tmp:rw,nosuid,nodev "$host_image" --test \

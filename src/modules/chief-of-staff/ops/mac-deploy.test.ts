@@ -35,8 +35,8 @@ const observation = {
   cwd: settings.installationRoot,
   state: null,
 };
-it('G01 requires the existing protected installed target before transfer', () => {
-  const manifest = fixtureVaultRelease(),
+it.each(['G01', 'G02'] as const)('%s requires the existing protected installed target before transfer', (slice) => {
+  const manifest = fixtureVaultRelease(slice),
     state = {
       version: 1,
       binding: {

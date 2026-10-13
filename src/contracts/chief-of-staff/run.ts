@@ -6,6 +6,7 @@ import { safeHostEnvironment } from '../../host-environment.js';
 import { stopFixtureWorkers } from './fixture-workers.js';
 import { parseFixtureArguments, fixtureFiles } from './arguments.js';
 import { assertRuntimeFixtureGuard, selectedFixtureEnvironment } from './fixture-database.js';
+import { selectedBackupFixtureEnvironment } from './backup-fixture-environment.js';
 
 try {
   const args = parseFixtureArguments(process.argv.slice(2)),
@@ -13,6 +14,7 @@ try {
   const env = { ...process.env, COS_FIXTURE_DATABASE_PROFILE: profile };
   if (profile === 'runtime-disposable') await assertRuntimeFixtureGuard(env);
   const selected = selectedFixtureEnvironment(env, true);
+  const backup = selectedBackupFixtureEnvironment(args.slice, env);
   const fixtures = Object.fromEntries(
     ['COS_FIXTURE_HOST_ROOT', 'COS_FIXTURE_IMAGE', 'COS_FIXTURE_RUNNER_VOLUME', 'COS_FIXTURE_SOURCE_ROOT'].map(
       (key) => [key, process.env[key]],
@@ -46,17 +48,19 @@ try {
       ...files.map((file) => path.join(directory, file + '.' + extension)),
     ],
     {
-      env: { ...safeHostEnvironment('docker'), ...selected, ...fixtures },
+      env: { ...safeHostEnvironment('docker'), ...selected, ...fixtures, ...backup },
       stdio: 'inherit',
       // Complete native scenarios and actual database-time expiry use a bounded suite deadline.
       timeout:
-        ['S10', 'S11', 'G01'].includes(args.slice) && !args.demo
-          ? 900000
-          : ['S06', 'S07', 'S08', 'S09', 'S10', 'S11', 'G01'].includes(args.slice)
-            ? 600000
-            : args.slice === 'S05'
-              ? 300000
-              : 120000,
+        args.slice === 'G02'
+          ? 1200000
+          : ['S10', 'S11', 'G01'].includes(args.slice) && !args.demo
+            ? 900000
+            : ['S06', 'S07', 'S08', 'S09', 'S10', 'S11', 'G01'].includes(args.slice)
+              ? 600000
+              : args.slice === 'S05'
+                ? 300000
+                : 120000,
     },
   );
   if (result.error)
@@ -69,7 +73,7 @@ try {
             : 'fixture_suite_process_failed',
       }),
     );
-  if (['S05', 'S06', 'S07', 'S08', 'S09', 'S10', 'S11', 'G01'].includes(args.slice))
+  if (['S05', 'S06', 'S07', 'S08', 'S09', 'S10', 'S11', 'G01', 'G02'].includes(args.slice))
     await stopFixtureWorkers(fixtures.COS_FIXTURE_HOST_ROOT, fixtures.COS_FIXTURE_IMAGE);
   process.exitCode = result.status ?? 1;
   // eslint-disable-next-line no-catch-all/no-catch-all -- The fixture CLI reports its bounded configuration failure and exits without admission.

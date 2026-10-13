@@ -1,0 +1,17 @@
+# The application code, executable and dependencies come only from the selected immutable host.
+ARG HOST_IMAGE
+FROM ${HOST_IMAGE} AS release
+FROM debian@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f
+RUN rm -f /etc/apt/sources.list.d/debian.sources && \
+    printf '%s\n' 'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/20261007T000000Z trixie main' > /etc/apt/sources.list && \
+    apt-get update && apt-get install -y --no-install-recommends cifs-utils=2:7.4-1 util-linux mount libstdc++6
+COPY --from=release /release /release
+COPY probe.mjs /fixture/probe.mjs
+RUN chmod 0555 /fixture && chmod 0444 /fixture/probe.mjs && \
+    /release/node/bin/node --input-type=module -e 'if(process.platform!=="linux"||process.arch!=="arm64"||process.version!=="v22.23.2")process.exit(1);const {verifyResticReleasePayload}=await import("/release/dist/modules/chief-of-staff/ops/restic-release-payload.js");verifyResticReleasePayload("/release/libexec")'
+ARG SOURCE_COMMIT
+ARG SOURCE_TREE
+ARG HOST_IMAGE_ID
+LABEL org.opencontainers.image.revision=$SOURCE_COMMIT nanoclaw.source-tree=$SOURCE_TREE \
+      nanoclaw.tested-host=$HOST_IMAGE_ID nanoclaw.release-role=backup-smb-client-fixture nanoclaw.final-artifact=false
+ENTRYPOINT ["/release/node/bin/node", "/fixture/probe.mjs"]

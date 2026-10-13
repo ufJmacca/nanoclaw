@@ -9,6 +9,9 @@ import type { KnowledgeArtifacts } from '../knowledge/artifacts.js';
 import type { ActionWitness } from '../actions/witness.js';
 import { MIGRATIONS, SCHEMA_VERSION, migrationStatus } from '../store/migrations.js';
 import { backupNativeDatabase } from './native-installation.js';
+import { captureNativeDatabase, verifyRecoveredNativeDatabase } from './backup-native.js';
+import type { BackupSnapshotSink, BackupQueueReceipt } from './backup-queue.js';
+import type { BackupRestoreValidationScope } from './backup-restore-workspace.js';
 import { readPrivate, writeAtomic } from './target-state.js';
 import { artifactHash } from './release-artifacts.js';
 import { assertTestTarget } from '../store/preflight.js';
@@ -36,6 +39,18 @@ export type CoordinatedBackupOptions = {
 export type CoordinatedBackupIdentity = Omit<CoordinatedBackupOptions, 'client' | 'quiescent' | 'artifacts'> & {
   artifacts: Pick<KnowledgeArtifacts, 'root'>;
 };
+export type CoordinatedRecoveryIdentity = Omit<CoordinatedBackupIdentity, 'receiptRoot'>;
+/** Current independent journal checks for an already admitted recovery caller.
+ * This is read-only identity continuity, never restored permission. */
+export function assertCoordinatedRecoveryIdentity(options: CoordinatedRecoveryIdentity): void {
+  try {
+    identityParameters(options);
+    journalCurrent(options);
+  } catch {
+    // eslint-disable-next-line preserve-caught-error -- Current private binding and journal diagnostics stay in the trusted recovery process.
+    throw Error('coordinated_recovery_identity_unavailable');
+  }
+}
 export type ScopeCheckpoint = {
   format: 'cos-scoped-checkpoint/v1';
   scopeId: string;
@@ -89,7 +104,9 @@ export const CHECKPOINT_TABLES = [
   ),
 ].sort();
 const maximumRemoteBytes = 64 * 1024 * 1024;
-const inputsDigest = (options: CoordinatedBackupIdentity) =>
+const inputsDigest = (
+  options: Pick<CoordinatedRecoveryIdentity, 'nativeDatabases' | 'restrictionFiles' | 'artifacts'>,
+) =>
   digest({
     nativeDatabases: options.nativeDatabases,
     artifactsRoot: options.artifacts.root,
@@ -182,7 +199,7 @@ async function barrier(
   journalCurrent(options);
   return digest(value);
 }
-function journalCurrent(options: CoordinatedBackupIdentity) {
+function journalCurrent(options: Pick<CoordinatedRecoveryIdentity, 'witness'>) {
   // Validate the live independent journal. A backup never replaces or initializes it.
   directory(options.witness.root);
   const journal = readPrivate(path.join(options.witness.root, 'owner.json'));
@@ -198,6 +215,11 @@ function journalCurrent(options: CoordinatedBackupIdentity) {
 }
 function parameters(options: CoordinatedBackupIdentity) {
   directory(options.receiptRoot);
+  const root = path.join(options.receiptRoot, 'coordinated');
+  identityParameters(options, root);
+  return root;
+}
+function identityParameters(options: CoordinatedRecoveryIdentity, root?: string) {
   if (
     !/^[a-zA-Z0-9_-]{1,200}$/.test(options.context.scopeId) ||
     options.context.origin ||
@@ -209,7 +231,6 @@ function parameters(options: CoordinatedBackupIdentity) {
     options.restrictionFiles.length > 4096
   )
     throw new Error('invalid_coordinated_backup');
-  const root = path.join(options.receiptRoot, 'coordinated');
   for (const source of [
     ...options.nativeDatabases,
     ...options.restrictionFiles,
@@ -219,9 +240,7 @@ function parameters(options: CoordinatedBackupIdentity) {
     if (
       !path.isAbsolute(source) ||
       path.resolve(source) !== source ||
-      source === root ||
-      source.startsWith(root + '/') ||
-      root.startsWith(source + '/')
+      (root && (source === root || source.startsWith(root + '/') || root.startsWith(source + '/')))
     )
       throw new Error('unsafe_coordinated_backup');
   }
@@ -231,7 +250,6 @@ function parameters(options: CoordinatedBackupIdentity) {
     )
   )
     throw new Error('unsafe_coordinated_backup');
-  return root;
 }
 async function remoteSnapshot(
   options: Pick<CoordinatedBackupOptions, 'client' | 'context' | 'databaseFingerprint'>,
@@ -291,7 +309,7 @@ async function remoteSnapshot(
     throw error;
   }
 }
-function copyArtifacts(options: CoordinatedBackupOptions, temporary: string) {
+function artifactContents(options: CoordinatedBackupOptions, write: (name: string, bytes: Buffer) => void) {
   directory(options.artifacts.root);
   const names = fs
     .readdirSync(options.artifacts.root)
@@ -305,37 +323,123 @@ function copyArtifacts(options: CoordinatedBackupOptions, temporary: string) {
     if (name !== '.cos-artifacts' && !/^[a-f0-9]{64}-[a-f0-9]{64}\.blob$/.test(name))
       throw new Error('coordinated_backup_artifacts_invalid');
     const content = privateBytes(path.join(options.artifacts.root, name), 1024 * 1024);
-    bytes += content.length;
-    if (bytes > maximumRemoteBytes) throw new Error('coordinated_backup_bounds');
-    publishBytes(path.join(temporary, 'artifacts'), name, content);
-    result.push(fileReceipt('artifacts/' + name, content));
+    try {
+      bytes += content.length;
+      if (bytes > maximumRemoteBytes) throw new Error('coordinated_backup_bounds');
+      result.push(fileReceipt('artifacts/' + name, content));
+      write(name, content);
+    } finally {
+      content.fill(0);
+    }
   }
+  return result;
+}
+function copyArtifacts(options: CoordinatedBackupOptions, temporary: string) {
+  const result = artifactContents(options, (name, content) =>
+    publishBytes(path.join(temporary, 'artifacts'), name, content),
+  );
   sync(path.join(temporary, 'artifacts'));
   return result;
+}
+/** Captures the existing portable v1 receipt directly through an admitted encrypted queue sink.
+ * receiptRoot is validated for identity only; no staging directory or plaintext file is created there.
+ * The caller retains maintenance and publishes the queue only after this operation succeeds. */
+export async function captureCoordinatedState(
+  options: CoordinatedBackupOptions,
+  sink: BackupSnapshotSink,
+): Promise<CoordinatedBackupReceipt> {
+  try {
+    parameters(options);
+    const epoch = await barrier(options);
+    const locked = (await options.client.query('SELECT pg_try_advisory_lock(73101003) AS locked')).rows[0]?.locked;
+    if (!locked) throw Error('coordinated_backup_busy');
+    try {
+      return await options.artifacts.exclusive(async () => {
+        await barrier(options, epoch);
+        const snapshot = await remoteSnapshot(options),
+          remoteBytes = Buffer.from(JSON.stringify(snapshot) + '\n');
+        let remote: FileReceipt;
+        try {
+          if (remoteBytes.length > maximumRemoteBytes) throw Error('coordinated_backup_bounds');
+          remote = fileReceipt('remote.json', remoteBytes);
+          sink.write('coordinated/remote.json', remoteBytes);
+        } finally {
+          remoteBytes.fill(0);
+        }
+        const sqlite: FileReceipt[] = [];
+        for (const [index, source] of options.nativeDatabases.entries()) {
+          await barrier(options, epoch);
+          const prefix = 'sqlite/' + index;
+          const native = captureNativeDatabase(
+            source,
+            {
+              write(name, bytes) {
+                // The portable coordinated manifest carries this hash; the helper's source-path receipt is redundant.
+                if (name === prefix + '/native.sqlite') sink.write('coordinated/' + name, bytes);
+              },
+            },
+            prefix,
+            maximumRemoteBytes,
+          );
+          sqlite.push({ file: native.file, bytes: native.bytes, sha256: native.sha256 });
+        }
+        const artifacts = artifactContents(options, (name, bytes) =>
+          sink.write('coordinated/artifacts/' + name, bytes),
+        );
+        const restrictions: FileReceipt[] = [];
+        for (const [index, source] of options.restrictionFiles.entries()) {
+          await barrier(options, epoch);
+          const bytes = privateBytes(source, 1024 ** 2);
+          try {
+            if (!secretFree(JSON.parse(bytes.toString('utf8')))) throw Error('coordinated_backup_credentials_excluded');
+            restrictions.push(fileReceipt('restrictions/' + index + '.json', bytes));
+            sink.write('coordinated/restrictions/' + index + '.json', bytes);
+          } finally {
+            bytes.fill(0);
+          }
+        }
+        if (2 + sqlite.length + artifacts.length + restrictions.length > 4096) throw Error('coordinated_backup_bounds');
+        const receipt: CoordinatedBackupReceipt = {
+          format: 'cos-coordinated-backup/v1',
+          operationId: options.operationId,
+          contextDigest: digest(options.context),
+          inputsDigest: inputsDigest(options),
+          databaseFingerprint: options.databaseFingerprint,
+          schemaVersion: SCHEMA_VERSION,
+          schemaDigest,
+          barrierDigest: epoch,
+          admissionRestored: false,
+          journal: { installationDigest: options.witness.installationDigest, generation: options.witness.generation },
+          remote,
+          sqlite,
+          artifacts,
+          restrictions,
+        };
+        await barrier(options, epoch);
+        const metadata = Buffer.from(JSON.stringify(receipt) + '\n');
+        try {
+          if (metadata.length > 1024 ** 2) throw Error('coordinated_backup_bounds');
+          sink.write('coordinated/manifest.json', metadata);
+        } finally {
+          metadata.fill(0);
+        }
+        await barrier(options, epoch);
+        return receipt;
+      });
+    } finally {
+      await options.client.query('SELECT pg_advisory_unlock(73101003)');
+    }
+  } catch {
+    // eslint-disable-next-line preserve-caught-error -- Database contents, source paths and capture diagnostics are private.
+    throw Error('coordinated_backup_unavailable');
+  }
 }
 async function verify(options: CoordinatedBackupIdentity): Promise<CoordinatedBackupReceipt> {
   const root = parameters(options);
   journalCurrent(options);
   directory(root);
   const value = readPrivate<CoordinatedBackupReceipt>(path.join(root, 'manifest.json'), 1024 * 1024);
-  if (
-    value.format !== 'cos-coordinated-backup/v1' ||
-    value.operationId !== options.operationId ||
-    value.contextDigest !== digest(options.context) ||
-    value.inputsDigest !== inputsDigest(options) ||
-    value.databaseFingerprint !== options.databaseFingerprint ||
-    value.schemaVersion !== SCHEMA_VERSION ||
-    value.schemaDigest !== schemaDigest ||
-    value.admissionRestored !== false ||
-    digest(value.journal) !==
-      digest({ installationDigest: options.witness.installationDigest, generation: options.witness.generation }) ||
-    !Array.isArray(value.sqlite) ||
-    !Array.isArray(value.artifacts) ||
-    !Array.isArray(value.restrictions) ||
-    value.sqlite.length !== options.nativeDatabases.length ||
-    value.restrictions.length !== options.restrictionFiles.length
-  )
-    throw new Error('coordinated_backup_conflict');
+  receiptIdentity(options, value);
   const files = [value.remote, ...value.sqlite, ...value.artifacts, ...value.restrictions];
   if (files.length > 24097 || new Set(files.map((f) => f.file)).size !== files.length)
     throw new Error('coordinated_backup_conflict');
@@ -388,6 +492,27 @@ async function verify(options: CoordinatedBackupIdentity): Promise<CoordinatedBa
   };
   visit('', 0);
   return value;
+}
+function receiptIdentity(options: CoordinatedRecoveryIdentity, value: CoordinatedBackupReceipt) {
+  if (
+    !value ||
+    value.format !== 'cos-coordinated-backup/v1' ||
+    value.operationId !== options.operationId ||
+    value.contextDigest !== digest(options.context) ||
+    value.inputsDigest !== inputsDigest(options) ||
+    value.databaseFingerprint !== options.databaseFingerprint ||
+    value.schemaVersion !== SCHEMA_VERSION ||
+    value.schemaDigest !== schemaDigest ||
+    value.admissionRestored !== false ||
+    digest(value.journal) !==
+      digest({ installationDigest: options.witness.installationDigest, generation: options.witness.generation }) ||
+    !Array.isArray(value.sqlite) ||
+    !Array.isArray(value.artifacts) ||
+    !Array.isArray(value.restrictions) ||
+    value.sqlite.length !== options.nativeDatabases.length ||
+    value.restrictions.length !== options.restrictionFiles.length
+  )
+    throw new Error('coordinated_backup_conflict');
 }
 /** Read-only verification; no archived permission, context or deny journal is admitted. */
 export async function verifyCoordinatedBackup(options: CoordinatedBackupIdentity): Promise<CoordinatedBackupReceipt> {
@@ -478,6 +603,12 @@ function scopedCheckpoint(options: CoordinatedBackupIdentity, receipt: Coordinat
   const value = JSON.parse(
     privateBytes(path.join(parameters(options), 'remote.json'), maximumRemoteBytes).toString('utf8'),
   ) as ScopeCheckpoint;
+  return validateScopedCheckpoint(options, value);
+}
+function validateScopedCheckpoint(
+  options: Pick<CoordinatedRecoveryIdentity, 'context' | 'databaseFingerprint'>,
+  value: ScopeCheckpoint,
+): ScopeCheckpoint {
   const record = (x: unknown): x is Record<string, unknown> => !!x && typeof x === 'object' && !Array.isArray(x);
   if (
     !record(value) ||
@@ -525,6 +656,122 @@ function scopedCheckpoint(options: CoordinatedBackupIdentity, receipt: Coordinat
     throw Error('coordinated_restore_conflict');
   return value;
 }
+/** Portable verification uses the already owned encrypted workspace, with no
+ * second payload copy or activation of archived restrictions or journals.
+ * A PostgreSQL import still requires separate test-target admission. */
+export function verifyRecoveredCoordinatedState(
+  options: CoordinatedRecoveryIdentity,
+  scope: BackupRestoreValidationScope,
+  entries: BackupQueueReceipt['files'],
+): {
+  receipt: CoordinatedBackupReceipt;
+  checkpoint: ScopeCheckpoint;
+  nativeDatabasesVerified: number;
+  admissionRestored: false;
+  eventJournalRestored: false;
+} {
+  try {
+    const current = () => {
+      scope.assertCurrent();
+      journalCurrent(options);
+      scope.assertCurrent();
+    };
+    current();
+    identityParameters(options);
+    if (
+      !Array.isArray(entries) ||
+      entries.length > 4096 ||
+      new Set(entries.map((item) => item.name)).size !== entries.length
+    )
+      throw Error('coordinated_recovery_bounds');
+    const selected = entries.filter((item) => item.name.startsWith('coordinated/')),
+      listed = new Map(selected.map((item) => [item.name, item]));
+    const checkFile = (item: FileReceipt, maximum: number) => {
+      current();
+      const entry = listed.get('coordinated/' + item.file);
+      if (
+        !item ||
+        Object.keys(item).sort().join(',') !== 'bytes,file,sha256' ||
+        typeof item.file !== 'string' ||
+        !/^(?:[A-Za-z0-9]|\.cos-)[A-Za-z0-9_.-]*(?:\/(?:[A-Za-z0-9]|\.cos-)[A-Za-z0-9_.-]*){0,6}$/.test(item.file) ||
+        !Number.isSafeInteger(item.bytes) ||
+        item.bytes < 0 ||
+        item.bytes > maximum ||
+        typeof item.sha256 !== 'string' ||
+        !/^[a-f0-9]{64}$/.test(item.sha256) ||
+        !entry ||
+        entry.bytes !== item.bytes ||
+        entry.sha256 !== item.sha256
+      )
+        throw Error('coordinated_recovery_file_changed');
+      const actual = scope.inspectFile(entry.name);
+      if (actual.bytes !== item.bytes || actual.sha256 !== item.sha256)
+        throw Error('coordinated_recovery_file_changed');
+      current();
+    };
+    const readJson = <T>(name: string, maximum: number): T =>
+      scope.withFileBytes(
+        'coordinated/' + name,
+        maximum,
+        (bytes) => JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) as T,
+      );
+    const metadata = listed.get('coordinated/manifest.json');
+    if (!metadata) throw Error('coordinated_recovery_manifest_missing');
+    const manifestFile = { file: 'manifest.json', bytes: metadata.bytes, sha256: metadata.sha256 };
+    checkFile(manifestFile, 1024 ** 2);
+    const receipt = readJson<CoordinatedBackupReceipt>('manifest.json', 1024 ** 2);
+    if (
+      !receipt ||
+      Object.keys(receipt).sort().join(',') !==
+        'admissionRestored,artifacts,barrierDigest,contextDigest,databaseFingerprint,format,inputsDigest,journal,operationId,remote,restrictions,schemaDigest,schemaVersion,sqlite' ||
+      typeof receipt.barrierDigest !== 'string' ||
+      !/^[a-f0-9]{64}$/.test(receipt.barrierDigest)
+    )
+      throw Error('coordinated_recovery_manifest_changed');
+    receiptIdentity(options, receipt);
+    const files = [receipt.remote, ...receipt.sqlite, ...receipt.artifacts, ...receipt.restrictions],
+      expectedNames = new Set(['coordinated/manifest.json', ...files.map((item) => 'coordinated/' + item.file)]);
+    if (
+      files.length > 4095 ||
+      expectedNames.size !== files.length + 1 ||
+      selected.length !== expectedNames.size ||
+      selected.some((item) => !expectedNames.has(item.name))
+    )
+      throw Error('coordinated_recovery_graph_changed');
+    if (receipt.remote.file !== 'remote.json') throw Error('coordinated_recovery_file_changed');
+    checkFile(receipt.remote, maximumRemoteBytes);
+    const checkpoint = validateScopedCheckpoint(options, readJson<ScopeCheckpoint>('remote.json', maximumRemoteBytes));
+    for (const [index, item] of receipt.sqlite.entries()) {
+      if (item.file !== 'sqlite/' + index + '/native.sqlite') throw Error('coordinated_recovery_native_changed');
+      checkFile(item, maximumRemoteBytes);
+      verifyRecoveredNativeDatabase(scope, { ...item, file: 'coordinated/' + item.file });
+    }
+    for (const [index, item] of receipt.restrictions.entries()) {
+      if (item.file !== 'restrictions/' + index + '.json') throw Error('coordinated_recovery_restriction_changed');
+      checkFile(item, 1024 ** 2);
+      if (!secretFree(readJson(item.file, 1024 ** 2))) throw Error('coordinated_recovery_credentials_excluded');
+    }
+    if (!receipt.artifacts.some((item) => item.file === 'artifacts/.cos-artifacts'))
+      throw Error('coordinated_recovery_artifacts_changed');
+    for (const item of receipt.artifacts) {
+      if (item.file !== 'artifacts/.cos-artifacts' && !/^artifacts\/[a-f0-9]{64}-[a-f0-9]{64}\.blob$/.test(item.file))
+        throw Error('coordinated_recovery_artifacts_changed');
+      checkFile(item, 1024 ** 2);
+    }
+    current();
+    checkFile(manifestFile, 1024 ** 2);
+    return {
+      receipt,
+      checkpoint,
+      nativeDatabasesVerified: receipt.sqlite.length,
+      admissionRestored: false,
+      eventJournalRestored: false,
+    };
+  } catch {
+    // eslint-disable-next-line preserve-caught-error -- Recovered rows, native files and current journal diagnostics remain private.
+    throw Error('coordinated_recovery_check_unavailable');
+  }
+}
 /** Import only a fresh owned scope into an independently admitted test database. Never update, clear or replace
  * an existing scope. A durable start reservation permits read-only reconciliation of an unknown commit.
  * This restores data for a drill; it grants no account, model, effect or notification admission.
@@ -542,37 +789,152 @@ export async function restoreCoordinatedTestScope(
     throw Error('coordinated_test_restore_unavailable');
   }
 }
+export type CoordinatedTestRestoreStart = {
+  format: 'cos-sandbox-restore-start/v1';
+  checkpointDigest: string;
+  sandboxDatabaseFingerprint: string;
+  testMarkerDigest: string;
+  scopeId: string;
+  journal: CoordinatedBackupReceipt['journal'];
+};
+/** Trusted live storage only. Installed recovery must bind this port to a
+ * separately admitted encrypted reservation, never a file from the archive.
+ * Creation must be exclusive and durable before the first database insert. */
+export type CoordinatedTestRestoreReservation = Readonly<{
+  assertCurrent(): void;
+  read(): unknown | undefined;
+  create(start: CoordinatedTestRestoreStart): void;
+}>;
+type TestSandbox = { client: pg.Client; config: PoolConfig; testTargetId: string };
+type CheckedCheckpoint = { receipt: CoordinatedBackupReceipt; checkpoint: ScopeCheckpoint };
+/** Portable insert-only component. The installed caller must also validate the
+ * complete capture and hold current owner, vault, repository and queue authority.
+ * No filesystem path conversion or second recovered payload is needed. */
+export async function restoreRecoveredCoordinatedTestScope(
+  options: CoordinatedRecoveryIdentity,
+  scope: BackupRestoreValidationScope,
+  entries: BackupQueueReceipt['files'],
+  sandbox: TestSandbox,
+  reservation: CoordinatedTestRestoreReservation,
+  check: () => Promise<void>,
+) {
+  try {
+    const inventoryDigest = digest(entries);
+    return await restoreCheckedTestScope(
+      options,
+      sandbox,
+      reservation,
+      async () => {
+        scope.assertPayloadCurrent();
+        if (digest(entries) !== inventoryDigest) throw Error('coordinated_restore_inventory_changed');
+        await check();
+        scope.assertPayloadCurrent();
+        if (digest(entries) !== inventoryDigest) throw Error('coordinated_restore_inventory_changed');
+      },
+      async () => verifyRecoveredCoordinatedState(options, scope, entries),
+    );
+  } catch {
+    // eslint-disable-next-line preserve-caught-error -- Recovered content, reservation and test endpoint diagnostics remain private.
+    throw Error('coordinated_test_restore_unavailable');
+  }
+}
 async function restoreTestScope(
   options: CoordinatedBackupIdentity,
   operationRoot: string,
   sandbox: { client: pg.Client; config: PoolConfig; testTargetId: string },
   check: () => Promise<void>,
 ) {
+  directory(operationRoot);
+  if (
+    [
+      parameters(options),
+      options.witness.root,
+      options.artifacts.root,
+      ...options.nativeDatabases,
+      ...options.restrictionFiles,
+    ].some(
+      (root) => root === operationRoot || operationRoot.startsWith(root + '/') || root.startsWith(operationRoot + '/'),
+    )
+  )
+    throw Error('unsafe_coordinated_restore');
+  const file = path.join(operationRoot, 'restore-start.json');
+  return restoreCheckedTestScope(
+    options,
+    sandbox,
+    {
+      assertCurrent: () => directory(operationRoot),
+      read: () =>
+        fs.lstatSync(file, { throwIfNoEntry: false })
+          ? JSON.parse(privateBytes(file, 16384).toString('utf8'))
+          : undefined,
+      create: (start) => {
+        if (fs.lstatSync(file, { throwIfNoEntry: false })) throw Error('coordinated_restore_conflict');
+        writeAtomic(operationRoot, 'restore-start.json', start);
+      },
+    },
+    check,
+    async () => {
+      const receipt = await verify(options);
+      return { receipt, checkpoint: scopedCheckpoint(options, receipt) };
+    },
+  );
+}
+async function restoreCheckedTestScope(
+  options: CoordinatedRecoveryIdentity,
+  sandbox: TestSandbox,
+  reservationPort: CoordinatedTestRestoreReservation,
+  check: () => Promise<void>,
+  verifyCheckpoint: () => Promise<CheckedCheckpoint>,
+) {
   let locked = false,
     transaction = false;
-  const client = sandbox.client;
-  try {
-    directory(operationRoot);
+  const client = sandbox.client,
+    port = { ...reservationPort },
+    configuration = () =>
+      digest({
+        context: options.context,
+        databaseFingerprint: options.databaseFingerprint,
+        operationId: options.operationId,
+        nativeDatabases: options.nativeDatabases,
+        restrictionFiles: options.restrictionFiles,
+        artifactsRoot: options.artifacts.root,
+        witness: {
+          root: options.witness.root,
+          installationDigest: options.witness.installationDigest,
+          generation: options.witness.generation,
+        },
+        config: sandbox.config,
+        testTargetId: sandbox.testTargetId,
+      }),
+    initial = configuration();
+  const current = () => {
     if (
-      [
-        parameters(options),
-        options.witness.root,
-        options.artifacts.root,
-        ...options.nativeDatabases,
-        ...options.restrictionFiles,
-      ].some(
-        (root) =>
-          root === operationRoot || operationRoot.startsWith(root + '/') || root.startsWith(operationRoot + '/'),
-      )
+      sandbox.client !== client ||
+      configuration() !== initial ||
+      reservationPort.assertCurrent !== port.assertCurrent ||
+      reservationPort.read !== port.read ||
+      reservationPort.create !== port.create
     )
-      throw Error('unsafe_coordinated_restore');
+      throw Error('coordinated_restore_identity_changed');
+    journalCurrent(options);
+    port.assertCurrent();
+  };
+  const checked = async () => {
+    current();
     await check();
-    const receipt = await verify(options),
-      original = scopedCheckpoint(options, receipt);
+    current();
+  };
+  try {
+    await checked();
+    const { receipt, checkpoint: original } = await verifyCheckpoint(),
+      receiptDigest = digest(receipt),
+      originalDigest = digest(original);
+    await checked();
     await assertTestTarget(client, sandbox.testTargetId);
     const fingerprint = await databaseFingerprint(client, sandbox.config);
     if (fingerprint === options.databaseFingerprint || (await migrationStatus(client)) !== SCHEMA_VERSION)
       throw Error('unsafe_coordinated_restore');
+    await checked();
     if (!(await client.query('SELECT pg_try_advisory_lock(73101003) AS locked')).rows[0]?.locked)
       throw Error('coordinated_restore_busy');
     locked = true;
@@ -585,20 +947,47 @@ async function restoreTestScope(
       ).rows.map((row) => row.attname);
       if (digest(columns) !== digest(original.columns[table])) throw Error('coordinated_restore_conflict');
     }
-    const reservation = {
-        format: 'cos-sandbox-restore-start/v1',
-        checkpointDigest: digest(receipt),
-        sandboxDatabaseFingerprint: fingerprint,
-        testMarkerDigest: digest(sandbox.testTargetId),
-        scopeId: original.scopeId,
-        journal: receipt.journal,
+    const reservation: CoordinatedTestRestoreStart = {
+      format: 'cos-sandbox-restore-start/v1',
+      checkpointDigest: digest(receipt),
+      sandboxDatabaseFingerprint: fingerprint,
+      testMarkerDigest: digest(sandbox.testTargetId),
+      scopeId: original.scopeId,
+      journal: receipt.journal,
+    };
+    const readStart = () => {
+        current();
+        const value = port.read();
+        current();
+        return value;
       },
-      file = path.join(operationRoot, 'restore-start.json');
-    const started = !!fs.lstatSync(file, { throwIfNoEntry: false });
-    if (started && digest(JSON.parse(privateBytes(file, 16384).toString('utf8'))) !== digest(reservation))
-      throw Error('coordinated_restore_conflict');
-    await check();
-    if (digest(await verify(options)) !== digest(receipt)) throw Error('coordinated_restore_conflict');
+      start = readStart(),
+      started = start !== undefined;
+    if (started && digest(start) !== digest(reservation)) throw Error('coordinated_restore_conflict');
+    const unchanged = async () => {
+      await checked();
+      const verified = await verifyCheckpoint();
+      await checked();
+      if (
+        digest(verified.receipt) !== receiptDigest ||
+        digest(verified.checkpoint) !== originalDigest ||
+        digest(original) !== originalDigest ||
+        digest(receipt) !== receiptDigest
+      )
+        throw Error('coordinated_restore_conflict');
+    };
+    const admit = async () => {
+      await checked();
+      await assertTestTarget(client, sandbox.testTargetId);
+      if (
+        (await databaseFingerprint(client, sandbox.config)) !== fingerprint ||
+        (await migrationStatus(client)) !== SCHEMA_VERSION
+      )
+        throw Error('coordinated_restore_identity_changed');
+      await checked();
+    };
+    await unchanged();
+    await admit();
     await client.query('BEGIN');
     transaction = true;
     await client.query('SET CONSTRAINTS ALL DEFERRED');
@@ -606,15 +995,24 @@ async function restoreTestScope(
       (await client.query('SELECT id FROM cos.scopes WHERE id=$1 FOR UPDATE', [original.scopeId])).rows.length > 0;
     if (exists && !started) throw Error('coordinated_restore_scope_exists');
     if (!exists) {
-      await check();
-      if (!started) writeAtomic(operationRoot, 'restore-start.json', reservation);
+      await checked();
+      if (!started) {
+        port.create(reservation);
+        current();
+      }
+      if (digest(readStart()) !== digest(reservation)) throw Error('coordinated_restore_conflict');
       let remaining = CHECKPOINT_TABLES.filter((table) => original.rows[table].length > 0);
       while (remaining.length) {
         const retry: string[] = [];
         for (const table of remaining) {
-          await check();
+          await admit();
+          if (digest(original) !== originalDigest || digest(readStart()) !== digest(reservation))
+            throw Error('coordinated_restore_conflict');
           await client.query('SAVEPOINT cos_sandbox_restore');
           try {
+            await checked();
+            if (digest(original) !== originalDigest || digest(readStart()) !== digest(reservation))
+              throw Error('coordinated_restore_conflict');
             const columns = original.columns[table].map((name) => '"' + name + '"').join(',');
             await client.query(
               `INSERT INTO cos."${table}"(${columns}) SELECT ${columns} FROM jsonb_populate_recordset(NULL::cos."${table}",$1::jsonb)`,
@@ -632,19 +1030,21 @@ async function restoreTestScope(
         remaining = retry;
       }
     }
-    await check();
+    await unchanged();
+    await admit();
+    if (digest(readStart()) !== digest(reservation)) throw Error('coordinated_restore_conflict');
     await client.query('COMMIT');
     transaction = false;
-    await check();
+    await checked();
     const restored = await remoteSnapshot({ context: options.context, databaseFingerprint: fingerprint, client });
     if (
       digest(checkpointState(restored)) !== digest(checkpointState(original)) ||
-      digest(await verify(options)) !== digest(receipt) ||
-      digest(JSON.parse(privateBytes(file, 16384).toString('utf8'))) !== digest(reservation)
+      digest(readStart()) !== digest(reservation)
     )
       throw Error('coordinated_restore_conflict');
-    await check();
-    journalCurrent(options);
+    await unchanged();
+    await admit();
+    if (digest(readStart()) !== digest(reservation)) throw Error('coordinated_restore_conflict');
     return {
       format: 'cos-sandbox-scope-restore/v1',
       checkpointDigest: digest(receipt),

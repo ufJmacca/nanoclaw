@@ -4,11 +4,17 @@ import { deploymentSettings } from './deployment-settings.js';
 import { readPrivate } from './target-state.js';
 import { withDeploymentLock } from './deployment-lock.js';
 import { validateReleaseManifest, type ReleaseManifest } from './release-manifest.js';
+import { parseBackupOwnerRestoreArguments } from './backup-owner-restore-arguments.js';
 const commands = [
   'vault-status',
   'vault-provision',
   'vault-install',
   'vault-recovery-check',
+  'backup-credentials-install',
+  'backup-nas-configure',
+  'backup-nas-recover-unmount',
+  'backup-nas-inspect-initialization',
+  'backup-nas-recover-initialization',
   'database-check',
   'status',
   'operator-status',
@@ -16,7 +22,9 @@ const commands = [
   'owner-export',
   'export-purge',
   'operations-backup',
+  'backup-checkpoint',
   'operations-restore-check',
+  'backup-restore-check',
 ];
 export function parseOwnerAdminArguments(args: string[]): {
   settings: string;
@@ -42,10 +50,11 @@ export function parseOwnerAdminArguments(args: string[]): {
   if (
     !canonical(flags[1]) ||
     (flags.length === 4 && !canonical(flags[3])) ||
-    (admin[0] === 'operations-restore-check') !== (flags.length === 4) ||
+    ['operations-restore-check', 'backup-restore-check'].includes(admin[0]) !== (flags.length === 4) ||
     (['database-check', 'vault-status'].includes(admin[0]) && admin.length !== 1)
   )
     return invalid();
+  if (admin[0] === 'backup-restore-check') parseBackupOwnerRestoreArguments(admin);
   return { settings: flags[1], databaseEnvironment: flags[3], admin };
 }
 export async function ownerDatabasePreflight(
@@ -77,7 +86,7 @@ export async function selectedOwnerAdminProfile(
   if (!commands.includes(command)) throw new Error('invalid_owner_admin_arguments');
   return ['operator-control', 'vault-status'].includes(command)
     ? {}
-    : command === 'operations-restore-check'
+    : ['operations-restore-check', 'backup-restore-check'].includes(command)
       ? profiles.test()
       : profiles.runtime();
 }
@@ -85,6 +94,15 @@ export async function targetOwnerAdmin(args: string[]): Promise<Record<string, u
   const request = parseOwnerAdminArguments(args),
     settings = deploymentSettings(readPrivate(request.settings));
   process.chdir(settings.installationRoot);
+  if (request.admin[0] === 'backup-restore-check') {
+    const { restoreOwnerVaultBackup } = await import('./backup-owner-restore.js');
+    return restoreOwnerVaultBackup({
+      settingsFile: request.settings,
+      testEnvironmentFile: request.databaseEnvironment!,
+      invokedHelper: path.join(path.dirname(fileURLToPath(import.meta.url)), 'target-helper.js'),
+      args: parseBackupOwnerRestoreArguments(request.admin),
+    });
+  }
   // Fix cwd before loading native/runtime modules. Never source a whole private environment file.
   const { parseAdminArguments, adminEnvironment, adminStatus } = await import('./admin.js');
   const parsed =

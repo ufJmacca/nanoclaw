@@ -227,6 +227,115 @@ ordinary NanoClaw data and messaging must remain intact. Release the held
 operation using its original maintenance UUID after the checks pass. These
 commands grant no Google, Calendar writer or model authority.
 
+## Recover an interrupted G02 backup copy
+
+This procedure requires a verified, healthy G02 payload, reopened target
+admission and the existing vault memory restrictions. Use the retained payload and settings recorded for the verified G02 release.
+Actual delivery and remaining acceptance are recorded in
+[the G02 receipt](evidence/G02.md).
+
+The hourly upload job first reconciles the queue's current owned incomplete
+capture. A completed pending snapshot stays queued. An authenticated incomplete
+copy can be removed, or a fully written pending receipt can be completed without
+recapturing its payload. This local step needs no NAS connection. An interrupted
+service checkpoint must first finish its recorded service recovery and restore
+healthy admission. Queue recovery does not release maintenance or restart it.
+
+For an explicit owner retry, run the target helper with the same capture ID:
+
+```sh
+cos_target reconcile-backup-capture --kind state --request-id CAPTURE_UUID
+```
+
+Use `credentials` for a credential capture. Run the helper under the scoped core
+and swap restrictions described above. `capture_retired` acknowledges removal
+of that known incomplete copy; `capture_pending` preserves its completed
+snapshot for upload. A credential owner's ordinary retry also heals its exact
+deterministic event under fresh primary-state permission, without repeating an
+OAuth exchange.
+
+Changed bytes or file identities, unknown files, missing ownership claims and
+live writers prevent cleanup. Leave those copies intact for investigation.
+
+## Initialize the G02 backup repository
+
+Use only a verified, healthy G02 payload with reopened target admission. First
+complete the owner-authorized credential installation and NAS configuration
+under their existing maintenance procedure. Verified NAS setup saves private
+destination metadata; release that maintenance operation before initialization.
+The reviewed G01 payload cannot run this command. Use the
+[G02 receipt](evidence/G02.md) to distinguish actual repository binding from
+checkpoint and isolated restore acceptance.
+
+Keep the request UUID in private operator records. Run the fixed target helper
+with the same memory restrictions used for credential-bearing operations:
+
+```sh
+cos_backup_target() {
+  systemd-run --user --quiet --pipe --wait --collect \
+    --property=LimitCORE=0 --property=MemorySwapMax=0 \
+    --property=RuntimeMaxSec=1900 -- \
+    /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C LC_ALL=C \
+    "$COS_OPERATOR_PAYLOAD/node/bin/node" \
+    "$COS_OPERATOR_PAYLOAD/dist/modules/chief-of-staff/ops/target-helper.js" \
+    "$@" --settings "$COS_OPERATOR_SETTINGS"
+}
+cos_backup_target initialize-backups --request-id REQUEST_UUID
+```
+
+Initialization uses the verified fixed NAS destination and installed credential
+reference, admits the actual signed SMB2.1 mount and measured capacity, then
+claims only a new `restic` directory. It verifies authenticated repository v2
+configuration and all repository data before publishing the private binding.
+It shares the upload/retention lock and keeps the service running during NAS
+waits. No destination, password, adoption, repair or overwrite flag exists.
+
+Repeat the same UUID after a lost reply. A completed, authenticated attempt can
+bind its original repository without initializing twice. An unclaimed directory,
+incomplete utility result or changed file remains held; preserve it for inspection.
+`backup_repository_initialized` and `backup_repository_bound` establish this
+repository binding only. They do not prove a checkpoint or isolated restore.
+
+## Check G02 repository integrity and retention
+
+This procedure requires a healthy, admitted G02 release and the signed NAS
+mount. Use the retained G02 helper and settings under the scoped core and swap
+restrictions described above. Current installed results are recorded in
+[the G02 receipt](evidence/G02.md).
+
+```sh
+cos_target maintain-backups --request-id REQUEST_UUID
+```
+
+The command checks all repository data, applies the fixed policy of 14 daily
+and four weekly snapshots separately to state and credentials, prunes with a
+16 MiB repack input limit, then checks all data again. Selection requires the
+current repository, owner, kind and archive path. Only the exact snapshot IDs
+authenticated by the preview can be forgotten; unrelated snapshots must survive.
+The pinned tool's [retention policy](https://raw.githubusercontent.com/restic/restic/v0.19.1/doc/060_forget.rst)
+defines daily and weekly groups; the retained count can be fewer than 18 when
+groups overlap. An interrupted upload that still needs its original remote
+snapshot prevents maintenance until upload reconciliation finishes.
+
+The hourly uploader runs this maintenance after successful delivery, at most
+once every 24 hours. Empty or held-only queues do not contact the NAS. The owner
+command can check an otherwise idle repository. Both operations use the same
+uploader lock and the repository's kernel writer, without pausing CoS or holding
+its checkpoint operation lock during a NAS wait.
+
+`backup-maintenance-status.json` records the last completed check for the current
+release and target binding. It is frequency evidence, not permission to access
+or delete backups. Upload status reports this time separately from capture and
+delivery ages. `backup_uploaded_maintenance_failed` means delivery succeeded
+but maintenance failed; it must not be presented as verified integrity. Failed
+checks leave the previous verification time intact. Repository identity,
+capacity, pending retirement and live vault/target scopes are checked again
+before each maintenance command. A changed inventory stops further deletion or
+pruning. These operations do not unlock stale Restic locks, repair corruption,
+initialize a repository or restore data.
+Neither the saved capture claim nor a queue status grants permission to restore
+primary state or remove a completed pending backup.
+
 ## Rotate credentials
 
 Use the hold procedure before changing client credentials. An unreachable old

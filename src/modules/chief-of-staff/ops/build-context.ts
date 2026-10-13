@@ -5,7 +5,14 @@ import { promisify } from 'node:util';
 import { createHash } from 'node:crypto';
 import { safeHostEnvironment } from '../../../host-environment.js';
 const execute = promisify(execFile);
-const rootFiles = new Set(['package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', '.npmrc', 'tsconfig.json']);
+const rootFiles = new Set([
+  'package.json',
+  'pnpm-lock.yaml',
+  'pnpm-workspace.yaml',
+  '.npmrc',
+  'tsconfig.json',
+  'vitest.config.ts',
+]);
 const vaultFiles = new Set([
   'container/fixtures/vault/Dockerfile.release',
   ...[
@@ -17,9 +24,26 @@ const vaultFiles = new Set([
     'probe-wire.mjs',
     'probe-config.mjs',
     'probe-artifact.mjs',
+    'probe-backup-credentials.mjs',
+    'probe-backup-journal.mjs',
+    'probe-backup-postgres.mjs',
   ].map((name) => 'container/fixtures/vault/' + name),
   'scripts/cos-vault-fixture.sh',
   'scripts/cos-vault-keychain.swift',
+  'scripts/cos-backup-keychain.swift',
+  'scripts/cos-backup-keychain-fixture.swift',
+  'scripts/cos-root-unit-fixture.sh',
+  'scripts/cos-source-fixture.sh',
+  'scripts/cos-release.sh',
+  'container/fixtures/backup-smb/Dockerfile.server',
+  'container/fixtures/backup-smb/Dockerfile.client',
+  'container/fixtures/backup-smb/server.sh',
+  'container/fixtures/backup-smb/probe.mjs',
+  'scripts/cos-backup-smb-fixture.sh',
+  'container/fixtures/backup-jobs/Dockerfile.release',
+  'container/fixtures/backup-jobs/probe-release.mjs',
+  'scripts/cos-backup-jobs-fixture.sh',
+  'scripts/cos-backup-repository-fixture.sh',
 ]);
 function allowed(name: string): boolean {
   const pieces = name.split('/');
@@ -132,6 +156,7 @@ export async function prepareBuildContext(
     const workerAssetsDigest = assets.digest('hex');
     const info = JSON.stringify({ commit, tree: sourceTree, workerAssetsDigest }) + '\n';
     fs.writeFileSync(path.join(destination, 'build-info.json'), info, { flag: 'wx', mode: 0o644 });
+    fs.chmodSync(path.join(destination, 'build-info.json'), 0o644);
     build.update(info);
     return {
       sourceCommit: commit,

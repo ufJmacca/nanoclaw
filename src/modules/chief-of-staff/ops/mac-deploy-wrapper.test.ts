@@ -72,8 +72,15 @@ case "$operation" in
 esac
 `,
   );
-  script(path.join(bin, 'ssh'), 'printf \'%s\\n\' "${!#}" >> "$COS_TEST_SSH_LOG"\necho \'{"status":"healthy"}\'\n');
-  for (const command of ['scp', 'gh']) script(path.join(bin, command), 'exit 0\n');
+  const logTransport = `
+{ printf '%s' "$(basename "$0")"; printf '\\t%s' "$@"; printf '\\n'; } >> "$COS_TEST_TRANSPORT_LOG"
+`;
+  script(
+    path.join(bin, 'ssh'),
+    logTransport + 'printf \'%s\\n\' "${!#}" >> "$COS_TEST_SSH_LOG"\necho \'{"status":"healthy"}\'\n',
+  );
+  script(path.join(bin, 'scp'), logTransport);
+  script(path.join(bin, 'gh'), 'exit 0\n');
   const result = spawnSync(
     'bash',
     [
@@ -93,6 +100,7 @@ esac
         COS_TEST_ROOT: root,
         COS_TEST_ARGS: path.join(root, 'args'),
         COS_TEST_SSH_LOG: path.join(root, 'ssh.log'),
+        COS_TEST_TRANSPORT_LOG: path.join(root, 'transport.log'),
         COS_TEST_FAIL: String(failCommand),
         COS_TEST_SLICE: slice,
       },
@@ -105,18 +113,49 @@ esac
     remote: fs.existsSync(path.join(root, 'ssh.log'))
       ? fs.readFileSync(path.join(root, 'ssh.log'), 'utf8').trimEnd().split('\n')
       : [],
+    transport: fs.existsSync(path.join(root, 'transport.log'))
+      ? fs
+          .readFileSync(path.join(root, 'transport.log'), 'utf8')
+          .trimEnd()
+          .split('\n')
+          .map((line) => line.split('\t'))
+      : [],
   };
 }
-it('G01 uses the already protected target without rerunning original programme closure', () => {
-  const { result, remote } = invoke(false, 0, 'G01');
-  expect(result.status, result.stderr).toBe(0);
-  expect(remote[0]).toBe('inspect');
-  expect(remote).not.toContain('protection');
-});
-it('G01 stops before staging when its protected target observation is denied', () => {
-  const { result, remote } = invoke(false, 5, 'G01');
+it.each(['G01', 'G02'])(
+  '%s uses the already protected target without rerunning original programme closure',
+  (slice) => {
+    const { result, remote } = invoke(false, 0, slice);
+    expect(result.status, result.stderr).toBe(0);
+    expect(remote[0]).toBe('inspect');
+    expect(remote).not.toContain('protection');
+  },
+);
+it.each(['G01', 'G02'])('%s stops before staging when its protected target observation is denied', (slice) => {
+  const { result, remote } = invoke(false, 5, slice);
   expect(result.status).not.toBe(0);
   expect(remote).toEqual(['inspect']);
+});
+
+it('uses the working IPv4 route and bounded verified connections for every G02 command and artifact transfer', () => {
+  const { result, transport } = invoke(false, 0, 'G02');
+  expect(result.status, result.stderr).toBe(0);
+  expect(transport.filter(([command]) => command === 'scp')).toHaveLength(5);
+  expect(transport.some(([command]) => command === 'ssh')).toBe(true);
+  for (const args of transport)
+    expect(args.slice(1, 12)).toEqual([
+      '-4',
+      '-o',
+      'BatchMode=yes',
+      '-o',
+      'StrictHostKeyChecking=yes',
+      '-o',
+      'ConnectTimeout=15',
+      '-o',
+      'ServerAliveInterval=15',
+      '-o',
+      'ServerAliveCountMax=3',
+    ]);
 });
 
 it('runs ordinary delivery with no recovery argument', () => {
@@ -125,6 +164,31 @@ it('runs ordinary delivery with no recovery argument', () => {
   expect(args).toBe('1:' + id);
   expect(remote.at(-1)).toBe('activate ' + id);
   expect(remote[0]).toBe('protection');
+});
+it.each([
+  ['G01', false],
+  ['G01', true],
+  ['G02', false],
+  ['G02', true],
+] as const)('%s protects the actual deployment process for recovery=%s', (slice, recovery) => {
+  const { result, id, remote } = invoke(recovery, 0, slice);
+  expect(result.status, result.stderr).toBe(0);
+  expect(remote.at(-1)).toBe(
+    'systemd-run --user --quiet --pipe --wait --collect ' +
+      '--unit=nanoclaw-cos-deploy-' +
+      id +
+      '.service ' +
+      '--property=LimitCORE=0 --property=MemorySwapMax=0 --property=RuntimeMaxSec=1900 -- ' +
+      '/usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C LC_ALL=C ' +
+      'activate ' +
+      id +
+      (recovery ? ' release-failed' : ''),
+  );
+});
+it.each(['G01', 'G02'])('%s refuses an empty command before starting a protected unit', (slice) => {
+  const { result, remote } = invoke(false, 2, slice);
+  expect(result.status).not.toBe(0);
+  expect(remote.at(-1)).toBe('bootstrap prepare');
 });
 it('finishes the verified protected current release without replaying normal deployment or archive preparation', () => {
   const { result, args, remote } = invoke(false, 4);

@@ -11,8 +11,7 @@ export function localTarget(root: string, installationRoot: string, dataRoot: st
   const value = readPrivate<TargetState>(path.join(root, 'state.json'));
   return readTarget(root, { ...value.binding, hostFingerprint: machineFingerprint(), installationRoot, dataRoot });
 }
-/** Stable across login roles and password rotation. The actual server/database must match, too. */
-export async function databaseFingerprint(client: Pick<pg.Client, 'query'>, config: PoolConfig): Promise<string> {
+async function databaseIdentity(client: Pick<pg.Client, 'query'>, config: Pick<PoolConfig, 'database'>) {
   const { rows } = await client.query(`SELECT current_database() AS database,
     (SELECT oid::text FROM pg_database WHERE datname=current_database()) AS database_oid,
     host(inet_server_addr()) AS server_address, inet_server_port() AS server_port`);
@@ -27,7 +26,21 @@ export async function databaseFingerprint(client: Pick<pg.Client, 'query'>, conf
     !Number.isInteger(value.server_port)
   )
     throw new Error('database_identity_unavailable');
-  const tls = config.ssl && typeof config.ssl === 'object' ? config.ssl : null;
+  return value;
+}
+/** Actual server/database identity, independent of configured aliases, roles and
+ * trust labels. Trusted recovery compares two live clients before admitting a
+ * test import; an archived connection fingerprint alone cannot prove separation. */
+export async function databasePhysicalFingerprint(
+  client: Pick<pg.Client, 'query'>,
+  config: Pick<PoolConfig, 'database'>,
+): Promise<string> {
+  return digest(await databaseIdentity(client, config));
+}
+/** Stable across login roles and password rotation. The actual server/database must match, too. */
+export async function databaseFingerprint(client: Pick<pg.Client, 'query'>, config: PoolConfig): Promise<string> {
+  const value = await databaseIdentity(client, config),
+    tls = config.ssl && typeof config.ssl === 'object' ? config.ssl : null;
   return digest({
     host: config.host,
     port: config.port,

@@ -66,6 +66,61 @@ function fixture() {
   };
   return { input, controls, proof };
 }
+function upgrade(f: ReturnType<typeof fixture>) {
+  const release = fixtureVaultRelease('G02'),
+    nonce = randomUUID(),
+    operationId = randomUUID();
+  release.source.commit = 'e'.repeat(40);
+  release.source.tree = 'f'.repeat(40);
+  release.releaseId = 'release-eeeeeeeeeeee-20261011000000';
+  release.previousReleaseIds = [f.input.release.releaseId];
+  release.vaultArtifact!.seal.sourceCommit = release.source.commit;
+  release.vaultArtifact!.seal.sourceTree = release.source.tree;
+  release.vaultArtifact!.digest = digest(release.vaultArtifact!.seal);
+  for (const check of Object.values(release.checks)) check.sourceCommit = release.source.commit;
+  f.input.release = release;
+  f.input.payloadRoot = '/home/fixture/.config/nanoclaw-cos/releases/' + release.releaseId + '/payload';
+  Object.assign(f.input.target, { releaseId: release.releaseId, generation: 4, maintenanceId: nonce });
+  Object.assign(f.input.maintenance, { owner: 'operations-' + operationId, nonce, generation: 4 });
+  Object.assign(f.proof.scope, { operationId, generation: 4 });
+}
+it('G02 admin preserves the existing vault metadata and uses the fresh proof for the upgraded staged helper', async () => {
+  const f = fixture();
+  await runVaultInstallAdmin(f.input, f.controls);
+  const previous = f.controls.saveConfiguration.mock.calls[0]![0];
+  upgrade(f);
+  const result = await runVaultInstallAdmin(f.input, f.controls),
+    request = f.controls.invoke.mock.calls[1]![0];
+  expect(request.configuration.identity).toEqual(previous.identity);
+  expect(request.configuration.owner).toEqual(previous.owner);
+  expect(request.configuration.authority.operationId).toBe(f.proof.scope.operationId);
+  expect(request.configuration.artifact.digest).toBe(f.input.release.vaultArtifact!.digest);
+  expect(result.recoveryReference).toBe(previous.identity.recoveryReference);
+  expect(vaultInstallInvocation(request.configuration, request.releaseId).args.slice(-3)).toEqual([
+    f.input.payloadRoot + '/vault-artifacts/' + request.configuration.artifact.digest + '/node',
+    f.input.payloadRoot + '/vault-artifacts/' + request.configuration.artifact.digest + '/gateway.mjs',
+    '--install',
+  ]);
+  await runVaultInstallAdmin(f.input, f.controls);
+  expect(f.controls.saveConfiguration).toHaveBeenCalledTimes(2);
+  expect(f.proof.authority.close).toHaveBeenCalledTimes(3);
+});
+it.each(['predecessor', 'backup-gate'])(
+  'G02 admin denies missing %s before saving metadata or opening provisioning authority',
+  async (reason) => {
+    const f = fixture();
+    if (reason === 'backup-gate') await runVaultInstallAdmin(f.input, f.controls);
+    upgrade(f);
+    if (reason === 'backup-gate') delete f.input.release.checks.backup_transfer;
+    f.controls.saveConfiguration.mockClear();
+    f.controls.openAuthority.mockClear();
+    f.controls.invoke.mockClear();
+    await expect(runVaultInstallAdmin(f.input, f.controls)).rejects.toThrow('vault_owner_installation_unavailable');
+    expect(f.controls.saveConfiguration).not.toHaveBeenCalled();
+    expect(f.controls.openAuthority).not.toHaveBeenCalled();
+    expect(f.controls.invoke).not.toHaveBeenCalled();
+  },
+);
 it('persists stable metadata before opening the live root capability, sends no recovery key and always closes the proof', async () => {
   const f = fixture(),
     result = await runVaultInstallAdmin(f.input, f.controls);

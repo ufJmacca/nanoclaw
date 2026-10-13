@@ -31,6 +31,63 @@ function fixture() {
     owner: { uid: 1000, gid: 1000, home: '/home/fixture', targetRoot: '/home/fixture/.config/nanoclaw-cos/state' },
   };
 }
+function backupUpgrade() {
+  const input = fixture(),
+    previous = vaultOwnerConfiguration(input),
+    nonce = randomUUID(),
+    release = fixtureVaultRelease('G02');
+  release.source.commit = 'e'.repeat(40);
+  release.source.tree = 'f'.repeat(40);
+  release.releaseId = 'release-backup-fixture';
+  release.previousReleaseIds = [input.release.releaseId];
+  release.vaultArtifact!.seal.sourceCommit = release.source.commit;
+  release.vaultArtifact!.seal.sourceTree = release.source.tree;
+  release.vaultArtifact!.digest = digest(release.vaultArtifact!.seal);
+  for (const check of Object.values(release.checks)) check.sourceCommit = release.source.commit;
+  return {
+    ...input,
+    previous,
+    release,
+    target: { ...input.target, releaseId: release.releaseId, generation: 4, maintenanceId: nonce },
+    maintenance: { ...input.maintenance, owner: 'operations-' + randomUUID(), generation: 4, nonce },
+  };
+}
+it('G02 upgrades the sealed helper under new maintenance authority while preserving the existing vault', () => {
+  const input = backupUpgrade(),
+    config = vaultOwnerConfiguration(input);
+  expect(config.identity).toEqual(input.previous.identity);
+  expect(config.owner).toEqual(input.previous.owner);
+  expect(config.target.binding).toEqual(input.previous.target.binding);
+  expect(config.authority.operationId).toBe(input.maintenance.owner.slice(11));
+  expect(config.authority.operationId).not.toBe(input.previous.authority.operationId);
+  expect(config.target.minimumGeneration).toBe(4);
+  expect(config.artifact).toEqual({
+    sourceCommit: input.release.source.commit,
+    sourceTree: input.release.source.tree,
+    digest: input.release.vaultArtifact!.digest,
+  });
+  expect(vaultOwnerConfiguration({ ...input, previous: config })).toEqual(config);
+});
+it('G02 refuses to create a fresh vault when the existing configuration is absent', () => {
+  const { previous: _previous, ...input } = backupUpgrade();
+  expect(() => vaultOwnerConfiguration(input)).toThrow('vault_owner_configuration_unavailable');
+});
+it.each(['owner', 'binding', 'generation', 'reused-operation', 'backup-gate', 'artifact'])(
+  'G02 refuses a conflicting %s upgrade',
+  (reason) => {
+    const input = backupUpgrade();
+    if (reason === 'owner') input.owner.gid++;
+    if (reason === 'binding') input.target.binding.hostFingerprint = '9'.repeat(64);
+    if (reason === 'generation') {
+      input.target.generation = 3;
+      input.maintenance.generation = 3;
+    }
+    if (reason === 'reused-operation') input.maintenance.owner = 'operations-' + input.previous.authority.operationId;
+    if (reason === 'backup-gate') delete input.release.checks.backup_recovery;
+    if (reason === 'artifact') input.release.vaultArtifact!.digest = '0'.repeat(64);
+    expect(() => vaultOwnerConfiguration(input)).toThrow('vault_owner_configuration_unavailable');
+  },
+);
 it('creates source-bound metadata with a permanent resource ID distinct from the checked maintenance operation', () => {
   const input = fixture(),
     config = vaultOwnerConfiguration(input);

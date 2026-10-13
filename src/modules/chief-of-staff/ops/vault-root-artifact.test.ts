@@ -2,12 +2,13 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
-import { afterEach, expect, it } from 'vitest';
+import { afterEach, expect, it, vi } from 'vitest';
 import { digest } from '../domain/contracts.js';
 import { vaultRootConfiguration } from './vault-root-config.js';
-import { verifyVaultRootArtifact, type VaultRootArtifactSeal } from './vault-root-artifact.js';
+import { verifyVaultRootArtifact, withVaultRootArtifact, type VaultRootArtifactSeal } from './vault-root-artifact.js';
 const roots: string[] = [];
 afterEach(() => {
+  vi.restoreAllMocks();
   for (const root of roots.splice(0)) {
     fs.chmodSync(root, 0o700);
     fs.rmSync(root, { recursive: true, force: true });
@@ -147,4 +148,101 @@ it('checks actual memory and role before reading even a missing artifact', () =>
     }),
   ).toThrow('vault_root_artifact_unavailable');
   expect(calls).toEqual(['memory']);
+});
+it('retains the verified payload descriptors across awaited work and repeated checks without re-reading their bytes', async () => {
+  const f = fixture(),
+    reads = vi.spyOn(fs, 'readSync'),
+    opened = vi.spyOn(fs, 'openSync');
+  let released!: () => void;
+  await withVaultRootArtifact(
+    f.config,
+    async (lease) => {
+      released = lease.assertCurrent;
+      expect(lease.seal).toEqual(f.seal);
+      const count = reads.mock.calls.length;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      for (let index = 0; index < 100; index++) lease.assertCurrent();
+      expect(reads.mock.calls.length).toBe(count);
+    },
+    f.controls,
+  );
+  expect(() => released()).toThrow(/^vault_root_artifact_unavailable$/);
+  for (const result of opened.mock.results)
+    if (result.type === 'return') expect(() => fs.fstatSync(result.value)).toThrow();
+});
+it.each([
+  'gateway-replace',
+  'node-rewrite',
+  'manifest-replace',
+  'mode',
+  'special-mode',
+  'hardlink',
+  'directory-mode',
+  'directory-replace',
+  'extra-file',
+  'memory',
+  'role',
+])('invalidates a held artifact after %s changes across an await', async (reason) => {
+  const f = fixture();
+  let revoked = false;
+  f.controls.assertMemory = () => {
+    if (revoked && reason === 'memory') throw Error('PRIVATE_MEMORY');
+  };
+  f.controls.assertRole = () => {
+    if (revoked && reason === 'role') throw Error('PRIVATE_ROLE');
+  };
+  await expect(
+    withVaultRootArtifact(
+      f.config,
+      async (lease) => {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        if (['gateway-replace', 'manifest-replace', 'directory-replace', 'hardlink', 'extra-file'].includes(reason))
+          fs.chmodSync(f.root, 0o755);
+        if (reason === 'gateway-replace' || reason === 'manifest-replace') {
+          const file = path.join(f.root, reason === 'gateway-replace' ? 'gateway.mjs' : 'artifact.json');
+          const bytes = fs.readFileSync(file);
+          fs.renameSync(file, file + '-old');
+          fs.writeFileSync(file, bytes, { mode: 0o444 });
+          fs.unlinkSync(file + '-old');
+        }
+        if (reason === 'node-rewrite') {
+          const file = path.join(f.root, 'node');
+          fs.chmodSync(file, 0o755);
+          fs.writeFileSync(file, 'changed fixture bytes\n');
+          fs.chmodSync(file, 0o555);
+        }
+        if (reason === 'mode') fs.chmodSync(path.join(f.root, 'gateway.mjs'), 0o644);
+        if (reason === 'special-mode') fs.chmodSync(path.join(f.root, 'gateway.mjs'), 0o2444);
+        if (reason === 'hardlink') fs.linkSync(path.join(f.root, 'gateway.mjs'), path.join(f.root, 'foreign'));
+        if (reason === 'extra-file') fs.writeFileSync(path.join(f.root, 'foreign'), 'fixture');
+        if (reason === 'directory-replace') {
+          const old = f.root + '-old';
+          fs.renameSync(f.root, old);
+          roots.push(old);
+          fs.mkdirSync(f.root, { mode: 0o555 });
+        }
+        if (reason === 'directory-mode') fs.chmodSync(f.root, 0o755);
+        if (['gateway-replace', 'manifest-replace', 'hardlink', 'extra-file'].includes(reason))
+          fs.chmodSync(f.root, 0o555);
+        if (reason === 'memory' || reason === 'role') revoked = true;
+        lease.assertCurrent();
+      },
+      f.controls,
+    ),
+  ).rejects.toThrow(/^vault_root_artifact_unavailable$/);
+});
+it('redacts a callback failure and permanently releases its held artifact lease', async () => {
+  const f = fixture();
+  let released!: () => void;
+  await expect(
+    withVaultRootArtifact(
+      f.config,
+      async (lease) => {
+        released = lease.assertCurrent;
+        throw Error('PRIVATE_CALLBACK');
+      },
+      f.controls,
+    ),
+  ).rejects.toThrow(/^vault_root_artifact_unavailable$/);
+  expect(() => released()).toThrow(/^vault_root_artifact_unavailable$/);
 });

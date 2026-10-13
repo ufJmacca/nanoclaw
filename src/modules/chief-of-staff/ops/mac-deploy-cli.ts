@@ -132,7 +132,7 @@ export async function macDeployCommand(args: string[]): Promise<string | void> {
     });
   }
   const manifest = validateReleaseManifest(readPrivate(path.join(root, 'release.json')));
-  if (manifest.slice === 'G01') readReleaseExecution(path.resolve('.cos-plan-state'), manifest.slice);
+  if (['G01', 'G02'].includes(manifest.slice)) readReleaseExecution(path.resolve('.cos-plan-state'), manifest.slice);
   if (manifest.releaseId !== id) throw new Error('release_identity_mismatch');
   const local = readPrivate<{
     status: string;

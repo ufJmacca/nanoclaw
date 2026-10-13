@@ -16,6 +16,8 @@ import { targetBinding } from './target-host.js';
 import { deploymentSettings, type DeploymentSettings } from './deployment-settings.js';
 import { activeMaintenanceLease, assertMaintenanceLease } from './maintenance.js';
 import { backupTargetActionState } from './target-action-backup.js';
+import { captureTargetVaultState } from './backup-state-capture.js';
+import { validateReleaseManifest } from './release-manifest.js';
 import { verifyConversationBackup } from './conversation-backup.js';
 import { verifyMissionBackup } from './mission-backup.js';
 import {
@@ -37,6 +39,7 @@ import {
 export type ActionRecoveryArguments =
   | { command: 'action-backup'; scopeId: string; requestId: string; settingsFile: string }
   | { command: 'operations-backup'; scopeId: string; requestId: string; settingsFile: string }
+  | { command: 'backup-checkpoint'; scopeId: string; requestId: string; settingsFile: string }
   | { command: 'action-restore-check'; scopeId: string; requestId: string; backupOperationId: string }
   | {
       command: 'operations-restore-check';
@@ -46,13 +49,17 @@ export type ActionRecoveryArguments =
       settingsFile: string;
     };
 export function isActionRecoveryCommand(args: { command: string }): args is ActionRecoveryArguments {
-  return ['action-backup', 'action-restore-check', 'operations-backup', 'operations-restore-check'].includes(
-    args.command,
-  );
+  return [
+    'action-backup',
+    'action-restore-check',
+    'operations-backup',
+    'operations-restore-check',
+    'backup-checkpoint',
+  ].includes(args.command);
 }
 export function parseActionRecoveryArguments(args: string[]): ActionRecoveryArguments {
   const invalid = () => Error('invalid_admin_arguments'),
-    backup = ['action-backup', 'operations-backup'].includes(args[0]),
+    backup = ['action-backup', 'operations-backup', 'backup-checkpoint'].includes(args[0]),
     operationsRestore = args[0] === 'operations-restore-check';
   if (!isActionRecoveryCommand({ command: args[0] }) || args.length !== (operationsRestore ? 9 : 7)) throw invalid();
   const allowed = [
@@ -96,7 +103,12 @@ export function parseActionRecoveryArguments(args: string[]): ActionRecoveryArgu
   )
     throw invalid();
   return {
-    command: args[0] === 'operations-backup' ? 'operations-backup' : 'action-backup',
+    command:
+      args[0] === 'backup-checkpoint'
+        ? 'backup-checkpoint'
+        : args[0] === 'operations-backup'
+          ? 'operations-backup'
+          : 'action-backup',
     scopeId,
     requestId,
     settingsFile,
@@ -118,7 +130,7 @@ const fields = (value: unknown, keys: string[]): value is Record<string, unknown
   !Array.isArray(value) &&
   Object.keys(value).sort().join(',') === [...keys].sort().join(',');
 const hash = (value: unknown) => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
-function recordedRelease(settings: DeploymentSettings, id: string | null, current = false): RecoveryRelease {
+export function recordedRelease(settings: DeploymentSettings, id: string | null, current = false): RecoveryRelease {
   if (!id || !/^release-[a-zA-Z0-9_-]{1,120}$/.test(id)) throw Error('action_recovery_unavailable');
   const release = recoveryReleaseForManifest(readJson(path.join(settings.releaseRoot, id, 'release.json'))),
     deployment = readJson(path.join(settings.stateRoot, 'releases', id, 'deployment.json'));
@@ -180,6 +192,92 @@ async function recovery(o: Options): Promise<Record<string, unknown>> {
       throw Error('action_recovery_unavailable');
   };
   const base = { scope_id: binding.scopeId, paused: true, writer_enabled: false, live_model: 'not_invoked' };
+  if (args.command === 'backup-checkpoint') {
+    const settings = deploymentSettings(readJson(args.settingsFile)),
+      settingsDigest = digest(settings);
+    if (
+      settings.stateRoot !== roots.targetRoot ||
+      digest(targetBinding(settings)) !== installationDigest ||
+      target.lifecycle !== 'protected' ||
+      !target.maintenance
+    )
+      throw Error('action_recovery_unavailable');
+    const selectedRelease = () => {
+      const currentTarget = localTarget(roots.targetRoot, roots.installationRoot, roots.dataRoot);
+      if (
+        currentTarget.releaseId !== target.releaseId ||
+        currentTarget.lifecycle !== 'protected' ||
+        digest(deploymentSettings(readJson(args.settingsFile))) !== settingsDigest
+      )
+        throw Error('action_recovery_unavailable');
+      const release = recordedRelease(settings, currentTarget.releaseId, true),
+        manifest = validateReleaseManifest(
+          readJson(path.join(settings.releaseRoot, release.releaseId, 'release.json')),
+        );
+      if (manifest.slice !== 'G02' || digest(manifest) !== release.manifestDigest)
+        throw Error('action_recovery_unavailable');
+      return release;
+    };
+    const release = selectedRelease(),
+      releaseDigest = digest(release),
+      current = async () => {
+        await check();
+        if (digest(selectedRelease()) !== releaseDigest) throw Error('action_recovery_unavailable');
+      };
+    await current();
+    operation(roots, args.requestId, { command: args.command, binding, settingsDigest, releaseDigest });
+    const operationId = 'release-action-' + args.requestId;
+    const result = await captureTargetVaultState(
+      settings,
+      operationId,
+      { native: o.native, hostLease: o.hostLease, maintenance, check: current },
+      release,
+    );
+    await current();
+    if (
+      result.operationId !== operationId ||
+      result.targetBindingDigest !== installationDigest ||
+      result.nativeBindingDigest !== digest(binding) ||
+      digest(result.journal) !== digest({ installationDigest, generation: witness.generation }) ||
+      result.writerActivated !== false ||
+      result.admissionRestored !== false ||
+      !/^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(result.queueOperationId)
+    )
+      throw Error('action_recovery_unavailable');
+    if (result.status === 'skipped_pending') {
+      if (!['pending', 'capturing', 'failed'].includes(String(result.slotState)))
+        throw Error('action_recovery_unavailable');
+      return {
+        ...base,
+        status: 'backup_skipped_pending',
+        request_operation_id: operationId,
+        queue_operation_id: result.queueOperationId,
+        pending_state: result.slotState,
+        remote_checkpoint: 'pending',
+        admission_restored: false,
+      };
+    }
+    if (
+      result.status !== 'queued' ||
+      result.queueOperationId !== args.requestId ||
+      !hash(result.snapshotDigest) ||
+      !result.operations ||
+      digest(result.operations.release) !== releaseDigest ||
+      !hash(result.operations.manifestDigest)
+    )
+      throw Error('action_recovery_unavailable');
+    return {
+      ...base,
+      status: 'backup_queued_verified_paused',
+      backup_operation_id: operationId,
+      queue_operation_id: result.queueOperationId,
+      snapshot_digest: result.snapshotDigest,
+      operations_manifest_digest: result.operations.manifestDigest,
+      target_backup_digest: digest(result),
+      remote_checkpoint: 'pending',
+      admission_restored: false,
+    };
+  }
   if (args.command === 'action-backup' || args.command === 'operations-backup') {
     const settings = deploymentSettings(readJson(args.settingsFile));
     if (settings.stateRoot !== roots.targetRoot || digest(targetBinding(settings)) !== installationDigest)

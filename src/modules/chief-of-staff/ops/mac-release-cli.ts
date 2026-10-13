@@ -26,6 +26,13 @@ import {
 import { imageConfigurations } from './image-archive.js';
 import { artifactHash, verifyReleaseBundle } from './release-artifacts.js';
 import { validateBuildTargetObservation } from './mac-deploy.js';
+import { packageResticReleaseArtifact, verifyResticReleaseArtifactInput } from './restic-release-package.js';
+import { validateResticArtifactSeal } from './restic-artifact.js';
+import { verifyBackupJobFixtureImage, verifyBackupJobFixtureEvidence } from './backup-job-fixture-evidence.js';
+import { verifyBackupSmbFixtureImages, verifyBackupSmbFixtureEvidence } from './backup-smb-fixture-evidence.js';
+import { verifyBackupRepositoryFixtureEvidence } from './backup-repository-fixture-evidence.js';
+import { verifyBackupCredentialReleaseEvidence } from './backup-vault-fixture-evidence.js';
+import { verifyBackupCaptureFixtureEvidence } from './backup-capture-fixture-evidence.js';
 
 export const BUILD_TARGETS = ['host', 'agent-standard', 'agent-documents'] as const;
 type BuildTarget = (typeof BUILD_TARGETS)[number];
@@ -35,6 +42,23 @@ type Plan = Omit<ReleaseManifest, 'checks'> & {
   builder?: string;
   context?: string;
 };
+export function releaseCheckImageIds(
+  images: ReadonlyArray<Pick<ReleaseManifest['images'][number], 'role' | 'id'>>,
+  name: string,
+): string[] {
+  const hostOnly = name.startsWith('vault_') || name.startsWith('backup_'),
+    allImages = name.includes('image') || name === 'protected_state';
+  if (!hostOnly && !allImages) return [];
+  if (
+    images.length !== BUILD_TARGETS.length ||
+    new Set(images.map((image) => image.id)).size !== BUILD_TARGETS.length ||
+    images.some((image) => !/^sha256:[a-f0-9]{64}$/.test(image.id)) ||
+    images.filter((image) => image.role === 'host').length !== 1 ||
+    images.filter((image) => image.role === 'agent').length !== 2
+  )
+    throw Error('image_identity_required');
+  return (hostOnly ? images.filter((image) => image.role === 'host') : images).map((image) => image.id);
+}
 function releaseRoot(id: string): string {
   if (!/^release-[a-f0-9]{12}-[0-9]{14}$/.test(id)) throw new Error('invalid_local_release');
   const root = path.resolve('.cos-plan-state/releases', id);
@@ -74,20 +98,21 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
   if (operation === 'init' && values.length === 3) {
     const [commit, fetchRef, slice] = values;
     // Only the current implemented slice may create a new release; historical manifests remain readable.
-    if ((slice !== 'S11' && slice !== 'G01') || Number(SCHEMA_VERSION) !== 18)
+    if (!['S11', 'G01', 'G02'].includes(slice) || Number(SCHEMA_VERSION) !== 18)
       throw new Error('current_release_slice_required');
     if (!/^[a-f0-9]{40}$/.test(commit) || !/^refs\/heads\/[a-zA-Z0-9_./-]+$/.test(fetchRef) || fetchRef.includes('..'))
       throw new Error('invalid_candidate_source');
     const root = releaseRoot(id);
     if (fs.existsSync(path.join(root, 'plan.json'))) throw new Error('release_already_exists');
     const target = deploymentSettings(readPrivate(path.resolve('.cos-plan-state/deployment-target.json')));
-    if (readReleaseExecution(path.resolve('.cos-plan-state'), slice, true).active_slice !== slice)
+    const selectedSlice = slice as ReleaseManifest['slice'];
+    if (readReleaseExecution(path.resolve('.cos-plan-state'), selectedSlice, true).active_slice !== slice)
       throw new Error('active_slice_required');
     const metadata = await prepareBuildContext(process.cwd(), commit, path.join(root, 'context'));
     const plan: Plan = {
       contract: 'cos-release/v1',
       releaseId: id,
-      slice,
+      slice: selectedSlice,
       platform: 'linux/arm64',
       source: {
         repository: 'ufJmacca/nanoclaw',
@@ -107,6 +132,14 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
       images: [],
       checks: {},
       targetDigest: digest(target),
+      ...(slice === 'G02'
+        ? {
+            backupArtifact: packageResticReleaseArtifact({
+              binary: path.resolve('.cos-plan-state/g02-restic-0.19.1/restic'),
+              output: path.join(root, 'backup-artifact-input'),
+            }),
+          }
+        : {}),
     };
     writeAtomic(root, 'plan.json', plan);
     checkedPlan(id);
@@ -119,8 +152,39 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
     return;
   }
   const { root, plan } = checkedPlan(id);
+  if (operation === 'backup-input' && !values.length) {
+    if (plan.slice !== 'G02') throw Error('backup_release_required');
+    validateResticArtifactSeal(plan.backupArtifact);
+    verifyResticReleaseArtifactInput(path.join(root, 'backup-artifact-input'));
+    return;
+  }
+  if (operation === 'backup-job-fixture' && !values.length) {
+    if (plan.slice !== 'G02') throw Error('backup_release_required');
+    const [hostImage] = releaseCheckImageIds(plan.images, 'backup_units');
+    const image = verifyBackupJobFixtureImage(
+      readPrivate(path.join(root, 'backup-jobs-fixture-inspect.json')),
+      plan.source.commit,
+      plan.source.tree,
+      hostImage,
+    );
+    writeAtomic(root, 'backup-jobs-fixture.json', { image, hostImage, source: plan.source });
+    return image;
+  }
+  if (operation === 'backup-smb-fixture' && !values.length) {
+    if (plan.slice !== 'G02') throw Error('backup_release_required');
+    const [hostImage] = releaseCheckImageIds(plan.images, 'backup_mount');
+    const images = verifyBackupSmbFixtureImages(
+      readPrivate(path.join(root, 'backup-smb-server-inspect.json')),
+      readPrivate(path.join(root, 'backup-smb-client-inspect.json')),
+      plan.source.commit,
+      plan.source.tree,
+      hostImage,
+    );
+    writeAtomic(root, 'backup-smb-fixture.json', { ...images, hostImage, source: plan.source });
+    return images.clientImage;
+  }
   if (operation === 'vault-fixture' && !values.length) {
-    if (plan.slice !== 'G01' || !plan.vaultArtifact) throw Error('vault_release_required');
+    if (!['G01', 'G02'].includes(plan.slice) || !plan.vaultArtifact) throw Error('vault_release_required');
     const host = plan.images.find((image) => image.role === 'host');
     if (!host) throw Error('image_identity_required');
     const image = verifyVaultFixtureImage(
@@ -137,7 +201,7 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
     return image;
   }
   if (operation === 'vault-wire' && !values.length) {
-    if (plan.slice !== 'G01') throw Error('vault_release_required');
+    if (!['G01', 'G02'].includes(plan.slice)) throw Error('vault_release_required');
     const file = path.join(root, 'vault_kernel.log'),
       stat = fs.lstatSync(file);
     if (
@@ -158,7 +222,7 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
     return;
   }
   if (operation === 'vault-artifact' && !values.length) {
-    if (plan.slice !== 'G01') throw Error('vault_release_required');
+    if (!['G01', 'G02'].includes(plan.slice)) throw Error('vault_release_required');
     const seal = vaultRootArtifactSeal(readPrivate(path.join(root, 'vault-artifact.json'), 4096));
     if (
       seal.sourceCommit !== plan.source.commit ||
@@ -250,6 +314,10 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
       !/^[a-zA-Z0-9_.-]+$/.test(volume)
     )
       throw new Error('invalid_fixture_configuration');
+    if (plan.slice === 'G02') {
+      validateResticArtifactSeal(plan.backupArtifact);
+      verifyResticReleaseArtifactInput(path.join(root, 'backup-artifact-input'));
+    }
     const selected = selectTestEnvironment(readEnvFile([...TEST_ENVIRONMENT_KEYS]), path.join(testRoot(id), 'ca.pem'));
     const result = spawnSync(
       process.execPath,
@@ -270,13 +338,19 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
           COS_FIXTURE_HOST_ROOT: hostRoot,
           COS_FIXTURE_IMAGE: image,
           COS_FIXTURE_RUNNER_VOLUME: volume,
+          ...(plan.slice === 'G02'
+            ? { COS_BACKUP_FIXTURE_BINARY: path.join(root, 'backup-artifact-input/restic') }
+            : {}),
         },
         stdio: 'inherit',
-        timeout: ['S10', 'S11'].includes(plan.slice)
-          ? 960000
-          : ['S06', 'S07', 'S08', 'S09'].includes(plan.slice)
-            ? 660000
-            : 180000,
+        timeout:
+          plan.slice === 'G02'
+            ? 1260000
+            : ['S10', 'S11', 'G01'].includes(plan.slice)
+              ? 960000
+              : ['S06', 'S07', 'S08', 'S09'].includes(plan.slice)
+                ? 660000
+                : 180000,
       },
     );
     if (result.status !== 0) throw new Error('local_fixture_failed');
@@ -314,20 +388,145 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
     const [name, status] = values;
     if (!requiredReleaseChecks(plan.slice).includes(name) || !['0', '1'].includes(status))
       throw new Error('invalid_check_result');
-    if (
-      (name.includes('image') || name.startsWith('vault_') || name === 'protected_state') &&
-      plan.images.length !== BUILD_TARGETS.length
-    )
-      throw new Error('image_identity_required');
+    const imageIds = releaseCheckImageIds(plan.images, name);
+    if (name === 'backup_capture' && status === '0') {
+      const fixture = readPrivate<{ image: string; hostImage: string; source: ReleaseManifest['source'] }>(
+        path.join(root, 'vault-fixture.json'),
+      );
+      if (fixture.hostImage !== imageIds[0] || digest(fixture.source) !== digest(plan.source))
+        throw Error('vault_fixture_identity_mismatch');
+      const file = path.join(root, 'backup_capture.log'),
+        stat = fs.lstatSync(file);
+      if (
+        !stat.isFile() ||
+        stat.nlink !== 1 ||
+        stat.uid !== process.getuid?.() ||
+        (stat.mode & 0o7777) !== 0o600 ||
+        stat.size > 512 * 1024
+      )
+        throw Error('backup_capture_release_evidence_unavailable');
+      const records = fs
+        .readFileSync(file, 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+      verifyBackupCaptureFixtureEvidence(records, {
+        sourceCommit: plan.source.commit,
+        sourceTree: plan.source.tree,
+        hostImage: imageIds[0],
+        fixtureImage: fixture.image,
+      });
+    }
+    if (name === 'backup_credentials' && status === '0') {
+      const fixture = readPrivate<{ image: string; hostImage: string; source: ReleaseManifest['source'] }>(
+        path.join(root, 'vault-fixture.json'),
+      );
+      if (fixture.hostImage !== imageIds[0] || digest(fixture.source) !== digest(plan.source))
+        throw Error('vault_fixture_identity_mismatch');
+      const file = path.join(root, 'backup_credentials.log'),
+        stat = fs.lstatSync(file);
+      if (
+        !stat.isFile() ||
+        stat.nlink !== 1 ||
+        stat.uid !== process.getuid?.() ||
+        (stat.mode & 0o7777) !== 0o600 ||
+        stat.size > 512 * 1024
+      )
+        throw Error('backup_credential_release_evidence_unavailable');
+      const records = fs
+        .readFileSync(file, 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+      verifyBackupCredentialReleaseEvidence(records, {
+        sourceCommit: plan.source.commit,
+        sourceTree: plan.source.tree,
+        hostImage: imageIds[0],
+        fixtureImage: fixture.image,
+      });
+    }
+    if (['backup_transfer', 'backup_retention', 'backup_recovery'].includes(name) && status === '0') {
+      const file = path.join(root, name + '.log'),
+        stat = fs.lstatSync(file);
+      if (
+        !stat.isFile() ||
+        stat.nlink !== 1 ||
+        stat.uid !== process.getuid?.() ||
+        (stat.mode & 0o7777) !== 0o600 ||
+        stat.size > 1024 ** 2
+      )
+        throw Error('backup_repository_release_evidence_unavailable');
+      verifyBackupRepositoryFixtureEvidence(fs.readFileSync(file, 'utf8'), {
+        sourceCommit: plan.source.commit,
+        sourceTree: plan.source.tree,
+        hostImage: imageIds[0],
+      });
+    }
+    if (name === 'backup_mount' && status === '0') {
+      const fixture = readPrivate<{
+        serverImage: string;
+        clientImage: string;
+        hostImage: string;
+        source: ReleaseManifest['source'];
+      }>(path.join(root, 'backup-smb-fixture.json'));
+      if (fixture.hostImage !== imageIds[0] || digest(fixture.source) !== digest(plan.source))
+        throw Error('backup_smb_fixture_identity_mismatch');
+      const file = path.join(root, 'backup_mount.log'),
+        stat = fs.lstatSync(file);
+      if (
+        !stat.isFile() ||
+        stat.nlink !== 1 ||
+        stat.uid !== process.getuid?.() ||
+        (stat.mode & 0o7777) !== 0o600 ||
+        stat.size > 262144
+      )
+        throw Error('backup_smb_fixture_evidence_unavailable');
+      const records = fs
+        .readFileSync(file, 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+      verifyBackupSmbFixtureEvidence(records, {
+        sourceCommit: plan.source.commit,
+        sourceTree: plan.source.tree,
+        hostImage: imageIds[0],
+        serverImage: fixture.serverImage,
+        clientImage: fixture.clientImage,
+      });
+    }
+    if (name === 'backup_units' && status === '0') {
+      const fixture = readPrivate<{ image: string; hostImage: string; source: ReleaseManifest['source'] }>(
+        path.join(root, 'backup-jobs-fixture.json'),
+      );
+      if (fixture.hostImage !== imageIds[0] || digest(fixture.source) !== digest(plan.source))
+        throw Error('backup_job_fixture_identity_mismatch');
+      const file = path.join(root, 'backup_units.log'),
+        stat = fs.lstatSync(file);
+      if (
+        !stat.isFile() ||
+        stat.nlink !== 1 ||
+        stat.uid !== process.getuid?.() ||
+        (stat.mode & 0o7777) !== 0o600 ||
+        stat.size > 262144
+      )
+        throw Error('backup_job_fixture_evidence_unavailable');
+      const records = fs
+        .readFileSync(file, 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+      verifyBackupJobFixtureEvidence(records, {
+        sourceCommit: plan.source.commit,
+        sourceTree: plan.source.tree,
+        hostImage: imageIds[0],
+        fixtureImage: fixture.image,
+      });
+    }
     plan.checks[name] = {
       status: status === '0' ? 'passed' : 'failed',
       at: new Date().toISOString(),
       sourceCommit: plan.source.commit,
-      imageIds: name.startsWith('vault_')
-        ? plan.images.filter((image) => image.role === 'host').map((image) => image.id)
-        : name.includes('image') || name === 'protected_state'
-          ? plan.images.map((image) => image.id)
-          : [],
+      imageIds,
     };
     writeAtomic(root, 'plan.json', plan);
     checkpointReleaseExecution(path.resolve('.cos-plan-state'), plan.slice, { release_local_checks: plan.checks });

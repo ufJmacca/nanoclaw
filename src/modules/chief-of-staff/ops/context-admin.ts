@@ -1,6 +1,17 @@
 import { policyAllowsBriefContext } from '../bridge/brief-context-renewal.js';
 import { runVaultProvisionAdmin, runVaultRecoveryAdmin } from './vault-owner-admin.js';
 import { runVaultInstallAdmin } from './vault-owner-install.js';
+import { runBackupCredentialInstallAdmin, type BackupCredentialInstallArguments } from './backup-credential-admin.js';
+import {
+  runBackupNasConfigureAdmin,
+  runBackupNasRecoverAdmin,
+  runBackupNasInspectAdmin,
+  runBackupNasInitializationRecoverAdmin,
+  type BackupNasConfigureArguments,
+  type BackupNasRecoverArguments,
+  type BackupNasInspectArguments,
+  type BackupNasInitializationRecoverArguments,
+} from './backup-nas-owner-setup.js';
 /** Owner-run controls. Calendar sync may refresh its own tokens; no model calls or message sends. */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -63,6 +74,11 @@ import {
 } from './action-recovery-admin.js';
 
 export type ContextAdminArguments =
+  | BackupCredentialInstallArguments
+  | BackupNasConfigureArguments
+  | BackupNasRecoverArguments
+  | BackupNasInspectArguments
+  | BackupNasInitializationRecoverArguments
   | { command: 'vault-provision'; scopeId: string }
   | { command: 'vault-install'; scopeId: string }
   | { command: 'vault-recovery-check'; scopeId: string }
@@ -206,10 +222,16 @@ export async function contextAdminCommand(
       'owner-export',
       'export-purge',
       'operations-backup',
+      'backup-checkpoint',
       'operations-restore-check',
       'vault-provision',
       'vault-install',
       'vault-recovery-check',
+      'backup-credentials-install',
+      'backup-nas-configure',
+      'backup-nas-recover-unmount',
+      'backup-nas-inspect-initialization',
+      'backup-nas-recover-initialization',
     ].includes(args.command)
   )
     return { status: 'disabled', live_model: 'not_verified' };
@@ -378,6 +400,52 @@ export async function contextAdminCommand(
         assertAuthority();
       };
       await check();
+      if (
+        args.command === 'backup-nas-configure' ||
+        args.command === 'backup-nas-recover-unmount' ||
+        args.command === 'backup-nas-inspect-initialization' ||
+        args.command === 'backup-nas-recover-initialization'
+      ) {
+        if (!vaultRelease)
+          throw Error(
+            args.command === 'backup-nas-configure'
+              ? 'backup_nas_owner_setup_unavailable'
+              : args.command === 'backup-nas-inspect-initialization'
+                ? 'backup_nas_owner_inspection_unavailable'
+                : args.command === 'backup-nas-recover-initialization'
+                  ? 'backup_nas_owner_initialization_recovery_unavailable'
+                  : 'backup_nas_owner_recovery_unavailable',
+          );
+        const input = {
+          args,
+          root,
+          target,
+          maintenance,
+          native,
+          hostLease: lease,
+          check,
+          release: vaultRelease.release,
+        };
+        return args.command === 'backup-nas-configure'
+          ? runBackupNasConfigureAdmin({ ...input, args })
+          : args.command === 'backup-nas-inspect-initialization'
+            ? runBackupNasInspectAdmin({ ...input, args })
+            : args.command === 'backup-nas-recover-initialization'
+              ? runBackupNasInitializationRecoverAdmin({ ...input, args })
+              : runBackupNasRecoverAdmin({ ...input, args });
+      }
+      if (args.command === 'backup-credentials-install') {
+        return runBackupCredentialInstallAdmin({
+          args,
+          roots: {
+            targetRoot: root,
+            installationRoot: target.binding.installationRoot,
+            dataRoot: target.binding.dataRoot,
+          },
+          check,
+          assertAuthority,
+        });
+      }
       if (args.command === 'vault-install') {
         if (!vaultRelease) throw Error('vault_owner_installation_unavailable');
         return runVaultInstallAdmin({ root, target, maintenance, native, hostLease: lease, check, ...vaultRelease });

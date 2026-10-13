@@ -16,6 +16,7 @@ import type { CalendarAccessFences } from './access-fences.js';
 import { CalendarReadError } from './reader.js';
 import { object } from './normalization.js';
 import { assertCalendarActive, awaitCalendarCredential } from './cancellation.js';
+import type { CredentialJournal } from '../ops/backup-credential-event.js';
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const profiles = {
   reader: { marker: '.cos-calendar-credentials', contract: 'cos-calendar-credentials/v1' },
@@ -105,6 +106,7 @@ export class CalendarCredentialCore {
     profile: OAuthScopeProfile,
     transport: OAuthTransport = {},
     private readonly protection: () => void = () => {},
+    private readonly journal?: CredentialJournal,
   ) {
     const selected = profileSpec(profile);
     this.#profile = profile;
@@ -220,6 +222,32 @@ export class CalendarCredentialCore {
       return fail('calendar_auth_expired');
     }
   }
+  private async record(root: string, reference: string, state: State): Promise<void> {
+    if (!this.journal) return;
+    const identity = digest(state),
+      bytes = Buffer.from(JSON.stringify(state) + '\n');
+    const assertCurrent = () => {
+      this.guard();
+      if (digest(this.state(root, reference, state.identity, true)) !== identity)
+        throw Error('credential_state_changed');
+    };
+    try {
+      assertCurrent();
+      await this.journal(
+        {
+          sourceKind: this.#profile === 'reader' ? 'calendar_reader' : 'calendar_owned_event_writer',
+          sourceKey: digest({ identity: state.identity, clientId: state.clientId, profile: this.#profile }),
+          generation: state.generation,
+          phase: state.phase,
+          files: [{ name: 'credential.json', bytes }],
+        },
+        assertCurrent,
+      );
+      assertCurrent();
+    } finally {
+      bytes.fill(0);
+    }
+  }
   async install(scope: string, binding: string, reference: string, tokens: GoogleCalendarTokens): Promise<void> {
     if (!validCalendarTokens(tokens, this.#profile)) return fail('calendar_credentials_invalid');
     const captured = structuredClone(tokens);
@@ -231,6 +259,7 @@ export class CalendarCredentialCore {
         if (digest(old.tokens) !== digest(captured)) return fail('calendar_credentials_conflict');
         // Re-publish identical data to finish an interrupted directory sync before acknowledging install.
         writeAtomic(root, reference + '.json', old);
+        await this.record(root, reference, old);
         return;
       }
       const state: State = {
@@ -243,6 +272,7 @@ export class CalendarCredentialCore {
       };
       this.admitted(scope, binding, state);
       writeAtomic(root, reference + '.json', state);
+      await this.record(root, reference, state);
     });
   }
   async token(scope: string, binding: string, reference: string, signal?: AbortSignal): Promise<string> {
@@ -254,8 +284,15 @@ export class CalendarCredentialCore {
       assertCalendarActive(signal);
       const state = this.state(root, reference, identity, true);
       this.admitted(scope, binding, state);
+      await this.record(root, reference, state);
+      assertCalendarActive(signal);
+      this.#fences.assertOpen(scope, binding);
       if (state.tokens.expiresAt > (this.#transport.now ?? Date.now)() + 60000) return state.tokens.accessToken;
-      writeAtomic(root, reference + '.json', { ...state, phase: 'refreshing' });
+      const refreshing: State = { ...state, phase: 'refreshing' };
+      writeAtomic(root, reference + '.json', refreshing);
+      await this.record(root, reference, refreshing);
+      assertCalendarActive(signal);
+      this.#fences.assertOpen(scope, binding);
       let rotated: GoogleCalendarTokens;
       try {
         rotated = await refreshCalendarToken(
@@ -267,18 +304,22 @@ export class CalendarCredentialCore {
       } catch (error) {
         const revoked = error instanceof CalendarReadError && error.code === 'calendar_oauth_revoked';
         this.#fences.deny(scope, binding, revoked ? 'revoked' : 'expired');
-        writeAtomic(root, reference + '.json', { ...state, phase: revoked ? 'revoked' : 'uncertain' });
+        const denied: State = { ...state, phase: revoked ? 'revoked' : 'uncertain' };
+        writeAtomic(root, reference + '.json', denied);
+        await this.record(root, reference, denied);
         if (revoked) return fail('calendar_auth_revoked');
         if (error instanceof CalendarReadError) throw error;
         return fail('calendar_oauth_exchange_uncertain');
       }
       // On publication failure, the durable 'refreshing' record prevents reuse after reconstruction.
-      writeAtomic(root, reference + '.json', {
+      const ready: State = {
         ...state,
         phase: 'ready',
         generation: state.generation + 1,
         tokens: rotated,
-      });
+      };
+      writeAtomic(root, reference + '.json', ready);
+      await this.record(root, reference, ready);
       this.#fences.assertOpen(scope, binding);
       return rotated.accessToken;
     });
@@ -302,6 +343,7 @@ export class CalendarCredentialCore {
     return this.locked(scope, binding, reference, async (identity, root) => {
       const state = this.state(root, reference, identity, true);
       this.admitted(scope, binding, state);
+      await this.record(root, reference, state);
       return { auth: 'ready', scopes: [...state.tokens.scopes], generation: state.generation };
     });
   }

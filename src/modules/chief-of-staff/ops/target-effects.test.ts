@@ -16,13 +16,13 @@ vi.mock('./target-host.js', async () => ({
   checkedTargetDatabase: calls.database,
 }));
 import { createTargetEffects } from './target-effects.js';
-import { fixtureRelease } from '../../../contracts/chief-of-staff/release-fixture.js';
+import { fixtureRelease, fixtureVaultRelease } from '../../../contracts/chief-of-staff/release-fixture.js';
 import type { DeploymentSettings } from './deployment-settings.js';
 import * as maintenance from './maintenance.js';
 import * as migrations from '../store/migrations.js';
 import * as nativeInstallation from './native-installation.js';
 import { targetBinding } from './target-host.js';
-import { writeAtomic } from './target-state.js';
+import { writeAtomic, initializeTarget, readPrivate } from './target-state.js';
 import { digest } from '../domain/contracts.js';
 import type { DeploymentReceipt } from './deployment.js';
 import * as targetActionBackup from './target-action-backup.js';
@@ -31,6 +31,13 @@ import * as missions from './mission-backup.js';
 import * as calendars from '../calendar/backup.js';
 import * as databaseCli from './db-cli.js';
 import * as targetHost from './target-host.js';
+import * as vaultCapture from './backup-state-capture.js';
+import * as backupQueue from './backup-queue.js';
+import * as vaultMemory from './vault-memory.js';
+import * as releaseArtifacts from './release-artifacts.js';
+import { recoveryReleaseForManifest } from './recovery-manifest.js';
+import { runMigrations } from '../../../db/migrations/index.js';
+import { randomUUID } from 'node:crypto';
 
 it('S11 declines a retained S10 rollback before service or database effects when owner denials exist', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-owner-denial-downgrade-'));
@@ -615,3 +622,301 @@ it('prepares a stopped-service recovery baseline without adopting a failed candi
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+async function vaultDeploymentFixture(maintain = true) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-g02-deployment-'));
+  fs.chmodSync(root, 0o700);
+  const settings: DeploymentSettings = {
+    version: 1,
+    target: 'pi',
+    sshAlias: 'fixture',
+    userHome: root,
+    stateRoot: root + '/state',
+    releaseRoot: root + '/releases',
+    stagingRoot: root + '/staging',
+    sourceRoot: root + '/sources',
+    installationRoot: root + '/app',
+    dataRoot: root + '/app/data',
+    service: 'nano.service',
+    hostFingerprint: '1'.repeat(64),
+    databaseFingerprint: '2'.repeat(64),
+    runtimeEnvironment: root + '/.config/runtime',
+    migrationEnvironment: root + '/.config/migration',
+  };
+  fs.mkdirSync(settings.dataRoot, { recursive: true, mode: 0o700 });
+  const binding = targetBinding(settings),
+    initial = initializeTarget(settings.stateRoot, binding),
+    manifest = fixtureVaultRelease('G02'),
+    previous = { ...fixtureVaultRelease('G01'), releaseId: 'release-reviewed-g01' },
+    recovery = recoveryReleaseForManifest(previous),
+    receipt = settings.stateRoot + '/releases/' + manifest.releaseId;
+  writeAtomic(settings.stateRoot, 'protected.json', { bindingDigest: digest(binding), generation: 1 });
+  writeAtomic(settings.stateRoot, 'state.json', {
+    ...initial,
+    lifecycle: 'protected',
+    maintenance: false,
+    releaseId: previous.releaseId,
+  });
+  for (const directory of [
+    receipt,
+    settings.stateRoot + '/releases/' + previous.releaseId,
+    settings.releaseRoot + '/' + previous.releaseId,
+  ])
+    fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  writeAtomic(settings.releaseRoot + '/' + previous.releaseId, 'release.json', previous);
+  writeAtomic(settings.stateRoot + '/releases/' + previous.releaseId, 'deployment.json', {
+    version: 1,
+    releaseId: previous.releaseId,
+    manifestDigest: recovery.manifestDigest,
+    bindingDigest: digest(binding),
+    status: 'healthy',
+    pending: null,
+    completed: ['source', 'artifacts', 'quiesce', 'backup', 'migrate', 'activate', 'health'],
+  });
+  writeAtomic(receipt, 'baseline.json', {
+    version: 1,
+    bindingDigest: digest(binding),
+    releaseId: previous.releaseId,
+    executable: '/previous/node',
+    entryPoint: '/previous/index.js',
+    unit: 'synthetic-existing-unit',
+  });
+  const lease = maintain
+    ? maintenance.beginMaintenance(settings.stateRoot, binding, manifest.releaseId, 'deployment')
+    : undefined;
+  if (lease)
+    await maintenance.confirmQuiescence(settings.stateRoot, binding, lease, async () => ({
+      activeCoordinators: 0,
+      activeDatabaseOperations: 0,
+    }));
+  const db = new Database(settings.dataRoot + '/v2.db');
+  runMigrations(db);
+  db.close();
+  const snapshot = {
+    operationId: manifest.releaseId,
+    queueOperationId: lease?.nonce ?? randomUUID(),
+    status: 'queued' as const,
+    targetBindingDigest: digest(binding),
+    nativeBindingDigest: '3'.repeat(64),
+    journal: { installationDigest: digest(binding), generation: randomUUID() },
+    writerActivated: false,
+    admissionRestored: false,
+    snapshotDigest: '4'.repeat(64),
+    operations: { release: recovery, manifestDigest: '5'.repeat(64) },
+  };
+  const capture = vi.spyOn(vaultCapture, 'captureTargetVaultState').mockResolvedValue(snapshot),
+    verify = vi.spyOn(vaultCapture, 'verifyTargetVaultState').mockResolvedValue(snapshot),
+    legacy = vi.spyOn(targetActionBackup, 'backupTargetActionState'),
+    nativeBackup = vi.spyOn(nativeInstallation, 'backupNativeDatabase'),
+    calendarBackup = vi.spyOn(calendars, 'backupCalendarState'),
+    memory = vi.spyOn(vaultMemory, 'verifyVaultMemory').mockImplementation(() => undefined);
+  vi.spyOn(targetHost, 'readTargetDatabaseEnvironment').mockReturnValue({ COS_PGDATABASE: 'synthetic' });
+  const migrate = vi
+    .spyOn(databaseCli, 'databaseCommand')
+    .mockResolvedValue({ status: 'ok', schema_version: migrations.SCHEMA_VERSION });
+  calls.observe.mockResolvedValue({ pid: 0, cwd: settings.installationRoot, activeState: 'inactive' });
+  calls.ownedContainers.mockResolvedValue([]);
+  calls.service.mockClear();
+  calls.database.mockClear();
+  const effects = createTargetEffects(settings, manifest, digest(manifest));
+  const close = () => {
+    vi.restoreAllMocks();
+    calls.observe.mockReset();
+    calls.ownedContainers.mockReset();
+    fs.rmSync(root, { recursive: true, force: true });
+  };
+  return {
+    root,
+    settings,
+    binding,
+    manifest,
+    previous,
+    recovery,
+    receipt,
+    snapshot,
+    effects,
+    capture,
+    verify,
+    legacy,
+    nativeBackup,
+    calendarBackup,
+    migrate,
+    memory,
+    close,
+  };
+}
+it('G02 deployment captures the recorded predecessor in the vault and verifies it before any migration without plaintext backup calls', async () => {
+  const s = await vaultDeploymentFixture();
+  try {
+    await s.effects.backup();
+    expect(s.capture).toHaveBeenCalledWith(s.settings, s.manifest.releaseId, undefined, s.recovery);
+    expect(readPrivate(s.receipt + '/vault-state.json')).toEqual(s.snapshot);
+    await s.effects.migrate();
+    expect(s.verify).toHaveBeenCalledWith(
+      s.settings,
+      s.manifest.releaseId,
+      undefined,
+      s.recovery,
+      s.snapshot.snapshotDigest,
+    );
+    expect(s.verify.mock.invocationCallOrder.at(-1)).toBeLessThan(s.migrate.mock.invocationCallOrder[0]);
+    expect(s.legacy).not.toHaveBeenCalled();
+    expect(s.nativeBackup).not.toHaveBeenCalled();
+    expect(s.calendarBackup).not.toHaveBeenCalled();
+    expect(fs.existsSync(s.receipt + '/native-state.json')).toBe(false);
+    expect(readPrivate(s.receipt + '/migration.json')).toMatchObject({ vaultBackupDigest: digest(s.snapshot) });
+    s.capture.mockClear();
+    await s.effects.backup();
+    expect(s.capture).not.toHaveBeenCalled();
+  } finally {
+    s.close();
+  }
+});
+it('G02 migration refuses a changed pending snapshot before database or native mutation', async () => {
+  const s = await vaultDeploymentFixture();
+  try {
+    await s.effects.backup();
+    s.verify.mockRejectedValue(Error('target_vault_capture_unavailable'));
+    const before = fs.readFileSync(s.settings.dataRoot + '/v2.db');
+    await expect(s.effects.migrate()).rejects.toThrow('target_vault_capture_unavailable');
+    expect(s.migrate).not.toHaveBeenCalled();
+    expect(fs.readFileSync(s.settings.dataRoot + '/v2.db')).toEqual(before);
+    expect(fs.existsSync(s.receipt + '/migration.json')).toBe(false);
+  } finally {
+    s.close();
+  }
+});
+it('G02 reconciles a lost backup acknowledgement only by verifying the pending slot of its own current lease', async () => {
+  const s = await vaultDeploymentFixture();
+  try {
+    const { snapshotDigest: _hash, operations: _operations, ...base } = s.snapshot;
+    s.capture.mockResolvedValue({ ...base, status: 'skipped_pending', slotState: 'pending' });
+    await s.effects.backup();
+    expect(s.verify).toHaveBeenCalledWith(s.settings, s.manifest.releaseId, undefined, s.recovery);
+    expect(readPrivate(s.receipt + '/vault-state.json')).toEqual(s.snapshot);
+  } finally {
+    s.close();
+  }
+});
+it.each(['foreign-slot', 'failed-slot', 'unrecorded-release'] as const)(
+  'G02 refuses %s before marking deployment backup complete',
+  async (failure) => {
+    const s = await vaultDeploymentFixture();
+    try {
+      if (failure === 'unrecorded-release')
+        fs.unlinkSync(s.settings.stateRoot + '/releases/' + s.previous.releaseId + '/deployment.json');
+      else {
+        const { snapshotDigest: _hash, operations: _operations, ...base } = s.snapshot;
+        s.capture.mockResolvedValue({
+          ...base,
+          status: 'skipped_pending',
+          queueOperationId: failure === 'foreign-slot' ? randomUUID() : base.queueOperationId,
+          slotState: failure === 'failed-slot' ? 'failed' : 'pending',
+        });
+      }
+      await expect(s.effects.backup()).rejects.toThrow();
+      expect(s.verify).not.toHaveBeenCalled();
+      expect(s.migrate).not.toHaveBeenCalled();
+      expect(fs.existsSync(s.receipt + '/vault-state.json')).toBe(false);
+      expect(s.legacy).not.toHaveBeenCalled();
+    } finally {
+      s.close();
+    }
+  },
+);
+it('G02 refuses an occupied full slot during preflight before stopping the application', async () => {
+  const s = await vaultDeploymentFixture(false);
+  try {
+    vi.spyOn(releaseArtifacts, 'verifyReleaseBundle').mockResolvedValue({ manifest: s.manifest } as Awaited<
+      ReturnType<typeof releaseArtifacts.verifyReleaseBundle>
+    >);
+    vi.spyOn(targetHost, 'verifyTargetPaths').mockImplementation(() => {});
+    vi.spyOn(targetHost, 'verifyInstalledProfiles').mockImplementation(() => {});
+    vi.spyOn(backupQueue, 'createVaultBackupQueue').mockReturnValue({
+      inspect: async () => [{ operationId: randomUUID(), state: 'pending' }],
+    } as unknown as backupQueue.BackupQueue);
+    calls.database.mockResolvedValue({ end: async () => {} });
+    const before = fs.readFileSync(s.settings.stateRoot + '/state.json');
+    await expect(s.effects.verify()).rejects.toThrow('deployment_backup_slot_occupied');
+    expect(calls.service).not.toHaveBeenCalled();
+    expect(s.capture).not.toHaveBeenCalled();
+    expect(s.migrate).not.toHaveBeenCalled();
+    expect(fs.readFileSync(s.settings.stateRoot + '/state.json')).toEqual(before);
+  } finally {
+    s.close();
+  }
+});
+
+it.each(['capture', 'verify'] as const)(
+  'G02 refuses predecessor provenance changed during %s before publishing backup or migrating',
+  async (phase) => {
+    const s = await vaultDeploymentFixture();
+    try {
+      const change = async () => {
+        writeAtomic(s.settings.stateRoot + '/releases/' + s.previous.releaseId, 'deployment.json', {
+          version: 1,
+          releaseId: s.previous.releaseId,
+          status: 'failed',
+        });
+        return s.snapshot;
+      };
+      if (phase === 'capture') {
+        s.capture.mockImplementation(change);
+        await expect(s.effects.backup()).rejects.toThrow('deployment_backup_predecessor_unavailable');
+        expect(fs.existsSync(s.receipt + '/vault-state.json')).toBe(false);
+      } else {
+        await s.effects.backup();
+        const before = fs.readFileSync(s.settings.dataRoot + '/v2.db');
+        s.verify.mockImplementation(change);
+        await expect(s.effects.migrate()).rejects.toThrow('deployment_backup_predecessor_unavailable');
+        expect(fs.readFileSync(s.settings.dataRoot + '/v2.db')).toEqual(before);
+      }
+      expect(s.migrate).not.toHaveBeenCalled();
+      expect(fs.existsSync(s.receipt + '/migration.json')).toBe(false);
+    } finally {
+      s.close();
+    }
+  },
+);
+
+it('G02 refuses a durable receipt inconsistent with a freshly read full slot', async () => {
+  const s = await vaultDeploymentFixture();
+  try {
+    await s.effects.backup();
+    writeAtomic(s.receipt, 'vault-state.json', {
+      ...s.snapshot,
+      operations: { ...s.snapshot.operations, manifestDigest: '6'.repeat(64) },
+    });
+    await expect(s.effects.migrate()).rejects.toThrow('deployment_vault_backup_conflict');
+    expect(s.migrate).not.toHaveBeenCalled();
+    expect(s.capture).toHaveBeenCalledTimes(1);
+  } finally {
+    s.close();
+  }
+});
+
+it.each(['pending', 'capturing', 'failed'] as const)(
+  'G02 preflight admits only pending state owned by its current lease: %s',
+  async (state) => {
+    const s = await vaultDeploymentFixture();
+    try {
+      vi.spyOn(releaseArtifacts, 'verifyReleaseBundle').mockResolvedValue({ manifest: s.manifest } as Awaited<
+        ReturnType<typeof releaseArtifacts.verifyReleaseBundle>
+      >);
+      vi.spyOn(targetHost, 'verifyTargetPaths').mockImplementation(() => {});
+      vi.spyOn(targetHost, 'verifyInstalledProfiles').mockImplementation(() => {});
+      vi.spyOn(backupQueue, 'createVaultBackupQueue').mockReturnValue({
+        inspect: async () => [{ operationId: s.snapshot.queueOperationId, state }],
+      } as unknown as backupQueue.BackupQueue);
+      calls.database.mockResolvedValue({ end: async () => {} });
+      const before = fs.readFileSync(s.settings.stateRoot + '/state.json');
+      if (state === 'pending') await expect(s.effects.verify()).resolves.toBeUndefined();
+      else await expect(s.effects.verify()).rejects.toThrow('deployment_backup_slot_occupied');
+      expect(calls.service).not.toHaveBeenCalled();
+      expect(s.capture).not.toHaveBeenCalled();
+      expect(fs.readFileSync(s.settings.stateRoot + '/state.json')).toEqual(before);
+    } finally {
+      s.close();
+    }
+  },
+);

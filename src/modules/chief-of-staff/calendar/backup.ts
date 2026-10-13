@@ -8,6 +8,7 @@ import type { StorageInspection } from './storage-protection.js';
 import { checkedClient, validCalendarTokens } from './oauth-core.js';
 import { object } from './normalization.js';
 import { verifyVaultMemory } from '../ops/vault-memory.js';
+import type { BackupSnapshotSink } from '../ops/backup-queue.js';
 export type CalendarBackupOptions = {
   roots: CalendarStorageRoots;
   operationId: string;
@@ -26,6 +27,10 @@ export type CalendarBackupReceipt = {
   sha256: string;
   files: number;
   bytes: number;
+};
+export type CalendarCaptureReceipt = Omit<CalendarBackupReceipt, 'contract' | 'snapshot'> & {
+  contract: 'cos-calendar-capture/v1';
+  directories: string[];
 };
 const name = 'calendar-backup.json',
   maximumBytes = 64 * 1024 * 1024;
@@ -80,8 +85,15 @@ function absent(o: CalendarBackupOptions) {
 function absentReceipt(o: CalendarBackupOptions): CalendarBackupReceipt {
   return { ...parameters(o), present: false, storageDigest: null, snapshot: null, ...empty };
 }
-function inventory(root: string, destination?: string) {
-  directory(root, true);
+function inventory(
+  root: string,
+  destination?: string,
+  capture?: {
+    directory(relative: string): void;
+    write(relative: string, bytes: Buffer): void;
+  },
+) {
+  const rootStat = directory(root, true);
   let entries = 0,
     files = 0,
     bytes = 0;
@@ -90,11 +102,20 @@ function inventory(root: string, destination?: string) {
     if (++entries > 10000 || depth > 16) throw new Error('calendar_backup_bounds');
     const file = path.join(root, relative),
       stat = fs.lstatSync(file);
-    if (stat.uid !== process.getuid?.() || stat.isSymbolicLink()) throw new Error('unsafe_calendar_backup_source');
+    if (stat.uid !== process.getuid?.() || stat.isSymbolicLink() || (capture && stat.dev !== rootStat.dev))
+      throw new Error('unsafe_calendar_backup_source');
+    if (
+      capture &&
+      (relative.length + 'calendar-state/'.length > 192 ||
+        depth > 7 ||
+        !relative.split('/').every((part) => /^(?:[A-Za-z0-9]|\.cos-)[A-Za-z0-9_.-]*$/.test(part)))
+    )
+      throw new Error('calendar_capture_bounds');
     const copy = destination ? path.join(destination, relative) : undefined;
     if (stat.isDirectory()) {
       if ((stat.mode & 0o777) !== 0o700) throw new Error('unsafe_calendar_backup_source');
       hash.update(JSON.stringify([relative, 'directory']) + '\n');
+      capture?.directory(relative);
       if (copy) fs.mkdirSync(copy, { mode: 0o700 });
       for (const child of fs.readdirSync(file).sort()) visit(relative + '/' + child, depth + 1);
       if (copy) sync(copy);
@@ -110,6 +131,7 @@ function inventory(root: string, destination?: string) {
       bytes += stat.size;
       if (bytes > maximumBytes) throw new Error('calendar_backup_bounds');
       const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+      const buffer = Buffer.alloc(stat.size + 1);
       try {
         const before = fs.fstatSync(fd);
         if (
@@ -121,7 +143,6 @@ function inventory(root: string, destination?: string) {
           (before.mode & 0o777) !== 0o600
         )
           throw new Error('calendar_backup_changed');
-        const buffer = Buffer.alloc(stat.size + 1);
         let length = 0;
         while (length < buffer.length) {
           const read = fs.readSync(fd, buffer, length, buffer.length - length, length);
@@ -138,6 +159,7 @@ function inventory(root: string, destination?: string) {
         )
           throw new Error('calendar_backup_changed');
         const content = buffer.subarray(0, length);
+        capture?.write(relative, content);
         if (copy) {
           const output = fs.openSync(copy, 'wx', 0o600);
           try {
@@ -151,6 +173,7 @@ function inventory(root: string, destination?: string) {
           JSON.stringify([relative, 'file', length, createHash('sha256').update(content).digest('hex')]) + '\n',
         );
       } finally {
+        buffer.fill(0);
         fs.closeSync(fd);
       }
     }
@@ -158,6 +181,70 @@ function inventory(root: string, destination?: string) {
   for (const child of fs.readdirSync(root).sort()) visit(child, 1);
   if (destination) sync(destination);
   return { sha256: hash.digest('hex'), files, bytes };
+}
+/** The caller holds maintenance and supplies an admitted encrypted queue sink. Historical
+ * credentials and deny journals are backup bytes only; this operation grants no account access. */
+export async function captureCalendarState(
+  o: CalendarBackupOptions,
+  sink: BackupSnapshotSink,
+): Promise<CalendarCaptureReceipt> {
+  try {
+    (o.memory ?? verifyVaultMemory)();
+    await o.check();
+    const identity = parameters(o);
+    const publish = (receipt: CalendarCaptureReceipt) => {
+      const bytes = Buffer.from(JSON.stringify(receipt) + '\n');
+      try {
+        if (bytes.length > 1024 ** 2) throw Error('calendar_capture_bounds');
+        sink.write('calendar-capture-receipt.json', bytes);
+      } finally {
+        bytes.fill(0);
+      }
+      return receipt;
+    };
+    if (absent(o)) {
+      await o.check();
+      if (!absent(o)) throw Error('calendar_capture_changed');
+      return publish({
+        ...identity,
+        contract: 'cos-calendar-capture/v1',
+        present: false,
+        storageDigest: null,
+        ...empty,
+        directories: [],
+      });
+    }
+    return await protectedStorage(o, async ({ policy, source, assertPinned }) => {
+      const guard = { directory: () => {}, write: () => {} };
+      const before = inventory(source, undefined, guard),
+        directories: string[] = [];
+      const copied = inventory(source, undefined, {
+        directory(relative) {
+          if (directories.length >= 4096) throw Error('calendar_capture_bounds');
+          directories.push(relative);
+        },
+        write: (relative, bytes) => sink.write('calendar-state/' + relative, bytes),
+      });
+      if (digest(before) !== digest(copied) || digest(before) !== digest(inventory(source, undefined, guard)))
+        throw Error('calendar_capture_changed');
+      await o.check();
+      assertPinned();
+      const receipt = publish({
+        ...identity,
+        contract: 'cos-calendar-capture/v1',
+        present: true,
+        storageDigest: digest(policy),
+        ...copied,
+        directories,
+      });
+      await o.check();
+      assertPinned();
+      return receipt;
+    });
+  } catch {
+    // eslint-disable-next-line preserve-caught-error -- Captured credentials, source paths and storage diagnostics remain private.
+    throw Error('calendar_capture_unavailable');
+  }
 }
 /** Hold directory descriptors across verification and copying: unmounting a volume must never redirect
  * secret writes into a plaintext directory underneath its former mount point. No restore operation exists.

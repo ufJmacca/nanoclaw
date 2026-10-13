@@ -2,8 +2,17 @@
 # Sourced by the Mac test coordinators. No application credentials are copied into this workspace.
 prepare_source_fixture() {
   local dev=$1 owner=$2 source=$3 image=$4 runner=$5
+  [[ $# == 5 || ( $# == 6 && "$6" == G02 ) ]] || return 1
   [[ "$owner" =~ ^[a-zA-Z0-9_-]{1,100}$ && "$image" =~ ^sha256:[a-f0-9]{64}$ && "$runner" =~ ^[a-zA-Z0-9_.-]+$ ]] || return 1
   [[ "$source" == /* && -f "$source/build-info.json" && ! -e "$source/.env" && ! -e "$source/.git" ]] || return 1
+  local backup_input=''
+  if [[ "${6:-}" == G02 ]]; then
+    # The release CLI rechecks the exact binary and seal before calling this
+    # driver. Mount only that public input, never its private release parent.
+    backup_input="${source%/*}/backup-artifact-input"
+    [[ -d "$backup_input" && ! -L "$backup_input" && -f "$backup_input/restic" && ! -L "$backup_input/restic" && \
+       -f "$backup_input/artifact.json" && ! -L "$backup_input/artifact.json" ]] || return 1
+  fi
   [[ "$(docker inspect --format '{{.Image}}' "$dev")" == "$image" ]] || return 1
   local dependencies
   dependencies=$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/workspace/node_modules"}}{{.Name}}{{end}}{{end}}' "$dev")
@@ -25,4 +34,8 @@ prepare_source_fixture() {
     --mount type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock
     -e COS_FIXTURE_WORK_ROOT=/fixture -e "COS_FIXTURE_WORK_HOST_ROOT=$source_fixture_host_root"
     --entrypoint node)
+  if [[ -n "$backup_input" ]]; then
+    source_fixture_driver+=(--mount "type=bind,src=$backup_input,dst=/backup-artifact,readonly"
+      -e COS_BACKUP_FIXTURE_BINARY=/backup-artifact/restic)
+  fi
 }

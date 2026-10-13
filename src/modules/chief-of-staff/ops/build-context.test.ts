@@ -22,6 +22,7 @@ function fixture() {
     'package.json': '{}',
     'pnpm-lock.yaml': 'fixture-lock',
     'tsconfig.json': '{}',
+    'vitest.config.ts': 'public test identity selection',
     'src/index.ts': 'console.log("fixture")',
     'container/agent-runner/src/index.ts': 'fixture runner',
     'container/agent-runner/fixtures/cos-subscription-capability.ts': 'offline native protocol fixture',
@@ -30,9 +31,30 @@ function fixture() {
     'container/CLAUDE.md': 'fixture instructions',
     'container/fixtures/vault/Dockerfile.release': 'immutable vault build',
     'container/fixtures/vault/probe-provision.mjs': 'synthetic kernel probe',
+    'container/fixtures/vault/probe-backup-credentials.mjs': 'synthetic encrypted credential probe',
+    'container/fixtures/vault/probe-backup-journal.mjs': 'synthetic encrypted credential journal probe',
+    'container/fixtures/vault/probe-backup-postgres.mjs':
+      'compiled actual test database inside encrypted kernel storage',
     'container/fixtures/vault/unadmitted.mjs': 'UNADMITTED_VAULT_CANARY',
     'scripts/cos-vault-fixture.sh': 'host-only private pipe orchestration',
     'scripts/cos-vault-keychain.swift': 'trusted keychain code, never key bytes',
+    'scripts/cos-backup-keychain.swift': 'trusted backup credential code, never credential material',
+    'scripts/cos-backup-keychain-fixture.swift': 'disposable host-native credential entry fixture',
+    'scripts/cos-root-unit-fixture.sh': 'isolated root administration source fixture',
+    'scripts/cos-source-fixture.sh': 'public source-only Docker fixture driver',
+    'scripts/cos-release.sh': 'source-pinned host release coordinator',
+    'scripts/cos-backup-repository-fixture.sh': 'immutable host encrypted repository fixture driver',
+    'container/fixtures/backup-smb/Dockerfile.server': 'pinned synthetic SMB server',
+    'container/fixtures/backup-smb/Dockerfile.client': 'immutable tested host CIFS client',
+    'container/fixtures/backup-smb/server.sh': 'dedicated synthetic account and share',
+    'container/fixtures/backup-smb/probe.mjs': 'actual signed kernel mount and encrypted transport',
+    'container/fixtures/backup-smb/unadmitted.mjs': 'UNADMITTED_SMB_CANARY',
+    'scripts/cos-backup-smb-fixture.sh': 'isolated internal network orchestration',
+    'container/fixtures/backup-jobs/Dockerfile.release': 'immutable host-derived service-manager fixture',
+    'container/fixtures/backup-jobs/probe-release.mjs': 'actual compiled installer and manager probe',
+    'container/fixtures/backup-jobs/Dockerfile': 'UNADMITTED_MUTABLE_JOB_FIXTURE',
+    'container/fixtures/backup-jobs/unadmitted.mjs': 'UNADMITTED_JOB_CANARY',
+    'scripts/cos-backup-jobs-fixture.sh': 'isolated source-bound user-manager driver',
     'scripts/unadmitted.sh': 'UNADMITTED_SCRIPT_CANARY',
     '.env': 'PRIVATE_ENV_CANARY',
     'data/v2.db': 'PRIVATE_STATE_CANARY',
@@ -48,6 +70,18 @@ function fixture() {
   return { root, repo, git, commit: git('rev-parse', 'HEAD') };
 }
 describe('S01-REL03 pinned source-only build context', () => {
+  it('keeps the enclosing export private while its public build identity is readable under a private host umask', async () => {
+    const f = fixture(),
+      out = path.join(f.root, 'private-context'),
+      mask = process.umask(0o077);
+    try {
+      await prepareBuildContext(f.repo, f.commit, out);
+      expect(fs.statSync(out).mode & 0o777).toBe(0o700);
+      expect(fs.statSync(path.join(out, 'build-info.json')).mode & 0o777).toBe(0o644);
+    } finally {
+      process.umask(mask);
+    }
+  });
   it('exports only allowed committed bytes, excluding secrets, live state and host dependencies', async () => {
     const f = fixture(),
       out = path.join(f.root, 'context');
@@ -61,6 +95,7 @@ describe('S01-REL03 pinned source-only build context', () => {
     ).toBe('offline native protocol fixture');
     expect(fs.existsSync(path.join(out, 'container/agent-runner/fixtures/unadmitted.ts'))).toBe(false);
     expect(result.sourceCommit).toBe(f.commit);
+    expect(fs.readFileSync(path.join(out, 'vitest.config.ts'), 'utf8')).toBe('public test identity selection');
     expect(result.sourceTree).toBe(f.git('rev-parse', f.commit + '^{tree}'));
     for (const denied of ['.env', 'data', 'container/agent-runner/node_modules', 'src/private.key'])
       expect(fs.existsSync(path.join(out, denied))).toBe(false);
@@ -100,8 +135,12 @@ it('exports only the admitted vault drivers from the same source and binds their
   for (const name of [
     'container/fixtures/vault/Dockerfile.release',
     'container/fixtures/vault/probe-provision.mjs',
+    'container/fixtures/vault/probe-backup-credentials.mjs',
+    'container/fixtures/vault/probe-backup-journal.mjs',
     'scripts/cos-vault-fixture.sh',
     'scripts/cos-vault-keychain.swift',
+    'scripts/cos-source-fixture.sh',
+    'scripts/cos-release.sh',
   ])
     expect(fs.existsSync(path.join(first, name))).toBe(true);
   for (const name of ['container/fixtures/vault/unadmitted.mjs', 'scripts/unadmitted.sh'])
@@ -112,6 +151,82 @@ it('exports only the admitted vault drivers from the same source and binds their
   const after = await prepareBuildContext(f.repo, f.git('rev-parse', 'HEAD'), path.join(f.root, 'vault-second'));
   expect(after.buildInputDigest).not.toBe(before.buildInputDigest);
   expect(after.workerAssetsDigest).toBe(before.workerAssetsDigest);
+});
+it('exports only the exact signed SMB fixtures and binds committed transport checks into build identity', async () => {
+  const f = fixture(),
+    out = path.join(f.root, 'smb-first');
+  const first = await prepareBuildContext(f.repo, f.commit, out);
+  for (const name of [
+    'container/fixtures/backup-smb/Dockerfile.server',
+    'container/fixtures/backup-smb/Dockerfile.client',
+    'container/fixtures/backup-smb/server.sh',
+    'container/fixtures/backup-smb/probe.mjs',
+    'scripts/cos-backup-smb-fixture.sh',
+  ])
+    expect(fs.existsSync(path.join(out, name))).toBe(true);
+  expect(fs.existsSync(path.join(out, 'container/fixtures/backup-smb/unadmitted.mjs'))).toBe(false);
+  fs.writeFileSync(path.join(f.repo, 'container/fixtures/backup-smb/probe.mjs'), 'changed signed transport');
+  f.git('add', '.');
+  f.git('commit', '-qm', 'changed SMB fixture');
+  const second = await prepareBuildContext(f.repo, f.git('rev-parse', 'HEAD'), path.join(f.root, 'smb-second'));
+  expect(second.buildInputDigest).not.toBe(first.buildInputDigest);
+  expect(second.workerAssetsDigest).toBe(first.workerAssetsDigest);
+});
+it('binds the host backup credential helper to committed source without changing worker assets', async () => {
+  const f = fixture(),
+    first = path.join(f.root, 'backup-first');
+  fs.writeFileSync(path.join(f.repo, 'scripts/cos-backup-keychain.swift'), 'UNCOMMITTED_CREDENTIAL_DRIVER');
+  const before = await prepareBuildContext(f.repo, f.commit, first);
+  expect(fs.readFileSync(path.join(first, 'scripts/cos-backup-keychain.swift'), 'utf8')).toBe(
+    'trusted backup credential code, never credential material',
+  );
+  expect(fs.readFileSync(path.join(first, 'scripts/cos-backup-keychain-fixture.swift'), 'utf8')).toBe(
+    'disposable host-native credential entry fixture',
+  );
+  expect(fs.readFileSync(path.join(first, 'scripts/cos-root-unit-fixture.sh'), 'utf8')).toBe(
+    'isolated root administration source fixture',
+  );
+  f.git('add', '.');
+  f.git('commit', '-qm', 'changed credential driver');
+  const after = await prepareBuildContext(f.repo, f.git('rev-parse', 'HEAD'), path.join(f.root, 'backup-second'));
+  expect(after.buildInputDigest).not.toBe(before.buildInputDigest);
+  expect(after.workerAssetsDigest).toBe(before.workerAssetsDigest);
+});
+it('exports only immutable job-manager fixtures and binds their committed bytes', async () => {
+  const f = fixture(),
+    first = path.join(f.root, 'jobs-first');
+  const before = await prepareBuildContext(f.repo, f.commit, first);
+  for (const name of [
+    'container/fixtures/backup-jobs/Dockerfile.release',
+    'container/fixtures/backup-jobs/probe-release.mjs',
+    'scripts/cos-backup-jobs-fixture.sh',
+  ])
+    expect(fs.existsSync(path.join(first, name))).toBe(true);
+  for (const name of ['container/fixtures/backup-jobs/Dockerfile', 'container/fixtures/backup-jobs/unadmitted.mjs'])
+    expect(fs.existsSync(path.join(first, name))).toBe(false);
+  fs.writeFileSync(path.join(f.repo, 'container/fixtures/backup-jobs/probe-release.mjs'), 'changed real manager probe');
+  f.git('add', '.');
+  f.git('commit', '-qm', 'changed manager probe');
+  const after = await prepareBuildContext(f.repo, f.git('rev-parse', 'HEAD'), path.join(f.root, 'jobs-second'));
+  expect(after.buildInputDigest).not.toBe(before.buildInputDigest);
+  expect(after.workerAssetsDigest).toBe(before.workerAssetsDigest);
+});
+it.each([
+  'scripts/cos-source-fixture.sh',
+  'scripts/cos-release.sh',
+  'scripts/cos-backup-repository-fixture.sh',
+  'container/fixtures/vault/probe-backup-postgres.mjs',
+])('binds committed %s bytes without exporting arbitrary scripts or changing worker assets', async (script) => {
+  const f = fixture(),
+    before = await prepareBuildContext(f.repo, f.commit, path.join(f.root, 'first'));
+  expect(fs.existsSync(path.join(f.root, 'first', script))).toBe(true);
+  fs.writeFileSync(path.join(f.repo, script), 'changed public host driver');
+  f.git('add', '.');
+  f.git('commit', '-qm', 'changed host driver');
+  const after = await prepareBuildContext(f.repo, f.git('rev-parse', 'HEAD'), path.join(f.root, 'second'));
+  expect(after.buildInputDigest).not.toBe(before.buildInputDigest);
+  expect(after.workerAssetsDigest).toBe(before.workerAssetsDigest);
+  expect(fs.existsSync(path.join(f.root, 'second/scripts/unadmitted.sh'))).toBe(false);
 });
 describe('S01-REL02 Mac-local builder', () => {
   const good = {

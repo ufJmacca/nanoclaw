@@ -14,6 +14,8 @@ import { machineFingerprint } from './host-fingerprint.js';
 import { withDeploymentLock } from './deployment-lock.js';
 import { syncPinnedSource } from './source-sync.js';
 import { extractCarrierPayload } from './carrier-extraction.js';
+import { installResticRuntimeArtifact } from './restic-runtime-install.js';
+import { readImageArchiveStorage, assertImageImportSpace } from './image-archive-storage.js';
 
 export type BootstrapDocker = (args: string[]) => Promise<string>;
 function privateDirectory(directory: string): void {
@@ -71,6 +73,7 @@ export async function prepareTargetArtifacts(
   try {
     await verifyLoadedImages(manifest, inspect);
     loaded = true;
+    // eslint-disable-next-line no-catch-all/no-catch-all -- Missing or mismatched images must pass verification after loading the authenticated archive.
   } catch {
     /* Missing or mismatched images must still pass verification after loading the authenticated archive. */
   }
@@ -85,6 +88,7 @@ export async function prepareTargetArtifacts(
     let container: unknown;
     try {
       container = JSON.parse(await docker(['container', 'inspect', name]))[0];
+      // eslint-disable-next-line no-catch-all/no-catch-all -- A missing carrier may be created only with the fixed name and rechecked identity below.
     } catch {
       container = undefined;
     }
@@ -138,6 +142,23 @@ export async function prepareTargetArtifacts(
     fs.copyFileSync(manifestFile, destination, fs.constants.COPYFILE_EXCL);
     fs.chmodSync(destination, 0o600);
   }
+  if (manifest.slice === 'G02') {
+    const check = () => {
+      privateDirectory(release);
+      if (digest(validateReleaseManifest(readPrivate(manifestFile))) !== digest(manifest))
+        throw Error('release_manifest_mismatch');
+    };
+    const installed = await withDeploymentLock(settings.stateRoot + '.backup-upload.lock', () =>
+      installResticRuntimeArtifact({ installationRoot: settings.installationRoot, payload, manifest, check }),
+    );
+    check();
+    writeAtomic(release, 'runtime-artifact.json', {
+      contract: 'cos-backup-runtime-artifact/v1',
+      ...installed,
+      verifiedBySourceCommit: manifest.source.commit,
+      verifiedBySourceTree: manifest.source.tree,
+    });
+  }
   return { releaseId: manifest.releaseId, payload, hostPayloadDigest: manifest.hostPayloadDigest };
 }
 export async function bootstrapCommand(args: string[]): Promise<Record<string, unknown>> {
@@ -185,9 +206,10 @@ export async function bootstrapCommand(args: string[]): Promise<Record<string, u
     writeAtomic(stage, 'source.json', source);
     if (command === 'source') return { status: 'source_verified', releaseId, commit: source.commit, tree: source.tree };
     const bundle = await verifyReleaseBundle(stage, manifestHash);
-    const required = fs.statSync(bundle.archiveFile).size * 3 + 512 * 1024 * 1024,
-      disk = fs.statfsSync(settings.userHome);
-    if (disk.bavail * disk.bsize < required) throw new Error('insufficient_target_disk');
+    const host = manifest.images.find((image) => image.role === 'host')!;
+    const storage = await readImageArchiveStorage(bundle.archiveFile, bundle.archiveHash, host.configurationId);
+    const disk = fs.statfsSync(settings.userHome);
+    assertImageImportSpace(disk.bavail * disk.bsize, storage);
     const docker: BootstrapDocker = async (params) =>
       (
         await promisify(execFile)('/usr/bin/docker', ['--host=unix:///var/run/docker.sock', ...params], {

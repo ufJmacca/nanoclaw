@@ -22,6 +22,7 @@ import { MANDATE_CHECKSUM } from '../../modules/chief-of-staff/store/mandate-sch
 import { ACTION_CHECKSUM } from '../../modules/chief-of-staff/store/action-schema.js';
 import { STRATEGY_CHECKSUM } from '../../modules/chief-of-staff/store/strategy-schema.js';
 import { STRATEGY_CHAIN_CHECKSUM } from '../../modules/chief-of-staff/store/strategy-chain-schema.js';
+import { RESTIC_ARTIFACT } from '../../modules/chief-of-staff/ops/restic-artifact.js';
 /** Synthetic identities for release-contract tests; never a transferable artifact receipt. */
 export function fixtureRelease(slice: ReleaseManifest['slice'] = 'S01'): ReleaseManifest {
   const commit = 'a'.repeat(40),
@@ -147,10 +148,11 @@ export function fixtureRelease(slice: ReleaseManifest['slice'] = 'S01'): Release
     ),
   };
 }
-/** A complete synthetic G01 contract for admin tests; its payload/image identities are never deployment evidence. */
-export function fixtureVaultRelease(): ReleaseManifest {
+/** Synthetic G01/G02 contracts for admin tests; their payload/image identities are never deployment evidence. */
+export function fixtureVaultRelease(slice: 'G01' | 'G02' = 'G01'): ReleaseManifest {
   const manifest = fixtureRelease('S11');
-  manifest.slice = 'G01';
+  manifest.slice = slice;
+  if (slice === 'G02') manifest.backupArtifact = RESTIC_ARTIFACT;
   const seal = {
     contract: 'cos-vault-root-artifact/v1' as const,
     sourceCommit: manifest.source.commit,
@@ -162,9 +164,9 @@ export function fixtureVaultRelease(): ReleaseManifest {
     },
   };
   manifest.vaultArtifact = { digest: digest(seal), seal };
-  manifest.previousReleaseIds = ['release-reviewed-s11'];
+  manifest.previousReleaseIds = [slice === 'G01' ? 'release-reviewed-s11' : 'release-reviewed-g01'];
   manifest.checks = Object.fromEntries(
-    requiredReleaseChecks('G01').map((name) => [
+    requiredReleaseChecks(slice).map((name) => [
       name,
       {
         status: 'passed',
@@ -173,7 +175,7 @@ export function fixtureVaultRelease(): ReleaseManifest {
         imageIds:
           name === 'protected_state' || name.includes('image')
             ? manifest.images.map(({ id }) => id)
-            : name.startsWith('vault_')
+            : name.startsWith('vault_') || name.startsWith('backup_')
               ? [manifest.images[0]!.id]
               : [],
       },

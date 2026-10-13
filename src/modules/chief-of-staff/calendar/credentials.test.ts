@@ -7,6 +7,8 @@ import { CalendarCredentialOwner } from './credentials.js';
 import { CalendarAccessFences } from './access-fences.js';
 import { GOOGLE_EVENT_READ_SCOPE } from './reader.js';
 import type { GoogleCalendarTokens } from './oauth.js';
+import type { CredentialJournal } from '../ops/backup-credential-event.js';
+import { BackupQueue } from '../ops/backup-queue.js';
 const dirs: string[] = [];
 afterEach(() => {
   vi.restoreAllMocks();
@@ -46,6 +48,178 @@ function setup() {
     reference = randomUUID();
   return { base, root, fences, fetch, transport, owner, binding, reference };
 }
+describe('G02 durable credential journals', () => {
+  it.each(['payload', 'pending-publication'] as const)(
+    'heals an interrupted %s copy of the rotated token through the real queue without another OAuth exchange',
+    async (phase) => {
+      const s = setup(),
+        directory = s.base + '/journals';
+      fs.mkdirSync(directory, { mode: 0o700 });
+      const queue = new BackupQueue('a'.repeat(64), async (_kind, operation) => operation(directory));
+      let interrupt = false;
+      const journal: CredentialJournal = async (change, guard) => {
+        interrupt = change.generation === 2;
+        await queue.recordCredential(change, guard);
+      };
+      const owner = new CalendarCredentialOwner(s.root, client, s.fences, s.transport, undefined, journal);
+      await owner.install('scope', s.binding, s.reference, tokens(true));
+      const open = fs.openSync,
+        rename = fs.renameSync;
+      const create = vi.spyOn(fs, 'openSync').mockImplementation((file, ...args) => {
+        if (interrupt && phase === 'payload' && String(file).endsWith('/credential-event.json'))
+          throw Error('synthetic_capture_interruption');
+        return open(file, ...args);
+      });
+      const publish = vi.spyOn(fs, 'renameSync').mockImplementation((from, to) => {
+        if (
+          interrupt &&
+          phase === 'pending-publication' &&
+          String(to).endsWith('/receipt.json') &&
+          JSON.parse(fs.readFileSync(from, 'utf8')).state === 'pending'
+        )
+          throw Error('synthetic_capture_interruption');
+        return rename(from, to);
+      });
+      await expect(owner.token('scope', s.binding, s.reference)).rejects.toThrow('calendar_credentials_unavailable');
+      create.mockRestore();
+      publish.mockRestore();
+      const primary = fs.readFileSync(s.root + '/' + s.reference + '.json');
+      expect(JSON.parse(primary.toString())).toMatchObject({
+        generation: 2,
+        phase: 'ready',
+        tokens: { refreshToken: 'ROTATED_REFRESH_TOKEN' },
+      });
+      const before = (await queue.pending('credentials')).map((receipt) => receipt.operationId),
+        rebuilt = new CalendarCredentialOwner(s.root, client, s.fences, s.transport, undefined, journal);
+      expect(await rebuilt.token('scope', s.binding, s.reference)).toBe('ROTATED_ACCESS_TOKEN');
+      expect(await rebuilt.token('scope', s.binding, s.reference)).toBe('ROTATED_ACCESS_TOKEN');
+      expect(s.fetch).toHaveBeenCalledOnce();
+      expect(fs.readFileSync(s.root + '/' + s.reference + '.json').equals(primary)).toBe(true);
+      const after = await queue.pending('credentials');
+      expect(after.map((receipt) => receipt.operationId)).toEqual(before);
+      expect(after.every((receipt) => receipt.state === 'pending')).toBe(true);
+    },
+  );
+  it('records each transition through the actual private queue and keeps ordinary reads independent of remote storage', async () => {
+    const s = setup(),
+      directory = s.base + '/journals';
+    fs.mkdirSync(directory, { mode: 0o700 });
+    const queue = new BackupQueue('a'.repeat(64), async (_kind, operation) => operation(directory));
+    const journal: CredentialJournal = async (change, guard) => {
+      await queue.recordCredential(change, guard);
+    };
+    const owner = new CalendarCredentialOwner(s.root, client, s.fences, s.transport, undefined, journal);
+    await owner.install('scope', s.binding, s.reference, tokens(true));
+    await expect(owner.token('scope', s.binding, s.reference)).resolves.toBe('ROTATED_ACCESS_TOKEN');
+    await owner.token('scope', s.binding, s.reference);
+    const rebuilt = new CalendarCredentialOwner(s.root, client, s.fences, s.transport, undefined, journal);
+    await rebuilt.inspect('scope', s.binding, s.reference);
+    const pending = await queue.pending('credentials');
+    expect(pending).toHaveLength(3);
+    const phases: string[] = [];
+    for (const receipt of pending)
+      await queue.withPending('credentials', receipt.operationId, async (directory) => {
+        const event = JSON.parse(fs.readFileSync(directory + '/credential-event.json', 'utf8'));
+        const credential = JSON.parse(fs.readFileSync(directory + '/credential.json', 'utf8'));
+        expect(credential.generation).toBe(event.generation);
+        expect(credential.phase).toBe(event.phase);
+        phases.push(event.generation + ':' + event.phase);
+      });
+    expect(phases.sort()).toEqual(['1:ready', '1:refreshing', '2:ready']);
+    expect(s.fetch).toHaveBeenCalledOnce();
+  });
+  it('does not exchange a token after access is withdrawn during journal recording', async () => {
+    const s = setup();
+    const journal: CredentialJournal = async (change, guard) => {
+      if (change.phase === 'refreshing') s.fences.deny('scope', s.binding, 'revoked');
+      guard();
+    };
+    const owner = new CalendarCredentialOwner(s.root, client, s.fences, s.transport, undefined, journal);
+    await owner.install('scope', s.binding, s.reference, tokens(true));
+    await expect(owner.token('scope', s.binding, s.reference)).rejects.toThrow('calendar_auth_revoked');
+    expect(s.fetch).not.toHaveBeenCalled();
+  });
+  it('records the unchanged six-field primary format before acknowledging an install and wipes journal buffers', async () => {
+    const s = setup();
+    const held: Buffer[] = [];
+    const journal: CredentialJournal = vi.fn(async (change, assertCurrent) => {
+      assertCurrent();
+      const primary = JSON.parse(fs.readFileSync(s.root + '/' + s.reference + '.json', 'utf8'));
+      expect(Object.keys(primary).sort()).toEqual([
+        'clientId',
+        'contract',
+        'generation',
+        'identity',
+        'phase',
+        'tokens',
+      ]);
+      expect(JSON.parse(change.files[0].bytes.toString('utf8'))).toEqual(primary);
+      expect(change).toMatchObject({ sourceKind: 'calendar_reader', generation: 1, phase: 'ready' });
+      held.push(change.files[0].bytes);
+    });
+    const owner = new CalendarCredentialOwner(s.root, client, s.fences, s.transport, undefined, journal);
+    await owner.install('scope', s.binding, s.reference, tokens());
+    expect(journal).toHaveBeenCalledOnce();
+    expect(held[0].every((byte) => byte === 0)).toBe(true);
+  });
+  it('preserves a rotated primary token when the local journal fails, and heals it without a second OAuth exchange', async () => {
+    const s = setup();
+    const journal: CredentialJournal = vi.fn(async (change) => {
+      if (change.generation === 2) throw Error('PRIVATE_QUEUE_FULL');
+    });
+    const owner = new CalendarCredentialOwner(s.root, client, s.fences, s.transport, undefined, journal);
+    await owner.install('scope', s.binding, s.reference, tokens(true));
+    await expect(owner.token('scope', s.binding, s.reference)).rejects.toThrow('calendar_credentials_unavailable');
+    expect(JSON.parse(fs.readFileSync(s.root + '/' + s.reference + '.json', 'utf8'))).toMatchObject({
+      generation: 2,
+      phase: 'ready',
+      tokens: { refreshToken: 'ROTATED_REFRESH_TOKEN' },
+    });
+    const healed = new CalendarCredentialOwner(
+      s.root,
+      client,
+      s.fences,
+      s.transport,
+      undefined,
+      async (change, guard) => {
+        guard();
+        expect(change.generation).toBe(2);
+      },
+    );
+    await expect(healed.token('scope', s.binding, s.reference)).resolves.toBe('ROTATED_ACCESS_TOKEN');
+    expect(s.fetch).toHaveBeenCalledOnce();
+  });
+  it('journals refresh preparation and revocation without reopening the independent access fence', async () => {
+    const s = setup();
+    const phases: string[] = [];
+    const journal: CredentialJournal = async (change, guard) => {
+      guard();
+      phases.push(change.phase);
+    };
+    const owner = new CalendarCredentialOwner(s.root, client, s.fences, s.transport, undefined, journal);
+    await owner.install('scope', s.binding, s.reference, tokens(true));
+    s.fetch.mockImplementation(async () => new Response(JSON.stringify({ error: 'invalid_grant' }), { status: 400 }));
+    await expect(owner.token('scope', s.binding, s.reference)).rejects.toThrow('calendar_auth_revoked');
+    expect(phases).toEqual(['ready', 'ready', 'refreshing', 'revoked']);
+    expect(() => s.fences.assertOpen('scope', s.binding)).toThrow('calendar_auth_revoked');
+    await expect(owner.token('scope', s.binding, s.reference)).rejects.toThrow('calendar_auth_revoked');
+    expect(s.fetch).toHaveBeenCalledOnce();
+  });
+  it('withholds a token if the primary credential changes while its journal is awaited', async () => {
+    const s = setup();
+    await s.owner.install('scope', s.binding, s.reference, tokens());
+    const journal: CredentialJournal = async (_change, guard) => {
+      const file = s.root + '/' + s.reference + '.json';
+      const value = JSON.parse(fs.readFileSync(file, 'utf8'));
+      value.generation++;
+      fs.writeFileSync(file, JSON.stringify(value), { mode: 0o600 });
+      guard();
+    };
+    const owner = new CalendarCredentialOwner(s.root, client, s.fences, s.transport, undefined, journal);
+    await expect(owner.token('scope', s.binding, s.reference)).rejects.toThrow('calendar_credentials_unavailable');
+    expect(s.fetch).not.toHaveBeenCalled();
+  });
+});
 describe('S03 host calendar credential owner', () => {
   it('S04 pre-cancellation preserves the installed credential and avoids token rotation', async () => {
     const s = setup();

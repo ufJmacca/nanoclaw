@@ -18,6 +18,7 @@ import { STRATEGY_CHECKSUM } from '../store/strategy-schema.js';
 import { STRATEGY_CHAIN_CHECKSUM } from '../store/strategy-chain-schema.js';
 import { digest } from '../domain/contracts.js';
 import { vaultRootArtifactSeal, type VaultRootArtifactSeal } from './vault-root-artifact.js';
+import { validateResticArtifactSeal, type RESTIC_ARTIFACT } from './restic-artifact.js';
 export const REQUIRED_RELEASE_CHECKS = [
   'root',
   'runner',
@@ -34,14 +35,26 @@ export const VAULT_RELEASE_CHECKS = [
   'vault_wire',
   'protected_state',
 ] as const;
+/** Final immutable host fixtures for the G02 acceptance cases; source-only tests cannot supply these receipts. */
+export const BACKUP_RELEASE_CHECKS = [
+  'backup_credentials',
+  'backup_mount',
+  'backup_capture',
+  'backup_transfer',
+  'backup_retention',
+  'backup_recovery',
+  'backup_units',
+] as const;
 export function requiredReleaseChecks(slice: ReleaseManifest['slice']): readonly string[] {
+  if (slice === 'G02') return [...REQUIRED_RELEASE_CHECKS, ...VAULT_RELEASE_CHECKS, ...BACKUP_RELEASE_CHECKS];
   return slice === 'G01' ? [...REQUIRED_RELEASE_CHECKS, ...VAULT_RELEASE_CHECKS] : REQUIRED_RELEASE_CHECKS;
 }
 export type ReleaseManifest = {
   contract: 'cos-release/v1';
   releaseId: string;
-  slice: 'S01' | 'S02' | 'S03' | 'S04' | 'S05' | 'S06' | 'S07' | 'S08' | 'S09' | 'S10' | 'S11' | 'G01';
+  slice: 'S01' | 'S02' | 'S03' | 'S04' | 'S05' | 'S06' | 'S07' | 'S08' | 'S09' | 'S10' | 'S11' | 'G01' | 'G02';
   vaultArtifact?: { digest: string; seal: VaultRootArtifactSeal };
+  backupArtifact?: typeof RESTIC_ARTIFACT;
   platform: 'linux/arm64';
   source: {
     repository: 'ufJmacca/nanoclaw';
@@ -74,7 +87,9 @@ export function validateReleaseManifest(value: unknown): ReleaseManifest {
     !object(value) ||
     value.contract !== 'cos-release/v1' ||
     typeof value.slice !== 'string' ||
-    !['S01', 'S02', 'S03', 'S04', 'S05', 'S06', 'S07', 'S08', 'S09', 'S10', 'S11', 'G01'].includes(value.slice) ||
+    !['S01', 'S02', 'S03', 'S04', 'S05', 'S06', 'S07', 'S08', 'S09', 'S10', 'S11', 'G01', 'G02'].includes(
+      value.slice,
+    ) ||
     value.platform !== 'linux/arm64' ||
     value.rpc !== 'cos-rpc/v1' ||
     !matches(value.releaseId, /^release-[a-zA-Z0-9_-]{1,120}$/) ||
@@ -178,7 +193,15 @@ export function validateReleaseManifest(value: unknown): ReleaseManifest {
     if (image.role === 'host') hosts++;
   }
   if (hosts !== 1 || !object(value.checks)) return reject();
-  if (value.slice === 'G01') {
+  if (value.slice === 'G02') {
+    try {
+      validateResticArtifactSeal(value.backupArtifact);
+      // eslint-disable-next-line no-catch-all/no-catch-all -- Invalid pinned executable identity denies release admission.
+    } catch {
+      return reject();
+    }
+  }
+  if (value.slice === 'G01' || value.slice === 'G02') {
     try {
       const artifact = value.vaultArtifact;
       if (
@@ -214,7 +237,11 @@ export function validateReleaseManifest(value: unknown): ReleaseManifest {
       check.imageIds.some((id) => !images.has(id))
     )
       return reject();
-    if (name.startsWith('vault_') && (check.imageIds.length !== 1 || check.imageIds[0] !== host?.id)) return reject();
+    if (
+      (name.startsWith('vault_') || name.startsWith('backup_')) &&
+      (check.imageIds.length !== 1 || check.imageIds[0] !== host?.id)
+    )
+      return reject();
     if (
       name === 'protected_state' &&
       (check.imageIds.length !== images.size || new Set(check.imageIds).size !== images.size)

@@ -15,6 +15,7 @@ import { vaultUnits } from '/code/modules/chief-of-staff/ops/vault-units.js';
 import { checkVaultAuthority } from '/code/modules/chief-of-staff/ops/vault-authority.js';
 import { runtimeTestMessages, writeRuntimeTestMessage } from '/code/modules/chief-of-staff/ops/runtime-test-wire.js';
 import { writeVaultRootRequest } from '/code/modules/chief-of-staff/ops/vault-root-wire.js';
+import { selectedFixtureEnvironment } from '/code/contracts/chief-of-staff/fixture-database.js';
 const mapping = `cos-vault-fixture-${randomUUID()}`;
 const paths = {
   stateRoot: '/case/control',
@@ -230,15 +231,50 @@ async function provisionRoot(identity, cryptoControls) {
 }
 function run(tool, args) {
   verifyVaultMemory();
+  const fullCapture = args.includes('/probe/probe-backup-capture.compiled.mjs');
+  const credentialJournal = args.includes('/probe/probe-backup-journal.mjs');
+  const postgresCapture = args.includes('/probe/probe-backup-postgres.mjs');
   const result = spawnSync(tool, args, {
     cwd: '/',
-    env: { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', LANG: 'C', LC_ALL: 'C', NANOCLAW_COS_VAULT_FIXTURE: '1' },
+    env: { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', LANG: 'C', LC_ALL: 'C', NANOCLAW_COS_VAULT_FIXTURE: '1',
+      ...(postgresCapture ? selectedFixtureEnvironment(process.env,true) : {}) },
     encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'ignore'],
-    timeout: 30000,
+    stdio: ['ignore', 'pipe', fullCapture || credentialJournal ? 'pipe' : 'ignore'],
+    timeout: postgresCapture ? 300000 : credentialJournal ? 120000 : 30000,
     maxBuffer: 262144,
   });
-  if (result.error || result.signal || result.status !== 0) throw Error('fixture utility unavailable');
+  if (result.error || result.signal || result.status !== 0) {
+    if (credentialJournal) {
+      const file = '/home/fixture/.config/nanoclaw-cos/state/credential-journal-stage.json';
+      const stage = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')).stage : 'module_initialization';
+      assert.match(stage, /^[a-z_]{1,64}$/);
+      console.log(JSON.stringify({ credentialJournalFailureStage: stage,
+        code: result.error?.code === 'ETIMEDOUT' ? 'fixture_deadline' : 'fixture_process_failed',
+        location: result.stderr?.match(/\/probe\/probe-backup-journal\.mjs:[0-9]+:[0-9]+/)?.[0] ?? null }));
+    }
+    if (fullCapture) {
+      const file = '/home/fixture/.config/nanoclaw-cos/state/full-capture-stage.json';
+      const stage = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')).stage : 'module_initialization';
+      assert.match(stage, /^[a-z_]{1,64}$/);
+      console.log(
+        JSON.stringify({
+          fullCaptureFailureStage: stage,
+          code: result.stderr?.match(/ERR_[A-Z_]+|target_vault_capture_unavailable/)?.[0] ?? 'fixture_process_failed',
+          location: result.stderr?.match(/\/probe\/probe-backup-capture\.compiled\.mjs:[0-9]+:[0-9]+/)?.[0] ?? null,
+        }),
+      );
+      for (const line of (result.stderr ?? '').split('\n').slice(0, 64)) {
+        if (/^\{"captureDiagnosticModule":"[a-z-]+\.ts","code":"[a-z_]+"\}$/.test(line)) console.log(line);
+        if (
+          /^\{"captureNamePrefix":"vault-(?:backup-credentials|journals)","depth":[0-9]+,"bytes":[0-9]+,"leading":[0-9]+,"invalid":\[[0-9,]*\]\}$/.test(
+            line,
+          )
+        )
+          console.log(line);
+      }
+    }
+    throw Error('fixture utility unavailable');
+  }
   verifyVaultMemory();
   return result.stdout;
 }
@@ -445,7 +481,47 @@ try {
   assert.equal(mounts.inspect(), 'matching');
   await mount();
   await mount();
+  if (process.env.NANOCLAW_COS_BACKUP_FIXTURE === '1') console.log('{"stage":"backup_vault_owner_capture"}');
   owner('capture');
+  if (process.env.NANOCLAW_COS_BACKUP_POSTGRES_FIXTURE === '1') {
+    console.log('{"stage":"backup_encrypted_postgres_capture"}');
+    const capture=JSON.parse(run('/usr/bin/setpriv',['--clear-groups','--reuid=1000','--regid=1000',process.execPath,'/probe/probe-backup-postgres.mjs']));
+    assert.equal(capture.encryptedPostgresCapture,'passed');console.log(JSON.stringify(capture));
+  }
+  if (process.env.NANOCLAW_COS_BACKUP_FIXTURE === '1') {
+    console.log('{"stage":"backup_vault_credential_installation"}');
+    run('/usr/bin/setpriv', [
+      '--clear-groups',
+      '--reuid=1000',
+      '--regid=1000',
+      process.execPath,
+      '/probe/probe-backup-credentials.mjs',
+      'install',
+    ]);
+    console.log('{"stage":"backup_vault_root_handoff"}');
+    const backup = JSON.parse(run(process.execPath, ['/probe/probe-backup-credentials.mjs', 'root']));
+    assert.equal(backup.backupVaultCredentialHandoff, 'passed');
+    console.log(JSON.stringify(backup));
+    const journal = JSON.parse(run('/usr/bin/setpriv', [
+      '--clear-groups', '--reuid=1000', '--regid=1000', process.execPath, '/probe/probe-backup-journal.mjs',
+    ]));
+    assert.equal(journal.encryptedCredentialJournal, 'passed');
+    console.log(JSON.stringify(journal));
+  }
+  if (process.env.NANOCLAW_COS_FULL_CAPTURE_FIXTURE === '1') {
+    const full = JSON.parse(
+      run('/usr/bin/setpriv', [
+        '--clear-groups',
+        '--reuid=1000',
+        '--regid=1000',
+        process.execPath,
+        '/probe/probe-backup-capture.compiled.mjs',
+        'capture',
+      ]),
+    );
+    assert.equal(full.encryptedFullCapture, 'passed');
+    console.log(JSON.stringify(full));
+  }
   const beforeRecovery = recoveryOpens;
   assert.equal((await checkVaultRecovery(identity, rootPorts)).status, 'ready');
   assert.equal(recoveryOpens, beforeRecovery + 1);
@@ -515,6 +591,20 @@ try {
   run('/usr/bin/umount', ['/case/vault']);
   mounted = false;
   owner('unavailable');
+  if (process.env.NANOCLAW_COS_FULL_CAPTURE_FIXTURE === '1') {
+    const full = JSON.parse(
+      run('/usr/bin/setpriv', [
+        '--clear-groups',
+        '--reuid=1000',
+        '--regid=1000',
+        process.execPath,
+        '/probe/probe-backup-capture.compiled.mjs',
+        'unavailable',
+      ]),
+    );
+    assert.equal(full.encryptedFullCaptureMountLoss, 'passed');
+    console.log(JSON.stringify(full));
+  }
   assert.deepEqual(fs.readdirSync('/case/vault'), []);
   assert.deepEqual(fs.readdirSync('/home/fixture/.config/nanoclaw-cos/state/calendar'), []);
   await writeRuntimeTestMessage(authorityChild.stdin, { action: 'deny' });

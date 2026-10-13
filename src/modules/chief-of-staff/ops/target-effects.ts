@@ -21,6 +21,10 @@ import { runTargetHealth } from './target-health.js';
 import { syncPinnedSource } from './source-sync.js';
 import { nativeFixtureSmoke } from './native-smoke.js';
 import { backupTargetActionState } from './target-action-backup.js';
+import { captureTargetVaultState, verifyTargetVaultState } from './backup-state-capture.js';
+import { createVaultBackupQueue } from './backup-queue.js';
+import { verifyVaultMemory } from './vault-memory.js';
+import { recoveryReleaseForManifest, type RecoveryRelease } from './recovery-manifest.js';
 import {
   targetBinding,
   targetCommands,
@@ -209,6 +213,79 @@ export function createTargetEffects(
     }
     return value;
   };
+  const vaultRoots = {
+    targetRoot: settings.stateRoot,
+    installationRoot: settings.installationRoot,
+    dataRoot: settings.dataRoot,
+  };
+  const predecessorRecovery = (): RecoveryRelease => {
+    const previous = baseline().releaseId,
+      state = readTarget(settings.stateRoot, binding);
+    if (
+      state.lifecycle !== 'protected' ||
+      !previous ||
+      !/^release-[a-zA-Z0-9_-]{1,120}$/.test(previous) ||
+      state.releaseId !== previous ||
+      !manifest.previousReleaseIds.includes(previous)
+    )
+      throw Error('deployment_backup_predecessor_unavailable');
+    const prior = validateReleaseManifest(readPrivate(path.join(settings.releaseRoot, previous, 'release.json'))),
+      recovery = recoveryReleaseForManifest(prior),
+      recorded = readPrivate<DeploymentReceipt>(path.join(settings.stateRoot, 'releases', previous, 'deployment.json'));
+    if (
+      !['G01', 'G02'].includes(prior.slice) ||
+      recovery.releaseId !== previous ||
+      recorded.version !== 1 ||
+      recorded.releaseId !== previous ||
+      recorded.manifestDigest !== recovery.manifestDigest ||
+      recorded.bindingDigest !== digest(binding) ||
+      recorded.status !== 'healthy' ||
+      recorded.pending !== null ||
+      !Array.isArray(recorded.completed) ||
+      recorded.completed.join(',') !== 'source,artifacts,quiesce,backup,migrate,activate,health'
+    )
+      throw Error('deployment_backup_predecessor_unavailable');
+    return recovery;
+  };
+  type VaultSnapshot = Awaited<ReturnType<typeof verifyTargetVaultState>>;
+  const assertVaultSnapshot = (value: VaultSnapshot, recovery: RecoveryRelease) => {
+    const hash = (value: unknown) => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
+    if (
+      !value ||
+      value.status !== 'queued' ||
+      value.operationId !== manifest.releaseId ||
+      value.queueOperationId !== lease().nonce ||
+      value.targetBindingDigest !== digest(binding) ||
+      !hash(value.nativeBindingDigest) ||
+      !value.journal ||
+      value.journal.installationDigest !== digest(binding) ||
+      !/^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(value.journal.generation) ||
+      value.writerActivated !== false ||
+      value.admissionRestored !== false ||
+      !hash(value.snapshotDigest) ||
+      !value.operations ||
+      !hash(value.operations.manifestDigest) ||
+      digest(value.operations.release) !== digest(recovery) ||
+      digest(predecessorRecovery()) !== digest(recovery)
+    )
+      throw Error('deployment_vault_backup_conflict');
+  };
+  const verifiedVaultBackup = async () => {
+    const recovery = predecessorRecovery(),
+      saved = readPrivate<VaultSnapshot>(path.join(receipt, 'vault-state.json'));
+    assertVaultSnapshot(saved, recovery);
+    const verified = await verifyTargetVaultState(
+      settings,
+      manifest.releaseId,
+      undefined,
+      recovery,
+      saved.snapshotDigest,
+    );
+    await verifyQuiescent();
+    assertVaultSnapshot(verified, recovery);
+    if (digest(verified) !== digest(saved)) throw Error('deployment_vault_backup_conflict');
+    return verified;
+  };
   const effects: DeploymentEffects = {
     async prepareRecovery(previous) {
       if (
@@ -257,6 +334,23 @@ export function createTargetEffects(
       verifyTargetPaths(settings, 1024 * 1024 * 1024);
       if (!nativeCompatible(manifest)) throw new Error('specialist_release_required');
       verifyInstalledProfiles(settings, manifest);
+      if (manifest.slice === 'G02') {
+        verifyVaultMemory();
+        const slots = await createVaultBackupQueue(vaultRoots).inspect('state');
+        if (slots.length) {
+          // A published slot may be reconciled only by the deployment that still
+          // owns its live lease. Foreign or interrupted captures remain visible.
+          let owned = false;
+          try {
+            const current = lease(false);
+            owned = slots.length === 1 && slots[0].operationId === current.nonce && slots[0].state === 'pending';
+          } catch {
+            // eslint-disable-next-line preserve-caught-error -- Preflight reports queue occupancy without private lease diagnostics.
+            throw Error('deployment_backup_slot_occupied');
+          }
+          if (!owned) throw Error('deployment_backup_slot_occupied');
+        }
+      }
       if ((await commands.observe()).cwd !== settings.installationRoot) throw new Error('wrong_service_installation');
       for (const login of ['runtime', 'migration'] as const) {
         const check = await checkedTargetDatabase(settings, login);
@@ -308,6 +402,25 @@ export function createTargetEffects(
     },
     async backup() {
       await verifyQuiescent();
+      if (manifest.slice === 'G02') {
+        if (fs.lstatSync(path.join(receipt, 'vault-state.json'), { throwIfNoEntry: false })) {
+          await verifiedVaultBackup();
+          return;
+        }
+        const recovery = predecessorRecovery();
+        let captured = await captureTargetVaultState(settings, manifest.releaseId, undefined, recovery);
+        await verifyQuiescent();
+        if (digest(predecessorRecovery()) !== digest(recovery)) throw Error('deployment_vault_backup_conflict');
+        if (captured.status === 'skipped_pending') {
+          if (captured.queueOperationId !== lease().nonce || captured.slotState !== 'pending')
+            throw Error('deployment_backup_slot_occupied');
+          captured = await verifyTargetVaultState(settings, manifest.releaseId, undefined, recovery);
+          await verifyQuiescent();
+        }
+        assertVaultSnapshot(captured, recovery);
+        writeAtomic(receipt, 'vault-state.json', captured);
+        return;
+      }
       await backupNativeDatabase(central, receipt);
       const db = new Database(central, { readonly: true, fileMustExist: true });
       let sessions: Array<{ id: string; agent_group_id: string }>;
@@ -372,11 +485,14 @@ export function createTargetEffects(
     },
     async migrate() {
       await verifyQuiescent();
-      // Revalidate the preserved central backup before either store is changed.
-      await backupNativeDatabase(central, receipt);
-      await verifyConversationBackup(path.join(settings.stateRoot, 'conversations'), receipt);
-      await verifyMissionBackup(settings.stateRoot, receipt);
-      await verifyCalendarBackup(calendarBackup);
+      const vaultBackup = manifest.slice === 'G02' ? await verifiedVaultBackup() : null;
+      if (!vaultBackup) {
+        // Revalidate the preserved central backup before either store is changed.
+        await backupNativeDatabase(central, receipt);
+        await verifyConversationBackup(path.join(settings.stateRoot, 'conversations'), receipt);
+        await verifyMissionBackup(settings.stateRoot, receipt);
+        await verifyCalendarBackup(calendarBackup);
+      }
       await verifyQuiescent();
       const env: NodeJS.ProcessEnv = {
         ...readTargetDatabaseEnvironment(settings, 'migration'),
@@ -408,13 +524,16 @@ export function createTargetEffects(
         writeAtomic(receipt, 'binding.json', result);
       }
       const actionBackup =
-        manifest.postgres.maximum >= 16 ? await backupTargetActionState(settings, manifest.releaseId) : null;
+        !vaultBackup && manifest.postgres.maximum >= 16
+          ? await backupTargetActionState(settings, manifest.releaseId)
+          : null;
       writeAtomic(receipt, 'migration.json', {
         ...result,
         sourceCommit: manifest.source.commit,
         migrations: manifest.migrations,
         native: 'cos-subscription-context',
         ...(actionBackup ? { actionBackupDigest: digest(actionBackup) } : {}),
+        ...(vaultBackup ? { vaultBackupDigest: digest(vaultBackup) } : {}),
       });
     },
     async activate() {

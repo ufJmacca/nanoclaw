@@ -6,7 +6,8 @@ on:
 
 jobs:
   ci:
-    runs-on: ubuntu-latest
+    # Owner-bound backup fixtures exercise the Pi's actual Linux/ARM64 guards.
+    runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4

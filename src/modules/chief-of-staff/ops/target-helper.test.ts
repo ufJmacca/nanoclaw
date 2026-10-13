@@ -1,5 +1,119 @@
 import { expect, it } from 'vitest';
 import { parseTargetArguments } from './target-helper.js';
+it('admits only fixed repository initialization and rejects destination, password and repair selectors', () => {
+  const args = [
+    'initialize-backups',
+    '--settings',
+    '/home/pi/settings.json',
+    '--request-id',
+    '01234567-89ab-4def-8123-456789abcdef',
+  ];
+  expect(parseTargetArguments(args)).toEqual({ command: 'initialize-backups', settings: args[2], requestId: args[4] });
+  for (const extra of [
+    ['--repository', '/mnt/foreign'],
+    ['--host', '192.168.1.4'],
+    ['--password', 'secret'],
+    ['--repair', 'true'],
+    ['--owner', 'foreign'],
+    ['--kind', 'state'],
+  ])
+    expect(() => parseTargetArguments([...args, ...extra])).toThrow('invalid_target_arguments');
+});
+it('admits a fixed owner maintenance request without repository, restore, retention or kind selectors', () => {
+  const args = [
+    'maintain-backups',
+    '--settings',
+    '/home/pi/settings.json',
+    '--request-id',
+    '01234567-89ab-4def-8123-456789abcdef',
+  ];
+  expect(parseTargetArguments(args)).toEqual({ command: args[0], settings: args[2], requestId: args[4] });
+  for (const extra of [
+    ['--kind', 'state'],
+    ['--repository', '/mnt/other'],
+    ['--retention', 'all'],
+    ['--restore', '/tmp/restore'],
+    ['--owner', 'other'],
+    ['--phase', 'hold'],
+  ])
+    expect(() => parseTargetArguments([...args, ...extra])).toThrow('invalid_target_arguments');
+  expect(() => parseTargetArguments([...args.slice(0, -1), 'latest'])).toThrow('invalid_target_arguments');
+});
+it('admits only an existing capture kind and stable ID for owner recovery', () => {
+  const args = [
+    'reconcile-backup-capture',
+    '--settings',
+    '/home/pi/target.json',
+    '--kind',
+    'state',
+    '--request-id',
+    '01234567-89ab-4def-8123-456789abcdef',
+  ];
+  expect(parseTargetArguments(args)).toEqual({
+    command: args[0],
+    settings: args[2],
+    kind: 'state',
+    requestId: args[6],
+  });
+  for (const invalid of [
+    [...args.slice(0, 4), 'all', ...args.slice(5)],
+    [...args.slice(0, -1), 'latest'],
+    [...args, '--owner', 'foreign'],
+    [...args, '--path', '/tmp/copy'],
+    ['status', '--settings', args[2], '--kind', 'state'],
+  ])
+    expect(() => parseTargetArguments(invalid)).toThrow('invalid_target_arguments');
+});
+it('admits only fixed backup-job installation without unit, mode, root or credential selectors', () => {
+  const args = ['install-backup-jobs', '--settings', '/home/pi/target.json'];
+  expect(parseTargetArguments(args)).toEqual({ command: 'install-backup-jobs', settings: args[2] });
+  for (const extra of [
+    ['--request-id', '01234567-89ab-4def-8123-456789abcdef'],
+    ['--phase', 'release'],
+    ['--unit', 'foreign.service'],
+    ['--owner', 'foreign'],
+  ])
+    expect(() => parseTargetArguments([...args, ...extra])).toThrow('invalid_target_arguments');
+});
+it('admits only an independent upload job ID and rejects snapshot, NAS, retention and capture selectors', () => {
+  const args = [
+    'upload-backups',
+    '--settings',
+    '/home/pi/settings.json',
+    '--request-id',
+    '01234567-89ab-4def-8123-456789abcdef',
+  ];
+  expect(parseTargetArguments(args)).toEqual({ command: 'upload-backups', settings: args[2], requestId: args[4] });
+  for (const extra of [
+    ['--kind', 'state'],
+    ['--operation-id', args[4]],
+    ['--nas', '/mnt/foreign'],
+    ['--retention', 'all'],
+    ['--phase', 'hold'],
+    ['--owner', 'foreign'],
+  ])
+    expect(() => parseTargetArguments([...args, ...extra])).toThrow('invalid_target_arguments');
+  expect(() => parseTargetArguments([...args.slice(0, -1), 'latest'])).toThrow('invalid_target_arguments');
+});
+it('admits only a fixed scheduled checkpoint request, without account, capture-mode or upload arguments', () => {
+  const args = [
+    'scheduled-backup',
+    '--settings',
+    '/home/pi/settings.json',
+    '--request-id',
+    '01234567-89ab-4def-8123-456789abcdef',
+  ];
+  expect(parseTargetArguments(args)).toEqual({ command: 'scheduled-backup', settings: args[2], requestId: args[4] });
+  for (const extra of [
+    ['--phase', 'release'],
+    ['--owner', 'foreign'],
+    ['--release-id', 'release-other'],
+    ['--capture-mode', 'unpaused'],
+    ['--upload', 'true'],
+  ])
+    expect(() => parseTargetArguments([...args, ...extra])).toThrow('invalid_target_arguments');
+  expect(() => parseTargetArguments([...args.slice(0, -1), 'latest'])).toThrow('invalid_target_arguments');
+});
 it('requires the exact manifest hash and rejects repair, binding and account flags for protected release completion', () => {
   const args = [
     'protected-release',
@@ -142,4 +256,39 @@ it('accepts only fixed target operations, canonical private settings, and exact 
     ],
   ])
     expect(() => parseTargetArguments(args)).toThrow('invalid_target_arguments');
+});
+
+it('admits only staged initialization repair with a stable request, without activation or scope overrides', () => {
+  const args = [
+    'repair-initialize-backups',
+    '--settings',
+    '/home/pi/target.json',
+    '--request-id',
+    '01234567-89ab-4def-8123-456789abcdef',
+  ];
+  expect(parseTargetArguments(args)).toEqual({ command: args[0], settings: args[2], requestId: args[4] });
+  for (const extra of [
+    ['--release-id', 'release-other'],
+    ['--repository', '/mnt/other'],
+    ['--binding', '/home/pi/other.json'],
+    ['--owner', 'other'],
+    ['--kind', 'state'],
+    ['--phase', 'hold'],
+    ['--recover-from', 'release-failed'],
+    ['--password', 'private'],
+  ])
+    expect(() => parseTargetArguments([...args, ...extra])).toThrow('invalid_target_arguments');
+});
+
+it('parses a fixed prepared upload repair without accepting a source, repository or credential override', () => {
+  const args = [
+    'repair-upload-backups',
+    '--settings',
+    '/synthetic/target.json',
+    '--request-id',
+    '01234567-89ab-4def-8123-456789abcdef',
+  ];
+  expect(parseTargetArguments(args)).toEqual({ command: args[0], settings: args[2], requestId: args[4] });
+  for (const option of ['--source', '--repository', '--password-file', '--mode'])
+    expect(() => parseTargetArguments([...args, option, '/synthetic/other'])).toThrow('invalid_target_arguments');
 });

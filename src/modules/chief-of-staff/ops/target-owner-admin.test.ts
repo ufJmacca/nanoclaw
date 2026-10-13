@@ -3,6 +3,100 @@ import { parseOwnerAdminArguments, selectedOwnerAdminProfile, ownerDatabasePrefl
 import { fixtureRelease } from '../../../contracts/chief-of-staff/release-fixture.js';
 import { DatabasePreflightError } from '../store/preflight.js';
 const request = ['owner-export', '--scope', 'fixture', '--request-id', '01234567-89ab-4def-8123-456789abcdef'];
+it('admits complete encrypted recovery only with its explicit separate test environment', async () => {
+  const admin = [
+    'backup-restore-check',
+    '--scope',
+    'fixture',
+    '--request-id',
+    '01234567-89ab-4def-8123-456789abcdef',
+    '--backup-operation-id',
+    '48f99256-b105-4ee3-848c-00140c98151d',
+    '--backup-release',
+    'release-fixture',
+    '--snapshot-digest',
+    'a'.repeat(64),
+  ];
+  expect(
+    parseOwnerAdminArguments([
+      '--settings',
+      '/home/pi/target.json',
+      '--database-environment',
+      '/home/pi/test.env',
+      '--',
+      ...admin,
+    ]),
+  ).toMatchObject({ admin, databaseEnvironment: '/home/pi/test.env' });
+  expect(() => parseOwnerAdminArguments(['--settings', '/home/pi/target.json', '--', ...admin])).toThrow();
+  const test = { COS_TEST_TARGET_ID: 'fixture-test' };
+  await expect(
+    selectedOwnerAdminProfile('backup-restore-check', {
+      runtime: () => {
+        throw Error('runtime_must_not_be_forwarded');
+      },
+      test: () => test,
+    }),
+  ).resolves.toBe(test);
+});
+it.each([
+  'backup-nas-configure',
+  'backup-nas-recover-unmount',
+  'backup-nas-inspect-initialization',
+  'backup-nas-recover-initialization',
+])('admits %s through the retained helper with only the selected runtime profile', async (command) => {
+  const admin = [
+    command,
+    '--scope',
+    'fixture',
+    '--request-id',
+    '48f99256-b105-4ee3-848c-00140c98151d',
+    '--host',
+    '192.168.56.12',
+    '--credential-reference',
+    '319c6740-24ba-4d68-9d3c-a4d53c9607d1',
+  ];
+  expect(parseOwnerAdminArguments(['--settings', '/home/pi/target.json', '--', ...admin])).toMatchObject({ admin });
+  const runtime = { MATTERMOST_BOT_TOKEN: 'fixture-runtime' };
+  await expect(
+    selectedOwnerAdminProfile(admin[0], {
+      runtime: () => runtime,
+      test: () => {
+        throw Error('test_profile_forbidden');
+      },
+    }),
+  ).resolves.toBe(runtime);
+});
+it('admits credential installation only through the retained owner helper and selected runtime profile', async () => {
+  const admin = [
+    'backup-credentials-install',
+    '--scope',
+    'fixture',
+    '--request-id',
+    '48f99256-b105-4ee3-848c-00140c98151d',
+    '--credential-reference',
+    '319c6740-24ba-4d68-9d3c-a4d53c9607d1',
+  ];
+  expect(parseOwnerAdminArguments(['--settings', '/home/pi/target.json', '--', ...admin])).toMatchObject({ admin });
+  const profile = { MATTERMOST_BOT_TOKEN: 'fixture-runtime' };
+  await expect(
+    selectedOwnerAdminProfile(admin[0], {
+      runtime: () => profile,
+      test: () => {
+        throw Error('test profile must not be read');
+      },
+    }),
+  ).resolves.toBe(profile);
+  expect(() =>
+    parseOwnerAdminArguments([
+      '--settings',
+      '/home/pi/target.json',
+      '--database-environment',
+      '/home/pi/foreign.env',
+      '--',
+      ...admin,
+    ]),
+  ).toThrow('invalid_owner_admin_arguments');
+});
 it('G01 installed vault health uses no database or external account credentials', async () => {
   expect(parseOwnerAdminArguments(['--settings', '/home/pi/target.json', '--', 'vault-status'])).toMatchObject({
     admin: ['vault-status'],
@@ -160,4 +254,36 @@ it('admits vault provisioning through the pinned owner helper with the selected 
       },
     }),
   ).toBe(runtime);
+});
+
+it('G02 admits the fixed encrypted checkpoint through the retained helper with only its runtime profile', async () => {
+  const admin = [
+    'backup-checkpoint',
+    '--scope',
+    'fixture',
+    '--request-id',
+    '48f99256-b105-4ee3-848c-00140c98151d',
+    '--settings',
+    '/home/pi/target.json',
+  ];
+  expect(parseOwnerAdminArguments(['--settings', '/home/pi/target.json', '--', ...admin])).toMatchObject({ admin });
+  const runtime = { COS_PGPASSWORD: 'synthetic-runtime' };
+  await expect(
+    selectedOwnerAdminProfile('backup-checkpoint', {
+      runtime: () => runtime,
+      test: () => {
+        throw Error('test_profile_forbidden');
+      },
+    }),
+  ).resolves.toBe(runtime);
+  expect(() =>
+    parseOwnerAdminArguments([
+      '--settings',
+      '/home/pi/target.json',
+      '--database-environment',
+      '/home/pi/test.env',
+      '--',
+      ...admin,
+    ]),
+  ).toThrow('invalid_owner_admin_arguments');
 });

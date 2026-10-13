@@ -15,6 +15,9 @@ import { GOOGLE_EVENT_READ_SCOPE } from '../calendar/reader.js';
 import type { StorageInspection } from '../calendar/storage-protection.js';
 vi.mock('../host-store.js', () => ({ connectCosHostStore: vi.fn() }));
 vi.mock('./vault-memory.js', () => ({ verifyVaultMemory: vi.fn() }));
+vi.mock('./backup-credential-journal.js', () => ({
+  createVaultCredentialJournal: () => async (_change: unknown, guard: () => void) => guard(),
+}));
 const dirs: string[] = [];
 const inspect: StorageInspection = (command, args) =>
   JSON.stringify(

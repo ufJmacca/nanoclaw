@@ -17,7 +17,8 @@ if (mode === 'memory') {
   verifyVaultMemory();
 } else if (mode === 'capture') {
   configureVaultStorage(roots, '/case/vault');
-  await withVaultDirectory(roots, 'backup-credentials', async (pinned) => {
+  await withVaultDirectory(roots, 'backup-credentials', async (pinned, current) => {
+    for (let block = 0; block < 128; block++) current();
     const fd = fs.openSync(pinned + '/canary', 'wx', 0o600);
     try {
       fs.writeFileSync(fd, 'SYNTHETIC_ENCRYPTED_CANARY');
@@ -35,7 +36,7 @@ if (mode === 'memory') {
   });
 } else if (mode === 'race') {
   await assert.rejects(
-    withVaultDirectory(roots, 'backup-credentials', async (pinned) => {
+    withVaultDirectory(roots, 'backup-credentials', async (pinned, current) => {
       fs.writeFileSync('/home/fixture/.config/nanoclaw-cos/state/race-request', 'synthetic', {
         flag: 'wx',
         mode: 0o600,
@@ -49,6 +50,10 @@ if (mode === 'memory') {
         await new Promise((resolve) => setTimeout(resolve, 20));
       }
       assert.equal(detached, true);
+      assert.throws(current, /^Error: vault_storage_unavailable$/);
+      // The fresh streaming guard denies further credential use. This separate
+      // synthetic forensic write verifies the old pinned descriptor still
+      // reaches encrypted storage and can never write to the plaintext underlay.
       const fd = fs.openSync(pinned + '/race-canary', 'wx', 0o600);
       try {
         fs.writeFileSync(fd, 'SYNTHETIC_RACE_CANARY');

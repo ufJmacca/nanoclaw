@@ -11,6 +11,14 @@ type TargetArguments =
   | { command: 'programme-protect'; settings: string; completion: string }
   | { command: 'protected-release'; settings: string; releaseId: string; manifestHash: string }
   | { command: 'operations-maintenance'; settings: string; requestId: string; phase: 'hold' | 'release' }
+  | { command: 'scheduled-backup'; settings: string; requestId: string }
+  | { command: 'upload-backups'; settings: string; requestId: string }
+  | { command: 'maintain-backups'; settings: string; requestId: string }
+  | { command: 'initialize-backups'; settings: string; requestId: string }
+  | { command: 'repair-initialize-backups'; settings: string; requestId: string }
+  | { command: 'repair-upload-backups'; settings: string; requestId: string }
+  | { command: 'install-backup-jobs'; settings: string }
+  | { command: 'reconcile-backup-capture'; settings: string; requestId: string; kind: 'state' | 'credentials' }
   | { command: 'runtime-test'; settings: string; owner: string }
   | { command: 'rollback'; settings: string; releaseId: string; fromReleaseId: string }
   | {
@@ -35,6 +43,14 @@ export function parseTargetArguments(args: string[]): TargetArguments {
       'programme-protect',
       'protected-release',
       'operations-maintenance',
+      'scheduled-backup',
+      'upload-backups',
+      'maintain-backups',
+      'initialize-backups',
+      'repair-initialize-backups',
+      'repair-upload-backups',
+      'install-backup-jobs',
+      'reconcile-backup-capture',
     ].includes(command) ||
     rest.length % 2 !== 0
   )
@@ -53,6 +69,7 @@ export function parseTargetArguments(args: string[]): TargetArguments {
         '--completion',
         '--request-id',
         '--phase',
+        '--kind',
       ].includes(rest[i]) ||
       !rest[i + 1] ||
       values[rest[i]]
@@ -79,8 +96,31 @@ export function parseTargetArguments(args: string[]): TargetArguments {
           phase: values['--phase'] as 'hold' | 'release',
         }
       : reject();
-  if (values['--completion'] || values['--request-id'] || values['--phase']) return reject();
-  if (command === 'status')
+  if (
+    command === 'scheduled-backup' ||
+    command === 'upload-backups' ||
+    command === 'maintain-backups' ||
+    command === 'initialize-backups' ||
+    command === 'repair-initialize-backups' ||
+    command === 'repair-upload-backups'
+  )
+    return Object.keys(values).length === 2 &&
+      /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(values['--request-id'] ?? '')
+      ? { command, settings: values['--settings'], requestId: values['--request-id'] }
+      : reject();
+  if (command === 'reconcile-backup-capture')
+    return Object.keys(values).length === 3 &&
+      ['state', 'credentials'].includes(values['--kind']) &&
+      /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(values['--request-id'] ?? '')
+      ? {
+          command,
+          settings: values['--settings'],
+          requestId: values['--request-id'],
+          kind: values['--kind'] as 'state' | 'credentials',
+        }
+      : reject();
+  if (values['--completion'] || values['--request-id'] || values['--phase'] || values['--kind']) return reject();
+  if (command === 'status' || command === 'install-backup-jobs')
     return Object.keys(values).length === 1 ? { command, settings: values['--settings'] } : reject();
   if (command === 'runtime-test') {
     if (Object.keys(values).length !== 2 || !/^[a-zA-Z0-9_-]{1,120}$/.test(values['--owner'] ?? '')) return reject();
@@ -162,7 +202,65 @@ export async function targetCommand(args: string[]): Promise<Record<string, unkn
   const binding = targetBinding(settings);
   const parent = path.dirname(settings.stateRoot);
   if (!fs.existsSync(parent)) throw new Error('target_state_parent_required');
+  if (request.command === 'install-backup-jobs') {
+    const { configureTargetBackupJobs } = await import('./backup-job-configure.js');
+    return configureTargetBackupJobs(settings, fileURLToPath(import.meta.url));
+  }
+  if (request.command === 'reconcile-backup-capture') {
+    const { reconcileTargetBackupCapture } = await import('./backup-capture-reconcile.js');
+    return reconcileTargetBackupCapture(settings, fileURLToPath(import.meta.url), request.kind, request.requestId);
+  }
+  if (request.command === 'repair-initialize-backups') {
+    const { initializeBackupRepair, createBackupInitializationRepairEffects } =
+      await import('./backup-initialization-repair.js');
+    return initializeBackupRepair({
+      root: settings.stateRoot,
+      binding,
+      requestId: request.requestId,
+      effects: createBackupInitializationRepairEffects(settings, fileURLToPath(import.meta.url)),
+    });
+  }
+  if (request.command === 'initialize-backups') {
+    const { initializeBackupJob, createBackupInitializationEffects } = await import('./backup-initialize-job.js');
+    return initializeBackupJob({
+      root: settings.stateRoot,
+      binding,
+      requestId: request.requestId,
+      effects: createBackupInitializationEffects(settings, fileURLToPath(import.meta.url)),
+    });
+  }
+  if (
+    request.command === 'upload-backups' ||
+    request.command === 'maintain-backups' ||
+    request.command === 'repair-upload-backups'
+  ) {
+    const { uploadBackupJob } = await import('./backup-upload-job.js');
+    const { createBackupUploadJobEffects } = await import('./backup-upload-job-effects.js');
+    const { createBackupUploadRepairEffects } = await import('./backup-upload-repair.js');
+    // The job owns a separate kernel lock. NAS waits must not hold the
+    // deployment/checkpoint operation lock or the credential publication lock.
+    return uploadBackupJob({
+      root: settings.stateRoot,
+      binding,
+      requestId: request.requestId,
+      effects:
+        request.command === 'repair-upload-backups'
+          ? createBackupUploadRepairEffects(settings, fileURLToPath(import.meta.url))
+          : createBackupUploadJobEffects(settings, fileURLToPath(import.meta.url)),
+      mode: request.command === 'maintain-backups' ? 'maintain' : 'deliver',
+    });
+  }
   return withDeploymentLock(settings.stateRoot + '.operation.lock', async () => {
+    if (request.command === 'scheduled-backup') {
+      const { checkpointMaintenance } = await import('./checkpoint-maintenance.js');
+      const { createCheckpointMaintenanceEffects } = await import('./checkpoint-maintenance-effects.js');
+      return checkpointMaintenance({
+        root: settings.stateRoot,
+        binding,
+        requestId: request.requestId,
+        effects: createCheckpointMaintenanceEffects(settings, fileURLToPath(import.meta.url), request.requestId),
+      });
+    }
     if (request.command === 'operations-maintenance') {
       const { operationsMaintenance } = await import('./operations-maintenance.js');
       const { createOperationsMaintenanceEffects } = await import('./operations-maintenance-effects.js');
@@ -366,6 +464,12 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
         'target_protection_conflict',
         'operations_maintenance_unverified',
         'operations_workers_active',
+        'backup_upload_locked',
+        'backup_upload_job_unavailable',
+        'backup_job_installation_busy',
+        'backup_job_installation_unavailable',
+        'backup_capture_recovery_busy',
+        'backup_capture_recovery_unavailable',
       ]);
       console.error(
         JSON.stringify({

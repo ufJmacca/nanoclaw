@@ -22,6 +22,7 @@ import {
   type CalendarWindow,
 } from '../calendar/normalization.js';
 import { writeAtomic } from './target-state.js';
+import type { CredentialJournal } from './backup-credential-event.js';
 
 export type CalendarAdminArguments =
   | { command: 'calendar-status'; scopeId: string; offset: number }
@@ -185,6 +186,7 @@ export async function runCalendarAdmin(
   dependencies: {
     inspect?: StorageInspection;
     memory?: () => void;
+    credentialJournal?: CredentialJournal;
     fetch?: OAuthTransport['fetch'];
     connect?: typeof connectCosHostStore;
     artifacts?: typeof openKnowledgeArtifacts;
@@ -295,7 +297,12 @@ export async function runCalendarAdmin(
         () => input!.window ?? snapshotWindow(new Date(Date.now()).toISOString(), connection.timeZone),
       );
       await backup('before');
-      const owner = openCalendarCredentials(roots, dependencies.inspect, dependencies.memory);
+      const owner = openCalendarCredentials(
+        roots,
+        dependencies.inspect,
+        dependencies.memory,
+        dependencies.credentialJournal,
+      );
       await options.check();
       const connector = new CalendarConnector({ store, ...owner, admitted, fetch: dependencies.fetch });
       const refreshed = await connector.refresh(

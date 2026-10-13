@@ -12,6 +12,10 @@ import { configureCalendarStorage } from '../calendar/storage-policy.js';
 import type { StorageInspection } from '../calendar/storage-protection.js';
 import { GOOGLE_CALENDAR_METADATA_SCOPE, GOOGLE_OWNED_EVENT_WRITE_SCOPE } from './writer.js';
 vi.mock('../ops/vault-memory.js', () => ({ verifyVaultMemory: vi.fn() }));
+// Legacy profile fixtures test factory isolation; actual journal persistence is tested separately.
+vi.mock('../ops/backup-credential-journal.js', () => ({
+  createVaultCredentialJournal: () => async (_change: unknown, guard: () => void) => guard(),
+}));
 const temporary: string[] = [];
 const inspect: StorageInspection = (command, args) =>
   JSON.stringify(

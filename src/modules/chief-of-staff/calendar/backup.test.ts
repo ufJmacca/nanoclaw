@@ -2,7 +2,12 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
-import { backupCalendarState, verifyCalendarBackup, verifyCalendarWriterBackup } from './backup.js';
+import {
+  backupCalendarState,
+  captureCalendarState,
+  verifyCalendarBackup,
+  verifyCalendarWriterBackup,
+} from './backup.js';
 import { randomUUID } from 'node:crypto';
 import { digest } from '../domain/contracts.js';
 import { GOOGLE_CALENDAR_METADATA_SCOPE, GOOGLE_OWNED_EVENT_WRITE_SCOPE } from '../actions/writer.js';
@@ -56,6 +61,91 @@ afterEach(() => {
   vi.mocked(verifyVaultMemory).mockReset();
   vi.restoreAllMocks();
   for (const base of bases.splice(0)) fs.rmSync(base, { recursive: true, force: true });
+});
+it('G02 captures credentials and denial journals through a sink without creating another staging copy', async () => {
+  const f = setup(),
+    files = new Map<string, Buffer>();
+  const receipt = await captureCalendarState(f.options, {
+    write(name, bytes) {
+      files.set(name, Buffer.from(bytes));
+    },
+  });
+  expect(receipt).toMatchObject({ contract: 'cos-calendar-capture/v1', present: true, files: 4 });
+  expect(files.get('calendar-state/credentials/token.json')!.toString()).toBe('PRIVATE_TOKEN_CANARY');
+  expect(files.get('calendar-state/access-denials/denial.json')!.toString()).toBe('MONOTONIC_DENIAL_CANARY');
+  expect(receipt.directories.sort()).toEqual(['access-denials', 'credentials']);
+  expect(fs.readdirSync(f.backupRoot)).toEqual(['.cos-calendar-backups']);
+  expect(fs.readdirSync(f.options.receiptRoot)).toEqual([]);
+  expect(verifyVaultMemory).toHaveBeenCalled();
+});
+it('G02 denies credential streaming before the sink when memory protection is absent', async () => {
+  const f = setup();
+  let emitted = false;
+  vi.mocked(verifyVaultMemory).mockImplementation(() => {
+    throw Error('PRIVATE_MEMORY_CANARY');
+  });
+  await expect(
+    captureCalendarState(f.options, {
+      write() {
+        emitted = true;
+      },
+    }),
+  ).rejects.toThrow(/^calendar_capture_unavailable$/);
+  expect(emitted).toBe(false);
+});
+it('G02 refuses a nested foreign filesystem before any credential streaming', async () => {
+  const f = setup(),
+    original = fs.lstatSync;
+  vi.spyOn(fs, 'lstatSync').mockImplementation(((file: fs.PathLike, options?: fs.StatOptions) => {
+    const stat = original(file, options);
+    if (stat && String(file).endsWith('/credentials') && String(file).startsWith('/proc/self/fd/')) {
+      const foreign = Object.create(stat) as fs.Stats;
+      Object.defineProperty(foreign, 'dev', { value: Number(stat.dev) + 1 });
+      return foreign;
+    }
+    return stat;
+  }) as typeof fs.lstatSync);
+  let emitted = false;
+  await expect(
+    captureCalendarState(f.options, {
+      write() {
+        emitted = true;
+      },
+    }),
+  ).rejects.toThrow(/^calendar_capture_unavailable$/);
+  expect(emitted).toBe(false);
+});
+it('G02 refuses a credential source replaced during capture without publishing a receipt', async () => {
+  const f = setup();
+  let replaced = false,
+    published = false;
+  await expect(
+    captureCalendarState(f.options, {
+      write(name) {
+        if (name.endsWith('receipt.json')) published = true;
+        if (!replaced) {
+          replaced = true;
+          fs.renameSync(f.source, f.source + '-held');
+          fs.mkdirSync(f.source, { mode: 0o700 });
+        }
+      },
+    }),
+  ).rejects.toThrow(/^calendar_capture_unavailable$/);
+  expect(replaced).toBe(true);
+  expect(published).toBe(false);
+  expect(fs.readdirSync(f.options.receiptRoot)).toEqual([]);
+});
+it('G02 records an absent Calendar store without inventing credentials or using Google', async () => {
+  const f = setup(false),
+    files = new Map<string, Buffer>();
+  const receipt = await captureCalendarState(f.options, {
+    write(name, bytes) {
+      files.set(name, Buffer.from(bytes));
+    },
+  });
+  expect(receipt).toMatchObject({ present: false, files: 0, bytes: 0, directories: [], storageDigest: null });
+  expect([...files.keys()]).toEqual(['calendar-capture-receipt.json']);
+  expect(fs.readdirSync(f.options.receiptRoot)).toEqual([]);
 });
 it('denies credential capture before staging when process memory protection is absent', async () => {
   const f = setup();

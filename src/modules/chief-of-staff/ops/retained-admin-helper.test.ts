@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, expect, it } from 'vitest';
 import { digest } from '../domain/contracts.js';
-import { fixtureRelease } from '../../../contracts/chief-of-staff/release-fixture.js';
+import { fixtureRelease, fixtureVaultRelease } from '../../../contracts/chief-of-staff/release-fixture.js';
 import { requiredReleaseChecks, type ReleaseManifest } from './release-manifest.js';
 import { initializeTarget, protectTarget, readPrivate, writeAtomic } from './target-state.js';
 import { payloadDigest } from './payload.js';
@@ -13,7 +13,7 @@ const roots: string[] = [];
 afterEach(() => {
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
-async function fixture(slice: 'S11' | 'G01' = 'G01') {
+async function fixture(slice: 'S11' | 'G01' | 'G02' = 'G01') {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'retained-admin-'));
   roots.push(root);
   const binding = {
@@ -26,7 +26,7 @@ async function fixture(slice: 'S11' | 'G01' = 'G01') {
     settings = { releaseRoot: root + '/releases', stateRoot: root + '/state' };
   initializeTarget(settings.stateRoot, binding);
   protectTarget(settings.stateRoot, binding);
-  const manifest = fixtureRelease(slice);
+  const manifest = slice === 'G02' ? fixtureVaultRelease('G02') : fixtureRelease(slice);
   manifest.releaseId = 'release-aaaaaaaaaaaa-20261008011204';
   if (slice === 'G01') {
     const seal = {
@@ -86,12 +86,33 @@ it('admits the healthy sealed G01 admin payload while original programme closure
     'programme_completion_unverified',
   );
 });
+it('admits the healthy sealed G02 admin payload with all backup gates on the protected target', async () => {
+  const f = await fixture('G02');
+  await expect(verifyRetainedAdminHelper(f.settings, f.binding, f.helper)).resolves.toEqual(f.manifest);
+  await expect(verifyProtectionHelper(f.settings, f.binding, f.helper)).rejects.toThrow(
+    'programme_completion_unverified',
+  );
+});
+it.each(['unprotected', 'backup-gate'])('refuses G02 helper %s before owner administration', async (reason) => {
+  const f = await fixture('G02');
+  if (reason === 'unprotected') {
+    fs.unlinkSync(f.settings.stateRoot + '/protected.json');
+    const state = readPrivate<Record<string, unknown>>(f.settings.stateRoot + '/state.json');
+    writeAtomic(f.settings.stateRoot, 'state.json', { ...state, lifecycle: 'implementation_disposable' });
+  } else {
+    delete f.manifest.checks.backup_mount;
+    writeAtomic(f.archive, 'release.json', f.manifest);
+  }
+  await expect(verifyRetainedAdminHelper(f.settings, f.binding, f.helper)).rejects.toThrow(
+    'retained_admin_helper_unverified',
+  );
+});
 it('preserves retained S11 repair compatibility', async () => {
   const f = await fixture('S11');
   await expect(verifyRetainedAdminHelper(f.settings, f.binding, f.helper)).resolves.toEqual(f.manifest);
   await expect(verifyProtectionHelper(f.settings, f.binding, f.helper)).resolves.toEqual(f.manifest);
 });
-it.each(['unprotected', 'seal', 'incomplete', 'binding', 'payload', 'future-slice'])(
+it.each(['unprotected', 'seal', 'incomplete', 'binding', 'payload', 'missing-backup-gates', 'future-slice'])(
   'denies %s G01 helper evidence before owner administration',
   async (reason) => {
     const f = await fixture();
@@ -105,7 +126,8 @@ it.each(['unprotected', 'seal', 'incomplete', 'binding', 'payload', 'future-slic
     if (reason === 'binding')
       writeAtomic(f.receiptRoot, 'deployment.json', { ...f.record, bindingDigest: '9'.repeat(64) });
     if (reason === 'payload') fs.appendFileSync(f.helper, ' changed');
-    if (reason === 'future-slice') writeAtomic(f.archive, 'release.json', { ...f.manifest, slice: 'G02' });
+    if (reason === 'missing-backup-gates') writeAtomic(f.archive, 'release.json', { ...f.manifest, slice: 'G02' });
+    if (reason === 'future-slice') writeAtomic(f.archive, 'release.json', { ...f.manifest, slice: 'G03' });
     await expect(verifyRetainedAdminHelper(f.settings, f.binding, f.helper)).rejects.toThrow(
       'retained_admin_helper_unverified',
     );
