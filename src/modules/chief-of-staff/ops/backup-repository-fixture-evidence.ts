@@ -1,6 +1,6 @@
 import { verifyBackupRepositoryReport } from '../../../contracts/chief-of-staff/backup-repository-report.js';
 type Identity = Readonly<{ sourceCommit: string; sourceTree: string; hostImage: string }>;
-/** All three local repository gates share one real 45-case run. Vault and NAS
+/** All three local repository gates share one complete actual run. Vault and NAS
  * admission are explicit fixtures here and have their separate kernel gates.
  */
 export function verifyBackupRepositoryFixtureEvidence(text: string, identity: Identity) {

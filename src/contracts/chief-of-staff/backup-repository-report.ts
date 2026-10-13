@@ -25,6 +25,10 @@ export const BACKUP_REPOSITORY_CASES = [
   'real remote restoration streams directly into new private files and retires only its verified isolated workspace',
   'real remote recovery shares measured staging and the actual checkpoint writer while preserving pending state',
   'real encrypted remote recovery validates the complete captured payload without importing live authority',
+  'real encrypted predeployment recovery validates the complete captured payload without importing live authority',
+  ...['owner', 'nonce', 'source-release'].map(
+    (mismatch) => `real encrypted predeployment recovery refuses an authentic archive with a foreign ${mismatch}`,
+  ),
   'real restoration denies a foreign receipt owner and missing checkpoint without destination files or remote changes',
   'real restoration refuses capacity withdrawn after its awaited repository identity without a completed destination',
   'real restoration handles long PAX paths and empty files through bounded streaming sinks',
@@ -45,7 +49,7 @@ export const BACKUP_REPOSITORY_CASES = [
 /** A success exit and aggregate count alone cannot supply the three repository
  * gates. Require every actual compiled case, no skips and the complete TAP plan.
  */
-export function verifyBackupRepositoryReport(text: string): { actualRepositoryCases: 45 } {
+export function verifyBackupRepositoryReport(text: string): { actualRepositoryCases: number } {
   try {
     if (
       typeof text !== 'string' ||
@@ -55,25 +59,25 @@ export function verifyBackupRepositoryReport(text: string): { actualRepositoryCa
     )
       throw Error('report');
     const lines = text.split(/\r?\n/),
-      cases = lines.filter((line) => /^ok \d+ - /.test(line));
-    if (cases.length !== 45 || BACKUP_REPOSITORY_CASES.length !== 45 || new Set(BACKUP_REPOSITORY_CASES).size !== 45)
-      throw Error('coverage');
+      cases = lines.filter((line) => /^ok \d+ - /.test(line)),
+      required = BACKUP_REPOSITORY_CASES.length;
+    if (cases.length !== required || new Set(BACKUP_REPOSITORY_CASES).size !== required) throw Error('coverage');
     const ids = new Set<number>(),
       names = new Set<string>();
     for (const line of cases) {
       const match = /^ok ([1-9][0-9]*) - (.+)$/.exec(line)!;
       const id = Number(match[1]);
-      if (id > 45 || ids.has(id) || names.has(match[2]) || !BACKUP_REPOSITORY_CASES.includes(match[2]))
+      if (id > required || ids.has(id) || names.has(match[2]) || !BACKUP_REPOSITORY_CASES.includes(match[2]))
         throw Error('case');
       ids.add(id);
       names.add(match[2]);
     }
     for (const [pattern, expected] of [
       [/^TAP version .*$/, 'TAP version 13'],
-      [/^[0-9]+\.\.[0-9]+$/, '1..45'],
-      [/^# tests .*$/, '# tests 45'],
+      [/^[0-9]+\.\.[0-9]+$/, `1..${required}`],
+      [/^# tests .*$/, `# tests ${required}`],
       [/^# suites .*$/, '# suites 0'],
-      [/^# pass .*$/, '# pass 45'],
+      [/^# pass .*$/, `# pass ${required}`],
       [/^# fail .*$/, '# fail 0'],
       [/^# cancelled .*$/, '# cancelled 0'],
       [/^# skipped .*$/, '# skipped 0'],
@@ -82,7 +86,7 @@ export function verifyBackupRepositoryReport(text: string): { actualRepositoryCa
       const found = lines.filter((line) => pattern.test(line));
       if (found.length !== 1 || found[0] !== expected) throw Error('summary');
     }
-    return { actualRepositoryCases: 45 };
+    return { actualRepositoryCases: required };
   } catch {
     // eslint-disable-next-line preserve-caught-error -- Do not expose private fixture command diagnostics.
     throw Error('backup_repository_fixture_unverified');

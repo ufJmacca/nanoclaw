@@ -1757,10 +1757,10 @@ async function completeCapturedPayloadRecovery(
     native.close();
   }
 }
-for (const captureMode of ['operator', 'predeployment'] as const) {
-  test(`real encrypted ${captureMode} recovery validates the complete captured payload without importing live authority`, () =>
-    completeCapturedPayloadRecovery(captureMode));
-}
+test('real encrypted remote recovery validates the complete captured payload without importing live authority', () =>
+  completeCapturedPayloadRecovery('operator'));
+test('real encrypted predeployment recovery validates the complete captured payload without importing live authority', () =>
+  completeCapturedPayloadRecovery('predeployment'));
 for (const mismatch of ['owner', 'nonce', 'source-release'] as const) {
   test(`real encrypted predeployment recovery refuses an authentic archive with a foreign ${mismatch}`, () =>
     completeCapturedPayloadRecovery('predeployment', mismatch));

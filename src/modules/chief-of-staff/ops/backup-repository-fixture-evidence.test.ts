@@ -39,10 +39,10 @@ const fixture = () => ({
   report: [
     'TAP version 13',
     ...BACKUP_REPOSITORY_CASES.map((title, index) => `ok ${index + 1} - ${title}`),
-    '1..45',
-    '# tests 45',
+    '1..49',
+    '# tests 49',
     '# suites 0',
-    '# pass 45',
+    '# pass 49',
     '# fail 0',
     '# cancelled 0',
     '# skipped 0',
@@ -54,7 +54,7 @@ const serialize = (value: ReturnType<typeof fixture>) =>
 it('binds all three repository gates to one complete actual host run without claiming installed acceptance', () => {
   expect(verifyBackupRepositoryFixtureEvidence(serialize(fixture()), identity)).toEqual({
     status: 'passed',
-    actualRepositoryCases: 45,
+    actualRepositoryCases: 49,
     gates: ['backup_transfer', 'backup_retention', 'backup_recovery'],
     installedAcceptance: false,
   });
