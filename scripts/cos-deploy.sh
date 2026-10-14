@@ -62,7 +62,7 @@ id=${directory##*/}
 cli verify "$id"
 # Close disposal before target/migration/health repair can delay the final release.
 slice=$(cli field "$id" slice)
-if [[ "$slice" != G01 && "$slice" != G02 ]]; then bash scripts/cos-protect-programme.sh --release-manifest "$manifest"; fi
+if [[ "$slice" != G01 && "$slice" != G02 && "$slice" != G03 ]]; then bash scripts/cos-protect-programme.sh --release-manifest "$manifest"; fi
 remote "$(cli preflight-command)" > "$directory/target-observation.json"
 cli target-check "$id"
 command=$(cli protected-release-command "$id")
@@ -104,7 +104,7 @@ cli checkpoint "$id" prepared
 printf 'Activating %s. The existing NanoClaw service will briefly stop while protected state is backed up and migrated.\n' "$id"
 command=$(cli deploy-command "$id" ${recovery_args[@]+"${recovery_args[@]}"})
 [[ -n "$command" ]] || { echo 'Empty remote command refused.' >&2; exit 1; }
-if [[ "$slice" == G01 || "$slice" == G02 ]]; then
+if [[ "$slice" == G01 || "$slice" == G02 || "$slice" == G03 ]]; then
   # Protect the actual credential/backup process before it reads private state.
   command="systemd-run --user --quiet --pipe --wait --collect --unit=nanoclaw-cos-deploy-$id.service --property=LimitCORE=0 --property=MemorySwapMax=0 --property=RuntimeMaxSec=1900 -- /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C LC_ALL=C $command"
 fi

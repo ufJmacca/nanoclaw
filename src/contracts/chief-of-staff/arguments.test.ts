@@ -146,7 +146,7 @@ it('G01 regresses the completed programme using only the admitted separate test 
   expect(() => parseFixtureArguments(['--slice', 'G01', '--db-profile', 'runtime-disposable'])).toThrow(
     'explicit_supported_slice_and_profile_required',
   );
-  expect(() => parseFixtureArguments(['--slice', 'G03', '--db-profile', 'test'])).toThrow(
+  expect(() => parseFixtureArguments(['--slice', 'G04', '--db-profile', 'test'])).toThrow(
     'explicit_supported_slice_and_profile_required',
   );
 });
@@ -163,6 +163,17 @@ it('G02 regresses the protected programme and demonstrates encrypted recovery us
     'backup-publication.integration',
   ]);
   expect(() => parseFixtureArguments(['--slice', 'G02', '--db-profile', 'runtime-disposable'])).toThrow(
+    'explicit_supported_slice_and_profile_required',
+  );
+});
+it('G03 retains protected backup regressions and adds the Calendar conversation to its fixture demonstration', () => {
+  const args = parseFixtureArguments(['--slice', 'G03', '--db-profile', 'test']);
+  expect(fixtureFiles(args)).toEqual(fixtureFiles({ slice: 'G02', demo: false }));
+  expect(fixtureFiles({ ...args, demo: true })).toEqual([
+    ...fixtureFiles({ slice: 'G02', demo: true }),
+    'calendar-flow.integration',
+  ]);
+  expect(() => parseFixtureArguments(['--slice', 'G03', '--db-profile', 'runtime-disposable'])).toThrow(
     'explicit_supported_slice_and_profile_required',
   );
 });

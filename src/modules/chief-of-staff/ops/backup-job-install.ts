@@ -58,7 +58,7 @@ export function createBackupJobInstaller(
 ) {
   const settings = deploymentSettings(structuredClone(selected)),
     manifest = validateReleaseManifest(structuredClone(selectedManifest));
-  if (manifest.slice !== 'G02') throw Error('backup_job_installation_unavailable');
+  if (!['G02', 'G03'].includes(manifest.slice)) throw Error('backup_job_installation_unavailable');
   const paths = {
     config: path.join(settings.userHome, '.config/nanoclaw-cos'),
     units: path.join(settings.userHome, '.config/systemd/user'),

@@ -46,7 +46,8 @@ export const BACKUP_RELEASE_CHECKS = [
   'backup_units',
 ] as const;
 export function requiredReleaseChecks(slice: ReleaseManifest['slice']): readonly string[] {
-  if (slice === 'G02') return [...REQUIRED_RELEASE_CHECKS, ...VAULT_RELEASE_CHECKS, ...BACKUP_RELEASE_CHECKS];
+  if (slice === 'G02' || slice === 'G03')
+    return [...REQUIRED_RELEASE_CHECKS, ...VAULT_RELEASE_CHECKS, ...BACKUP_RELEASE_CHECKS];
   return slice === 'G01' ? [...REQUIRED_RELEASE_CHECKS, ...VAULT_RELEASE_CHECKS] : REQUIRED_RELEASE_CHECKS;
 }
 export type ReleaseManifest = {
@@ -87,7 +88,7 @@ export function validateReleaseManifest(value: unknown): ReleaseManifest {
     !object(value) ||
     value.contract !== 'cos-release/v1' ||
     typeof value.slice !== 'string' ||
-    !['S01', 'S02', 'S03', 'S04', 'S05', 'S06', 'S07', 'S08', 'S09', 'S10', 'S11', 'G01', 'G02'].includes(
+    !['S01', 'S02', 'S03', 'S04', 'S05', 'S06', 'S07', 'S08', 'S09', 'S10', 'S11', 'G01', 'G02', 'G03'].includes(
       value.slice,
     ) ||
     value.platform !== 'linux/arm64' ||
@@ -193,7 +194,7 @@ export function validateReleaseManifest(value: unknown): ReleaseManifest {
     if (image.role === 'host') hosts++;
   }
   if (hosts !== 1 || !object(value.checks)) return reject();
-  if (value.slice === 'G02') {
+  if (value.slice === 'G02' || value.slice === 'G03') {
     try {
       validateResticArtifactSeal(value.backupArtifact);
       // eslint-disable-next-line no-catch-all/no-catch-all -- Invalid pinned executable identity denies release admission.
@@ -201,7 +202,7 @@ export function validateReleaseManifest(value: unknown): ReleaseManifest {
       return reject();
     }
   }
-  if (value.slice === 'G01' || value.slice === 'G02') {
+  if (value.slice === 'G01' || value.slice === 'G02' || value.slice === 'G03') {
     try {
       const artifact = value.vaultArtifact;
       if (

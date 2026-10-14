@@ -27,7 +27,7 @@ export async function configureTargetBackupJobs(
         current = admittedGeneration(settings.stateRoot, binding);
       if (
         !selected ||
-        selected.slice !== 'G02' ||
+        !['G02', 'G03'].includes(selected.slice) ||
         state.lifecycle !== 'protected' ||
         state.releaseId !== selected.releaseId ||
         current === null ||

@@ -29,21 +29,27 @@ test('the final ARM64 host carries the exact official backup executable and immu
   assert.match(build.workerAssetsDigest, /^[a-f0-9]{64}$/);
   // Synthetic target authority; execute the exact baked installer against the
   // baked public utility, without source overrides or owner credentials.
-  const installationRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-runtime-artifact-'));
-  try {
-    const input = { installationRoot, payload: '/release', manifest: fixtureVaultRelease('G02'), check() {} };
-    const installed = await installResticRuntimeArtifact(input),
-      file = installationRoot + '/libexec/restic';
-    assert.deepEqual(installed, { status: 'installed', bytes: RESTIC_ARTIFACT.bytes, sha256: RESTIC_ARTIFACT.sha256 });
-    const inode = fs.lstatSync(file).ino;
-    assert.equal(fs.lstatSync(file).mode & 0o7777, 0o555);
-    assert.deepEqual(await installResticRuntimeArtifact(input), { ...installed, status: 'already_installed' });
-    assert.equal(fs.lstatSync(file).ino, inode);
-    fs.chmodSync(file, 0o600);
-    fs.writeFileSync(file, 'synthetic-interrupted-artifact');
-    await assert.rejects(installResticRuntimeArtifact(input), /^Error: backup_runtime_artifact_unavailable$/);
-    assert.equal(fs.readFileSync(file, 'utf8'), 'synthetic-interrupted-artifact');
-  } finally {
-    fs.rmSync(installationRoot, { recursive: true, force: true });
+  for (const slice of ['G02', 'G03'] as const) {
+    const installationRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-runtime-artifact-'));
+    try {
+      const input = { installationRoot, payload: '/release', manifest: fixtureVaultRelease(slice), check() {} };
+      const installed = await installResticRuntimeArtifact(input),
+        file = installationRoot + '/libexec/restic';
+      assert.deepEqual(installed, {
+        status: 'installed',
+        bytes: RESTIC_ARTIFACT.bytes,
+        sha256: RESTIC_ARTIFACT.sha256,
+      });
+      const inode = fs.lstatSync(file).ino;
+      assert.equal(fs.lstatSync(file).mode & 0o7777, 0o555);
+      assert.deepEqual(await installResticRuntimeArtifact(input), { ...installed, status: 'already_installed' });
+      assert.equal(fs.lstatSync(file).ino, inode);
+      fs.chmodSync(file, 0o600);
+      fs.writeFileSync(file, 'synthetic-interrupted-artifact');
+      await assert.rejects(installResticRuntimeArtifact(input), /^Error: backup_runtime_artifact_unavailable$/);
+      assert.equal(fs.readFileSync(file, 'utf8'), 'synthetic-interrupted-artifact');
+    } finally {
+      fs.rmSync(installationRoot, { recursive: true, force: true });
+    }
   }
 });
