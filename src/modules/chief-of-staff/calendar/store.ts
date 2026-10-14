@@ -46,11 +46,16 @@ type Binding = {
   version: number;
   auth: CalendarAccess['auth'];
 };
-async function authorised(client: PoolClient, context: Context, mutation: boolean): Promise<boolean> {
+async function authorised(
+  client: PoolClient,
+  context: Context,
+  mutation: boolean,
+  ownerAdministration: boolean,
+): Promise<boolean> {
   return (
     (
       await client.query(
-        `SELECT id FROM cos.scopes WHERE id=$1 AND owner_id=$2 AND agent_group_id=$3 AND status='active' FOR ${mutation ? 'UPDATE' : 'SHARE'}`,
+        `SELECT id FROM cos.scopes WHERE id=$1 AND owner_id=$2 AND agent_group_id=$3 AND ${ownerAdministration ? "status IN ('active','paused')" : "status='active'"} FOR ${mutation ? 'UPDATE' : 'SHARE'}`,
         [context.scopeId, context.ownerId, context.agentGroupId],
       )
     ).rowCount === 1
@@ -159,6 +164,7 @@ function snapshotValid(value: CalendarSnapshot): boolean {
 }
 
 export class CalendarStore {
+  protected readonly ownerAdministration: boolean = false;
   /** Bounded metadata inventory for the current model-processing profile. No tokens or source text. */
   async coverage(context: Context & { provider: string }, offset = 0): Promise<Result> {
     if (!Number.isInteger(offset) || offset < 0 || offset > 10000) return { status: 'denied' };
@@ -197,7 +203,7 @@ export class CalendarStore {
         async (client) => {
           await client.query('BEGIN');
           if (publishing && this.evidence) await client.query('SELECT pg_advisory_xact_lock(73101004)');
-          if (!(await authorised(client, context, mutation))) {
+          if (!(await authorised(client, context, mutation, this.ownerAdministration))) {
             await client.query('COMMIT');
             return { status: 'denied' };
           }
