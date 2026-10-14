@@ -283,9 +283,9 @@ export function rebindRecoveredActivation(o: Options, request: { expectedGenerat
   writeAtomic(history, file, { ...record, phase: 'complete' });
   return result();
 }
-/** A repeated resume request observes the result; it can never undo a later pause. */
-export function resumeContext(
-  o: Options & { inbound: Database.Database; outbound: Database.Database; ownerDenialsCheckpoint?: string },
+/** Verify issued, current authority before a separate owner operation grants database admission. */
+export function verifyResumeActivation(
+  o: Options & { ownerDenialsCheckpoint?: string },
   activationId: string,
   resumeId: string,
 ) {
@@ -307,6 +307,15 @@ export function resumeContext(
   )
     throw new Error('activation_conflict');
   if (remaining(o, policy) < 1) throw new Error('activation_exhausted');
+  return policy;
+}
+/** A repeated resume request observes the result; it can never undo a later pause. */
+export function resumeContext(
+  o: Options & { inbound: Database.Database; outbound: Database.Database; ownerDenialsCheckpoint?: string },
+  activationId: string,
+  resumeId: string,
+) {
+  const policy = verifyResumeActivation(o, activationId, resumeId);
   const history = directory(o.root, 'context-resumptions'),
     file = resumeId + '.json';
   const requestDigest = digest({ binding: o.binding, policy, resumeId });

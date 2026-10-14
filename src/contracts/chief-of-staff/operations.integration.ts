@@ -26,6 +26,7 @@ import { CalendarConnector } from '../../modules/chief-of-staff/calendar/connect
 import { CalendarReadError, GOOGLE_EVENT_READ_SCOPE } from '../../modules/chief-of-staff/calendar/reader.js';
 import { exportOwnerRecords, purgeOwnerExports } from '../../modules/chief-of-staff/ops/owner-export.js';
 import { digest } from '../../modules/chief-of-staff/domain/contracts.js';
+import { resumeCatalogueScope } from '../../modules/chief-of-staff/ops/catalogue-resume.js';
 let admin: pg.Client, store: PriorityStore;
 let knowledge: KnowledgeStore, artifactRoot: string;
 const scope = 'operations-' + randomUUID(),
@@ -793,4 +794,185 @@ test('S11-T06 denied retention releases its transaction and leaves the bounded p
   } finally {
     await pool.end();
   }
+});
+
+function catalogueResumeRequest(expectedVersion: number) {
+  const binding: CosBinding = {
+    scopeId: scope,
+    ownerId: context.ownerId,
+    botId: 'fixture-bot',
+    instanceId: 'fixture',
+    channelId: scope,
+    agentGroupId: scope,
+    messagingGroupId: 'messages-' + scope,
+    sessionId: scope,
+    provider: 'codex',
+  };
+  return {
+    binding,
+    activationId: 'a'.repeat(32),
+    resumeId: randomUUID(),
+    expectedVersion,
+    policyDigest: 'b'.repeat(64),
+    ownerControlsDigest: 'c'.repeat(64),
+    check: async () => {},
+  };
+}
+async function withPausedCatalogue(run: (client: pg.Client, version: number) => Promise<void>) {
+  const before = (await admin.query('SELECT status,version FROM cos.scopes WHERE id=$1', [scope])).rows[0];
+  const client = await connectFixtureDatabase(process.env);
+  try {
+    await admin.query("UPDATE cos.scopes SET status='paused' WHERE id=$1", [scope]);
+    await run(client, before.version);
+  } finally {
+    await client.end();
+    await admin.query('UPDATE cos.scopes SET status=$2,version=$3 WHERE id=$1', [scope, before.status, before.version]);
+  }
+}
+test('G03 explicit catalogue resume commits one matching grant and replays without another transition', async () => {
+  await withPausedCatalogue(async (client, version) => {
+    const request = catalogueResumeRequest(version);
+    assert.deepEqual(await resumeCatalogueScope(client, request), {
+      status: 'catalogue_resumed',
+      scope_id: scope,
+      version: version + 1,
+    });
+    assert.deepEqual(await resumeCatalogueScope(client, request), {
+      status: 'catalogue_resume_replayed',
+      scope_id: scope,
+      version: version + 1,
+    });
+    assert.deepEqual((await admin.query('SELECT status,version FROM cos.scopes WHERE id=$1', [scope])).rows[0], {
+      status: 'active',
+      version: version + 1,
+    });
+    assert.equal(
+      (
+        await admin.query('SELECT count(*)::int AS n FROM cos.events WHERE id=$1', [
+          'owner-catalogue-resume-' + request.resumeId,
+        ])
+      ).rows[0].n,
+      1,
+    );
+  });
+});
+test('G03 catalogue resume rejects every mismatched scope identity and stale version before a grant', async () => {
+  await withPausedCatalogue(async (client, version) => {
+    for (const key of ['ownerId', 'instanceId', 'channelId', 'agentGroupId', 'scopeId'] as const) {
+      const request = catalogueResumeRequest(version);
+      request.binding[key] = 'foreign';
+      await assert.rejects(resumeCatalogueScope(client, request), /catalogue_resume_denied/);
+    }
+    await assert.rejects(
+      resumeCatalogueScope(client, catalogueResumeRequest(version + 1)),
+      /catalogue_resume_stale_version/,
+    );
+    assert.deepEqual((await admin.query('SELECT status,version FROM cos.scopes WHERE id=$1', [scope])).rows[0], {
+      status: 'paused',
+      version,
+    });
+  });
+});
+test('G03 catalogue resume never reopens a later pause, revocation or changed native owner control', async () => {
+  await withPausedCatalogue(async (client, version) => {
+    const request = catalogueResumeRequest(version);
+    await resumeCatalogueScope(client, request);
+    await assert.rejects(
+      resumeCatalogueScope(client, { ...request, ownerControlsDigest: 'd'.repeat(64) }),
+      /resume_conflict/,
+    );
+    await admin.query("UPDATE cos.scopes SET status='paused',version=version+1 WHERE id=$1", [scope]);
+    await assert.rejects(resumeCatalogueScope(client, request), /catalogue_resume_superseded/);
+    assert.deepEqual((await admin.query('SELECT status,version FROM cos.scopes WHERE id=$1', [scope])).rows[0], {
+      status: 'paused',
+      version: version + 2,
+    });
+    await admin.query("UPDATE cos.scopes SET status='revoked' WHERE id=$1", [scope]);
+    await assert.rejects(resumeCatalogueScope(client, catalogueResumeRequest(version + 2)), /catalogue_resume_denied/);
+  });
+});
+test('G03 a lost catalogue commit response reconciles the same durable grant identity', async () => {
+  await withPausedCatalogue(async (client, version) => {
+    const request = catalogueResumeRequest(version);
+    const uncertain = {
+      query: async (text: string, values?: unknown[]) => {
+        const result = await client.query(text, values);
+        if (text === 'COMMIT') throw Error('fixture lost commit response');
+        return result;
+      },
+    };
+    await assert.rejects(
+      resumeCatalogueScope(uncertain as unknown as pg.Client, request),
+      /fixture lost commit response/,
+    );
+    assert.deepEqual(await resumeCatalogueScope(client, request), {
+      status: 'catalogue_resume_replayed',
+      scope_id: scope,
+      version: version + 1,
+    });
+    assert.equal(
+      (
+        await admin.query('SELECT count(*)::int AS n FROM cos.operations WHERE session_id=$1 AND request_id=$2', [
+          scope,
+          'owner-catalogue-resume-' + request.resumeId,
+        ])
+      ).rows[0].n,
+      1,
+    );
+  });
+});
+test('G03 authority loss before catalogue commit rolls back both admission and the operation receipt', async () => {
+  await withPausedCatalogue(async (client, version) => {
+    const request = catalogueResumeRequest(version);
+    let calls = 0;
+    request.check = async () => {
+      if (++calls === 3) throw Error('fixture owner paused');
+    };
+    await assert.rejects(resumeCatalogueScope(client, request), /fixture owner paused/);
+    assert.deepEqual((await admin.query('SELECT status,version FROM cos.scopes WHERE id=$1', [scope])).rows[0], {
+      status: 'paused',
+      version,
+    });
+    assert.equal(
+      (
+        await admin.query('SELECT count(*)::int AS n FROM cos.operations WHERE session_id=$1 AND request_id=$2', [
+          scope,
+          'owner-catalogue-resume-' + request.resumeId,
+        ])
+      ).rows[0].n,
+      0,
+    );
+  });
+});
+test('G03 concurrent catalogue resume requests at one version allow only one new transition', async () => {
+  await withPausedCatalogue(async (client, version) => {
+    const other = await connectFixtureDatabase(process.env);
+    try {
+      const requests = [catalogueResumeRequest(version), catalogueResumeRequest(version)];
+      const outcomes = await Promise.allSettled([
+        resumeCatalogueScope(client, requests[0]),
+        resumeCatalogueScope(other, requests[1]),
+      ]);
+      assert.equal(outcomes.filter((r) => r.status === 'fulfilled').length, 1);
+      assert.equal(outcomes.filter((r) => r.status === 'rejected').length, 1);
+      assert.deepEqual((await admin.query('SELECT status,version FROM cos.scopes WHERE id=$1', [scope])).rows[0], {
+        status: 'active',
+        version: version + 1,
+      });
+    } finally {
+      await other.end();
+    }
+  });
+});
+test('G03 native resume history cannot reconstruct a missing catalogue receipt into fresh authority', async () => {
+  await withPausedCatalogue(async (client, version) => {
+    await assert.rejects(
+      resumeCatalogueScope(client, { ...catalogueResumeRequest(version), observeOnly: true }),
+      /catalogue_resume_superseded/,
+    );
+    assert.deepEqual((await admin.query('SELECT status,version FROM cos.scopes WHERE id=$1', [scope])).rows[0], {
+      status: 'paused',
+      version,
+    });
+  });
 });

@@ -112,7 +112,12 @@ export function parseAdminArguments(args: string[]): AdminArguments {
       : args[0] === 'model-activate'
         ? ['--scope', '--policy']
         : args[0] === 'context-resume'
-          ? ['--scope', '--activation-id', '--resume-id']
+          ? [
+              '--scope',
+              '--activation-id',
+              '--resume-id',
+              ...(args.includes('--catalogue-version') ? ['--catalogue-version'] : []),
+            ]
           : ['--scope'];
     if (args.length !== 1 + allowed.length * 2) throw new Error('invalid_admin_arguments');
     for (let i = 1; i < args.length; i += 2) {
@@ -134,11 +139,15 @@ export function parseAdminArguments(args: string[]): AdminArguments {
     if (args[0] === 'context-resume') {
       if (!/^[a-f0-9]{32}$/.test(values['--activation-id']) || !uuid.test(values['--resume-id']))
         throw new Error('invalid_admin_arguments');
+      const version = values['--catalogue-version'];
+      if (version !== undefined && (!/^[1-9][0-9]{0,9}$/.test(version) || Number(version) >= 2147483647))
+        throw new Error('invalid_admin_arguments');
       return {
         command: 'context-resume',
         scopeId: values['--scope'],
         activationId: values['--activation-id'],
         resumeId: values['--resume-id'],
+        ...(version !== undefined ? { catalogueVersion: Number(version) } : {}),
       };
     }
     if (recovery) {
@@ -308,6 +317,9 @@ export function safeAdminError(error: unknown): string {
         'invalid_resume_request',
         'resume_conflict',
         'resume_outcome_uncertain',
+        'catalogue_resume_denied',
+        'catalogue_resume_stale_version',
+        'catalogue_resume_superseded',
       ].includes(error.message)
     )
       return error.message;

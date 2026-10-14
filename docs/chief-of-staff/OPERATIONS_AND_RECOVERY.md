@@ -480,3 +480,27 @@ activation. Subscription login, finite model policy, exact private channel/owner
 account consent, pilot usefulness and calendar writer reconciliation remain
 separately gated. Deployment, restart, restore evidence or code review does not
 approve a real action or extend an expired model allowance.
+
+## Resume a paused database catalogue with current model authority
+
+The G03 owner resume correction adds an optional `--catalogue-version` to
+`context-resume`. Use it only from the exact tested installed payload, under
+quiescent maintenance and the native host lease, after an explicit current model
+allowance has been issued. Supply the observed positive PostgreSQL scope version,
+the issued activation ID and a fresh deliberate resume UUID. The command derives
+the owner, channel, instance and group from the current native binding; callers
+cannot supply replacements.
+
+The native intent freezes the current owner-control journal before the database
+grant. The matching scope transition, operation receipt and event commit together.
+Only an active or paused matching scope at the expected version is eligible;
+revoked, foreign and stale scopes are denied. The command then uses the existing
+native resume procedure, preserving conversation and model counters and
+quarantining pre-pause work. It does not issue or extend model allowance.
+
+Retain the original resume UUID through an uncertain result. A retry observes the
+committed receipt; it cannot reopen a later database pause, revocation or newer
+native owner control. Native history with a missing remote receipt grants no new
+authority. Native resumption without `--catalogue-version` retains its previous
+behaviour and does not establish database admission. Verify the actual native,
+database, account and model gates before a live demonstration.

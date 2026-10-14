@@ -30,6 +30,9 @@ it.each([
   'team_database_mismatch',
   'team_schema_incompatible',
   'team_template_conflict',
+  'catalogue_resume_denied',
+  'catalogue_resume_stale_version',
+  'catalogue_resume_superseded',
 ])('reports %s without exposing appended private diagnostics', (code) => {
   expect(safeAdminError(new Error(code))).toBe(code);
   expect(safeAdminError(new Error(code + ': PRIVATE_CANARY'))).toBe('unreachable');
@@ -121,6 +124,27 @@ describe('S01 owner administration', () => {
       ['context-resume', '--scope', 'fixture', '--activation-id', activationId, '--resume-id', 'invalid'],
     ])
       expect(() => parseAdminArguments(args)).toThrow('invalid_admin_arguments');
+  });
+  it('requires an explicit positive catalogue version for a combined database and native resume', () => {
+    const args = [
+      'context-resume',
+      '--scope',
+      'fixture',
+      '--activation-id',
+      'a'.repeat(32),
+      '--resume-id',
+      '11111111-1111-4111-8111-111111111111',
+    ];
+    expect(parseAdminArguments([...args, '--catalogue-version', '2'])).toEqual({
+      command: 'context-resume',
+      scopeId: 'fixture',
+      activationId: 'a'.repeat(32),
+      resumeId: '11111111-1111-4111-8111-111111111111',
+      catalogueVersion: 2,
+    });
+    for (const value of ['0', '-1', '02', '1.5', '2147483647', 'active'])
+      expect(() => parseAdminArguments([...args, '--catalogue-version', value])).toThrow('invalid_admin_arguments');
+    expect(() => parseAdminArguments([...args, '--catalogue-version'])).toThrow('invalid_admin_arguments');
   });
   it('reports actionable context errors without passing through raw account or filesystem text', () => {
     expect(safeAdminError(new Error('context_recovery_stale_generation'))).toBe('context_recovery_stale_generation');
