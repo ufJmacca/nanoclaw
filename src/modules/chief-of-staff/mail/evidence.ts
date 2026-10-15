@@ -64,6 +64,7 @@ export class MailEvidence {
     captureId: string,
     selections: MailSelection[],
     lease: ArtifactLease,
+    retiredSourceIds: string[] = [],
   ) {
     const selected = selections.map((selection) => ({
       selection,
@@ -75,8 +76,8 @@ export class MailEvidence {
         `SELECT s.id,s.source_key,s.status,s.version,s.current_revision_id,s.processing_providers,s.provenance,r.digest,
       EXISTS(SELECT 1 FROM cos.revocation_tombstones t WHERE t.scope_id=s.scope_id AND t.source_id=s.id) AS tombstoned
       FROM cos.sources s LEFT JOIN cos.source_revisions r ON r.scope_id=s.scope_id AND r.id=s.current_revision_id
-      WHERE s.scope_id=$1 AND (s.source_key=ANY($2::text[]) OR (s.access_policy->>'mail_binding_id'=$3 AND s.status<>'revoked')) LIMIT 2001`,
-        [context.scopeId, selected.map((s) => s.key), binding.id],
+      WHERE s.scope_id=$1 AND (s.source_key=ANY($2::text[]) OR s.id=ANY($4::text[]) OR (s.access_policy->>'mail_binding_id'=$3 AND s.status<>'revoked')) LIMIT 2001`,
+        [context.scopeId, selected.map((s) => s.key), binding.id, retiredSourceIds],
       )
     ).rows;
     if (previous.length > 2000) throw Error('mail_evidence_bounds');
@@ -186,9 +187,7 @@ export class MailEvidence {
       [context.scopeId, binding.id, JSON.stringify(links)],
     );
     const selectedKeys = new Set(selected.map((s) => s.key)),
-      retired = previous
-        .filter((row) => !selectedKeys.has(row.source_key) && row.status !== 'revoked')
-        .map((row) => row.id);
+      retired = previous.filter((row) => !selectedKeys.has(row.source_key)).map((row) => row.id);
     await this.retire(client, context.scopeId, binding.id, captureId, retired, invalidated);
   }
   private async retire(
@@ -201,15 +200,15 @@ export class MailEvidence {
   ) {
     const retired = (
       await client.query(
-        `UPDATE cos.sources SET status='revoked',processing_providers='{}',version=version+1,updated_at=clock_timestamp()
-      WHERE scope_id=$1 AND id=ANY($2::text[]) AND status<>'revoked' RETURNING id AS source_id,version`,
+        `UPDATE cos.sources s SET status='revoked',processing_providers='{}',version=version+CASE WHEN status='revoked' THEN 0 ELSE 1 END,updated_at=clock_timestamp()
+      WHERE scope_id=$1 AND id=ANY($2::text[]) AND (status<>'revoked' OR NOT EXISTS(SELECT 1 FROM cos.revocation_tombstones t WHERE t.scope_id=s.scope_id AND t.source_id=s.id AND t.kind='delete' AND t.purge_after<=clock_timestamp())) RETURNING id AS source_id,version`,
         [scope, ids],
       )
     ).rows;
     await client.query(
       `INSERT INTO cos.revocation_tombstones(scope_id,source_id,kind,version,provenance,purge_after)
       SELECT $1,x.source_id,'delete',x.version,jsonb_build_object('origin','mail_selection_retired','binding_id',$3::text),clock_timestamp()
-      FROM jsonb_to_recordset($2::jsonb) AS x(source_id text,version integer) ON CONFLICT(scope_id,source_id) DO NOTHING`,
+      FROM jsonb_to_recordset($2::jsonb) AS x(source_id text,version integer) ON CONFLICT(scope_id,source_id) DO UPDATE SET kind='delete',version=excluded.version,purge_after=clock_timestamp(),updated_at=clock_timestamp()`,
       [scope, JSON.stringify(retired), binding],
     );
     await client.query(

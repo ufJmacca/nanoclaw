@@ -87,12 +87,12 @@ async function fixture(hooks: ConstructorParameters<typeof MailStore>[2] = {}) {
   };
   return { scope, root, artifacts, store, context, binding };
 }
-async function capture(capturedAt = Date.now()) {
+async function capture(capturedAt = Date.now(), ageMs = 1000) {
   const raw = {
     id: 'aa01',
     threadId: 'bb01',
     historyId: '101',
-    internalDate: String(capturedAt - 1000),
+    internalDate: String(capturedAt - ageMs),
     labelIds: ['INBOX'],
     payload: {
       mimeType: 'text/plain',
@@ -242,6 +242,8 @@ test('G04 reconstructs only the current capture and preserves the original selec
     first = randomUUID();
   await f.store.start(f.context, f.binding.id, first, prepared.window);
   assert.equal((await f.store.publish(f.context, f.binding.id, first, prepared)).status, 'ok');
+  const firstSelection = (await admin.query('SELECT selection_id FROM cos.mail_messages WHERE scope_id=$1', [f.scope]))
+    .rows[0].selection_id;
   const second = await capture(Date.now()),
     id = randomUUID();
   const started = await f.store.start(f.context, f.binding.id, id, second.window);
@@ -252,15 +254,36 @@ test('G04 reconstructs only the current capture and preserves the original selec
     await admin.query('SELECT last_capture,selection_id FROM cos.mail_messages WHERE scope_id=$1', [f.scope])
   ).rows[0];
   assert.equal(row.last_capture, id);
-  assert.equal(row.selection_id, first);
+  assert.equal(row.selection_id, firstSelection);
+  const anchor = (
+    await admin.query('SELECT metadata FROM cos.mail_captures WHERE scope_id=$1 AND id=$2', [f.scope, firstSelection])
+  ).rows[0].metadata;
+  assert.equal(anchor.contract, 'cos-mail-selection-anchor/v1');
+  assert.equal(JSON.stringify(anchor).includes('Fixture mail asks'), false);
+  const historical = (
+    await admin.query('SELECT content_digest,metadata FROM cos.mail_captures WHERE scope_id=$1 AND id=$2', [
+      f.scope,
+      first,
+    ])
+  ).rows[0];
+  assert.equal(historical.content_digest, prepared.digest);
+  assert.equal(historical.metadata.contract, 'cos-mail-capture-receipt/v1');
+  assert.equal(historical.metadata.capture_digest, prepared.digest);
+  assert.equal(historical.metadata.messageIds, undefined);
+  assert.equal((await f.store.publish(f.context, f.binding.id, first, prepared)).status, 'ok');
+  assert.equal(
+    (await admin.query('SELECT current_capture FROM cos.mail_states WHERE scope_id=$1', [f.scope])).rows[0]
+      .current_capture,
+    id,
+  );
   const coverage = await f.store.coverage(f.context);
   assert.equal(coverage.status, 'ok');
   assert.equal(JSON.stringify(coverage).includes('Fixture mail asks'), false);
 });
-async function publishFixture() {
+async function publishFixture(ageMs = 1000) {
   const f = await fixture();
   await f.store.bind(f.context, f.binding);
-  const prepared = await capture(),
+  const prepared = await capture(Date.now(), ageMs),
     id = randomUUID();
   await f.store.start(f.context, f.binding.id, id, prepared.window);
   assert.equal((await f.store.publish(f.context, f.binding.id, id, prepared)).status, 'ok');
@@ -281,14 +304,14 @@ test('G04 publishes mail as cited untrusted evidence in the same committed captu
   const f = await publishFixture();
   const row = (
     await admin.query(
-      'SELECT m.source_id,s.provenance,s.access_policy,s.current_revision_id FROM cos.mail_messages m JOIN cos.sources s ON s.scope_id=m.scope_id AND s.id=m.source_id WHERE m.scope_id=$1',
+      'SELECT m.source_id,m.selection_id,s.provenance,s.access_policy,s.current_revision_id FROM cos.mail_messages m JOIN cos.sources s ON s.scope_id=m.scope_id AND s.id=m.source_id WHERE m.scope_id=$1',
       [f.scope],
     )
   ).rows[0];
   assert(row);
   assert.equal(row.provenance.origin, 'mail_message');
   assert.equal(row.access_policy.mail_binding_id, f.binding.id);
-  assert.equal(row.access_policy.selection_id, f.id);
+  assert.equal(row.access_policy.selection_id, row.selection_id);
   const found = await f.knowledge.search(f.context, { query: 'alpha' });
   assert.equal(found.status, 'ok');
   assert.equal((found.items as unknown[]).length, 1);
@@ -389,6 +412,111 @@ test('G04 selection withdrawal closes evidence immediately and purges its local 
   assert.notEqual(current.artifact_id, artifact);
   assert.equal((await f.knowledge.contextReady(f.context)).status, 'denied');
 });
+test('G04 retention publishes a separate immutable checkpoint during a provider outage and preserves the provider sync time and cursor', async () => {
+  const f = await publishFixture(30 * 86400000 - 500);
+  const before = (
+    await admin.query(
+      'SELECT current_capture,history_cursor,last_success_at,last_attempt FROM cos.mail_states WHERE scope_id=$1',
+      [f.scope],
+    )
+  ).rows[0];
+  const original = (
+    await admin.query('SELECT metadata,content_digest FROM cos.mail_captures WHERE scope_id=$1 AND id=$2', [
+      f.scope,
+      f.id,
+    ])
+  ).rows[0];
+  await new Promise((resolve) => setTimeout(resolve, 750));
+  const operation = randomUUID();
+  const result = await f.store.maintain(f.context, f.binding.id, operation);
+  assert.equal(result.status, 'ok');
+  assert.deepEqual(await f.store.maintain(f.context, f.binding.id, operation), result);
+  const state = (
+    await admin.query(
+      'SELECT current_capture,history_cursor,last_success_at,last_attempt FROM cos.mail_states WHERE scope_id=$1',
+      [f.scope],
+    )
+  ).rows[0];
+  assert.equal(state.current_capture, operation);
+  assert.equal(state.history_cursor, before.history_cursor);
+  assert.equal(state.last_success_at.toISOString(), before.last_success_at.toISOString());
+  assert.equal(state.last_attempt, before.last_attempt);
+  assert.equal(
+    (await admin.query('SELECT count(*)::int AS n FROM cos.mail_messages WHERE scope_id=$1', [f.scope])).rows[0].n,
+    0,
+  );
+  assert.deepEqual(
+    (
+      await admin.query('SELECT metadata,content_digest FROM cos.mail_captures WHERE scope_id=$1 AND id=$2', [
+        f.scope,
+        f.id,
+      ])
+    ).rows[0],
+    original,
+  );
+  assert.equal((await f.knowledge.purgeDue(f.scope)).status, 'ok');
+  const currentWindow = await f.store.captureWindow(f.context);
+  assert.equal(currentWindow.status, 'ok');
+  const next = await f.store.start(f.context, f.binding.id, randomUUID(), currentWindow.window as MailWindow);
+  assert.equal(next.status, 'ok');
+  const previous = next.previous as { messages: unknown[]; mode: string };
+  assert.equal(previous.mode, 'retention');
+  assert.deepEqual(previous.messages, []);
+});
+for (const state of ['paused', 'revoked'])
+  test(`G04 trusted retention removes closed mail while ${state} without reopening source or global admission`, async () => {
+    const f = await publishFixture();
+    if (state === 'paused') await admin.query("UPDATE cos.scopes SET status='paused' WHERE id=$1", [f.scope]);
+    await admin.query("UPDATE cos.mail_bindings SET auth='revoked' WHERE scope_id=$1", [f.scope]);
+    const result = await f.store.maintain(f.context, f.binding.id, randomUUID());
+    assert.equal(result.status, 'ok');
+    assert.equal(
+      (await admin.query('SELECT count(*)::int AS n FROM cos.mail_messages WHERE scope_id=$1', [f.scope])).rows[0].n,
+      0,
+    );
+    assert.equal(
+      (await admin.query('SELECT auth FROM cos.mail_bindings WHERE scope_id=$1', [f.scope])).rows[0].auth,
+      'revoked',
+    );
+    assert.equal(
+      (await admin.query('SELECT status FROM cos.scopes WHERE id=$1', [f.scope])).rows[0].status,
+      state === 'paused' ? 'paused' : 'active',
+    );
+  });
+test('G04 owner source denial removes raw copies and cannot be revived by a later capture', async () => {
+  const f = await publishFixture(),
+    row = (await admin.query('SELECT source_id FROM cos.mail_messages WHERE scope_id=$1', [f.scope])).rows[0];
+  assert.equal((await f.knowledge.revokeOwned(f.context, row.source_id)).status, 'ok');
+  const maintained = await f.store.maintain(f.context, f.binding.id, randomUUID());
+  assert.equal(maintained.status, 'ok');
+  assert.equal(
+    (await admin.query('SELECT count(*)::int AS n FROM cos.mail_messages WHERE scope_id=$1', [f.scope])).rows[0].n,
+    0,
+  );
+  assert.equal((await f.knowledge.purgeDue(f.scope)).status, 'ok');
+  const currentWindow = await f.store.captureWindow(f.context);
+  assert.equal(currentWindow.status, 'ok');
+  const id = randomUUID(),
+    freshCapture = await capture((currentWindow.window as MailWindow).capturedAt);
+  assert.equal((await f.store.start(f.context, f.binding.id, id, freshCapture.window)).status, 'ok');
+  assert.equal((await f.store.publish(f.context, f.binding.id, id, freshCapture)).status, 'denied');
+  const filtered = await f.store.filterCapture(f.context, f.binding.id, freshCapture);
+  assert.equal(filtered.status, 'ok');
+  const safeCapture = filtered.capture as typeof f.prepared;
+  assert.deepEqual(safeCapture.messages, []);
+  assert.equal(safeCapture.complete, false);
+  assert(safeCapture.limitations.includes('owner_denied'));
+  assert.equal((await f.store.publish(f.context, f.binding.id, id, safeCapture)).status, 'ok');
+  assert.equal(
+    (await admin.query('SELECT count(*)::int AS n FROM cos.mail_messages WHERE scope_id=$1', [f.scope])).rows[0].n,
+    0,
+  );
+});
+test('G04 a fresh capture cannot move its observation window backwards after retention advanced it', async () => {
+  const f = await publishFixture();
+  assert.equal((await f.store.maintain(f.context, f.binding.id, randomUUID())).status, 'ok');
+  assert.equal((await f.store.start(f.context, f.binding.id, randomUUID(), f.prepared.window)).status, 'conflict');
+});
 /** Independent source fixture exercises disclosure guards before the mail publisher is added. */
 async function readableMailFixture() {
   const f = await fixture();
@@ -407,7 +535,8 @@ async function readableMailFixture() {
     mailbox_email: f.binding.mailboxEmail,
     provider_message_id: 'aa01',
     provider_thread_id: 'bb01',
-    selection_id: id,
+    selection_id: (await admin.query('SELECT selection_id FROM cos.mail_messages WHERE scope_id=$1', [f.scope])).rows[0]
+      .selection_id,
   };
   await admin.query(
     "INSERT INTO cos.artifacts(id,scope_id,kind,digest,byte_length,lifecycle,provenance) VALUES($1,$2,'source',$3,$4,'published','{}')",

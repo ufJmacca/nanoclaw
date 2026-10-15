@@ -10,10 +10,13 @@ export type MailCaptureLimitation =
   | 'unsupported_messages'
   | 'deferred_messages'
   | 'selection_changed'
+  | 'owner_denied'
+  | 'retention_only'
+  | 'access_unavailable'
   | 'provider_byte_limit';
 export type MailCapture = {
   contract: 'cos-mail-capture/v1';
-  mode: 'full' | 'incremental' | 'resync';
+  mode: 'full' | 'incremental' | 'resync' | 'retention';
   mailboxEmail: string;
   historyId: string;
   window: MailWindow;
@@ -237,7 +240,7 @@ export async function collectMail(options: {
       !prior ||
       capturedAt - prior.lastFullSyncAt >= 86400000 ||
       prior.limitations.some((x) =>
-        ['message_limit', 'text_limit', 'selection_changed', 'provider_byte_limit'].includes(x),
+        ['message_limit', 'text_limit', 'selection_changed', 'provider_byte_limit', 'access_unavailable'].includes(x),
       );
     let changes: Awaited<ReturnType<typeof history>>;
     if (forcedFull) {

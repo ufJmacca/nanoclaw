@@ -1,11 +1,13 @@
 import { digest, type Context, type Result } from '../domain/contracts.js';
+import { randomUUID } from 'node:crypto';
 import { DatabaseUnavailable, type BoundedDatabase } from '../store/client.js';
-import type { KnowledgeArtifacts } from '../knowledge/artifacts.js';
+import type { ArtifactLease, KnowledgeArtifacts } from '../knowledge/artifacts.js';
 import { MAIL_RETENTION_MS, mailHistoryId, type MailWindow, type MailMessage } from './normalization.js';
 import { MAIL_CAPTURE_MESSAGES, MAIL_CAPTURE_TEXT_BYTES, type MailCapture } from './capture.js';
 import type { PoolClient } from 'pg';
 import { GOOGLE_MAIL_READ_SCOPE } from '../calendar/oauth-core.js';
 import { MailEvidence } from './evidence.js';
+import { retainedMailCapture, suppressMailCapture } from './retention.js';
 export type MailBindingInput = {
   id: string;
   provider: 'google' | 'fixture';
@@ -63,7 +65,7 @@ export function validMailCapture(c: MailCapture): boolean {
       !c ||
       Object.keys(c).sort().join(',') !== keys ||
       c.contract !== 'cos-mail-capture/v1' ||
-      !['full', 'incremental', 'resync'].includes(c.mode) ||
+      !['full', 'incremental', 'resync', 'retention'].includes(c.mode) ||
       !email(c.mailboxEmail) ||
       !windowValid(c.window) ||
       Object.keys(c.window).sort().join(',') !== 'capturedAt,since' ||
@@ -119,7 +121,8 @@ export function validMailCapture(c: MailCapture): boolean {
         (d) =>
           !providerId(d.id) ||
           !Number.isSafeInteger(d.until) ||
-          d.until <= c.window.capturedAt ||
+          (d.until <= c.window.capturedAt && c.mode !== 'retention') ||
+          d.until <= d.seenAt ||
           !Number.isSafeInteger(d.seenAt) ||
           d.seenAt < c.window.since ||
           c.messages.some((m) => m.id === d.id) ||
@@ -131,7 +134,9 @@ export function validMailCapture(c: MailCapture): boolean {
       c.unsupported.some(
         (u) =>
           !providerId(u.id) ||
-          !['invalid_message', 'content_limit', 'body_unavailable', 'response_too_large'].includes(u.reason) ||
+          !['invalid_message', 'content_limit', 'body_unavailable', 'response_too_large', 'owner_denied'].includes(
+            u.reason,
+          ) ||
           !Number.isSafeInteger(u.seenAt) ||
           u.seenAt < c.window.since ||
           c.messages.some((m) => m.id === u.id) ||
@@ -149,9 +154,13 @@ export function validMailCapture(c: MailCapture): boolean {
             'deferred_messages',
             'selection_changed',
             'provider_byte_limit',
+            'owner_denied',
+            'retention_only',
+            'access_unavailable',
           ].includes(l),
       ) ||
       c.complete !== (c.limitations.length === 0) ||
+      (c.mode === 'retention' && !c.limitations.includes('retention_only')) ||
       (c.deferred.length > 0 && !c.limitations.includes('deferred_messages')) ||
       (c.unsupported.length > 0 && !c.limitations.includes('unsupported_messages')) ||
       !Array.isArray(c.removedIds) ||
@@ -189,6 +198,7 @@ export class MailStore {
     mutation: boolean,
     operation: (client: PoolClient) => Promise<Result>,
     publishing = false,
+    retaining = false,
   ): Promise<Result> {
     try {
       return await this.database.run(async (client) => {
@@ -197,7 +207,7 @@ export class MailStore {
         try {
           if (publishing) await client.query('SELECT pg_advisory_xact_lock(73101004)');
           const scope = await client.query(
-            `SELECT id FROM cos.scopes WHERE id=$1 AND owner_id=$2 AND agent_group_id=$3 AND ${this.ownerAdministration ? "status IN ('active','paused')" : "status='active'"} FOR ${mutation ? 'UPDATE' : 'SHARE'}`,
+            `SELECT id FROM cos.scopes WHERE id=$1 AND owner_id=$2 AND agent_group_id=$3 AND ${this.ownerAdministration || retaining ? "status IN ('active','paused')" : "status='active'"} FOR ${mutation ? 'UPDATE' : 'SHARE'}`,
             [context.scopeId, context.ownerId, context.agentGroupId],
           );
           if (!scope.rowCount) {
@@ -283,6 +293,13 @@ export class MailStore {
       return { status: 'ok', binding };
     });
   }
+  /** Polling and physical retention share the selected database clock. */
+  async captureWindow(context: Context): Promise<Result> {
+    return this.transaction(context, false, async (client) => {
+      const capturedAt = (await client.query('SELECT clock_timestamp() AS now')).rows[0].now.getTime();
+      return { status: 'ok', window: { capturedAt, since: capturedAt - MAIL_RETENTION_MS } };
+    });
+  }
   private async previous(
     client: PoolClient,
     context: Context,
@@ -329,6 +346,7 @@ export class MailStore {
           id,
         ])
       ).rows[0];
+      let previous: MailCapture | null | undefined;
       if (attempt) {
         if (attempt.binding_version !== b.version || digest(attempt.capture_window) !== digest(captured))
           return { status: 'conflict' };
@@ -345,6 +363,8 @@ export class MailStore {
         );
       } else {
         if (Math.abs(Date.now() - captured.capturedAt) > 60000) return { status: 'denied' };
+        previous = await this.previous(client, context, binding, state.current_capture);
+        if (previous && captured.capturedAt < previous.window.capturedAt) return { status: 'conflict' };
         await client.query(
           "UPDATE cos.mail_captures SET status='superseded' WHERE scope_id=$1 AND binding_id=$2 AND id=$3 AND status='collecting'",
           [context.scopeId, binding, state.last_attempt],
@@ -363,13 +383,191 @@ export class MailStore {
         capture_id: id,
         binding_version: b.version,
         base_capture: state.current_capture,
-        previous: await this.previous(client, context, binding, state.current_capture),
+        previous:
+          previous === undefined ? await this.previous(client, context, binding, state.current_capture) : previous,
       };
     });
   }
   async publish(context: Context, binding: string, id: string, input: MailCapture): Promise<Result> {
-    if (!uuid(binding) || !uuid(id) || !validMailCapture(input)) return { status: 'denied' };
+    if (!uuid(binding) || !uuid(id) || !validMailCapture(input) || input.mode === 'retention')
+      return { status: 'denied' };
     const capture = structuredClone(input);
+    try {
+      return await this.artifacts.exclusive((lease) =>
+        this.transaction(context, true, this.publishOperation(context, binding, id, capture, lease), true),
+      );
+      // eslint-disable-next-line no-catch-all/no-catch-all -- Artifact failures contain private paths and source content; the public boundary returns a fixed status.
+    } catch {
+      return { status: 'unavailable' };
+    }
+  }
+  private publishOperation(
+    context: Context,
+    binding: string,
+    id: string,
+    capture: MailCapture,
+    lease: ArtifactLease,
+    retaining = false,
+  ) {
+    return async (client: PoolClient): Promise<Result> => {
+      const b = await this.binding(client, context, binding);
+      if (!b || (!retaining && b.auth !== 'ready') || b.mailbox_email !== capture.mailboxEmail)
+        return { status: 'denied' };
+      const attempt = (
+        await client.query('SELECT * FROM cos.mail_captures WHERE scope_id=$1 AND binding_id=$2 AND id=$3', [
+          context.scopeId,
+          binding,
+          id,
+        ])
+      ).rows[0];
+      if (
+        !attempt ||
+        attempt.binding_version !== b.version ||
+        digest(attempt.capture_window) !== digest(capture.window)
+      )
+        return { status: 'conflict' };
+      if (attempt.status === 'complete')
+        return attempt.content_digest === capture.digest ? attempt.result : { status: 'conflict' };
+      const state = (
+        await client.query('SELECT * FROM cos.mail_states WHERE scope_id=$1 AND binding_id=$2 FOR UPDATE', [
+          context.scopeId,
+          binding,
+        ])
+      ).rows[0];
+      if (
+        attempt.status !== 'collecting' ||
+        (!retaining && state.last_attempt !== id) ||
+        state.current_capture !== attempt.base_capture
+      )
+        return { status: 'conflict' };
+      if (state.history_cursor && BigInt(capture.historyId) < BigInt(state.history_cursor))
+        return { status: 'conflict' };
+      if (
+        (
+          await this.deniedMessageIds(
+            client,
+            context,
+            binding,
+            capture.messages.map((m) => m.id),
+          )
+        ).length
+      )
+        return { status: 'denied' };
+      const previous = (
+        await client.query(
+          'SELECT provider_message_id,selection_id,source_id FROM cos.mail_messages WHERE scope_id=$1 AND binding_id=$2',
+          [context.scopeId, binding],
+        )
+      ).rows;
+      const old = new Map(previous.map((r) => [r.provider_message_id, r]));
+      const rows = capture.messages.map((message) => ({
+        provider_message_id: message.id,
+        provider_thread_id: message.threadId,
+        message,
+        content_digest: message.digest,
+        internal_date: new Date(message.internalDate).toISOString(),
+        selection_id: old.get(message.id)?.selection_id ?? randomUUID(),
+        source_id: old.get(message.id)?.source_id ?? null,
+      }));
+      const anchors = rows
+        .filter((row) => !old.has(row.provider_message_id))
+        .map((row) => {
+          const metadata = {
+            contract: 'cos-mail-selection-anchor/v1',
+            binding_id: binding,
+            selection_id: row.selection_id,
+            provider_message_id: row.provider_message_id,
+            first_capture_id: id,
+            first_capture_digest: capture.digest,
+          };
+          return { id: row.selection_id, metadata, content_digest: digest(metadata) };
+        });
+      await client.query(
+        `INSERT INTO cos.mail_captures(scope_id,binding_id,id,binding_version,status,capture_window,content_digest,metadata,result,completed_at)
+              SELECT $1,$2,x.id,$3,'complete',$4,x.content_digest,x.metadata,jsonb_build_object('status','ok','selection_anchor',true),clock_timestamp()
+              FROM jsonb_to_recordset($5::jsonb) AS x(id uuid,metadata jsonb,content_digest text)`,
+        [context.scopeId, binding, b.version, JSON.stringify(capture.window), JSON.stringify(anchors)],
+      );
+      await client.query(
+        'DELETE FROM cos.mail_messages WHERE scope_id=$1 AND binding_id=$2 AND NOT provider_message_id=ANY($3::text[])',
+        [context.scopeId, binding, capture.messages.map((m) => m.id)],
+      );
+      await client.query(
+        `INSERT INTO cos.mail_messages(scope_id,binding_id,provider_message_id,provider_thread_id,message,content_digest,internal_date,selection_id,source_id,last_capture)
+    SELECT $1,$2,x.provider_message_id,x.provider_thread_id,x.message,x.content_digest,x.internal_date,x.selection_id,x.source_id,$3 FROM jsonb_to_recordset($4::jsonb) AS x(provider_message_id text,provider_thread_id text,message jsonb,content_digest text,internal_date timestamptz,selection_id uuid,source_id text)
+    ON CONFLICT(scope_id,binding_id,provider_message_id) DO UPDATE SET provider_thread_id=EXCLUDED.provider_thread_id,message=EXCLUDED.message,content_digest=EXCLUDED.content_digest,internal_date=EXCLUDED.internal_date,last_capture=EXCLUDED.last_capture,updated_at=clock_timestamp()`,
+        [context.scopeId, binding, id, JSON.stringify(rows)],
+      );
+      const present = new Set(capture.messages.map((m) => m.id)),
+        retiredSources = previous
+          .filter((r) => !present.has(r.provider_message_id) && r.source_id)
+          .map((r) => r.source_id);
+      await new MailEvidence(this.artifacts).publish(client, context, b, id, rows, lease, retiredSources);
+      const { messages, ...metadata } = capture,
+        result = {
+          status: 'ok' as const,
+          capture_id: id,
+          message_count: messages.length,
+          complete: capture.complete,
+          limitations: capture.limitations,
+          history_cursor: capture.historyId,
+          ...(retaining ? { retention: true } : {}),
+        };
+      await client.query(
+        "UPDATE cos.mail_captures SET status='complete',content_digest=$4,metadata=$5,result=$6,completed_at=clock_timestamp(),failure_code=NULL WHERE scope_id=$1 AND binding_id=$2 AND id=$3",
+        [
+          context.scopeId,
+          binding,
+          id,
+          capture.digest,
+          JSON.stringify({ ...metadata, messageIds: messages.map((m) => m.id) }),
+          JSON.stringify(result),
+        ],
+      );
+      await client.query(
+        retaining
+          ? 'UPDATE cos.mail_states SET current_capture=$3,history_cursor=$4 WHERE scope_id=$1 AND binding_id=$2'
+          : "UPDATE cos.mail_states SET current_capture=$3,history_cursor=$4,last_success_at=clock_timestamp(),next_poll_at=clock_timestamp()+interval '5 minutes' WHERE scope_id=$1 AND binding_id=$2",
+        [context.scopeId, binding, id, capture.historyId],
+      );
+      await this.compactCaptures(client, context, binding);
+      return result;
+    };
+  }
+  private async deniedMessageIds(
+    client: PoolClient,
+    context: Context,
+    binding: string,
+    ids: string[],
+  ): Promise<string[]> {
+    if (!ids.length) return [];
+    return (
+      await client.query(
+        `SELECT DISTINCT s.access_policy->>'provider_message_id' AS id FROM cos.sources s
+      JOIN cos.revocation_tombstones t ON t.scope_id=s.scope_id AND t.source_id=s.id
+      WHERE s.scope_id=$1 AND s.access_policy->>'mail_binding_id'=$2 AND s.access_policy->>'provider_message_id'=ANY($3::text[])
+        AND COALESCE(t.provenance->>'origin','')<>'mail_selection_retired'`,
+        [context.scopeId, binding, ids],
+      )
+    ).rows.map((row) => row.id);
+  }
+  async filterCapture(context: Context, binding: string, input: MailCapture): Promise<Result> {
+    if (!uuid(binding) || !validMailCapture(input) || input.mode === 'retention') return { status: 'denied' };
+    const capture = structuredClone(input);
+    return this.transaction(context, false, async (client) => {
+      const b = await this.binding(client, context, binding);
+      if (!b || b.auth !== 'ready' || b.mailbox_email !== capture.mailboxEmail) return { status: 'denied' };
+      const ids = [...new Set([...capture.messages.map((m) => m.id), ...capture.unsupported.map((u) => u.id)])];
+      return {
+        status: 'ok',
+        capture: suppressMailCapture(capture, await this.deniedMessageIds(client, context, binding, ids)),
+      };
+    });
+  }
+  /** No Google or model access. This path may only tighten retention while a
+   * scope is paused or source access is closed; it never reopens admission. */
+  async maintain(context: Context, binding: string, id: string): Promise<Result> {
+    if (context.origin || !uuid(binding) || !uuid(id)) return { status: 'denied' };
     try {
       return await this.artifacts.exclusive((lease) =>
         this.transaction(
@@ -377,96 +575,69 @@ export class MailStore {
           true,
           async (client) => {
             const b = await this.binding(client, context, binding);
-            if (!b || b.auth !== 'ready' || b.mailbox_email !== capture.mailboxEmail) return { status: 'denied' };
-            const attempt = (
-              await client.query('SELECT * FROM cos.mail_captures WHERE scope_id=$1 AND binding_id=$2 AND id=$3', [
-                context.scopeId,
-                binding,
-                id,
-              ])
-            ).rows[0];
-            if (
-              !attempt ||
-              attempt.binding_version !== b.version ||
-              digest(attempt.capture_window) !== digest(capture.window)
-            )
-              return { status: 'conflict' };
-            if (attempt.status === 'complete')
-              return attempt.content_digest === capture.digest ? attempt.result : { status: 'conflict' };
-            const state = (
-              await client.query('SELECT * FROM cos.mail_states WHERE scope_id=$1 AND binding_id=$2 FOR UPDATE', [
-                context.scopeId,
-                binding,
-              ])
-            ).rows[0];
-            if (
-              attempt.status !== 'collecting' ||
-              state.last_attempt !== id ||
-              state.current_capture !== attempt.base_capture
-            )
-              return { status: 'conflict' };
-            if (state.history_cursor && BigInt(capture.historyId) < BigInt(state.history_cursor))
-              return { status: 'conflict' };
-            const previous = (
+            if (!b) return { status: 'denied' };
+            const existing = (
               await client.query(
-                'SELECT provider_message_id,selection_id,source_id FROM cos.mail_messages WHERE scope_id=$1 AND binding_id=$2',
+                'SELECT status,binding_version,result FROM cos.mail_captures WHERE scope_id=$1 AND binding_id=$2 AND id=$3',
+                [context.scopeId, binding, id],
+              )
+            ).rows[0];
+            if (existing)
+              return existing.status === 'complete' &&
+                existing.binding_version === b.version &&
+                existing.result?.retention === true
+                ? existing.result
+                : { status: 'conflict' };
+            const state = (
+              await client.query(
+                'SELECT current_capture FROM cos.mail_states WHERE scope_id=$1 AND binding_id=$2 FOR UPDATE',
                 [context.scopeId, binding],
               )
-            ).rows;
-            const old = new Map(previous.map((r) => [r.provider_message_id, r]));
-            const rows = capture.messages.map((message) => ({
-              provider_message_id: message.id,
-              provider_thread_id: message.threadId,
-              message,
-              content_digest: message.digest,
-              internal_date: new Date(message.internalDate).toISOString(),
-              selection_id: old.get(message.id)?.selection_id ?? id,
-              source_id: old.get(message.id)?.source_id ?? null,
-            }));
-            await client.query(
-              'DELETE FROM cos.mail_messages WHERE scope_id=$1 AND binding_id=$2 AND NOT provider_message_id=ANY($3::text[])',
-              [context.scopeId, binding, capture.messages.map((m) => m.id)],
+            ).rows[0];
+            const previous = await this.previous(client, context, binding, state?.current_capture ?? null);
+            if (!previous) {
+              await this.compactCaptures(client, context, binding);
+              return { status: 'ok', retention: true, changed: false };
+            }
+            const at = (await client.query('SELECT clock_timestamp() AS now')).rows[0].now.getTime();
+            const denied = await this.deniedMessageIds(
+              client,
+              context,
+              binding,
+              previous.messages.map((m) => m.id),
             );
+            const capture = retainedMailCapture(previous, at, denied, b.auth !== 'ready');
+            if (!validMailCapture(capture)) throw Error('mail_retention_invalid');
             await client.query(
-              `INSERT INTO cos.mail_messages(scope_id,binding_id,provider_message_id,provider_thread_id,message,content_digest,internal_date,selection_id,source_id,last_capture)
-    SELECT $1,$2,x.provider_message_id,x.provider_thread_id,x.message,x.content_digest,x.internal_date,x.selection_id,x.source_id,$3 FROM jsonb_to_recordset($4::jsonb) AS x(provider_message_id text,provider_thread_id text,message jsonb,content_digest text,internal_date timestamptz,selection_id uuid,source_id text)
-    ON CONFLICT(scope_id,binding_id,provider_message_id) DO UPDATE SET provider_thread_id=EXCLUDED.provider_thread_id,message=EXCLUDED.message,content_digest=EXCLUDED.content_digest,internal_date=EXCLUDED.internal_date,last_capture=EXCLUDED.last_capture,updated_at=clock_timestamp()`,
-              [context.scopeId, binding, id, JSON.stringify(rows)],
+              "INSERT INTO cos.mail_captures(scope_id,binding_id,id,binding_version,base_capture,status,capture_window) VALUES($1,$2,$3,$4,$5,'collecting',$6)",
+              [context.scopeId, binding, id, b.version, state.current_capture, JSON.stringify(capture.window)],
             );
-            await new MailEvidence(this.artifacts).publish(client, context, b, id, rows, lease);
-            const { messages, ...metadata } = capture,
-              result = {
-                status: 'ok' as const,
-                capture_id: id,
-                message_count: messages.length,
-                complete: capture.complete,
-                limitations: capture.limitations,
-                history_cursor: capture.historyId,
-              };
-            await client.query(
-              "UPDATE cos.mail_captures SET status='complete',content_digest=$4,metadata=$5,result=$6,completed_at=clock_timestamp(),failure_code=NULL WHERE scope_id=$1 AND binding_id=$2 AND id=$3",
-              [
-                context.scopeId,
-                binding,
-                id,
-                capture.digest,
-                JSON.stringify({ ...metadata, messageIds: messages.map((m) => m.id) }),
-                JSON.stringify(result),
-              ],
-            );
-            await client.query(
-              "UPDATE cos.mail_states SET current_capture=$3,history_cursor=$4,last_success_at=clock_timestamp(),next_poll_at=clock_timestamp()+interval '5 minutes' WHERE scope_id=$1 AND binding_id=$2",
-              [context.scopeId, binding, id, capture.historyId],
-            );
-            return result;
+            return this.publishOperation(context, binding, id, capture, lease, true)(client);
           },
+          true,
           true,
         ),
       );
-      // eslint-disable-next-line no-catch-all/no-catch-all -- Artifact failures contain private paths and source content; the public boundary returns a fixed status.
+      // eslint-disable-next-line no-catch-all/no-catch-all -- Maintenance storage diagnostics and source bytes stay inside the trusted host.
     } catch {
       return { status: 'unavailable' };
     }
+  }
+  /** Historical completion receipts retain their content commitment/result, not
+   * an ever-growing duplicate inventory. Current captures and FK anchors remain
+   * intact; receipt records cannot be hydrated as a current capture. */
+  private async compactCaptures(client: PoolClient, context: Context, binding: string) {
+    const unreferenced = `NOT EXISTS(SELECT 1 FROM cos.mail_states s WHERE s.scope_id=c.scope_id AND s.binding_id=c.binding_id AND (s.current_capture=c.id OR s.last_attempt=c.id))
+      AND NOT EXISTS(SELECT 1 FROM cos.mail_messages m WHERE m.scope_id=c.scope_id AND m.binding_id=c.binding_id AND (m.last_capture=c.id OR m.selection_id=c.id))`;
+    await client.query(
+      `UPDATE cos.mail_captures c SET metadata=jsonb_build_object('contract','cos-mail-capture-receipt/v1','mode',c.metadata->'mode','window',c.capture_window,'capture_digest',c.content_digest)
+      WHERE c.scope_id=$1 AND c.binding_id=$2 AND c.status='complete' AND c.metadata->>'contract'='cos-mail-capture/v1' AND ${unreferenced}`,
+      [context.scopeId, binding],
+    );
+    await client.query(
+      `DELETE FROM cos.mail_captures c WHERE c.scope_id=$1 AND c.binding_id=$2 AND c.created_at<clock_timestamp()-interval '30 days' AND ${unreferenced}`,
+      [context.scopeId, binding],
+    );
   }
   async fail(context: Context, binding: string, id: string, code: string): Promise<Result> {
     if (!uuid(binding) || !uuid(id)) return { status: 'denied' };
