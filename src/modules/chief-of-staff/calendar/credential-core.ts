@@ -45,6 +45,11 @@ export function credentialRootMarker(profile: OAuthScopeProfile): { name: string
   const { marker, contract } = profileSpec(profile);
   return { name: marker, contents: JSON.stringify({ contract }) + '\n' };
 }
+/** Metadata for trusted backup readers; never an account or token admission grant. */
+export function credentialProfileMetadata(profile: OAuthScopeProfile) {
+  const { contract, sourceKind } = profileSpec(profile);
+  return { contract, sourceKind };
+}
 type State = {
   contract: string;
   identity: string;
