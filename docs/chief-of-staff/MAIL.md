@@ -2,7 +2,15 @@
 
 G04 adds a host-only Gmail reader for the selected owner's Inbox and Sent mail. Its separate Desktop OAuth client uses only `gmail.readonly`. Calendar credentials and grants do not provide mail authority. Owner account selection, Google consent and model data-control verification remain prerequisites for live use.
 
-The implementation is in progress. The mail collector, store, evidence publication, read adapters and host refresh connector have fixture coverage; installed polling, encrypted configuration recovery and G04 deployment acceptance remain pending. The accepted G03 installation does not yet expose these mail tools.
+The implementation is in progress. The collector, store, evidence publication, read adapters, host refresh connector and encrypted profile opener have fixture coverage; installed polling, owner setup and G04 deployment/recovery acceptance remain pending. The accepted G03 installation does not yet expose these mail tools.
+
+## Encrypted profile
+
+Mail has its own `mail-reader` child beneath the existing protected Google/Calendar directory, with a separate OAuth client, credentials marker and denial journal. This keeps complete mail configuration in the existing encrypted Google-state capture without widening Calendar tokens or changing the vault's v1 area policy.
+
+`COS_MAIL_ENABLED` defaults to `false`. Runtime opening uses existing state only and holds verified directory descriptors until explicit shutdown. A profile proof binds its filesystem, credential/denial folder identities and client digest. Replaced folders or client files are refused after restart as well as during an active operation. Every credential and denial operation rechecks the held vault and memory proof. Lost protection cannot redirect a rotated token or new denial into a replacement directory.
+
+Backup copies include the separate mail client, credentials and denial journals as private recovery material. Archived profile proofs and journals do not grant live access or replace current authority.
 
 ## Captures and retention
 
