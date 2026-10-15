@@ -7,6 +7,7 @@ import { initializeMailProfile } from './setup.js';
 import { openMailCredentials } from './config.js';
 import { configureVaultStorage, VAULT_DIRECTORIES } from '../ops/vault-storage.js';
 import type { StorageInspection } from '../calendar/storage-protection.js';
+import { GOOGLE_MAIL_READ_SCOPE } from './oauth.js';
 const cleanup: string[] = [];
 afterEach(() => {
   for (const root of cleanup.splice(0)) fs.rmSync(root, { recursive: true, force: true });
@@ -41,6 +42,14 @@ function fixture() {
         : { blockdevices: [{ type: 'crypt', 'maj:min': '253:0', uuid: 'fixture-volume-uuid' }] },
     );
   configureVaultStorage(roots, vault, inspect);
+  fs.writeFileSync(
+    vault + '/google/calendar/oauth-client.json',
+    JSON.stringify({
+      clientId: 'calendar-setup-fixture.apps.googleusercontent.com',
+      clientSecret: 'PRIVATE_CALENDAR_SETUP_CANARY',
+    }),
+    { mode: 0o600 },
+  );
   const client = {
     clientId: 'mail-setup-fixture.apps.googleusercontent.com',
     clientSecret: 'PRIVATE_MAIL_SETUP_CANARY',
@@ -75,6 +84,39 @@ it('initializes only the dedicated encrypted profile and an exact retry preserve
   ]);
   expect(fs.readdirSync(f.root + '/credentials')).toEqual(['.cos-mail-reader-credentials']);
   expect(f.authority.assertAuthority).toHaveBeenCalled();
+});
+it('never resets installed credentials or independent denials on a completed-profile retry', async () => {
+  const f = fixture();
+  await initializeMailProfile(f.roots, f.client, f.authority, f.inspect, f.memory);
+  const host = await openMailCredentials(f.roots, f.inspect, f.memory, async () => {});
+  const binding = randomUUID();
+  try {
+    await host.credentials.install('scope', binding, randomUUID(), {
+      accessToken: 'PRIVATE_INSTALLED_ACCESS',
+      refreshToken: 'PRIVATE_INSTALLED_REFRESH',
+      expiresAt: Date.now() + 3600000,
+      refreshExpiresAt: null,
+      scopes: [GOOGLE_MAIL_READ_SCOPE],
+    });
+    host.fences.deny('scope', binding, 'revoked');
+  } finally {
+    await host.close();
+  }
+  const snapshot = () =>
+    ['credentials', 'access-denials'].flatMap((child) =>
+      fs
+        .readdirSync(f.root + '/' + child)
+        .sort()
+        .map((name) => ({
+          child,
+          name,
+          bytes: fs.readFileSync(f.root + '/' + child + '/' + name),
+          modified: fs.statSync(f.root + '/' + child + '/' + name).mtimeMs,
+        })),
+    );
+  const before = snapshot();
+  await initializeMailProfile(f.roots, f.client, f.authority, f.inspect, f.memory);
+  expect(snapshot()).toEqual(before);
 });
 for (const step of ['intent', 'directories', 'client', 'markers', 'proof'] as const)
   it(`reconciles the same interrupted ${step} setup without publishing an incomplete runtime profile`, async () => {
@@ -211,5 +253,30 @@ it('does not reseal a replaced child directory when reconstructing an interrupte
   await expect(initializeMailProfile(f.roots, f.client, f.authority, f.inspect, f.memory)).rejects.toThrow(
     'mail_profile_initialization_unavailable',
   );
+  expect(fs.existsSync(f.root + '/oauth-client.json')).toBe(false);
+});
+it('requires its own OAuth client and never reuses Calendar client authority', async () => {
+  const f = fixture();
+  await expect(
+    initializeMailProfile(
+      f.roots,
+      { clientId: 'calendar-setup-fixture.apps.googleusercontent.com', clientSecret: 'PRIVATE_CALENDAR_SETUP_CANARY' },
+      f.authority,
+      f.inspect,
+      f.memory,
+    ),
+  ).rejects.toThrow('mail_profile_initialization_unavailable');
+  expect(fs.existsSync(f.root)).toBe(false);
+});
+it('keeps the Calendar client identity pinned while mail setup awaits', async () => {
+  const f = fixture();
+  await expect(
+    initializeMailProfile(f.roots, f.client, f.authority, f.inspect, f.memory, {
+      afterStep: async (step) => {
+        if (step === 'intent')
+          fs.writeFileSync(f.vault + '/google/calendar/oauth-client.json', JSON.stringify(f.client));
+      },
+    }),
+  ).rejects.toThrow('mail_profile_initialization_unavailable');
   expect(fs.existsSync(f.root + '/oauth-client.json')).toBe(false);
 });

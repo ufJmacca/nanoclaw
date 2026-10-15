@@ -15,6 +15,17 @@ type Step = 'intent' | 'directories' | 'client' | 'markers' | 'proof';
 const intentName = '.cos-mail-reader-initializing';
 const directoryProofName = '.cos-mail-reader-setup-directories';
 const descriptor = (fd: number) => '/proc/self/fd/' + fd;
+const fileIdentity = (stat: fs.Stats) =>
+  digest({
+    dev: stat.dev,
+    ino: stat.ino,
+    uid: stat.uid,
+    mode: stat.mode,
+    nlink: stat.nlink,
+    size: stat.size,
+    mtimeMs: stat.mtimeMs,
+    ctimeMs: stat.ctimeMs,
+  });
 const uuid = (id: string) => /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(id);
 /** flock the held encrypted parent inode itself; no named lock file can be
  * redirected to an unmounted underlay. Closing our descriptor releases it. */
@@ -69,10 +80,17 @@ export async function initializeMailProfile(
         parentLock(parent, async () => {
           const handles: number[] = [],
             directories: Array<{ named: string; fd: number; ino: number }> = [];
+          let calendarClient: { fd: number; name: string; identity: string } | undefined;
           const device = fs.statSync(parent).dev;
           const current = () => {
             authority.assertAuthority();
             parentCurrent();
+            if (
+              calendarClient &&
+              (fileIdentity(fs.fstatSync(calendarClient.fd)) !== calendarClient.identity ||
+                fileIdentity(fs.lstatSync(calendarClient.name)) !== calendarClient.identity)
+            )
+              throw Error('calendar_client_changed');
             for (const { named, fd, ino } of directories) {
               const held = fs.fstatSync(fd),
                 now = fs.lstatSync(named);
@@ -179,6 +197,39 @@ export async function initializeMailProfile(
             }
           };
           try {
+            current();
+            const calendarName = parent + '/oauth-client.json';
+            const calendarFd = fs.openSync(
+              calendarName,
+              fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK,
+            );
+            handles.push(calendarFd);
+            const stat = fs.fstatSync(calendarFd);
+            if (
+              !stat.isFile() ||
+              stat.dev !== device ||
+              stat.uid !== process.getuid?.() ||
+              (stat.mode & 0o7777) !== 0o600 ||
+              stat.nlink !== 1 ||
+              stat.size < 1 ||
+              stat.size > 16384
+            )
+              throw Error('calendar_client_unavailable');
+            calendarClient = { fd: calendarFd, name: calendarName, identity: fileIdentity(stat) };
+            const bytes = Buffer.alloc(stat.size + 1);
+            try {
+              if (fs.readSync(calendarFd, bytes, 0, bytes.length, 0) !== stat.size)
+                throw Error('calendar_client_changed');
+              current();
+              const calendar = checkedClient(
+                JSON.parse(
+                  new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(0, stat.size)),
+                ) as GoogleOAuthClient,
+              );
+              if (calendar.clientId === client.clientId) throw Error('separate_mail_client_required');
+            } finally {
+              bytes.fill(0);
+            }
             const root = pin(parent, 'mail-reader', namedRoot),
               rootPath = descriptor(root);
             const names = fs.readdirSync(rootPath);
