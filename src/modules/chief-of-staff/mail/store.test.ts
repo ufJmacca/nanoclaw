@@ -38,6 +38,28 @@ function rehash(c: MailCapture) {
 it('validates an actual bounded host capture', async () => {
   expect(validMailCapture(await fixture())).toBe(true);
 });
+it('independently rejects a rehashed capture whose escaped mail and evidence exceed checkpoint capacity', async () => {
+  const c = await fixture(),
+    message = c.messages[0];
+  c.messages = Array.from({ length: 256 }, (_, i) => {
+    const changed = { ...message, id: (i + 1).toString(16), text: '\n'.repeat(65535) + 'x' },
+      { digest: _digest, ...content } = changed;
+    return { ...content, digest: digest(content) };
+  });
+  c.textBytes = c.messages.reduce(
+    (n, m) =>
+      n +
+      Buffer.byteLength(m.text) +
+      Buffer.byteLength(m.subject) +
+      Buffer.byteLength(m.from) +
+      Buffer.byteLength(m.to),
+    0,
+  );
+  const { digest: _digest, ...content } = c;
+  c.digest = digest(content);
+  expect(c.textBytes).toBe(16 * 1024 ** 2);
+  expect(validMailCapture(c)).toBe(false);
+});
 it.each([
   'unknown-message-field',
   'invalid-label',

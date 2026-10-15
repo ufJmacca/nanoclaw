@@ -1,7 +1,24 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { decodeSource, extractChunks, MAX_SOURCE_BYTES } from './text.js';
 
 describe('S02 deterministic admitted text', () => {
+  it('bounds repeated serialization work for a maximum mail body of short lines', () => {
+    const text = '\n'.repeat(65535) + 'x',
+      original = Array.prototype.join;
+    let joinedElements = 0;
+    const join = vi.spyOn(Array.prototype, 'join').mockImplementation(function (this: unknown[], separator?: string) {
+      joinedElements += this.length;
+      return original.call(this, separator);
+    });
+    let chunks: ReturnType<typeof extractChunks>;
+    try {
+      chunks = extractChunks(text);
+    } finally {
+      join.mockRestore();
+    }
+    expect(joinedElements).toBeLessThan(text.length * 4);
+    expect(chunks.map((c) => c.text).join('\n')).toBe(text);
+  });
   it('S02-T02: chunks resolve to the actual heading and line range without losing contradictory evidence', () => {
     const text = '# Pilot Alpha\nBlocked on supplier approval.\n\n## Update\nSupplier approval is complete.\n';
     const chunks = extractChunks(decodeSource(Buffer.from(text)));

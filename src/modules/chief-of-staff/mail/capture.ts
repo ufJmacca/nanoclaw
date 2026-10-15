@@ -2,6 +2,7 @@ import { MAIL_RETENTION_MS, mailHistoryId, type MailMessage, type MailWindow } f
 import type { MailReader } from './reader.js';
 import { MailReadError } from './reader.js';
 import { digest } from '../domain/contracts.js';
+import { MAIL_CHECKPOINT_BYTES, mailCheckpointBytes } from './bounds.js';
 export const MAIL_CAPTURE_MESSAGES = 1000,
   MAIL_CAPTURE_TEXT_BYTES = 16 * 1024 ** 2;
 export type MailCaptureLimitation =
@@ -13,6 +14,7 @@ export type MailCaptureLimitation =
   | 'owner_denied'
   | 'retention_only'
   | 'access_unavailable'
+  | 'checkpoint_limit'
   | 'provider_byte_limit';
 export type MailCapture = {
   contract: 'cos-mail-capture/v1';
@@ -80,8 +82,9 @@ export async function collectMail(options: {
       };
     let mode: MailCapture['mode'] = 'incremental',
       lastFullSyncAt = prior?.lastFullSyncAt ?? capturedAt,
-      totalBytes = 0;
-    const messages = new Map<string, { message: MailMessage; bytes: number }>(),
+      totalBytes = 0,
+      totalCheckpointBytes = 0;
+    const messages = new Map<string, { message: MailMessage; bytes: number; checkpointBytes: number }>(),
       deferred = new Map<string, MailCapture['deferred'][number]>(),
       unsupported = new Map<string, MailCapture['unsupported'][number]>(),
       limits = new Set<MailCaptureLimitation>();
@@ -89,6 +92,7 @@ export async function collectMail(options: {
       const old = messages.get(id);
       if (old) {
         totalBytes -= old.bytes;
+        totalCheckpointBytes -= old.checkpointBytes;
         messages.delete(id);
       }
     };
@@ -102,12 +106,19 @@ export async function collectMail(options: {
       )
         return fail('mail_invalid_response');
       remove(message.id);
-      const bytes = textBytes(message);
-      messages.set(message.id, { message: structuredClone(message), bytes });
+      const bytes = textBytes(message),
+        checkpointBytes = mailCheckpointBytes(message, mailboxEmail);
+      messages.set(message.id, { message: structuredClone(message), bytes, checkpointBytes });
       totalBytes += bytes;
-      while (messages.size > MAIL_CAPTURE_MESSAGES || totalBytes > MAIL_CAPTURE_TEXT_BYTES) {
+      totalCheckpointBytes += checkpointBytes;
+      while (
+        messages.size > MAIL_CAPTURE_MESSAGES ||
+        totalBytes > MAIL_CAPTURE_TEXT_BYTES ||
+        totalCheckpointBytes > MAIL_CHECKPOINT_BYTES
+      ) {
         if (messages.size > MAIL_CAPTURE_MESSAGES) limits.add('message_limit');
         if (totalBytes > MAIL_CAPTURE_TEXT_BYTES) limits.add('text_limit');
+        if (totalCheckpointBytes > MAIL_CHECKPOINT_BYTES) limits.add('checkpoint_limit');
         const oldest = [...messages.values()]
           .map((x) => x.message)
           .sort(order)
@@ -211,6 +222,7 @@ export async function collectMail(options: {
       unsupported.clear();
       limits.clear();
       totalBytes = 0;
+      totalCheckpointBytes = 0;
       lastFullSyncAt = capturedAt;
       const selected = new Set<string>(),
         seen = new Set<string>();
@@ -240,7 +252,14 @@ export async function collectMail(options: {
       !prior ||
       capturedAt - prior.lastFullSyncAt >= 86400000 ||
       prior.limitations.some((x) =>
-        ['message_limit', 'text_limit', 'selection_changed', 'provider_byte_limit', 'access_unavailable'].includes(x),
+        [
+          'message_limit',
+          'text_limit',
+          'selection_changed',
+          'provider_byte_limit',
+          'access_unavailable',
+          'checkpoint_limit',
+        ].includes(x),
       );
     let changes: Awaited<ReturnType<typeof history>>;
     if (forcedFull) {

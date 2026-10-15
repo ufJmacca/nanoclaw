@@ -2,6 +2,8 @@ import { expect, it, vi } from 'vitest';
 import { collectMail, MAIL_CAPTURE_TEXT_BYTES } from './capture.js';
 import { normalizeMailMessage, MAIL_RETENTION_MS, type MailWindow } from './normalization.js';
 import { MailReadError, type MailHistoryPage } from './reader.js';
+import { mailEvidenceText } from './evidence.js';
+import { extractChunks } from '../knowledge/text.js';
 const now = Date.parse('2026-10-15T10:00:00Z'),
   mailboxEmail = 'owner@example.invalid';
 const raw = (id: string, date = now - 1000, text = 'Fixture body') => ({
@@ -163,6 +165,31 @@ it('keeps the newest bounded normalized text and reports the 16 MiB limit explic
   expect(capture.limitations).toContain('text_limit');
   expect(capture.complete).toBe(false);
 });
+it('reports an encoded checkpoint limit when escaping and citation chunks would outgrow the checkpoint reserve', async () => {
+  const f = fixture(256);
+  for (const [id, m] of f.data) f.data.set(id, raw(id, Number(m.internalDate), '\n'.repeat(65535) + 'x'));
+  const capture = await f.collect();
+  const wire = capture.messages.reduce(
+    (n, message) =>
+      n +
+      Buffer.byteLength(
+        JSON.stringify({
+          message,
+          chunks: extractChunks(
+            mailEvidenceText(
+              { id: 'a'.repeat(36), mailbox_email: mailboxEmail, processing_providers: ['codex'] },
+              { message, selection_id: 'b'.repeat(36) },
+            ),
+          ),
+        }),
+      ),
+    0,
+  );
+  expect(capture.limitations).toContain('checkpoint_limit');
+  expect(capture.complete).toBe(false);
+  expect(wire).toBeLessThan(48 * 1024 ** 2);
+  expect(capture.messages[0].id).toBe('1');
+}, 15000);
 it('reports unsupported bodies separately and preserves incomplete coverage through later incremental captures', async () => {
   const f = fixture(2);
   f.data.set('2', raw('2', now - 2000, 'x'.repeat(65537)));

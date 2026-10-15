@@ -8,6 +8,7 @@ import type { PoolClient } from 'pg';
 import { GOOGLE_MAIL_READ_SCOPE } from '../calendar/oauth-core.js';
 import { MailEvidence } from './evidence.js';
 import { retainedMailCapture, suppressMailCapture } from './retention.js';
+import { MAIL_CHECKPOINT_BYTES, mailCheckpointBytes } from './bounds.js';
 export type MailBindingInput = {
   id: string;
   provider: 'google' | 'fixture';
@@ -79,7 +80,8 @@ export function validMailCapture(c: MailCapture): boolean {
       Buffer.byteLength(JSON.stringify(c)) > 34 * 1024 ** 2
     )
       return false;
-    let bytes = 0;
+    let bytes = 0,
+      checkpointBytes = 0;
     for (const m of c.messages) {
       if (
         Object.keys(m).sort().join(',') !==
@@ -110,10 +112,12 @@ export function validMailCapture(c: MailCapture): boolean {
       if (stored !== digest(content)) return false;
       bytes +=
         Buffer.byteLength(m.text) + Buffer.byteLength(m.subject) + Buffer.byteLength(m.from) + Buffer.byteLength(m.to);
+      checkpointBytes += mailCheckpointBytes(m, c.mailboxEmail);
     }
     if (
       bytes !== c.textBytes ||
       bytes > MAIL_CAPTURE_TEXT_BYTES ||
+      checkpointBytes > MAIL_CHECKPOINT_BYTES ||
       !Array.isArray(c.deferred) ||
       c.deferred.length > 1000 ||
       new Set(c.deferred.map((d) => d.id)).size !== c.deferred.length ||
@@ -157,6 +161,7 @@ export function validMailCapture(c: MailCapture): boolean {
             'owner_denied',
             'retention_only',
             'access_unavailable',
+            'checkpoint_limit',
           ].includes(l),
       ) ||
       c.complete !== (c.limitations.length === 0) ||

@@ -22,6 +22,8 @@ import {
 import { KnowledgeArtifacts } from '../../modules/chief-of-staff/knowledge/artifacts.js';
 import { ActionWitness, initializeActionWitness } from '../../modules/chief-of-staff/actions/witness.js';
 import { digest } from '../../modules/chief-of-staff/domain/contracts.js';
+import { normalizeMailMessage, MAIL_RETENTION_MS } from '../../modules/chief-of-staff/mail/normalization.js';
+import { GOOGLE_MAIL_READ_SCOPE } from '../../modules/chief-of-staff/mail/oauth.js';
 
 let admin: pg.Client, client: pg.Client;
 const scopes: string[] = [],
@@ -36,6 +38,12 @@ before(async () => {
 after(async () => {
   try {
     if (admin) {
+      await admin.query('DELETE FROM cos.mail_messages WHERE scope_id=ANY($1)', [scopes]);
+      await admin.query('UPDATE cos.mail_states SET current_capture=NULL,last_attempt=NULL WHERE scope_id=ANY($1)', [
+        scopes,
+      ]);
+      for (const table of ['mail_captures', 'mail_states', 'mail_bindings'])
+        await admin.query('DELETE FROM cos.' + table + ' WHERE scope_id=ANY($1)', [scopes]);
       await admin.query('DELETE FROM cos.records WHERE scope_id=ANY($1)', [scopes]);
       await admin.query('DELETE FROM cos.scopes WHERE id=ANY($1)', [scopes]);
     }
@@ -123,6 +131,137 @@ async function fixture(version: number) {
       updated_at: storedAt,
     },
   ];
+  if (version === 19) {
+    const binding = randomUUID(),
+      captureId = randomUUID(),
+      anchor = randomUUID(),
+      capturedAt = Date.now(),
+      internalDate = capturedAt - 1000;
+    const normalized = normalizeMailMessage(
+      {
+        id: 'aa01',
+        threadId: 'bb01',
+        historyId: '101',
+        internalDate: String(internalDate),
+        labelIds: ['INBOX'],
+        payload: {
+          mimeType: 'text/plain',
+          body: { data: Buffer.from('Synthetic mail body survives checked restoration.').toString('base64url') },
+        },
+      },
+      { capturedAt, since: capturedAt - MAIL_RETENTION_MS },
+    );
+    assert.equal(normalized.status, 'selected');
+    if (normalized.status !== 'selected') throw Error('synthetic_mail_required');
+    const message = normalized.message,
+      window = { capturedAt, since: capturedAt - MAIL_RETENTION_MS };
+    const content = {
+      contract: 'cos-mail-capture/v1',
+      mode: 'full',
+      mailboxEmail: 'owner@example.invalid',
+      historyId: '200',
+      window,
+      lastFullSyncAt: capturedAt,
+      messages: [message],
+      deferred: [],
+      unsupported: [],
+      limitations: [],
+      complete: true,
+      textBytes: Buffer.byteLength(message.text),
+      removedIds: [],
+    };
+    const capture = { ...content, digest: digest(content) },
+      { messages: _messages, ...metadata } = capture;
+    const anchorMetadata = {
+      contract: 'cos-mail-selection-anchor/v1',
+      binding_id: binding,
+      selection_id: anchor,
+      provider_message_id: message.id,
+      first_capture_id: captureId,
+      first_capture_digest: capture.digest,
+    };
+    rows.mail_bindings = [
+      {
+        scope_id: scope,
+        id: binding,
+        provider: 'fixture',
+        mailbox_email: content.mailboxEmail,
+        permission_scopes: [GOOGLE_MAIL_READ_SCOPE],
+        credential_ref: null,
+        processing_providers: ['codex'],
+        auth: 'ready',
+        version: 1,
+        provenance: { origin: 'synthetic_checkpoint' },
+        created_at: storedAt,
+        updated_at: storedAt,
+      },
+    ];
+    rows.mail_states = [
+      {
+        scope_id: scope,
+        binding_id: binding,
+        current_capture: captureId,
+        last_attempt: captureId,
+        history_cursor: '200',
+        last_attempt_at: storedAt,
+        last_success_at: storedAt,
+        next_poll_at: storedAt,
+      },
+    ];
+    const base = {
+      scope_id: scope,
+      binding_id: binding,
+      binding_version: 1,
+      base_capture: null,
+      status: 'complete',
+      capture_window: window,
+      failure_code: null,
+      created_at: storedAt,
+      completed_at: storedAt,
+    };
+    rows.mail_captures = [
+      {
+        ...base,
+        id: anchor,
+        content_digest: digest(anchorMetadata),
+        metadata: anchorMetadata,
+        result: { status: 'ok', selection_anchor: true },
+      },
+      {
+        ...base,
+        id: captureId,
+        content_digest: capture.digest,
+        metadata: { ...metadata, messageIds: [message.id] },
+        result: {
+          status: 'ok',
+          capture_id: captureId,
+          message_count: 1,
+          complete: true,
+          limitations: [],
+          history_cursor: '200',
+        },
+      },
+    ];
+    const storedInternalDate = (
+      await client.query('SELECT to_jsonb($1::timestamptz) AS value', [new Date(internalDate).toISOString()])
+    ).rows[0].value;
+    rows.mail_messages = [
+      {
+        scope_id: scope,
+        binding_id: binding,
+        provider_message_id: message.id,
+        provider_thread_id: message.threadId,
+        message,
+        content_digest: message.digest,
+        internal_date: storedInternalDate,
+        source_id: null,
+        selection_id: anchor,
+        last_capture: captureId,
+        created_at: storedAt,
+        updated_at: storedAt,
+      },
+    ];
+  }
   const checkpoint: ScopeCheckpoint = {
     format: 'cos-scoped-checkpoint/v1',
     scopeId: scope,
@@ -205,7 +344,22 @@ for (const version of [18, 19])
     for (const table of ['mail_bindings', 'mail_states', 'mail_captures', 'mail_messages'])
       assert.equal(
         (await admin.query('SELECT count(*)::int AS n FROM cos.' + table + ' WHERE scope_id=$1', [f.scope])).rows[0].n,
-        0,
+        f.checkpoint.rows[table]?.length ?? 0,
       );
+    if (version === 19) {
+      const message = (
+        await admin.query('SELECT message,selection_id,last_capture FROM cos.mail_messages WHERE scope_id=$1', [
+          f.scope,
+        ])
+      ).rows[0];
+      assert.deepEqual(message.message, f.checkpoint.rows.mail_messages[0].message);
+      assert.equal(message.selection_id, f.checkpoint.rows.mail_messages[0].selection_id);
+      assert.equal(message.last_capture, f.checkpoint.rows.mail_states[0].current_capture);
+      assert.equal(
+        (await admin.query('SELECT history_cursor FROM cos.mail_states WHERE scope_id=$1', [f.scope])).rows[0]
+          .history_cursor,
+        '200',
+      );
+    }
     assert.deepEqual(fs.readFileSync(f.options.witness.root + '/owner.json'), journal);
   });
