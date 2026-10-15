@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import { afterEach, expect, it, vi } from 'vitest';
-import { mailSettings, openMailCredentials } from './config.js';
+import { mailSettings, openMailCredentials, openMailFences } from './config.js';
 import { CalendarAccessFences } from '../calendar/access-fences.js';
 import { MailCredentialOwner } from './credentials.js';
 import { configureVaultStorage, VAULT_DIRECTORIES } from '../ops/vault-storage.js';
@@ -123,6 +123,7 @@ it('holds a cheap current vault guard through the host lifetime, journals its ow
     await host.close();
   }
   expect(() => host.verifyStorage()).toThrow();
+  expect(host.closed()).toBe(true);
   expect(() => host.fences.assertOpen('scope', randomUUID())).toThrow();
 });
 for (const changed of ['profile', 'credentials', 'fences', 'client', 'marker', 'memory'])
@@ -154,6 +155,7 @@ for (const changed of ['profile', 'credentials', 'fences', 'client', 'marker', '
     expect(() => host.verifyStorage()).toThrow();
     expect(() => host.fences.deny('scope', randomUUID(), 'revoked')).toThrow();
     await expect(host.close()).rejects.toThrow('mail_configuration_unavailable');
+    expect(host.closed()).toBe(true);
   });
 it('does not reveal malformed client bytes through configuration errors', async () => {
   const f = fixture();
@@ -257,4 +259,22 @@ it('does not redirect a rotated token into a replacement directory during the aw
   expect(fetch).toHaveBeenCalledOnce();
   expect(fs.readdirSync(original)).toEqual(['.cos-mail-reader-credentials']);
   await expect(host.close()).rejects.toThrow('mail_configuration_unavailable');
+});
+it('opens only mail storage and denial authority for disabled-reader retention, without reading token state', async () => {
+  const f = fixture(),
+    reference = randomUUID();
+  fs.writeFileSync(f.root + '/credentials/' + reference + '.json', 'PRIVATE_INVALID_TOKEN_CANARY', { mode: 0o600 });
+  const open = vi.spyOn(fs, 'openSync');
+  const host = await openMailFences(f.roots, f.inspect, () => {});
+  try {
+    const binding = randomUUID();
+    host.fences.deny('scope', binding, 'revoked');
+    expect(() => host.fences.assertOpen('scope', binding)).toThrow('auth_revoked');
+    expect(open.mock.calls.some(([file]) => String(file).endsWith('/' + reference + '.json'))).toBe(false);
+    expect(host.closed()).toBe(false);
+  } finally {
+    await host.close();
+    open.mockRestore();
+  }
+  expect(host.closed()).toBe(true);
 });

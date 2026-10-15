@@ -248,4 +248,33 @@ describe('G04 host-only mail refresh', () => {
     expect((await original).result.status).toBe('ok');
     expect(f.reader.profile).toHaveBeenCalledTimes(1);
   });
+  it('closes admission immediately and awaits the actual refresh before releasing host resources', async () => {
+    const f = fixture();
+    let resume!: () => void;
+    const hold = new Promise<void>((resolve) => {
+      resume = resolve;
+    });
+    f.reader.profile.mockImplementationOnce(async () => {
+      await hold;
+      return { mailboxEmail: f.binding.mailboxEmail, historyId: '100' };
+    });
+    const refresh = f.connector.refresh(context, id, captureId);
+    await vi.waitFor(() => expect(f.reader.profile).toHaveBeenCalledOnce());
+    let closed = false;
+    const closing = f.connector.close().then(() => {
+      closed = true;
+    });
+    expect((await f.connector.refresh(context, id, '33333333-3333-4333-8333-333333333333')).result.status).toBe(
+      'denied',
+    );
+    expect(() => f.connector.assertOpen('scope', id)).toThrow('mail_disabled');
+    await Promise.resolve();
+    expect(closed).toBe(false);
+    resume();
+    expect((await refresh).result.status).not.toBe('ok');
+    await closing;
+    expect(closed).toBe(true);
+    expect(f.store.publish).not.toHaveBeenCalled();
+    await f.connector.close();
+  });
 });

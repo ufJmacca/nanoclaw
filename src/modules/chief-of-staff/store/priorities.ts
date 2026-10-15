@@ -30,6 +30,7 @@ import { BriefRunStore } from '../automation/brief-store.js';
 import type { CalendarConnector } from '../calendar/connector.js';
 import type { CalendarView } from '../calendar/view.js';
 import type { MailView } from '../mail/view.js';
+import type { MailHost } from '../mail/host.js';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { PoolClient } from 'pg';
 import { BoundedDatabase, DatabaseUnavailable } from './client.js';
@@ -115,6 +116,7 @@ export class PriorityStore {
     teamAuthority?: TeamAuthorityResolver,
     actionDependencies?: ActionDependencies,
     readonly mailView?: MailView,
+    readonly mail?: MailHost,
   ) {
     this.strategy = new StrategyApprovalStore(knowledge, () => this.directions);
     this.actions = new ActionStore(database, knowledge, actionDependencies);

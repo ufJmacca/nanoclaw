@@ -19,7 +19,7 @@ export type MailConnectorOptions = {
   credentials?: Pick<MailCredentialOwner, 'inspect' | 'token'>;
   /** A dedicated mail-profile journal in the guarded vault, separate from Calendar. */
   fences: Pick<CalendarAccessFences, 'assertOpen' | 'deny' | 'runCheck'>;
-  admitted(): boolean;
+  admitted(context: Context & { provider: string }): boolean;
   verifyStorage(): void;
   fixtureReader?(binding: MailConnection): MailReader;
   fetch?: (url: string, init: RequestInit) => Promise<Response>;
@@ -45,16 +45,19 @@ const lost: Record<string, Closed> = {
 export class MailConnector {
   private readonly denied = new Map<string, Closed>();
   private readonly pending = new Map<string, { request: string; work: Promise<Refresh> }>();
+  private readonly shutdown = new AbortController();
+  private closing?: Promise<void>;
   constructor(private readonly options: MailConnectorOptions) {}
   assertOpen(scope: string, binding: string): void {
+    if (this.shutdown.signal.aborted) throw new MailReadError('mail_disabled');
     this.options.verifyStorage();
     const denied = this.denied.get(digest({ scope, binding }));
     if (denied) throw new MailReadError('mail_auth_' + denied);
     this.options.fences.assertOpen(scope, binding);
   }
-  private active(signal: AbortSignal) {
+  private active(signal: AbortSignal, context: MailContext) {
     if (signal.aborted) throw new MailReadError('mail_cancelled');
-    if (!this.options.admitted()) throw new MailReadError('mail_disabled');
+    if (!this.options.admitted(context)) throw new MailReadError('mail_disabled');
   }
   private observedLoss(error: unknown, context: MailContext, binding: string): Closed | null {
     const code = failure(error);
@@ -69,10 +72,10 @@ export class MailConnector {
     return null;
   }
   private async connection(context: MailContext, id: string, signal: AbortSignal): Promise<MailConnection> {
-    this.active(signal);
+    this.active(signal, context);
     this.assertOpen(context.scopeId, id);
     const result = await this.options.store.connection(context, id);
-    this.active(signal);
+    this.active(signal, context);
     this.assertOpen(context.scopeId, id);
     if (result.status !== 'ok')
       throw new MailReadError(result.status === 'denied' ? 'mail_binding_denied' : 'mail_unavailable');
@@ -140,6 +143,7 @@ export class MailConnector {
     retry?: PreparedMailRefresh,
     signal?: AbortSignal,
   ): Promise<Refresh> {
+    if (this.shutdown.signal.aborted) return { result: { status: 'denied' } };
     if (context.origin || !uuid(bindingId) || !uuid(captureId)) return { result: { status: 'denied' } };
     if (signal?.aborted) return { result: { status: 'unavailable', code: 'mail_refresh_timed_out' } };
     const ctx = Object.freeze({ ...context }),
@@ -160,7 +164,7 @@ export class MailConnector {
         ? this.awaitRefresh(pending.work, signal)
         : { result: { status: 'pending', code: 'mail_refresh_busy' } };
     if (this.pending.size >= 8) return { result: { status: 'pending', code: 'mail_refresh_busy' } };
-    const bounded = AbortSignal.any([AbortSignal.timeout(240000), ...(signal ? [signal] : [])]);
+    const bounded = AbortSignal.any([this.shutdown.signal, AbortSignal.timeout(240000), ...(signal ? [signal] : [])]);
     const work = this.run(ctx, bindingId, captureId, prepared, bounded);
     this.pending.set(key, { request, work });
     try {
@@ -168,6 +172,16 @@ export class MailConnector {
     } finally {
       if (this.pending.get(key)?.work === work) this.pending.delete(key);
     }
+  }
+  /** Retiring credentials must wait for real operations, including an ambiguous
+   * publication. Aborting an observer is not proof that its work has settled. */
+  close(): Promise<void> {
+    if (this.closing) return this.closing;
+    this.shutdown.abort();
+    this.closing = Promise.allSettled([...this.pending.values()].map((entry) => entry.work)).then((results) => {
+      if (results.some((result) => result.status === 'rejected')) throw Error('mail_refresh_retirement_unavailable');
+    });
+    return this.closing;
   }
   private async awaitRefresh(work: Promise<Refresh>, signal?: AbortSignal): Promise<Refresh> {
     if (!signal) return work;
@@ -208,7 +222,7 @@ export class MailConnector {
     signal: AbortSignal,
   ): Promise<Refresh> {
     try {
-      this.active(signal);
+      this.active(signal, context);
       const binding = await this.connection(context, bindingId, signal);
       if (retry && (retry.bindingDigest !== digest(binding) || retry.capture.mailboxEmail !== binding.mailboxEmail))
         return { result: { status: 'denied' } };
@@ -222,7 +236,7 @@ export class MailConnector {
             ? { status: 'ok' as const, window: retry.capture.window }
             : await this.options.store.captureWindow(context);
           if (clock.status !== 'ok') return { result: { status: clock.status } };
-          this.active(signal);
+          this.active(signal, context);
           const start = await this.options.store.start(context, bindingId, captureId, clock.window as MailWindow);
           if (start.status !== 'ok') return { result: start };
           started = true;

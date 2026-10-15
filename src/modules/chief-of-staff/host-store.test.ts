@@ -11,6 +11,8 @@ const f = vi.hoisted(() => ({
   configure: vi.fn(),
   calendarOpen: vi.fn(),
   actionOpen: vi.fn(),
+  mailOpen: vi.fn(),
+  mailFences: vi.fn(),
 }));
 vi.mock('./store/preflight.js', async (original) => ({
   ...(await original<typeof import('./store/preflight.js')>()),
@@ -39,6 +41,11 @@ vi.mock('./calendar/config.js', async (original) => ({
   openCalendarCredentials: f.calendarOpen,
 }));
 vi.mock('./actions/host.js', () => ({ openActionHost: f.actionOpen }));
+vi.mock('./mail/config.js', async (original) => ({
+  ...(await original<typeof import('./mail/config.js')>()),
+  openMailCredentials: f.mailOpen,
+  openMailFences: f.mailFences,
+}));
 import { connectCosHostStore } from './host-store.js';
 import { SCHEMA_VERSION } from './store/migrations.js';
 afterEach(() => vi.resetAllMocks());
@@ -51,6 +58,82 @@ function fixture() {
   f.open.mockReturnValue(f.artifacts);
   f.configure.mockResolvedValue({});
 }
+it('G04 opens the separate reader after database checks and binds mail evidence to host admission', async () => {
+  fixture();
+  const close = vi.fn(async () => {}),
+    guard = vi.fn(),
+    fences = { assertOpen: vi.fn(), deny: vi.fn(), runCheck: vi.fn() };
+  f.mailOpen.mockResolvedValue({ credentials: {}, fences, verifyStorage: guard, close, closed: () => true });
+  let open = true;
+  const store = await connectCosHostStore(
+    { COS_MAIL_ENABLED: 'true', COS_KNOWLEDGE_ENABLED: 'true' },
+    { targetRoot: '/state', installationRoot: '/install', dataRoot: '/install/data' },
+    () => open,
+  );
+  expect(store.mail?.active()).toBe(true);
+  expect(store.mailView).toBeDefined();
+  expect(store.mail?.store.database).toBe(store.database);
+  expect(f.mailOpen.mock.invocationCallOrder[0]).toBeGreaterThan(f.schema.mock.invocationCallOrder[0]);
+  store.mail!.connector!.assertOpen('scope', 'binding');
+  expect(guard).toHaveBeenCalled();
+  expect(fences.assertOpen).toHaveBeenCalledWith('scope', 'binding');
+  open = false;
+  await store.mail!.close();
+  expect(store.mail!.active()).toBe(false);
+  expect(close).toHaveBeenCalledOnce();
+});
+it('G04 retains denial-only and retention ownership while the mail reader is disabled', async () => {
+  fixture();
+  const close = vi.fn(async () => {});
+  f.mailFences.mockResolvedValue({ fences: {}, verifyStorage: () => {}, close, closed: () => true });
+  const store = await connectCosHostStore(
+    {},
+    { targetRoot: '/state', installationRoot: '/install', dataRoot: '/install/data' },
+    () => true,
+  );
+  expect(f.mailOpen).not.toHaveBeenCalled();
+  expect(f.mailFences).toHaveBeenCalledOnce();
+  expect(store.mail?.store).toBeDefined();
+  expect(store.mail?.connector).toBeUndefined();
+  expect(store.mailView).toBeUndefined();
+  await store.mail!.close();
+  expect(close).toHaveBeenCalledOnce();
+});
+it('G04 lost mail vault protection does not prevent the ordinary host store or date-based retention', async () => {
+  fixture();
+  f.mailOpen.mockRejectedValue(Error('mail_configuration_unavailable'));
+  f.mailFences.mockRejectedValue(Error('mail_configuration_unavailable'));
+  const store = await connectCosHostStore(
+    { COS_MAIL_ENABLED: 'true' },
+    { targetRoot: '/state', installationRoot: '/install', dataRoot: '/install/data' },
+    () => true,
+  );
+  expect(store.knowledge).toBeDefined();
+  expect(store.mail?.store).toBeDefined();
+  expect(store.mail?.connector).toBeUndefined();
+});
+it('G04 startup releases opened mail resources and the pool after an unexpected construction failure', async () => {
+  fixture();
+  const close = vi.fn(async () => {});
+  f.mailOpen.mockResolvedValue({
+    get credentials() {
+      throw Error('unexpected_mail_setup_fault');
+    },
+    fences: {},
+    verifyStorage: () => {},
+    close,
+    closed: () => true,
+  });
+  await expect(
+    connectCosHostStore(
+      { COS_MAIL_ENABLED: 'true' },
+      { targetRoot: '/state', installationRoot: '/install', dataRoot: '/install/data' },
+      () => true,
+    ),
+  ).rejects.toThrow('unexpected_mail_setup_fault');
+  expect(close).toHaveBeenCalledOnce();
+  expect(f.pool.end).toHaveBeenCalledOnce();
+});
 it('keeps the ordinary host store available while lost vault protection closes Google readers and writers', async () => {
   fixture();
   f.calendarOpen.mockImplementation(() => {

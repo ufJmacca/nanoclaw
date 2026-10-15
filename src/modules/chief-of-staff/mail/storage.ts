@@ -20,7 +20,7 @@ export const mailReaderRootIdentity = (roots: CalendarStorageRoots, proof: MailR
   directoryInodes: proof.directoryInodes,
   clientSha256: proof.clientSha256,
 });
-type PinnedMailStorage = { root: string; directory: string; readClient(): unknown; assertCurrent(): void };
+export type PinnedMailStorage = { root: string; directory: string; readClient(): unknown; assertCurrent(): void };
 const privateDirectory = (file: string, device: number) => {
   const stat = fs.lstatSync(file);
   if (
