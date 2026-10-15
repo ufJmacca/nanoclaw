@@ -40,6 +40,11 @@ function profileSpec(profile: OAuthScopeProfile) {
     throw new Error('unsafe_calendar_credential_profile');
   return profiles[profile];
 }
+/** Marker data for trusted descriptor-based setup; it grants no credential access. */
+export function credentialRootMarker(profile: OAuthScopeProfile): { name: string; contents: string } {
+  const { marker, contract } = profileSpec(profile);
+  return { name: marker, contents: JSON.stringify({ contract }) + '\n' };
+}
 type State = {
   contract: string;
   identity: string;

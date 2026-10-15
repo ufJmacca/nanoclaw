@@ -12,6 +12,8 @@ Mail has its own `mail-reader` child beneath the existing protected Google/Calen
 
 Backup copies include the separate mail client, credentials and denial journals as private recovery material. Archived profile proofs and journals do not grant live access or replace current authority.
 
+The owner-only initializer requires current administration authority and holds a lock on the encrypted parent directory. Setup writes through pinned descriptors and records an operation-bound intent before the client file. It seals child directory identities before writing secrets, publishes the final profile proof after its markers are complete, and leaves interrupted profiles closed to runtime use. An exact retry can finish corroborated partial writes. A completed profile is checked without rewriting it; changed clients, foreign files and replaced directories are refused. The owner command, separate Google consent and queued configuration/denial snapshots are still being implemented.
+
 ## Captures and retention
 
 Each capture covers the most recent 30 days and holds at most 1,000 messages and 16 MiB of normalized text. A separate 48 MiB encoded checkpoint budget accounts for raw records, citation chunks and provenance within the existing coordinated checkpoint limit. Limits are explicit in coverage. Captures retain individual Inbox/Sent messages; Spam, Trash, drafts, older messages and unselected thread members are excluded. HTML conversion loads no external content or attachments. Mail text remains untrusted evidence.
