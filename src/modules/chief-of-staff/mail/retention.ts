@@ -12,6 +12,17 @@ const bytes = (messages: MailCapture['messages']) =>
     0,
   );
 const seal = (value: Omit<MailCapture, 'digest'>): MailCapture => ({ ...value, digest: digest(value) });
+/** Moving the observation clock alone is not a new retention event. Provider
+ * captures keep their original freshness until content or queued metadata expires. */
+export function mailRetentionChanged(previous: MailCapture, retained: MailCapture): boolean {
+  const content = (capture: MailCapture) => ({
+    messages: capture.messages.map((message) => ({ id: message.id, digest: message.digest })),
+    deferred: capture.deferred,
+    unsupported: capture.unsupported,
+    accessClosed: capture.limitations.includes('access_unavailable'),
+  });
+  return digest(content(previous)) !== digest(content(retained));
+}
 /** A new capture with an explicit omission; never redact an already published
  * capture in place or keep a denied raw body merely for cursor continuity. */
 export function suppressMailCapture(input: MailCapture, deniedIds: string[]): MailCapture {

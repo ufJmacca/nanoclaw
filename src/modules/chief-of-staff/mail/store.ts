@@ -7,7 +7,7 @@ import { MAIL_CAPTURE_MESSAGES, MAIL_CAPTURE_TEXT_BYTES, type MailCapture } from
 import type { PoolClient } from 'pg';
 import { GOOGLE_MAIL_READ_SCOPE } from '../calendar/oauth-core.js';
 import { MailEvidence } from './evidence.js';
-import { retainedMailCapture, suppressMailCapture } from './retention.js';
+import { retainedMailCapture, suppressMailCapture, mailRetentionChanged } from './retention.js';
 import { MAIL_CHECKPOINT_BYTES, mailCheckpointBytes } from './bounds.js';
 import { mailSourceAccess } from './source-access.js';
 export type MailBindingInput = {
@@ -635,6 +635,10 @@ export class MailStore {
             );
             const capture = retainedMailCapture(previous, at, denied, b.auth !== 'ready');
             if (!validMailCapture(capture)) throw Error('mail_retention_invalid');
+            if (!mailRetentionChanged(previous, capture)) {
+              await this.compactCaptures(client, context, binding);
+              return { status: 'ok', retention: true, changed: false };
+            }
             await client.query(
               "INSERT INTO cos.mail_captures(scope_id,binding_id,id,binding_version,base_capture,status,capture_window) VALUES($1,$2,$3,$4,$5,'collecting',$6)",
               [context.scopeId, binding, id, b.version, state.current_capture, JSON.stringify(capture.window)],

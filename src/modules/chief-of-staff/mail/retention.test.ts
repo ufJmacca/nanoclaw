@@ -1,6 +1,6 @@
 import { expect, it, vi } from 'vitest';
 import { digest } from '../domain/contracts.js';
-import { retainedMailCapture, suppressMailCapture } from './retention.js';
+import { retainedMailCapture, suppressMailCapture, mailRetentionChanged } from './retention.js';
 import { validMailCapture } from './store.js';
 import { collectMail, type MailCapture } from './capture.js';
 import { MAIL_RETENTION_MS, normalizeMailMessage, type MailWindow } from './normalization.js';
@@ -64,6 +64,15 @@ it('retains due deferred IDs through an outage so the next successful incrementa
   expect(message).toHaveBeenCalledOnce();
   expect(result.messages.map((m) => m.id)).toEqual(['aa01']);
   expect(result.deferred).toEqual([]);
+});
+it('does not turn clock-only maintenance into a new capture but records content expiry and first access closure', () => {
+  const previous = fixture(),
+    at = previous.window.capturedAt + 60000;
+  expect(mailRetentionChanged(previous, retainedMailCapture(previous, at, [], false))).toBe(false);
+  expect(mailRetentionChanged(previous, retainedMailCapture(previous, at + MAIL_RETENTION_MS, [], false))).toBe(true);
+  const closed = retainedMailCapture(previous, at, [], true);
+  expect(mailRetentionChanged(previous, closed)).toBe(true);
+  expect(mailRetentionChanged(closed, retainedMailCapture(closed, at + 1, [], true))).toBe(false);
 });
 it('preserves a bodyless owner-denial hole on later filtering rather than incorrectly declaring a complete empty capture', () => {
   const old = fixture(),

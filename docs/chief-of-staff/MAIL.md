@@ -14,6 +14,8 @@ The host refresh connector uses PostgreSQL's observation clock and rechecks the 
 
 Retention can tighten a stored selection without a provider request or model call, including while the scope is paused or access is closed. Its separate capture does not advance the provider's refresh time or cursor. Read checks enforce the rolling wall-clock boundary even before physical cleanup runs. Tiny selection anchors preserve immutable selection identity; superseded unreferenced capture inventories become bodyless receipts and age out after 30 days.
 
+An unchanged retention check creates no new capture and preserves provider freshness. Actual message or queued-metadata expiry, owner withdrawal and the first recorded access closure still create the required atomic retention checkpoint.
+
 ## Read tools and answers
 
 `cos_context_get` includes mailbox binding references and a host-generated freshness notice when the mail adapter is configured.

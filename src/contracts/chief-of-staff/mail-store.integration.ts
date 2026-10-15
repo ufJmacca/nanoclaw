@@ -519,9 +519,37 @@ test('G04 owner source denial removes raw copies and cannot be revived by a late
   );
 });
 test('G04 a fresh capture cannot move its observation window backwards after retention advanced it', async () => {
-  const f = await publishFixture();
+  const f = await publishFixture(30 * 86400000 - 500);
+  await new Promise((resolve) => setTimeout(resolve, 650));
   assert.equal((await f.store.maintain(f.context, f.binding.id, randomUUID())).status, 'ok');
   assert.equal((await f.store.start(f.context, f.binding.id, randomUUID(), f.prepared.window)).status, 'conflict');
+});
+test('G04 repeated retention checks without content changes do not grow checkpoint history or replace provider freshness', async () => {
+  const f = await publishFixture(),
+    before = (await admin.query('SELECT count(*)::int AS n FROM cos.mail_captures WHERE scope_id=$1', [f.scope]))
+      .rows[0].n;
+  const state = (
+    await admin.query('SELECT current_capture,last_success_at,last_attempt FROM cos.mail_states WHERE scope_id=$1', [
+      f.scope,
+    ])
+  ).rows[0];
+  for (let i = 0; i < 4; i++) {
+    const result = await f.store.maintain(f.context, f.binding.id, randomUUID());
+    assert.equal(result.status, 'ok');
+    assert.equal(result.changed, false);
+  }
+  assert.equal(
+    (await admin.query('SELECT count(*)::int AS n FROM cos.mail_captures WHERE scope_id=$1', [f.scope])).rows[0].n,
+    before,
+  );
+  assert.deepEqual(
+    (
+      await admin.query('SELECT current_capture,last_success_at,last_attempt FROM cos.mail_states WHERE scope_id=$1', [
+        f.scope,
+      ])
+    ).rows[0],
+    state,
+  );
 });
 test('G04 cited mail answers carry host-rendered freshness without resetting their context on an ordinary poll', async () => {
   const f = await publishFixture(),
@@ -587,7 +615,7 @@ test('G04 mail exposed by a work-evidence path still adds host coverage to its a
 });
 for (const state of ['partial', 'stale', 'failed', 'retention'])
   test(`G04 mailbox coverage explicitly reports ${state} observations`, async () => {
-    const f = await publishFixture();
+    const f = await publishFixture(state === 'retention' ? 30 * 86400000 - 500 : 1000);
     if (state === 'partial') {
       const next = rehashCapture({
         ...structuredClone(f.prepared),
@@ -609,8 +637,10 @@ for (const state of ['partial', 'stale', 'failed', 'retention'])
       assert.equal((await f.store.start(f.context, f.binding.id, id, clock.window as MailWindow)).status, 'ok');
       assert.equal((await f.store.fail(f.context, f.binding.id, id, 'mail_unavailable')).status, 'ok');
     }
-    if (state === 'retention')
+    if (state === 'retention') {
+      await new Promise((resolve) => setTimeout(resolve, 650));
       assert.equal((await f.store.maintain(f.context, f.binding.id, randomUUID())).status, 'ok');
+    }
     const view = await f.knowledge.recordMailContext(f.context);
     assert.equal(view.status, 'ok');
     const text = (view.notice as { text: string }).text;
