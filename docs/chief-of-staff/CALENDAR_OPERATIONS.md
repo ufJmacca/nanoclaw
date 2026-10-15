@@ -4,6 +4,8 @@ S03 is deployed as a tested candidate; see the [acceptance receipt](evidence/S03
 
 Calendar administration uses the existing native CoS binding. The target must have its maintenance lease, a stopped service and workers, a paused CoS binding, and current private owner/bot membership. The command takes the target and host locks and derives scope ownership from NanoClaw. It leaves CoS paused and does not invoke a model or send a message.
 
+Trusted owner Calendar commands accept an active or paused PostgreSQL scope with matching owner and agent-group identities. A revoked or mismatched scope remains denied. Linking, status, refresh and disconnection preserve the scope row and native pause; ordinary runtime Calendar access still requires an active scope.
+
 Run project commands in the Mac devcontainer with fixtures. On the Pi, use the activated release's packaged Node and `dist/modules/chief-of-staff/ops/admin.js` under the trusted host environment. Do not install dependencies on the Pi or run its bot identity on the Mac.
 
 ## Configure protected storage and a desktop client

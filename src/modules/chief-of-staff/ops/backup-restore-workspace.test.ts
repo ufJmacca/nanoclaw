@@ -131,7 +131,7 @@ it('holds unclaimed empty-directory residue instead of adding it to the owned gr
   ).rejects.toThrow(/^backup_restore_workspace_unavailable$/);
   expect(fs.existsSync(f.destination + '/foreign')).toBe(true);
 });
-it.each(['../outside', '/outside', 'a//b', 'a/../b', 'a/.hidden'])(
+it.each(['../outside', '/outside', 'a//b', 'a/../b', 'a/..hidden'])(
   'rejects unsafe directory name %s before mutation',
   async (name) => {
     const f = fixture();
@@ -249,7 +249,7 @@ it('never adopts or overwrites an existing restore operation', async () => {
   ).rejects.toThrow(/^backup_restore_workspace_unavailable$/);
   expect(fs.readFileSync(f.destination + '/valuable', 'utf8')).toBe('PRESERVE');
 });
-it.each(['../outside', '/outside', 'a//b', 'a/../b', 'a/.hidden'])(
+it.each(['../outside', '/outside', 'a//b', 'a/../b', 'a/..hidden'])(
   'refuses unsafe file name %s before mutation',
   async (name) => {
     const f = fixture();

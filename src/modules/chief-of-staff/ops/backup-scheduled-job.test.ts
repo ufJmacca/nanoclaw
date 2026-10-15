@@ -16,12 +16,13 @@ afterEach(() => {
   vi.restoreAllMocks();
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
-function fixture() {
+function fixture(slice: 'G02' | 'G03' = 'G02') {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-backup-schedule-'));
   roots.push(base);
   fs.chmodSync(base, 0o700);
   const root = base + '/state',
     manifest = fixtureVaultRelease('G02');
+  manifest.slice = slice;
   const binding = {
     hostFingerprint: 'a'.repeat(64),
     databaseFingerprint: 'b'.repeat(64),
@@ -73,66 +74,69 @@ function fixture() {
   const invoke = (job: 'capture' | 'upload' = 'capture') => scheduledBackupJob({ root, binding, job, effects });
   return { root, manifest, binding, effects, invoke, events };
 }
-it('reconciles the same actual maintenance lease after an interrupted stop, captures once and dispatches after restart', async () => {
-  const f = fixture();
-  fs.mkdirSync(f.root + '/queue-area', { mode: 0o700 });
-  const queue = new BackupQueue('a'.repeat(64), async (_kind, callback) => callback(f.root + '/queue-area'));
-  const ports = {
-    verify: f.effects.verify,
-    healthy: f.effects.healthy,
-    workersIdle: async () => true,
-    nativeStopped: async () => true,
-    databaseCompatible: async () => true,
-    stopNative: vi.fn(async () => {
-      f.events.push('stop');
-    }),
-    startNative: vi.fn(async () => {
-      f.events.push('restart');
-    }),
-    inspect: () => queue.inspect('state'),
-    capture: vi.fn(async (lease: { nonce: string }) => {
-      f.events.push('capture');
-      await queue.capture(
-        'state',
-        lease.nonce,
-        async (sink) => sink.write('fixture.json', Buffer.from('synthetic')),
-        65536,
-      );
-      return {
-        status: 'queued' as const,
-        queueOperationId: lease.nonce,
-        snapshotDigest: digest((await queue.inspect('state'))[0]),
-      };
-    }),
-    verifyCapture: async (lease: { nonce: string }) =>
-      queue.withPending('state', lease.nonce, async (_data, receipt) => ({
-        status: 'queued' as const,
-        queueOperationId: lease.nonce,
-        snapshotDigest: digest(receipt),
-      })),
-  };
-  ports.stopNative.mockRejectedValueOnce(Error('interrupted stop'));
-  f.effects.capture.mockImplementation((requestId) =>
-    withDeploymentLock(f.root + '.operation.lock', () =>
-      checkpointMaintenance({ root: f.root, binding: f.binding, requestId, effects: ports }),
-    ),
-  );
-  await expect(f.invoke()).rejects.toThrow('backup_schedule_unavailable');
-  const marker = readPrivate<{ requestId: string }>(f.root + '/backup-scheduled-request.json'),
-    held = maintenanceLeaseForOwner(f.root, f.binding, 'release-backup-' + marker.requestId, 'deployment');
-  expect(held.owner).toBe('release-backup-' + marker.requestId);
-  expect(f.effects.dispatchUpload).not.toHaveBeenCalled();
-  await expect(f.invoke()).resolves.toMatchObject({
-    checkpointStatus: 'backup_queued',
-    requestId: marker.requestId,
-    uploadDispatched: true,
-  });
-  expect(ports.capture).toHaveBeenCalledOnce();
-  expect(ports.capture.mock.calls[0][0].nonce).toBe(held.nonce);
-  expect(f.events).toEqual(['stop', 'capture', 'restart', 'dispatch']);
-  expect(admittedGeneration(f.root, f.binding)).not.toBeNull();
-  expect((await queue.pending('state')).map((item) => item.operationId)).toEqual([held.nonce]);
-});
+it.each(['G02', 'G03'] as const)(
+  '%s reconciles the same maintenance lease after interrupted stop, captures once and dispatches after restart',
+  async (slice) => {
+    const f = fixture(slice);
+    fs.mkdirSync(f.root + '/queue-area', { mode: 0o700 });
+    const queue = new BackupQueue('a'.repeat(64), async (_kind, callback) => callback(f.root + '/queue-area'));
+    const ports = {
+      verify: f.effects.verify,
+      healthy: f.effects.healthy,
+      workersIdle: async () => true,
+      nativeStopped: async () => true,
+      databaseCompatible: async () => true,
+      stopNative: vi.fn(async () => {
+        f.events.push('stop');
+      }),
+      startNative: vi.fn(async () => {
+        f.events.push('restart');
+      }),
+      inspect: () => queue.inspect('state'),
+      capture: vi.fn(async (lease: { nonce: string }) => {
+        f.events.push('capture');
+        await queue.capture(
+          'state',
+          lease.nonce,
+          async (sink) => sink.write('fixture.json', Buffer.from('synthetic')),
+          65536,
+        );
+        return {
+          status: 'queued' as const,
+          queueOperationId: lease.nonce,
+          snapshotDigest: digest((await queue.inspect('state'))[0]),
+        };
+      }),
+      verifyCapture: async (lease: { nonce: string }) =>
+        queue.withPending('state', lease.nonce, async (_data, receipt) => ({
+          status: 'queued' as const,
+          queueOperationId: lease.nonce,
+          snapshotDigest: digest(receipt),
+        })),
+    };
+    ports.stopNative.mockRejectedValueOnce(Error('interrupted stop'));
+    f.effects.capture.mockImplementation((requestId) =>
+      withDeploymentLock(f.root + '.operation.lock', () =>
+        checkpointMaintenance({ root: f.root, binding: f.binding, requestId, effects: ports }),
+      ),
+    );
+    await expect(f.invoke()).rejects.toThrow('backup_schedule_unavailable');
+    const marker = readPrivate<{ requestId: string }>(f.root + '/backup-scheduled-request.json'),
+      held = maintenanceLeaseForOwner(f.root, f.binding, 'release-backup-' + marker.requestId, 'deployment');
+    expect(held.owner).toBe('release-backup-' + marker.requestId);
+    expect(f.effects.dispatchUpload).not.toHaveBeenCalled();
+    await expect(f.invoke()).resolves.toMatchObject({
+      checkpointStatus: 'backup_queued',
+      requestId: marker.requestId,
+      uploadDispatched: true,
+    });
+    expect(ports.capture).toHaveBeenCalledOnce();
+    expect(ports.capture.mock.calls[0][0].nonce).toBe(held.nonce);
+    expect(f.events).toEqual(['stop', 'capture', 'restart', 'dispatch']);
+    expect(admittedGeneration(f.root, f.binding)).not.toBeNull();
+    expect((await queue.pending('state')).map((item) => item.operationId)).toEqual([held.nonce]);
+  },
+);
 it('durably selects a checkpoint ID before capture and dispatches upload only after healthy admission', async () => {
   const f = fixture();
   f.effects.capture.mockImplementationOnce(async (requestId) => {

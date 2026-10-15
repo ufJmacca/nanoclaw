@@ -133,6 +133,76 @@ it('routes G02 release admission and checkpoints only to its reviewed extension 
   expect(saved.slices.G01).toEqual(g01);
   expect(fs.readFileSync(f.root + '/execution.json')).toEqual(original);
 });
+function completedG02(f: ReturnType<typeof fixture>) {
+  completedG01(f);
+  const commit = 'e'.repeat(40),
+    tree = 'f'.repeat(40),
+    releaseId = 'release-reviewed-g02';
+  const predecessor = Object.assign(f.extension.slices.G02, {
+    status: 'complete',
+    review: { status: 'human_review_and_merge_verified', reviewed: true, merged: true, mergeCommit: commit },
+    current_source: { commit, tree, releaseId },
+    deployed_source_sha: commit,
+    pi_smoke_status: 'passed',
+    merged_release_reconciliation: {
+      status: 'passed',
+      commit,
+      tree,
+      releaseId,
+      humanReview: 'verified',
+      allMandatoryGates: 'passed',
+      actualPiAcceptance: 'passed',
+    },
+    actual_G02_isolated_restore: { status: 'backup_test_restore_verified' },
+    actual_merged_remote_checkpoint: {
+      status: 'backup_uploaded',
+      maintenance: { status: 'verified' },
+      state: { pending: 0, held: 0 },
+      credentials: { pending: 0, held: 0 },
+    },
+  });
+  Object.assign(f.extension.slices, { G03: { status: 'in_progress', depends_on: 'G02', unknown: 'retain-g03' } });
+  f.extension.active_slice = 'G03';
+  f.save();
+  return predecessor;
+}
+it('admits G03 after reviewed matching G02 delivery, encrypted backup and isolated restore acceptance', () => {
+  const f = fixture();
+  completedG02(f);
+  const original = fs.readFileSync(f.root + '/execution.json'),
+    predecessor = structuredClone(f.extension.slices.G02);
+  expect(readExtensionRelease(f.root, true)).toEqual(f.extension);
+  expect(readReleaseExecution(f.root, 'G03', true)).toEqual(f.extension);
+  checkpointReleaseExecution(f.root, 'G03', { release_status: 'g03_fixture_pending' });
+  const saved = JSON.parse(fs.readFileSync(f.root + '/google-mail-storage-execution.json', 'utf8'));
+  expect(saved.slices.G03).toMatchObject({ unknown: 'retain-g03', release_status: 'g03_fixture_pending' });
+  expect(saved.slices.G02).toEqual(predecessor);
+  expect(saved.unknown).toEqual(f.extension.unknown);
+  expect(fs.readFileSync(f.root + '/execution.json')).toEqual(original);
+});
+it.each(['review', 'source', 'delivery', 'health', 'restore', 'upload', 'integrity', 'pending', 'held'])(
+  'refuses G03 while G02 %s acceptance is incomplete and preserves both ledgers',
+  (boundary) => {
+    const f = fixture(),
+      predecessor = completedG02(f);
+    if (boundary === 'review') predecessor.review.reviewed = false;
+    if (boundary === 'source') predecessor.current_source.commit = '0'.repeat(40);
+    if (boundary === 'delivery') predecessor.merged_release_reconciliation.actualPiAcceptance = 'pending';
+    if (boundary === 'health') predecessor.pi_smoke_status = 'pending';
+    if (boundary === 'restore') predecessor.actual_G02_isolated_restore.status = 'pending';
+    if (boundary === 'upload') predecessor.actual_merged_remote_checkpoint.status = 'backup_upload_failed';
+    if (boundary === 'integrity') predecessor.actual_merged_remote_checkpoint.maintenance.status = 'failed';
+    if (boundary === 'pending') predecessor.actual_merged_remote_checkpoint.state.pending = 1;
+    if (boundary === 'held') predecessor.actual_merged_remote_checkpoint.credentials.held = 1;
+    f.save();
+    const original = fs.readFileSync(f.root + '/execution.json'),
+      extension = fs.readFileSync(f.root + '/google-mail-storage-execution.json');
+    expect(() => readExtensionRelease(f.root, true)).toThrow('extension_release_not_admitted');
+    expect(() => checkpointReleaseExecution(f.root, 'G03', { release_status: 'must_not_write' })).toThrow();
+    expect(fs.readFileSync(f.root + '/execution.json')).toEqual(original);
+    expect(fs.readFileSync(f.root + '/google-mail-storage-execution.json')).toEqual(extension);
+  },
+);
 it('retains additive private programme history above the target receipt ceiling', () => {
   const f = fixture();
   completedG01(f);
@@ -295,7 +365,7 @@ it.each([
   if (reason === 'gates') accepted.allMandatoryGates = 'pending';
   if (reason === 'health') accepted.actualPiAcceptance = 'pending';
   if (reason === 'pi') s.pi_smoke_status = 'failed';
-  if (reason === 'future') f.extension.active_slice = 'G03';
+  if (reason === 'future') f.extension.active_slice = 'G04';
   if (reason === 'dependency') f.extension.slices.G02.depends_on = 'S11';
   if (reason === 'review-wait') f.extension.slices.G02.status = 'awaiting_review';
   f.save();

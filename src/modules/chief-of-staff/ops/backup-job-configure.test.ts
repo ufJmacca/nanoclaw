@@ -33,7 +33,7 @@ afterEach(() => {
   vi.resetAllMocks();
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
-function fixture() {
+function fixture(slice: 'G02' | 'G03' = 'G02') {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-job-configure-'));
   roots.push(home);
   fs.chmodSync(home, 0o700);
@@ -62,6 +62,7 @@ function fixture() {
       dataRoot: settings.dataRoot,
     },
     manifest = fixtureVaultRelease('G02');
+  manifest.slice = slice;
   const initial = initializeTarget(settings.stateRoot, binding);
   writeAtomic(settings.stateRoot, 'state.json', { ...initial, releaseId: manifest.releaseId, maintenance: false });
   const state = protectTarget(settings.stateRoot, binding);
@@ -93,22 +94,25 @@ function fixture() {
     invoke: () => configureTargetBackupJobs(settings, '/fixture/target-helper.js'),
   };
 }
-it('holds real operation/job locks during publication and releases them before activation', async () => {
-  const fxt = fixture(),
-    root = fxt.settings.stateRoot;
-  f.install.mockImplementation(async () => {
-    for (const suffix of ['.operation.lock', '.backup-schedule.lock', '.backup-upload.lock'])
-      await expect(withDeploymentLock(root + suffix, async () => {})).rejects.toThrow('target_deployment_locked');
-  });
-  f.activate.mockImplementation(async () => {
-    for (const suffix of ['.operation.lock', '.backup-schedule.lock', '.backup-upload.lock'])
-      await expect(withDeploymentLock(root + suffix, async () => 42)).resolves.toBe(42);
-    return { status: 'backup_jobs_active' };
-  });
-  await expect(fxt.invoke()).resolves.toMatchObject({ status: 'backup_jobs_active' });
-  expect(f.memory).toHaveBeenCalled();
-  expect(f.paths).toHaveBeenCalledWith(fxt.settings, 0);
-});
+it.each(['G02', 'G03'] as const)(
+  '%s holds real operation/job locks during publication and releases them before activation',
+  async (slice) => {
+    const fxt = fixture(slice),
+      root = fxt.settings.stateRoot;
+    f.install.mockImplementation(async () => {
+      for (const suffix of ['.operation.lock', '.backup-schedule.lock', '.backup-upload.lock'])
+        await expect(withDeploymentLock(root + suffix, async () => {})).rejects.toThrow('target_deployment_locked');
+    });
+    f.activate.mockImplementation(async () => {
+      for (const suffix of ['.operation.lock', '.backup-schedule.lock', '.backup-upload.lock'])
+        await expect(withDeploymentLock(root + suffix, async () => 42)).resolves.toBe(42);
+      return { status: 'backup_jobs_active' };
+    });
+    await expect(fxt.invoke()).resolves.toMatchObject({ status: 'backup_jobs_active' });
+    expect(f.memory).toHaveBeenCalled();
+    expect(f.paths).toHaveBeenCalledWith(fxt.settings, 0);
+  },
+);
 it('never waits behind a running uploader or publishes while a schedule owns its lock', async () => {
   const fxt = fixture();
   for (const suffix of ['.backup-upload.lock', '.backup-schedule.lock'])

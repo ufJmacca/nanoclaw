@@ -33,7 +33,7 @@ export function createCheckpointMaintenanceEffects(
   const recorded = async () => {
     verifyVaultMemory();
     const manifest = await service.verify();
-    if (manifest.slice !== 'G02') throw Error('checkpoint_maintenance_unverified');
+    if (!['G02', 'G03'].includes(manifest.slice)) throw Error('checkpoint_maintenance_unverified');
     const selected = recoveryReleaseForManifest(manifest),
       receipt = readPrivate<Record<string, unknown>>(
         path.join(settings.stateRoot, 'releases', manifest.releaseId, 'deployment.json'),

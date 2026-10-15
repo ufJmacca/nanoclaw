@@ -181,6 +181,44 @@ function historyFixture(profile: 'conversation' | 'mission') {
   return { ...f, source, base };
 }
 it.each(['conversation', 'mission'] as const)(
+  'round-trips hidden %s provider files through capture, archive and isolated recovery',
+  async (profile) => {
+    const f = historyFixture(profile);
+    fs.mkdirSync(f.base + '/skills/.system/empty', { recursive: true, mode: 0o755 });
+    fs.writeFileSync(f.base + '/.sandbox-migration', 'SYNTHETIC_MARKER', { mode: 0o600 });
+    fs.writeFileSync(f.base + '/skills/.system/SKILL.md', 'SYNTHETIC_PROVIDER_SKILL', { mode: 0o644 });
+    fs.writeFileSync(f.base + '/.auth-interrupted', 'CURRENT_AUTH_PRESERVE', { mode: 0o600 });
+    const receipt = await capturePrivateHistory(f.source, f.sink, profile);
+    fs.appendFileSync(f.base + '/sessions/history.jsonl', 'CURRENT_LATER_HISTORY');
+    const result = await f.recover(async (scope, entries) => {
+      const checked = verifyRecoveredPrivateHistory(scope, entries, f.source, profile);
+      const prefix =
+        profile +
+        '-backup/history/' +
+        (profile === 'conversation' ? generation : 'missions/' + generation + '/provider');
+      expect(scope.withFileBytes(prefix + '/.sandbox-migration', 1024, (b) => b.toString())).toBe('SYNTHETIC_MARKER');
+      expect(scope.withFileBytes(prefix + '/skills/.system/SKILL.md', 1024, (b) => b.toString())).toBe(
+        'SYNTHETIC_PROVIDER_SKILL',
+      );
+      expect(fs.statSync(scope.directory + '/' + prefix + '/skills/.system/empty').mode & 0o777).toBe(0o700);
+      expect(entries.some((e) => e.name.endsWith('/auth.json') || e.name.endsWith('/.auth-interrupted'))).toBe(false);
+      return checked;
+    }, true);
+    expect(result).toEqual(receipt);
+    expect(fs.readFileSync(f.base + '/sessions/history.jsonl', 'utf8')).toContain('CURRENT_LATER_HISTORY');
+    expect(fs.readFileSync(f.base + '/.auth-interrupted', 'utf8')).toBe('CURRENT_AUTH_PRESERVE');
+  },
+);
+it('refuses a hidden provider symlink before streaming any history', async () => {
+  const f = historyFixture('conversation');
+  fs.symlinkSync(f.base + '/sessions/history.jsonl', f.base + '/.hidden-link');
+  const write = vi.fn();
+  await expect(capturePrivateHistory(f.source, { write }, 'conversation')).rejects.toThrow(
+    /^private_history_capture_unavailable$/,
+  );
+  expect(write).not.toHaveBeenCalled();
+});
+it.each(['conversation', 'mission'] as const)(
   'checks recovered %s history using the v1 hash and tracked empty directories',
   async (profile) => {
     const f = historyFixture(profile),

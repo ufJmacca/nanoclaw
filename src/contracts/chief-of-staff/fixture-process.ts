@@ -30,7 +30,8 @@ export function startFixtureProcess(args: string[], env: NodeJS.ProcessEnv, outp
           .split(/\s+/);
         if (Number(fields[2]) === child.pid && !['Z', 'X'].includes(fields[0])) count++;
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        // A process can exit between listing it and reading its proc metadata.
+        if (!['ENOENT', 'ESRCH'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error;
       }
     }
     return count;

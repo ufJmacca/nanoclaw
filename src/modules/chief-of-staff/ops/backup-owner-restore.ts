@@ -70,12 +70,14 @@ export async function restoreOwnerVaultBackup(input: {
         recoveryDigest = digest(recovery),
         deadline = performance.now() + 45 * 60 * 1000;
       if (
-        manifest.slice !== 'G02' ||
+        !['G02', 'G03'].includes(manifest.slice) ||
         state.lifecycle !== 'protected' ||
         state.releaseId !== manifest.releaseId ||
         generation === null ||
-        validateReleaseManifest(readPrivate(path.join(settings.releaseRoot, args.backupReleaseId, 'release.json')))
-          .slice !== 'G02'
+        !['G02', 'G03'].includes(
+          validateReleaseManifest(readPrivate(path.join(settings.releaseRoot, args.backupReleaseId, 'release.json')))
+            .slice,
+        )
       )
         throw Error('restore_owner_required');
       const central = path.join(settings.dataRoot, 'v2.db'),

@@ -18,6 +18,7 @@ import type { StatusInput } from '../contracts/operations-protocol.js';
 import { digest, type Context, type Result } from '../domain/contracts.js';
 import { HostOwnerControls, parseOwnerControl, type DenialHandlers } from '../ops/owner-controls.js';
 import { hasTable } from '../../../db/connection.js';
+import { log } from '../../../log.js';
 export type ControllerDependencies = {
   db: Database.Database;
   enabled(): boolean;
@@ -43,8 +44,18 @@ export type ControllerDependencies = {
 };
 export class CosController {
   private readonly ownerControls: HostOwnerControls;
+  private intakeFailure: string | undefined;
   constructor(readonly dependencies: ControllerDependencies) {
     this.ownerControls = new HostOwnerControls(dependencies);
+  }
+  private intakeClosed(
+    reason: 'event_unverified' | 'native_session_unavailable' | 'native_boundary_unavailable' | 'runtime_unavailable',
+  ): true {
+    if (reason !== this.intakeFailure) {
+      this.intakeFailure = reason;
+      log.warn('CoS message intake closed', { reason });
+    }
+    return true;
   }
   reconcileControls(
     binding: CosBinding,
@@ -96,11 +107,12 @@ export class CosController {
     const d = this.dependencies,
       now = d.now?.() ?? Date.now();
     const verified = verifyIngress(binding, await d.facts(binding), event, now);
-    if (!verified) return true;
+    if (!verified) return this.intakeClosed('event_unverified');
     const session = d.session(binding.sessionId);
-    if (!session) return true;
+    if (!session) return this.intakeClosed('native_session_unavailable');
     const boundary = cosBoundary(session, d.db);
-    if (!boundary.restricted || !boundary.binding || digest(boundary.binding) !== digest(binding)) return true;
+    if (!boundary.restricted || !boundary.binding || digest(boundary.binding) !== digest(binding))
+      return this.intakeClosed('native_boundary_unavailable');
     const payloadDigest = digest(verified);
     const previous = d.db
       .prepare('SELECT payload_digest FROM cos_ingress_receipts WHERE scope_id=? AND ingress_id=?')
@@ -142,7 +154,9 @@ export class CosController {
       return true;
     }
     const control = parseControl(verified.text);
-    if (!d.enabled() || boundary.paused) return true;
+    if (boundary.paused) return true;
+    if (!d.enabled()) return this.intakeClosed('runtime_unavailable');
+    this.intakeFailure = undefined;
     if (control && control.kind !== 'pause') {
       const result = await d.decide(
         {

@@ -54,7 +54,13 @@ import { RestrictedExecutionProbe } from '../bridge/native-execution.js';
 import { getInstallSlug } from '../../../install-slug.js';
 import type { Session } from '../../../types.js';
 import { hasOwnerAccessDenials, ownerDenialsPermitResume, ownerDenialCheckpoint } from './owner-denial-resume.js';
-import { issueActivation, resumeContext, rebindRecoveredActivation } from './model-activation.js';
+import {
+  issueActivation,
+  resumeContext,
+  rebindRecoveredActivation,
+  verifyResumeActivation,
+} from './model-activation.js';
+import { catalogueResumeGuard, resumeCatalogueScope } from './catalogue-resume.js';
 
 import { isKnowledgeCommand, runKnowledgeAdmin, type KnowledgeAdminArguments } from './knowledge-admin.js';
 import { isCalendarCommand, runCalendarAdmin, type CalendarAdminArguments } from './calendar-admin.js';
@@ -95,7 +101,7 @@ export type ContextAdminArguments =
   | { command: 'operator-control'; scopeId: string; requestId: string; text: string }
   | { command: 'context-prepare'; scopeId: string }
   | { command: 'model-activate'; scopeId: string; policyFile: string }
-  | { command: 'context-resume'; scopeId: string; activationId: string; resumeId: string }
+  | { command: 'context-resume'; scopeId: string; activationId: string; resumeId: string; catalogueVersion?: number }
   | { command: 'context-recover'; scopeId: string; expectedGeneration: string; recoveryId: string };
 type Dependencies = {
   target(root: string): TargetState;
@@ -582,7 +588,9 @@ export async function contextAdminCommand(
       }
       if (args.command === 'context-resume') {
         let ownerDenialsCheckpoint: string | undefined;
-        if (hasOwnerAccessDenials(native, binding)) {
+        let catalogue: Awaited<ReturnType<typeof resumeCatalogueScope>> | undefined;
+        let catalogueGuard: ReturnType<typeof catalogueResumeGuard> | undefined;
+        if (hasOwnerAccessDenials(native, binding) || args.catalogueVersion !== undefined) {
           const remote = await connectChecked(env, 'runtime');
           try {
             if (
@@ -596,6 +604,37 @@ export async function contextAdminCommand(
               throw Error('operator_denial_requires_reconciliation');
             ownerDenialsCheckpoint = ownerDenialCheckpoint(native, binding);
             await remote.query('COMMIT');
+            if (args.catalogueVersion !== undefined) {
+              const policy = verifyResumeActivation(
+                { ...activationOptions, ownerDenialsCheckpoint },
+                args.activationId,
+                args.resumeId,
+              );
+              const request = {
+                binding,
+                activationId: args.activationId,
+                resumeId: args.resumeId,
+                expectedVersion: args.catalogueVersion,
+                policyDigest: digest(policy),
+              };
+              catalogueGuard = catalogueResumeGuard(root, native, request);
+              catalogue = await resumeCatalogueScope(remote, {
+                ...request,
+                ownerControlsDigest: catalogueGuard.ownerControlsDigest,
+                observeOnly: catalogueGuard.observeOnly,
+                check: async () => {
+                  await check();
+                  catalogueGuard!.check();
+                  verifyResumeActivation(
+                    { ...activationOptions, ownerDenialsCheckpoint },
+                    args.activationId,
+                    args.resumeId,
+                  );
+                  if (!(await ownerDenialsPermitResume(native, binding, remote)))
+                    throw Error('operator_denial_requires_reconciliation');
+                },
+              });
+            }
           } finally {
             await remote.end();
           }
@@ -603,11 +642,21 @@ export async function contextAdminCommand(
         }
         inbound = openInboundDb(binding.agentGroupId, binding.sessionId);
         outbound = openOutboundDb(binding.agentGroupId, binding.sessionId);
-        return resumeContext(
-          { ...activationOptions, inbound, outbound, ownerDenialsCheckpoint },
+        const resumed = resumeContext(
+          {
+            ...activationOptions,
+            inbound,
+            outbound,
+            ownerDenialsCheckpoint,
+            assertAuthority: () => {
+              assertAuthority();
+              catalogueGuard?.check();
+            },
+          },
           args.activationId,
           args.resumeId,
         );
+        return { ...resumed, ...(catalogue ? { catalogue } : {}) };
       }
       if (args.command === 'context-prepare') {
         const context = createConversationState(root, db).prepare(binding, accountFingerprint);

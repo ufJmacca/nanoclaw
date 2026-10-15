@@ -214,7 +214,7 @@ async function recovery(o: Options): Promise<Record<string, unknown>> {
         manifest = validateReleaseManifest(
           readJson(path.join(settings.releaseRoot, release.releaseId, 'release.json')),
         );
-      if (manifest.slice !== 'G02' || digest(manifest) !== release.manifestDigest)
+      if (!['G02', 'G03'].includes(manifest.slice) || digest(manifest) !== release.manifestDigest)
         throw Error('action_recovery_unavailable');
       return release;
     };

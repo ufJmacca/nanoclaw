@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { initTestDb, closeDb, getDb } from './db/connection.js';
 import {
   cosBoundary,
@@ -7,9 +7,11 @@ import {
   permitCosOutbound,
   prepareCosLaunch,
   setCosBoundaryHooks,
+  interceptCosIngress,
   type CosBinding,
 } from './cos-boundary.js';
 import type { Session } from './types.js';
+import { log } from './log.js';
 const binding: CosBinding = {
   scopeId: 'fixture',
   agentGroupId: 'cos',
@@ -35,6 +37,30 @@ afterEach(() => {
   closeDb();
 });
 describe('S01-T08 permanent host restriction', () => {
+  it('reports a failed trusted intake without leaking its error or falling through to ordinary routing', async () => {
+    const warn = vi.spyOn(log, 'warn').mockImplementation(() => {});
+    try {
+      setCosBoundaryHooks({
+        executionReady: () => false,
+        ingress: async () => {
+          throw Error('PRIVATE_CREDENTIAL_OR_MESSAGE');
+        },
+        validatePrivateDestination: async () => false,
+      });
+      expect(
+        await interceptCosIngress({
+          channelType: 'mattermost',
+          platformId: 'mattermost:fixture:private',
+          threadId: null,
+          message: { id: 'owner', kind: 'chat', content: '{}', timestamp: new Date().toISOString() },
+        }),
+      ).toBe(true);
+      expect(warn).toHaveBeenCalledWith('CoS message intake closed', { reason: 'trusted_intake_failed' });
+      expect(JSON.stringify(warn.mock.calls)).not.toContain('PRIVATE');
+    } finally {
+      warn.mockRestore();
+    }
+  });
   it('passes exact chat text to the final policy check and never treats an RPC as chat', async () => {
     getDb().exec('UPDATE cos_identity_boundaries SET paused=0');
     const seen: unknown[][] = [];

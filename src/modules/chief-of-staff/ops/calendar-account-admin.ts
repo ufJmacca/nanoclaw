@@ -4,7 +4,7 @@ import path from 'node:path';
 import type { CosBinding } from '../../../cos-boundary.js';
 import { digest } from '../domain/contracts.js';
 import { connectCosHostStore } from '../host-store.js';
-import { CalendarStore } from '../calendar/store.js';
+import { OwnerCalendarStore } from './owner-calendar-store.js';
 import { CalendarCredentialOwner } from '../calendar/credentials.js';
 import { CalendarAccessFences } from '../calendar/access-fences.js';
 import {
@@ -247,7 +247,7 @@ export async function runCalendarAccountAdmin(o: Options, d: Dependencies = {}):
       ingressId: 'owner-calendar-' + args.requestId,
     };
     const base = { scope_id: binding.scopeId, binding_id: args.bindingId, paused: true, live_model: 'not_invoked' };
-    const store = new CalendarStore(host.database);
+    const store = new OwnerCalendarStore(host.database);
     const authorised = await store.coverage(context);
     if (authorised.status !== 'ok') return { ...base, status: authorised.status };
     await o.check();

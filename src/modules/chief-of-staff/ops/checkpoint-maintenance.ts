@@ -50,7 +50,11 @@ export async function checkpointMaintenance(input: {
   const manifest = validateReleaseManifest(await effects.verify()),
     state = readTarget(root, binding),
     owner = 'release-backup-' + requestId;
-  if (manifest.slice !== 'G02' || state.lifecycle !== 'protected' || state.releaseId !== manifest.releaseId)
+  if (
+    !['G02', 'G03'].includes(manifest.slice) ||
+    state.lifecycle !== 'protected' ||
+    state.releaseId !== manifest.releaseId
+  )
     unverified();
   const directory = path.join(root, 'backup-checkpoints'),
     file = path.join(directory, requestId + '.json');

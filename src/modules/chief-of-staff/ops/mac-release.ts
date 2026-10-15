@@ -7,7 +7,7 @@ export function readReleaseExecution(
   slice: ReleaseManifest['slice'],
   forRelease = false,
 ): { active_slice: string } {
-  if (slice === 'G01' || slice === 'G02') {
+  if (slice === 'G01' || slice === 'G02' || slice === 'G03') {
     const ledger = readExtensionRelease(root, forRelease);
     if (ledger.active_slice !== slice) throw Error('active_slice_required');
     return ledger;
@@ -22,7 +22,7 @@ export function checkpointReleaseExecution(
   patch: Record<string, unknown>,
 ): void {
   readReleaseExecution(root, slice);
-  if (slice === 'G01' || slice === 'G02') checkpointExtensionRelease(root, patch);
+  if (slice === 'G01' || slice === 'G02' || slice === 'G03') checkpointExtensionRelease(root, patch);
   else checkpointLocalExecution(root, patch);
 }
 

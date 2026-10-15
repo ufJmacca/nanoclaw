@@ -9,7 +9,8 @@ import { INBOUND_SCHEMA, OUTBOUND_SCHEMA } from '../../../db/schema.js';
 import { getDeliveredIds, getDueOutboundMessages } from '../../../db/session-db.js';
 import { createConversationState } from '../bridge/conversation-state.js';
 import { ensureModelBudget, reserveSubscriptionAttempt, type SubscriptionActivation } from '../bridge/model-policy.js';
-import { issueActivation, resumeContext } from './model-activation.js';
+import { issueActivation, resumeContext, verifyResumeActivation } from './model-activation.js';
+import { catalogueResumeGuard } from './catalogue-resume.js';
 import { HostOwnerControls, parseOwnerControl } from './owner-controls.js';
 import type { Session } from '../../../types.js';
 const cleanup: Array<() => void> = [];
@@ -63,6 +64,61 @@ function fixture() {
   const options = { root, db, inbound, outbound, binding, accountFingerprint, assertAuthority: vi.fn() };
   return { root, db, inbound, outbound, binding, state, context, policy, options };
 }
+it('catalogue admission verification reads issued authority without renewing, charging or resuming', () => {
+  const f = fixture();
+  issueActivation(f.options, f.policy);
+  const before = f.db.prepare('SELECT used FROM cos_model_budgets').all();
+  expect(verifyResumeActivation(f.options, f.policy.activationId, randomUUID())).toEqual(f.policy);
+  expect(f.db.prepare('SELECT used FROM cos_model_budgets').all()).toEqual(before);
+  expect(f.db.prepare('SELECT paused FROM cos_identity_boundaries').get()).toEqual({ paused: 1 });
+  expect(fs.existsSync(path.join(f.root, 'context-resumptions'))).toBe(false);
+});
+it('freezes catalogue resume intent against a later owner pause without altering its native context', () => {
+  const f = fixture();
+  issueActivation(f.options, f.policy);
+  const request = {
+    binding: f.binding,
+    activationId: f.policy.activationId,
+    resumeId: randomUUID(),
+    expectedVersion: 2,
+    policyDigest: 'a'.repeat(64),
+  };
+  const guard = catalogueResumeGuard(f.root, f.db, request);
+  guard.check();
+  const session = {
+    id: f.binding.sessionId,
+    agent_group_id: f.binding.agentGroupId,
+    messaging_group_id: f.binding.messagingGroupId,
+    thread_id: null,
+    status: 'active',
+    agent_provider: 'codex',
+  } as Session;
+  const controls = new HostOwnerControls({ db: f.db, session: () => session, stop: () => {} }),
+    text = 'cos pause admission';
+  controls.record(
+    f.binding,
+    { id: 'later-pause', ownerId: f.binding.ownerId, text, timestamp: new Date().toISOString() },
+    parseOwnerControl(text)!,
+  );
+  expect(() => guard.check()).toThrow('resume_conflict');
+  expect(() => catalogueResumeGuard(f.root, f.db, request)).toThrow('resume_conflict');
+  expect(f.state.current(f.binding, f.policy.accountFingerprint, f.context.generation)).toBe(true);
+});
+it('a legacy native resume cannot acquire catalogue authority by adding an option on replay', () => {
+  const f = fixture();
+  issueActivation(f.options, f.policy);
+  const resumeId = randomUUID();
+  resumeContext(f.options, f.policy.activationId, resumeId);
+  expect(() =>
+    catalogueResumeGuard(f.root, f.db, {
+      binding: f.binding,
+      activationId: f.policy.activationId,
+      resumeId,
+      expectedVersion: 2,
+      policyDigest: 'a'.repeat(64),
+    }),
+  ).toThrow('resume_conflict');
+});
 it('S11-T05 every resume entry point requires the current remote denial checkpoint, including prepared-history replay', () => {
   const f = fixture();
   issueActivation(f.options, f.policy);

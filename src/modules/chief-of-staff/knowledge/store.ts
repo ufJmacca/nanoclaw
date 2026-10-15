@@ -17,6 +17,7 @@ import { KnowledgeAnswers, type AnswerHooks } from './answer-store.js';
 import { calendarSourceAccess } from '../calendar/source-access.js';
 import { hasCalendarReadScope } from '../calendar/reader.js';
 import { calendarAnswerNotice, checkCalendarContext, type CalendarAnswerNotice } from '../calendar/answer-notice.js';
+import { calendarEmptyWindowNotice } from '../calendar/empty-window-notice.js';
 export type KnowledgeContext = Context & { provider: string; generation: string };
 export type ImportSource = {
   sourceKey: string;
@@ -112,6 +113,11 @@ export class KnowledgeStore {
       calendarNotice: this.calendarNotice,
       calendarContext: (client, context, register) =>
         checkCalendarContext(client, context, () => this.calendarNotice(client, context), register),
+      calendarEmptyWindow: (client, context, request) =>
+        calendarEmptyWindowNotice(client, context, request, {
+          enabled: () => this.retrievalEnabled() && (options.calendarEnabled?.() ?? false),
+          access: this.calendarAccess,
+        }),
     });
     this.retentionMs = options.retentionMs ?? 30 * 24 * 60 * 60 * 1000;
     if (!Number.isSafeInteger(this.retentionMs) || this.retentionMs < 0 || this.retentionMs > 365 * 24 * 60 * 60 * 1000)

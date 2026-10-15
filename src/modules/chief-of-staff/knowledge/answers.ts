@@ -5,6 +5,7 @@ export {
   validAnswerDraft,
   type AnswerCitation,
   type AnswerDraft,
+  type CalendarEmptyWindow,
 } from '../contracts/answer-protocol.js';
 export type ResolvedCitation =
   | {
@@ -35,6 +36,7 @@ const label = (value: string) =>
 /** Reference correctness is blocking; whether an inference follows is a separate quality judgement. */
 export function renderAnswer(draft: AnswerDraft, resolved: ResolvedCitation[]): string {
   if (!validAnswerDraft(draft)) throw new Error('invalid_answer_draft');
+  if (draft.calendar_window) throw new Error('calendar_window_notice_required');
   const conversation = [
     ...(draft.notice === 'approval_required'
       ? ['Proposed changes require your approval before they take effect.']

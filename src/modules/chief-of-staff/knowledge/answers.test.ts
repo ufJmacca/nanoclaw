@@ -23,6 +23,37 @@ const source: ResolvedCitation = {
   text: 'Supplier approval is pending.',
   artifact_id: 'private-host-only',
 };
+it('admits only a typed request for a host-verified empty calendar window, without model claims', () => {
+  const value = {
+    kind: 'answer',
+    coverage: 'limited',
+    claims: [],
+    calendar: 'coverage',
+    calendar_window: {
+      binding_id: evidence,
+      calendar_id: 'primary',
+      time_min: '2026-10-15T13:00:00Z',
+      time_max: '2026-10-16T13:00:00Z',
+    },
+  };
+  expect(validAnswerDraft(value)).toBe(true);
+  if (!validAnswerDraft(value)) throw new Error('invalid fixture');
+  expect(() => renderAnswer(value, [])).toThrow('calendar_window_notice_required');
+  for (const invalid of [
+    { ...value, claims: draft.claims },
+    { ...value, kind: 'summary' },
+    { ...value, coverage: 'insufficient' },
+    { ...value, calendar: undefined },
+    { ...value, notice: 'approval_required' },
+    { ...value, questions: ['Is this free?'] },
+    { ...value, calendar_window: { ...value.calendar_window, scope_id: 'foreign' } },
+    { ...value, calendar_window: { ...value.calendar_window, last_success_at: 'forged' } },
+    { ...value, calendar_window: { ...value.calendar_window, binding_id: 'invalid' } },
+    { ...value, calendar_window: { ...value.calendar_window, calendar_id: '..' } },
+    { ...value, calendar_window: { ...value.calendar_window, time_min: 'tomorrow' } },
+  ])
+    expect(validAnswerDraft(invalid)).toBe(false);
+});
 it('accepts only a request for host-verified calendar coverage, never model-supplied freshness', () => {
   expect(validAnswerDraft({ ...draft, calendar: 'coverage' })).toBe(true);
   for (const calendar of ['complete', { last_success_at: '2026-10-01T00:00:00Z' }, true, null])

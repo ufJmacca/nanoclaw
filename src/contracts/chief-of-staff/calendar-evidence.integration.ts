@@ -11,6 +11,7 @@ import { BoundedDatabase } from '../../modules/chief-of-staff/store/client.js';
 import { KnowledgeArtifacts } from '../../modules/chief-of-staff/knowledge/artifacts.js';
 import { KnowledgeStore, type KnowledgeContext, type Evidence } from '../../modules/chief-of-staff/knowledge/store.js';
 import { CalendarStore } from '../../modules/chief-of-staff/calendar/store.js';
+import { OwnerCalendarStore } from '../../modules/chief-of-staff/ops/owner-calendar-store.js';
 import { CalendarEvidence } from '../../modules/chief-of-staff/calendar/evidence.js';
 import { CalendarAccessFences } from '../../modules/chief-of-staff/calendar/access-fences.js';
 import { fixtureCalendarReader } from '../../modules/chief-of-staff/calendar/fixture-reader.js';
@@ -145,165 +146,325 @@ async function find(text: string, ctx = fresh()) {
   assert.ok(row, 'calendar evidence missing');
   return { row, ctx };
 }
-test('S03 operator flow: explicit loopback link, selected sync, stable retry and local/database disconnect', async () => {
-  const fixtureRoot = path.join(base, 'operator');
-  fs.mkdirSync(fixtureRoot, { mode: 0o700 });
-  const roots = {
-      targetRoot: fixtureRoot + '/state',
-      installationRoot: fixtureRoot + '/app',
-      dataRoot: fixtureRoot + '/data',
-    },
-    backupRoot = fixtureRoot + '/backup';
-  for (const root of [...Object.values(roots), backupRoot, roots.targetRoot + '/calendar'])
-    fs.mkdirSync(root, { mode: 0o700 });
-  writeAtomic(roots.targetRoot + '/calendar', 'oauth-client.json', {
-    clientId: 'fixture.apps.googleusercontent.com',
-    clientSecret: 'OPERATOR_CLIENT_CANARY',
+const emptyWindowDraft = (bindingId: string, timeMin = '2026-10-05T13:00:00Z', timeMax = '2026-10-06T13:00:00Z') => ({
+  kind: 'answer',
+  coverage: 'limited',
+  claims: [],
+  calendar: 'coverage',
+  calendar_window: { binding_id: bindingId, calendar_id: 'selected', time_min: timeMin, time_max: timeMax },
+});
+test('G03 an empty selected window has host-checked text, freshness and exact publication authority', async () => {
+  const s = await setup('OutsideRequestedWindow');
+  s.fixture = fixtureCalendarReader({
+    access: { generation: s.id + ':1', calendarIds: ['selected'], scopes: [GOOGLE_EVENT_READ_SCOPE], auth: 'ready' },
+    calendars: { selected: [] },
   });
-  const inspect: StorageInspection = (command, args) =>
-    JSON.stringify(
-      command.endsWith('/findmnt')
-        ? {
-            filesystems: [
-              {
-                target: args[args.indexOf('--target') + 1],
-                source: '/dev/mapper/fixture',
-                fstype: 'ext4',
-                'maj:min': '253:0',
-                uuid: 'operator-fixture-storage',
-              },
-            ],
-          }
-        : {
-            blockdevices: [
-              { name: '/dev/mapper/fixture', type: 'crypt', 'maj:min': '253:0', uuid: 'operator-fixture-storage' },
-            ],
-          },
-    );
-  const requests: string[] = [];
-  const credentialJournalRoot = path.join(fixtureRoot, 'credential-journal');
-  fs.mkdirSync(credentialJournalRoot, { mode: 0o700 });
-  // Storage inspection is synthetic in this operator fixture. The actual
-  // encrypted-volume gate exercises the production vault journal separately.
-  const credentialQueue = new BackupQueue('a'.repeat(64), async (_kind, operation) => operation(credentialJournalRoot));
-  const credentialJournal: CredentialJournal = async (change, assertState) => {
-    await credentialQueue.recordCredential(change, assertState);
-  };
-  const transport = async (url: string, init: RequestInit) => {
-    requests.push(url);
-    if (url === 'https://oauth2.googleapis.com/token') {
-      assert.equal(init.method, 'POST');
-      return new Response(
-        JSON.stringify({
-          access_token: 'OPERATOR_ACCESS_CANARY',
-          refresh_token: 'OPERATOR_REFRESH_CANARY',
-          token_type: 'Bearer',
-          expires_in: 3600,
-          scope: GOOGLE_EVENT_READ_SCOPE,
-        }),
-      );
-    }
-    assert.equal(new URL(url).origin, 'https://www.googleapis.com');
-    assert.equal(new URL(url).pathname, '/calendar/v3/calendars/selected/events');
-    assert.equal(init.method, 'GET');
-    return new Response(JSON.stringify({ accessRole: 'reader', items: [event('OperatorCalendarFixtureCanary')] }));
-  };
-  const connect = async () => new PriorityStore(BoundedDatabase.fromConfig(await fixtureDatabaseConfig()));
-  const dependencies = {
-    inspect,
-    memory: () => {}, // Offline synthetic storage fixture; actual kernel memory checks have their own gate.
-    credentialJournal,
-    fetch: transport,
-    connect,
-    artifacts: () => artifacts,
-    display: async (url: string) => {
-      const auth = new URL(url),
-        callback = new URL(auth.searchParams.get('redirect_uri')!);
-      callback.searchParams.set('code', 'fixture-code');
-      callback.searchParams.set('state', auth.searchParams.get('state')!);
-      const response = await fetch(callback);
-      assert.equal(response.status, 200);
-      assert.doesNotMatch(await response.text(), /CANARY/);
-    },
-  };
-  const options = {
-    roots,
-    env: { COS_CALENDAR_ENABLED: 'true' },
-    binding: {
-      scopeId: scope,
-      ownerId: context.ownerId,
-      agentGroupId: scope,
-      sessionId: scope,
-      provider: 'codex',
-    } as CosBinding,
-    check: async () => {},
-    assertAuthority: () => {},
-  };
-  const configured = await runCalendarAccountAdmin(
-    { ...options, args: { command: 'calendar-setup', scopeId: scope, requestId: randomUUID(), backupRoot } },
-    dependencies,
+  await publish(s);
+  const ctx = fresh(),
+    request = randomUUID(),
+    draft = emptyWindowDraft(s.id);
+  const answer = await knowledge.answers.prepare(ctx, request, draft);
+  assert.equal(answer.status, 'ok');
+  assert.match(String(answer.text), /No observed meetings/);
+  assert.match(String(answer.text), /selected/);
+  assert.match(String(answer.text), /Australia\/Sydney/);
+  assert.match(String(answer.text), /6 October 2026/);
+  assert.match(String(answer.text), /Last successful calendar refresh:/);
+  assert.match(String(answer.text), /stored snapshot/i);
+  assert.doesNotMatch(String(answer.text), /OutsideRequestedWindow|insufficient|Inference:|free day/);
+  assert.equal((await knowledge.answers.prepare(ctx, request, draft)).text, answer.text);
+  assert.equal((await knowledge.answers.authorizePublication(ctx, String(answer.text))).status, 'ok');
+  assert.equal(
+    (await knowledge.answers.authorizePublication(ctx, String(answer.text) + ' Your whole day is free.')).status,
+    'denied',
   );
-  assert.equal(configured.status, 'configured_paused');
-  const bindingId = randomUUID();
-  writeAtomic(roots.targetRoot, 'selection.json', {
-    calendarIds: ['selected'],
-    timeZone: window.timeZone,
-    processingProviders: ['codex'],
-  });
-  const link = {
-    command: 'calendar-link' as const,
-    scopeId: scope,
-    bindingId,
-    requestId: randomUUID(),
-    manifestFile: roots.targetRoot + '/selection.json',
-  };
-  assert.equal((await runCalendarAccountAdmin({ ...options, args: link }, dependencies)).status, 'ok');
-  assert.equal((await runCalendarAccountAdmin({ ...options, args: link }, dependencies)).status, 'ok');
-  assert.equal(requests.length, 1);
-  assert.equal((await credentialQueue.pending('credentials')).length, 1);
-  writeAtomic(roots.targetRoot, 'sync.json', { calendarId: 'selected', window });
-  const sync = {
-    command: 'calendar-sync' as const,
-    scopeId: scope,
-    bindingId,
-    requestId: randomUUID(),
-    manifestFile: roots.targetRoot + '/sync.json',
-  };
-  assert.equal((await runCalendarAdmin({ ...options, args: sync }, dependencies)).status, 'ok');
-  assert.equal((await runCalendarAdmin({ ...options, args: sync }, dependencies)).status, 'ok');
-  assert.equal(requests.length, 2);
-  assert.equal((await credentialQueue.pending('credentials')).length, 1);
-  const [snapshot] = (
-    await pool.query('SELECT status FROM cos.calendar_snapshots WHERE scope_id=$1 AND id=$2', [scope, sync.requestId])
-  ).rows;
-  assert.equal(snapshot.status, 'complete');
-  const rows = (
-    await pool.query('SELECT event FROM cos.calendar_event_revisions WHERE scope_id=$1 AND binding_id=$2', [
-      scope,
-      bindingId,
-    ])
-  ).rows;
-  assert.equal(rows.length, 1);
-  assert.equal(rows[0].event.summary, 'OperatorCalendarFixtureCanary');
-  const disconnected = await runCalendarAdmin(
+  await calendar.start(context, s.id, 'selected', randomUUID(), window);
+  assert.equal((await knowledge.answers.get(ctx, String(answer.artifact_id))).status, 'denied');
+  assert.equal((await knowledge.answers.authorizePublication(ctx, String(answer.text))).status, 'denied');
+});
+test('G03 empty-window preparation refuses overlapping all-day events, incomplete windows and wrong selections', async () => {
+  const s = await setup('OverlappingAllDayEvent');
+  const unrefreshed = await knowledge.answers.prepare(fresh(), randomUUID(), emptyWindowDraft(s.id));
+  assert.equal(unrefreshed.status, 'denied');
+  await publish(s);
+  for (const draft of [
+    emptyWindowDraft(s.id, '2026-10-03T14:00:00Z', '2026-10-04T13:00:00Z'),
+    emptyWindowDraft(s.id, '2026-10-10T00:00:00Z', '2026-10-11T00:00:00Z'),
+    emptyWindowDraft(s.id, '2026-10-06T13:00:00Z', '2026-10-05T13:00:00Z'),
     {
-      ...options,
-      env: {},
-      args: { command: 'calendar-disconnect', scopeId: scope, bindingId, requestId: randomUUID() },
+      ...emptyWindowDraft(s.id),
+      calendar_window: { ...emptyWindowDraft(s.id).calendar_window, calendar_id: 'unselected' },
     },
-    dependencies,
+    emptyWindowDraft(randomUUID()),
+  ])
+    assert.equal((await knowledge.answers.prepare(fresh(), randomUUID(), draft)).status, 'denied');
+  const valid = await knowledge.answers.prepare(fresh(), randomUUID(), emptyWindowDraft(s.id));
+  assert.equal(valid.status, 'ok');
+  fences.deny(scope, s.id, 'revoked');
+  assert.equal((await knowledge.answers.prepare(fresh(), randomUUID(), emptyWindowDraft(s.id))).status, 'denied');
+});
+test('G03 a local withdrawal after empty-window artifact staging prevents publication', async () => {
+  const s = await setup('EmptyWindowPublicationRace');
+  await publish(s);
+  const raced = new KnowledgeStore(
+    database,
+    artifacts,
+    {
+      afterAnswerPublication: async () => {
+        fences.deny(scope, s.id, 'revoked');
+      },
+    },
+    { calendarAccess, calendarEnabled: () => true },
   );
-  assert.equal(disconnected.status, 'ok');
-  assert.equal(disconnected.local_access, 'denied');
-  const recorded = await calendar.connection(context, bindingId);
-  assert.equal((recorded.binding as { auth: string }).auth, 'disconnected');
-  assert.throws(
-    () => new CalendarAccessFences(roots.targetRoot + '/calendar/access-denials').assertOpen(scope, bindingId),
-    /calendar_auth_disconnected/,
+  assert.equal((await raced.answers.prepare(fresh(), randomUUID(), emptyWindowDraft(s.id))).status, 'denied');
+});
+test('G03 missing or quarantined observations cannot become a verified empty window', async () => {
+  const s = await setup('UncertainOutsideWindow');
+  const published = await publish(s);
+  await pool.query("UPDATE cos.calendar_observations SET lifecycle='quarantined' WHERE scope_id=$1 AND binding_id=$2", [
+    scope,
+    s.id,
+  ]);
+  assert.equal((await knowledge.answers.prepare(fresh(), randomUUID(), emptyWindowDraft(s.id))).status, 'denied');
+  await pool.query("UPDATE cos.calendar_observations SET lifecycle='current' WHERE scope_id=$1 AND binding_id=$2", [
+    scope,
+    s.id,
+  ]);
+  await pool.query(
+    "UPDATE cos.calendar_snapshots SET result=jsonb_set(result,'{event_count}','2') WHERE scope_id=$1 AND binding_id=$2 AND id=$3",
+    [scope, s.id, published.id],
   );
-  await assert.rejects(runCalendarAccountAdmin({ ...options, args: link }, dependencies), /calendar_auth_disconnected/);
-  assert.equal(requests.length, 2);
-  assert.doesNotMatch(JSON.stringify([configured, disconnected]), /CANARY|refreshToken|clientSecret/);
+  assert.equal((await knowledge.answers.prepare(fresh(), randomUUID(), emptyWindowDraft(s.id))).status, 'denied');
+  assert.equal(
+    (await knowledge.answers.prepare({ ...fresh(), provider: 'claude' }, randomUUID(), emptyWindowDraft(s.id))).status,
+    'denied',
+  );
+});
+test('S03 operator flow: explicit loopback link, selected sync, stable retry and local/database disconnect', async () => {
+  await pool.query("UPDATE cos.scopes SET status='paused' WHERE id=$1", [scope]);
+  const pausedScope = (await pool.query('SELECT to_jsonb(s) AS body FROM cos.scopes s WHERE id=$1', [scope])).rows[0];
+  assert.equal((await calendar.coverage(context)).status, 'denied');
+  try {
+    const fixtureRoot = path.join(base, 'operator');
+    fs.mkdirSync(fixtureRoot, { mode: 0o700 });
+    const roots = {
+        targetRoot: fixtureRoot + '/state',
+        installationRoot: fixtureRoot + '/app',
+        dataRoot: fixtureRoot + '/data',
+      },
+      backupRoot = fixtureRoot + '/backup';
+    for (const root of [...Object.values(roots), backupRoot, roots.targetRoot + '/calendar'])
+      fs.mkdirSync(root, { mode: 0o700 });
+    writeAtomic(roots.targetRoot + '/calendar', 'oauth-client.json', {
+      clientId: 'fixture.apps.googleusercontent.com',
+      clientSecret: 'OPERATOR_CLIENT_CANARY',
+    });
+    const inspect: StorageInspection = (command, args) =>
+      JSON.stringify(
+        command.endsWith('/findmnt')
+          ? {
+              filesystems: [
+                {
+                  target: args[args.indexOf('--target') + 1],
+                  source: '/dev/mapper/fixture',
+                  fstype: 'ext4',
+                  'maj:min': '253:0',
+                  uuid: 'operator-fixture-storage',
+                },
+              ],
+            }
+          : {
+              blockdevices: [
+                { name: '/dev/mapper/fixture', type: 'crypt', 'maj:min': '253:0', uuid: 'operator-fixture-storage' },
+              ],
+            },
+      );
+    const requests: string[] = [];
+    const credentialJournalRoot = path.join(fixtureRoot, 'credential-journal');
+    fs.mkdirSync(credentialJournalRoot, { mode: 0o700 });
+    // Storage inspection is synthetic in this operator fixture. The actual
+    // encrypted-volume gate exercises the production vault journal separately.
+    const credentialQueue = new BackupQueue('a'.repeat(64), async (_kind, operation) =>
+      operation(credentialJournalRoot),
+    );
+    const credentialJournal: CredentialJournal = async (change, assertState) => {
+      await credentialQueue.recordCredential(change, assertState);
+    };
+    const transport = async (url: string, init: RequestInit) => {
+      requests.push(url);
+      if (url === 'https://oauth2.googleapis.com/token') {
+        assert.equal(init.method, 'POST');
+        return new Response(
+          JSON.stringify({
+            access_token: 'OPERATOR_ACCESS_CANARY',
+            refresh_token: 'OPERATOR_REFRESH_CANARY',
+            token_type: 'Bearer',
+            expires_in: 3600,
+            scope: GOOGLE_EVENT_READ_SCOPE,
+          }),
+        );
+      }
+      assert.equal(new URL(url).origin, 'https://www.googleapis.com');
+      assert.equal(new URL(url).pathname, '/calendar/v3/calendars/selected/events');
+      assert.equal(init.method, 'GET');
+      return new Response(JSON.stringify({ accessRole: 'reader', items: [event('OperatorCalendarFixtureCanary')] }));
+    };
+    const connect = async () => new PriorityStore(BoundedDatabase.fromConfig(await fixtureDatabaseConfig()));
+    const dependencies = {
+      inspect,
+      memory: () => {}, // Offline synthetic storage fixture; actual kernel memory checks have their own gate.
+      credentialJournal,
+      fetch: transport,
+      connect,
+      artifacts: () => artifacts,
+      display: async (url: string) => {
+        const auth = new URL(url),
+          callback = new URL(auth.searchParams.get('redirect_uri')!);
+        callback.searchParams.set('code', 'fixture-code');
+        callback.searchParams.set('state', auth.searchParams.get('state')!);
+        const response = await fetch(callback);
+        assert.equal(response.status, 200);
+        assert.doesNotMatch(await response.text(), /CANARY/);
+      },
+    };
+    const options = {
+      roots,
+      env: { COS_CALENDAR_ENABLED: 'true' },
+      binding: {
+        scopeId: scope,
+        ownerId: context.ownerId,
+        agentGroupId: scope,
+        sessionId: scope,
+        provider: 'codex',
+      } as CosBinding,
+      check: async () => {},
+      assertAuthority: () => {},
+    };
+    const configured = await runCalendarAccountAdmin(
+      { ...options, args: { command: 'calendar-setup', scopeId: scope, requestId: randomUUID(), backupRoot } },
+      dependencies,
+    );
+    assert.equal(configured.status, 'configured_paused');
+    const bindingId = randomUUID();
+    writeAtomic(roots.targetRoot, 'selection.json', {
+      calendarIds: ['selected'],
+      timeZone: window.timeZone,
+      processingProviders: ['codex'],
+    });
+    const link = {
+      command: 'calendar-link' as const,
+      scopeId: scope,
+      bindingId,
+      requestId: randomUUID(),
+      manifestFile: roots.targetRoot + '/selection.json',
+    };
+    for (const denial of ['owner', 'group', 'revoked'] as const) {
+      const deniedLink = { ...link, bindingId: randomUUID(), requestId: randomUUID() };
+      if (denial === 'revoked') await pool.query("UPDATE cos.scopes SET status='revoked' WHERE id=$1", [scope]);
+      const deniedOptions = {
+        ...options,
+        binding: {
+          ...options.binding,
+          ...(denial === 'owner' ? { ownerId: 'foreign-owner' } : {}),
+          ...(denial === 'group' ? { agentGroupId: 'foreign-group' } : {}),
+        },
+        args: deniedLink,
+      };
+      assert.equal((await runCalendarAccountAdmin(deniedOptions, dependencies)).status, 'denied');
+      assert.equal(
+        fs.existsSync(roots.targetRoot + '/calendar-admin/' + deniedLink.bindingId + '/authorization.json'),
+        false,
+      );
+      assert.equal(fs.existsSync(roots.targetRoot + '/calendar-admin/' + deniedLink.bindingId + '/before'), false);
+      assert.equal(requests.length, 0);
+      assert.equal(
+        fs.readdirSync(roots.targetRoot + '/calendar/credentials').filter((name) => name.endsWith('.json')).length,
+        0,
+      );
+      await pool.query("UPDATE cos.scopes SET status='paused' WHERE id=$1", [scope]);
+    }
+    assert.equal((await runCalendarAccountAdmin({ ...options, args: link }, dependencies)).status, 'ok');
+    assert.equal((await runCalendarAccountAdmin({ ...options, args: link }, dependencies)).status, 'ok');
+    assert.equal(requests.length, 1);
+    assert.equal((await credentialQueue.pending('credentials')).length, 1);
+    const ownerStatus = await runCalendarAdmin(
+      { ...options, args: { command: 'calendar-status', scopeId: scope, offset: 0 } },
+      dependencies,
+    );
+    assert.equal(ownerStatus.status, 'ok');
+    assert.equal((await new OwnerCalendarStore(database).connection(context, bindingId)).status, 'ok');
+    assert.equal((await calendar.connection(context, bindingId)).status, 'denied');
+    assert.equal(
+      (
+        await calendar.bind(context, {
+          id: randomUUID(),
+          provider: 'fixture',
+          calendarIds: ['selected'],
+          scopes: [GOOGLE_EVENT_READ_SCOPE],
+          timeZone: window.timeZone,
+          processingProviders: ['codex'],
+        })
+      ).status,
+      'denied',
+    );
+    writeAtomic(roots.targetRoot, 'sync.json', { calendarId: 'selected', window });
+    const sync = {
+      command: 'calendar-sync' as const,
+      scopeId: scope,
+      bindingId,
+      requestId: randomUUID(),
+      manifestFile: roots.targetRoot + '/sync.json',
+    };
+    assert.equal((await runCalendarAdmin({ ...options, args: sync }, dependencies)).status, 'ok');
+    assert.equal((await runCalendarAdmin({ ...options, args: sync }, dependencies)).status, 'ok');
+    assert.equal(requests.length, 2);
+    assert.equal((await credentialQueue.pending('credentials')).length, 1);
+    const [snapshot] = (
+      await pool.query('SELECT status FROM cos.calendar_snapshots WHERE scope_id=$1 AND id=$2', [scope, sync.requestId])
+    ).rows;
+    assert.equal(snapshot.status, 'complete');
+    const rows = (
+      await pool.query('SELECT event FROM cos.calendar_event_revisions WHERE scope_id=$1 AND binding_id=$2', [
+        scope,
+        bindingId,
+      ])
+    ).rows;
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].event.summary, 'OperatorCalendarFixtureCanary');
+    const disconnected = await runCalendarAdmin(
+      {
+        ...options,
+        env: {},
+        args: { command: 'calendar-disconnect', scopeId: scope, bindingId, requestId: randomUUID() },
+      },
+      dependencies,
+    );
+    assert.equal(disconnected.status, 'ok');
+    assert.equal(disconnected.local_access, 'denied');
+    assert.equal((await calendar.connection(context, bindingId)).status, 'denied');
+    const recorded = (
+      await pool.query('SELECT auth FROM cos.calendar_bindings WHERE scope_id=$1 AND id=$2', [scope, bindingId])
+    ).rows[0];
+    assert.equal(recorded.auth, 'disconnected');
+    assert.throws(
+      () => new CalendarAccessFences(roots.targetRoot + '/calendar/access-denials').assertOpen(scope, bindingId),
+      /calendar_auth_disconnected/,
+    );
+    await assert.rejects(
+      runCalendarAccountAdmin({ ...options, args: link }, dependencies),
+      /calendar_auth_disconnected/,
+    );
+    assert.equal(requests.length, 2);
+    assert.doesNotMatch(JSON.stringify([configured, disconnected]), /CANARY|refreshToken|clientSecret/);
+    assert.deepEqual(
+      (await pool.query('SELECT to_jsonb(s) AS body FROM cos.scopes s WHERE id=$1', [scope])).rows[0],
+      pausedScope,
+    );
+    assert.equal((await calendar.coverage(context)).status, 'denied');
+    assert.equal((await calendar.start(context, bindingId, 'selected', randomUUID(), window)).status, 'denied');
+  } finally {
+    await pool.query("UPDATE cos.scopes SET status='active' WHERE id=$1", [scope]);
+  }
 });
 test('S03-T10: checked calendar notices survive replay but expire on refresh and access changes, even without event citations', async () => {
   const s = await setup('CoverageNoticeCanary');

@@ -17,6 +17,8 @@ const tools = new Set([
   'cos_action_get',
   'cos_action_cancel',
   ...strategyCoordinatorToolNames,
+  'cos_answer_prepare',
+  'cos_answer_get',
 ]);
 
 export async function createMandateToolBridge(

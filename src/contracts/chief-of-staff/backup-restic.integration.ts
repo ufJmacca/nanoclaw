@@ -1108,8 +1108,17 @@ async function completeCapturedPayloadRecovery(
     mission = source;
   fs.mkdirSync(conversation + '/' + generation + '/empty', { recursive: true, mode: 0o700 });
   fs.mkdirSync(mission + '/missions/' + generation + '/provider/empty', { recursive: true, mode: 0o700 });
-  const history = conversation + '/' + generation + '/history.jsonl';
+  const history = conversation + '/' + generation + '/history.jsonl',
+    providerMarker = 'SYNTHETIC_PROVIDER_MARKER',
+    providerSkill = 'SYNTHETIC_PROVIDER_SKILL';
   fs.writeFileSync(history, Buffer.alloc(150000, 0x41), { mode: 0o600 });
+  fs.writeFileSync(conversation + '/' + generation + '/.sandbox-migration', providerMarker, {
+    mode: 0o600,
+  });
+  fs.mkdirSync(conversation + '/' + generation + '/skills/.system', { recursive: true, mode: 0o700 });
+  fs.writeFileSync(conversation + '/' + generation + '/skills/.system/SKILL.md', providerSkill, {
+    mode: 0o600,
+  });
   fs.writeFileSync(conversation + '/' + generation + '/auth.json', 'SYNTHETIC_CURRENT_AUTH', { mode: 0o600 });
   fs.writeFileSync(mission + '/missions/' + generation + '/provider/history', 'SYNTHETIC_SPECIALIST_HISTORY', {
     mode: 0o600,
@@ -1536,7 +1545,21 @@ async function completeCapturedPayloadRecovery(
             assert.deepEqual(instructions.operations.nativeDenials, []);
             assert.equal(
               verifyRecoveredPrivateHistory(workspace, recovered.receipt.files, conversation, 'conversation').bytes,
-              150000,
+              150000 + Buffer.byteLength(providerMarker) + Buffer.byteLength(providerSkill),
+            );
+            assert.equal(
+              verifyRecoveredPrivateHistory(workspace, recovered.receipt.files, conversation, 'conversation').files,
+              3,
+            );
+            workspace.withFileBytes(
+              'conversation-backup/history/' + generation + '/.sandbox-migration',
+              1024,
+              (bytes) => assert.equal(bytes.toString('utf8'), providerMarker),
+            );
+            workspace.withFileBytes(
+              'conversation-backup/history/' + generation + '/skills/.system/SKILL.md',
+              1024,
+              (bytes) => assert.equal(bytes.toString('utf8'), providerSkill),
             );
             assert.equal(
               verifyRecoveredPrivateHistory(workspace, recovered.receipt.files, mission, 'mission').files,

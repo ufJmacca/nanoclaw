@@ -19,13 +19,14 @@ afterEach(() => {
   vi.restoreAllMocks();
   vi.useRealTimers();
 });
-function fixture() {
+function fixture(slice: 'G02' | 'G03' = 'G02') {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-upload-job-'));
   fs.chmodSync(base, 0o700);
   cleanup.push(() => fs.rmSync(base, { recursive: true, force: true }));
   const root = base + '/target',
     manifest = fixtureVaultRelease('G02'),
     requestId = randomUUID();
+  manifest.slice = slice;
   const binding = {
     hostFingerprint: 'a'.repeat(64),
     databaseFingerprint: 'b'.repeat(64),
@@ -104,23 +105,26 @@ function fixture() {
   const invoke = (mode?: 'deliver' | 'maintain') => uploadBackupJob({ root, binding, requestId, effects, mode });
   return { root, binding, manifest, queues, effects, events, native, requestId, add, invoke };
 }
-it('performs daily integrity and retention after delivery, and retains the verified time across idle runs', async () => {
-  const f = fixture();
-  f.add('state');
-  expect(await f.invoke()).toMatchObject({
-    status: 'backup_uploaded',
-    maintenance: { status: 'verified', lastVerifiedAt: expect.any(String) },
-  });
-  expect(f.effects.maintain).toHaveBeenCalledOnce();
-  const recorded = readPrivate<{ verifiedAt: string }>(f.root + '/backup-maintenance-status.json');
-  expect(await f.invoke()).toMatchObject({
-    status: 'backup_upload_idle',
-    maintenance: { lastVerifiedAt: recorded.verifiedAt },
-  });
-  f.add('credentials');
-  expect(await f.invoke()).toMatchObject({ maintenance: { status: 'not_due', lastVerifiedAt: recorded.verifiedAt } });
-  expect(f.effects.maintain).toHaveBeenCalledOnce();
-});
+it.each(['G02', 'G03'] as const)(
+  '%s performs daily integrity and retention after delivery, retaining the verified time across idle runs',
+  async (slice) => {
+    const f = fixture(slice);
+    f.add('state');
+    expect(await f.invoke()).toMatchObject({
+      status: 'backup_uploaded',
+      maintenance: { status: 'verified', lastVerifiedAt: expect.any(String) },
+    });
+    expect(f.effects.maintain).toHaveBeenCalledOnce();
+    const recorded = readPrivate<{ verifiedAt: string }>(f.root + '/backup-maintenance-status.json');
+    expect(await f.invoke()).toMatchObject({
+      status: 'backup_upload_idle',
+      maintenance: { lastVerifiedAt: recorded.verifiedAt },
+    });
+    f.add('credentials');
+    expect(await f.invoke()).toMatchObject({ maintenance: { status: 'not_due', lastVerifiedAt: recorded.verifiedAt } });
+    expect(f.effects.maintain).toHaveBeenCalledOnce();
+  },
+);
 it('permits an owner integrity check with an empty queue under the independent uploader lock', async () => {
   const f = fixture(),
     before = f.native.serialize();

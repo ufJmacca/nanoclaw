@@ -149,10 +149,10 @@ export function fixtureRelease(slice: ReleaseManifest['slice'] = 'S01'): Release
   };
 }
 /** Synthetic G01/G02 contracts for admin tests; their payload/image identities are never deployment evidence. */
-export function fixtureVaultRelease(slice: 'G01' | 'G02' = 'G01'): ReleaseManifest {
+export function fixtureVaultRelease(slice: 'G01' | 'G02' | 'G03' = 'G01'): ReleaseManifest {
   const manifest = fixtureRelease('S11');
   manifest.slice = slice;
-  if (slice === 'G02') manifest.backupArtifact = RESTIC_ARTIFACT;
+  if (slice === 'G02' || slice === 'G03') manifest.backupArtifact = RESTIC_ARTIFACT;
   const seal = {
     contract: 'cos-vault-root-artifact/v1' as const,
     sourceCommit: manifest.source.commit,
@@ -164,7 +164,9 @@ export function fixtureVaultRelease(slice: 'G01' | 'G02' = 'G01'): ReleaseManife
     },
   };
   manifest.vaultArtifact = { digest: digest(seal), seal };
-  manifest.previousReleaseIds = [slice === 'G01' ? 'release-reviewed-s11' : 'release-reviewed-g01'];
+  manifest.previousReleaseIds = [
+    slice === 'G01' ? 'release-reviewed-s11' : slice === 'G02' ? 'release-reviewed-g01' : 'release-reviewed-g02',
+  ];
   manifest.checks = Object.fromEntries(
     requiredReleaseChecks(slice).map((name) => [
       name,

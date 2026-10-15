@@ -29,13 +29,13 @@ RUN pnpm build && bun build src/modules/chief-of-staff/ops/target-bootstrap.ts -
 ARG RELEASE_SLICE=S11
 ARG SOURCE_COMMIT
 ARG SOURCE_TREE
-RUN if [ "$RELEASE_SLICE" = G01 ] || [ "$RELEASE_SLICE" = G02 ]; then \
+RUN if [ "$RELEASE_SLICE" = G01 ] || [ "$RELEASE_SLICE" = G02 ] || [ "$RELEASE_SLICE" = G03 ]; then \
       bun build src/modules/chief-of-staff/ops/vault-root-entry.ts --target=node --format=esm --packages=external --outfile=/build/vault-gateway.mjs && \
       node --input-type=module -e 'import {packageVaultRootArtifact} from "./dist/modules/chief-of-staff/ops/vault-root-package.js";packageVaultRootArtifact({sourceCommit:process.argv[1],sourceTree:process.argv[2],gateway:"/build/vault-gateway.mjs",output:"/build/vault-artifacts"})' "$SOURCE_COMMIT" "$SOURCE_TREE" && \
       rm /build/vault-gateway.mjs; \
     fi
 
-# G02 receives only the separately verified public binary/seal build context.
+# Backup-capable releases receive only the verified public binary/seal build context.
 # Ordinary releases do not evaluate this stage or include backup credentials.
 FROM scratch AS backup-artifact-input
 FROM host-build AS host-build-standard
@@ -47,7 +47,7 @@ RUN node --input-type=module -e 'import {verifyResticReleasePayload} from "./dis
 FROM host-build-${RELEASE_FLAVOUR} AS host-build-selected
 ARG RELEASE_SLICE=S11
 RUN case "$RELEASE_SLICE" in \
-      G02) node --input-type=module -e 'import {verifyResticReleasePayload} from "./dist/modules/chief-of-staff/ops/restic-release-payload.js";verifyResticReleasePayload("/build/libexec")' ;; \
+      G02|G03) node --input-type=module -e 'import {verifyResticReleasePayload} from "./dist/modules/chief-of-staff/ops/restic-release-payload.js";verifyResticReleasePayload("/build/libexec")' ;; \
       G01|S11) test ! -e /build/libexec/restic ;; \
       *) exit 1 ;; \
     esac

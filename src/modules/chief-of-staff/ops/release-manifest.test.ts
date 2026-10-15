@@ -23,11 +23,11 @@ const backupChecks = [
   'backup_recovery',
   'backup_units',
 ];
-function backupManifest() {
+function backupManifest(slice: 'G02' | 'G03' = 'G02') {
   const value = vaultManifest();
-  value.slice = 'G02';
+  value.slice = slice;
   Object.assign(value, { backupArtifact: RESTIC_ARTIFACT });
-  value.previousReleaseIds = ['release-reviewed-g01'];
+  value.previousReleaseIds = [slice === 'G03' ? 'release-reviewed-g02' : 'release-reviewed-g01'];
   for (const name of backupChecks)
     value.checks[name] = {
       status: 'passed',
@@ -76,78 +76,80 @@ it('G01 requires its sealed helper and additional immutable vault gates while pr
   expect(supportsReleaseSchema(validateReleaseManifest(value), 18, 22)).toBe(true);
   expect(supportsReleaseSchema(validateReleaseManifest(value), 17, 22)).toBe(false);
 });
-it('G02 requires every backup and inherited vault gate for the same sealed ARM64 host and exact schemas', () => {
-  const value = backupManifest(),
-    checked = validateReleaseManifest(value);
-  expect(checked).toEqual(value);
-  expect(requiredReleaseChecks(checked.slice)).toEqual([
-    ...REQUIRED_RELEASE_CHECKS,
-    'vault_helper',
-    'vault_kernel',
-    'vault_units',
-    'vault_wire',
-    'protected_state',
-    ...backupChecks,
-  ]);
-  expect(supportsReleaseSchema(checked, 18, 22)).toBe(true);
-  expect(supportsReleaseSchema(checked, 17, 22)).toBe(false);
-  expect(supportsReleaseSchema(checked, 18, 21)).toBe(false);
-});
-it.each(['absent', 'version', 'platform', 'bytes', 'sha256', 'compressedSha256', 'unexpected'])(
-  'G02 refuses a %s backup executable seal despite otherwise complete checks',
-  (reason) => {
-    const value = backupManifest() as unknown as Record<string, unknown>,
-      artifact: Record<string, unknown> = { ...RESTIC_ARTIFACT };
-    value.backupArtifact = artifact;
-    if (reason === 'absent') delete value.backupArtifact;
-    else if (reason === 'unexpected') artifact.path = '/arbitrary/executable';
-    else artifact[reason] = reason === 'bytes' ? RESTIC_ARTIFACT.bytes + 1 : 'different';
-    expect(() => validateReleaseManifest(value)).toThrow('release_not_transferable');
-  },
-);
-it.each(backupChecks)('G02 denies incomplete or differently bound %s final-image evidence', (name) => {
-  for (const patch of [
-    { status: 'failed' },
-    { sourceCommit: '0'.repeat(40) },
-    { at: 'invalid' },
-    { imageIds: [] },
-    { imageIds: [agent] },
-    { imageIds: [image, image] },
-    { imageIds: [image, agent] },
-    { imageIds: ['sha256:' + '0'.repeat(64)] },
-  ]) {
-    const value = backupManifest();
-    Object.assign(value.checks[name], patch);
-    expect(() => validateReleaseManifest(value)).toThrow('release_not_transferable');
-  }
-  const value = backupManifest();
-  delete value.checks[name];
-  expect(() => validateReleaseManifest(value)).toThrow('release_not_transferable');
-});
-it.each(['vault_helper', 'vault_kernel', 'vault_units', 'vault_wire', 'protected_state'])(
-  'G02 still requires the inherited %s gate',
-  (name) => {
-    const value = backupManifest();
+describe.each(['G02', 'G03'] as const)('%s encrypted release safeguards', (slice) => {
+  it('the release requires every backup and inherited vault gate for the same sealed ARM64 host and exact schemas', () => {
+    const value = backupManifest(slice),
+      checked = validateReleaseManifest(value);
+    expect(checked).toEqual(value);
+    expect(requiredReleaseChecks(checked.slice)).toEqual([
+      ...REQUIRED_RELEASE_CHECKS,
+      'vault_helper',
+      'vault_kernel',
+      'vault_units',
+      'vault_wire',
+      'protected_state',
+      ...backupChecks,
+    ]);
+    expect(supportsReleaseSchema(checked, 18, 22)).toBe(true);
+    expect(supportsReleaseSchema(checked, 17, 22)).toBe(false);
+    expect(supportsReleaseSchema(checked, 18, 21)).toBe(false);
+  });
+  it.each(['absent', 'version', 'platform', 'bytes', 'sha256', 'compressedSha256', 'unexpected'])(
+    'the release refuses a %s backup executable seal despite otherwise complete checks',
+    (reason) => {
+      const value = backupManifest(slice) as unknown as Record<string, unknown>,
+        artifact: Record<string, unknown> = { ...RESTIC_ARTIFACT };
+      value.backupArtifact = artifact;
+      if (reason === 'absent') delete value.backupArtifact;
+      else if (reason === 'unexpected') artifact.path = '/arbitrary/executable';
+      else artifact[reason] = reason === 'bytes' ? RESTIC_ARTIFACT.bytes + 1 : 'different';
+      expect(() => validateReleaseManifest(value)).toThrow('release_not_transferable');
+    },
+  );
+  it.each(backupChecks)('the release denies incomplete or differently bound %s final-image evidence', (name) => {
+    for (const patch of [
+      { status: 'failed' },
+      { sourceCommit: '0'.repeat(40) },
+      { at: 'invalid' },
+      { imageIds: [] },
+      { imageIds: [agent] },
+      { imageIds: [image, image] },
+      { imageIds: [image, agent] },
+      { imageIds: ['sha256:' + '0'.repeat(64)] },
+    ]) {
+      const value = backupManifest(slice);
+      Object.assign(value.checks[name], patch);
+      expect(() => validateReleaseManifest(value)).toThrow('release_not_transferable');
+    }
+    const value = backupManifest(slice);
     delete value.checks[name];
     expect(() => validateReleaseManifest(value)).toThrow('release_not_transferable');
-  },
-);
-it.each(['no-seal', 'digest', 'source', 'tree', 'runtime', 'predecessor', 'old-checks-only', 'native-schema'])(
-  'G02 refuses %s with otherwise complete backup evidence',
-  (reason) => {
-    const value = backupManifest();
-    if (reason === 'no-seal') Object.assign(value, { vaultArtifact: undefined });
-    if (reason === 'digest') value.vaultArtifact.digest = '0'.repeat(64);
-    if (reason === 'source') value.vaultArtifact.seal.sourceCommit = '0'.repeat(40);
-    if (reason === 'tree') value.vaultArtifact.seal.sourceTree = '0'.repeat(40);
-    if (reason === 'runtime') value.vaultArtifact.seal.runtime.version = '24.0.0';
-    if (reason === 'predecessor') value.previousReleaseIds = [];
-    if (reason === 'old-checks-only') value.checks = vaultManifest().checks;
-    if (reason === 'native-schema') value.sqlite = { minimum: 21, maximum: 22 };
-    if (!['no-seal', 'digest'].includes(reason)) value.vaultArtifact.digest = digest(value.vaultArtifact.seal);
-    expect(() => validateReleaseManifest(value)).toThrow('release_not_transferable');
-  },
-);
+  });
+  it.each(['vault_helper', 'vault_kernel', 'vault_units', 'vault_wire', 'protected_state'])(
+    'the release still requires the inherited %s gate',
+    (name) => {
+      const value = backupManifest(slice);
+      delete value.checks[name];
+      expect(() => validateReleaseManifest(value)).toThrow('release_not_transferable');
+    },
+  );
+  it.each(['no-seal', 'digest', 'source', 'tree', 'runtime', 'predecessor', 'old-checks-only', 'native-schema'])(
+    'the release refuses %s with otherwise complete backup evidence',
+    (reason) => {
+      const value = backupManifest(slice);
+      if (reason === 'no-seal') Object.assign(value, { vaultArtifact: undefined });
+      if (reason === 'digest') value.vaultArtifact.digest = '0'.repeat(64);
+      if (reason === 'source') value.vaultArtifact.seal.sourceCommit = '0'.repeat(40);
+      if (reason === 'tree') value.vaultArtifact.seal.sourceTree = '0'.repeat(40);
+      if (reason === 'runtime') value.vaultArtifact.seal.runtime.version = '24.0.0';
+      if (reason === 'predecessor') value.previousReleaseIds = [];
+      if (reason === 'old-checks-only') value.checks = vaultManifest().checks;
+      if (reason === 'native-schema') value.sqlite = { minimum: 21, maximum: 22 };
+      if (!['no-seal', 'digest'].includes(reason)) value.vaultArtifact.digest = digest(value.vaultArtifact.seal);
+      expect(() => validateReleaseManifest(value)).toThrow('release_not_transferable');
+    },
+  );
+});
 it.each(['vault_helper', 'vault_kernel', 'vault_units', 'vault_wire', 'protected_state'])(
   'G01 refuses a missing, failed or foreign-image %s gate',
   (name) => {

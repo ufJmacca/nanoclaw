@@ -6,7 +6,8 @@ import type { CosBinding } from '../../../cos-boundary.js';
 import { digest } from '../domain/contracts.js';
 import { connectCosHostStore } from '../host-store.js';
 import { openKnowledgeArtifacts } from '../knowledge/config.js';
-import { CalendarStore, type CalendarConnection } from '../calendar/store.js';
+import type { CalendarConnection } from '../calendar/store.js';
+import { OwnerCalendarStore } from './owner-calendar-store.js';
 import { CalendarEvidence } from '../calendar/evidence.js';
 import { CalendarConnector } from '../calendar/connector.js';
 import { calendarSettings, openCalendarCredentials, openCalendarFences } from '../calendar/config.js';
@@ -248,7 +249,7 @@ export async function runCalendarAdmin(
     );
     try {
       await options.check();
-      const store = new CalendarStore(
+      const store = new OwnerCalendarStore(
         host.database,
         {},
         new CalendarEvidence(

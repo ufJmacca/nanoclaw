@@ -122,7 +122,7 @@ esac
       : [],
   };
 }
-it.each(['G01', 'G02'])(
+it.each(['G01', 'G02', 'G03'])(
   '%s uses the already protected target without rerunning original programme closure',
   (slice) => {
     const { result, remote } = invoke(false, 0, slice);
@@ -131,7 +131,7 @@ it.each(['G01', 'G02'])(
     expect(remote).not.toContain('protection');
   },
 );
-it.each(['G01', 'G02'])('%s stops before staging when its protected target observation is denied', (slice) => {
+it.each(['G01', 'G02', 'G03'])('%s stops before staging when its protected target observation is denied', (slice) => {
   const { result, remote } = invoke(false, 5, slice);
   expect(result.status).not.toBe(0);
   expect(remote).toEqual(['inspect']);
@@ -170,6 +170,8 @@ it.each([
   ['G01', true],
   ['G02', false],
   ['G02', true],
+  ['G03', false],
+  ['G03', true],
 ] as const)('%s protects the actual deployment process for recovery=%s', (slice, recovery) => {
   const { result, id, remote } = invoke(recovery, 0, slice);
   expect(result.status, result.stderr).toBe(0);
@@ -185,7 +187,7 @@ it.each([
       (recovery ? ' release-failed' : ''),
   );
 });
-it.each(['G01', 'G02'])('%s refuses an empty command before starting a protected unit', (slice) => {
+it.each(['G01', 'G02', 'G03'])('%s refuses an empty command before starting a protected unit', (slice) => {
   const { result, remote } = invoke(false, 2, slice);
   expect(result.status).not.toBe(0);
   expect(remote.at(-1)).toBe('bootstrap prepare');

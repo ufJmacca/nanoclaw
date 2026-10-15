@@ -1,3 +1,4 @@
+import { validBackupPathSegment } from './backup-names.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
@@ -7,7 +8,8 @@ import { BACKUP_LIMITS } from './backup-policy.js';
 const pinned = (fd: number) => '/proc/self/fd/' + fd;
 function directory(file: string, device?: number): number {
   const alias = /^\/proc\/self\/fd\/\d+$/.test(file);
-  const heldChild = device !== undefined && /^\/proc\/self\/fd\/\d+\/(?:[A-Za-z0-9]|\.cos-)[A-Za-z0-9_.-]*$/.test(file);
+  const heldChild =
+    device !== undefined && /^\/proc\/self\/fd\/\d+\/[^/]+$/.test(file) && validBackupPathSegment(path.basename(file));
   if (!path.isAbsolute(file) || path.resolve(file) !== file || (!alias && !heldChild && fs.realpathSync(file) !== file))
     throw Error('unsafe_archive_directory');
   const fd = fs.openSync(
@@ -50,7 +52,7 @@ function validate(receipt: BackupQueueReceipt): void {
         typeof file.name !== 'string' ||
         file.name.length > 192 ||
         file.name.split('/').length > 8 ||
-        !file.name.split('/').every((part) => /^(?:[A-Za-z0-9]|\.cos-)[A-Za-z0-9_.-]*$/.test(part)) ||
+        !file.name.split('/').every((part) => validBackupPathSegment(part)) ||
         !Number.isSafeInteger(file.bytes) ||
         file.bytes < 0 ||
         !/^[a-f0-9]{64}$/.test(file.sha256),
@@ -94,7 +96,7 @@ export function backupArchiveEntryPrefix(name: string, size: number, index: numb
   if (
     typeof name !== 'string' ||
     name.length > 200 ||
-    !name.split('/').every((part) => /^(?:[A-Za-z0-9]|\.cos-)[A-Za-z0-9_.-]*$/.test(part)) ||
+    !name.split('/').every((part) => validBackupPathSegment(part)) ||
     !Number.isSafeInteger(size) ||
     size < 0 ||
     size > BACKUP_LIMITS.staging ||
