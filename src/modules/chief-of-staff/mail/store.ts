@@ -306,6 +306,27 @@ export class MailStore {
       return { status: 'ok', window: { capturedAt, since: capturedAt - MAIL_RETENTION_MS } };
     });
   }
+  /** Trusted host access loss only. A new link must use a fresh binding identity. */
+  async setAuth(context: Context, binding: string, auth: Exclude<MailConnection['auth'], 'ready'>): Promise<Result> {
+    if (context.origin || !uuid(binding) || !['expired', 'revoked', 'disconnected'].includes(auth))
+      return { status: 'denied' };
+    return this.transaction(
+      context,
+      true,
+      async (client) => {
+        const current = await this.binding(client, context, binding);
+        if (!current) return { status: 'denied' };
+        if (current.auth !== 'ready') return { status: 'ok', auth: current.auth };
+        await client.query(
+          'UPDATE cos.mail_bindings SET auth=$3,version=version+1,updated_at=clock_timestamp() WHERE scope_id=$1 AND id=$2',
+          [context.scopeId, binding, auth],
+        );
+        return { status: 'ok', auth };
+      },
+      true,
+      true,
+    );
+  }
   private async previous(
     client: PoolClient,
     context: Context,

@@ -17,6 +17,9 @@ import { normalizeMailMessage, type MailWindow } from '../../modules/chief-of-st
 import { digest } from '../../modules/chief-of-staff/domain/contracts.js';
 import { KnowledgeStore } from '../../modules/chief-of-staff/knowledge/store.js';
 import { MailView } from '../../modules/chief-of-staff/mail/view.js';
+import { MailConnector } from '../../modules/chief-of-staff/mail/connector.js';
+import { CalendarAccessFences } from '../../modules/chief-of-staff/calendar/access-fences.js';
+import { MailReadError } from '../../modules/chief-of-staff/mail/reader.js';
 const scopes: string[] = [],
   roots: string[] = [];
 let admin: pg.Client, database: BoundedDatabase;
@@ -679,6 +682,134 @@ test('G04 a refresh starting during answer publication cannot commit the previou
   assert.equal(hookCalled, true);
   assert.equal(answer.status, 'denied');
   assert.equal((await knowledge.contextReady(f.context)).status, 'ok');
+});
+test('G04 host refresh publishes through the real store and a reconstructed mail journal preserves provider revocation', async () => {
+  const f = await fixture();
+  assert.equal((await f.store.bind(f.context, f.binding)).status, 'ok');
+  fs.mkdirSync(f.root + '/mail-fences', { mode: 0o700 });
+  const fences = CalendarAccessFences.initialize(f.root + '/mail-fences');
+  let revoked = false;
+  const options = {
+    store: f.store,
+    fences,
+    admitted: () => true,
+    verifyStorage: () => {},
+    fixtureReader: () => ({
+      profile: async () => {
+        if (revoked) throw new MailReadError('mail_auth_revoked');
+        return { mailboxEmail: f.binding.mailboxEmail, historyId: '100' };
+      },
+      list: async () => ({ messages: [], nextPageToken: null, resultSizeEstimate: 0 }),
+      history: async () => ({ changedIds: [], deletedIds: [], historyId: '101', nextPageToken: null }),
+      message: async () => ({ status: 'excluded' as const, reason: 'not_selected' as const }),
+      thread: async () => ({ messages: [], excluded: 0, unsupported: 0 }),
+    }),
+  };
+  const connector = new MailConnector(options),
+    first = randomUUID();
+  assert.equal((await connector.refresh(f.context, f.binding.id, first)).result.status, 'ok');
+  assert.equal(
+    (await admin.query('SELECT current_capture,history_cursor FROM cos.mail_states WHERE scope_id=$1', [f.scope]))
+      .rows[0].current_capture,
+    first,
+  );
+  revoked = true;
+  const denied = await connector.refresh(f.context, f.binding.id, randomUUID());
+  assert.equal(denied.result.status, 'denied');
+  assert.equal(denied.result.access_loss, 'revoked');
+  const reconstructed = new MailConnector({ ...options, fences: new CalendarAccessFences(f.root + '/mail-fences') });
+  assert.throws(() => reconstructed.assertOpen(f.scope, f.binding.id), /auth_revoked/);
+  assert.equal(
+    (await admin.query('SELECT auth FROM cos.mail_bindings WHERE scope_id=$1', [f.scope])).rows[0].auth,
+    'revoked',
+  );
+  assert.equal(
+    (await admin.query('SELECT current_capture FROM cos.mail_states WHERE scope_id=$1', [f.scope])).rows[0]
+      .current_capture,
+    first,
+  );
+});
+test('G04 host refresh reconciles the exact committed capture after losing publication acknowledgement', async () => {
+  let interrupted = false;
+  const f = await fixture({
+    afterPublishCommit: async () => {
+      if (!interrupted) {
+        interrupted = true;
+        throw Error('FIXTURE_LOST_PUBLICATION_ACK');
+      }
+    },
+  });
+  await f.store.bind(f.context, f.binding);
+  const options = {
+    store: f.store,
+    admitted: () => true,
+    verifyStorage: () => {},
+    fences: {
+      assertOpen: () => {},
+      deny: () => {},
+      runCheck: async <T>(_scope: string, _binding: string, operation: () => Promise<T>) => operation(),
+    },
+    fixtureReader: () => ({
+      profile: async () => ({ mailboxEmail: f.binding.mailboxEmail, historyId: '100' }),
+      list: async () => ({ messages: [], nextPageToken: null, resultSizeEstimate: 0 }),
+      message: async () => ({ status: 'excluded' as const, reason: 'not_selected' as const }),
+      thread: async () => ({ messages: [], excluded: 0, unsupported: 0 }),
+      history: async () => ({ changedIds: [], deletedIds: [], historyId: '101', nextPageToken: null }),
+    }),
+  };
+  const connector = new MailConnector(options),
+    id = randomUUID();
+  const first = await connector.refresh(f.context, f.binding.id, id);
+  assert.equal(first.result.status, 'pending');
+  assert(first.prepared);
+  // Reconstruct the runtime pool after the lost acknowledgement, like host recovery.
+  await database.pool.end();
+  database = BoundedDatabase.fromConfig(await fixtureDatabaseConfig());
+  const restored = new MailConnector({
+    ...options,
+    store: new MailStore(database, f.artifacts),
+    fixtureReader: () => {
+      throw Error('PROVIDER_MUST_NOT_BE_REPLAYED');
+    },
+  });
+  assert.equal((await restored.refresh(f.context, f.binding.id, id, first.prepared)).result.status, 'ok');
+  assert.equal(
+    (await admin.query('SELECT current_capture FROM cos.mail_states WHERE scope_id=$1', [f.scope])).rows[0]
+      .current_capture,
+    id,
+  );
+  assert.equal(
+    (
+      await admin.query(
+        "SELECT count(*)::int AS n FROM cos.mail_captures WHERE scope_id=$1 AND metadata->>'contract'='cos-mail-capture/v1'",
+        [f.scope],
+      )
+    ).rows[0].n,
+    1,
+  );
+});
+test('G04 host access-loss updates are monotonic, close exposed evidence and remain available while paused', async () => {
+  const f = await publishFixture();
+  assert.equal((await f.knowledge.search(f.context, { query: 'alpha' })).status, 'ok');
+  await admin.query("UPDATE cos.scopes SET status='paused' WHERE id=$1", [f.scope]);
+  assert.equal((await f.store.setAuth(f.context, f.binding.id, 'revoked')).status, 'ok');
+  const first = (await admin.query('SELECT auth,version FROM cos.mail_bindings WHERE scope_id=$1', [f.scope])).rows[0];
+  assert.equal(first.auth, 'revoked');
+  assert.equal(first.version, 2);
+  assert.equal((await f.store.setAuth(f.context, f.binding.id, 'expired')).status, 'ok');
+  assert.equal((await f.store.setAuth(f.context, f.binding.id, 'ready' as never)).status, 'denied');
+  assert.deepEqual(
+    (await admin.query('SELECT auth,version FROM cos.mail_bindings WHERE scope_id=$1', [f.scope])).rows[0],
+    first,
+  );
+  await admin.query("UPDATE cos.scopes SET status='active' WHERE id=$1", [f.scope]);
+  assert.equal((await f.knowledge.contextReady(f.context)).status, 'denied');
+  assert.equal((await f.store.start(f.context, f.binding.id, randomUUID(), f.prepared.window)).status, 'denied');
+  assert.equal((await f.store.maintain(f.context, f.binding.id, randomUUID())).status, 'ok');
+  assert.equal(
+    (await admin.query('SELECT count(*)::int AS n FROM cos.mail_messages WHERE scope_id=$1', [f.scope])).rows[0].n,
+    0,
+  );
 });
 test('G04 typed mail search ranks only the selected binding and thread reads carry captured message references', async () => {
   const f = await publishFixture();

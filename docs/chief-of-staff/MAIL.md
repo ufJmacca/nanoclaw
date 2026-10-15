@@ -2,13 +2,15 @@
 
 G04 adds a host-only Gmail reader for the selected owner's Inbox and Sent mail. Its separate Desktop OAuth client uses only `gmail.readonly`. Calendar credentials and grants do not provide mail authority. Owner account selection, Google consent and model data-control verification remain prerequisites for live use.
 
-The implementation is in progress. The mail collector, store, evidence publication and read adapters have fixture coverage; installed polling, encrypted configuration recovery and G04 deployment acceptance remain pending. The accepted G03 installation does not yet expose these mail tools.
+The implementation is in progress. The mail collector, store, evidence publication, read adapters and host refresh connector have fixture coverage; installed polling, encrypted configuration recovery and G04 deployment acceptance remain pending. The accepted G03 installation does not yet expose these mail tools.
 
 ## Captures and retention
 
 Each capture covers the most recent 30 days and holds at most 1,000 messages and 16 MiB of normalized text. A separate 48 MiB encoded checkpoint budget accounts for raw records, citation chunks and provenance within the existing coordinated checkpoint limit. Limits are explicit in coverage. Captures retain individual Inbox/Sent messages; Spam, Trash, drafts, older messages and unselected thread members are excluded. HTML conversion loads no external content or attachments. Mail text remains untrusted evidence.
 
 History cursors advance only in the same transaction that publishes the capture and its knowledge evidence. Stable attempt IDs reconcile uncertain commits. Unchanged message text preserves source revisions across ordinary polling. Selection withdrawal uses the existing source tombstones, context invalidation and purge machinery. An owner's source denial also suppresses raw message copies in later captures.
+
+The host refresh connector uses PostgreSQL's observation clock and rechecks the binding, exact read grant, storage proof and polling admission around asynchronous work. One binding has one refresh in flight, bounded to four minutes. An uncertain publication returns private recovery material to the trusted host; retrying that exact capture reconciles its receipt without repeating a completed provider read. Access loss latches the independent mail denial journal before a database update, so a database outage cannot reopen cached mail.
 
 Retention can tighten a stored selection without a provider request or model call, including while the scope is paused or access is closed. Its separate capture does not advance the provider's refresh time or cursor. Read checks enforce the rolling wall-clock boundary even before physical cleanup runs. Tiny selection anchors preserve immutable selection identity; superseded unreferenced capture inventories become bodyless receipts and age out after 30 days.
 
