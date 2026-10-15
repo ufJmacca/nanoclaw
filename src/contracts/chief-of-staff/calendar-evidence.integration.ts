@@ -146,6 +146,100 @@ async function find(text: string, ctx = fresh()) {
   assert.ok(row, 'calendar evidence missing');
   return { row, ctx };
 }
+const emptyWindowDraft = (bindingId: string, timeMin = '2026-10-05T13:00:00Z', timeMax = '2026-10-06T13:00:00Z') => ({
+  kind: 'answer',
+  coverage: 'limited',
+  claims: [],
+  calendar: 'coverage',
+  calendar_window: { binding_id: bindingId, calendar_id: 'selected', time_min: timeMin, time_max: timeMax },
+});
+test('G03 an empty selected window has host-checked text, freshness and exact publication authority', async () => {
+  const s = await setup('OutsideRequestedWindow');
+  s.fixture = fixtureCalendarReader({
+    access: { generation: s.id + ':1', calendarIds: ['selected'], scopes: [GOOGLE_EVENT_READ_SCOPE], auth: 'ready' },
+    calendars: { selected: [] },
+  });
+  await publish(s);
+  const ctx = fresh(),
+    request = randomUUID(),
+    draft = emptyWindowDraft(s.id);
+  const answer = await knowledge.answers.prepare(ctx, request, draft);
+  assert.equal(answer.status, 'ok');
+  assert.match(String(answer.text), /No observed meetings/);
+  assert.match(String(answer.text), /selected/);
+  assert.match(String(answer.text), /Australia\/Sydney/);
+  assert.match(String(answer.text), /6 October 2026/);
+  assert.match(String(answer.text), /Last successful calendar refresh:/);
+  assert.match(String(answer.text), /stored snapshot/i);
+  assert.doesNotMatch(String(answer.text), /OutsideRequestedWindow|insufficient|Inference:|free day/);
+  assert.equal((await knowledge.answers.prepare(ctx, request, draft)).text, answer.text);
+  assert.equal((await knowledge.answers.authorizePublication(ctx, String(answer.text))).status, 'ok');
+  assert.equal(
+    (await knowledge.answers.authorizePublication(ctx, String(answer.text) + ' Your whole day is free.')).status,
+    'denied',
+  );
+  await calendar.start(context, s.id, 'selected', randomUUID(), window);
+  assert.equal((await knowledge.answers.get(ctx, String(answer.artifact_id))).status, 'denied');
+  assert.equal((await knowledge.answers.authorizePublication(ctx, String(answer.text))).status, 'denied');
+});
+test('G03 empty-window preparation refuses overlapping all-day events, incomplete windows and wrong selections', async () => {
+  const s = await setup('OverlappingAllDayEvent');
+  const unrefreshed = await knowledge.answers.prepare(fresh(), randomUUID(), emptyWindowDraft(s.id));
+  assert.equal(unrefreshed.status, 'denied');
+  await publish(s);
+  for (const draft of [
+    emptyWindowDraft(s.id, '2026-10-03T14:00:00Z', '2026-10-04T13:00:00Z'),
+    emptyWindowDraft(s.id, '2026-10-10T00:00:00Z', '2026-10-11T00:00:00Z'),
+    emptyWindowDraft(s.id, '2026-10-06T13:00:00Z', '2026-10-05T13:00:00Z'),
+    {
+      ...emptyWindowDraft(s.id),
+      calendar_window: { ...emptyWindowDraft(s.id).calendar_window, calendar_id: 'unselected' },
+    },
+    emptyWindowDraft(randomUUID()),
+  ])
+    assert.equal((await knowledge.answers.prepare(fresh(), randomUUID(), draft)).status, 'denied');
+  const valid = await knowledge.answers.prepare(fresh(), randomUUID(), emptyWindowDraft(s.id));
+  assert.equal(valid.status, 'ok');
+  fences.deny(scope, s.id, 'revoked');
+  assert.equal((await knowledge.answers.prepare(fresh(), randomUUID(), emptyWindowDraft(s.id))).status, 'denied');
+});
+test('G03 a local withdrawal after empty-window artifact staging prevents publication', async () => {
+  const s = await setup('EmptyWindowPublicationRace');
+  await publish(s);
+  const raced = new KnowledgeStore(
+    database,
+    artifacts,
+    {
+      afterAnswerPublication: async () => {
+        fences.deny(scope, s.id, 'revoked');
+      },
+    },
+    { calendarAccess, calendarEnabled: () => true },
+  );
+  assert.equal((await raced.answers.prepare(fresh(), randomUUID(), emptyWindowDraft(s.id))).status, 'denied');
+});
+test('G03 missing or quarantined observations cannot become a verified empty window', async () => {
+  const s = await setup('UncertainOutsideWindow');
+  const published = await publish(s);
+  await pool.query("UPDATE cos.calendar_observations SET lifecycle='quarantined' WHERE scope_id=$1 AND binding_id=$2", [
+    scope,
+    s.id,
+  ]);
+  assert.equal((await knowledge.answers.prepare(fresh(), randomUUID(), emptyWindowDraft(s.id))).status, 'denied');
+  await pool.query("UPDATE cos.calendar_observations SET lifecycle='current' WHERE scope_id=$1 AND binding_id=$2", [
+    scope,
+    s.id,
+  ]);
+  await pool.query(
+    "UPDATE cos.calendar_snapshots SET result=jsonb_set(result,'{event_count}','2') WHERE scope_id=$1 AND binding_id=$2 AND id=$3",
+    [scope, s.id, published.id],
+  );
+  assert.equal((await knowledge.answers.prepare(fresh(), randomUUID(), emptyWindowDraft(s.id))).status, 'denied');
+  assert.equal(
+    (await knowledge.answers.prepare({ ...fresh(), provider: 'claude' }, randomUUID(), emptyWindowDraft(s.id))).status,
+    'denied',
+  );
+});
 test('S03 operator flow: explicit loopback link, selected sync, stable retry and local/database disconnect', async () => {
   await pool.query("UPDATE cos.scopes SET status='paused' WHERE id=$1", [scope]);
   const pausedScope = (await pool.query('SELECT to_jsonb(s) AS body FROM cos.scopes s WHERE id=$1', [scope])).rows[0];

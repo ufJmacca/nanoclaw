@@ -108,6 +108,8 @@ const mandateMcpTools = [
   'mcp__nanoclaw_cos_mandates__cos_review_request',
   'mcp__nanoclaw_cos_mandates__cos_review_submit',
   'mcp__nanoclaw_cos_mandates__cos_review_get',
+  'mcp__nanoclaw_cos_mandates__cos_answer_prepare',
+  'mcp__nanoclaw_cos_mandates__cos_answer_get',
 ];
 const mcpResourceTools = ['list_mcp_resource_templates', 'list_mcp_resources', 'read_mcp_resource'];
 if (sharedOwner && (!runnerEntry || cancellation || compaction)) throw new Error('invalid_shared_owner_fixture');
@@ -256,7 +258,7 @@ function respond(body: any, send: (text: string) => void) {
         name: 'exec',
         input:
           requests.length === 6
-            ? `text({mandateCatalogue:ALL_TOOLS.filter(t=>t.name.startsWith("mcp__nanoclaw_cos_mandates__")).map(t=>t.name).sort()});text(await tools.${mandateMcpTools[0]}({mandate_id:"mandate-${'a'.repeat(64)}"}));text(await tools.mcp__nanoclaw_cos_mandates__cos_review_get({review_id:"review-${'b'.repeat(64)}",revision:1,historical:true}));`
+            ? `text({mandateCatalogue:ALL_TOOLS.filter(t=>t.name.startsWith("mcp__nanoclaw_cos_mandates__")).map(t=>t.name).sort()});text(await tools.${mandateMcpTools[0]}({mandate_id:"mandate-${'a'.repeat(64)}"}));text(await tools.mcp__nanoclaw_cos_mandates__cos_review_get({review_id:"review-${'b'.repeat(64)}",revision:1,historical:true}));text(await tools.mcp__nanoclaw_cos_mandates__cos_answer_prepare({draft:{kind:"answer",coverage:"limited",claims:[],calendar:"coverage",calendar_window:{binding_id:"11111111-1111-4111-8111-111111111111",calendar_id:"primary",time_min:"2026-10-15T13:00:00Z",time_max:"2026-10-16T13:00:00Z"}}}));text(await tools.mcp__nanoclaw_cos_mandates__cos_answer_get({artifact_id:"${'a'.repeat(64)}-${'b'.repeat(64)}"}));`
             : `try{text(await tools.list_mcp_resources({server:"nanoclaw_cos_mandates"}));}catch{text("resource-list-unavailable");}try{text(await tools.list_mcp_resource_templates({server:"nanoclaw_cos_mandates"}));}catch{text("resource-templates-unavailable");}try{text(await tools.read_mcp_resource({server:"nanoclaw_cos_mandates",uri:"file:///home/node/.codex/auth.json"}));}catch{text("resource-unavailable");}try{text(await tools.read_mcp_resource({server:"unconfigured",uri:"file:///home/node/.codex/auth.json"}));}catch{text("unconfigured-server-unavailable");}text(await tools.${mandateMcpTools[0]}({mandate_id:"mandate-${'a'.repeat(64)}",scope_id:"scope-authority-canary"}));`,
       };
     if (calls[requests.length - 1])
@@ -569,8 +571,16 @@ try {
           assert.ok(
             request.method === 'cos_context_get' ||
               (toolRefresh && request.method === 'cos_knowledge_search') ||
-              (mandateRefresh && ['cos_mandate_activity', 'cos_review_get'].includes(request.method)),
+              (mandateRefresh &&
+                ['cos_mandate_activity', 'cos_review_get', 'cos_answer_prepare', 'cos_answer_get'].includes(
+                  request.method,
+                )),
           );
+          if (request.method === 'cos_answer_prepare') {
+            assert.equal(request.params.draft.claims.length, 0);
+            assert.equal(request.params.draft.calendar_window.calendar_id, 'primary');
+            assert.equal(request.params.draft.calendar_window.time_min, '2026-10-15T13:00:00Z');
+          }
           const response = {
             protocol: 'cos-rpc/v1',
             request_id: request.request_id,
@@ -793,9 +803,14 @@ try {
         await connect();
         const created = await sendCodexRequest(server, 'thread/start', {
           ...params,
-          dynamicTools: cosDynamicTools.filter((tool) =>
-            (mandateRefresh ? legacyCoordinatorTools : s01Tools).includes(tool.name),
-          ),
+          dynamicTools: cosDynamicTools
+            .filter((tool) => (mandateRefresh ? legacyCoordinatorTools : s01Tools).includes(tool.name))
+            .map((tool) => {
+              if (!mandateRefresh || tool.name !== 'cos_answer_prepare') return tool;
+              const legacy = structuredClone(tool);
+              delete (legacy.inputSchema as any).properties.draft.properties.calendar_window;
+              return legacy;
+            }),
         });
         assert.equal(created.error, undefined);
         const legacyThread = (created.result as any).thread.id;
@@ -899,7 +914,7 @@ try {
   assert.deepEqual(
     dispatched,
     mandateRefresh
-      ? ['cos_context_get', 'cos_mandate_activity', 'cos_review_get']
+      ? ['cos_context_get', 'cos_mandate_activity', 'cos_review_get', 'cos_answer_prepare', 'cos_answer_get']
       : toolRefresh
         ? ['cos_context_get', 'cos_knowledge_search']
         : compaction || cancellation === 'rpc'

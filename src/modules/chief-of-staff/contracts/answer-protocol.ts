@@ -2,6 +2,12 @@
 export type AnswerCitation =
   | { kind: 'source'; evidence_id: string }
   | { kind: 'record'; record_id: string; version: number };
+export type CalendarEmptyWindow = {
+  binding_id: string;
+  calendar_id: string;
+  time_min: string;
+  time_max: string;
+};
 export type AnswerDraft = {
   kind: 'answer' | 'summary';
   coverage: 'limited' | 'conflicting' | 'insufficient' | 'not_applicable';
@@ -9,6 +15,7 @@ export type AnswerDraft = {
   questions?: string[];
   notice?: 'approval_required';
   calendar?: 'coverage';
+  calendar_window?: CalendarEmptyWindow;
 };
 /** Provider guidance; validAnswerDraft additionally enforces byte, Unicode and cross-field limits. */
 export const answerDraftSchema = {
@@ -16,6 +23,19 @@ export const answerDraftSchema = {
   additionalProperties: false,
   required: ['kind', 'coverage', 'claims'],
   properties: {
+    calendar_window: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['binding_id', 'calendar_id', 'time_min', 'time_max'],
+      properties: {
+        binding_id: { type: 'string', format: 'uuid' },
+        calendar_id: { type: 'string', minLength: 1, maxLength: 1024 },
+        time_min: { type: 'string', format: 'date-time' },
+        time_max: { type: 'string', format: 'date-time' },
+      },
+      description:
+        'Request a host-rendered empty-window reply after a complete zero-event calendar read. Use kind answer, coverage limited, claims [], calendar coverage, and these exact selected calendar/window bounds. No questions, notice, claim text or freshness overrides. The host rejects overlapping events, incomplete coverage and changed access.',
+    },
     calendar: {
       type: 'string',
       enum: ['coverage'],
@@ -86,6 +106,25 @@ const object = (value: unknown): value is Record<string, unknown> =>
 const keys = (value: Record<string, unknown>, allowed: string[]) =>
   Object.keys(value).every((key) => allowed.includes(key));
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+export function validCalendarEmptyWindow(value: unknown): value is CalendarEmptyWindow {
+  const instant = (v: unknown) =>
+    typeof v === 'string' &&
+    v.length <= 80 &&
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/.test(v);
+  return (
+    object(value) &&
+    keys(value, ['binding_id', 'calendar_id', 'time_min', 'time_max']) &&
+    typeof value.binding_id === 'string' &&
+    uuid.test(value.binding_id) &&
+    typeof value.calendar_id === 'string' &&
+    value.calendar_id.length > 0 &&
+    value.calendar_id.length <= 1024 &&
+    !/[\s\u007f-\u009f]/u.test(value.calendar_id) &&
+    !['.', '..'].includes(value.calendar_id) &&
+    instant(value.time_min) &&
+    instant(value.time_max)
+  );
+}
 const control = (character: string) => {
   const code = character.codePointAt(0)!;
   return code < 32 || (code >= 127 && code <= 159);
@@ -110,7 +149,7 @@ export function validAnswerCitation(citation: unknown): citation is AnswerCitati
 export function validAnswerDraft(value: unknown): value is AnswerDraft {
   if (
     !object(value) ||
-    !keys(value, ['kind', 'coverage', 'claims', 'questions', 'notice', 'calendar']) ||
+    !keys(value, ['kind', 'coverage', 'claims', 'questions', 'notice', 'calendar', 'calendar_window']) ||
     !['answer', 'summary'].includes(String(value.kind)) ||
     !['limited', 'conflicting', 'insufficient', 'not_applicable'].includes(String(value.coverage)) ||
     !Array.isArray(value.claims) ||
@@ -119,6 +158,17 @@ export function validAnswerDraft(value: unknown): value is AnswerDraft {
     return false;
   if (value.notice !== undefined && value.notice !== 'approval_required') return false;
   if (value.calendar !== undefined && value.calendar !== 'coverage') return false;
+  if (
+    value.calendar_window !== undefined &&
+    (!validCalendarEmptyWindow(value.calendar_window) ||
+      value.kind !== 'answer' ||
+      value.coverage !== 'limited' ||
+      value.calendar !== 'coverage' ||
+      value.claims.length !== 0 ||
+      value.questions !== undefined ||
+      value.notice !== undefined)
+  )
+    return false;
   if (
     value.questions !== undefined &&
     (!Array.isArray(value.questions) ||
@@ -138,7 +188,7 @@ export function validAnswerDraft(value: unknown): value is AnswerDraft {
   if (value.coverage === 'not_applicable' && (value.kind !== 'answer' || (!value.notice && !value.questions)))
     return false;
   if (
-    value.coverage === 'insufficient' || value.coverage === 'not_applicable'
+    value.calendar_window !== undefined || value.coverage === 'insufficient' || value.coverage === 'not_applicable'
       ? value.claims.length !== 0
       : value.claims.length < (value.coverage === 'conflicting' ? 2 : 1)
   )
