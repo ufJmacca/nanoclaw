@@ -146,6 +146,9 @@ if (mode === 'unavailable') {
     directory(history);
     file(history + '/history', 'SYNTHETIC_MAIN_HISTORY');
     file(history + '/auth.json', 'SYNTHETIC_PROVIDER_CACHE');
+    file(history + '/.sandbox-migration', 'SYNTHETIC_PROVIDER_MARKER');
+    directory(history + '/skills/.system');
+    file(history + '/skills/.system/SKILL.md', 'SYNTHETIC_PROVIDER_SKILL');
     const mission = stateRoot + '/missions/' + randomUUID();
     directory(mission + '/provider');
     directory(mission + '/context');
@@ -209,6 +212,8 @@ if (mode === 'unavailable') {
           'SYNTHETIC_MAIN_HISTORY',
         );
         assert.equal(fs.existsSync(directory + '/conversation-backup/history/' + generation + '/auth.json'), false);
+        assert.equal(fs.readFileSync(directory + '/conversation-backup/history/' + generation + '/.sandbox-migration', 'utf8'), 'SYNTHETIC_PROVIDER_MARKER');
+        assert.equal(fs.readFileSync(directory + '/conversation-backup/history/' + generation + '/skills/.system/SKILL.md', 'utf8'), 'SYNTHETIC_PROVIDER_SKILL');
         assert.equal(
           fs.readFileSync(
             directory + '/mission-backup/history/missions/' + mission.split('/').at(-1) + '/provider/history',

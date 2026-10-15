@@ -1,3 +1,4 @@
+import { validBackupPathSegment } from './backup-names.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
@@ -147,7 +148,7 @@ export async function withIsolatedBackupRestore<T>(
       typeof name === 'string' &&
       name.length <= 192 &&
       name.split('/').length <= 8 &&
-      name.split('/').every((part) => /^(?:[A-Za-z0-9]|\.cos-)[A-Za-z0-9_.-]*$/.test(part));
+      name.split('/').every((part) => validBackupPathSegment(part));
     const missingParents = (name: string) => {
       const parts = name.split('/');
       let missing = 0;

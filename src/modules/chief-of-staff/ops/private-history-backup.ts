@@ -1,3 +1,4 @@
+import { validBackupPathSegment } from './backup-names.js';
 /** Private Pi-only snapshots. Caller holds maintenance and has stopped all native writers.
  * A snapshot preserves bytes; it never restores context, credentials or admission authority.
  */
@@ -19,7 +20,7 @@ function capturedDirectory(name: string, profile: Profile, names: Set<string>) {
     typeof name !== 'string' ||
     name.length > 170 ||
     name.split('/').length > 6 ||
-    !name.split('/').every((part) => /^(?:[A-Za-z0-9]|\.cos-)[A-Za-z0-9_.-]*$/.test(part))
+    !name.split('/').every((part) => validBackupPathSegment(part))
   )
     throw Error('invalid_history_directory');
   const parts = name.split('/');
@@ -210,7 +211,7 @@ export async function capturePrivateHistory(
         if (
           name.length > 192 ||
           name.split('/').length > 8 ||
-          !name.split('/').every((part) => /^(?:[A-Za-z0-9]|\.cos-)[A-Za-z0-9_.-]*$/.test(part))
+          !name.split('/').every((part) => validBackupPathSegment(part))
         )
           throw Error('history_capture_name');
       },
@@ -323,7 +324,7 @@ export function verifyRecoveredPrivateHistory(
       if (
         relative.length > 170 ||
         parts.length > 6 ||
-        !parts.every((part) => /^(?:[A-Za-z0-9]|\.cos-)[A-Za-z0-9_.-]*$/.test(part)) ||
+        !parts.every((part) => validBackupPathSegment(part)) ||
         directories.has(relative)
       )
         throw Error('history_recovery_file_bounds');

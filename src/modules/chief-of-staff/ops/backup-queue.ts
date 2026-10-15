@@ -1,3 +1,4 @@
+import { validBackupPathSegment } from './backup-names.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
@@ -238,11 +239,7 @@ function privateJson<T>(file: string, device: number): T {
 }
 function validName(name: string): boolean {
   const parts = name.split('/');
-  return (
-    Buffer.byteLength(name) <= 192 &&
-    parts.length <= 8 &&
-    parts.every((part) => /^(?:[A-Za-z0-9]|\.cos-)[A-Za-z0-9_.-]*$/.test(part))
-  );
+  return Buffer.byteLength(name) <= 192 && parts.length <= 8 && parts.every((part) => validBackupPathSegment(part));
 }
 function checksum(file: string, expected: { bytes: number; sha256: string }, device: number) {
   const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);

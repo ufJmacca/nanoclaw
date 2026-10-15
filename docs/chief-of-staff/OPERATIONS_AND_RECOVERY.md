@@ -374,6 +374,21 @@ logical-backup limits can refuse a large scope rather than quietly omit data.
 Keep these private target backups on the Pi. Do not copy real conversation history
 or account secrets to the Mac as fixtures.
 
+Provider history includes hidden marker files and skill directories. Portable
+backup paths accept a single leading dot followed by an alphanumeric character,
+including `.system`; they still reject empty, dot, dot-dot and separator segments.
+Capture, archive framing and isolated recovery use the same segment rule. Provider
+access credential caches remain excluded, and archived files and directories use
+private modes. Link, ownership, depth, size and changing-file checks still apply.
+
+G02/G03 deployment capture requires native CoS admission to be explicitly paused,
+in addition to stopping the bound service and holding the deployment lease. Record
+an implementation-owned pause and a fresh same-policy resume guard before invoking
+that deployment workflow. Preserve earlier owner controls and spent attempts; an
+existing independent owner pause does not become permission to resume. Stage the
+tested artifacts before stopping the main service. Restore admission only through
+the matching checked release and the recorded current allowance.
+
 The external server's backup/PITR policy remains separate and explicitly
 unverified unless the DBA provides its own evidence. A release image archive,
 logical CoS checkpoint and server backup serve different purposes.

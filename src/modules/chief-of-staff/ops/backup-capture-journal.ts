@@ -1,3 +1,4 @@
+import { validBackupPathSegment } from './backup-names.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
@@ -46,7 +47,7 @@ const dataName = (name: string) =>
   (name.startsWith('data/') &&
     name.length <= 197 &&
     name.split('/').length <= 9 &&
-    name.split('/').every((part) => /^(?:[A-Za-z0-9]|\.cos-)[A-Za-z0-9_.-]*$/.test(part)));
+    name.split('/').every((part) => validBackupPathSegment(part)));
 const directory = (file: string) => {
   const fd = fs.openSync(
     file,

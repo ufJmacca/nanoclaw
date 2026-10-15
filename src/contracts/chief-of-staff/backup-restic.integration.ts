@@ -1110,6 +1110,13 @@ async function completeCapturedPayloadRecovery(
   fs.mkdirSync(mission + '/missions/' + generation + '/provider/empty', { recursive: true, mode: 0o700 });
   const history = conversation + '/' + generation + '/history.jsonl';
   fs.writeFileSync(history, Buffer.alloc(150000, 0x41), { mode: 0o600 });
+  fs.writeFileSync(conversation + '/' + generation + '/.sandbox-migration', 'SYNTHETIC_PROVIDER_MARKER', {
+    mode: 0o600,
+  });
+  fs.mkdirSync(conversation + '/' + generation + '/skills/.system', { recursive: true, mode: 0o700 });
+  fs.writeFileSync(conversation + '/' + generation + '/skills/.system/SKILL.md', 'SYNTHETIC_PROVIDER_SKILL', {
+    mode: 0o600,
+  });
   fs.writeFileSync(conversation + '/' + generation + '/auth.json', 'SYNTHETIC_CURRENT_AUTH', { mode: 0o600 });
   fs.writeFileSync(mission + '/missions/' + generation + '/provider/history', 'SYNTHETIC_SPECIALIST_HISTORY', {
     mode: 0o600,
