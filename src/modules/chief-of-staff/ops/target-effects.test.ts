@@ -92,7 +92,7 @@ it('S11 declines a retained S10 rollback before service or database effects when
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
-it('S10 preserves S09 paired action backup before recording current-schema migration acceptance', async () => {
+it('the current helper refuses a historical S10 migration manifest before applying a newer schema', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-action-migration-'));
   const settings = {
     stateRoot: root + '/state',
@@ -136,17 +136,11 @@ it('S10 preserves S09 paired action backup before recording current-schema migra
   calls.observe.mockResolvedValue({ pid: 0, cwd: settings.installationRoot, activeState: 'inactive' });
   calls.ownedContainers.mockResolvedValue([]);
   try {
-    await createTargetEffects(settings, manifest, digest(manifest)).migrate();
-    expect(paired).toHaveBeenCalledWith(settings, manifest.releaseId);
-    expect(paired.mock.invocationCallOrder[0]).toBeGreaterThan(migrate.mock.invocationCallOrder[0]);
-    expect(JSON.parse(fs.readFileSync(path.join(receipt, 'migration.json'), 'utf8')).schema_version).toBe(
-      migrations.SCHEMA_VERSION,
-    );
-    fs.unlinkSync(path.join(receipt, 'migration.json'));
-    paired.mockRejectedValueOnce(Error('target_action_backup_unavailable'));
     await expect(createTargetEffects(settings, manifest, digest(manifest)).migrate()).rejects.toThrow(
-      'target_action_backup_unavailable',
+      'migration_manifest_mismatch',
     );
+    expect(migrate).not.toHaveBeenCalled();
+    expect(paired).not.toHaveBeenCalled();
     expect(fs.existsSync(path.join(receipt, 'migration.json'))).toBe(false);
   } finally {
     vi.restoreAllMocks();
@@ -745,13 +739,13 @@ async function vaultDeploymentFixture(maintain = true) {
     close,
   };
 }
-it('G02 deployment captures the recorded predecessor in the vault and verifies it before any migration without plaintext backup calls', async () => {
+it('the current helper verifies a historical G02 vault checkpoint but refuses its obsolete migration manifest', async () => {
   const s = await vaultDeploymentFixture();
   try {
     await s.effects.backup();
     expect(s.capture).toHaveBeenCalledWith(s.settings, s.manifest.releaseId, undefined, s.recovery);
     expect(readPrivate(s.receipt + '/vault-state.json')).toEqual(s.snapshot);
-    await s.effects.migrate();
+    await expect(s.effects.migrate()).rejects.toThrow('migration_manifest_mismatch');
     expect(s.verify).toHaveBeenCalledWith(
       s.settings,
       s.manifest.releaseId,
@@ -759,12 +753,12 @@ it('G02 deployment captures the recorded predecessor in the vault and verifies i
       s.recovery,
       s.snapshot.snapshotDigest,
     );
-    expect(s.verify.mock.invocationCallOrder.at(-1)).toBeLessThan(s.migrate.mock.invocationCallOrder[0]);
+    expect(s.migrate).not.toHaveBeenCalled();
     expect(s.legacy).not.toHaveBeenCalled();
     expect(s.nativeBackup).not.toHaveBeenCalled();
     expect(s.calendarBackup).not.toHaveBeenCalled();
     expect(fs.existsSync(s.receipt + '/native-state.json')).toBe(false);
-    expect(readPrivate(s.receipt + '/migration.json')).toMatchObject({ vaultBackupDigest: digest(s.snapshot) });
+    expect(fs.existsSync(s.receipt + '/migration.json')).toBe(false);
     s.capture.mockClear();
     await s.effects.backup();
     expect(s.capture).not.toHaveBeenCalled();

@@ -10,6 +10,7 @@ import { INITIAL_CHECKSUM, MIGRATIONS } from '../store/migrations.js';
 import { digest } from '../domain/contracts.js';
 import type { VaultRootArtifactSeal } from './vault-root-artifact.js';
 import { RESTIC_ARTIFACT } from './restic-artifact.js';
+import { recoveryReleaseForManifest } from './recovery-manifest.js';
 const sha = 'a'.repeat(40),
   tree = 'b'.repeat(40),
   image = 'sha256:' + 'c'.repeat(64),
@@ -64,7 +65,7 @@ function vaultManifest() {
     slice: 'G01',
     postgres: { minimum: 18, maximum: 18 },
     sqlite: { minimum: 22, maximum: 22 },
-    migrations: MIGRATIONS.map(({ version, checksum }) => ({ version, checksum })),
+    migrations: MIGRATIONS.slice(0, 18).map(({ version, checksum }) => ({ version, checksum })),
     previousReleaseIds: ['release-reviewed-s11'],
     vaultArtifact: { digest: digest(seal), seal },
     checks: { ...manifest().checks, ...checks },
@@ -93,6 +94,7 @@ describe.each(['G02', 'G03'] as const)('%s encrypted release safeguards', (slice
     expect(supportsReleaseSchema(checked, 18, 22)).toBe(true);
     expect(supportsReleaseSchema(checked, 17, 22)).toBe(false);
     expect(supportsReleaseSchema(checked, 18, 21)).toBe(false);
+    expect(recoveryReleaseForManifest(checked).software.schemaVersion).toBe(18);
   });
   it.each(['absent', 'version', 'platform', 'bytes', 'sha256', 'compressedSha256', 'unexpected'])(
     'the release refuses a %s backup executable seal despite otherwise complete checks',
@@ -212,7 +214,7 @@ it('S11 operations preserves schema18 compatibility and every exact reviewed mig
     slice: 'S11',
     postgres: { minimum: 18, maximum: 18 },
     sqlite: { minimum: 22, maximum: 22 },
-    migrations: MIGRATIONS.map(({ version, checksum }) => ({ version, checksum })),
+    migrations: MIGRATIONS.slice(0, 18).map(({ version, checksum }) => ({ version, checksum })),
   };
   expect(validateReleaseManifest(current)).toEqual(current);
   expect(supportsReleaseSchema(validateReleaseManifest(current), 18)).toBe(true);
