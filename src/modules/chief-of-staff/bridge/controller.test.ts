@@ -5,6 +5,7 @@ import { CosController } from './controller.js';
 import { installCosBoundary, type CosBinding } from '../../../cos-boundary.js';
 import type { InboundEvent } from '../../../channels/adapter.js';
 import type { Session } from '../../../types.js';
+import { log } from '../../../log.js';
 const databases: Database.Database[] = [];
 afterEach(() => {
   for (const db of databases.splice(0)) db.close();
@@ -81,6 +82,25 @@ const event = (text: string, id = 'ingress'): InboundEvent => ({
   },
 });
 const command = 'cos approve 11111111-1111-4111-8111-111111111111 abcdefghijklmnopqrstuvwxyz123456';
+it.each(['runtime_unavailable', 'event_unverified'])(
+  'reports %s intake refusal without projecting private text or changing owner pause',
+  async (reason) => {
+    const warn = vi.spyOn(log, 'warn').mockImplementation(() => {});
+    try {
+      const f = fixture();
+      if (reason === 'runtime_unavailable') f.enabled.mockReturnValue(false);
+      else f.facts.mockResolvedValue({ id: 'private', type: 'P', delete_at: 0, members: [] });
+      await f.controller.ingress(binding, event('PRIVATE_OWNER_QUESTION'));
+      expect(warn).toHaveBeenCalledWith('CoS message intake closed', { reason });
+      expect(f.project).not.toHaveBeenCalled();
+      expect(f.wake).not.toHaveBeenCalled();
+      expect(f.db.prepare('SELECT paused FROM cos_identity_boundaries').get()).toEqual({ paused: 0 });
+      expect(JSON.stringify(warn.mock.calls)).not.toContain('PRIVATE');
+    } finally {
+      warn.mockRestore();
+    }
+  },
+);
 it('S11-UI01 exact action inspection stays available while paused/model unavailable and cannot perform cancellation or provider reconciliation', async () => {
   const f = fixture(),
     id = 'action-' + 'a'.repeat(64),

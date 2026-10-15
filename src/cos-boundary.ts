@@ -6,6 +6,7 @@ import type { InboundEvent } from './channels/adapter.js';
 import type { Binding } from './modules/chief-of-staff/bridge/identity.js';
 import { hasCosMissionBoundary } from './cos-mission-boundary.js';
 import { missionExecutionReady, prepareMissionLaunch, permitMissionRpc } from './cos-mission-execution.js';
+import { log } from './log.js';
 
 export type CosBinding = Binding & { sessionId: string };
 export function hasCosStateBoundary(agentGroupId: string, sessionId: string): boolean {
@@ -183,10 +184,14 @@ export async function interceptCosIngress(event: InboundEvent): Promise<boolean>
     | { binding: string }
     | undefined;
   if (!row) return false;
-  if (!hooks) return true;
+  if (!hooks) {
+    log.warn('CoS message intake closed', { reason: 'runtime_not_installed' });
+    return true;
+  }
   try {
     return await hooks.ingress(JSON.parse(row.binding), event);
   } catch {
+    log.warn('CoS message intake closed', { reason: 'trusted_intake_failed' });
     return true;
   }
 }

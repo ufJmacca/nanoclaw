@@ -10,6 +10,7 @@ import { installReviewOrigin, reviewContext } from './missions/review-origin.js'
 import type { Session } from '../../types.js';
 import { installCosMissionBoundary, type CosMissionIdentity } from '../../cos-mission-boundary.js';
 import { isCosMissionStopped } from '../../cos-mission-stop.js';
+import { log } from '../../log.js';
 const services: CosService[] = [];
 afterEach(async () => {
   for (const service of services.splice(0)) await service.stop();
@@ -46,6 +47,79 @@ function fixture(enabled: boolean, specialists?: (store: PriorityStore) => Speci
 function specialist() {
   return { pump: vi.fn(async (_binding: CosBinding) => {}), fenceLocal: vi.fn(), close: vi.fn(async () => {}) };
 }
+it('reports the failing readiness stage without private errors and deduplicates unchanged failures', async () => {
+  const warn = vi.spyOn(log, 'warn').mockImplementation(() => {});
+  try {
+    const f = fixture(true);
+    f.query.mockRejectedValueOnce(Error('PRIVATE_DATABASE_CREDENTIAL_AND_MESSAGE'));
+    await f.service.tick();
+    expect(f.service.healthStatus()).toMatchObject({ component_phase: 'database_health', admission: 'closed' });
+    expect(warn).toHaveBeenCalledWith('CoS readiness check failed', {
+      phase: 'database_health',
+      readiness: 'UNAVAILABLE',
+      reason: 'unreachable',
+    });
+    f.query.mockRejectedValueOnce(Error('DIFFERENT_PRIVATE_ERROR'));
+    await f.service.tick();
+    expect(warn).toHaveBeenCalledTimes(1);
+    await f.service.tick();
+    expect(f.service.healthStatus()).toMatchObject({ component_phase: 'ready' });
+    f.query.mockRejectedValueOnce(Error('PRIVATE_ERROR_AFTER_RECOVERY'));
+    await f.service.tick();
+    expect(warn).toHaveBeenCalledTimes(2);
+    expect(JSON.stringify(warn.mock.calls)).not.toContain('PRIVATE');
+  } finally {
+    warn.mockRestore();
+  }
+});
+it('distinguishes specialist startup failure from database health without invoking workers', async () => {
+  const warn = vi.spyOn(log, 'warn').mockImplementation(() => {});
+  try {
+    const lifecycle = { ...specialist(), recover: vi.fn().mockRejectedValue(Error('PRIVATE_SPECIALIST_STATE')) };
+    const f = fixture(true, () => lifecycle);
+    await f.service.tick();
+    expect(f.service.healthStatus()).toMatchObject({ component_phase: 'specialist_recovery', admission: 'closed' });
+    expect(warn).toHaveBeenCalledWith('CoS readiness check failed', {
+      phase: 'specialist_recovery',
+      readiness: 'UNAVAILABLE',
+      reason: 'unreachable',
+    });
+    expect(lifecycle.pump).not.toHaveBeenCalled();
+    expect(JSON.stringify(warn.mock.calls)).not.toContain('PRIVATE');
+  } finally {
+    warn.mockRestore();
+  }
+});
+it('reports a main-pump fault with a fixed reason and closes admission before cleanup', async () => {
+  const warn = vi.spyOn(log, 'warn').mockImplementation(() => {});
+  try {
+    const f = fixture(true);
+    const binding: CosBinding = {
+      scopeId: 'scope',
+      agentGroupId: 'group',
+      messagingGroupId: 'mg',
+      sessionId: 'main',
+      provider: 'codex',
+      instanceId: 'fixture',
+      channelId: 'private',
+      ownerId: 'owner',
+      botId: 'bot',
+    };
+    installCosBoundary(binding, f.db);
+    await f.service.tick();
+    vi.spyOn(f.service.runtime, 'pump').mockRejectedValueOnce(TypeError('PRIVATE_PATH_AND_PROMPT'));
+    await f.service.tick();
+    expect(f.service.healthStatus()).toMatchObject({ component_phase: 'main_pump', admission: 'closed' });
+    expect(warn).toHaveBeenCalledWith('CoS readiness check failed', {
+      phase: 'main_pump',
+      readiness: 'UNAVAILABLE',
+      reason: 'host_type_error',
+    });
+    expect(JSON.stringify(warn.mock.calls)).not.toContain('PRIVATE');
+  } finally {
+    warn.mockRestore();
+  }
+});
 it('S11-T02/T07 actual main execution stays closed during startup health and after database failure', async () => {
   const f = fixture(true);
   const binding: CosBinding = {
