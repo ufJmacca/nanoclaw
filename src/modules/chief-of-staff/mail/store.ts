@@ -22,6 +22,13 @@ export type MailConnection = MailBindingInput & {
   version: number;
   auth: 'ready' | 'expired' | 'revoked' | 'disconnected';
 };
+/** Host maintenance inventory contains no account, credential or message data. */
+export type MailMaintenanceBinding = {
+  binding_id: string;
+  auth: MailConnection['auth'];
+  provider_allowed: boolean;
+  poll_due: boolean;
+};
 const uuid = (x: unknown): x is string =>
   typeof x === 'string' && /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(x);
 const email = (x: unknown): x is string =>
@@ -304,6 +311,43 @@ export class MailStore {
     return this.transaction(context, false, async (client) => {
       const capturedAt = (await client.query('SELECT clock_timestamp() AS now')).rows[0].now.getTime();
       return { status: 'ok', window: { capturedAt, since: capturedAt - MAIL_RETENTION_MS } };
+    });
+  }
+  /** Keyset paging includes closed and paused bindings for deletion obligations. */
+  async maintenanceBindings(context: Context & { provider: string }, after?: string): Promise<Result> {
+    if (context.origin || (after !== undefined && !uuid(after))) return { status: 'denied' };
+    return this.transaction(
+      context,
+      false,
+      async (client) => {
+        const rows = (
+          await client.query<MailMaintenanceBinding>(
+            `SELECT b.id AS binding_id,b.auth,$2=ANY(b.processing_providers) AS provider_allowed,
+            (s.next_poll_at IS NULL OR s.next_poll_at<=clock_timestamp()) AS poll_due
+            FROM cos.mail_bindings b JOIN cos.mail_states s ON s.scope_id=b.scope_id AND s.binding_id=b.id
+            WHERE b.scope_id=$1 AND ($3::uuid IS NULL OR b.id>$3) ORDER BY b.id LIMIT 11`,
+            [context.scopeId, context.provider, after ?? null],
+          )
+        ).rows;
+        return { status: 'ok', items: rows.slice(0, 10), next_after: rows.length > 10 ? rows[9].binding_id : null };
+      },
+      false,
+      true,
+    );
+  }
+  /** Claim with the selected database clock, including failures before collection
+   * starts. A claim never creates a capture or advances provider freshness. */
+  async claimPoll(context: Context & { provider: string }, binding: string): Promise<Result> {
+    if (context.origin || !uuid(binding)) return { status: 'denied' };
+    return this.transaction(context, true, async (client) => {
+      const result = await client.query(
+        `UPDATE cos.mail_states s SET next_poll_at=clock_timestamp()+interval '5 minutes'
+        FROM cos.mail_bindings b WHERE b.scope_id=s.scope_id AND b.id=s.binding_id
+        AND s.scope_id=$1 AND s.binding_id=$2 AND b.auth='ready' AND $3=ANY(b.processing_providers)
+        AND (s.next_poll_at IS NULL OR s.next_poll_at<=clock_timestamp()) RETURNING s.binding_id`,
+        [context.scopeId, binding, context.provider],
+      );
+      return { status: 'ok', claimed: !!result.rowCount };
     });
   }
   /** Trusted host access loss only. A new link must use a fresh binding identity. */

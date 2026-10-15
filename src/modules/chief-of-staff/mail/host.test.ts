@@ -60,3 +60,33 @@ it('retains uncertain resource cleanup and permits reconciliation without reopen
   await f.host.close();
   expect(f.resource.close).toHaveBeenCalledTimes(2);
 });
+it('owns background maintenance through actual database settlement before releasing profile resources', async () => {
+  const f = fixture();
+  let settle!: (value: { status: string }) => void;
+  const inventory = vi.fn(
+    () =>
+      new Promise<{ status: string }>((resolve) => {
+        settle = resolve;
+      }),
+  );
+  Object.assign(f.host.store, { maintenanceBindings: inventory });
+  const context = {
+    scopeId: 'scope',
+    ownerId: 'owner',
+    agentGroupId: 'group',
+    sessionId: 'session',
+    ingressId: 'mail-maintenance',
+    provider: 'codex',
+  };
+  f.host.poke(context, { retention: () => true, poll: () => false });
+  expect(inventory).toHaveBeenCalledOnce();
+  const close = f.host.close();
+  await Promise.resolve();
+  expect(f.host.active()).toBe(false);
+  expect(f.resource.close).not.toHaveBeenCalled();
+  f.host.poke(context, { retention: () => true, poll: () => true });
+  expect(inventory).toHaveBeenCalledOnce();
+  settle({ status: 'unavailable' });
+  await close;
+  expect(f.resource.close).toHaveBeenCalledOnce();
+});

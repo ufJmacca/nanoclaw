@@ -1,6 +1,9 @@
 import type { MailStore } from './store.js';
 import type { MailConnector } from './connector.js';
 import type { MailHostFences } from './config.js';
+import type { Context } from '../domain/contracts.js';
+import type { MailAuthorities } from './authority.js';
+import { MailPump } from './pump.js';
 /** A lost final proof is terminal only after the pinned resource lifetime settled. */
 export async function closeMailProfile(resource: MailHostFences): Promise<void> {
   try {
@@ -20,6 +23,7 @@ export class MailHost {
   private fenced = false;
   private retired = false;
   private closing?: Promise<void>;
+  private pump?: MailPump;
   constructor(options: { store: MailStore; connector?: MailConnector; resource?: MailHostFences }) {
     this.store = options.store;
     this.connector = options.connector;
@@ -27,6 +31,16 @@ export class MailHost {
   }
   active(): boolean {
     return !this.fenced && !!this.connector;
+  }
+  poke(context: Context & { provider: string }, authority: MailAuthorities): void {
+    if (this.fenced) return;
+    this.pump ??= new MailPump({
+      store: this.store,
+      connector: this.connector,
+      fences: this.resource?.fences,
+      authority,
+    });
+    this.pump.poke(context);
   }
   async close(): Promise<void> {
     if (this.retired) return;
@@ -42,7 +56,8 @@ export class MailHost {
     }
   }
   private async retire(): Promise<void> {
-    await this.connector?.close();
+    const settled = await Promise.allSettled([this.pump?.close(), this.connector?.close()]);
+    if (settled.some((result) => result.status === 'rejected')) throw Error('mail_host_retirement_unavailable');
     if (!this.resource) return;
     await closeMailProfile(this.resource);
   }

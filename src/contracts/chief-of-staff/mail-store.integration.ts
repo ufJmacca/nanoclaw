@@ -20,6 +20,8 @@ import { MailView } from '../../modules/chief-of-staff/mail/view.js';
 import { MailConnector } from '../../modules/chief-of-staff/mail/connector.js';
 import { CalendarAccessFences } from '../../modules/chief-of-staff/calendar/access-fences.js';
 import { MailReadError } from '../../modules/chief-of-staff/mail/reader.js';
+import { MailPump } from '../../modules/chief-of-staff/mail/pump.js';
+import { setTimeout as delay } from 'node:timers/promises';
 const scopes: string[] = [],
   roots: string[] = [];
 let admin: pg.Client, database: BoundedDatabase;
@@ -117,6 +119,63 @@ async function capture(capturedAt?: number, ageMs = 1000) {
     },
   });
 }
+test('G04 host inventory pages all retention bindings without account or message content', async () => {
+  const f = await fixture();
+  const ids = Array.from({ length: 12 }, () => randomUUID()).sort();
+  for (const id of ids) assert.equal((await f.store.bind(f.context, { ...f.binding, id })).status, 'ok');
+  await admin.query("UPDATE cos.scopes SET status='paused' WHERE id=$1", [f.scope]);
+  await f.store.setAuth(f.context, ids[0], 'revoked');
+  const first = await f.store.maintenanceBindings(f.context);
+  assert.equal(first.status, 'ok');
+  const items = first.items as Array<Record<string, unknown>>;
+  assert.equal(items.length, 10);
+  assert.deepEqual(Object.keys(items[0]).sort(), ['auth', 'binding_id', 'poll_due', 'provider_allowed']);
+  assert.equal(items[0].auth, 'revoked');
+  assert.deepEqual(
+    items.map((x) => x.binding_id),
+    ids.slice(0, 10),
+  );
+  assert.equal(first.next_after, ids[9]);
+  const second = await f.store.maintenanceBindings(f.context, String(first.next_after));
+  assert.deepEqual(
+    (second.items as typeof items).map((x) => x.binding_id),
+    ids.slice(10),
+  );
+  assert.equal(second.next_after, null);
+  assert.equal((await f.store.maintenanceBindings({ ...f.context, ownerId: 'other' })).status, 'denied');
+  assert.equal((await f.store.maintenanceBindings(f.context, 'bad')).status, 'denied');
+  assert.equal(
+    (await f.store.maintenanceBindings({ ...f.context, origin: { kind: 'schedule' } } as never)).status,
+    'denied',
+  );
+});
+test('G04 only one concurrent host claims a due poll; claims never fabricate a capture or success', async () => {
+  const f = await fixture();
+  await f.store.bind(f.context, f.binding);
+  const claims = await Promise.all([
+    f.store.claimPoll(f.context, f.binding.id),
+    f.store.claimPoll(f.context, f.binding.id),
+  ]);
+  assert.deepEqual(claims.map((x) => x.claimed).sort(), [false, true]);
+  const state = (await admin.query('SELECT * FROM cos.mail_states WHERE scope_id=$1', [f.scope])).rows[0];
+  assert.equal(state.current_capture, null);
+  assert.equal(state.last_attempt, null);
+  assert.equal(state.last_success_at, null);
+  assert.equal(
+    (await admin.query('SELECT count(*) AS n FROM cos.mail_captures WHERE scope_id=$1', [f.scope])).rows[0].n,
+    '0',
+  );
+  assert.equal((await f.store.claimPoll(f.context, f.binding.id)).claimed, false);
+  await admin.query("UPDATE cos.mail_states SET next_poll_at=clock_timestamp()-interval '1 second' WHERE scope_id=$1", [
+    f.scope,
+  ]);
+  assert.equal((await f.store.claimPoll({ ...f.context, provider: 'other' }, f.binding.id)).claimed, false);
+  await admin.query("UPDATE cos.scopes SET status='paused' WHERE id=$1", [f.scope]);
+  assert.equal((await f.store.claimPoll(f.context, f.binding.id)).status, 'denied');
+  await admin.query("UPDATE cos.scopes SET status='active' WHERE id=$1", [f.scope]);
+  await f.store.setAuth(f.context, f.binding.id, 'revoked');
+  assert.equal((await f.store.claimPoll(f.context, f.binding.id)).claimed, false);
+});
 test('G04 mailbox schema is additive, constrained and included in coordinated checkpoints', async () => {
   assert.equal(SCHEMA_VERSION, 19);
   for (const table of ['mail_bindings', 'mail_states', 'mail_captures', 'mail_messages'])
@@ -301,6 +360,111 @@ async function publishFixture(ageMs = 1000) {
   );
   return { ...f, prepared, id, knowledge, context: { ...f.context, generation: randomUUID() } };
 }
+async function eventually(check: () => Promise<boolean>): Promise<void> {
+  const until = performance.now() + 3000;
+  while (!(await check())) {
+    assert(performance.now() < until, 'mail background operation did not settle');
+    await delay(20);
+  }
+}
+test('G04 background maintenance applies independent revocation to real paused storage without inference or provider reads', async () => {
+  const f = await publishFixture();
+  const before = (await admin.query('SELECT last_success_at FROM cos.mail_states WHERE scope_id=$1', [f.scope]))
+    .rows[0];
+  fs.mkdirSync(f.root + '/pump-fences', { mode: 0o700 });
+  const fences = CalendarAccessFences.initialize(f.root + '/pump-fences');
+  fences.deny(f.scope, f.binding.id, 'revoked');
+  await admin.query("UPDATE cos.scopes SET status='paused' WHERE id=$1", [f.scope]);
+  let reads = 0;
+  const pump = new MailPump({
+    store: f.store,
+    fences,
+    connector: {
+      refresh: async () => {
+        reads++;
+        return { result: { status: 'unavailable' } };
+      },
+    },
+    authority: { retention: () => true, poll: () => false },
+  });
+  try {
+    assert.equal(pump.poke(f.context), true);
+    await eventually(
+      async () =>
+        (await admin.query('SELECT count(*) AS n FROM cos.mail_messages WHERE scope_id=$1', [f.scope])).rows[0].n ===
+        '0',
+    );
+    assert.equal(reads, 0);
+    const after = (
+      await admin.query(
+        'SELECT b.auth,s.last_success_at FROM cos.mail_bindings b JOIN cos.mail_states s ON s.scope_id=b.scope_id AND s.binding_id=b.id WHERE b.scope_id=$1',
+        [f.scope],
+      )
+    ).rows[0];
+    assert.equal(after.auth, 'revoked');
+    assert.deepEqual(after.last_success_at, before.last_success_at);
+  } finally {
+    await pump.close();
+  }
+});
+test('G04 reconstructing a background scheduler honors a prior database poll claim', async () => {
+  const f = await fixture();
+  await f.store.bind(f.context, f.binding);
+  let reads = 0;
+  const options = {
+    store: f.store,
+    fences: { assertOpen: () => {} },
+    connector: {
+      refresh: async () => {
+        reads++;
+        return { result: { status: 'unavailable' as const } };
+      },
+    },
+    authority: { retention: () => true, poll: () => true },
+  };
+  const first = new MailPump(options);
+  try {
+    first.poke(f.context);
+    await eventually(async () => reads === 1);
+  } finally {
+    await first.close();
+  }
+  let checked = false,
+    claims = 0;
+  const next = new MailPump({
+    ...options,
+    store: {
+      maintenanceBindings: f.store.maintenanceBindings.bind(f.store),
+      setAuth: f.store.setAuth.bind(f.store),
+      claimPoll: async (...args) => {
+        claims++;
+        return f.store.claimPoll(...args);
+      },
+      maintain: async (...args) => {
+        const result = await f.store.maintain(...args);
+        checked = true;
+        return result;
+      },
+    },
+  });
+  try {
+    next.poke(f.context);
+    await eventually(async () => checked);
+  } finally {
+    await next.close();
+  }
+  assert.equal(reads, 1);
+  assert.equal(claims, 0);
+  const state = (
+    await admin.query(
+      'SELECT current_capture,last_success_at,next_poll_at>clock_timestamp() AS delayed FROM cos.mail_states WHERE scope_id=$1',
+      [f.scope],
+    )
+  ).rows[0];
+  assert.equal(state.current_capture, null);
+  assert.equal(state.last_success_at, null);
+  assert.equal(state.delayed, true);
+});
 const rehashCapture = (value: Awaited<ReturnType<typeof capture>>) => {
   const { digest: _digest, ...content } = value;
   value.digest = digest(content);

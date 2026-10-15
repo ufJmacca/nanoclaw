@@ -578,6 +578,18 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
     reconcile,
     pump: async (binding: CosBinding) => {
       await reconcile(binding);
+      if (enabled() && d.mailAuthority)
+        d.store?.mail?.poke(
+          {
+            scopeId: binding.scopeId,
+            ownerId: binding.ownerId,
+            agentGroupId: binding.agentGroupId,
+            sessionId: binding.sessionId,
+            ingressId: 'mail-maintenance',
+            provider: binding.provider,
+          },
+          d.mailAuthority,
+        );
       if (enabled()) await invalidations?.drain(binding);
       const recovered = enabled() ? await briefReconciliation?.drain(binding) : undefined;
       if (enabled()) await reviewDispatch?.drain(binding);

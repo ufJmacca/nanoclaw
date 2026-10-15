@@ -2,7 +2,7 @@
 
 G04 adds a host-only Gmail reader for the selected owner's Inbox and Sent mail. Its separate Desktop OAuth client uses only `gmail.readonly`. Calendar credentials and grants do not provide mail authority. Owner account selection, Google consent and model data-control verification remain prerequisites for live use.
 
-The implementation is in progress. The collector, store, evidence publication, read adapters, host refresh connector and encrypted profile opener have fixture coverage; installed polling, owner setup and G04 deployment/recovery acceptance remain pending. The accepted G03 installation does not yet expose these mail tools.
+The implementation is in progress. The collector, store, evidence publication, read adapters, encrypted profile and host scheduler have fixture coverage; owner setup, retention with the entire CoS service disabled, and G04 deployment/recovery acceptance remain pending. The accepted G03 installation does not yet expose these mail tools.
 
 ## Encrypted profile
 
@@ -19,6 +19,10 @@ Each capture covers the most recent 30 days and holds at most 1,000 messages and
 History cursors advance only in the same transaction that publishes the capture and its knowledge evidence. Stable attempt IDs reconcile uncertain commits. Unchanged message text preserves source revisions across ordinary polling. Selection withdrawal uses the existing source tombstones, context invalidation and purge machinery. An owner's source denial also suppresses raw message copies in later captures.
 
 The host refresh connector uses PostgreSQL's observation clock and rechecks the binding, exact read grant, storage proof and polling admission around asynchronous work. One binding has one refresh in flight, bounded to four minutes. An uncertain publication returns private recovery material to the trusted host; retrying that exact capture reconciles its receipt without repeating a completed provider read. Access loss latches the independent mail denial journal before a database update, so a database outage cannot reopen cached mail.
+
+The host scheduler checks due bindings during the existing service tick and atomically claims each five-minute poll using PostgreSQL's clock. A claim cannot advance the history cursor, create a successful capture or imply a fresh read. Polling runs in the background with at most one active mailbox refresh, so it does not hold up ordinary messaging. Host retirement aborts polling and waits for the actual database and provider operations before releasing pinned credential resources or the shared database pool.
+
+Polling requires the current native owner binding, an active Mattermost subscription, unpaused native admission, the installed release and its current host lease. These checks do not consult model sign-in or spend inference allowance. Retention uses a separate tightening-only authority that still checks the owner binding, installed release and host lease while allowing a paused or closed native session. Closed or historical mail bindings remain in the paged retention inventory; no mailbox addresses, credentials or message text are returned by that inventory.
 
 Retention can tighten a stored selection without a provider request or model call, including while the scope is paused or access is closed. Its separate capture does not advance the provider's refresh time or cursor. Read checks enforce the rolling wall-clock boundary even before physical cleanup runs. Tiny selection anchors preserve immutable selection identity; superseded unreferenced capture inventories become bodyless receipts and age out after 30 days.
 
