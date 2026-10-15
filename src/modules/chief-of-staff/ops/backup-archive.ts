@@ -64,6 +64,8 @@ function validate(receipt: BackupQueueReceipt): void {
 /** Structural archive metadata only; callers still verify payload bytes and scope. */
 export function validateBackupArchiveReceipt(receipt: BackupQueueReceipt): void {
   validate(receipt);
+  if (typeof receipt.createdAt !== 'string' || !Number.isFinite(Date.parse(receipt.createdAt)))
+    throw Error('invalid_archive_receipt');
 }
 function header(name: string, size: number, type = '0'): Buffer {
   const bytes = Buffer.alloc(512);

@@ -116,6 +116,7 @@ for (const changed of [
   'extra-file',
   'digest',
   'failed',
+  'invalid-time',
   'invented-manifest',
 ] as const)
   it(`refuses ${changed} receipt or manifest metadata without deriving any restore/prune authority`, async () => {
@@ -130,6 +131,7 @@ for (const changed of [
       changedReceipt.files.push({ name: 'unexpected.json', bytes: 1, sha256: '0'.repeat(64) });
     if (changed === 'digest') changedReceipt.files[0].sha256 = '0'.repeat(64);
     if (changed === 'failed') changedReceipt.state = 'failed';
+    if (changed === 'invalid-time') changedReceipt.createdAt = 'invalid';
     if (changed === 'invented-manifest') Object.assign(changedManifest, { complete: true });
     expect(() => verifyCredentialRecoveryReceipt(changedManifest, owner, changedReceipt, [token.event])).toThrow(
       'credential_recovery_set_unavailable',
