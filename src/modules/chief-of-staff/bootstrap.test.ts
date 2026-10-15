@@ -5,6 +5,8 @@ const f = vi.hoisted(() => ({
   connect: vi.fn(),
   authority: vi.fn(),
   actionAuthority: vi.fn(),
+  mailPoll: vi.fn(),
+  mailRetention: vi.fn(),
   tick: vi.fn(async () => {}),
   stop: vi.fn(async () => {}),
   close: vi.fn(async () => {}),
@@ -28,6 +30,9 @@ vi.mock('./host-store.js', () => ({ connectCosHostStore: f.connect }));
 vi.mock('./missions/authority.js', () => ({
   createMissionAuthorityResolver: () => f.authority,
   createActionAuthorityResolver: () => f.actionAuthority,
+}));
+vi.mock('./mail/authority.js', () => ({
+  createMailAuthorities: () => ({ poll: f.mailPoll, retention: f.mailRetention }),
 }));
 vi.mock('./bridge/coordinator-launcher.js', () => ({ createCoordinatorLauncher: () => ({ close: f.close }) }));
 vi.mock('./service.js', () => ({
@@ -95,5 +100,22 @@ it('S05 production bootstrap creates specialists from the checked service store 
     expect.any(Function),
     undefined,
     f.actionAuthority,
+    f.mailPoll,
   );
+});
+it('G04 selects the mail switch and separates native poll and retention authority without model consent', async () => {
+  vi.stubEnv('COS_MAIL_ENABLED', 'true');
+  const assertHostAuthority = vi.fn();
+  host = startCosHostModule(assertHostAuthority);
+  const options = f.service.mock.calls[0][0];
+  expect(options.mailAuthority).toEqual({ poll: f.mailPoll, retention: f.mailRetention });
+  await options.connect();
+  expect(f.connect.mock.calls[0][0].COS_MAIL_ENABLED).toBe('true');
+  expect(f.connect.mock.calls[0][8]).toBe(f.mailPoll);
+  expect(options.admission()).toBe(true);
+  expect(assertHostAuthority).toHaveBeenCalled();
+  assertHostAuthority.mockImplementation(() => {
+    throw Error('PRIVATE_HOST_LEASE_LOSS');
+  });
+  expect(options.admission()).toBe(false);
 });

@@ -35,11 +35,13 @@ import { ActionNotificationDelivery } from './actions/notification-delivery.js';
 import type { KnowledgeContext } from './knowledge/store.js';
 import { renderOperatorStatus } from './ops/operator-status-render.js';
 import { renderOwnerControl } from './ops/owner-control-render.js';
+import type { MailAuthorities } from './mail/authority.js';
 
 export type RuntimeDependencies = {
   db: Database.Database;
   enabled: boolean;
   admission?(): boolean;
+  mailAuthority?: MailAuthorities;
   store?: PriorityStore;
   facts(binding: CosBinding): Promise<ChannelFacts>;
   session(id: string): Session | undefined;
