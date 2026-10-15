@@ -24,6 +24,7 @@ import { MailConnector } from './mail/connector.js';
 import { MailView } from './mail/view.js';
 import { MailHost, closeMailProfile } from './mail/host.js';
 import type { Context } from './domain/contracts.js';
+import type { MailMaintenanceResources } from './mail/maintenance.js';
 async function optionalGoogleHost<T>(open: () => T | Promise<T>, unavailable: string): Promise<T | undefined> {
   try {
     return await open();
@@ -32,11 +33,65 @@ async function optionalGoogleHost<T>(open: () => T | Promise<T>, unavailable: st
     return undefined;
   }
 }
+type HostRoots = { targetRoot: string; installationRoot: string; dataRoot: string };
+async function checkRuntimeDatabase(env: NodeJS.ProcessEnv, roots: HostRoots): Promise<void> {
+  const check = await connectChecked(env, 'runtime');
+  try {
+    const target = localTarget(roots.targetRoot, roots.installationRoot, roots.dataRoot);
+    if ((await databaseFingerprint(check, parseDatabaseConfig(env, 'runtime'))) !== target.binding.databaseFingerprint)
+      throw new DatabasePreflightError('database_identity_mismatch');
+    if ((await migrationStatus(check)) !== SCHEMA_VERSION) throw new DatabasePreflightError('schema_incompatible');
+  } finally {
+    await check.end();
+  }
+}
+/** No source adapters, OAuth token owner, RPC stores or model credentials.
+ * The caller owns this lifetime even when the whole CoS service is disabled. */
+export async function connectCosMailMaintenanceStore(
+  env: NodeJS.ProcessEnv,
+  roots: HostRoots,
+  admitted: () => boolean,
+): Promise<MailMaintenanceResources> {
+  const guard = () => {
+    if (!admitted()) throw Error('mail_maintenance_unavailable');
+  };
+  guard();
+  await checkRuntimeDatabase(env, roots);
+  guard();
+  const settings = knowledgeSettings({ ...env, COS_KNOWLEDGE_ENABLED: 'false' });
+  const artifacts = openKnowledgeArtifacts(roots.targetRoot, [roots.installationRoot, roots.dataRoot]);
+  const database = BoundedDatabase.fromConfig(await externalDatabaseConfig(env, 'runtime'), admitted);
+  let resource: MailHostFences | undefined, mail: MailHost | undefined;
+  try {
+    guard();
+    resource = await optionalGoogleHost(() => openMailFences(roots), 'mail_configuration_unavailable');
+    mail = new MailHost({ store: new MailStore(database, artifacts), resource });
+    guard();
+    return {
+      mail,
+      database,
+      knowledge: new KnowledgeStore(
+        database,
+        artifacts,
+        {},
+        { retrievalEnabled: () => false, retentionMs: settings.retentionMs },
+      ),
+    };
+  } catch (error) {
+    try {
+      if (mail) await mail.close();
+      else if (resource) await closeMailProfile(resource);
+    } finally {
+      await database.pool.end();
+    }
+    throw error;
+  }
+}
 
 /** Runtime credentials only. Startup validates the schema; it never migrates or opens source access implicitly. */
 export async function connectCosHostStore(
   env: NodeJS.ProcessEnv,
-  roots: { targetRoot: string; installationRoot: string; dataRoot: string },
+  roots: HostRoots,
   admitted: () => boolean,
   retention: Pick<PurgeHooks, 'purgeContexts'> = {},
   missionAuthority?: MissionAuthorityResolver,
@@ -50,15 +105,7 @@ export async function connectCosHostStore(
   const actionConfig = actionSettings(env);
   const mailConfig = mailSettings(env);
   if (actionConfig.enabled && !actionAuthority && !actionDependencies) throw new Error('action_authority_required');
-  const check = await connectChecked(env, 'runtime');
-  try {
-    const target = localTarget(roots.targetRoot, roots.installationRoot, roots.dataRoot);
-    if ((await databaseFingerprint(check, parseDatabaseConfig(env, 'runtime'))) !== target.binding.databaseFingerprint)
-      throw new DatabasePreflightError('database_identity_mismatch');
-    if ((await migrationStatus(check)) !== SCHEMA_VERSION) throw new DatabasePreflightError('schema_incompatible');
-  } finally {
-    await check.end();
-  }
+  await checkRuntimeDatabase(env, roots);
   const actions =
     actionDependencies ??
     (actionAuthority

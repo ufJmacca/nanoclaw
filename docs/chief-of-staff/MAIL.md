@@ -2,7 +2,7 @@
 
 G04 adds a host-only Gmail reader for the selected owner's Inbox and Sent mail. Its separate Desktop OAuth client uses only `gmail.readonly`. Calendar credentials and grants do not provide mail authority. Owner account selection, Google consent and model data-control verification remain prerequisites for live use.
 
-The implementation is in progress. The collector, store, evidence publication, read adapters, encrypted profile and host scheduler have fixture coverage; owner setup, retention with the entire CoS service disabled, and G04 deployment/recovery acceptance remain pending. The accepted G03 installation does not yet expose these mail tools.
+The implementation is in progress. The collector, store, evidence publication, read adapters, encrypted profile, host scheduler and disabled-service maintenance have fixture coverage; owner setup and G04 deployment/recovery acceptance remain pending. The accepted G03 installation does not yet expose these mail tools.
 
 ## Encrypted profile
 
@@ -25,6 +25,8 @@ The host scheduler checks due bindings during the existing service tick and atom
 Polling requires the current native owner binding, an active Mattermost subscription, unpaused native admission, the installed release and its current host lease. These checks do not consult model sign-in or spend inference allowance. Retention uses a separate tightening-only authority that still checks the owner binding, installed release and host lease while allowing a paused or closed native session. Closed or historical mail bindings remain in the paged retention inventory; no mailbox addresses, credentials or message text are returned by that inventory.
 
 Retention can tighten a stored selection without a provider request or model call, including while the scope is paused or access is closed. Its separate capture does not advance the provider's refresh time or cursor. Read checks enforce the rolling wall-clock boundary even before physical cleanup runs. Tiny selection anchors preserve immutable selection identity; superseded unreferenced capture inventories become bodyless receipts and age out after 30 days.
+
+When the entire CoS service is disabled, the installed host uses a separate maintenance owner. It verifies current target and owner registration before opening runtime-role storage, opens only the protected mail denial profile, and cannot poll providers or start model, RPC, specialist or messaging work. It applies the same retention and source-purge machinery. Required cleanup of retained native conversation history stays pending until the existing protected maintenance procedure completes; disabling the service does not waive that boundary. Unconfigured or unadmitted installations open no maintenance database.
 
 An unchanged retention check creates no new capture and preserves provider freshness. Actual message or queued-metadata expiry, owner withdrawal and the first recorded access closure still create the required atomic retention checkpoint.
 

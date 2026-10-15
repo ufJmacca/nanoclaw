@@ -14,7 +14,7 @@ import { validateMattermostSessionForExecution } from '../../channels/mattermost
 import { createMattermostFacts } from './bridge/mattermost-facts.js';
 import { guardConversationAccess } from './bridge/conversation-access.js';
 import type { CosBinding } from '../../cos-boundary.js';
-import { connectCosHostStore } from './host-store.js';
+import { connectCosHostStore, connectCosMailMaintenanceStore } from './host-store.js';
 import { CosService } from './service.js';
 import { createCoordinatorLauncher } from './bridge/coordinator-launcher.js';
 import { RestrictedExecutionProbe } from './bridge/native-execution.js';
@@ -25,6 +25,7 @@ import { createTeamAuthorityResolver } from './missions/team-authority.js';
 import { MissionHost } from './missions/host.js';
 import { createMissionExecution } from './missions/execution.js';
 import { createMailAuthorities } from './mail/authority.js';
+import { MailMaintenance, mailMaintenanceContexts } from './mail/maintenance.js';
 import { cosMissionIdentities, hasCosMissionBoundary } from '../../cos-mission-boundary.js';
 
 /** Narrow host-service profile: never load migration or test credentials into this module. */
@@ -223,13 +224,32 @@ export function startCosHostModule(assertHostAuthority: () => void): { service: 
       ),
   });
   // PostgreSQL availability never holds up unrelated channel startup.
+  const maintenance =
+    selected.COS_ENABLED !== 'true' && releaseMode() && targetRoot
+      ? new MailMaintenance({
+          admitted,
+          authority: mailAuthority,
+          contexts: mailMaintenanceContexts(getDb()),
+          connect: () =>
+            connectCosMailMaintenanceStore(
+              selected,
+              { targetRoot, installationRoot: process.cwd(), dataRoot: DATA_DIR },
+              admitted,
+            ),
+        })
+      : undefined;
   void service.tick();
-  const timer = setInterval(() => void service.tick(), 5000);
+  void maintenance?.tick();
+  const timer = setInterval(() => {
+    void service.tick();
+    void maintenance?.tick();
+  }, 5000);
   timer.unref();
   return {
     service,
     async stop() {
       clearInterval(timer);
+      await maintenance?.close();
       await credentials?.coordinator.close();
       await service.stop();
       await launcher.close();

@@ -46,7 +46,7 @@ vi.mock('./mail/config.js', async (original) => ({
   openMailCredentials: f.mailOpen,
   openMailFences: f.mailFences,
 }));
-import { connectCosHostStore } from './host-store.js';
+import { connectCosHostStore, connectCosMailMaintenanceStore } from './host-store.js';
 import { SCHEMA_VERSION } from './store/migrations.js';
 afterEach(() => vi.resetAllMocks());
 function fixture() {
@@ -58,6 +58,35 @@ function fixture() {
   f.open.mockReturnValue(f.artifacts);
   f.configure.mockResolvedValue({});
 }
+it('G04 global-off maintenance opens only checked runtime storage and denial fences, even with source flags set', async () => {
+  fixture();
+  const close = vi.fn(async () => {});
+  f.mailFences.mockResolvedValue({ fences: { assertOpen: vi.fn() }, close, closed: () => true });
+  const resources = await connectCosMailMaintenanceStore(
+    { COS_MAIL_ENABLED: 'true', COS_CALENDAR_ENABLED: 'true', COS_ACTIONS_ENABLED: 'true' },
+    { targetRoot: '/state', installationRoot: '/install', dataRoot: '/install/data' },
+    () => true,
+  );
+  expect(resources.mail.active()).toBe(false);
+  expect(resources.mail.connector).toBeUndefined();
+  expect(f.mailOpen).not.toHaveBeenCalled();
+  expect(f.calendarOpen).not.toHaveBeenCalled();
+  expect(f.actionOpen).not.toHaveBeenCalled();
+  expect(f.mailFences).toHaveBeenCalledOnce();
+  expect(f.fingerprint.mock.invocationCallOrder[0]).toBeLessThan(f.mailFences.mock.invocationCallOrder[0]);
+  await resources.mail.close();
+  expect(close).toHaveBeenCalledOnce();
+});
+it('G04 global-off maintenance rejects lost host admission before or during database verification', async () => {
+  fixture();
+  const roots = { targetRoot: '/state', installationRoot: '/install', dataRoot: '/install/data' };
+  await expect(connectCosMailMaintenanceStore({}, roots, () => false)).rejects.toThrow('mail_maintenance_unavailable');
+  expect(f.connect).not.toHaveBeenCalled();
+  const admitted = vi.fn().mockReturnValueOnce(true).mockReturnValue(false);
+  await expect(connectCosMailMaintenanceStore({}, roots, admitted)).rejects.toThrow('mail_maintenance_unavailable');
+  expect(f.mailFences).not.toHaveBeenCalled();
+  expect(f.configure).not.toHaveBeenCalled();
+});
 it('G04 opens the separate reader after database checks and binds mail evidence to host admission', async () => {
   fixture();
   const close = vi.fn(async () => {}),

@@ -10,11 +10,16 @@ const f = vi.hoisted(() => ({
   tick: vi.fn(async () => {}),
   stop: vi.fn(async () => {}),
   close: vi.fn(async () => {}),
+  release: vi.fn(() => false),
+  maintenance: vi.fn(),
+  maintenanceConnect: vi.fn(),
+  maintenanceTick: vi.fn(async () => {}),
+  maintenanceClose: vi.fn(async () => {}),
 }));
 vi.mock('../../env.js', () => ({
   readEnvFile: () => ({ COS_ENABLED: 'true', COS_TARGET_STATE_DIR: '/fixture/target' }),
 }));
-vi.mock('../../release-runtime.js', () => ({ releaseMode: () => false }));
+vi.mock('../../release-runtime.js', () => ({ releaseMode: f.release }));
 vi.mock('./ops/target-identity.js', () => ({ localTarget: () => ({ binding: {} }) }));
 vi.mock('./ops/maintenance.js', () => ({ admittedGeneration: () => 'fixture' }));
 vi.mock('../../install-slug.js', async () => ({
@@ -26,7 +31,20 @@ vi.mock('../../container-runner.js', () => ({
   wakeContainer: vi.fn(),
   hasContainerExecution: vi.fn(() => false),
 }));
-vi.mock('./host-store.js', () => ({ connectCosHostStore: f.connect }));
+vi.mock('./host-store.js', () => ({
+  connectCosHostStore: f.connect,
+  connectCosMailMaintenanceStore: f.maintenanceConnect,
+}));
+vi.mock('./mail/maintenance.js', () => ({
+  mailMaintenanceContexts: () => () => [],
+  MailMaintenance: class {
+    constructor(options: unknown) {
+      f.maintenance(options);
+    }
+    tick = f.maintenanceTick;
+    close = f.maintenanceClose;
+  },
+}));
 vi.mock('./missions/authority.js', () => ({
   createMissionAuthorityResolver: () => f.authority,
   createActionAuthorityResolver: () => f.actionAuthority,
@@ -57,6 +75,7 @@ import { startCosHostModule } from './bootstrap.js';
 let host: ReturnType<typeof startCosHostModule> | undefined;
 beforeEach(() => {
   vi.clearAllMocks();
+  f.release.mockReturnValue(false);
   initTestDb();
   vi.stubEnv('COS_ENABLED', 'true');
   vi.stubEnv('COS_TARGET_STATE_DIR', '/fixture/target');
@@ -118,4 +137,26 @@ it('G04 selects the mail switch and separates native poll and retention authorit
     throw Error('PRIVATE_HOST_LEASE_LOSS');
   });
   expect(options.admission()).toBe(false);
+});
+it('G04 gives an installed globally disabled host a separate maintenance owner without enabling the runtime', async () => {
+  vi.stubEnv('COS_ENABLED', 'false');
+  vi.stubEnv('COS_MAIL_ENABLED', 'true');
+  f.release.mockReturnValue(true);
+  host = startCosHostModule(vi.fn());
+  expect(f.service.mock.calls[0][0].enabled).toBe(false);
+  expect(f.maintenance).toHaveBeenCalledOnce();
+  expect(f.maintenanceTick).toHaveBeenCalledOnce();
+  const options = f.maintenance.mock.calls[0][0];
+  expect(options.authority).toEqual({ poll: f.mailPoll, retention: f.mailRetention });
+  await options.connect();
+  expect(f.maintenanceConnect).toHaveBeenCalledWith(
+    expect.objectContaining({ COS_ENABLED: 'false' }),
+    expect.any(Object),
+    options.admitted,
+  );
+  expect(f.connect).not.toHaveBeenCalled();
+  await host.stop();
+  host = undefined;
+  expect(f.maintenanceClose).toHaveBeenCalledOnce();
+  expect(f.stop).toHaveBeenCalledOnce();
 });

@@ -21,6 +21,8 @@ import { MailConnector } from '../../modules/chief-of-staff/mail/connector.js';
 import { CalendarAccessFences } from '../../modules/chief-of-staff/calendar/access-fences.js';
 import { MailReadError } from '../../modules/chief-of-staff/mail/reader.js';
 import { MailPump } from '../../modules/chief-of-staff/mail/pump.js';
+import { MailHost } from '../../modules/chief-of-staff/mail/host.js';
+import { MailMaintenance } from '../../modules/chief-of-staff/mail/maintenance.js';
 import { setTimeout as delay } from 'node:timers/promises';
 const scopes: string[] = [],
   roots: string[] = [];
@@ -405,6 +407,51 @@ test('G04 background maintenance applies independent revocation to real paused s
     assert.deepEqual(after.last_success_at, before.last_success_at);
   } finally {
     await pump.close();
+  }
+});
+test('G04 global-off owner tightens real paused mail storage without a source connector or waiving protected history purge', async () => {
+  const f = await publishFixture();
+  const exposed = await f.knowledge.search(f.context, { query: 'alpha' });
+  assert.equal(exposed.status, 'ok');
+  assert((exposed.items as unknown[]).length > 0);
+  await f.store.setAuth(f.context, f.binding.id, 'revoked');
+  await admin.query("UPDATE cos.scopes SET status='paused' WHERE id=$1", [f.scope]);
+  const ownedDatabase = BoundedDatabase.fromConfig(await fixtureDatabaseConfig());
+  const host = new MailHost({ store: new MailStore(ownedDatabase, f.artifacts) });
+  const maintenance = new MailMaintenance({
+    admitted: () => true,
+    contexts: () => [f.context],
+    authority: { retention: () => true, poll: () => true },
+    connect: async () => ({
+      mail: host,
+      knowledge: new KnowledgeStore(ownedDatabase, f.artifacts),
+      database: ownedDatabase,
+    }),
+  });
+  try {
+    assert.equal(host.active(), false);
+    assert.equal(host.connector, undefined);
+    await maintenance.tick();
+    await eventually(
+      async () =>
+        (await admin.query('SELECT count(*) AS n FROM cos.mail_messages WHERE scope_id=$1', [f.scope])).rows[0].n ===
+        '0',
+    );
+    assert.equal(
+      (await admin.query('SELECT auth FROM cos.mail_bindings WHERE scope_id=$1', [f.scope])).rows[0].auth,
+      'revoked',
+    );
+    const current = (
+      await admin.query(
+        'SELECT c.metadata FROM cos.mail_states s JOIN cos.mail_captures c ON c.scope_id=s.scope_id AND c.id=s.current_capture WHERE s.scope_id=$1',
+        [f.scope],
+      )
+    ).rows[0];
+    assert.equal(current.metadata.mode, 'retention');
+    await maintenance.tick();
+    assert.equal(maintenance.status().purge, 'pending');
+  } finally {
+    await maintenance.close();
   }
 });
 test('G04 reconstructing a background scheduler honors a prior database poll claim', async () => {
