@@ -159,7 +159,9 @@ export type CosMethod =
   | 'cos_source_change_propose'
   | 'cos_answer_prepare'
   | 'cos_answer_get'
-  | 'cos_calendar_read';
+  | 'cos_calendar_read'
+  | 'cos_mail_search'
+  | 'cos_mail_thread_get';
 export type CosRequest = {
   protocol: typeof COS_PROTOCOL;
   request_id: string;
@@ -171,6 +173,33 @@ const object = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === 'object' && !Array.isArray(value);
 const keys = (value: Record<string, unknown>, allowed: string[]): boolean =>
   Object.keys(value).every((key) => allowed.includes(key));
+export type MailSearchInput = { binding_id: string; query: string; limit?: number; offset?: number };
+export type MailThreadInput = { binding_id: string; thread_id: string; limit?: number; offset?: number };
+const mailReadBounds = (value: Record<string, unknown>) =>
+  typeof value.binding_id === 'string' &&
+  uuid.test(value.binding_id) &&
+  (value.limit === undefined ||
+    (Number.isInteger(value.limit) && Number(value.limit) >= 1 && Number(value.limit) <= 5)) &&
+  (value.offset === undefined ||
+    (Number.isInteger(value.offset) && Number(value.offset) >= 0 && Number(value.offset) <= 10000));
+export function validMailSearchInput(value: unknown): value is MailSearchInput {
+  return (
+    object(value) &&
+    keys(value, ['binding_id', 'query', 'limit', 'offset']) &&
+    mailReadBounds(value) &&
+    typeof value.query === 'string' &&
+    value.query.length <= 400
+  );
+}
+export function validMailThreadInput(value: unknown): value is MailThreadInput {
+  return (
+    object(value) &&
+    keys(value, ['binding_id', 'thread_id', 'limit', 'offset']) &&
+    mailReadBounds(value) &&
+    typeof value.thread_id === 'string' &&
+    /^[a-f0-9]{1,128}$/.test(value.thread_id)
+  );
+}
 export type CalendarReadInput = {
   binding_id: string;
   calendar_id: string;
@@ -208,6 +237,7 @@ export function validRequest(value: unknown): value is CosRequest {
   let encoded: string;
   try {
     encoded = JSON.stringify(value);
+    // eslint-disable-next-line no-catch-all/no-catch-all -- Any unserializable wire input is invalid, regardless of serialization failure type.
   } catch {
     return false;
   }
@@ -252,6 +282,8 @@ export function validRequest(value: unknown): value is CosRequest {
           Number(value.params.calendar_offset) <= 10000))
     );
   if (value.method === 'cos_calendar_read') return validCalendarReadInput(value.params);
+  if (value.method === 'cos_mail_search') return validMailSearchInput(value.params);
+  if (value.method === 'cos_mail_thread_get') return validMailThreadInput(value.params);
   if (value.method === 'cos_request_status')
     return (
       keys(value.params, ['request_id']) &&
@@ -466,6 +498,7 @@ function workZone(v: unknown): v is string {
   try {
     new Intl.DateTimeFormat('en', { timeZone: v }).format(0);
     return true;
+    // eslint-disable-next-line no-catch-all/no-catch-all -- Unknown or invalid time zones cannot become work-record dates.
   } catch {
     return false;
   }
@@ -625,6 +658,7 @@ export function validResponse(value: unknown, requestId: string): value is CosRe
   if (!object(value) || !keys(value, ['protocol', 'request_id', 'status', 'result'])) return false;
   try {
     if (new TextEncoder().encode(JSON.stringify(value)).length > COS_MAX_BYTES) return false;
+    // eslint-disable-next-line no-catch-all/no-catch-all -- Unserializable responses must not cross the bounded RPC wire.
   } catch {
     return false;
   }

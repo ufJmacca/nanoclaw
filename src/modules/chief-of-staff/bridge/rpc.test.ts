@@ -793,6 +793,62 @@ describe('S02 knowledge RPC host authority', () => {
     expect(denied.status).toBe('denied');
     expect(JSON.stringify(denied)).not.toContain('WorkRPCFixtureCanary');
   });
+  it('G04 routes mail reads through host context and rechecks cached disclosure', async () => {
+    const { db, store } = fixture();
+    const context = {
+      scopeId: 'fixture',
+      ownerId: 'owner',
+      sessionId: 'session',
+      agentGroupId: 'group',
+      ingressId: 'verified',
+    };
+    const retained = { ...context, provider: 'codex', generation: '33333333-3333-4333-8333-333333333333' };
+    const knowledge = { contextReady: vi.fn().mockResolvedValue({ status: 'ok' }) };
+    const mailView = {
+      search: vi.fn().mockResolvedValue({ status: 'ok', items: [{ text: 'MailRPCFixtureCanary' }] }),
+      thread: vi.fn().mockResolvedValue({ status: 'ok', items: [{ text: 'MailRPCFixtureCanary' }] }),
+      coverage: vi.fn().mockResolvedValue({ status: 'ok', items: [], freshness_notice: 'Incomplete' }),
+    };
+    const handler = createRpcHandler({
+      resolveContext: async () => context,
+      store: { ...store, mailView } as unknown as PriorityStore,
+      knowledge: knowledge as unknown as KnowledgeStore,
+      resolveKnowledgeContext: async () => retained,
+    });
+    const call = async (method: string, params: Record<string, unknown>) => {
+      const message = { ...request, method, params };
+      await handler(
+        {
+          action: 'cos_rpc',
+          delivery_id: '22222222-2222-4222-8222-222222222222',
+          request: message,
+        },
+        {} as Session,
+        db,
+      );
+      return JSON.parse(
+        (
+          db
+            .prepare('SELECT response FROM cos_rpc_responses WHERE request_id=? AND payload_hash=?')
+            .get(request.request_id, digest(message)) as { response: string }
+        ).response,
+      );
+    };
+    const search = { binding_id: request.request_id, query: 'alpha' },
+      thread = { binding_id: request.request_id, thread_id: 'ab01' };
+    expect(await call('cos_mail_search', search)).toMatchObject({ status: 'ok' });
+    expect(mailView.search).toHaveBeenCalledWith(retained, search);
+    expect(await call('cos_mail_thread_get', thread)).toMatchObject({ status: 'ok' });
+    expect(mailView.thread).toHaveBeenCalledWith(retained, thread);
+    expect(await call('cos_context_get', { view: 'today' })).toMatchObject({
+      status: 'ok',
+      result: { mail: { freshness_notice: 'Incomplete' } },
+    });
+    knowledge.contextReady.mockResolvedValueOnce({ status: 'ok' }).mockResolvedValue({ status: 'denied' });
+    const denied = await call('cos_mail_thread_get', thread);
+    expect(denied.status).toBe('denied');
+    expect(JSON.stringify(denied)).not.toContain('MailRPCFixtureCanary');
+  });
   it('S03 uses host context for calendar reads and includes bounded calendar coverage with priorities', async () => {
     const { db, store } = fixture(),
       context = {

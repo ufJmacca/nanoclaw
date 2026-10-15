@@ -9,6 +9,7 @@ import { GOOGLE_MAIL_READ_SCOPE } from '../calendar/oauth-core.js';
 import { MailEvidence } from './evidence.js';
 import { retainedMailCapture, suppressMailCapture } from './retention.js';
 import { MAIL_CHECKPOINT_BYTES, mailCheckpointBytes } from './bounds.js';
+import { mailSourceAccess } from './source-access.js';
 export type MailBindingInput = {
   id: string;
   provider: 'google' | 'fixture';
@@ -658,7 +659,7 @@ export class MailStore {
     return this.transaction(context, false, async (client) => {
       const rows = (
         await client.query(
-          `SELECT b.id AS binding_id,b.auth,s.last_attempt_at,s.last_success_at,s.next_poll_at,s.current_capture,c.metadata,a.status AS attempt_status
+          `SELECT b.id AS binding_id,b.auth,b.permission_scopes,s.last_attempt_at,s.last_success_at,s.next_poll_at,s.current_capture,c.metadata,a.status AS attempt_status
     FROM cos.mail_bindings b JOIN cos.mail_states s ON s.scope_id=b.scope_id AND s.binding_id=b.id
     LEFT JOIN cos.mail_captures c ON c.scope_id=s.scope_id AND c.binding_id=s.binding_id AND c.id=s.current_capture
     LEFT JOIN cos.mail_captures a ON a.scope_id=s.scope_id AND a.binding_id=s.binding_id AND a.id=s.last_attempt
@@ -679,6 +680,40 @@ export class MailStore {
         })),
         more,
       };
+    });
+  }
+  /** References only, from the committed selection. No provider thread expansion or raw body read. */
+  async evidenceSnapshot(context: Context & { provider: string }, binding: string, thread?: string): Promise<Result> {
+    if (!uuid(binding) || (thread !== undefined && !providerId(thread))) return { status: 'denied' };
+    return this.transaction(context, false, async (client) => {
+      const state = (
+        await client.query(
+          `SELECT ms.current_capture,ms.last_attempt,ms.last_success_at FROM cos.mail_bindings b
+         JOIN cos.mail_states ms ON ms.scope_id=b.scope_id AND ms.binding_id=b.id
+         WHERE b.scope_id=$1 AND b.id=$2 AND $3=ANY(b.processing_providers) AND b.auth='ready'
+         AND b.permission_scopes=ARRAY[$4]::text[]`,
+          [context.scopeId, binding, context.provider, GOOGLE_MAIL_READ_SCOPE],
+        )
+      ).rows[0];
+      if (!state) return { status: 'denied' };
+      const items = (
+        await client.query(
+          `SELECT mm.provider_message_id AS message_id,mm.provider_thread_id AS thread_id,mm.source_id,
+         s.current_revision_id AS revision_id,s.version,
+         (SELECT count(*)::int FROM cos.chunks ch WHERE ch.scope_id=s.scope_id AND ch.revision_id=s.current_revision_id) AS chunk_count,
+         COALESCE(s.provenance->>'origin'='mail_message' AND s.status IN ('current','stale') AND $3=ANY(s.processing_providers)
+           AND a.lifecycle='published' AND NOT EXISTS(SELECT 1 FROM cos.revocation_tombstones t WHERE t.scope_id=s.scope_id AND t.source_id=s.id)
+           AND ${mailSourceAccess("ARRAY['mail:'||$2::text]")},false) AS readable
+         FROM cos.mail_messages mm LEFT JOIN cos.sources s ON s.scope_id=mm.scope_id AND s.id=mm.source_id
+         LEFT JOIN cos.source_revisions r ON r.scope_id=s.scope_id AND r.id=s.current_revision_id
+         LEFT JOIN cos.artifacts a ON a.scope_id=r.scope_id AND a.id=r.artifact_id
+         WHERE mm.scope_id=$1 AND mm.binding_id=$2::uuid AND mm.last_capture=$4 AND ($5::text IS NULL OR mm.provider_thread_id=$5)
+         ORDER BY mm.internal_date,mm.provider_message_id LIMIT 1001`,
+          [context.scopeId, binding, context.provider, state.current_capture, thread ?? null],
+        )
+      ).rows;
+      if (items.length > 1000) return { status: 'unavailable' };
+      return { status: 'ok', binding_id: binding, ...state, items };
     });
   }
 }

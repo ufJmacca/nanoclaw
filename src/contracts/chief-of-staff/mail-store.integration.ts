@@ -16,6 +16,7 @@ import { collectMail } from '../../modules/chief-of-staff/mail/capture.js';
 import { normalizeMailMessage, type MailWindow } from '../../modules/chief-of-staff/mail/normalization.js';
 import { digest } from '../../modules/chief-of-staff/domain/contracts.js';
 import { KnowledgeStore } from '../../modules/chief-of-staff/knowledge/store.js';
+import { MailView } from '../../modules/chief-of-staff/mail/view.js';
 const scopes: string[] = [],
   roots: string[] = [];
 let admin: pg.Client, database: BoundedDatabase;
@@ -87,12 +88,14 @@ async function fixture(hooks: ConstructorParameters<typeof MailStore>[2] = {}) {
   };
   return { scope, root, artifacts, store, context, binding };
 }
-async function capture(capturedAt = Date.now(), ageMs = 1000) {
+async function capture(capturedAt?: number, ageMs = 1000) {
+  // Production polling and retention both use the selected PostgreSQL clock.
+  const at: number = capturedAt ?? (await admin.query('SELECT clock_timestamp() AS now')).rows[0].now.getTime();
   const raw = {
     id: 'aa01',
     threadId: 'bb01',
     historyId: '101',
-    internalDate: String(capturedAt - ageMs),
+    internalDate: String(at - ageMs),
     labelIds: ['INBOX'],
     payload: {
       mimeType: 'text/plain',
@@ -101,7 +104,7 @@ async function capture(capturedAt = Date.now(), ageMs = 1000) {
   };
   return collectMail({
     mailboxEmail: 'owner@example.invalid',
-    capturedAt,
+    capturedAt: at,
     reader: {
       profile: async () => ({ mailboxEmail: 'owner@example.invalid', historyId: '100' }),
       list: async () => ({ messages: [{ id: 'aa01', threadId: 'bb01' }], nextPageToken: null, resultSizeEstimate: 1 }),
@@ -244,7 +247,7 @@ test('G04 reconstructs only the current capture and preserves the original selec
   assert.equal((await f.store.publish(f.context, f.binding.id, first, prepared)).status, 'ok');
   const firstSelection = (await admin.query('SELECT selection_id FROM cos.mail_messages WHERE scope_id=$1', [f.scope]))
     .rows[0].selection_id;
-  const second = await capture(Date.now()),
+  const second = await capture(),
     id = randomUUID();
   const started = await f.store.start(f.context, f.binding.id, id, second.window);
   assert.equal(started.status, 'ok');
@@ -283,7 +286,7 @@ test('G04 reconstructs only the current capture and preserves the original selec
 async function publishFixture(ageMs = 1000) {
   const f = await fixture();
   await f.store.bind(f.context, f.binding);
-  const prepared = await capture(Date.now(), ageMs),
+  const prepared = await capture(undefined, ageMs),
     id = randomUUID();
   await f.store.start(f.context, f.binding.id, id, prepared.window);
   assert.equal((await f.store.publish(f.context, f.binding.id, id, prepared)).status, 'ok');
@@ -676,6 +679,53 @@ test('G04 a refresh starting during answer publication cannot commit the previou
   assert.equal(hookCalled, true);
   assert.equal(answer.status, 'denied');
   assert.equal((await knowledge.contextReady(f.context)).status, 'ok');
+});
+test('G04 typed mail search ranks only the selected binding and thread reads carry captured message references', async () => {
+  const f = await publishFixture();
+  fs.writeFileSync(f.root + '/staging/note.md', 'alpha alpha alpha alpha alpha alpha alpha', { mode: 0o600 });
+  assert.equal(
+    (
+      await f.knowledge.importSource(f.context, randomUUID(), {
+        sourceKey: 'unrelated-note',
+        filename: 'note.md',
+        title: 'Unrelated note',
+        processingProviders: ['codex'],
+        expectedVersion: 0,
+      })
+    ).status,
+    'ok',
+  );
+  const view = new MailView({ store: f.store, knowledge: f.knowledge, enabled: () => true, assertOpen: () => {} });
+  const found = await view.search(f.context, { binding_id: f.binding.id, query: 'alpha', limit: 1 });
+  assert.equal(found.status, 'ok');
+  assert.equal((found.items as Array<{ message_id: string }>)[0]?.message_id, 'aa01');
+  assert.equal(JSON.stringify(found).includes('Unrelated note'), false);
+  const thread = await view.thread(f.context, { binding_id: f.binding.id, thread_id: 'bb01' });
+  assert.equal(thread.status, 'ok');
+  const message = (
+    thread.items as Array<{ message_id: string; evidence: Array<{ evidence_id: string; text: string }> }>
+  )[0];
+  assert.equal(message.message_id, 'aa01');
+  assert(message.evidence.every((ref) => typeof ref.evidence_id === 'string'));
+  assert.match(message.evidence.map((ref) => ref.text).join('\n'), /project alpha/);
+  assert.match(String(thread.freshness_notice), /Last successful refresh/);
+  const absent = await view.thread(f.context, { binding_id: f.binding.id, thread_id: 'ff01' });
+  assert.equal(absent.status, 'ok');
+  assert.deepEqual(absent.items, []);
+  assert.match(String(absent.freshness_notice), /does not establish that the inbox is empty/);
+  assert.equal((await view.search(f.context, { binding_id: randomUUID(), query: 'alpha' })).status, 'denied');
+  const foreign = { ...f.context, ownerId: 'foreign-owner', generation: randomUUID() };
+  assert.equal((await view.thread(foreign, { binding_id: f.binding.id, thread_id: 'bb01' })).status, 'denied');
+  await admin.query(
+    "UPDATE cos.mail_messages SET message=jsonb_set(message,'{labels}','[\"TRASH\"]') WHERE scope_id=$1",
+    [f.scope],
+  );
+  const fresh = { ...f.context, generation: randomUUID() },
+    excluded = await view.thread(fresh, { binding_id: f.binding.id, thread_id: 'bb01' });
+  assert.equal(excluded.status, 'ok');
+  assert.deepEqual(excluded.items, []);
+  assert.equal(excluded.omitted_messages, 1);
+  assert.equal(JSON.stringify(excluded).includes('project alpha'), false);
 });
 /** Independent source fixture exercises disclosure guards before the mail publisher is added. */
 async function readableMailFixture() {

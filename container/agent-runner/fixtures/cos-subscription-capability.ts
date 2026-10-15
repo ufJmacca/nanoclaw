@@ -988,6 +988,8 @@ try {
               'cos_change_propose',
               'cos_context_get',
               'cos_knowledge_search',
+              'cos_mail_search',
+              'cos_mail_thread_get',
               'cos_mandate_activity',
               'cos_mandate_propose',
               'cos_mission_cancel',

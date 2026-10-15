@@ -639,6 +639,18 @@ export class KnowledgeStore {
     );
   }
   async search(context: KnowledgeContext, input: Search): Promise<Result> {
+    return this.searchRestricted(context, input, null);
+  }
+  /** Trusted mail adapter: constrain the source set before ranking and paging. */
+  async searchMail(context: KnowledgeContext, binding: string, input: Search): Promise<Result> {
+    if (!uuid.test(binding)) return { status: 'denied' };
+    return this.searchRestricted(context, input, binding);
+  }
+  private async searchRestricted(
+    context: KnowledgeContext,
+    input: Search,
+    mailBinding: string | null,
+  ): Promise<Result> {
     if (!this.retrievalEnabled()) return { status: 'unavailable' };
     if (
       typeof input?.query !== 'string' ||
@@ -661,6 +673,7 @@ export class KnowledgeStore {
           `${candidateSelect},ts_rank(c.search,plainto_tsquery('simple',$3)) AS score ${candidateJoin}
         AND c.search @@ plainto_tsquery('simple',$3) AND ($4::text IS NULL OR s.id=$4) AND ($5::text IS NULL OR s.project_id=$5)
         AND ${sourceAccess('$8')}
+        AND ($9::text IS NULL OR (s.provenance->>'origin'='mail_message' AND s.access_policy->>'mail_binding_id'=$9))
         ORDER BY score DESC,s.id,c.ordinal LIMIT $6 OFFSET $7`,
           [
             context.scopeId,
@@ -671,6 +684,7 @@ export class KnowledgeStore {
             input.limit ?? 5,
             input.offset ?? 0,
             await this.openSourceBindings(client, context),
+            mailBinding,
           ],
         )
       ).rows;
