@@ -53,7 +53,22 @@ export function requiredReleaseChecks(slice: ReleaseManifest['slice']): readonly
 export type ReleaseManifest = {
   contract: 'cos-release/v1';
   releaseId: string;
-  slice: 'S01' | 'S02' | 'S03' | 'S04' | 'S05' | 'S06' | 'S07' | 'S08' | 'S09' | 'S10' | 'S11' | 'G01' | 'G02' | 'G03';
+  slice:
+    | 'S01'
+    | 'S02'
+    | 'S03'
+    | 'S04'
+    | 'S05'
+    | 'S06'
+    | 'S07'
+    | 'S08'
+    | 'S09'
+    | 'S10'
+    | 'S11'
+    | 'G01'
+    | 'G02'
+    | 'G03'
+    | 'G04';
   vaultArtifact?: { digest: string; seal: VaultRootArtifactSeal };
   backupArtifact?: typeof RESTIC_ARTIFACT;
   platform: 'linux/arm64';
