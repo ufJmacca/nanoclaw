@@ -19,7 +19,7 @@ export type MailMessage = {
 };
 export type NormalizedMail =
   | { status: 'selected'; message: MailMessage }
-  | { status: 'excluded'; reason: 'not_selected' | 'outside_window' }
+  | { status: 'excluded'; reason: 'not_selected' | 'outside_window'; deferredUntil?: number }
   | { status: 'unsupported'; reason: 'invalid_message' | 'content_limit' | 'body_unavailable' };
 
 const object = (x: unknown): x is Record<string, unknown> => !!x && typeof x === 'object' && !Array.isArray(x);
@@ -194,8 +194,9 @@ export function normalizeMailMessage(input: unknown, window: MailWindow): Normal
     )
       return fail('invalid_message');
     const internalDate = Number(input.internalDate);
-    if (internalDate < window.since || internalDate > window.capturedAt)
-      return { status: 'excluded', reason: 'outside_window' };
+    if (internalDate > window.capturedAt)
+      return { status: 'excluded', reason: 'outside_window', deferredUntil: internalDate };
+    if (internalDate < window.since) return { status: 'excluded', reason: 'outside_window' };
     if (!object(input.payload)) return fail('invalid_message');
     const top = headers(input.payload);
     let visited = 0,

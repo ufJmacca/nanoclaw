@@ -54,9 +54,16 @@ it.each(
   });
 });
 it.each([now - 31 * 86400000, now + 1000])('does not publish mail outside the rolling window at %i', (internalDate) => {
-  expect(normalizeMailMessage(message({ internalDate: String(internalDate) }), window)).toEqual({
+  expect(normalizeMailMessage(message({ internalDate: String(internalDate) }), window)).toMatchObject({
     status: 'excluded',
     reason: 'outside_window',
+  });
+});
+it('identifies mail arriving after the scan boundary so advancing history cannot lose it', () => {
+  expect(normalizeMailMessage(message({ internalDate: String(now + 1000) }), window)).toEqual({
+    status: 'excluded',
+    reason: 'outside_window',
+    deferredUntil: now + 1000,
   });
 });
 it('includes the exact retention boundary and distinguishes valid empty bodies from failed body reads', () => {
