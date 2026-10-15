@@ -257,6 +257,138 @@ test('G04 reconstructs only the current capture and preserves the original selec
   assert.equal(coverage.status, 'ok');
   assert.equal(JSON.stringify(coverage).includes('Fixture mail asks'), false);
 });
+async function publishFixture() {
+  const f = await fixture();
+  await f.store.bind(f.context, f.binding);
+  const prepared = await capture(),
+    id = randomUUID();
+  await f.store.start(f.context, f.binding.id, id, prepared.window);
+  assert.equal((await f.store.publish(f.context, f.binding.id, id, prepared)).status, 'ok');
+  const knowledge = new KnowledgeStore(
+    database,
+    f.artifacts,
+    { purgeContexts: async () => ({ status: 'ok' }) },
+    { mailEnabled: () => true, mailAccess: () => true },
+  );
+  return { ...f, prepared, id, knowledge, context: { ...f.context, generation: randomUUID() } };
+}
+const rehashCapture = (value: Awaited<ReturnType<typeof capture>>) => {
+  const { digest: _digest, ...content } = value;
+  value.digest = digest(content);
+  return value;
+};
+test('G04 publishes mail as cited untrusted evidence in the same committed capture and cursor', async () => {
+  const f = await publishFixture();
+  const row = (
+    await admin.query(
+      'SELECT m.source_id,s.provenance,s.access_policy,s.current_revision_id FROM cos.mail_messages m JOIN cos.sources s ON s.scope_id=m.scope_id AND s.id=m.source_id WHERE m.scope_id=$1',
+      [f.scope],
+    )
+  ).rows[0];
+  assert(row);
+  assert.equal(row.provenance.origin, 'mail_message');
+  assert.equal(row.access_policy.mail_binding_id, f.binding.id);
+  assert.equal(row.access_policy.selection_id, f.id);
+  const found = await f.knowledge.search(f.context, { query: 'alpha' });
+  assert.equal(found.status, 'ok');
+  assert.equal((found.items as unknown[]).length, 1);
+  assert.match(JSON.stringify(found), /untrusted|Untrusted/);
+});
+test('G04 a capture rollback admits neither mail evidence nor its cursor and reconciles the same capture after restart', async () => {
+  const f = await fixture({
+    beforePublishCommit: async () => {
+      throw Error('FIXTURE_INTERRUPTED_BEFORE_COMMIT');
+    },
+  });
+  await f.store.bind(f.context, f.binding);
+  const prepared = await capture(),
+    id = randomUUID();
+  await f.store.start(f.context, f.binding.id, id, prepared.window);
+  assert.equal((await f.store.publish(f.context, f.binding.id, id, prepared)).status, 'pending');
+  for (const table of ['sources', 'source_revisions', 'chunks', 'mail_messages'])
+    assert.equal(
+      (await admin.query('SELECT count(*)::int AS n FROM cos.' + table + ' WHERE scope_id=$1', [f.scope])).rows[0].n,
+      0,
+    );
+  assert.equal(
+    (await admin.query('SELECT history_cursor FROM cos.mail_states WHERE scope_id=$1', [f.scope])).rows[0]
+      .history_cursor,
+    null,
+  );
+  await database.pool.end();
+  database = BoundedDatabase.fromConfig(await fixtureDatabaseConfig());
+  const store = new MailStore(database, f.artifacts);
+  assert.equal((await store.publish(f.context, f.binding.id, id, prepared)).status, 'ok');
+  assert.equal((await store.publish(f.context, f.binding.id, id, prepared)).status, 'ok');
+  assert.equal(
+    (await admin.query('SELECT count(*)::int AS n FROM cos.source_revisions WHERE scope_id=$1', [f.scope])).rows[0].n,
+    1,
+  );
+});
+test('G04 history and label changes preserve unchanged source revisions and exposed context', async () => {
+  const f = await publishFixture();
+  assert.equal((await f.knowledge.search(f.context, { query: 'alpha' })).status, 'ok');
+  const next = structuredClone(f.prepared),
+    id = randomUUID();
+  next.historyId = '201';
+  next.messages[0].historyId = '201';
+  next.messages[0].labels = ['SENT'];
+  const { digest: _old, ...message } = next.messages[0];
+  next.messages[0].digest = digest(message);
+  rehashCapture(next);
+  await f.store.start(f.context, f.binding.id, id, next.window);
+  assert.equal((await f.store.publish(f.context, f.binding.id, id, next)).status, 'ok');
+  assert.equal(
+    (await admin.query('SELECT count(*)::int AS n FROM cos.source_revisions WHERE scope_id=$1', [f.scope])).rows[0].n,
+    1,
+  );
+  assert.equal((await f.knowledge.contextReady(f.context)).status, 'ok');
+});
+test('G04 selection withdrawal closes evidence immediately and purges its local copies before a fresh selection is admitted', async () => {
+  const f = await publishFixture(),
+    found = await f.knowledge.search(f.context, { query: 'alpha' }),
+    evidence = (found.items as Array<{ source_id: string; revision_id: string }>)[0];
+  assert(evidence);
+  const source = evidence.source_id,
+    artifact = (
+      await admin.query('SELECT artifact_id FROM cos.source_revisions WHERE scope_id=$1 AND source_id=$2', [
+        f.scope,
+        source,
+      ])
+    ).rows[0].artifact_id;
+  const empty = rehashCapture({ ...structuredClone(f.prepared), messages: [], textBytes: 0, removedIds: ['aa01'] }),
+    removed = randomUUID();
+  await f.store.start(f.context, f.binding.id, removed, empty.window);
+  assert.equal((await f.store.publish(f.context, f.binding.id, removed, empty)).status, 'ok');
+  assert.equal((await f.knowledge.contextReady(f.context)).status, 'denied');
+  assert.equal(
+    (await f.knowledge.get({ ...f.context, generation: randomUUID() }, source, evidence.revision_id, 0)).status,
+    'denied',
+  );
+  assert.equal(
+    (
+      await admin.query('SELECT kind FROM cos.revocation_tombstones WHERE scope_id=$1 AND source_id=$2', [
+        f.scope,
+        source,
+      ])
+    ).rows[0].kind,
+    'delete',
+  );
+  assert.equal((await f.knowledge.purgeDue(f.scope)).status, 'ok');
+  assert.equal(fs.existsSync(f.artifacts.root + '/' + artifact + '.blob'), false);
+  const selected = randomUUID();
+  await f.store.start(f.context, f.binding.id, selected, f.prepared.window);
+  assert.equal((await f.store.publish(f.context, f.binding.id, selected, f.prepared)).status, 'ok');
+  const current = (
+    await admin.query(
+      'SELECT m.source_id,r.artifact_id FROM cos.mail_messages m JOIN cos.sources s ON s.scope_id=m.scope_id AND s.id=m.source_id JOIN cos.source_revisions r ON r.scope_id=s.scope_id AND r.id=s.current_revision_id WHERE m.scope_id=$1',
+      [f.scope],
+    )
+  ).rows[0];
+  assert.notEqual(current.source_id, source);
+  assert.notEqual(current.artifact_id, artifact);
+  assert.equal((await f.knowledge.contextReady(f.context)).status, 'denied');
+});
 /** Independent source fixture exercises disclosure guards before the mail publisher is added. */
 async function readableMailFixture() {
   const f = await fixture();

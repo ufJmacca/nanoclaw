@@ -5,6 +5,7 @@ import { MAIL_RETENTION_MS, mailHistoryId, type MailWindow, type MailMessage } f
 import { MAIL_CAPTURE_MESSAGES, MAIL_CAPTURE_TEXT_BYTES, type MailCapture } from './capture.js';
 import type { PoolClient } from 'pg';
 import { GOOGLE_MAIL_READ_SCOPE } from '../calendar/oauth-core.js';
+import { MailEvidence } from './evidence.js';
 export type MailBindingInput = {
   id: string;
   provider: 'google' | 'fixture';
@@ -194,6 +195,7 @@ export class MailStore {
         await client.query('BEGIN');
         let committed = false;
         try {
+          if (publishing) await client.query('SELECT pg_advisory_xact_lock(73101004)');
           const scope = await client.query(
             `SELECT id FROM cos.scopes WHERE id=$1 AND owner_id=$2 AND agent_group_id=$3 AND ${this.ownerAdministration ? "status IN ('active','paused')" : "status='active'"} FOR ${mutation ? 'UPDATE' : 'SHARE'}`,
             [context.scopeId, context.ownerId, context.agentGroupId],
@@ -368,95 +370,103 @@ export class MailStore {
   async publish(context: Context, binding: string, id: string, input: MailCapture): Promise<Result> {
     if (!uuid(binding) || !uuid(id) || !validMailCapture(input)) return { status: 'denied' };
     const capture = structuredClone(input);
-    return this.transaction(
-      context,
-      true,
-      async (client) => {
-        const b = await this.binding(client, context, binding);
-        if (!b || b.auth !== 'ready' || b.mailbox_email !== capture.mailboxEmail) return { status: 'denied' };
-        const attempt = (
-          await client.query('SELECT * FROM cos.mail_captures WHERE scope_id=$1 AND binding_id=$2 AND id=$3', [
-            context.scopeId,
-            binding,
-            id,
-          ])
-        ).rows[0];
-        if (
-          !attempt ||
-          attempt.binding_version !== b.version ||
-          digest(attempt.capture_window) !== digest(capture.window)
-        )
-          return { status: 'conflict' };
-        if (attempt.status === 'complete')
-          return attempt.content_digest === capture.digest ? attempt.result : { status: 'conflict' };
-        const state = (
-          await client.query('SELECT * FROM cos.mail_states WHERE scope_id=$1 AND binding_id=$2 FOR UPDATE', [
-            context.scopeId,
-            binding,
-          ])
-        ).rows[0];
-        if (
-          attempt.status !== 'collecting' ||
-          state.last_attempt !== id ||
-          state.current_capture !== attempt.base_capture
-        )
-          return { status: 'conflict' };
-        if (state.history_cursor && BigInt(capture.historyId) < BigInt(state.history_cursor))
-          return { status: 'conflict' };
-        const previous = (
-          await client.query(
-            'SELECT provider_message_id,selection_id,source_id FROM cos.mail_messages WHERE scope_id=$1 AND binding_id=$2',
-            [context.scopeId, binding],
-          )
-        ).rows;
-        const old = new Map(previous.map((r) => [r.provider_message_id, r]));
-        const rows = capture.messages.map((message) => ({
-          provider_message_id: message.id,
-          provider_thread_id: message.threadId,
-          message,
-          content_digest: message.digest,
-          internal_date: new Date(message.internalDate).toISOString(),
-          selection_id: old.get(message.id)?.selection_id ?? id,
-          source_id: old.get(message.id)?.source_id ?? null,
-        }));
-        await client.query(
-          'DELETE FROM cos.mail_messages WHERE scope_id=$1 AND binding_id=$2 AND NOT provider_message_id=ANY($3::text[])',
-          [context.scopeId, binding, capture.messages.map((m) => m.id)],
-        );
-        await client.query(
-          `INSERT INTO cos.mail_messages(scope_id,binding_id,provider_message_id,provider_thread_id,message,content_digest,internal_date,selection_id,source_id,last_capture)
+    try {
+      return await this.artifacts.exclusive((lease) =>
+        this.transaction(
+          context,
+          true,
+          async (client) => {
+            const b = await this.binding(client, context, binding);
+            if (!b || b.auth !== 'ready' || b.mailbox_email !== capture.mailboxEmail) return { status: 'denied' };
+            const attempt = (
+              await client.query('SELECT * FROM cos.mail_captures WHERE scope_id=$1 AND binding_id=$2 AND id=$3', [
+                context.scopeId,
+                binding,
+                id,
+              ])
+            ).rows[0];
+            if (
+              !attempt ||
+              attempt.binding_version !== b.version ||
+              digest(attempt.capture_window) !== digest(capture.window)
+            )
+              return { status: 'conflict' };
+            if (attempt.status === 'complete')
+              return attempt.content_digest === capture.digest ? attempt.result : { status: 'conflict' };
+            const state = (
+              await client.query('SELECT * FROM cos.mail_states WHERE scope_id=$1 AND binding_id=$2 FOR UPDATE', [
+                context.scopeId,
+                binding,
+              ])
+            ).rows[0];
+            if (
+              attempt.status !== 'collecting' ||
+              state.last_attempt !== id ||
+              state.current_capture !== attempt.base_capture
+            )
+              return { status: 'conflict' };
+            if (state.history_cursor && BigInt(capture.historyId) < BigInt(state.history_cursor))
+              return { status: 'conflict' };
+            const previous = (
+              await client.query(
+                'SELECT provider_message_id,selection_id,source_id FROM cos.mail_messages WHERE scope_id=$1 AND binding_id=$2',
+                [context.scopeId, binding],
+              )
+            ).rows;
+            const old = new Map(previous.map((r) => [r.provider_message_id, r]));
+            const rows = capture.messages.map((message) => ({
+              provider_message_id: message.id,
+              provider_thread_id: message.threadId,
+              message,
+              content_digest: message.digest,
+              internal_date: new Date(message.internalDate).toISOString(),
+              selection_id: old.get(message.id)?.selection_id ?? id,
+              source_id: old.get(message.id)?.source_id ?? null,
+            }));
+            await client.query(
+              'DELETE FROM cos.mail_messages WHERE scope_id=$1 AND binding_id=$2 AND NOT provider_message_id=ANY($3::text[])',
+              [context.scopeId, binding, capture.messages.map((m) => m.id)],
+            );
+            await client.query(
+              `INSERT INTO cos.mail_messages(scope_id,binding_id,provider_message_id,provider_thread_id,message,content_digest,internal_date,selection_id,source_id,last_capture)
     SELECT $1,$2,x.provider_message_id,x.provider_thread_id,x.message,x.content_digest,x.internal_date,x.selection_id,x.source_id,$3 FROM jsonb_to_recordset($4::jsonb) AS x(provider_message_id text,provider_thread_id text,message jsonb,content_digest text,internal_date timestamptz,selection_id uuid,source_id text)
     ON CONFLICT(scope_id,binding_id,provider_message_id) DO UPDATE SET provider_thread_id=EXCLUDED.provider_thread_id,message=EXCLUDED.message,content_digest=EXCLUDED.content_digest,internal_date=EXCLUDED.internal_date,last_capture=EXCLUDED.last_capture,updated_at=clock_timestamp()`,
-          [context.scopeId, binding, id, JSON.stringify(rows)],
-        );
-        const { messages, ...metadata } = capture,
-          result = {
-            status: 'ok' as const,
-            capture_id: id,
-            message_count: messages.length,
-            complete: capture.complete,
-            limitations: capture.limitations,
-            history_cursor: capture.historyId,
-          };
-        await client.query(
-          "UPDATE cos.mail_captures SET status='complete',content_digest=$4,metadata=$5,result=$6,completed_at=clock_timestamp(),failure_code=NULL WHERE scope_id=$1 AND binding_id=$2 AND id=$3",
-          [
-            context.scopeId,
-            binding,
-            id,
-            capture.digest,
-            JSON.stringify({ ...metadata, messageIds: messages.map((m) => m.id) }),
-            JSON.stringify(result),
-          ],
-        );
-        await client.query(
-          "UPDATE cos.mail_states SET current_capture=$3,history_cursor=$4,last_success_at=clock_timestamp(),next_poll_at=clock_timestamp()+interval '5 minutes' WHERE scope_id=$1 AND binding_id=$2",
-          [context.scopeId, binding, id, capture.historyId],
-        );
-        return result;
-      },
-      true,
-    );
+              [context.scopeId, binding, id, JSON.stringify(rows)],
+            );
+            await new MailEvidence(this.artifacts).publish(client, context, b, id, rows, lease);
+            const { messages, ...metadata } = capture,
+              result = {
+                status: 'ok' as const,
+                capture_id: id,
+                message_count: messages.length,
+                complete: capture.complete,
+                limitations: capture.limitations,
+                history_cursor: capture.historyId,
+              };
+            await client.query(
+              "UPDATE cos.mail_captures SET status='complete',content_digest=$4,metadata=$5,result=$6,completed_at=clock_timestamp(),failure_code=NULL WHERE scope_id=$1 AND binding_id=$2 AND id=$3",
+              [
+                context.scopeId,
+                binding,
+                id,
+                capture.digest,
+                JSON.stringify({ ...metadata, messageIds: messages.map((m) => m.id) }),
+                JSON.stringify(result),
+              ],
+            );
+            await client.query(
+              "UPDATE cos.mail_states SET current_capture=$3,history_cursor=$4,last_success_at=clock_timestamp(),next_poll_at=clock_timestamp()+interval '5 minutes' WHERE scope_id=$1 AND binding_id=$2",
+              [context.scopeId, binding, id, capture.historyId],
+            );
+            return result;
+          },
+          true,
+        ),
+      );
+      // eslint-disable-next-line no-catch-all/no-catch-all -- Artifact failures contain private paths and source content; the public boundary returns a fixed status.
+    } catch {
+      return { status: 'unavailable' };
+    }
   }
   async fail(context: Context, binding: string, id: string, code: string): Promise<Result> {
     if (!uuid(binding) || !uuid(id)) return { status: 'denied' };
