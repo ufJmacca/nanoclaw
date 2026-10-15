@@ -517,6 +517,166 @@ test('G04 a fresh capture cannot move its observation window backwards after ret
   assert.equal((await f.store.maintain(f.context, f.binding.id, randomUUID())).status, 'ok');
   assert.equal((await f.store.start(f.context, f.binding.id, randomUUID(), f.prepared.window)).status, 'conflict');
 });
+test('G04 cited mail answers carry host-rendered freshness without resetting their context on an ordinary poll', async () => {
+  const f = await publishFixture(),
+    found = await f.knowledge.search(f.context, { query: 'alpha' }),
+    evidence = (found.items as Array<{ text: string; evidence_id: string }>)[0];
+  assert(evidence);
+  const draft = {
+    kind: 'answer',
+    coverage: 'limited',
+    claims: [
+      { kind: 'quote', text: evidence.text, citations: [{ kind: 'source', evidence_id: evidence.evidence_id }] },
+    ],
+  };
+  const answer = await f.knowledge.answers.prepare(f.context, randomUUID(), draft);
+  assert.equal(answer.status, 'ok');
+  assert.match(String(answer.text), /Mailbox coverage/);
+  assert.match(String(answer.text), /last successful refresh/i);
+  assert.match(String(answer.text), /does not establish that the inbox is empty/i);
+  const clock = await f.store.captureWindow(f.context);
+  assert.equal(clock.status, 'ok');
+  const next = rehashCapture({
+      ...structuredClone(f.prepared),
+      mode: 'incremental',
+      window: clock.window as MailWindow,
+      historyId: '201',
+    }),
+    id = randomUUID();
+  await f.store.start(f.context, f.binding.id, id, next.window);
+  assert.equal((await f.store.publish(f.context, f.binding.id, id, next)).status, 'ok');
+  assert.equal((await f.knowledge.contextReady(f.context)).status, 'ok');
+  const old = await f.knowledge.answers.get(f.context, String(answer.artifact_id));
+  assert.equal(old.status, 'ok');
+  assert.equal(old.text, answer.text);
+  const fresh = await f.knowledge.answers.prepare(f.context, randomUUID(), draft);
+  assert.equal(fresh.status, 'ok');
+  assert.match(String(fresh.text), /Mailbox coverage/);
+});
+test('G04 even an empty mailbox metadata view is fenced when its account authority is later withdrawn', async () => {
+  const f = await fixture();
+  await f.store.bind(f.context, f.binding);
+  const ctx = { ...f.context, generation: randomUUID() },
+    knowledge = new KnowledgeStore(database, f.artifacts, {}, { mailEnabled: () => true, mailAccess: () => true });
+  assert.equal((await knowledge.recordMailContext(ctx)).status, 'ok');
+  assert.equal((await knowledge.contextReady(ctx)).status, 'ok');
+  await admin.query("UPDATE cos.mail_bindings SET auth='revoked' WHERE scope_id=$1", [f.scope]);
+  assert.equal((await knowledge.contextReady(ctx)).status, 'denied');
+});
+test('G04 mail exposed by a work-evidence path still adds host coverage to its answer', async () => {
+  const f = await publishFixture(),
+    found = await f.knowledge.search(f.context, { query: 'alpha' }),
+    evidence = (found.items as Array<{ text: string; evidence_id: string }>)[0];
+  // Work evidence can register source exposure without going through knowledge search.
+  await admin.query("DELETE FROM cos.operations WHERE scope_id=$1 AND method='cos_mail_context'", [f.scope]);
+  const answer = await f.knowledge.answers.prepare(f.context, randomUUID(), {
+    kind: 'answer',
+    coverage: 'limited',
+    claims: [
+      { kind: 'quote', text: evidence.text, citations: [{ kind: 'source', evidence_id: evidence.evidence_id }] },
+    ],
+  });
+  assert.equal(answer.status, 'ok');
+  assert.match(String(answer.text), /Mailbox coverage/);
+});
+for (const state of ['partial', 'stale', 'failed', 'retention'])
+  test(`G04 mailbox coverage explicitly reports ${state} observations`, async () => {
+    const f = await publishFixture();
+    if (state === 'partial') {
+      const next = rehashCapture({
+        ...structuredClone(f.prepared),
+        complete: false,
+        limitations: ['checkpoint_limit'],
+      });
+      const id = randomUUID();
+      assert.equal((await f.store.start(f.context, f.binding.id, id, next.window)).status, 'ok');
+      assert.equal((await f.store.publish(f.context, f.binding.id, id, next)).status, 'ok');
+    }
+    if (state === 'stale')
+      await admin.query(
+        "UPDATE cos.mail_states SET last_success_at=clock_timestamp()-interval '11 minutes' WHERE scope_id=$1",
+        [f.scope],
+      );
+    if (state === 'failed') {
+      const id = randomUUID(),
+        clock = await f.store.captureWindow(f.context);
+      assert.equal((await f.store.start(f.context, f.binding.id, id, clock.window as MailWindow)).status, 'ok');
+      assert.equal((await f.store.fail(f.context, f.binding.id, id, 'mail_unavailable')).status, 'ok');
+    }
+    if (state === 'retention')
+      assert.equal((await f.store.maintain(f.context, f.binding.id, randomUUID())).status, 'ok');
+    const view = await f.knowledge.recordMailContext(f.context);
+    assert.equal(view.status, 'ok');
+    const text = (view.notice as { text: string }).text;
+    assert.match(text, state === 'stale' ? /Stale:/ : /Incomplete:/);
+    assert.match(
+      text,
+      state === 'partial'
+        ? /checkpoint size limit/
+        : state === 'failed'
+          ? /latest refresh failed/
+          : state === 'retention'
+            ? /retention ran without a provider refresh/
+            : /over ten minutes old/,
+    );
+    assert.doesNotMatch(text, /Capture complete/);
+    assert.match(text, /does not establish that the inbox is empty/);
+  });
+test('G04 account loss between answer preparation and commit cannot publish a stale mail answer', async () => {
+  const f = await publishFixture();
+  let accessible = true,
+    hookCalled = false;
+  const knowledge = new KnowledgeStore(
+    database,
+    f.artifacts,
+    {
+      afterAnswerPublication: async () => {
+        hookCalled = true;
+        accessible = false;
+      },
+    },
+    { mailEnabled: () => true, mailAccess: () => accessible },
+  );
+  assert.equal((await knowledge.recordMailContext(f.context)).status, 'ok');
+  const answer = await knowledge.answers.prepare(f.context, randomUUID(), {
+    kind: 'answer',
+    coverage: 'insufficient',
+    claims: [],
+  });
+  assert.equal(hookCalled, true);
+  assert.equal(answer.status, 'denied');
+  assert.equal(
+    (await admin.query("SELECT count(*)::int AS n FROM cos.artifacts WHERE scope_id=$1 AND kind='answer'", [f.scope]))
+      .rows[0].n,
+    0,
+  );
+});
+test('G04 a refresh starting during answer publication cannot commit the previous freshness observation', async () => {
+  const f = await publishFixture();
+  let hookCalled = false;
+  const knowledge = new KnowledgeStore(
+    database,
+    f.artifacts,
+    {
+      afterAnswerPublication: async () => {
+        hookCalled = true;
+        const clock = await f.store.captureWindow(f.context),
+          id = randomUUID();
+        assert.equal((await f.store.start(f.context, f.binding.id, id, clock.window as MailWindow)).status, 'ok');
+      },
+    },
+    { mailEnabled: () => true, mailAccess: () => true },
+  );
+  assert.equal((await knowledge.recordMailContext(f.context)).status, 'ok');
+  const answer = await knowledge.answers.prepare(f.context, randomUUID(), {
+    kind: 'answer',
+    coverage: 'insufficient',
+    claims: [],
+  });
+  assert.equal(hookCalled, true);
+  assert.equal(answer.status, 'denied');
+  assert.equal((await knowledge.contextReady(f.context)).status, 'ok');
+});
 /** Independent source fixture exercises disclosure guards before the mail publisher is added. */
 async function readableMailFixture() {
   const f = await fixture();

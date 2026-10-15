@@ -19,6 +19,7 @@ import { GOOGLE_MAIL_READ_SCOPE } from '../calendar/oauth-core.js';
 import { hasCalendarReadScope } from '../calendar/reader.js';
 import { calendarAnswerNotice, checkCalendarContext, type CalendarAnswerNotice } from '../calendar/answer-notice.js';
 import { calendarEmptyWindowNotice } from '../calendar/empty-window-notice.js';
+import { mailAnswerNotice, checkMailContext, type MailAnswerNotice } from '../mail/answer-notice.js';
 export type KnowledgeContext = Context & { provider: string; generation: string };
 export type ImportSource = {
   sourceKey: string;
@@ -85,6 +86,7 @@ export class KnowledgeStore {
   private readonly calendarAccess: (scopeId: string, bindingId: string) => boolean;
   private readonly mailAccess: (scopeId: string, bindingId: string) => boolean;
   private readonly calendarNotice: (client: PoolClient, context: KnowledgeContext) => Promise<CalendarAnswerNotice>;
+  private readonly mailNotice?: (client: PoolClient, context: KnowledgeContext) => Promise<MailAnswerNotice>;
   constructor(
     readonly database: BoundedDatabase,
     readonly artifacts: KnowledgeArtifacts,
@@ -103,6 +105,12 @@ export class KnowledgeStore {
     this.calendarAccess = options.calendarAccess ?? (() => false);
     this.mailAccess = (scope, binding) =>
       this.retrievalEnabled() && (options.mailEnabled?.() ?? false) && (options.mailAccess?.(scope, binding) ?? false);
+    if (options.mailEnabled)
+      this.mailNotice = (client, context) =>
+        mailAnswerNotice(client, context, {
+          enabled: () => this.retrievalEnabled() && options.mailEnabled!(),
+          access: this.mailAccess,
+        });
     this.calendarNotice = (client, context) =>
       calendarAnswerNotice(client, context, {
         enabled: () => this.retrievalEnabled() && (options.calendarEnabled?.() ?? false),
@@ -117,6 +125,13 @@ export class KnowledgeStore {
       sourcesReadable: (client, context, ids) => this.sourcesReadable(client, context, ids),
       retrievalEnabled: this.retrievalEnabled,
       calendarNotice: this.calendarNotice,
+      ...(this.mailNotice
+        ? {
+            mailNotice: this.mailNotice,
+            mailContext: (client: PoolClient, context: KnowledgeContext, register = false) =>
+              checkMailContext(client, context, () => this.mailNotice!(client, context), register),
+          }
+        : {}),
       calendarContext: (client, context, register) =>
         checkCalendarContext(client, context, () => this.calendarNotice(client, context), register),
       calendarEmptyWindow: (client, context, request) =>
@@ -456,7 +471,12 @@ export class KnowledgeStore {
       ],
     );
     if (invalid.rowCount) return false;
-    return (await checkCalendarContext(client, context, () => this.calendarNotice(client, context))).status === 'ok';
+    if ((await checkCalendarContext(client, context, () => this.calendarNotice(client, context))).status !== 'ok')
+      return false;
+    return (
+      !this.mailNotice ||
+      (await checkMailContext(client, context, () => this.mailNotice!(client, context))).status === 'ok'
+    );
   }
   async contextReady(context: KnowledgeContext): Promise<Result> {
     return this.transaction(async (client) => ({ status: (await this.current(client, context)) ? 'ok' : 'denied' }));
@@ -576,6 +596,18 @@ export class KnowledgeStore {
       if (!(await this.current(client, context))) return { status: 'denied' };
       const result = await checkCalendarContext(client, context, () => this.calendarNotice(client, context), true);
       return { status: result.status };
+    }, true);
+  }
+  /** Record mailbox metadata exposure without binding the conversation to each
+   * polling refresh. A real account/access change still closes the context. */
+  async recordMailContext(context: KnowledgeContext): Promise<Result> {
+    if (!this.mailNotice) return { status: 'unavailable' };
+    return this.transaction(async (client) => {
+      if (!(await this.current(client, context))) return { status: 'denied' };
+      const result = await checkMailContext(client, context, () => this.mailNotice!(client, context), true);
+      return result.status === 'ok' && (await this.current(client, context))
+        ? { status: 'ok', notice: result.notice }
+        : { status: 'denied' };
     }, true);
   }
   /** Trusted host reconciliation, including paused scopes. No agent RPC exposes these methods. */
@@ -706,6 +738,19 @@ export class KnowledgeStore {
         ))
       )
         return { status: 'denied' };
+      if (this.mailNotice && candidates.length) {
+        const mail = (
+          await client.query(
+            "SELECT 1 FROM cos.sources WHERE scope_id=$1 AND id=ANY($2::text[]) AND provenance->>'origin'='mail_message' LIMIT 1",
+            [context.scopeId, candidates.map((row) => row.source_id)],
+          )
+        ).rowCount;
+        if (
+          mail &&
+          (await checkMailContext(client, context, () => this.mailNotice!(client, context), true)).status !== 'ok'
+        )
+          return { status: 'denied' };
+      }
       const items: Evidence[] = [];
       for (const row of candidates) {
         const allowed = await client.query(

@@ -4,6 +4,7 @@ import { digest, type Result } from '../domain/contracts.js';
 import type { KnowledgeContext } from './store.js';
 import { isArtifactIdentity, type ArtifactLease, type KnowledgeArtifacts } from './artifacts.js';
 import type { CalendarAnswerNotice, CalendarContextCheck } from '../calendar/answer-notice.js';
+import type { MailAnswerNotice, MailContextCheck } from '../mail/answer-notice.js';
 import {
   citationKey,
   renderAnswer,
@@ -32,6 +33,8 @@ type Metadata = {
     calendar_notice_digest?: string;
     calendar_window?: CalendarEmptyWindow;
     calendar_window_notice_digest?: string;
+    mail_notice_digest?: string;
+    mail_notice?: MailAnswerNotice;
   };
 };
 const references = (draft: AnswerDraft) => [
@@ -59,12 +62,13 @@ function checkedText(
   resolved: ResolvedCitation[],
   calendar: CalendarAnswerNotice | null,
   emptyCalendar: CalendarAnswerNotice | null,
+  mail: MailAnswerNotice | null = null,
 ): string {
   if (draft.calendar_window) {
     if (!emptyCalendar) throw Error('calendar_window_notice_required');
-    return emptyCalendar.text;
+    return emptyCalendar.text + (mail ? '\n\n' + mail.text : '');
   }
-  return renderAnswer(draft, resolved) + (calendar ? '\n\n' + calendar.text : '');
+  return renderAnswer(draft, resolved) + (calendar ? '\n\n' + calendar.text : '') + (mail ? '\n\n' + mail.text : '');
 }
 
 /** Candidate answers are local artifacts with checked references, never approved strategic records. */
@@ -79,6 +83,8 @@ export class KnowledgeAnswers {
       retrievalEnabled(): boolean;
       calendarNotice(client: PoolClient, context: KnowledgeContext): Promise<CalendarAnswerNotice>;
       calendarContext(client: PoolClient, context: KnowledgeContext, register?: boolean): Promise<CalendarContextCheck>;
+      mailNotice?(client: PoolClient, context: KnowledgeContext): Promise<MailAnswerNotice>;
+      mailContext?(client: PoolClient, context: KnowledgeContext, register?: boolean): Promise<MailContextCheck>;
       calendarEmptyWindow?(
         client: PoolClient,
         context: KnowledgeContext,
@@ -193,37 +199,52 @@ export class KnowledgeAnswers {
       refs = references(draft),
       hash = digest({ method: 'cos_answer_prepare', generation: context.generation, draft });
     const result = await d.exclusive(async (lease) => {
-      const before = await d.transaction(async (client) => {
-        if (!(await d.current(client, context))) return { status: 'denied' };
-        const old = (
-          await client.query(
-            'SELECT scope_id,payload_hash,result FROM cos.operations WHERE session_id=$1 AND request_id=$2',
-            [context.sessionId, requestId],
-          )
-        ).rows[0];
-        if (old)
-          return old.scope_id === context.scopeId && old.payload_hash === hash
-            ? (old.result ?? { status: 'pending', request_id: requestId })
-            : { status: 'conflict' };
-        const resolved = await this.resolve(client, context, refs);
-        if (!resolved) return { status: 'denied' };
-        const emptyCalendar = draft.calendar_window
-          ? ((await d.calendarEmptyWindow?.(client, context, draft.calendar_window)) ?? null)
-          : null;
-        if (draft.calendar_window && !emptyCalendar) return { status: 'denied' };
-        const dependency = await d.calendarContext(client, context, Boolean(draft.calendar));
-        return dependency.status === 'ok'
-          ? { status: 'ok', resolved, calendar: dependency.notice, emptyCalendar }
-          : { status: 'denied' };
-      }, Boolean(draft.calendar));
+      const before = await d.transaction(
+        async (client) => {
+          if (!(await d.current(client, context))) return { status: 'denied' };
+          const old = (
+            await client.query(
+              'SELECT scope_id,payload_hash,result FROM cos.operations WHERE session_id=$1 AND request_id=$2',
+              [context.sessionId, requestId],
+            )
+          ).rows[0];
+          if (old)
+            return old.scope_id === context.scopeId && old.payload_hash === hash
+              ? (old.result ?? { status: 'pending', request_id: requestId })
+              : { status: 'conflict' };
+          const resolved = await this.resolve(client, context, refs);
+          if (!resolved) return { status: 'denied' };
+          const emptyCalendar = draft.calendar_window
+            ? ((await d.calendarEmptyWindow?.(client, context, draft.calendar_window)) ?? null)
+            : null;
+          if (draft.calendar_window && !emptyCalendar) return { status: 'denied' };
+          const dependency = await d.calendarContext(client, context, Boolean(draft.calendar));
+          const exposedMail =
+            d.mailContext &&
+            (
+              await client.query(
+                `SELECT 1 FROM cos.evidence_refs e JOIN cos.sources s ON s.scope_id=e.scope_id AND s.id=e.source_id
+           WHERE e.scope_id=$1 AND e.session_id=$2 AND e.context_generation=$3 AND e.processing_provider=$4
+           AND s.provenance->>'origin'='mail_message' LIMIT 1`,
+                [context.scopeId, context.sessionId, context.generation, context.provider],
+              )
+            ).rowCount;
+          const mail = await d.mailContext?.(client, context, Boolean(exposedMail));
+          return dependency.status === 'ok' && mail?.status !== 'denied'
+            ? { status: 'ok', resolved, calendar: dependency.notice, emptyCalendar, mail: mail?.notice ?? null }
+            : { status: 'denied' };
+        },
+        Boolean(draft.calendar) || Boolean(d.mailContext),
+      );
       if (before.status !== 'ok' || before.artifact_id) return before;
       const resolved = before.resolved as ResolvedCitation[],
         calendar = before.calendar as CalendarAnswerNotice | null,
-        emptyCalendar = before.emptyCalendar as CalendarAnswerNotice | null;
+        emptyCalendar = before.emptyCalendar as CalendarAnswerNotice | null,
+        mail = before.mail as MailAnswerNotice | null;
       let text: string;
       try {
         this.verifyBytes(resolved);
-        text = checkedText(draft, resolved, calendar, emptyCalendar);
+        text = checkedText(draft, resolved, calendar, emptyCalendar, mail);
         // eslint-disable-next-line no-catch-all/no-catch-all -- Invalid citations or inaccessible private files deny preparation without disclosing paths or bytes.
       } catch {
         return { status: 'denied' };
@@ -234,6 +255,7 @@ export class KnowledgeAnswers {
         text,
         ...(calendar ? { calendar } : {}),
         ...(emptyCalendar ? { calendar_window_notice: emptyCalendar } : {}),
+        ...(mail ? { mail_notice: mail } : {}),
       });
       const namespace = digest({
         scope: context.scopeId,
@@ -251,6 +273,7 @@ export class KnowledgeAnswers {
         if (!current || digest(current) !== digest(resolved)) return { status: 'denied' };
         if (calendar && digest(await d.calendarNotice(client, context)) !== digest(calendar))
           return { status: 'denied' };
+        if (mail && digest(await d.mailNotice?.(client, context)) !== digest(mail)) return { status: 'denied' };
         if (
           emptyCalendar &&
           digest(await d.calendarEmptyWindow?.(client, context, draft.calendar_window!)) !== digest(emptyCalendar)
@@ -282,6 +305,7 @@ export class KnowledgeAnswers {
           citations: refs,
           output_digest: digest(text),
           ...(calendar ? { calendar_notice_digest: digest(calendar) } : {}),
+          ...(mail ? { mail_notice: mail, mail_notice_digest: digest(mail) } : {}),
           ...(emptyCalendar
             ? { calendar_window: draft.calendar_window, calendar_window_notice_digest: digest(emptyCalendar) }
             : {}),
@@ -327,6 +351,7 @@ export class KnowledgeAnswers {
     resolved: ResolvedCitation[];
     calendar: CalendarAnswerNotice | null;
     emptyCalendar: CalendarAnswerNotice | null;
+    mail: MailAnswerNotice | null;
   } | null> {
     if (!(await this.dependencies.current(client, context))) return null;
     const metadata = (
@@ -387,7 +412,19 @@ export class KnowledgeAnswers {
       (!emptyCalendar || digest(emptyCalendar) !== metadata.provenance.calendar_window_notice_digest)
     )
       return null;
-    return { metadata, resolved, calendar, emptyCalendar };
+    const mail = metadata.provenance.mail_notice ?? null;
+    if (Boolean(mail) !== Boolean(metadata.provenance.mail_notice_digest)) return null;
+    if (mail) {
+      const current = await this.dependencies.mailNotice?.(client, context);
+      if (
+        !current ||
+        !this.dependencies.mailContext ||
+        digest(mail) !== metadata.provenance.mail_notice_digest ||
+        current.identityDigest !== mail.identityDigest
+      )
+        return null;
+    }
+    return { metadata, resolved, calendar, emptyCalendar, mail };
   }
   async get(context: KnowledgeContext, id: string): Promise<Result> {
     if (!isArtifactIdentity(id)) return { status: 'denied' };
@@ -400,7 +437,8 @@ export class KnowledgeAnswers {
     const metadata = before.metadata as Metadata,
       resolved = before.resolved as ResolvedCitation[],
       calendar = before.calendar as CalendarAnswerNotice | null,
-      emptyCalendar = before.emptyCalendar as CalendarAnswerNotice | null;
+      emptyCalendar = before.emptyCalendar as CalendarAnswerNotice | null,
+      mail = before.mail as MailAnswerNotice | null;
     let text: string;
     try {
       this.verifyBytes(resolved);
@@ -408,7 +446,7 @@ export class KnowledgeAnswers {
       if (
         !body ||
         Object.keys(body).some(
-          (key) => !['format', 'draft', 'text', 'calendar', 'calendar_window_notice'].includes(key),
+          (key) => !['format', 'draft', 'text', 'calendar', 'calendar_window_notice', 'mail_notice'].includes(key),
         ) ||
         body.format !== 'cos-answer/v1' ||
         !validAnswerDraft(body.draft) ||
@@ -417,10 +455,11 @@ export class KnowledgeAnswers {
         (Boolean(body.draft.calendar) && !calendar) ||
         digest(body.calendar ?? null) !== digest(calendar) ||
         digest(body.draft.calendar_window ?? null) !== digest(metadata.provenance.calendar_window ?? null) ||
-        digest(body.calendar_window_notice ?? null) !== digest(emptyCalendar)
+        digest(body.calendar_window_notice ?? null) !== digest(emptyCalendar) ||
+        digest(body.mail_notice ?? null) !== digest(mail)
       )
         return { status: 'denied' };
-      text = checkedText(body.draft, resolved, calendar, emptyCalendar);
+      text = checkedText(body.draft, resolved, calendar, emptyCalendar, mail);
       if (text !== body.text) return { status: 'denied' };
       await d.hooks.beforeAnswerDisclosure?.();
       // eslint-disable-next-line no-catch-all/no-catch-all -- Unreadable or corrupt private artifacts cannot be redisplayed or leak diagnostic paths.
@@ -429,11 +468,16 @@ export class KnowledgeAnswers {
     }
     const final = await d.transaction(async (client) => {
       const fresh = await this.snapshot(client, context, id);
-      if (!fresh || digest(fresh) !== digest({ metadata, resolved, calendar, emptyCalendar }))
+      if (!fresh || digest(fresh) !== digest({ metadata, resolved, calendar, emptyCalendar, mail }))
         return { status: 'denied' };
       if (calendar) {
         const dependency = await d.calendarContext(client, context, true);
         if (dependency.status !== 'ok' || digest(dependency.notice) !== digest(calendar)) return { status: 'denied' };
+      }
+      if (mail) {
+        const dependency = await d.mailContext?.(client, context, true);
+        if (dependency?.status !== 'ok' || dependency.notice?.identityDigest !== mail.identityDigest)
+          return { status: 'denied' };
       }
       // Historical redisplay is a new disclosure to this context, which must be fenced on later correction/revocation.
       await this.registerExposure(client, context, resolved);
