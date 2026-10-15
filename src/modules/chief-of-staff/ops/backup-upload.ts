@@ -29,7 +29,11 @@ type Profile = {
   mount: BackupMountBinding;
 };
 const pinned = (fd: number) => '/proc/self/fd/' + fd;
-function validateProfile(value: Profile, roots: CalendarStorageRoots, filesystemUuid: string): void {
+export function validateBackupRepositoryProfile(
+  value: Profile,
+  roots: CalendarStorageRoots,
+  filesystemUuid: string,
+): void {
   if (
     !value ||
     typeof value !== 'object' ||
@@ -129,7 +133,7 @@ async function withVaultBackupRepository<T>(
             const value = JSON.parse(
               new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(0, count)),
             ) as Profile;
-            validateProfile(value, roots, policy.volume.filesystemUuid);
+            validateBackupRepositoryProfile(value, roots, policy.volume.filesystemUuid);
             return value;
           } finally {
             bytes.fill(0);

@@ -82,6 +82,29 @@ it('independently reads actual primary bytes matching the credential owner event
   });
   expect(borrowed.every((byte) => byte === 0)).toBe(true);
 });
+it('honors the remaining aggregate byte budget before exposing primary token buffers', async () => {
+  const f = await fixture(),
+    callback = vi.fn(),
+    fd = fs.openSync(f.root, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY);
+  try {
+    await expect(
+      withCredentialPrimarySnapshot(
+        {
+          directoryFd: fd,
+          ownerDigest: owner,
+          clientId: 'source-fixture.apps.googleusercontent.com',
+          profile: 'mail_reader',
+          assertScope: f.guard,
+          maximumBytes: 1,
+        },
+        callback,
+      ),
+    ).rejects.toThrow('credential_primary_snapshot_unavailable');
+    expect(callback).not.toHaveBeenCalled();
+  } finally {
+    fs.closeSync(fd);
+  }
+});
 it('keeps an as-of snapshot valid while a later source is added, without claiming it is still current', async () => {
   const f = await fixture();
   await f.run(async (snapshot) => {

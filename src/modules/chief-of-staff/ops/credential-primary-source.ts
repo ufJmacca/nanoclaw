@@ -44,6 +44,7 @@ export async function withCredentialPrimarySnapshot<T>(
     ownerDigest: string;
     clientId: string;
     profile: OAuthScopeProfile;
+    maximumBytes?: number;
     assertScope(): void;
   },
   operation: (snapshot: CredentialPrimarySnapshot) => Promise<T>,
@@ -61,6 +62,9 @@ export async function withCredentialPrimarySnapshot<T>(
       !/^[a-f0-9]{64}$/.test(input.ownerDigest)
     )
       throw Error('primary_scope_required');
+    const maximumBytes = input.maximumBytes ?? BACKUP_LIMITS.credentials;
+    if (!Number.isSafeInteger(maximumBytes) || maximumBytes < 1 || maximumBytes > BACKUP_LIMITS.credentials)
+      throw Error('primary_byte_bounds');
     input.assertScope();
     checkedClient({ clientId: input.clientId });
     directory = fs.openSync('/proc/self/fd/' + input.directoryFd, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY);
@@ -119,7 +123,7 @@ export async function withCredentialPrimarySnapshot<T>(
       )
         throw Error('unsafe_primary_file');
       total += stat.size;
-      if (total > BACKUP_LIMITS.credentials) throw Error('primary_byte_bounds');
+      if (total > maximumBytes) throw Error('primary_byte_bounds');
       files.push({ fd, name: file, signature: signature(stat) });
       const bytes = Buffer.alloc(stat.size + 1);
       buffers.push(bytes);
