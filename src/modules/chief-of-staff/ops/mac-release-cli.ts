@@ -98,7 +98,7 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
   if (operation === 'init' && values.length === 3) {
     const [commit, fetchRef, slice] = values;
     // Only the current implemented slice may create a new release; historical manifests remain readable.
-    if (!['S11', 'G01', 'G02', 'G03'].includes(slice) || Number(SCHEMA_VERSION) !== 18)
+    if (!['S11', 'G01', 'G02', 'G03'].includes(slice) || Number(SCHEMA_VERSION) !== MIGRATIONS.length)
       throw new Error('current_release_slice_required');
     if (!/^[a-f0-9]{40}$/.test(commit) || !/^refs\/heads\/[a-zA-Z0-9_./-]+$/.test(fetchRef) || fetchRef.includes('..'))
       throw new Error('invalid_candidate_source');
