@@ -62,6 +62,21 @@ function fixture() {
     reference: randomUUID(),
   };
 }
+function heldInspection(f: ReturnType<typeof fixture>) {
+  let entered!: () => void, release!: () => void;
+  const started = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const owner = new MailCredentialOwner(f.root, client, f.fences, f.transport, f.guard, async (change, check) => {
+    entered();
+    await held;
+    await f.journal(change, check);
+  });
+  return { owner, started, release };
+}
 it('uses a mail-specific owned root and refuses adopting an existing Calendar credential root', () => {
   const f = fixture();
   expect(fs.readdirSync(f.root)).toEqual(['.cos-mail-reader-credentials']);
@@ -89,6 +104,84 @@ it('records mail credentials in the real encrypted-queue interface before releas
     fs.readFileSync(f.base + '/queue/backup-queue/' + pending[0].operationId + '/data/credential-event.json', 'utf8'),
   );
   expect(event).toMatchObject({ sourceKind: 'mail_reader', generation: 1, phase: 'ready' });
+});
+it('admits concurrent message credential checks through the real credential journal', async () => {
+  const f = fixture();
+  await f.owner.install('scope', f.binding, f.reference, tokens());
+  const before = fs.readFileSync(f.root + '/' + f.reference + '.json');
+  const results = await Promise.allSettled(
+    Array.from({ length: 4 }, async () => {
+      const metadata = await f.owner.inspect('scope', f.binding, f.reference);
+      const token = await f.owner.token('scope', f.binding, f.reference);
+      return { metadata, token };
+    }),
+  );
+  expect(results).toEqual(
+    Array.from({ length: 4 }, () => ({
+      status: 'fulfilled',
+      value: {
+        metadata: { auth: 'ready', scopes: [GOOGLE_MAIL_READ_SCOPE], generation: 1 },
+        token: 'FIXTURE_MAIL_ACCESS',
+      },
+    })),
+  );
+  expect(fs.readFileSync(f.root + '/' + f.reference + '.json')).toEqual(before);
+  expect(f.fetch).not.toHaveBeenCalled();
+  expect(await f.queue.pending('credentials')).toHaveLength(1);
+});
+it('checks a durable denial again before releasing a queued access token', async () => {
+  const f = fixture();
+  await f.owner.install('scope', f.binding, f.reference, tokens());
+  const held = heldInspection(f),
+    first = held.owner.inspect('scope', f.binding, f.reference);
+  await held.started;
+  const waiting = held.owner.token('scope', f.binding, f.reference);
+  f.fences.deny('scope', f.binding, 'revoked');
+  held.release();
+  const results = await Promise.allSettled([first, waiting]);
+  expect(results[1]).toMatchObject({ status: 'rejected', reason: { code: 'calendar_auth_revoked' } });
+  expect(f.fetch).not.toHaveBeenCalled();
+});
+it('keeps the exclusive file lock against a different credential owner', async () => {
+  const f = fixture();
+  await f.owner.install('scope', f.binding, f.reference, tokens());
+  const held = heldInspection(f),
+    first = held.owner.inspect('scope', f.binding, f.reference);
+  await held.started;
+  try {
+    await expect(f.owner.token('scope', f.binding, f.reference)).rejects.toThrow('calendar_credentials_busy');
+  } finally {
+    held.release();
+    await first;
+  }
+  expect(await f.owner.token('scope', f.binding, f.reference)).toBe('FIXTURE_MAIL_ACCESS');
+});
+it('cancels a queued token waiter without waiting for the held inspection or refreshing', async () => {
+  const f = fixture();
+  await f.owner.install('scope', f.binding, f.reference, tokens(true));
+  const held = heldInspection(f),
+    first = held.owner.inspect('scope', f.binding, f.reference);
+  await held.started;
+  const controller = new AbortController(),
+    waiting = held.owner.token('scope', f.binding, f.reference, controller.signal);
+  controller.abort();
+  try {
+    await expect(waiting).rejects.toThrow('calendar_refresh_timed_out');
+    expect(f.fetch).not.toHaveBeenCalled();
+  } finally {
+    held.release();
+    await first;
+  }
+  expect(await held.owner.inspect('scope', f.binding, f.reference)).toMatchObject({ auth: 'ready' });
+  expect(f.fetch).not.toHaveBeenCalled();
+});
+it('returns a rejected promise for an already cancelled token request', async () => {
+  const f = fixture();
+  await f.owner.install('scope', f.binding, f.reference, tokens());
+  await expect(f.owner.token('scope', f.binding, f.reference, AbortSignal.abort())).rejects.toThrow(
+    'calendar_refresh_timed_out',
+  );
+  expect(f.fetch).not.toHaveBeenCalled();
 });
 it('does not import Calendar or broader mail tokens, or widen an existing Calendar grant', async () => {
   const f = fixture();

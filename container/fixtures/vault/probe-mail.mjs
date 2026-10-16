@@ -154,6 +154,21 @@ if (mode === 'install') {
       scopes: [GOOGLE_MAIL_READ_SCOPE],
       generation: 2,
     });
+    stage('mail_concurrent_metadata_and_tokens');
+    const beforeConcurrent = hash(profile + '/credentials/' + reference + '.json');
+    const concurrent = await Promise.all(
+      Array.from({ length: 4 }, async () => {
+        const metadata = await host.credentials.inspect(scope, binding, reference);
+        const token = await host.credentials.token(scope, binding, reference);
+        return { metadata, token };
+      }),
+    );
+    for (const result of concurrent) {
+      assert.deepEqual(result.metadata, { auth: 'ready', scopes: [GOOGLE_MAIL_READ_SCOPE], generation: 2 });
+      assert.equal(result.token, 'SYNTHETIC_ROTATED_ACCESS');
+    }
+    assert.equal(hash(profile + '/credentials/' + reference + '.json'), beforeConcurrent);
+    assert.equal(exchanges, 1);
     await assert.rejects(host.credentials.token(scope, randomUUID(), reference), /calendar_credentials_denied/);
     host.fences.deny(scope, deniedBinding, 'revoked');
     assert.throws(() => host.fences.assertOpen(scope, deniedBinding), /calendar_auth_revoked/);
