@@ -4,7 +4,7 @@ import { validStatusInput, type StatusInput } from '../contracts/operations-prot
 import { isKnowledgeCommand, parseKnowledgeArguments } from './knowledge-admin.js';
 import { isCalendarCommand, parseCalendarArguments } from './calendar-admin.js';
 import { isCalendarAccountCommand, parseCalendarAccountArguments } from './calendar-account-admin.js';
-import { isMailAccountCommand, parseMailAccountArguments } from './mail-account-admin.js';
+import { isMailAccountCommand, parseMailAccountArguments } from './mail-account-arguments.js';
 import { isMissionCommand, parseMissionArguments } from './mission-admin.js';
 import { isActionAccountCommand, parseActionAccountArguments } from './action-account-admin.js';
 import { isActionAdminCommand, parseActionAdminArguments } from './action-admin.js';

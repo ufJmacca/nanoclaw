@@ -5,7 +5,7 @@ import { readPrivate } from './target-state.js';
 import { withDeploymentLock } from './deployment-lock.js';
 import { validateReleaseManifest, type ReleaseManifest } from './release-manifest.js';
 import { parseBackupOwnerRestoreArguments } from './backup-owner-restore-arguments.js';
-import { isMailAccountCommand, parseMailAccountArguments } from './mail-account-admin.js';
+import { isMailAccountCommand, parseMailAccountArguments } from './mail-account-arguments.js';
 const commands = [
   'vault-status',
   'vault-provision',

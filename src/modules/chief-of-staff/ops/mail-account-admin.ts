@@ -1,6 +1,5 @@
 /** Trusted owner account setup, never a model/message capability. */
 import fs from 'node:fs';
-import path from 'node:path';
 import type { Readable } from 'node:stream';
 import type { CosBinding } from '../../../cos-boundary.js';
 import { digest } from '../domain/contracts.js';
@@ -24,40 +23,13 @@ import { readCalendarAdminJson as readJson, calendarAdminDirectory as directory 
 import { writeAtomic } from './target-state.js';
 import type { ReleaseManifest } from './release-manifest.js';
 
-export type MailAccountArguments =
-  | { command: 'mail-setup'; scopeId: string; requestId: string }
-  | { command: 'mail-link'; scopeId: string; requestId: string; bindingId: string; manifestFile: string };
+import { parseMailAccountArguments, type MailAccountArguments } from './mail-account-arguments.js';
+export {
+  isMailAccountCommand,
+  parseMailAccountArguments,
+  type MailAccountArguments,
+} from './mail-account-arguments.js';
 export type MailSelection = { mailboxEmail: string; processingProviders: ['codex'] };
-const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-export function isMailAccountCommand(args: { command: string }): args is MailAccountArguments {
-  return ['mail-setup', 'mail-link'].includes(args.command);
-}
-export function parseMailAccountArguments(args: string[]): MailAccountArguments {
-  const setup = args[0] === 'mail-setup',
-    values: Record<string, string> = {};
-  const invalid = () => Error('invalid_admin_arguments');
-  if (!isMailAccountCommand({ command: args[0] }) || args.length !== (setup ? 5 : 9)) throw invalid();
-  const allowed = ['--scope', '--request-id', ...(setup ? [] : ['--binding', '--manifest'])];
-  for (let i = 1; i < args.length; i += 2) {
-    if (!allowed.includes(args[i]) || values[args[i]] !== undefined || !args[i + 1]) throw invalid();
-    values[args[i]] = args[i + 1];
-  }
-  const scopeId = values['--scope'],
-    requestId = values['--request-id'];
-  if (!/^[a-zA-Z0-9_-]{1,128}$/.test(scopeId ?? '') || !uuid.test(requestId ?? '')) throw invalid();
-  if (setup) return { command: 'mail-setup', scopeId, requestId };
-  const bindingId = values['--binding'],
-    manifestFile = values['--manifest'];
-  if (
-    !uuid.test(bindingId ?? '') ||
-    !manifestFile ||
-    !path.isAbsolute(manifestFile) ||
-    path.resolve(manifestFile) !== manifestFile ||
-    /[\0\r\n]/.test(manifestFile)
-  )
-    throw invalid();
-  return { command: 'mail-link', scopeId, requestId, bindingId, manifestFile };
-}
 export function parseMailSelection(value: unknown): MailSelection {
   if (
     !object(value) ||
