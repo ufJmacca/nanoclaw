@@ -44,6 +44,7 @@ function fixture() {
     'scripts/cos-source-fixture.sh': 'public source-only Docker fixture driver',
     'scripts/cos-release.sh': 'source-pinned host release coordinator',
     'scripts/cos-backup-repository-fixture.sh': 'immutable host encrypted repository fixture driver',
+    'scripts/cos-mail-artifact-fixture.sh': 'immutable mail artifact fixture driver',
     'container/fixtures/backup-smb/Dockerfile.server': 'pinned synthetic SMB server',
     'container/fixtures/backup-smb/Dockerfile.client': 'immutable tested host CIFS client',
     'container/fixtures/backup-smb/server.sh': 'dedicated synthetic account and share',
@@ -90,6 +91,9 @@ describe('S01-REL03 pinned source-only build context', () => {
     expect(fs.statSync(path.join(out, 'container/agent-runner/src')).mode & 0o777).toBe(0o755);
     expect(fs.statSync(path.join(out, 'container/agent-runner/src/index.ts')).mode & 0o777).toBe(0o644);
     expect(fs.readFileSync(path.join(out, 'src/index.ts'), 'utf8')).toBe('console.log("fixture")');
+    expect(fs.readFileSync(path.join(out, 'scripts/cos-mail-artifact-fixture.sh'), 'utf8')).toBe(
+      'immutable mail artifact fixture driver',
+    );
     expect(
       fs.readFileSync(path.join(out, 'container/agent-runner/fixtures/cos-subscription-capability.ts'), 'utf8'),
     ).toBe('offline native protocol fixture');

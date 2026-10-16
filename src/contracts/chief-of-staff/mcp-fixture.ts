@@ -9,6 +9,7 @@ export class McpFixture {
   private sequence = 0;
   private pending = new Map<
     number,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Synthetic RPC envelopes differ by scenario; callers assert their case-specific shape.
     { resolve: (value: any) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }
   >();
   private buffer = '';
@@ -43,6 +44,8 @@ export class McpFixture {
         '--pull=never',
         '--name',
         this.name,
+        '--label',
+        'nanoclaw.cos-protocol=cos-rpc/v1',
         '--network=none',
         '--read-only',
         '--user=1000:1000',
@@ -98,6 +101,7 @@ export class McpFixture {
             if (response.error) waiter.reject(new Error('Fixture MCP error'));
             else waiter.resolve(response.result);
           }
+        // eslint-disable-next-line no-catch-all/no-catch-all -- Malformed fixture responses close every pending request instead of leaving a live unverified worker.
         } catch {
           this.fail();
         }
@@ -113,6 +117,7 @@ export class McpFixture {
     }
     this.pending.clear();
   }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Fixture callers validate each heterogeneous JSON RPC result before using it.
   request(method: string, params: unknown): Promise<any> {
     const id = ++this.sequence;
     return new Promise((resolve, reject) => {
