@@ -104,6 +104,7 @@ for (const format of ['change', 'set-v1', 'set-v2'] as const)
       guard,
     );
     expect(result.contents.kind).toBe(format);
+    if (result.contract !== 'cos-backup-archive-read/v1') throw Error('legacy_queue_contract_expected');
     expect(result.receipt.operationId).toBe(f.operationId);
     expect(result.archiveBytes).toBe(f.bytes.length);
     expect(JSON.stringify(result)).not.toContain('SYNTHETIC_ARCHIVE_TOKEN');

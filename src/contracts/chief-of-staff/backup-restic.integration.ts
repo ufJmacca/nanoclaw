@@ -48,6 +48,7 @@ import { MIGRATIONS, SCHEMA_VERSION } from '../../modules/chief-of-staff/store/m
 import { digest } from '../../modules/chief-of-staff/domain/contracts.js';
 import { BackupQueue } from '../../modules/chief-of-staff/ops/backup-queue.js';
 import { makeCredentialEvent } from '../../modules/chief-of-staff/ops/backup-credential-event.js';
+import { makeCredentialCapture, streamCredentialCapture } from '../../modules/chief-of-staff/ops/credential-capture.js';
 import {
   makeRoutedCredentialRecoveryManifest,
   routedCredentialRecoveryFiles,
@@ -2220,6 +2221,26 @@ test('real maintenance keeps 14 daily and four weekly checkpoints per kind witho
     const manifest = makeRoutedCredentialRecoveryManifest(owner, sources),
       metadata = Buffer.from(JSON.stringify(manifest) + '\n');
     try {
+      if (generation === 20) {
+        const capture = makeCredentialCapture(owner, '2026-09-27T04:00:00.000Z', manifest),
+          parts: Buffer[] = [];
+        await streamCredentialCapture(
+          {
+            ownerDigest: owner,
+            sources: sources.map((source) => ({
+              ...source,
+              files: source.files.map((file) => ({ ...file, bytes: file.name === 'credential.json' ? token : config })),
+            })),
+            assertCurrent: () => {},
+          },
+          capture,
+          async (bytes) => {
+            parts.push(Buffer.from(bytes));
+          },
+        );
+        maintenanceCredentialInventory = sources;
+        return { operationId: capture.operationId, bytes: Buffer.concat(parts) };
+      }
       await queue.capture('credentials', manifest.operationId, async (sink) => {
         for (const file of routedCredentialRecoveryFiles(manifest, owner))
           sink.write(

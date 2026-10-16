@@ -7,23 +7,33 @@ import {
   type RoutedCredentialRecoveryManifest,
 } from './credential-recovery-routing.js';
 import { credentialSource } from './backup-credential-event.js';
-export type CredentialRecoveryArchive = BackupArchiveReadResult & {
+import {
+  readCredentialCaptureArchive,
+  CREDENTIAL_CAPTURE_ENTRY,
+  type CredentialCaptureRead,
+} from './credential-capture.js';
+type LegacyCredentialRecoveryArchive = BackupArchiveReadResult & {
   contents:
     | { kind: 'change'; event: CredentialEvent }
     | { kind: 'set-v1'; manifest: CredentialRecoveryManifest }
     | { kind: 'set-v2'; manifest: RoutedCredentialRecoveryManifest };
 };
+export type CredentialRecoveryArchive =
+  | LegacyCredentialRecoveryArchive
+  | (CredentialCaptureRead & {
+      contents: { kind: 'set-v2'; manifest: RoutedCredentialRecoveryManifest };
+    });
 /** Hashes and checks the complete canonical archive, retaining only bounded
  * credential metadata. This establishes archive contents, not that the source
  * inventory is complete/current or that a NAS snapshot will remain retained.
  * The caller supplies the actual source and its live repository/owner guard.
  * No credential bytes are written to disk or returned; old formats remain
  * readable and no parsed record grants restore, admission or cleanup authority. */
-export async function readCredentialRecoveryArchive(
+async function readLegacyCredentialArchive(
   source: AsyncIterable<Buffer>,
   expected: { ownerDigest: string; operationId: string },
   assertCurrent: () => void,
-): Promise<CredentialRecoveryArchive> {
+): Promise<LegacyCredentialRecoveryArchive> {
   const metadata = new Map<string, Buffer>();
   try {
     expected = Object.freeze({ ...expected });
@@ -66,7 +76,7 @@ export async function readCredentialRecoveryArchive(
     const decode = (bytes: Buffer) => JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
     const change = metadata.get(credentialEventName),
       set = metadata.get('credential-set.json');
-    let contents: CredentialRecoveryArchive['contents'];
+    let contents: LegacyCredentialRecoveryArchive['contents'];
     if (change && !set) {
       const event = decode(change) as CredentialEvent;
       credentialHead(event, result.receipt);
@@ -97,4 +107,86 @@ export async function readCredentialRecoveryArchive(
   } finally {
     for (const bytes of metadata.values()) bytes.fill(0);
   }
+}
+/** Dispatch by a bounded canonical first entry only. Both readers verify their
+ * full format and every payload byte. The consumed input remains owned and
+ * wiped through failure/close, including a failed format selection. */
+export async function readCredentialRecoveryArchive(
+  source: AsyncIterable<Buffer>,
+  expected: { ownerDigest: string; operationId: string },
+  assertCurrent: () => void,
+): Promise<CredentialRecoveryArchive> {
+  const first = Buffer.alloc(512),
+    buffered: Buffer[] = [];
+  let iterator: AsyncIterator<Buffer> | undefined,
+    replay: AsyncGenerator<Buffer> | undefined,
+    returned = false,
+    result: CredentialRecoveryArchive | undefined,
+    failed = false;
+  const close = async () => {
+    if (!iterator || returned) return;
+    returned = true;
+    const end = await iterator.return?.();
+    if (Buffer.isBuffer(end?.value)) end.value.fill(0);
+  };
+  try {
+    if (typeof assertCurrent !== 'function') throw Error('archive_scope_required');
+    assertCurrent();
+    iterator = source[Symbol.asyncIterator]();
+    let offset = 0;
+    while (offset < first.length) {
+      const next = await iterator.next();
+      if (Buffer.isBuffer(next.value)) buffered.push(next.value);
+      assertCurrent();
+      if (next.done || !Buffer.isBuffer(next.value) || next.value.length < 1 || next.value.length > 65536)
+        throw Error('archive_first_entry');
+      const count = Math.min(first.length - offset, next.value.length);
+      next.value.copy(first, offset, 0, count);
+      offset += count;
+    }
+    replay = (async function* () {
+      try {
+        for (const bytes of buffered) {
+          assertCurrent();
+          yield bytes;
+        }
+        while (true) {
+          const next = await iterator!.next();
+          try {
+            assertCurrent();
+            if (next.done) return;
+            if (!Buffer.isBuffer(next.value) || next.value.length < 1 || next.value.length > 65536)
+              throw Error('archive_chunk_bounds');
+            yield next.value;
+          } finally {
+            if (Buffer.isBuffer(next.value)) next.value.fill(0);
+          }
+        }
+      } finally {
+        for (const bytes of buffered) bytes.fill(0);
+        await close();
+      }
+    })();
+    const name = first.subarray(0, 100).toString('ascii').replace(/\0.*$/, '');
+    if (name === CREDENTIAL_CAPTURE_ENTRY) {
+      const read = await readCredentialCaptureArchive(replay, expected, assertCurrent);
+      result = { ...read, contents: { kind: 'set-v2', manifest: read.capture.set } };
+    } else result = await readLegacyCredentialArchive(replay, expected, assertCurrent);
+    // eslint-disable-next-line no-catch-all/no-catch-all -- Clear and close all input before returning a fixed diagnostic.
+  } catch {
+    failed = true;
+  } finally {
+    first.fill(0);
+    for (const bytes of buffered) bytes.fill(0);
+    try {
+      await replay?.return(undefined);
+      await close();
+      if (!failed) assertCurrent();
+      // eslint-disable-next-line no-catch-all/no-catch-all -- A failed source close invalidates completed readback.
+    } catch {
+      failed = true;
+    }
+  }
+  if (failed || !result) throw Error('credential_recovery_archive_unavailable');
+  return result;
 }

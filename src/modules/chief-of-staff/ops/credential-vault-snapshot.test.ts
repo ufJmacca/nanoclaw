@@ -22,6 +22,7 @@ import {
 import { BackupQueue } from './backup-queue.js';
 import { streamBackupArchive } from './backup-archive.js';
 import { readBackupArchive } from './backup-archive-reader.js';
+import { makeCredentialCapture, streamCredentialCapture, readCredentialCaptureArchive } from './credential-capture.js';
 import { withVaultCredentialSnapshot } from './credential-vault-snapshot.js';
 import { digest } from '../domain/contracts.js';
 import { writeAtomic } from './target-state.js';
@@ -271,6 +272,33 @@ it('round-trips the actual full primary catalog through the queue and isolated a
   expect(fs.readdirSync(f.profiles[0].credentials).filter((name) => name.endsWith('.json'))).toEqual([
     f.profiles[0].reference + '.json',
   ]);
+});
+it('streams the actual full primary catalog into a separate capture format without creating queue staging', async () => {
+  const f = await fixture(),
+    parts: Buffer[] = [];
+  const capture = await f.run(async (snapshot) => {
+    const capture = makeCredentialCapture(
+      snapshot.ownerDigest,
+      '2026-10-16T00:00:00.000Z',
+      makeRoutedCredentialRecoveryManifest(snapshot.ownerDigest, snapshot.sources),
+    );
+    await streamCredentialCapture(snapshot, capture, async (bytes) => {
+      parts.push(Buffer.from(bytes));
+    });
+    return capture;
+  });
+  expect(fs.readdirSync(f.vault + '/journals')).toEqual([]);
+  async function* input() {
+    for (const part of parts) yield part;
+  }
+  const recovered = await readCredentialCaptureArchive(
+    input(),
+    { ownerDigest: f.owner, operationId: capture.operationId },
+    () => {},
+  );
+  expect(recovered.capture).toEqual(capture);
+  expect(recovered.capture.set.contents.sources).toHaveLength(11);
+  expect('receipt' in recovered).toBe(false);
 });
 it('records absent optional profiles without initializing them or inferring account authority', async () => {
   const f = await fixture();
