@@ -47,6 +47,12 @@ import {
 import { MIGRATIONS, SCHEMA_VERSION } from '../../modules/chief-of-staff/store/migrations.js';
 import { digest } from '../../modules/chief-of-staff/domain/contracts.js';
 import { BackupQueue } from '../../modules/chief-of-staff/ops/backup-queue.js';
+import { makeCredentialEvent } from '../../modules/chief-of-staff/ops/backup-credential-event.js';
+import {
+  makeRoutedCredentialRecoveryManifest,
+  routedCredentialRecoveryFiles,
+  type RoutedCredentialInventory,
+} from '../../modules/chief-of-staff/ops/credential-recovery-routing.js';
 import { BackupResticTransfer } from '../../modules/chief-of-staff/ops/backup-restic-transfer.js';
 import { BackupResticInitializer } from '../../modules/chief-of-staff/ops/backup-restic-initialize.js';
 import { initializePinnedBackupRepository } from '../../modules/chief-of-staff/ops/backup-repository-initialize.js';
@@ -192,6 +198,7 @@ const maintenanceOwner = 'a'.repeat(64),
   maintenanceLock = path.join(root, 'maintenance-lock');
 fs.mkdirSync(maintenanceLock, { mode: 0o700 });
 const maintenanceWriter = new BackupRepositoryWriter(maintenanceOwner, async (operation) => operation(maintenanceLock));
+let maintenanceCredentialInventory: RoutedCredentialInventory | undefined;
 /** Real transport and kernel writer, synthetic repository credentials/scopes only. */
 const maintainRepository = (admit: () => Promise<void> = async () => {}, expectedId = repositoryId) =>
   withVerifiedResticBinary(binary, async (executable) =>
@@ -201,6 +208,10 @@ const maintainRepository = (admit: () => Promise<void> = async () => {}, expecte
         writer,
         repositoryId: expectedId,
         ownerDigest: maintenanceOwner,
+        credentialInventory: async () => {
+          assert(maintenanceCredentialInventory);
+          return { ownerDigest: maintenanceOwner, sources: maintenanceCredentialInventory };
+        },
         password: {
           fd: passwordFd,
           assertCurrent() {
@@ -2167,6 +2178,67 @@ test('real maintenance keeps 14 daily and four weekly checkpoints per kind witho
     JSON.parse(run(['snapshots', '--host', host, '--tag', 'cos-owner=' + owner + ',cos-kind=' + kind])) as Array<{
       id: string;
     }>;
+  const queueArea = path.join(root, 'maintenance-credential-queue');
+  fs.mkdirSync(queueArea, { mode: 0o700 });
+  const queue = new BackupQueue(owner, async (_kind, operation) => operation(queueArea));
+  const credentialArchive = async (generation: number) => {
+    const token = Buffer.from('SYNTHETIC_MAINTENANCE_TOKEN_' + generation),
+      config = Buffer.from('SYNTHETIC_MAINTENANCE_REPOSITORY');
+    const sources = [
+      {
+        event: makeCredentialEvent(
+          {
+            sourceKind: 'mail_reader',
+            sourceKey: '1'.repeat(64),
+            generation,
+            phase: 'ready',
+            files: [{ name: 'credential.json', bytes: token }],
+          },
+          owner,
+        ),
+        files: [
+          {
+            name: 'credential.json',
+            destination: 'google/calendar/mail-reader/credentials/10000000-0000-4000-8000-000000000001.json',
+          },
+        ],
+      },
+      {
+        event: makeCredentialEvent(
+          {
+            sourceKind: 'backup_repository',
+            sourceKey: '2'.repeat(64),
+            generation: 1,
+            phase: 'ready',
+            files: [{ name: 'repository.json', bytes: config }],
+          },
+          owner,
+        ),
+        files: [{ name: 'repository.json', destination: 'backup-credentials/backup-repository.json' }],
+      },
+    ];
+    const manifest = makeRoutedCredentialRecoveryManifest(owner, sources),
+      metadata = Buffer.from(JSON.stringify(manifest) + '\n');
+    try {
+      await queue.capture('credentials', manifest.operationId, async (sink) => {
+        for (const file of routedCredentialRecoveryFiles(manifest, owner))
+          sink.write(
+            file.name,
+            file.name === 'credential-set.json' ? metadata : file.name.endsWith('/repository.json') ? config : token,
+          );
+      });
+      const parts: Buffer[] = [];
+      await streamQueuedBackup(queue, 'credentials', manifest.operationId, async (bytes) => {
+        parts.push(Buffer.from(bytes));
+      });
+      maintenanceCredentialInventory = sources;
+      return { operationId: manifest.operationId, bytes: Buffer.concat(parts) };
+    } finally {
+      token.fill(0);
+      config.fill(0);
+      metadata.fill(0);
+    }
+  };
   for (const [kindIndex, kind] of (['state', 'credentials'] as const).entries()) {
     const dates = [
       '2026-08-31 03:30:00',
@@ -2174,7 +2246,9 @@ test('real maintenance keeps 14 daily and four weekly checkpoints per kind witho
     ];
     if (kind === 'credentials') dates.push('2026-09-27 04:30:00');
     for (const [index, time] of dates.entries()) {
-      const operationId = '0000000' + (kindIndex + 1) + '-0000-4000-8000-' + String(index + 1).padStart(12, '0');
+      const archive = kind === 'credentials' ? await credentialArchive(index + 1) : undefined;
+      const operationId =
+        archive?.operationId ?? '0000000' + (kindIndex + 1) + '-0000-4000-8000-' + String(index + 1).padStart(12, '0');
       run(
         [
           'backup',
@@ -2187,8 +2261,9 @@ test('real maintenance keeps 14 daily and four weekly checkpoints per kind witho
           time,
           ...backupSnapshotTags(owner, kind, operationId).flatMap((tag) => ['--tag', tag]),
         ],
-        Buffer.from('synthetic-retention-checkpoint'),
+        archive?.bytes ?? Buffer.from('synthetic-retention-checkpoint'),
       );
+      archive?.bytes.fill(0);
     }
     assert.equal(selected(kind).length, dates.length);
   }

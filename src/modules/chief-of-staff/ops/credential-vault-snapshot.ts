@@ -10,7 +10,7 @@ import { digest } from '../domain/contracts.js';
 import { verifyVaultStorage, withVaultDirectory } from './vault-storage.js';
 import { verifyVaultMemory } from './vault-memory.js';
 import { readBackupCredentialInstallation } from './backup-credential-install.js';
-import { validateBackupRepositoryProfile } from './backup-upload.js';
+import { validateBackupRepositoryProfile } from './backup-repository-profile.js';
 import { withCredentialPrimarySnapshot } from './credential-primary-source.js';
 import { makeCredentialEvent, type CredentialChange, type CredentialEvent } from './backup-credential-event.js';
 import { makeRoutedCredentialRecoveryManifest } from './credential-recovery-routing.js';

@@ -24,6 +24,7 @@ const f = vi.hoisted(() => ({
   verify: vi.fn(),
   maintain: vi.fn(),
   restore: vi.fn(),
+  credentialSnapshot: vi.fn(),
   deps: undefined as undefined | Record<string, unknown>,
   producerFile: '',
 }));
@@ -47,6 +48,7 @@ vi.mock('./backup-repository-lease.js', async (original) => ({
 }));
 vi.mock('./backup-restic-transfer.js', () => ({ BackupResticTransfer: f.transfer }));
 vi.mock('./backup-producer-file.js', () => ({ backupProducerFile: () => f.producerFile }));
+vi.mock('./credential-vault-snapshot.js', () => ({ withVaultCredentialSnapshot: f.credentialSnapshot }));
 import { uploadVaultBackup, maintainVaultBackups, restoreVaultBackup } from './backup-upload.js';
 const temporary: string[] = [],
   held: number[] = [];
@@ -394,6 +396,36 @@ it('maintains through the same admitted installed scopes without uploading or ch
   expect(f.upload).not.toHaveBeenCalled();
   expect(f.verify).not.toHaveBeenCalled();
   expect(await s.queue.pending('state')).toMatchObject([{ operationId, state: 'pending' }]);
+});
+it('supplies the fixed primary catalog with the live repository authority and returns metadata only', async () => {
+  const s = await fixture(),
+    guard = vi.fn(),
+    unchanged = vi.fn(),
+    maintain = f.maintain.getMockImplementation()!;
+  const event = { syntheticEvent: true },
+    bytes = Buffer.from('PRIVATE_FIXTURE_BORROWED');
+  f.credentialSnapshot.mockImplementation(async (roots, options, operation) => {
+    expect(roots).toEqual(s.roots);
+    options.assertAuthority();
+    return operation({
+      ownerDigest: 'a'.repeat(64),
+      sources: [{ event, files: [{ name: 'credential.json', destination: 'fixed-fixture', bytes }] }],
+      assertPrimaryUnchanged: unchanged,
+    });
+  });
+  f.maintain.mockImplementation(async (admit) => {
+    const inventory = await (f.deps!.credentialInventory as () => Promise<unknown>)();
+    expect(inventory).toEqual({
+      ownerDigest: 'a'.repeat(64),
+      sources: [{ event, files: [{ name: 'credential.json', destination: 'fixed-fixture' }] }],
+    });
+    expect(JSON.stringify(inventory)).not.toContain('PRIVATE_FIXTURE_BORROWED');
+    return maintain(admit);
+  });
+  await maintainVaultBackups(s.roots, guard);
+  expect(unchanged).toHaveBeenCalledOnce();
+  expect(guard).toHaveBeenCalled();
+  await expect((f.deps!.credentialInventory as () => Promise<unknown>)()).rejects.toThrow();
 });
 it('refuses retention while a durable upload retirement still requires its original remote snapshot', async () => {
   const s = await fixture(),

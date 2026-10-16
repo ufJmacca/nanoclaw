@@ -1,6 +1,5 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { isIP } from 'node:net';
 import type { CalendarStorageRoots } from '../calendar/storage-policy.js';
 import { digest } from '../domain/contracts.js';
 import { verifyVaultStorage, withVaultDirectory } from './vault-storage.js';
@@ -13,7 +12,7 @@ import { createVaultBackupRepositoryWriter } from './backup-repository-lease.js'
 import { createVaultBackupQueue } from './backup-queue.js';
 import { readBackupCapacity } from './backup-capacity.js';
 import { backupProducerFile } from './backup-producer-file.js';
-import { BACKUP_LIMITS, admitBackupCapacity, type BackupKind, type BackupMountBinding } from './backup-policy.js';
+import { BACKUP_LIMITS, admitBackupCapacity, type BackupKind } from './backup-policy.js';
 import {
   BackupResticTransfer,
   type RemoteCheckpoint,
@@ -21,43 +20,12 @@ import {
   type BackupRemoteRestore,
 } from './backup-restic-transfer.js';
 import type { BackupRestoreValidationScope } from './backup-restore-workspace.js';
-type Profile = {
-  contract: 'cos-backup-repository/v1';
-  rootsDigest: string;
-  filesystemUuid: string;
-  repositoryId: string;
-  mount: BackupMountBinding;
-};
+import {
+  validateBackupRepositoryProfile,
+  type BackupRepositoryProfile as Profile,
+} from './backup-repository-profile.js';
+import { withVaultCredentialSnapshot } from './credential-vault-snapshot.js';
 const pinned = (fd: number) => '/proc/self/fd/' + fd;
-export function validateBackupRepositoryProfile(
-  value: Profile,
-  roots: CalendarStorageRoots,
-  filesystemUuid: string,
-): void {
-  if (
-    !value ||
-    typeof value !== 'object' ||
-    Array.isArray(value) ||
-    Object.keys(value).sort().join(',') !== 'contract,filesystemUuid,mount,repositoryId,rootsDigest' ||
-    value.contract !== 'cos-backup-repository/v1' ||
-    value.rootsDigest !== digest(roots) ||
-    value.filesystemUuid !== filesystemUuid ||
-    typeof value.repositoryId !== 'string' ||
-    !/^[a-f0-9]{64}$/.test(value.repositoryId) ||
-    !value.mount ||
-    typeof value.mount !== 'object' ||
-    Object.keys(value.mount).sort().join(',') !== 'host,mount,share' ||
-    typeof value.mount.host !== 'string' ||
-    isIP(value.mount.host) !== 4 ||
-    value.mount.share !== 'nanoclaw-cos-backups' ||
-    typeof value.mount.mount !== 'string' ||
-    !path.isAbsolute(value.mount.mount) ||
-    path.resolve(value.mount.mount) !== value.mount.mount ||
-    value.mount.mount === '/' ||
-    /[\0\r\n]/.test(value.mount.mount)
-  )
-    throw Error('invalid_backup_profile');
-}
 type RepositoryScope = {
   queue: ReturnType<typeof createVaultBackupQueue>;
   repository: SignedBackupRepository;
@@ -250,6 +218,17 @@ async function withVaultBackupRepository<T>(
                           writer: lease,
                           repositoryId: profile.repositoryId,
                           ownerDigest: repositoryOwner,
+                          credentialInventory: async () =>
+                            withVaultCredentialSnapshot(roots, { assertAuthority: assertCurrent }, async (snapshot) => {
+                              snapshot.assertPrimaryUnchanged();
+                              return {
+                                ownerDigest: snapshot.ownerDigest,
+                                sources: snapshot.sources.map(({ event, files }) => ({
+                                  event,
+                                  files: files.map(({ name, destination }) => ({ name, destination })),
+                                })),
+                              };
+                            }),
                           producer: (selected, id) => [
                             process.execPath,
                             producer,

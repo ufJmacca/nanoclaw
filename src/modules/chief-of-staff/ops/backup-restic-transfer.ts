@@ -16,6 +16,14 @@ import {
 import type { BackupQueueReceipt } from './backup-queue.js';
 import { backupArchiveReceiptPrefix } from './backup-archive.js';
 import { readBackupArchive, type BackupArchiveRestoreSink } from './backup-archive-reader.js';
+import { readCredentialRecoveryArchive, type CredentialRecoveryArchive } from './credential-recovery-archive.js';
+import {
+  makeRoutedCredentialRecoveryManifest,
+  routedCredentialRecoveryCovers,
+  type RoutedCredentialInventory,
+  type RoutedCredentialRecoveryManifest,
+} from './credential-recovery-routing.js';
+import { credentialRecoveryCovers } from './credential-recovery-set.js';
 type Descriptor = Readonly<{ fd: number; assertCurrent(): void }>;
 type Dependencies = {
   binary: VerifiedResticBinary;
@@ -27,6 +35,7 @@ type Dependencies = {
   ownerDigest: string;
   producer(kind: BackupKind, operationId: string): string[];
   admitUpload(kind: BackupKind, bytes: number): Promise<void>;
+  credentialInventory?(): Promise<{ ownerDigest: string; sources: RoutedCredentialInventory }>;
   timeoutMs?: number;
 };
 type Archive = { bytes: number; sha256: string };
@@ -89,6 +98,7 @@ export class BackupResticTransfer {
       !hex.test(options.ownerDigest) ||
       typeof options.producer !== 'function' ||
       typeof options.admitUpload !== 'function' ||
+      (options.credentialInventory !== undefined && typeof options.credentialInventory !== 'function') ||
       (options.timeoutMs !== undefined &&
         (!Number.isSafeInteger(options.timeoutMs) || options.timeoutMs < 1000 || options.timeoutMs > 900000))
     )
@@ -161,10 +171,85 @@ export class BackupResticTransfer {
         const fresh = (await list()).map((snapshot) => snapshot.id).sort();
         if (fresh.join(',') !== [...expected].sort().join(',')) throw Error('maintenance_inventory_changed');
       };
+      const keptCredentials: RoutedCredentialRecoveryManifest[] = [];
+      let queueOwner: string | undefined;
+      const credentialCoverage = async (removed?: CredentialRecoveryArchive) => {
+        if (!this.options.credentialInventory) throw Error('credential_primary_inventory_required');
+        this.current();
+        await admit();
+        this.current();
+        const inventory = await this.options.credentialInventory();
+        this.current();
+        await admit();
+        this.current();
+        if (queueOwner !== undefined && inventory.ownerDigest !== queueOwner) throw Error('credential_owner_changed');
+        const required = makeRoutedCredentialRecoveryManifest(inventory.ownerDigest, inventory.sources);
+        queueOwner = inventory.ownerDigest;
+        if (!keptCredentials.some((set) => routedCredentialRecoveryCovers(set, queueOwner!, required)))
+          throw Error('retained_current_credentials_missing');
+        if (removed) {
+          const contents = removed.contents;
+          const covered = keptCredentials.some((set) =>
+            contents.kind === 'set-v2'
+              ? routedCredentialRecoveryCovers(set, queueOwner!, contents.manifest)
+              : credentialRecoveryCovers(
+                  set.contents,
+                  queueOwner!,
+                  contents.kind === 'change' ? [contents.event] : contents.manifest.sources,
+                ),
+          );
+          if (!covered) throw Error('removed_credentials_not_covered');
+        }
+      };
+      if (plans.credentials.remove.length) {
+        if (!this.options.credentialInventory) throw Error('credential_primary_inventory_required');
+        this.current();
+        await admit();
+        this.current();
+        const inventory = await this.options.credentialInventory();
+        makeRoutedCredentialRecoveryManifest(inventory.ownerDigest, inventory.sources);
+        queueOwner = inventory.ownerDigest;
+        const read = async (id: string) => {
+          const selected = snapshots.find((snapshot) => snapshot.id === id),
+            tags = selected?.tags;
+          const operation = Array.isArray(tags)
+            ? tags.find((tag) => typeof tag === 'string' && tag.startsWith('cos-operation='))
+            : undefined;
+          if (typeof operation !== 'string') throw Error('credential_snapshot_identity_missing');
+          this.current();
+          await admit();
+          this.current();
+          const config = await this.run(['cat', 'config'], 65536);
+          try {
+            verifyResticRepositoryIdentity(config.toString('utf8'), this.options.repositoryId);
+          } finally {
+            config.fill(0);
+          }
+          await admit();
+          this.current();
+          const archive = await readCredentialRecoveryArchive(
+            this.output(['dump', id, 'checkpoint.tar'], BACKUP_LIMITS.credentials + 2 * 1024 ** 2),
+            { ownerDigest: queueOwner!, operationId: operation.slice('cos-operation='.length) },
+            () => this.current(),
+          );
+          await admit();
+          this.current();
+          return archive;
+        };
+        await unchanged();
+        for (const id of plans.credentials.keep) {
+          const archive = await read(id);
+          if (archive.contents.kind === 'set-v2') keptCredentials.push(archive.contents.manifest);
+        }
+        await credentialCoverage();
+        for (const id of plans.credentials.remove) await credentialCoverage(await read(id));
+        await unchanged();
+      }
       for (const kind of ['state', 'credentials'] as const) {
         const ids = plans[kind].remove;
         for (let start = 0; start < ids.length; start += 128) {
           await unchanged();
+          if (kind === 'credentials') await credentialCoverage();
           const batch = ids.slice(start, start + 128);
           await discard(['forget', ...batch]);
           for (const id of batch) expected.delete(id);
@@ -172,6 +257,7 @@ export class BackupResticTransfer {
         }
       }
       await unchanged();
+      if (plans.credentials.remove.length) await credentialCoverage();
       await discard(['prune', '--max-repack-size', '16M']);
       await unchanged();
       await discard(['check', '--read-data', '--with-cache']);
