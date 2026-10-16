@@ -6,6 +6,8 @@ G04 release manifests require exact PostgreSQL schema 19 with its sealed mail mi
 
 The implementation is in progress. The collector, store, evidence publication, read adapters, encrypted profile, host scheduler and disabled-service maintenance have fixture coverage; owner setup and G04 deployment/recovery acceptance remain pending. The accepted G03 installation does not yet expose these mail tools.
 
+The scripted native conversation fixture uses the separate test database and an isolated worker with no network. It exercises the actual mail RPC tools, host-rendered freshness, cited private delivery, excluded messages, rejected owner overrides, restart and reply-thread context continuity, preserved model counters, and closure after independent source denial. The real host maintenance pump tightens the selection without a provider or model call, and ordinary chat remains available. Fixture account/storage admission is explicit; this source run does not establish final-image isolation or live Gmail access. G04 fixture selection includes every predecessor regression, the mail store and checkpoint contracts, and this conversation; it refuses runtime-disposable tests.
+
 ## Encrypted profile
 
 Mail has its own `mail-reader` child beneath the existing protected Google/Calendar directory, with a separate OAuth client, credentials marker and denial journal. This keeps complete mail configuration in the existing encrypted Google-state capture without widening Calendar tokens or changing the vault's v1 area policy.
