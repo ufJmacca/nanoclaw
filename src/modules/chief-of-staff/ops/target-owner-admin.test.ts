@@ -3,6 +3,44 @@ import { parseOwnerAdminArguments, selectedOwnerAdminProfile, ownerDatabasePrefl
 import { fixtureRelease } from '../../../contracts/chief-of-staff/release-fixture.js';
 import { DatabasePreflightError } from '../store/preflight.js';
 const request = ['owner-export', '--scope', 'fixture', '--request-id', '01234567-89ab-4def-8123-456789abcdef'];
+it.each(['mail-setup', 'mail-link'])(
+  'admits %s only through the scoped retained helper, with selected runtime settings and no secret arguments',
+  async (command) => {
+    const admin = [
+      command,
+      '--scope',
+      'fixture',
+      '--request-id',
+      '01234567-89ab-4def-8123-456789abcdef',
+      ...(command === 'mail-link'
+        ? ['--binding', '48f99256-b105-4ee3-848c-00140c98151d', '--manifest', '/private/selection.json']
+        : []),
+    ];
+    expect(parseOwnerAdminArguments(['--settings', '/private/settings.json', '--', ...admin])).toMatchObject({ admin });
+    expect(() =>
+      parseOwnerAdminArguments([
+        '--settings',
+        '/private/settings.json',
+        '--database-environment',
+        '/private/test.env',
+        '--',
+        ...admin,
+      ]),
+    ).toThrow();
+    expect(() =>
+      parseOwnerAdminArguments(['--settings', '/private/settings.json', '--', ...admin, '--token', 'PRIVATE']),
+    ).toThrow();
+    const env = { COS_PG_TARGET_ID: 'selected-runtime' };
+    await expect(
+      selectedOwnerAdminProfile(command, {
+        runtime: () => env,
+        test: () => {
+          throw Error('test_not_selected');
+        },
+      }),
+    ).resolves.toBe(env);
+  },
+);
 it('admits isolated complete credential recovery with no database profile or arbitrary destination', async () => {
   const admin = [
     'backup-credentials-restore-check',

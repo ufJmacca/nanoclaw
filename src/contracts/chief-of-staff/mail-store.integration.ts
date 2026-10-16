@@ -11,6 +11,7 @@ import { CHECKPOINT_TABLES } from '../../modules/chief-of-staff/ops/coordinated-
 import { BoundedDatabase } from '../../modules/chief-of-staff/store/client.js';
 import { KnowledgeArtifacts } from '../../modules/chief-of-staff/knowledge/artifacts.js';
 import { MailStore } from '../../modules/chief-of-staff/mail/store.js';
+import { OwnerMailStore } from '../../modules/chief-of-staff/ops/owner-mail-store.js';
 import { GOOGLE_MAIL_READ_SCOPE } from '../../modules/chief-of-staff/mail/oauth.js';
 import { collectMail } from '../../modules/chief-of-staff/mail/capture.js';
 import { normalizeMailMessage, type MailWindow } from '../../modules/chief-of-staff/mail/normalization.js';
@@ -212,6 +213,25 @@ test('G04 binding replay preserves identity and refuses broader grants and forei
     'denied',
   );
   assert.equal((await f.store.connection({ ...f.context, ownerId: 'foreign-owner' }, f.binding.id)).status, 'denied');
+  await admin.query("UPDATE cos.scopes SET status='paused' WHERE id=$1", [f.scope]);
+  const owned = new OwnerMailStore(database, f.artifacts),
+    selected = { ...f.binding, id: randomUUID(), provider: 'google' as const, credentialRef: randomUUID() };
+  assert.equal((await f.store.bind(f.context, selected)).status, 'denied');
+  assert.equal((await owned.coverage(f.context)).status, 'ok');
+  const installed = await owned.bind(f.context, selected);
+  assert.equal(installed.status, 'ok');
+  assert.deepEqual(await owned.bind(f.context, selected), installed);
+  assert.equal((await owned.connection(f.context, selected.id)).status, 'ok');
+  assert.equal(
+    (await owned.bind({ ...f.context, ownerId: 'foreign-owner' }, { ...selected, id: randomUUID() })).status,
+    'denied',
+  );
+  assert.equal(
+    (await owned.bind(f.context, { ...selected, mailboxEmail: 'different@example.invalid' })).status,
+    'conflict',
+  );
+  assert.equal((await f.store.connection(f.context, selected.id)).status, 'denied');
+  assert.equal((await admin.query('SELECT status FROM cos.scopes WHERE id=$1', [f.scope])).rows[0].status, 'paused');
 });
 test('G04 publishes messages and their history cursor atomically, then reconciles the same capture once', async () => {
   const f = await fixture();

@@ -64,6 +64,7 @@ import { catalogueResumeGuard, resumeCatalogueScope } from './catalogue-resume.j
 
 import { isKnowledgeCommand, runKnowledgeAdmin, type KnowledgeAdminArguments } from './knowledge-admin.js';
 import { isCalendarCommand, runCalendarAdmin, type CalendarAdminArguments } from './calendar-admin.js';
+import { isMailAccountCommand, runMailAccountAdmin, type MailAccountArguments } from './mail-account-admin.js';
 import { isMissionCommand, runMissionAdmin, type MissionAdminArguments } from './mission-admin.js';
 import { isOwnerExportCommand, runOwnerExportAdmin, type OwnerExportArguments } from './owner-export-admin.js';
 import {
@@ -96,6 +97,7 @@ export type ContextAdminArguments =
   | KnowledgeAdminArguments
   | CalendarAdminArguments
   | CalendarAccountArguments
+  | MailAccountArguments
   | { command: 'context-status'; scopeId: string }
   | { command: 'operator-status'; scopeId: string; input: StatusInput }
   | { command: 'operator-control'; scopeId: string; requestId: string; text: string }
@@ -238,6 +240,8 @@ export async function contextAdminCommand(
       'backup-nas-recover-unmount',
       'backup-nas-inspect-initialization',
       'backup-nas-recover-initialization',
+      'mail-setup',
+      'mail-link',
     ].includes(args.command)
   )
     return { status: 'disabled', live_model: 'not_verified' };
@@ -406,6 +410,22 @@ export async function contextAdminCommand(
         assertAuthority();
       };
       await check();
+      if (isMailAccountCommand(args)) {
+        if (!vaultRelease || vaultRelease.release.slice !== 'G04') throw Error('mail_account_operation_unavailable');
+        return runMailAccountAdmin({
+          args,
+          env,
+          roots: {
+            targetRoot: root,
+            installationRoot: target.binding.installationRoot,
+            dataRoot: target.binding.dataRoot,
+          },
+          binding,
+          release: vaultRelease.release,
+          check,
+          assertAuthority,
+        });
+      }
       if (
         args.command === 'backup-nas-configure' ||
         args.command === 'backup-nas-recover-unmount' ||
