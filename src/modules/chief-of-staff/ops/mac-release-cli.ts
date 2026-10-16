@@ -175,7 +175,7 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
       plan.source.tree,
       hostImage,
     );
-    writeAtomic(root, 'backup-jobs-fixture.json', { image, hostImage, source: plan.source });
+    writeAtomic(root, 'backup-jobs-fixture.json', { image, hostImage, source: plan.source, releaseSlice: plan.slice });
     return image;
   }
   if (operation === 'backup-smb-fixture' && !values.length) {
@@ -565,10 +565,17 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
       });
     }
     if (name === 'backup_units' && status === '0') {
-      const fixture = readPrivate<{ image: string; hostImage: string; source: ReleaseManifest['source'] }>(
-        path.join(root, 'backup-jobs-fixture.json'),
-      );
-      if (fixture.hostImage !== imageIds[0] || digest(fixture.source) !== digest(plan.source))
+      const fixture = readPrivate<{
+        image: string;
+        hostImage: string;
+        source: ReleaseManifest['source'];
+        releaseSlice: string;
+      }>(path.join(root, 'backup-jobs-fixture.json'));
+      if (
+        fixture.hostImage !== imageIds[0] ||
+        digest(fixture.source) !== digest(plan.source) ||
+        fixture.releaseSlice !== plan.slice
+      )
         throw Error('backup_job_fixture_identity_mismatch');
       const file = path.join(root, 'backup_units.log'),
         stat = fs.lstatSync(file);
@@ -590,6 +597,7 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
         sourceTree: plan.source.tree,
         hostImage: imageIds[0],
         fixtureImage: fixture.image,
+        releaseSlice: plan.slice as 'G02' | 'G03' | 'G04',
       });
     }
     plan.checks[name] = {

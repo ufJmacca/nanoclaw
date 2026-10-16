@@ -188,7 +188,7 @@ if [[ "$slice" == G02 || "$slice" == G03 || "$slice" == G04 ]]; then
   [[ "$(docker image inspect --format '{{.Id}}' "$vault_host")" == "$host_image" ]] || exit 1
   docker image inspect "$jobs_tag" > "$directory/backup-jobs-fixture-inspect.json"
   jobs_image=$(cli backup-job-fixture "$id")
-  check backup_units bash "$directory/context/scripts/cos-backup-jobs-fixture.sh" "$jobs_image"
+  check backup_units bash "$directory/context/scripts/cos-backup-jobs-fixture.sh" "$jobs_image" "$slice"
 fi
 # Daemon-native paths are required for worker Unix sockets. Only this release's synthetic volume is used.
 volume="cos-${commit:0:8}-$stamp"

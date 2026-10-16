@@ -39,15 +39,24 @@ for (const root of [config, units, settings.stateRoot, settings.installationRoot
   fs.mkdirSync(root, { recursive: true, mode: 0o700 });
 // Only release authority is synthetic. Code, executable, fixed unit compiler,
 // installation effects and the isolated user manager are the selected host's.
-const manifest = fixtureVaultRelease('G02');
-const payload = settings.releaseRoot + '/' + manifest.releaseId + '/payload';
-fs.mkdirSync(payload + '/node/bin', { recursive: true, mode: 0o700 });
+const releaseSlice = process.env.COS_BACKUP_FIXTURE_SLICE;
+assert(['G02', 'G03', 'G04'].includes(releaseSlice));
+const manifest = fixtureVaultRelease(releaseSlice);
+manifest.releaseId = 'release-fixture-' + releaseSlice.toLowerCase();
+assert.equal(manifest.postgres.minimum, releaseSlice === 'G04' ? 19 : 18);
+assert.equal(manifest.postgres.maximum, manifest.postgres.minimum);
+const payloadFor = (release) => settings.releaseRoot + '/' + release.releaseId + '/payload';
 // The installed command runs actual retained files. A symlinked entry has a
 // different argv path from its module URL and does not exercise its main route.
-fs.copyFileSync('/release/node/bin/node', payload + '/node/bin/node');
-fs.cpSync('/release/dist', payload + '/dist', { recursive: true });
-fs.copyFileSync('/release/package.json', payload + '/package.json');
-fs.symlinkSync('/release/node_modules', payload + '/node_modules');
+const preparePayload = (release) => {
+  const payload = payloadFor(release);
+  fs.mkdirSync(payload + '/node/bin', { recursive: true, mode: 0o700 });
+  fs.copyFileSync('/release/node/bin/node', payload + '/node/bin/node');
+  fs.cpSync('/release/dist', payload + '/dist', { recursive: true });
+  fs.copyFileSync('/release/package.json', payload + '/package.json');
+  fs.symlinkSync('/release/node_modules', payload + '/node_modules');
+};
+preparePayload(manifest);
 fs.writeFileSync(units + '/unrelated.service', '[Service]\nExecStart=/usr/bin/true\n', { mode: 0o600 });
 let current = true,
   proofs = 0;
@@ -64,10 +73,38 @@ assert.deepEqual(await controls.inspectManager(), {
   definitionsLoaded: false,
 });
 const installer = createBackupJobInstaller(settings, manifest, controls);
+let priorSettings,
+  actualG03ToG04Upgrade = false;
+if (releaseSlice === 'G04') {
+  const prior = fixtureVaultRelease('G03');
+  prior.releaseId = 'release-fixture-prior-g03';
+  preparePayload(prior);
+  const priorInstaller = createBackupJobInstaller(settings, prior, controls);
+  await priorInstaller.install();
+  await priorInstaller.activate();
+  assert((await controls.inspectManager()).timersActive);
+  assert(!(await controls.inspectManager()).timersRunning);
+  assert(
+    fs
+      .readFileSync(units + '/nanoclaw-cos-backup-upload.service', 'utf8')
+      .includes('/' + prior.releaseId + '/payload/'),
+  );
+  priorSettings = fs.readFileSync(config + '/backup-jobs-target.json');
+}
 const first = await installer.install();
 assert.equal(first.status, 'backup_jobs_enabled');
 assert((await controls.inspectManager()).definitionsLoaded);
 assert(!(await controls.inspectManager()).timersRunning);
+if (releaseSlice === 'G04') {
+  assert(
+    fs
+      .readFileSync(units + '/nanoclaw-cos-backup-upload.service', 'utf8')
+      .includes('/' + manifest.releaseId + '/payload/'),
+  );
+  assert.deepEqual(fs.readFileSync(config + '/backup-jobs-target.json'), priorSettings);
+  assert.equal(readPrivate(settings.stateRoot + '/backup-job-installation.json').releaseId, manifest.releaseId);
+  actualG03ToG04Upgrade = true;
+}
 for (const name of ['nanoclaw-cos-backup-capture.timer', 'nanoclaw-cos-backup-upload.timer']) {
   const link = units + '/timers.target.wants/' + name;
   assert(fs.lstatSync(link).isSymbolicLink());
@@ -115,9 +152,12 @@ assert(!(await createBackupJobManagerControls(settings, async () => {}).inspectM
 assert.equal(fs.readFileSync(units + '/unrelated.service', 'utf8'), '[Service]\nExecStart=/usr/bin/true\n');
 console.log(
   JSON.stringify({
-    contract: 'cos-g02-backup-job-release-fixture/v1',
+    contract: 'cos-backup-job-release-fixture/v2',
     status: 'passed',
-    cases: 7,
+    cases: releaseSlice === 'G04' ? 8 : 7,
+    releaseSlice,
+    schemaVersion: manifest.postgres.minimum,
+    actualG03ToG04Upgrade,
     sealedSourceCommit: source.commit,
     sealedSourceTree: source.tree,
     backupArtifact,
