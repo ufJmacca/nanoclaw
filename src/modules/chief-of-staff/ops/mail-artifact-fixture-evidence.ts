@@ -1,6 +1,8 @@
 import path from 'node:path';
 import fs from 'node:fs';
 import { verifyMailFixtureReport } from '../../../contracts/chief-of-staff/mail-fixture-report.js';
+import { verifyMailVaultFixtureEvidence } from './mail-vault-fixture-evidence.js';
+import { verifyVaultFixtureImage } from './vault-fixture-evidence.js';
 type Identity = {
   sourceCommit: string;
   sourceTree: string;
@@ -11,13 +13,19 @@ type Identity = {
 };
 type RecordValue = Record<string, unknown>;
 export function readMailArtifactFixtureText(file: string): string {
+  return readMailFixtureText(file, 'mail_artifacts.log');
+}
+export function readMailCredentialFixtureText(file: string): string {
+  return readMailFixtureText(file, 'mail_credentials.log');
+}
+function readMailFixtureText(file: string, expectedName: 'mail_artifacts.log' | 'mail_credentials.log'): string {
   let fd: number | undefined, bytes: Buffer | undefined;
   try {
     if (
       typeof file !== 'string' ||
       !path.isAbsolute(file) ||
       path.resolve(file) !== file ||
-      path.basename(file) !== 'mail_artifacts.log' ||
+      path.basename(file) !== expectedName ||
       fs.realpathSync(path.dirname(file)) !== path.dirname(file)
     )
       throw Error('report_path');
@@ -81,11 +89,25 @@ export function mailArtifactFixtureCertificate(inspection: unknown, releaseId: s
     throw Error('mail_fixture_workspace_unverified');
   }
 }
-/** Credential and encrypted-recovery gates remain closed until their distinct
- * actual kernel consumer exists; database reports cannot stand in for it. */
-export function verifyMailReleaseEvidence(gate: string, text: string, identity: Identity) {
-  if (['mail_credentials', 'mail_recovery'].includes(gate)) throw Error('mail_kernel_release_evidence_required');
-  if (!['mail_capture', 'mail_evidence', 'mail_retention'].includes(gate))
+type KernelIdentity = Pick<Identity, 'sourceCommit' | 'sourceTree' | 'hostImage'> & {
+  fixtureImage: string;
+  fixtureInspection: unknown;
+};
+/** Each gate requires its own actual execution. A database report never stands
+ * in for encrypted credential proof; complete recovery remains a separate gate. */
+export function verifyMailReleaseEvidence(gate: string, text: string, identity: Identity | KernelIdentity) {
+  if (gate === 'mail_recovery') throw Error('mail_kernel_release_evidence_required');
+  if (gate === 'mail_credentials') {
+    if (!('fixtureImage' in identity) || !('fixtureInspection' in identity))
+      throw Error('mail_kernel_release_evidence_required');
+    if (
+      verifyVaultFixtureImage(identity.fixtureInspection, identity.sourceCommit, identity.hostImage) !==
+      identity.fixtureImage
+    )
+      throw Error('vault_fixture_identity_mismatch');
+    return verifyMailVaultFixtureEvidence(text, identity);
+  }
+  if (!['mail_capture', 'mail_evidence', 'mail_retention'].includes(gate) || !('workerImages' in identity))
     throw Error('mail_release_check_unavailable');
   return verifyMailArtifactFixtureEvidence(text, identity);
 }

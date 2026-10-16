@@ -36,6 +36,7 @@ import { verifyBackupCaptureFixtureEvidence } from './backup-capture-fixture-evi
 import {
   mailArtifactFixtureCertificate,
   readMailArtifactFixtureText,
+  readMailCredentialFixtureText,
   verifyMailReleaseEvidence,
 } from './mail-artifact-fixture-evidence.js';
 
@@ -190,7 +191,8 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
     return images.clientImage;
   }
   if (operation === 'vault-fixture' && !values.length) {
-    if (!['G01', 'G02', 'G03'].includes(plan.slice) || !plan.vaultArtifact) throw Error('vault_release_required');
+    if (!['G01', 'G02', 'G03', 'G04'].includes(plan.slice) || !plan.vaultArtifact)
+      throw Error('vault_release_required');
     const host = plan.images.find((image) => image.role === 'host');
     if (!host) throw Error('image_identity_required');
     const image = verifyVaultFixtureImage(
@@ -207,7 +209,7 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
     return image;
   }
   if (operation === 'vault-wire' && !values.length) {
-    if (!['G01', 'G02', 'G03'].includes(plan.slice)) throw Error('vault_release_required');
+    if (!['G01', 'G02', 'G03', 'G04'].includes(plan.slice)) throw Error('vault_release_required');
     const file = path.join(root, 'vault_kernel.log'),
       stat = fs.lstatSync(file);
     if (
@@ -228,7 +230,7 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
     return;
   }
   if (operation === 'vault-artifact' && !values.length) {
-    if (!['G01', 'G02', 'G03'].includes(plan.slice)) throw Error('vault_release_required');
+    if (!['G01', 'G02', 'G03', 'G04'].includes(plan.slice)) throw Error('vault_release_required');
     const seal = vaultRootArtifactSeal(readPrivate(path.join(root, 'vault-artifact.json'), 4096));
     if (
       seal.sourceCommit !== plan.source.commit ||
@@ -394,8 +396,40 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
     if (!requiredReleaseChecks(plan.slice).includes(name) || !['0', '1'].includes(status))
       throw new Error('invalid_check_result');
     const imageIds = releaseCheckImageIds(plan.images, name);
-    if (name.startsWith('mail_') && status === '0') {
-      if (['mail_credentials', 'mail_recovery'].includes(name)) throw Error('mail_kernel_release_evidence_required');
+    if (name === 'mail_credentials' && status === '0') {
+      const fixture = readPrivate<{
+        image: string;
+        hostImage: string;
+        source: ReleaseManifest['source'];
+        artifactDigest: string;
+      }>(path.join(root, 'vault-fixture.json'));
+      if (
+        !plan.vaultArtifact ||
+        fixture.artifactDigest !== plan.vaultArtifact.digest ||
+        fixture.hostImage !== imageIds[0] ||
+        digest(fixture.source) !== digest(plan.source)
+      )
+        throw Error('vault_fixture_identity_mismatch');
+      const text = readMailCredentialFixtureText(path.join(root, 'mail_credentials.log'));
+      const proof = verifyMailReleaseEvidence(name, text, {
+        sourceCommit: plan.source.commit,
+        sourceTree: plan.source.tree,
+        hostImage: imageIds[0],
+        fixtureImage: fixture.image,
+        fixtureInspection: readPrivate(path.join(root, 'vault-fixture-inspect.json'), 1024 ** 2),
+      });
+      writeAtomic(root, 'mail-credential-evidence.json', {
+        ...proof,
+        at: new Date().toISOString(),
+        source: plan.source,
+        hostImage: imageIds[0],
+        fixtureImage: fixture.image,
+        artifactDigest: fixture.artifactDigest,
+        reportDigest: digest(text),
+      });
+    }
+    if (name.startsWith('mail_') && name !== 'mail_credentials' && status === '0') {
+      if (name === 'mail_recovery') throw Error('mail_kernel_release_evidence_required');
       // All three artifact checks share the same actual database/two-worker run.
       // The Mac CA path comes from the observed devcontainer mount registration.
       const text = readMailArtifactFixtureText(path.join(root, 'mail_artifacts.log')),

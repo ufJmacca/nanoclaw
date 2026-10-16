@@ -130,7 +130,7 @@ cli images "$id"
 host_image=$(cli field "$id" host-id)
 standard_image=$(cli field "$id" agent-standard-id)
 documents_image=$(cli field "$id" agent-documents-id)
-if [[ "$slice" == G01 || "$slice" == G02 || "$slice" == G03 ]]; then
+if [[ "$slice" == G01 || "$slice" == G02 || "$slice" == G03 || "$slice" == G04 ]]; then
   docker run --rm --pull=never --network=none "$host_image" --input-type=module \
     -e 'import fs from "node:fs";const root="/release/vault-artifacts";const names=fs.readdirSync(root);if(names.length!==1)process.exit(1);process.stdout.write(fs.readFileSync(root+"/"+names[0]+"/artifact.json","utf8"))' > "$directory/vault-artifact.json"
   cli vault-artifact "$id"
@@ -270,6 +270,7 @@ check image_isolation isolation_checks
 check agent_image agent_checks
 check host_image host_checks
 if [[ "$slice" == G04 ]]; then
+  check mail_credentials bash "$directory/context/scripts/cos-vault-fixture.sh" mail-credentials-kernel "$vault_image" "$directory/context/scripts/cos-vault-keychain.swift"
   # One actual compiled database run and one native conversation per worker.
   # The release CLI independently consumes this private, source-bound report.
   if bash "$directory/context/scripts/cos-mail-artifact-fixture.sh" "$host_image" "$standard_image" "$documents_image" \

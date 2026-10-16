@@ -11,6 +11,7 @@ import {
   mailArtifactFixtureCertificate,
   verifyMailReleaseEvidence,
   readMailArtifactFixtureText,
+  readMailCredentialFixtureText,
 } from './mail-artifact-fixture-evidence.js';
 const roots: string[] = [];
 afterEach(() => {
@@ -173,6 +174,31 @@ it('reads only the private canonical bounded report used by the release coordina
   const f = privateReport();
   expect(readMailArtifactFixtureText(f.file)).toBe(f.text);
 });
+it('keeps canonical credential and database report names separate under the same private file protections', () => {
+  const f = privateReport(),
+    credentials = f.root + '/mail_credentials.log';
+  fs.renameSync(f.file, credentials);
+  expect(readMailCredentialFixtureText(credentials)).toBe(f.text);
+  expect(() => readMailArtifactFixtureText(credentials)).toThrow();
+  expect(() => readMailCredentialFixtureText(f.root + '/mail_artifacts.log')).toThrow();
+});
+it.each(['symlink', 'hardlink', 'permissions', 'parent-permissions', 'invalid-utf8'])(
+  'refuses %s credential report storage before the kernel consumer runs',
+  (reason) => {
+    const f = privateReport(),
+      file = f.root + '/mail_credentials.log';
+    fs.renameSync(f.file, file);
+    if (reason === 'symlink') {
+      fs.renameSync(file, file + '.held');
+      fs.symlinkSync(file + '.held', file);
+    }
+    if (reason === 'hardlink') fs.linkSync(file, file + '.alias');
+    if (reason === 'permissions') fs.chmodSync(file, 0o644);
+    if (reason === 'parent-permissions') fs.chmodSync(f.root, 0o755);
+    if (reason === 'invalid-utf8') fs.writeFileSync(file, Buffer.from([255]));
+    expect(() => readMailCredentialFixtureText(file)).toThrow('mail_artifact_release_evidence_unavailable');
+  },
+);
 it.each([
   'symlink',
   'hardlink',
