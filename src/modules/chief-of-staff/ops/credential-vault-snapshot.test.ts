@@ -494,6 +494,30 @@ it('serializes scheduled cursor work with the actual live kernel writer and neve
   expect(await pending).toMatchObject({ recorded: 8, next_after: null });
   expect(await queue.pending('credentials')).toHaveLength(8);
 });
+it('denies new cursor metadata before creating a writer when journal capacity has no reserved headroom', async () => {
+  const f = await fixture(),
+    directory = f.vault + '/journals',
+    file = directory + '/filled-fixture';
+  const fd = fs.openSync(file, 'wx', 0o600);
+  try {
+    fs.ftruncateSync(fd, 128 * 1024 ** 2 - 32768);
+  } finally {
+    fs.closeSync(fd);
+  }
+  const journal = vi.fn<CredentialJournal>(async () => {});
+  await expect(
+    recordScheduledCredentialRecoveryPage(
+      f.roots,
+      { releaseId: 'release-current', generation: 7, assertAuthority: f.authority },
+      f.inspect,
+      f.memory,
+      journal,
+    ),
+  ).rejects.toThrow('credential_recovery_page_unavailable');
+  expect(journal).not.toHaveBeenCalled();
+  expect(fs.existsSync(directory + '/credential-recovery-page.json')).toBe(false);
+  expect(fs.existsSync(directory + '/.cos-writer.lock')).toBe(false);
+});
 it('records absent optional profiles without initializing them or inferring account authority', async () => {
   const f = await fixture();
   fs.rmSync(f.calendar + '/mail-reader', { recursive: true });
