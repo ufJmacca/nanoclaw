@@ -30,6 +30,7 @@ import { makeCredentialCapture, streamCredentialCapture, readCredentialCaptureAr
 import { withVaultCredentialSnapshot } from './credential-vault-snapshot.js';
 import { digest } from '../domain/contracts.js';
 import { writeAtomic } from './target-state.js';
+import { BackupRepositoryWriter } from './backup-repository-lease.js';
 const cleanup: string[] = [];
 afterEach(() => {
   vi.restoreAllMocks();
@@ -192,6 +193,43 @@ it('independently selects all configured Google clients, tokens, permanent denia
   expect(borrowed.length).toBeGreaterThan(20);
   expect(borrowed.every((bytes) => bytes.every((byte) => byte === 0))).toBe(true);
 });
+it('captures credentials after repository initialization while preserving and excluding its kernel writer marker', async () => {
+  const f = await fixture();
+  const writer = new BackupRepositoryWriter(
+    digest({ contract: 'cos-backup-initialization-writer/v1', fixture: f.owner }),
+    async (operation) => operation(f.backup),
+    '.cos-writer.lock',
+  );
+  await writer.exclusive(async (lease) => lease.assertCurrent());
+  const marker = f.backup + '/.cos-writer.lock',
+    before = fs.readFileSync(marker);
+  await f.run(async (snapshot) => {
+    expect(snapshot.sources).toHaveLength(11);
+    expect(snapshot.sources.flatMap((source) => source.files).some((file) => file.name.includes('lock'))).toBe(false);
+    snapshot.assertPrimaryUnchanged();
+  });
+  expect(fs.readFileSync(marker)).toEqual(before);
+});
+it.each(['linked', 'public', 'oversized', 'changed'])(
+  'refuses an unsafe or changed initialization writer marker: %s',
+  async (failure) => {
+    const f = await fixture(),
+      marker = f.backup + '/.cos-writer.lock';
+    writeAtomic(f.backup, '.cos-writer.lock', { contract: 'cos-backup-repository-writer/v1', ownerDigest: f.owner });
+    if (failure === 'linked') {
+      fs.renameSync(marker, f.base + '/held-writer');
+      fs.symlinkSync(f.base + '/held-writer', marker);
+    }
+    if (failure === 'public') fs.chmodSync(marker, 0o644);
+    if (failure === 'oversized') fs.writeFileSync(marker, Buffer.alloc(16385));
+    await expect(
+      f.run(async (snapshot) => {
+        if (failure === 'changed') fs.appendFileSync(marker, '\n');
+        snapshot.assertPrimaryUnchanged();
+      }),
+    ).rejects.toThrow('credential_vault_snapshot_unavailable');
+  },
+);
 it('matches the existing immutable mail configuration and permanent-denial recovery identities', async () => {
   const f = await fixture(),
     recorded: CredentialEvent[] = [];

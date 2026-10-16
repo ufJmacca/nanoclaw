@@ -226,9 +226,12 @@ export async function withVaultCredentialSnapshot<T>(
                     'backup-repository.json',
                     'backup-repository-initialization.json',
                     'repository.lock',
+                    '.cos-writer.lock',
                   ];
                 if (names.some((name) => !allowed.includes(name))) throw Error('unknown_backup_state');
-                for (const name of ['backup-repository-initialization.json', 'repository.lock'])
+                // Coordination metadata is checked and pinned, but never becomes
+                // a recoverable credential or portable writer authority.
+                for (const name of ['backup-repository-initialization.json', 'repository.lock', '.cos-writer.lock'])
                   if (names.includes(name)) read(backup, name, 16384);
                 const installationBytes = read(backup, 'backup-credential-installation.json', 4096, true),
                   installation = readBackupCredentialInstallation(backup, roots, policy.volume.filesystemUuid);
