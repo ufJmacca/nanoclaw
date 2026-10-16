@@ -3,6 +3,47 @@ import { parseOwnerAdminArguments, selectedOwnerAdminProfile, ownerDatabasePrefl
 import { fixtureRelease } from '../../../contracts/chief-of-staff/release-fixture.js';
 import { DatabasePreflightError } from '../store/preflight.js';
 const request = ['owner-export', '--scope', 'fixture', '--request-id', '01234567-89ab-4def-8123-456789abcdef'];
+it('admits isolated complete credential recovery with no database profile or arbitrary destination', async () => {
+  const admin = [
+    'backup-credentials-restore-check',
+    '--scope',
+    'fixture',
+    '--request-id',
+    '01234567-89ab-4def-8123-456789abcdef',
+    '--capture-operation-id',
+    '48f99256-b105-4ee3-848c-00140c98151d',
+  ];
+  expect(parseOwnerAdminArguments(['--settings', '/home/pi/target.json', '--', ...admin])).toMatchObject({ admin });
+  for (const changed of [
+    admin.slice(0, -2),
+    [...admin, '--root', '/foreign'],
+    [...admin, '--backup-release', 'release-old'],
+    admin.map((value) => (value === admin[6] ? '../foreign' : value)),
+  ])
+    expect(() => parseOwnerAdminArguments(['--settings', '/home/pi/target.json', '--', ...changed])).toThrow(
+      'invalid_owner_admin_arguments',
+    );
+  expect(() =>
+    parseOwnerAdminArguments([
+      '--settings',
+      '/home/pi/target.json',
+      '--database-environment',
+      '/home/pi/runtime.env',
+      '--',
+      ...admin,
+    ]),
+  ).toThrow('invalid_owner_admin_arguments');
+  await expect(
+    selectedOwnerAdminProfile(admin[0], {
+      runtime() {
+        throw Error('runtime_profile_forbidden');
+      },
+      test() {
+        throw Error('test_profile_forbidden');
+      },
+    }),
+  ).resolves.toEqual({});
+});
 it('admits complete encrypted recovery only with its explicit separate test environment', async () => {
   const admin = [
     'backup-restore-check',

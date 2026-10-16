@@ -25,6 +25,7 @@ const commands = [
   'backup-checkpoint',
   'operations-restore-check',
   'backup-restore-check',
+  'backup-credentials-restore-check',
 ];
 export function parseOwnerAdminArguments(args: string[]): {
   settings: string;
@@ -54,7 +55,8 @@ export function parseOwnerAdminArguments(args: string[]): {
     (['database-check', 'vault-status'].includes(admin[0]) && admin.length !== 1)
   )
     return invalid();
-  if (admin[0] === 'backup-restore-check') parseBackupOwnerRestoreArguments(admin);
+  if (['backup-restore-check', 'backup-credentials-restore-check'].includes(admin[0]))
+    parseBackupOwnerRestoreArguments(admin);
   return { settings: flags[1], databaseEnvironment: flags[3], admin };
 }
 export async function ownerDatabasePreflight(
@@ -84,7 +86,7 @@ export async function selectedOwnerAdminProfile(
   profiles: { runtime(): NodeJS.ProcessEnv; test(): NodeJS.ProcessEnv },
 ): Promise<NodeJS.ProcessEnv> {
   if (!commands.includes(command)) throw new Error('invalid_owner_admin_arguments');
-  return ['operator-control', 'vault-status'].includes(command)
+  return ['operator-control', 'vault-status', 'backup-credentials-restore-check'].includes(command)
     ? {}
     : ['operations-restore-check', 'backup-restore-check'].includes(command)
       ? profiles.test()
@@ -94,11 +96,11 @@ export async function targetOwnerAdmin(args: string[]): Promise<Record<string, u
   const request = parseOwnerAdminArguments(args),
     settings = deploymentSettings(readPrivate(request.settings));
   process.chdir(settings.installationRoot);
-  if (request.admin[0] === 'backup-restore-check') {
+  if (['backup-restore-check', 'backup-credentials-restore-check'].includes(request.admin[0])) {
     const { restoreOwnerVaultBackup } = await import('./backup-owner-restore.js');
     return restoreOwnerVaultBackup({
       settingsFile: request.settings,
-      testEnvironmentFile: request.databaseEnvironment!,
+      testEnvironmentFile: request.databaseEnvironment,
       invokedHelper: path.join(path.dirname(fileURLToPath(import.meta.url)), 'target-helper.js'),
       args: parseBackupOwnerRestoreArguments(request.admin),
     });
