@@ -169,11 +169,13 @@ if (mode === 'install') {
       assert.equal(fs.statSync(directory).dev, fs.statSync('/case/vault').dev);
       assert.equal(JSON.parse(fs.readFileSync(directory + '/credential-event.json', 'utf8')).sourceKind, 'mail_reader');
     });
+  stage('mail_retry_preservation');
+  // The root-owned .vault-canary is storage proof, never credential payload.
   const before = snapshot(profile),
-    journal = snapshot('/case/vault/journals');
+    journal = snapshot('/case/vault/journals/backup-queue');
   assert.deepEqual(await initializeMailProfile(roots, client, authority(operationId)), { status: 'ready' });
   assert.equal(snapshot(profile), before);
-  assert.equal(snapshot('/case/vault/journals'), journal);
+  assert.equal(snapshot('/case/vault/journals/backup-queue'), journal);
   const reopened = await openMailCredentials(roots);
   assert.throws(() => reopened.fences.assertOpen(scope, deniedBinding), /calendar_auth_revoked/);
   await close(reopened);
@@ -254,7 +256,7 @@ if (mode === 'install') {
   assert.equal(cases, 7);
   writeAtomic(roots.targetRoot, 'mail-fixture-snapshot.json', {
     profile: snapshot(profile),
-    journals: snapshot('/case/vault/journals'),
+    journals: snapshot('/case/vault/journals/backup-queue'),
   });
   console.log(JSON.stringify({ mailVaultStage: 'directory_races', deniedCases: cases, replacementWrites: 0 }));
 } else if (mode === 'mount-loss') {
@@ -312,7 +314,7 @@ if (mode === 'install') {
   const metadata = JSON.parse(fs.readFileSync(metadataFile, 'utf8')),
     before = JSON.parse(fs.readFileSync(roots.targetRoot + '/mail-fixture-snapshot.json', 'utf8'));
   assert.equal(snapshot(profile), before.profile);
-  assert.equal(snapshot('/case/vault/journals'), before.journals);
+  assert.equal(snapshot('/case/vault/journals/backup-queue'), before.journals);
   const host = await openMailCredentials(roots);
   try {
     assert.deepEqual(await host.credentials.inspect(scope, metadata.binding, metadata.reference), {
@@ -326,7 +328,7 @@ if (mode === 'install') {
     await close(host);
   }
   assert.equal(snapshot(profile), before.profile);
-  assert.equal(snapshot('/case/vault/journals'), before.journals);
+  assert.equal(snapshot('/case/vault/journals/backup-queue'), before.journals);
   console.log(
     JSON.stringify({
       mailVaultStage: 'recovered',
