@@ -5,6 +5,7 @@ type Identity = { sourceCommit: string; sourceTree: string; fixtureImage: string
 export function verifyMailVaultFixtureEvidence(
   text: string,
   identity: Identity,
+  mode: 'mail-credentials-kernel' | 'mail-recovery-kernel' = 'mail-credentials-kernel',
 ): { credentialGeneration: 2; journalEvents: 3; deniedDirectoryCases: 7 } {
   const deny = (): never => {
     throw Error('mail_vault_evidence_unavailable');
@@ -16,7 +17,7 @@ export function verifyMailVaultFixtureEvidence(
     const records = lines.map((line) => JSON.parse(line) as Record<string, unknown>);
     if (records.some((record) => !record || Array.isArray(record) || typeof record !== 'object' || 'code' in record))
       deny();
-    verifyVaultWireEvidence(records, identity.sourceCommit, identity.fixtureImage, 'mail-credentials-kernel');
+    verifyVaultWireEvidence(records, identity.sourceCommit, identity.fixtureImage, mode);
     const one = (key: string, value?: string) => {
       const found = records.filter((record) => key in record && (value === undefined || record[key] === value));
       if (found.length !== 1) return deny();

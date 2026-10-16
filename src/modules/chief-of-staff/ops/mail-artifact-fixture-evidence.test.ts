@@ -12,6 +12,7 @@ import {
   verifyMailReleaseEvidence,
   readMailArtifactFixtureText,
   readMailCredentialFixtureText,
+  readMailRecoveryFixtureText,
 } from './mail-artifact-fixture-evidence.js';
 const roots: string[] = [];
 afterEach(() => {
@@ -181,6 +182,16 @@ it('keeps canonical credential and database report names separate under the same
   expect(readMailCredentialFixtureText(credentials)).toBe(f.text);
   expect(() => readMailArtifactFixtureText(credentials)).toThrow();
   expect(() => readMailCredentialFixtureText(f.root + '/mail_artifacts.log')).toThrow();
+});
+it('admits only the distinct private canonical recovery report, refusing a shared or linked replacement', () => {
+  const f = privateReport(),
+    file = f.root + '/mail_recovery.log';
+  fs.renameSync(f.file, file);
+  expect(readMailRecoveryFixtureText(file)).toBe(f.text);
+  expect(() => readMailCredentialFixtureText(file)).toThrow();
+  expect(() => readMailRecoveryFixtureText(f.root + '/mail_credentials.log')).toThrow();
+  fs.linkSync(file, file + '.alias');
+  expect(() => readMailRecoveryFixtureText(file)).toThrow();
 });
 it.each(['symlink', 'hardlink', 'permissions', 'parent-permissions', 'invalid-utf8'])(
   'refuses %s credential report storage before the kernel consumer runs',

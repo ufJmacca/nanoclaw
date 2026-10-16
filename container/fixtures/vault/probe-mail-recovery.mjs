@@ -271,8 +271,10 @@ await withVaultDirectory(roots, 'cache', async (cacheDirectory, cacheCurrent) =>
   const repoScope = pin(repository),
     cacheScope = pin(temporary);
   try {
+    stage('repository_executable');
     await withVerifiedResticBinary(binary, (executable) =>
       withVaultResticPassword(roots, async (passwordScope) => {
+        stage('repository_initialize');
         const initWriter = new BackupRepositoryWriter(
           digest('synthetic-mail-repository-initialization'),
           async (operation) => operation(temporary),
@@ -284,8 +286,10 @@ await withVaultDirectory(roots, 'cache', async (cacheDirectory, cacheCurrent) =>
             async () => assertAuthority(),
           );
           await initializer.create();
+          stage('repository_identify');
           return initializer.identify();
         });
+        stage('repository_profile');
         writeAtomic('/case/vault/backup-credentials', 'backup-repository.json', {
           contract: 'cos-backup-repository/v1',
           rootsDigest: digest(roots),
@@ -296,6 +300,7 @@ await withVaultDirectory(roots, 'cache', async (cacheDirectory, cacheCurrent) =>
         const writerFactory = createVaultBackupRepositoryWriter(roots, repositoryId),
           queue = createVaultBackupQueue(roots);
         await writerFactory.exclusive(async (writer) => {
+          stage('recovery_page');
           const page = await recordScheduledCredentialRecoveryPage(roots, {
             releaseId: state.releaseId,
             generation: state.generation,
@@ -305,6 +310,7 @@ await withVaultDirectory(roots, 'cache', async (cacheDirectory, cacheCurrent) =>
           assert.equal(page.next_after, null);
           assert.equal(page.open_checks, 0);
           const pending = digest(await queue.pending('credentials'));
+          stage('recovery_page_replay');
           await recordScheduledCredentialRecoveryPage(roots, {
             releaseId: state.releaseId,
             generation: state.generation,
@@ -313,6 +319,7 @@ await withVaultDirectory(roots, 'cache', async (cacheDirectory, cacheCurrent) =>
           assert.equal(digest(await queue.pending('credentials')), pending);
           const cycle = new Date();
           cycle.setUTCMinutes(0, 0, 0);
+          stage('complete_primary_snapshot');
           const measured = await withVaultCredentialSnapshot(roots, { assertAuthority }, async (snapshot) => {
             assert.equal(snapshot.sources.length, 11);
             assert.equal(snapshot.openChecks, 0);

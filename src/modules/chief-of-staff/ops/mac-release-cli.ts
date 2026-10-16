@@ -37,6 +37,7 @@ import {
   mailArtifactFixtureCertificate,
   readMailArtifactFixtureText,
   readMailCredentialFixtureText,
+  readMailRecoveryFixtureText,
   verifyMailReleaseEvidence,
 } from './mail-artifact-fixture-evidence.js';
 
@@ -396,7 +397,7 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
     if (!requiredReleaseChecks(plan.slice).includes(name) || !['0', '1'].includes(status))
       throw new Error('invalid_check_result');
     const imageIds = releaseCheckImageIds(plan.images, name);
-    if (name === 'mail_credentials' && status === '0') {
+    if (['mail_credentials', 'mail_recovery'].includes(name) && status === '0') {
       const fixture = readPrivate<{
         image: string;
         hostImage: string;
@@ -410,7 +411,10 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
         digest(fixture.source) !== digest(plan.source)
       )
         throw Error('vault_fixture_identity_mismatch');
-      const text = readMailCredentialFixtureText(path.join(root, 'mail_credentials.log'));
+      const text =
+        name === 'mail_credentials'
+          ? readMailCredentialFixtureText(path.join(root, 'mail_credentials.log'))
+          : readMailRecoveryFixtureText(path.join(root, 'mail_recovery.log'));
       const proof = verifyMailReleaseEvidence(name, text, {
         sourceCommit: plan.source.commit,
         sourceTree: plan.source.tree,
@@ -418,7 +422,7 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
         fixtureImage: fixture.image,
         fixtureInspection: readPrivate(path.join(root, 'vault-fixture-inspect.json'), 1024 ** 2),
       });
-      writeAtomic(root, 'mail-credential-evidence.json', {
+      writeAtomic(root, name === 'mail_credentials' ? 'mail-credential-evidence.json' : 'mail-recovery-evidence.json', {
         ...proof,
         at: new Date().toISOString(),
         source: plan.source,
@@ -428,8 +432,7 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
         reportDigest: digest(text),
       });
     }
-    if (name.startsWith('mail_') && name !== 'mail_credentials' && status === '0') {
-      if (name === 'mail_recovery') throw Error('mail_kernel_release_evidence_required');
+    if (name.startsWith('mail_') && !['mail_credentials', 'mail_recovery'].includes(name) && status === '0') {
       // All three artifact checks share the same actual database/two-worker run.
       // The Mac CA path comes from the observed devcontainer mount registration.
       const text = readMailArtifactFixtureText(path.join(root, 'mail_artifacts.log')),

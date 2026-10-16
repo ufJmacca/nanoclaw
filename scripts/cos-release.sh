@@ -271,6 +271,7 @@ check agent_image agent_checks
 check host_image host_checks
 if [[ "$slice" == G04 ]]; then
   check mail_credentials bash "$directory/context/scripts/cos-vault-fixture.sh" mail-credentials-kernel "$vault_image" "$directory/context/scripts/cos-vault-keychain.swift"
+  check mail_recovery bash "$directory/context/scripts/cos-vault-fixture.sh" mail-recovery-kernel "$vault_image" "$directory/context/scripts/cos-vault-keychain.swift" "$test_directory/test.env" "$test_directory/ca.pem"
   # One actual compiled database run and one native conversation per worker.
   # The release CLI independently consumes this private, source-bound report.
   if bash "$directory/context/scripts/cos-mail-artifact-fixture.sh" "$host_image" "$standard_image" "$documents_image" \

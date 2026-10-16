@@ -92,7 +92,7 @@ it('routes the credential release gate through its actual host-bound kernel cons
     deniedDirectoryCases: 7,
   });
   expect(() => verifyMailReleaseEvidence('mail_recovery', report(), releaseIdentity())).toThrow(
-    'mail_kernel_release_evidence_required',
+    'mail_recovery_evidence_unavailable',
   );
   for (const gate of ['mail_capture', 'mail_evidence', 'mail_retention'])
     expect(() => verifyMailReleaseEvidence(gate, report(), releaseIdentity())).toThrow(

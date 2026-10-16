@@ -2,6 +2,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { verifyMailFixtureReport } from '../../../contracts/chief-of-staff/mail-fixture-report.js';
 import { verifyMailVaultFixtureEvidence } from './mail-vault-fixture-evidence.js';
+import { verifyMailRecoveryFixtureEvidence } from './mail-recovery-fixture-evidence.js';
 import { verifyVaultFixtureImage } from './vault-fixture-evidence.js';
 type Identity = {
   sourceCommit: string;
@@ -18,7 +19,13 @@ export function readMailArtifactFixtureText(file: string): string {
 export function readMailCredentialFixtureText(file: string): string {
   return readMailFixtureText(file, 'mail_credentials.log');
 }
-function readMailFixtureText(file: string, expectedName: 'mail_artifacts.log' | 'mail_credentials.log'): string {
+export function readMailRecoveryFixtureText(file: string): string {
+  return readMailFixtureText(file, 'mail_recovery.log');
+}
+function readMailFixtureText(
+  file: string,
+  expectedName: 'mail_artifacts.log' | 'mail_credentials.log' | 'mail_recovery.log',
+): string {
   let fd: number | undefined, bytes: Buffer | undefined;
   try {
     if (
@@ -96,8 +103,7 @@ type KernelIdentity = Pick<Identity, 'sourceCommit' | 'sourceTree' | 'hostImage'
 /** Each gate requires its own actual execution. A database report never stands
  * in for encrypted credential proof; complete recovery remains a separate gate. */
 export function verifyMailReleaseEvidence(gate: string, text: string, identity: Identity | KernelIdentity) {
-  if (gate === 'mail_recovery') throw Error('mail_kernel_release_evidence_required');
-  if (gate === 'mail_credentials') {
+  if (gate === 'mail_credentials' || gate === 'mail_recovery') {
     if (!('fixtureImage' in identity) || !('fixtureInspection' in identity))
       throw Error('mail_kernel_release_evidence_required');
     if (
@@ -105,7 +111,9 @@ export function verifyMailReleaseEvidence(gate: string, text: string, identity: 
       identity.fixtureImage
     )
       throw Error('vault_fixture_identity_mismatch');
-    return verifyMailVaultFixtureEvidence(text, identity);
+    return gate === 'mail_credentials'
+      ? verifyMailVaultFixtureEvidence(text, identity)
+      : verifyMailRecoveryFixtureEvidence(text, identity);
   }
   if (!['mail_capture', 'mail_evidence', 'mail_retention'].includes(gate) || !('workerImages' in identity))
     throw Error('mail_release_check_unavailable');

@@ -260,6 +260,7 @@ function run(tool, args) {
         JSON.stringify({
           mailRecoveryFailureStage: stage,
           code: result.error?.code === 'ETIMEDOUT' ? 'fixture_deadline' : 'fixture_process_failed',
+          category: result.stderr?.match(/^Error: ([a-z_]{1,96})$/m)?.[1] ?? null,
           location: result.stderr?.match(/\/probe\/probe-mail-recovery\.mjs:[0-9]+:[0-9]+/)?.[0] ?? null,
         }),
       );
