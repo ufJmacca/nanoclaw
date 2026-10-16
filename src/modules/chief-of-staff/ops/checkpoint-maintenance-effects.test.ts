@@ -37,7 +37,7 @@ afterEach(() => {
   for (const close of cleanup.splice(0).reverse()) close();
   vi.resetAllMocks();
 });
-function fixture(paused = 0) {
+function fixture(paused = 0, slice: 'G02' | 'G03' | 'G04' = 'G02') {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-checkpoint-ports-'));
   cleanup.push(() => fs.rmSync(root, { recursive: true, force: true }));
   const settings: DeploymentSettings = {
@@ -57,7 +57,7 @@ function fixture(paused = 0) {
     hostFingerprint: 'a'.repeat(64),
     databaseFingerprint: 'b'.repeat(64),
   };
-  const manifest = fixtureVaultRelease('G02'),
+  const manifest = fixtureVaultRelease(slice),
     binding = targetBinding(settings),
     requestId = randomUUID();
   initializeTarget(settings.stateRoot, binding);
@@ -87,20 +87,23 @@ function fixture(paused = 0) {
   const effects = createCheckpointMaintenanceEffects(settings, '/fixture/target-helper.js', requestId);
   return { settings, native, manifest, binding, requestId, effects, directory, receipt };
 }
-it.each([0, 1])('scheduled service guards preserve native pause=%s, messages and used allowance', async (paused) => {
-  const s = fixture(paused),
-    before = s.native.serialize();
-  await s.effects.verify();
-  await s.effects.stopNative();
-  s.native.prepare('UPDATE cos_identity_boundaries SET paused=1').run();
-  const later = s.native.serialize();
-  await s.effects.startNative();
-  expect(s.native.serialize().equals(later)).toBe(true);
-  expect(s.native.prepare('SELECT used FROM cos_model_budgets').get()).toEqual({ used: 3 });
-  expect(s.native.prepare('SELECT body FROM messages').all()).toEqual([{ body: 'ordinary-message' }]);
-  expect(f.service.mock.calls).toEqual([['stop'], ['start']]);
-  expect(before.length).toBe(later.length);
-});
+it.each((['G02', 'G03', 'G04'] as const).flatMap((slice) => [0, 1].map((paused) => ({ slice, paused }))))(
+  '$slice scheduled service guards preserve native pause=$paused, messages and used allowance',
+  async ({ slice, paused }) => {
+    const s = fixture(paused, slice),
+      before = s.native.serialize();
+    await s.effects.verify();
+    await s.effects.stopNative();
+    s.native.prepare('UPDATE cos_identity_boundaries SET paused=1').run();
+    const later = s.native.serialize();
+    await s.effects.startNative();
+    expect(s.native.serialize().equals(later)).toBe(true);
+    expect(s.native.prepare('SELECT used FROM cos_model_budgets').get()).toEqual({ used: 3 });
+    expect(s.native.prepare('SELECT body FROM messages').all()).toEqual([{ body: 'ordinary-message' }]);
+    expect(f.service.mock.calls).toEqual([['stop'], ['start']]);
+    expect(before.length).toBe(later.length);
+  },
+);
 it('existing owner maintenance continues to refuse an unpaused native boundary', async () => {
   const s = fixture();
   await expect(createOperationsMaintenanceEffects(s.settings, '/fixture/target-helper.js').verify()).rejects.toThrow(

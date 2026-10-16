@@ -21,11 +21,11 @@ const binding = {
   installationRoot: '/home/pi/nano',
   dataRoot: '/home/pi/nano/data',
 };
-function fixture(slice: 'S11' | 'G01' | 'G02' = 'S11') {
+function fixture(slice: 'S11' | 'G01' | 'G02' | 'G03' | 'G04' = 'S11') {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-owner-maintenance-'));
   roots.push(base);
   const root = path.join(base, 'target');
-  const manifest = slice === 'G02' ? fixtureVaultRelease('G02') : fixtureRelease(slice),
+  const manifest = slice === 'S11' || slice === 'G01' ? fixtureRelease(slice) : fixtureVaultRelease(slice),
     requestId = randomUUID();
   if (slice === 'G01') {
     const seal = {
@@ -85,16 +85,26 @@ it('uses a fresh G01 request ID on the protected installed release and restores 
   });
   expect(activeMaintenanceLease(f.root, binding).owner).toBe('operations-' + requestId);
 });
-it('holds and releases fresh G02 maintenance under all backup gates while preserving protection and paused CoS', async () => {
-  const f = fixture('G02');
+it.each(['G02', 'G03', 'G04'] as const)(
+  'holds and releases fresh %s maintenance under all required gates while preserving protection and paused CoS',
+  async (slice) => {
+    const f = fixture(slice);
+    protectTarget(f.root, binding);
+    await expect(operationsMaintenance({ ...f, binding, phase: 'hold' })).resolves.toMatchObject({ status: 'held' });
+    expect(activeMaintenanceLease(f.root, binding).owner).toBe('operations-' + f.requestId);
+    await expect(operationsMaintenance({ ...f, binding, phase: 'release' })).resolves.toMatchObject({
+      status: 'released',
+      cosResumed: false,
+    });
+    expect(readTarget(f.root, binding).lifecycle).toBe('protected');
+  },
+);
+it('G04 rejects an incomplete Mail recovery gate before owner maintenance can stop the service', async () => {
+  const f = fixture('G04');
   protectTarget(f.root, binding);
-  await expect(operationsMaintenance({ ...f, binding, phase: 'hold' })).resolves.toMatchObject({ status: 'held' });
-  expect(activeMaintenanceLease(f.root, binding).owner).toBe('operations-' + f.requestId);
-  await expect(operationsMaintenance({ ...f, binding, phase: 'release' })).resolves.toMatchObject({
-    status: 'released',
-    cosResumed: false,
-  });
-  expect(readTarget(f.root, binding).lifecycle).toBe('protected');
+  delete f.manifest.checks.mail_recovery;
+  await expect(operationsMaintenance({ ...f, binding, phase: 'hold' })).rejects.toThrow();
+  expect(f.effects.stopNative).not.toHaveBeenCalled();
 });
 it.each(['unprotected', 'backup-gate'])('denies G02 maintenance %s before stopping any service', async (reason) => {
   const f = fixture('G02');

@@ -11,7 +11,7 @@ afterEach(() => {
   vi.restoreAllMocks();
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
-function fixture() {
+function fixture(slice: 'G02' | 'G03' | 'G04' = 'G02') {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-job-install-'));
   roots.push(home);
   fs.chmodSync(home, 0o700);
@@ -35,7 +35,7 @@ function fixture() {
   const config = home + '/.config/nanoclaw-cos',
     units = home + '/.config/systemd/user';
   for (const root of [config, units, settings.stateRoot]) fs.mkdirSync(root, { recursive: true, mode: 0o700 });
-  const manifest = fixtureVaultRelease('G02'),
+  const manifest = fixtureVaultRelease(slice),
     events: string[] = [];
   const manager = { owned: true, jobsIdle: true, timersActive: false, timersRunning: false, definitionsLoaded: true };
   const controls = {
@@ -62,24 +62,27 @@ function fixture() {
   const installer = createBackupJobInstaller(settings, manifest, controls);
   return { home, settings, config, units, manifest, controls, installer, events, manager };
 }
-it('publishes only the private settings and four fixed units before compile/reload/enable, then activates separately', async () => {
-  const f = fixture();
-  fs.writeFileSync(f.units + '/unrelated.service', 'unrelated');
-  const installed = await f.installer.install();
-  expect(installed).toMatchObject({ status: 'backup_jobs_enabled', releaseId: f.manifest.releaseId });
-  expect(f.events).toEqual(['compile', 'reload', 'enable']);
-  expect(f.controls.startTimers).not.toHaveBeenCalled();
-  expect(fs.readFileSync(f.units + '/unrelated.service', 'utf8')).toBe('unrelated');
-  const profile = f.config + '/backup-jobs-target.json';
-  expect(readPrivate(profile)).toEqual(f.settings);
-  expect(fs.statSync(profile).mode & 0o777).toBe(0o600);
-  for (const file of fs.readdirSync(f.units).filter((name) => name.startsWith('nanoclaw-cos-backup-'))) {
-    expect(fs.statSync(f.units + '/' + file).mode & 0o777).toBe(0o600);
-    if (file.endsWith('.service')) expect(fs.readFileSync(f.units + '/' + file, 'utf8')).toContain(profile);
-  }
-  await expect(f.installer.activate()).resolves.toMatchObject({ status: 'backup_jobs_active' });
-  expect(f.events.at(-1)).toBe('start-timers');
-});
+it.each(['G02', 'G03', 'G04'] as const)(
+  '%s publishes only the private settings and four fixed units before compile/reload/enable, then activates separately',
+  async (slice) => {
+    const f = fixture(slice);
+    fs.writeFileSync(f.units + '/unrelated.service', 'unrelated');
+    const installed = await f.installer.install();
+    expect(installed).toMatchObject({ status: 'backup_jobs_enabled', releaseId: f.manifest.releaseId });
+    expect(f.events).toEqual(['compile', 'reload', 'enable']);
+    expect(f.controls.startTimers).not.toHaveBeenCalled();
+    expect(fs.readFileSync(f.units + '/unrelated.service', 'utf8')).toBe('unrelated');
+    const profile = f.config + '/backup-jobs-target.json';
+    expect(readPrivate(profile)).toEqual(f.settings);
+    expect(fs.statSync(profile).mode & 0o777).toBe(0o600);
+    for (const file of fs.readdirSync(f.units).filter((name) => name.startsWith('nanoclaw-cos-backup-'))) {
+      expect(fs.statSync(f.units + '/' + file).mode & 0o777).toBe(0o600);
+      if (file.endsWith('.service')) expect(fs.readFileSync(f.units + '/' + file, 'utf8')).toContain(profile);
+    }
+    await expect(f.installer.activate()).resolves.toMatchObject({ status: 'backup_jobs_active' });
+    expect(f.events.at(-1)).toBe('start-timers');
+  },
+);
 it('reuses matching files and can finish a failed manager reload without rewriting them', async () => {
   const f = fixture();
   f.controls.reload.mockRejectedValueOnce(Error('PRIVATE_MANAGER_ERROR'));
@@ -98,6 +101,26 @@ it('upgrades only its recorded files after stopping its owned idle timers', asyn
   await createBackupJobInstaller(f.settings, next, f.controls).install();
   expect(f.controls.stopTimers).toHaveBeenCalledOnce();
   expect(fs.readFileSync(f.units + '/nanoclaw-cos-backup-upload.service', 'utf8')).toContain('/release-next/payload/');
+});
+it('upgrades an owned G03 timer installation to G04 while preserving unrelated units and private target settings', async () => {
+  const f = fixture('G03');
+  await f.installer.install();
+  const profile = fs.readFileSync(f.config + '/backup-jobs-target.json');
+  fs.writeFileSync(f.units + '/unrelated.service', 'PRESERVE', { mode: 0o600 });
+  f.manager.timersActive = f.manager.timersRunning = true;
+  const next = { ...fixtureVaultRelease('G04'), releaseId: 'release-mail-fixture' };
+  const installer = createBackupJobInstaller(f.settings, next, f.controls);
+  await installer.install();
+  expect(f.controls.stopTimers).toHaveBeenCalledOnce();
+  expect(fs.readFileSync(f.units + '/nanoclaw-cos-backup-upload.service', 'utf8')).toContain(
+    '/release-mail-fixture/payload/',
+  );
+  expect(fs.readFileSync(f.units + '/unrelated.service', 'utf8')).toBe('PRESERVE');
+  expect(fs.readFileSync(f.config + '/backup-jobs-target.json')).toEqual(profile);
+  await expect(installer.activate()).resolves.toMatchObject({
+    status: 'backup_jobs_active',
+    releaseId: next.releaseId,
+  });
 });
 it.each(['unit', 'settings', 'changed', 'linked', 'directory', 'dropin', 'manager', 'running'] as const)(
   'refuses %s conflicts without replacing their bytes or enabling timers',
