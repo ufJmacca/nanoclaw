@@ -25,6 +25,9 @@ import {
   type BackupRepositoryProfile as Profile,
 } from './backup-repository-profile.js';
 import { withVaultCredentialSnapshot } from './credential-vault-snapshot.js';
+import { admittedGeneration } from './maintenance.js';
+import { makeRoutedCredentialRecoveryManifest } from './credential-recovery-routing.js';
+import { makeCredentialCapture, streamCredentialCapture } from './credential-capture.js';
 const pinned = (fd: number) => '/proc/self/fd/' + fd;
 type RepositoryScope = {
   queue: ReturnType<typeof createVaultBackupQueue>;
@@ -134,20 +137,40 @@ async function withVaultBackupRepository<T>(
         )
           throw Error('backup_producer_unverified');
         assertConfiguration();
+        const producers = [{ file: producer, stat: producerStat }];
         const assertProducer = () => {
-          const current = fs.lstatSync(producer);
-          if (
-            fs.realpathSync(producer) !== producer ||
-            current.dev !== producerStat.dev ||
-            current.ino !== producerStat.ino ||
-            current.mode !== producerStat.mode ||
-            current.uid !== producerStat.uid ||
-            current.nlink !== 1 ||
-            current.size !== producerStat.size ||
-            current.mtimeMs !== producerStat.mtimeMs ||
-            current.ctimeMs !== producerStat.ctimeMs
-          )
-            throw Error('backup_producer_changed');
+          for (const { file, stat } of producers) {
+            const current = fs.lstatSync(file);
+            if (
+              fs.realpathSync(file) !== file ||
+              current.dev !== stat.dev ||
+              current.ino !== stat.ino ||
+              current.mode !== stat.mode ||
+              current.uid !== stat.uid ||
+              current.nlink !== 1 ||
+              current.size !== stat.size ||
+              current.mtimeMs !== stat.mtimeMs ||
+              current.ctimeMs !== stat.ctimeMs
+            )
+              throw Error('backup_producer_changed');
+          }
+        };
+        const captureProducer = () => {
+          const file = path.join(path.dirname(producer), 'credential-capture-producer.js');
+          if (!producers.some((entry) => entry.file === file)) {
+            const stat = fs.lstatSync(file);
+            if (
+              !stat.isFile() ||
+              stat.nlink !== 1 ||
+              (stat.mode & 0o022) !== 0 ||
+              ![0, process.getuid?.()].includes(stat.uid) ||
+              fs.realpathSync(file) !== file
+            )
+              throw Error('backup_producer_unverified');
+            producers.push({ file, stat });
+          }
+          assertProducer();
+          return file;
         };
         return await withVerifiedResticBinary(path.join(roots.installationRoot, 'libexec/restic'), async (binary) =>
           withSignedBackupRepository(profile.mount, async (repository) =>
@@ -218,6 +241,27 @@ async function withVaultBackupRepository<T>(
                           writer: lease,
                           repositoryId: profile.repositoryId,
                           ownerDigest: repositoryOwner,
+                          credentialProducer: (capture) => {
+                            assertCurrent();
+                            if (
+                              !Number.isSafeInteger(target.generation) ||
+                              target.generation < 1 ||
+                              admittedGeneration(roots.targetRoot, target.binding) !== target.generation
+                            )
+                              throw Error('backup_capture_not_admitted');
+                            return [
+                              process.execPath,
+                              captureProducer(),
+                              roots.targetRoot,
+                              roots.installationRoot,
+                              roots.dataRoot,
+                              target.releaseId!,
+                              String(target.generation),
+                              capture.cycleAt,
+                              capture.operationId,
+                              capture.set.operationId,
+                            ];
+                          },
                           credentialInventory: async () =>
                             withVaultCredentialSnapshot(roots, { assertAuthority: assertCurrent }, async (snapshot) => {
                               snapshot.assertPrimaryUnchanged();
@@ -356,6 +400,92 @@ export async function maintainVaultBackups(
   } catch {
     // eslint-disable-next-line preserve-caught-error -- Repository, queue and capacity diagnostics remain private.
     throw Error('backup_maintenance_unavailable');
+  }
+}
+
+/** Complete primary capture is measured in protected memory, then released
+ * before the separately admitted fixed command producer/network transfer.
+ * No queue slot, staging file, service pause or local retirement is involved. */
+export async function uploadVaultCredentialCapture(
+  input: CalendarStorageRoots,
+  cycleAt: string,
+  assertCaller: () => void,
+): Promise<RemoteCheckpoint> {
+  try {
+    if (
+      typeof assertCaller !== 'function' ||
+      typeof cycleAt !== 'string' ||
+      !/^\d{4}-\d{2}-\d{2}T\d{2}:00:00\.000Z$/.test(cycleAt) ||
+      !Number.isFinite(Date.parse(cycleAt)) ||
+      new Date(cycleAt).toISOString() !== cycleAt
+    )
+      throw Error('backup_capture_arguments');
+    const roots = Object.freeze({ ...input }),
+      original = localTarget(roots.targetRoot, roots.installationRoot, roots.dataRoot),
+      bindingDigest = digest(original.binding),
+      cycleTime = Date.parse(cycleAt);
+    const assertAdmission = () => {
+      assertCaller();
+      const current = localTarget(roots.targetRoot, roots.installationRoot, roots.dataRoot),
+        now = Date.now();
+      if (
+        current.lifecycle !== 'protected' ||
+        current.maintenance !== false ||
+        current.releaseId !== original.releaseId ||
+        !current.releaseId ||
+        current.generation !== original.generation ||
+        !Number.isSafeInteger(current.generation) ||
+        current.generation < 1 ||
+        digest(current.binding) !== bindingDigest ||
+        admittedGeneration(roots.targetRoot, current.binding) !== current.generation ||
+        !Number.isFinite(now) ||
+        now < cycleTime ||
+        now - cycleTime >= 2 * 60 * 60 * 1000
+      )
+        throw Error('backup_capture_admission_changed');
+    };
+    assertAdmission();
+    return await withVaultBackupRepository(roots, assertAdmission, async (scope) => {
+      const prepared = await withVaultCredentialSnapshot(
+        roots,
+        { assertAuthority: scope.assertCurrent },
+        async (snapshot) => {
+          snapshot.assertCurrent();
+          if (snapshot.ownerDigest !== scope.queueOwnerDigest) throw Error('backup_capture_owner_changed');
+          const capture = makeCredentialCapture(
+            snapshot.ownerDigest,
+            cycleAt,
+            makeRoutedCredentialRecoveryManifest(snapshot.ownerDigest, snapshot.sources),
+          );
+          const archive = await streamCredentialCapture(snapshot, capture, async () => {});
+          return { capture, archive };
+        },
+      );
+      scope.assertCurrent();
+      const transfer = scope.transfer(async (kind, bytes) => {
+        scope.assertCurrent();
+        if (kind !== 'credentials' || bytes !== prepared.archive.bytes) throw Error('backup_capture_archive_changed');
+        const usage = await readBackupCapacity(roots, scope.repository);
+        scope.assertCurrent();
+        // No new local snapshot allocation. Admit existing bounds and reserve
+        // exact conservative remote growth for the canonical stream separately.
+        admitBackupCapacity(usage, { kind: 'credentials', bytes: 1 }, 'remote');
+        const reserve = prepared.archive.bytes * 2 + 4 * 1024 ** 2;
+        if (
+          usage.repository + reserve > BACKUP_LIMITS.repository ||
+          usage.nasFree - reserve < BACKUP_LIMITS.nasFreeFloor
+        )
+          throw Error('backup_capacity_unavailable');
+      });
+      const checkpoint = await transfer.uploadCredentialCapture(prepared.capture, prepared.archive);
+      const usage = await readBackupCapacity(roots, scope.repository);
+      scope.assertCurrent();
+      admitBackupCapacity(usage, { kind: 'credentials', bytes: 1 }, 'remote');
+      return checkpoint;
+    });
+  } catch {
+    // eslint-disable-next-line preserve-caught-error -- Credential collection, producer, repository and scope diagnostics remain private.
+    throw Error('backup_credential_capture_unavailable');
   }
 }
 

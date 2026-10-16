@@ -8,6 +8,7 @@ import { BackupRepositoryWriter } from './backup-repository-lease.js';
 import type { RemoteCheckpoint } from './backup-restic-transfer.js';
 import { streamBackupArchive } from './backup-archive.js';
 import { readBackupArchive } from './backup-archive-reader.js';
+import { makeCredentialEvent } from './backup-credential-event.js';
 const f = vi.hoisted(() => ({
   vault: vi.fn(),
   access: vi.fn(),
@@ -25,6 +26,8 @@ const f = vi.hoisted(() => ({
   maintain: vi.fn(),
   restore: vi.fn(),
   credentialSnapshot: vi.fn(),
+  captureUpload: vi.fn(),
+  admitted: vi.fn(),
   deps: undefined as undefined | Record<string, unknown>,
   producerFile: '',
 }));
@@ -49,7 +52,16 @@ vi.mock('./backup-repository-lease.js', async (original) => ({
 vi.mock('./backup-restic-transfer.js', () => ({ BackupResticTransfer: f.transfer }));
 vi.mock('./backup-producer-file.js', () => ({ backupProducerFile: () => f.producerFile }));
 vi.mock('./credential-vault-snapshot.js', () => ({ withVaultCredentialSnapshot: f.credentialSnapshot }));
-import { uploadVaultBackup, maintainVaultBackups, restoreVaultBackup } from './backup-upload.js';
+vi.mock('./maintenance.js', async (original) => ({
+  ...(await original<typeof import('./maintenance.js')>()),
+  admittedGeneration: f.admitted,
+}));
+import {
+  uploadVaultBackup,
+  maintainVaultBackups,
+  restoreVaultBackup,
+  uploadVaultCredentialCapture,
+} from './backup-upload.js';
 const temporary: string[] = [],
   held: number[] = [];
 const operationId = 'fe682c6d-d762-40fb-89e6-e0f1e34edfc0';
@@ -78,13 +90,25 @@ async function fixture() {
   const producer = path.join(roots.installationRoot, 'dist/modules/chief-of-staff/ops/backup-archive-producer.js');
   fs.mkdirSync(path.dirname(producer), { recursive: true, mode: 0o700 });
   fs.writeFileSync(producer, '// synthetic fixture; never executed', { mode: 0o500 });
+  fs.writeFileSync(
+    path.join(path.dirname(producer), 'credential-capture-producer.js'),
+    '// separate synthetic fixture; never executed',
+    { mode: 0o500 },
+  );
   f.producerFile = producer;
   const policy = {
     targetDigest: digest(roots.targetRoot),
     volume: { filesystemUuid: '11111111-1111-4111-8111-111111111111' },
   };
   f.vault.mockReturnValue(policy);
-  f.target.mockReturnValue({ lifecycle: 'protected', maintenance: false, releaseId: 'release-fixture' });
+  f.target.mockReturnValue({
+    lifecycle: 'protected',
+    maintenance: false,
+    releaseId: 'release-fixture',
+    generation: 7,
+    binding: { syntheticBinding: true },
+  });
+  f.admitted.mockReturnValue(7);
   f.access.mockImplementation(async (_roots, area, callback) => callback(areas[area], () => {}));
   const profile = {
     contract: 'cos-backup-repository/v1',
@@ -132,7 +156,13 @@ async function fixture() {
   );
   f.transfer.mockImplementation(function (options) {
     f.deps = options;
-    return { upload: f.upload, verify: f.verify, maintain: f.maintain, restore: f.restore };
+    return {
+      upload: f.upload,
+      verify: f.verify,
+      maintain: f.maintain,
+      restore: f.restore,
+      uploadCredentialCapture: f.captureUpload,
+    };
   });
   let recorded: RemoteCheckpoint | undefined;
   f.upload.mockImplementation(async (kind, id, archive) => {
@@ -216,6 +246,112 @@ async function fixture() {
   });
   return { roots, areas, profile, file, queue, producer };
 }
+async function completeFixture() {
+  const s = await fixture(),
+    ownerDigest = digest({ targetDigest: digest(s.roots.targetRoot), filesystemUuid: s.profile.filesystemUuid }),
+    bytes = Buffer.from('PRIVATE_COMPLETE_CAPTURE_FIXTURE');
+  const event = makeCredentialEvent(
+    {
+      sourceKind: 'backup_repository',
+      sourceKey: 'e'.repeat(64),
+      generation: 1,
+      phase: 'ready',
+      files: [{ name: 'repository.json', bytes }],
+    },
+    ownerDigest,
+  );
+  let released = false;
+  f.credentialSnapshot.mockImplementation(async (roots, options, operation) => {
+    expect(roots).toEqual(s.roots);
+    options.assertAuthority();
+    try {
+      return await operation({
+        ownerDigest,
+        sources: [
+          {
+            event,
+            files: [{ name: 'repository.json', destination: 'backup-credentials/backup-repository.json', bytes }],
+          },
+        ],
+        assertCurrent: options.assertAuthority,
+      });
+    } finally {
+      bytes.fill(0);
+      released = true;
+    }
+  });
+  f.captureUpload.mockImplementation(async (capture, archive) => {
+    expect(released).toBe(true);
+    expect(bytes.every((byte) => byte === 0)).toBe(true);
+    const options = f.deps! as unknown as {
+      credentialProducer(capture: unknown): string[];
+      admitUpload(kind: string, bytes: number): Promise<void>;
+    };
+    const command = options.credentialProducer(capture);
+    expect(command.slice(1)).toEqual([
+      path.join(path.dirname(s.producer), 'credential-capture-producer.js'),
+      s.roots.targetRoot,
+      s.roots.installationRoot,
+      s.roots.dataRoot,
+      'release-fixture',
+      '7',
+      capture.cycleAt,
+      capture.operationId,
+      capture.set.operationId,
+    ]);
+    await options.admitUpload('credentials', archive.bytes);
+    return {
+      contract: 'cos-backup-remote-checkpoint/v1',
+      repositoryId: s.profile.repositoryId,
+      ownerDigest: 'b'.repeat(64),
+      kind: 'credentials',
+      operationId: capture.operationId,
+      snapshotId: 'c'.repeat(64),
+      snapshotAt: new Date().toISOString(),
+      archiveBytes: archive.bytes,
+      archiveSha256: archive.sha256,
+      verifiedAt: new Date().toISOString(),
+      reconciled: false,
+    };
+  });
+  const at = new Date();
+  at.setUTCMinutes(0, 0, 0);
+  return { ...s, cycleAt: at.toISOString() };
+}
+it('prepares and uploads a complete capture under installed scopes after clearing primary buffers, without retiring a queue item', async () => {
+  const s = await completeFixture(),
+    before = await s.queue.pending('state'),
+    guard = vi.fn();
+  const result = await uploadVaultCredentialCapture(s.roots, s.cycleAt, guard);
+  expect(result.kind).toBe('credentials');
+  expect(guard).toHaveBeenCalled();
+  expect(f.captureUpload).toHaveBeenCalledOnce();
+  expect(f.upload).not.toHaveBeenCalled();
+  expect(await s.queue.pending('state')).toEqual(before);
+  expect((await s.queue.inspectDelivery('credentials')).items).toEqual([]);
+});
+it('refuses a complete capture with missing current target admission before opening a repository', async () => {
+  const s = await completeFixture();
+  f.admitted.mockReturnValue(null);
+  await expect(uploadVaultCredentialCapture(s.roots, s.cycleAt, () => {})).rejects.toThrow(
+    'backup_credential_capture_unavailable',
+  );
+  expect(f.nas).not.toHaveBeenCalled();
+  expect(f.credentialSnapshot).not.toHaveBeenCalled();
+});
+it('refuses a changed installed capture producer during awaited upload work', async () => {
+  const s = await completeFixture(),
+    upload = f.captureUpload.getMockImplementation()!;
+  f.captureUpload.mockImplementation(async (...args) => {
+    const result = await upload(...args);
+    fs.chmodSync(path.join(path.dirname(s.producer), 'credential-capture-producer.js'), 0o600);
+    (f.deps!.cache as { assertCurrent(): void }).assertCurrent();
+    return result;
+  });
+  await expect(uploadVaultCredentialCapture(s.roots, s.cycleAt, () => {})).rejects.toThrow(
+    'backup_credential_capture_unavailable',
+  );
+});
 const restoreRequest = '14d948fc-4d6d-4e88-851b-257b701b4088';
 it('recovers through the installed gates and actual shared writers, then validates only the new isolated files', async () => {
   const s = await fixture(),

@@ -48,7 +48,11 @@ import { MIGRATIONS, SCHEMA_VERSION } from '../../modules/chief-of-staff/store/m
 import { digest } from '../../modules/chief-of-staff/domain/contracts.js';
 import { BackupQueue } from '../../modules/chief-of-staff/ops/backup-queue.js';
 import { makeCredentialEvent } from '../../modules/chief-of-staff/ops/backup-credential-event.js';
-import { makeCredentialCapture, streamCredentialCapture } from '../../modules/chief-of-staff/ops/credential-capture.js';
+import {
+  makeCredentialCapture,
+  streamCredentialCapture,
+  type CredentialCapture,
+} from '../../modules/chief-of-staff/ops/credential-capture.js';
 import {
   makeRoutedCredentialRecoveryManifest,
   routedCredentialRecoveryFiles,
@@ -155,6 +159,7 @@ const withTransfer = async <T>(
   producer = transferProducer,
   timeoutMs = 900000,
   guard: () => void = () => {},
+  credentialProducer?: (capture: CredentialCapture) => string[],
 ) =>
   withVerifiedResticBinary(binary, async (executable) =>
     transferWriter.exclusive(async (writer) => {
@@ -183,6 +188,7 @@ const withTransfer = async <T>(
           },
         },
         producer: (_kind, operationId) => producer(operationId),
+        credentialProducer,
         admitUpload,
         timeoutMs,
       });
@@ -801,6 +807,117 @@ test('guarded transfer authenticates read-back and reconciles the same operation
   const snapshots = JSON.parse(run(['snapshots', '--tag', 'cos-operation=' + transferOperation])) as unknown[];
   assert.equal(snapshots.length, 1);
   assert.equal((await transferQueue.pending('credentials'))[0].state, 'pending');
+  const body = Buffer.from(canary),
+    event = makeCredentialEvent(
+      {
+        sourceKind: 'backup_repository',
+        sourceKey: '5'.repeat(64),
+        generation: 1,
+        phase: 'ready',
+        files: [{ name: 'repository.json', bytes: body }],
+      },
+      'a'.repeat(64),
+    );
+  const sources = [
+      {
+        event,
+        files: [{ name: 'repository.json', destination: 'backup-credentials/backup-repository.json', bytes: body }],
+      },
+    ],
+    capture = makeCredentialCapture(
+      'a'.repeat(64),
+      '2026-10-16T00:00:00.000Z',
+      makeRoutedCredentialRecoveryManifest('a'.repeat(64), sources),
+    ),
+    archive = await streamCredentialCapture(
+      { ownerDigest: 'a'.repeat(64), sources, assertCurrent: () => {} },
+      capture,
+      async () => {},
+    );
+  let captureAdmissions = 0,
+    captureProducers = 0;
+  const completeProducer = () => {
+    captureProducers++;
+    return [
+      process.execPath,
+      ...childImports,
+      '--input-type=module',
+      '-e',
+      `
+      import {makeCredentialEvent} from ${JSON.stringify(moduleUrl('backup-credential-event'))};
+      import {makeRoutedCredentialRecoveryManifest} from ${JSON.stringify(moduleUrl('credential-recovery-routing'))};
+      import {makeCredentialCapture,streamCredentialCapture} from ${JSON.stringify(moduleUrl('credential-capture'))};
+      const owner='a'.repeat(64),bytes=Buffer.from(${JSON.stringify(canary)});
+      const event=makeCredentialEvent({sourceKind:'backup_repository',sourceKey:'5'.repeat(64),generation:1,phase:'ready',files:[{name:'repository.json',bytes}]},owner);
+      const sources=[{event,files:[{name:'repository.json',destination:'backup-credentials/backup-repository.json',bytes}]}];
+      const capture=makeCredentialCapture(owner,${JSON.stringify(capture.cycleAt)},makeRoutedCredentialRecoveryManifest(owner,sources));
+      try { await streamCredentialCapture({ownerDigest:owner,sources,assertCurrent(){}},capture,bytes=>new Promise((resolve,reject)=>process.stdout.write(bytes,error=>error?reject(error):resolve()))); }
+      catch {process.exitCode=77;} finally {bytes.fill(0);}
+    `,
+    ];
+  };
+  await withTransfer(
+    repositoryId,
+    async (kind, bytes) => {
+      assert.equal(kind, 'credentials');
+      assert.equal(bytes, archive.bytes);
+      captureAdmissions++;
+    },
+    async (transfer, current) => {
+      const first = await transfer.uploadCredentialCapture(capture, archive),
+        replay = await transfer.uploadCredentialCapture(capture, archive);
+      assert.equal(first.reconciled, false);
+      assert.equal(replay.reconciled, true);
+      assert.equal(first.snapshotId, replay.snapshotId);
+      const destination = path.join(restore, 'complete-credential-capture');
+      fs.mkdirSync(destination, { mode: 0o700 });
+      const recovered = await transfer.restoreCredentialCapture(
+        capture.operationId,
+        capture.ownerDigest,
+        {
+          open: async (name) => {
+            current();
+            const file = path.join(destination, name);
+            fs.mkdirSync(path.dirname(file), { mode: 0o700, recursive: true });
+            const fd = fs.openSync(file, 'wx', 0o600);
+            return {
+              write: async (bytes) => {
+                current();
+                fs.writeSync(fd, bytes);
+              },
+              close: async () => {
+                fs.closeSync(fd);
+              },
+            };
+          },
+        },
+        async () => {
+          current();
+        },
+      );
+      assert.equal(recovered.capture.operationId, capture.operationId);
+      assert.equal('receipt' in recovered, false);
+      assert.equal(
+        fs.readFileSync(
+          path.join(
+            destination,
+            'credential-sources',
+            digest({ sourceKind: event.sourceKind, sourceKey: event.sourceKey }),
+            'repository.json',
+          ),
+          'utf8',
+        ),
+        canary,
+      );
+    },
+    transferProducer,
+    900000,
+    () => {},
+    completeProducer,
+  );
+  assert.equal(captureAdmissions, 1);
+  assert.equal(captureProducers, 1);
+  body.fill(0);
   assert.deepEqual(fs.readdirSync(transferCache), []);
 });
 test('wrong repository identity and exhausted capacity refuse transfer before a new upload', async () => {
