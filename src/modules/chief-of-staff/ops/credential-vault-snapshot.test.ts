@@ -13,7 +13,11 @@ import { GOOGLE_MAIL_READ_SCOPE } from '../mail/oauth.js';
 import { GOOGLE_OWNED_EVENT_WRITE_SCOPE, GOOGLE_CALENDAR_METADATA_SCOPE } from '../actions/writer.js';
 import { initializeMailProfile } from '../mail/setup.js';
 import { recordMailRecoveryPage } from '../mail/recovery.js';
-import { makeCredentialEvent, type CredentialEvent } from './backup-credential-event.js';
+import { makeCredentialEvent, type CredentialEvent, type CredentialJournal } from './backup-credential-event.js';
+import {
+  recordVaultCredentialRecoveryPage,
+  recordScheduledCredentialRecoveryPage,
+} from './credential-recovery-page.js';
 import {
   makeRoutedCredentialRecoveryManifest,
   routedCredentialRecoveryFiles,
@@ -299,6 +303,196 @@ it('streams the actual full primary catalog into a separate capture format witho
   expect(recovered.capture).toEqual(capture);
   expect(recovered.capture.set.contents.sources).toHaveLength(11);
   expect('receipt' in recovered).toBe(false);
+});
+it('journals actual non-token configuration and permanent denials once while preserving token-owner journals', async () => {
+  const f = await fixture(),
+    queue = new BackupQueue(f.owner, async (_kind, operation) => operation(f.vault + '/journals')),
+    borrowed: Buffer[] = [];
+  const journal: CredentialJournal = async (change, guard) => {
+    borrowed.push(...change.files.map((file) => file.bytes));
+    await queue.recordCredential(change, guard);
+  };
+  const run = () =>
+    recordVaultCredentialRecoveryPage(f.roots, { assertAuthority: f.authority }, f.inspect, f.memory, journal);
+  expect(await run()).toEqual({
+    contract: 'cos-credential-recovery-page/v1',
+    ownerDigest: f.owner,
+    status: 'recorded',
+    recorded: 8,
+    next_after: null,
+    open_checks: 0,
+  });
+  const first = await queue.pending('credentials');
+  expect(first).toHaveLength(8);
+  expect(first.flatMap((receipt) => receipt.files).some((file) => file.name === 'credential.json')).toBe(false);
+  expect(await run()).toMatchObject({ recorded: 8, next_after: null });
+  expect((await queue.pending('credentials')).map((receipt) => receipt.operationId).sort()).toEqual(
+    first.map((receipt) => receipt.operationId).sort(),
+  );
+  expect(borrowed.every((bytes) => bytes.every((byte) => byte === 0))).toBe(true);
+});
+it('pages every permanent denial with a bounded opaque cursor and wraps rather than starving earlier sources', async () => {
+  const f = await fixture(),
+    queue = new BackupQueue(f.owner, async (_kind, operation) => operation(f.vault + '/journals'));
+  for (let index = 0; index < 13; index++) f.profiles[0].fences.deny('scope', randomUUID(), 'revoked');
+  const journal: CredentialJournal = async (change, guard) => {
+    await queue.recordCredential(change, guard);
+  };
+  const run = (after?: string) =>
+    recordVaultCredentialRecoveryPage(
+      f.roots,
+      { assertAuthority: f.authority, ...(after === undefined ? {} : { after }) },
+      f.inspect,
+      f.memory,
+      journal,
+    );
+  const first = await run();
+  expect(first).toMatchObject({ recorded: 10, next_after: expect.stringMatching(/^[a-f0-9]{64}$/) });
+  const second = await run(first.next_after!);
+  expect(second).toMatchObject({ recorded: 10, next_after: expect.stringMatching(/^[a-f0-9]{64}$/) });
+  expect(await run(second.next_after!)).toMatchObject({ recorded: 1, next_after: null });
+  expect(await queue.pending('credentials')).toHaveLength(21);
+  expect(await run('f'.repeat(64))).toMatchObject({ recorded: 0, next_after: null });
+  expect(await run()).toMatchObject({ recorded: 10 });
+});
+for (const loss of ['memory', 'authority', 'directory', 'queue'] as const)
+  it(`holds existing work and clears borrowed page buffers after awaited ${loss} failure`, async () => {
+    const f = await fixture(),
+      queue = new BackupQueue(f.owner, async (_kind, operation) => operation(f.vault + '/journals')),
+      borrowed: Buffer[] = [];
+    const journal: CredentialJournal = async (change, guard) => {
+      borrowed.push(...change.files.map((file) => file.bytes));
+      await queue.recordCredential(change, guard);
+      if (loss === 'memory' || loss === 'authority')
+        f[loss].mockImplementation(() => {
+          throw Error('PRIVATE_LOSS');
+        });
+      else if (loss === 'directory') {
+        fs.renameSync(f.profiles[0].denial, f.profiles[0].denial + '-held');
+        fs.mkdirSync(f.profiles[0].denial, { mode: 0o700 });
+      } else throw Error('PRIVATE_QUEUE_CAPACITY');
+      guard();
+    };
+    await expect(
+      recordVaultCredentialRecoveryPage(f.roots, { assertAuthority: f.authority }, f.inspect, f.memory, journal),
+    ).rejects.toThrow('credential_recovery_page_unavailable');
+    expect(await queue.pending('credentials')).toHaveLength(1);
+    expect(borrowed.every((bytes) => bytes.every((byte) => byte === 0))).toBe(true);
+  });
+it('refuses path-shaped page cursors before reading credential state', async () => {
+  const f = await fixture();
+  f.authority.mockClear();
+  await expect(
+    recordVaultCredentialRecoveryPage(
+      f.roots,
+      { assertAuthority: f.authority, after: '../source' },
+      f.inspect,
+      f.memory,
+      async () => {},
+    ),
+  ).rejects.toThrow('credential_recovery_page_unavailable');
+  expect(f.authority).not.toHaveBeenCalled();
+});
+it('persists only an encrypted owner/release/generation-bound cursor and wraps completed pages', async () => {
+  const f = await fixture(),
+    queue = new BackupQueue(f.owner, async (_kind, operation) => operation(f.vault + '/journals'));
+  for (let index = 0; index < 13; index++) f.profiles[0].fences.deny('scope', randomUUID(), 'revoked');
+  const run = (releaseId = 'release-current', generation = 7) =>
+    recordScheduledCredentialRecoveryPage(
+      f.roots,
+      { releaseId, generation, assertAuthority: f.authority },
+      f.inspect,
+      f.memory,
+      async (change, guard) => {
+        await queue.recordCredential(change, guard);
+      },
+    );
+  expect(await run()).toMatchObject({ recorded: 10, next_after: expect.any(String) });
+  const file = f.vault + '/journals/credential-recovery-page.json',
+    first = JSON.parse(fs.readFileSync(file, 'utf8'));
+  expect(first).toMatchObject({
+    contract: 'cos-credential-recovery-cursor/v1',
+    ownerDigest: f.owner,
+    releaseId: 'release-current',
+    generation: 7,
+    after: expect.stringMatching(/^[a-f0-9]{64}$/),
+  });
+  expect(fs.statSync(file).mode & 0o777).toBe(0o600);
+  expect(await run()).toMatchObject({ recorded: 10 });
+  expect(await run()).toMatchObject({ recorded: 1, next_after: null });
+  expect(await run()).toMatchObject({ recorded: 10 });
+  expect(await run('release-newer', 8)).toMatchObject({ recorded: 10 });
+  expect(JSON.parse(fs.readFileSync(file, 'utf8'))).toMatchObject({ releaseId: 'release-newer', generation: 8 });
+});
+for (const corruption of ['foreign-owner', 'linked', 'broad', 'extra-field', 'null-value'] as const)
+  it(`holds a ${corruption} cursor instead of overwriting it or selecting foreign source paths`, async () => {
+    const f = await fixture(),
+      queue = new BackupQueue(f.owner, async (_kind, operation) => operation(f.vault + '/journals'));
+    const run = () =>
+      recordScheduledCredentialRecoveryPage(
+        f.roots,
+        { releaseId: 'release-current', generation: 7, assertAuthority: f.authority },
+        f.inspect,
+        f.memory,
+        async (change, guard) => {
+          await queue.recordCredential(change, guard);
+        },
+      );
+    await run();
+    const file = f.vault + '/journals/credential-recovery-page.json';
+    if (corruption === 'linked') fs.linkSync(file, f.base + '/held-cursor');
+    else if (corruption === 'broad') fs.chmodSync(file, 0o644);
+    else if (corruption === 'null-value') fs.writeFileSync(file, 'null\n');
+    else {
+      const value = JSON.parse(fs.readFileSync(file, 'utf8'));
+      if (corruption === 'foreign-owner') value.ownerDigest = 'f'.repeat(64);
+      else value.authority = true;
+      fs.writeFileSync(file, JSON.stringify(value) + '\n');
+    }
+    const before = fs.readFileSync(file),
+      count = (await queue.pending('credentials')).length;
+    await expect(run()).rejects.toThrow('credential_recovery_page_unavailable');
+    expect(fs.readFileSync(file)).toEqual(before);
+    expect(await queue.pending('credentials')).toHaveLength(count);
+  });
+it('serializes scheduled cursor work with the actual live kernel writer and never duplicates source snapshots', async () => {
+  const f = await fixture(),
+    queue = new BackupQueue(f.owner, async (_kind, operation) => operation(f.vault + '/journals'));
+  let entered!: () => void,
+    release!: () => void,
+    first = true;
+  const ready = new Promise<void>((resolve) => {
+      entered = resolve;
+    }),
+    gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+  const journal: CredentialJournal = async (change, guard) => {
+    await queue.recordCredential(change, guard);
+    if (first) {
+      first = false;
+      entered();
+      await gate;
+    }
+    guard();
+  };
+  const run = () =>
+    recordScheduledCredentialRecoveryPage(
+      f.roots,
+      { releaseId: 'release-current', generation: 7, assertAuthority: f.authority },
+      f.inspect,
+      f.memory,
+      journal,
+    );
+  const pending = run();
+  await ready;
+  try {
+    await expect(run()).rejects.toThrow('credential_recovery_page_unavailable');
+  } finally {
+    release();
+  }
+  expect(await pending).toMatchObject({ recorded: 8, next_after: null });
+  expect(await queue.pending('credentials')).toHaveLength(8);
 });
 it('records absent optional profiles without initializing them or inferring account authority', async () => {
   const f = await fixture();
