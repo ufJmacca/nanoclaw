@@ -344,8 +344,15 @@ if (mode === 'install') {
     initializeMailProfile(roots, client, authority(randomUUID())),
     /mail_profile_initialization_unavailable/,
   );
-  assert.deepEqual(fs.readdirSync('/case/vault'), []);
-  assert.deepEqual(fs.readdirSync(roots.targetRoot + '/calendar'), []);
+  // Plaintext underlays are root-owned mode 000. The owner must be unable to
+  // read or write them; the root orchestrator separately verifies both empty.
+  for (const directory of ['/case/vault', roots.targetRoot + '/calendar']) {
+    const stat = fs.lstatSync(directory);
+    assert.equal(stat.uid, 0);
+    assert.equal(stat.mode & 0o7777, 0);
+    assert.throws(() => fs.readdirSync(directory), { code: 'EACCES' });
+    assert.throws(() => fs.openSync(directory + '/synthetic-plaintext-probe', 'wx', 0o600), { code: 'EACCES' });
+  }
   console.log(
     JSON.stringify({ mailVaultStage: 'unavailable', openDenied: true, setupDenied: true, plaintextWrites: 0 }),
   );
