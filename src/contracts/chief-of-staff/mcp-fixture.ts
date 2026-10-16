@@ -101,7 +101,7 @@ export class McpFixture {
             if (response.error) waiter.reject(new Error('Fixture MCP error'));
             else waiter.resolve(response.result);
           }
-        // eslint-disable-next-line no-catch-all/no-catch-all -- Malformed fixture responses close every pending request instead of leaving a live unverified worker.
+          // eslint-disable-next-line no-catch-all/no-catch-all -- Malformed fixture responses close every pending request instead of leaving a live unverified worker.
         } catch {
           this.fail();
         }
