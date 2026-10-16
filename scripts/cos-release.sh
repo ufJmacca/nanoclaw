@@ -269,6 +269,18 @@ isolation_checks() {
 check image_isolation isolation_checks
 check agent_image agent_checks
 check host_image host_checks
+if [[ "$slice" == G04 ]]; then
+  # One actual compiled database run and one native conversation per worker.
+  # The release CLI independently consumes this private, source-bound report.
+  if bash "$directory/context/scripts/cos-mail-artifact-fixture.sh" "$host_image" "$standard_image" "$documents_image" \
+      "$test_directory/test.env" "$test_directory/ca.pem" > "$directory/mail_artifacts.log" 2>&1; then
+    for gate in mail_capture mail_evidence mail_retention; do cli record "$id" "$gate" 0; done
+  else
+    for gate in mail_capture mail_evidence mail_retention; do cli record "$id" "$gate" 1; done
+    echo 'The immutable mail fixture failed; its private report is retained.' >&2
+    exit 1
+  fi
+fi
 if [[ "$slice" == G01 || "$slice" == G02 || "$slice" == G03 ]]; then
   # Actual compiled native state, backed up while WAL pages are committed; no live stores are mounted.
   check protected_state docker run --rm --pull=never --network=none --read-only --user 1000:1000 \

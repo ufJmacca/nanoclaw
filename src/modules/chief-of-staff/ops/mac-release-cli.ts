@@ -33,6 +33,11 @@ import { verifyBackupSmbFixtureImages, verifyBackupSmbFixtureEvidence } from './
 import { verifyBackupRepositoryFixtureEvidence } from './backup-repository-fixture-evidence.js';
 import { verifyBackupCredentialReleaseEvidence } from './backup-vault-fixture-evidence.js';
 import { verifyBackupCaptureFixtureEvidence } from './backup-capture-fixture-evidence.js';
+import {
+  mailArtifactFixtureCertificate,
+  readMailArtifactFixtureText,
+  verifyMailReleaseEvidence,
+} from './mail-artifact-fixture-evidence.js';
 
 export const BUILD_TARGETS = ['host', 'agent-standard', 'agent-documents'] as const;
 type BuildTarget = (typeof BUILD_TARGETS)[number];
@@ -389,6 +394,34 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
     if (!requiredReleaseChecks(plan.slice).includes(name) || !['0', '1'].includes(status))
       throw new Error('invalid_check_result');
     const imageIds = releaseCheckImageIds(plan.images, name);
+    if (name.startsWith('mail_') && status === '0') {
+      if (['mail_credentials', 'mail_recovery'].includes(name)) throw Error('mail_kernel_release_evidence_required');
+      // All three artifact checks share the same actual database/two-worker run.
+      // The Mac CA path comes from the observed devcontainer mount registration.
+      const text = readMailArtifactFixtureText(path.join(root, 'mail_artifacts.log')),
+        identity = {
+          sourceCommit: plan.source.commit,
+          sourceTree: plan.source.tree,
+          workerAssetsDigest: plan.workerAssetsDigest,
+          hostImage: plan.images.find((image) => image.role === 'host')!.id,
+          workerImages: plan.images.filter((image) => image.role === 'agent').map((image) => image.id),
+          certificateFile: mailArtifactFixtureCertificate(
+            readPrivate(path.join(root, 'devcontainer.json'), 1024 ** 2),
+            id,
+          ),
+        },
+        proof = verifyMailReleaseEvidence(name, text, identity);
+      writeAtomic(root, 'mail-artifact-evidence.json', {
+        ...proof,
+        at: new Date().toISOString(),
+        source: plan.source,
+        hostImage: identity.hostImage,
+        workerImages: identity.workerImages,
+        workerAssetsDigest: identity.workerAssetsDigest,
+        reportDigest: digest(text),
+        gates: ['mail_capture', 'mail_evidence', 'mail_retention'],
+      });
+    }
     if (name === 'backup_capture' && status === '0') {
       const fixture = readPrivate<{ image: string; hostImage: string; source: ReleaseManifest['source'] }>(
         path.join(root, 'vault-fixture.json'),
