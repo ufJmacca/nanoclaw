@@ -236,6 +236,7 @@ function run(tool, args) {
   const credentialJournal = args.includes('/probe/probe-backup-journal.mjs');
   const postgresCapture = args.includes('/probe/probe-backup-postgres.mjs');
   const mailCredential = args.includes('/probe/probe-mail.mjs');
+  const mailRecovery = args.includes('/probe/probe-mail-recovery.mjs');
   const result = spawnSync(tool, args, {
     cwd: '/',
     env: {
@@ -243,14 +244,26 @@ function run(tool, args) {
       LANG: 'C',
       LC_ALL: 'C',
       NANOCLAW_COS_VAULT_FIXTURE: '1',
-      ...(postgresCapture ? selectedFixtureEnvironment(process.env, true) : {}),
+      ...(postgresCapture || mailRecovery ? selectedFixtureEnvironment(process.env, true) : {}),
     },
     encoding: 'utf8',
-    stdio: ['ignore', 'pipe', fullCapture || credentialJournal || mailCredential ? 'pipe' : 'ignore'],
-    timeout: postgresCapture ? 300000 : credentialJournal ? 120000 : 30000,
-    maxBuffer: 262144,
+    stdio: ['ignore', 'pipe', fullCapture || credentialJournal || mailCredential || mailRecovery ? 'pipe' : 'ignore'],
+    timeout: postgresCapture || mailRecovery ? 300000 : credentialJournal ? 120000 : 30000,
+    maxBuffer: mailRecovery ? 2 * 1024 ** 2 : 262144,
   });
   if (result.error || result.signal || result.status !== 0) {
+    if (mailRecovery) {
+      const file = '/home/fixture/.config/nanoclaw-cos/state/mail-recovery-stage.json';
+      const stage = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')).stage : 'module_initialization';
+      assert.match(stage, /^[a-z_]{1,64}$/);
+      console.log(
+        JSON.stringify({
+          mailRecoveryFailureStage: stage,
+          code: result.error?.code === 'ETIMEDOUT' ? 'fixture_deadline' : 'fixture_process_failed',
+          location: result.stderr?.match(/\/probe\/probe-mail-recovery\.mjs:[0-9]+:[0-9]+/)?.[0] ?? null,
+        }),
+      );
+    }
     if (mailCredential) {
       const file = '/home/fixture/.config/nanoclaw-cos/state/mail-kernel-stage.json';
       const stage = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')).stage : 'module_initialization';
@@ -410,6 +423,7 @@ try {
   privateDirectory('/case', 0, 0o711);
   for (const directory of ['control', 'keys']) privateDirectory('/case/' + directory);
   for (const directory of ['application', 'data']) privateDirectory('/case/' + directory, 1000);
+  if (process.env.NANOCLAW_COS_MAIL_RECOVERY_FIXTURE === '1') privateDirectory('/case/synthetic-nas', 1000);
   for (const directory of [
     '/home/fixture',
     '/home/fixture/.config',
@@ -526,7 +540,10 @@ try {
   if (process.env.NANOCLAW_COS_BACKUP_FIXTURE === '1') console.log('{"stage":"backup_vault_owner_capture"}');
   owner('capture');
   if (process.env.NANOCLAW_COS_MAIL_CREDENTIAL_FIXTURE === '1') mailOwner('install');
-  if (process.env.NANOCLAW_COS_BACKUP_POSTGRES_FIXTURE === '1') {
+  if (
+    process.env.NANOCLAW_COS_BACKUP_POSTGRES_FIXTURE === '1' &&
+    process.env.NANOCLAW_COS_MAIL_RECOVERY_FIXTURE !== '1'
+  ) {
     console.log('{"stage":"backup_encrypted_postgres_capture"}');
     const capture = JSON.parse(
       run('/usr/bin/setpriv', [
@@ -696,6 +713,26 @@ try {
   await mount();
   owner('recovery');
   if (process.env.NANOCLAW_COS_MAIL_CREDENTIAL_FIXTURE === '1') mailOwner('recovered');
+  if (process.env.NANOCLAW_COS_MAIL_RECOVERY_FIXTURE === '1') {
+    const text = run('/usr/bin/setpriv', [
+      '--clear-groups',
+      '--reuid=1000',
+      '--regid=1000',
+      '--bounding-set=-all',
+      '--no-new-privs',
+      '--',
+      process.execPath,
+      '/probe/probe-mail-recovery.mjs',
+    ]);
+    const records = text
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line));
+    assert.equal(records.length, 2);
+    assert.equal(records[0].encryptedMailCheckpoint, 'passed');
+    assert.equal(records[1].completeMailCredentialRecovery, 'passed');
+    for (const record of records) console.log(JSON.stringify(record));
+  }
   run('/usr/bin/umount', ['/home/fixture/.config/nanoclaw-cos/state/calendar']);
   bound = false;
   run('/usr/bin/umount', ['/case/vault']);

@@ -1,6 +1,8 @@
 # Immutable vault fixtures use only the tested host image's compiled code and sealed helper.
 ARG HOST_IMAGE
 FROM ${HOST_IMAGE} AS release
+RUN mkdir -p /vault-fixture-public/libexec && \
+    if [ ! -d /release/libexec ]; then :; else cp -a /release/libexec/. /vault-fixture-public/libexec/; fi
 FROM debian@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f
 RUN rm -f /etc/apt/sources.list.d/debian.sources && \
     printf '%s\n' 'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/20261007T000000Z trixie main' > /etc/apt/sources.list && \
@@ -15,6 +17,7 @@ COPY --from=release /release/node_modules /node_modules
 COPY --from=release /release/dist /release/dist
 COPY --from=release /release/package.json /release/package.json
 COPY --from=release /release/build-info.json /release/build-info.json
+COPY --from=release /vault-fixture-public/libexec /release/libexec
 RUN mkdir -p /release/node/bin && ln -s /usr/local/bin/node /release/node/bin/node && \
     ln -s /node_modules /release/node_modules
 RUN node --input-type=module -e 'await import("/code/modules/chief-of-staff/calendar/credentials.js");await import("/code/modules/chief-of-staff/calendar/config.js")'
@@ -23,7 +26,7 @@ RUN chmod 0755 /opt/nanoclaw-cos/vault && \
     find /opt/nanoclaw-cos/vault -mindepth 1 -maxdepth 1 -type d -exec chmod 0555 {} + && \
     find /opt/nanoclaw-cos/vault -type f -name node -exec chmod 0555 {} + && \
     find /opt/nanoclaw-cos/vault -type f ! -name node -exec chmod 0444 {} +
-COPY probe.sh probe.mjs probe-authority.mjs probe-provision.mjs verify-units.mjs probe-wire.mjs probe-config.mjs probe-artifact.mjs probe-backup-credentials.mjs probe-backup-journal.mjs probe-backup-postgres.mjs probe-mail.mjs /probe/
+COPY probe.sh probe.mjs probe-authority.mjs probe-provision.mjs verify-units.mjs probe-wire.mjs probe-config.mjs probe-artifact.mjs probe-backup-credentials.mjs probe-backup-journal.mjs probe-backup-postgres.mjs probe-mail.mjs probe-mail-recovery.mjs /probe/
 RUN chmod 0755 /probe && chmod 0644 /probe/*
 ARG SOURCE_COMMIT
 ARG HOST_IMAGE_ID

@@ -51,7 +51,7 @@ export const MAIL_CHECKPOINT_CASES = [
 export const MAIL_NATIVE_CASES = [
   'G04 native mail conversation cites only selected messages, preserves context across restart and closes withdrawn evidence',
 ] as const;
-export type MailFixtureSuite = 'database' | 'native' | 'all';
+export type MailFixtureSuite = 'database' | 'native' | 'all' | 'checkpoint';
 /** Report coverage only. Immutable source/image bindings, selected database,
  * kernel credentials and installed/live acceptance remain separate gates. */
 export function verifyMailFixtureReport(
@@ -62,16 +62,18 @@ export function verifyMailFixtureReport(
     if (
       typeof text !== 'string' ||
       Buffer.byteLength(text) > 1024 ** 2 ||
-      !['database', 'native', 'all'].includes(suite) ||
+      !['database', 'native', 'all', 'checkpoint'].includes(suite) ||
       /^\s*not ok\b/m.test(text) ||
       /^\s*Bail out!/im.test(text) ||
       /^\s+(?:ok|not ok)\b/m.test(text)
     )
       throw Error('report');
     const required: readonly string[] =
-      suite === 'native'
-        ? MAIL_NATIVE_CASES
-        : [...MAIL_STORE_CASES, ...MAIL_CHECKPOINT_CASES, ...(suite === 'all' ? MAIL_NATIVE_CASES : [])];
+      suite === 'checkpoint'
+        ? MAIL_CHECKPOINT_CASES
+        : suite === 'native'
+          ? MAIL_NATIVE_CASES
+          : [...MAIL_STORE_CASES, ...MAIL_CHECKPOINT_CASES, ...(suite === 'all' ? MAIL_NATIVE_CASES : [])];
     const lines = text.split(/\r?\n/),
       records = lines.filter((line) => /^(?:ok|not ok)\b/.test(line)),
       count = required.length,
