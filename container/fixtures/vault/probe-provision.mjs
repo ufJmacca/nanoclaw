@@ -30,6 +30,7 @@ let recovery,
   mounted = false,
   bound = false,
   race,
+  mailRace,
   authorityChild,
   authorityMessages,
   authorityExited,
@@ -234,23 +235,45 @@ function run(tool, args) {
   const fullCapture = args.includes('/probe/probe-backup-capture.compiled.mjs');
   const credentialJournal = args.includes('/probe/probe-backup-journal.mjs');
   const postgresCapture = args.includes('/probe/probe-backup-postgres.mjs');
+  const mailCredential = args.includes('/probe/probe-mail.mjs');
   const result = spawnSync(tool, args, {
     cwd: '/',
-    env: { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', LANG: 'C', LC_ALL: 'C', NANOCLAW_COS_VAULT_FIXTURE: '1',
-      ...(postgresCapture ? selectedFixtureEnvironment(process.env,true) : {}) },
+    env: {
+      PATH: '/usr/sbin:/usr/bin:/sbin:/bin',
+      LANG: 'C',
+      LC_ALL: 'C',
+      NANOCLAW_COS_VAULT_FIXTURE: '1',
+      ...(postgresCapture ? selectedFixtureEnvironment(process.env, true) : {}),
+    },
     encoding: 'utf8',
-    stdio: ['ignore', 'pipe', fullCapture || credentialJournal ? 'pipe' : 'ignore'],
+    stdio: ['ignore', 'pipe', fullCapture || credentialJournal || mailCredential ? 'pipe' : 'ignore'],
     timeout: postgresCapture ? 300000 : credentialJournal ? 120000 : 30000,
     maxBuffer: 262144,
   });
   if (result.error || result.signal || result.status !== 0) {
+    if (mailCredential) {
+      const file = '/home/fixture/.config/nanoclaw-cos/state/mail-kernel-stage.json';
+      const stage = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')).stage : 'module_initialization';
+      assert.match(stage, /^[a-z_]{1,64}$/);
+      console.log(
+        JSON.stringify({
+          mailCredentialFailureStage: stage,
+          code: result.error?.code === 'ETIMEDOUT' ? 'fixture_deadline' : 'fixture_process_failed',
+          location: result.stderr?.match(/\/probe\/probe-mail\.mjs:[0-9]+:[0-9]+/)?.[0] ?? null,
+        }),
+      );
+    }
     if (credentialJournal) {
       const file = '/home/fixture/.config/nanoclaw-cos/state/credential-journal-stage.json';
       const stage = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')).stage : 'module_initialization';
       assert.match(stage, /^[a-z_]{1,64}$/);
-      console.log(JSON.stringify({ credentialJournalFailureStage: stage,
-        code: result.error?.code === 'ETIMEDOUT' ? 'fixture_deadline' : 'fixture_process_failed',
-        location: result.stderr?.match(/\/probe\/probe-backup-journal\.mjs:[0-9]+:[0-9]+/)?.[0] ?? null }));
+      console.log(
+        JSON.stringify({
+          credentialJournalFailureStage: stage,
+          code: result.error?.code === 'ETIMEDOUT' ? 'fixture_deadline' : 'fixture_process_failed',
+          location: result.stderr?.match(/\/probe\/probe-backup-journal\.mjs:[0-9]+:[0-9]+/)?.[0] ?? null,
+        }),
+      );
     }
     if (fullCapture) {
       const file = '/home/fixture/.config/nanoclaw-cos/state/full-capture-stage.json';
@@ -287,6 +310,25 @@ function owner(mode) {
     '/probe/probe.mjs',
     mode,
   ]);
+}
+function mailOwner(mode) {
+  const text = run('/usr/bin/setpriv', [
+    '--clear-groups',
+    '--reuid=1000',
+    '--regid=1000',
+    '--bounding-set=-all',
+    '--no-new-privs',
+    '--',
+    process.execPath,
+    '/probe/probe-mail.mjs',
+    mode,
+  ]);
+  const records = text
+    .trim()
+    .split('\n')
+    .map((line) => JSON.parse(line));
+  assert(records.length > 0 && records.length <= 3);
+  for (const record of records) console.log(JSON.stringify(record));
 }
 function privateDirectory(directory, uid = 0, mode = 0o700) {
   fs.mkdirSync(directory, { mode });
@@ -483,10 +525,20 @@ try {
   await mount();
   if (process.env.NANOCLAW_COS_BACKUP_FIXTURE === '1') console.log('{"stage":"backup_vault_owner_capture"}');
   owner('capture');
+  if (process.env.NANOCLAW_COS_MAIL_CREDENTIAL_FIXTURE === '1') mailOwner('install');
   if (process.env.NANOCLAW_COS_BACKUP_POSTGRES_FIXTURE === '1') {
     console.log('{"stage":"backup_encrypted_postgres_capture"}');
-    const capture=JSON.parse(run('/usr/bin/setpriv',['--clear-groups','--reuid=1000','--regid=1000',process.execPath,'/probe/probe-backup-postgres.mjs']));
-    assert.equal(capture.encryptedPostgresCapture,'passed');console.log(JSON.stringify(capture));
+    const capture = JSON.parse(
+      run('/usr/bin/setpriv', [
+        '--clear-groups',
+        '--reuid=1000',
+        '--regid=1000',
+        process.execPath,
+        '/probe/probe-backup-postgres.mjs',
+      ]),
+    );
+    assert.equal(capture.encryptedPostgresCapture, 'passed');
+    console.log(JSON.stringify(capture));
   }
   if (process.env.NANOCLAW_COS_BACKUP_FIXTURE === '1') {
     console.log('{"stage":"backup_vault_credential_installation"}');
@@ -502,9 +554,15 @@ try {
     const backup = JSON.parse(run(process.execPath, ['/probe/probe-backup-credentials.mjs', 'root']));
     assert.equal(backup.backupVaultCredentialHandoff, 'passed');
     console.log(JSON.stringify(backup));
-    const journal = JSON.parse(run('/usr/bin/setpriv', [
-      '--clear-groups', '--reuid=1000', '--regid=1000', process.execPath, '/probe/probe-backup-journal.mjs',
-    ]));
+    const journal = JSON.parse(
+      run('/usr/bin/setpriv', [
+        '--clear-groups',
+        '--reuid=1000',
+        '--regid=1000',
+        process.execPath,
+        '/probe/probe-backup-journal.mjs',
+      ]),
+    );
     assert.equal(journal.encryptedCredentialJournal, 'passed');
     console.log(JSON.stringify(journal));
   }
@@ -545,6 +603,53 @@ try {
   owner('denied');
   fs.unlinkSync('/case/vault/cache');
   fs.renameSync('/case/vault/cache-original', '/case/vault/cache');
+  let mailExited;
+  if (process.env.NANOCLAW_COS_MAIL_CREDENTIAL_FIXTURE === '1') {
+    mailRace = spawn(
+      '/usr/bin/setpriv',
+      [
+        '--clear-groups',
+        '--reuid=1000',
+        '--regid=1000',
+        '--bounding-set=-all',
+        '--no-new-privs',
+        '--',
+        process.execPath,
+        '/probe/probe-mail.mjs',
+        'mount-loss',
+      ],
+      { env: { PATH: '/usr/sbin:/usr/bin:/sbin:/bin' }, stdio: ['ignore', 'pipe', 'pipe'], timeout: 15000 },
+    );
+    let output = '';
+    mailRace.stdout.on('data', (bytes) => {
+      output += bytes.toString('utf8');
+      if (output.length > 8192) mailRace.kill();
+    });
+    mailRace.stderr.resume(); // Never forward credential or nested filesystem diagnostics.
+    mailExited = new Promise((resolve, reject) => {
+      mailRace.once('error', reject);
+      mailRace.once('close', (code, signal) => {
+        try {
+          assert.equal(code, 0);
+          assert.equal(signal, null);
+          const record = JSON.parse(output);
+          assert.equal(record.mailVaultStage, 'mount_loss');
+          console.log(JSON.stringify(record));
+          resolve();
+        } catch {
+          reject(Error('mail_mount_fixture_unavailable'));
+        }
+      });
+    });
+    mailExited.catch(() => {});
+    for (
+      let attempt = 0;
+      attempt < 200 && !fs.existsSync('/home/fixture/.config/nanoclaw-cos/state/mail-race-request');
+      attempt++
+    )
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(fs.existsSync('/home/fixture/.config/nanoclaw-cos/state/mail-race-request'), true);
+  }
   race = spawn(
     '/usr/bin/setpriv',
     ['--reuid=1000', '--regid=1000', '--clear-groups', process.execPath, '/probe/probe.mjs', 'race'],
@@ -572,6 +677,10 @@ try {
   fs.chownSync('/home/fixture/.config/nanoclaw-cos/state/race-closed', 1000, 1000);
   await exited;
   race = undefined;
+  if (mailExited) {
+    await mailExited;
+    mailRace = undefined;
+  }
   assert.deepEqual(fs.readdirSync('/case/vault'), []);
   assert.deepEqual(fs.readdirSync('/home/fixture/.config/nanoclaw-cos/state/calendar'), []);
   crypto.close();
@@ -586,11 +695,13 @@ try {
   crypto.open(recovery);
   await mount();
   owner('recovery');
+  if (process.env.NANOCLAW_COS_MAIL_CREDENTIAL_FIXTURE === '1') mailOwner('recovered');
   run('/usr/bin/umount', ['/home/fixture/.config/nanoclaw-cos/state/calendar']);
   bound = false;
   run('/usr/bin/umount', ['/case/vault']);
   mounted = false;
   owner('unavailable');
+  if (process.env.NANOCLAW_COS_MAIL_CREDENTIAL_FIXTURE === '1') mailOwner('unavailable');
   if (process.env.NANOCLAW_COS_FULL_CAPTURE_FIXTURE === '1') {
     const full = JSON.parse(
       run('/usr/bin/setpriv', [
@@ -638,6 +749,7 @@ try {
 } finally {
   recovery?.fill(0);
   if (race) race.kill();
+  if (mailRace) mailRace.kill();
   if (authorityChild && authorityChild.exitCode === null && authorityChild.signalCode === null) authorityChild.kill();
   try {
     if (bound) run('/usr/bin/umount', ['/home/fixture/.config/nanoclaw-cos/state/calendar']);

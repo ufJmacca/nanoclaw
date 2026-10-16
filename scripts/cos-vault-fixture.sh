@@ -4,7 +4,7 @@ set -euo pipefail
 umask 077
 [[ "$(uname -s)" == Darwin && ( $# == 2 || $# == 3 || $# == 5 ) ]] || exit 1
 mode=$1 image=$2
-[[ "$mode" == kernel || "$mode" == backup-kernel || "$mode" == backup-capture-kernel || "$mode" == helper || "$mode" == units ]] || exit 1
+[[ "$mode" == kernel || "$mode" == backup-kernel || "$mode" == backup-capture-kernel || "$mode" == mail-credentials-kernel || "$mode" == helper || "$mode" == units ]] || exit 1
 [[ "$image" =~ ^sha256:[a-f0-9]{64}$ ]] || exit 1
 [[ -z "${DOCKER_HOST:-}${DOCKER_CONTEXT:-}${DOCKER_TLS_VERIFY:-}${DOCKER_CERT_PATH:-}" ]] || exit 1
 role=$(docker image inspect --format '{{index .Config.Labels "nanoclaw.release-role"}}' "$image")
@@ -38,6 +38,9 @@ fixture_network=none
 if [[ "$mode" == backup-kernel ]]; then
   # Inspect only a helper spawned inside this disposable container's private PID namespace.
   backup_options=(--cap-add SYS_PTRACE -e NANOCLAW_COS_BACKUP_FIXTURE=1)
+fi
+if [[ "$mode" == mail-credentials-kernel ]]; then
+  backup_options=(-e NANOCLAW_COS_MAIL_CREDENTIAL_FIXTURE=1)
 fi
 if [[ "$mode" == backup-capture-kernel ]]; then
   [[ $# == 5 ]] || exit 1

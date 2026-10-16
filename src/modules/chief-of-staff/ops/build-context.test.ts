@@ -35,6 +35,7 @@ function fixture() {
     'container/fixtures/vault/probe-backup-journal.mjs': 'synthetic encrypted credential journal probe',
     'container/fixtures/vault/probe-backup-postgres.mjs':
       'compiled actual test database inside encrypted kernel storage',
+    'container/fixtures/vault/probe-mail.mjs': 'compiled mail credential kernel probe',
     'container/fixtures/vault/unadmitted.mjs': 'UNADMITTED_VAULT_CANARY',
     'scripts/cos-vault-fixture.sh': 'host-only private pipe orchestration',
     'scripts/cos-vault-keychain.swift': 'trusted keychain code, never key bytes',
@@ -220,6 +221,7 @@ it.each([
   'scripts/cos-release.sh',
   'scripts/cos-backup-repository-fixture.sh',
   'container/fixtures/vault/probe-backup-postgres.mjs',
+  'container/fixtures/vault/probe-mail.mjs',
 ])('binds committed %s bytes without exporting arbitrary scripts or changing worker assets', async (script) => {
   const f = fixture(),
     before = await prepareBuildContext(f.repo, f.commit, path.join(f.root, 'first'));

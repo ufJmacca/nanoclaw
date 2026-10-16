@@ -40,6 +40,13 @@ it('requires explicit selection of the separate actual capture kernel run', () =
   expect(() => verifyVaultWireEvidence(records, source, image, 'backup-kernel')).toThrow();
   expect(() => verifyVaultWireEvidence(records, source, image, 'backup-capture-kernel')).not.toThrow();
 });
+it('admits a mail credential kernel run only when that separate mode is selected', () => {
+  const records = evidence();
+  Object.assign(records[0], { mode: 'mail-credentials-kernel' });
+  expect(() => verifyVaultWireEvidence(records, source, image)).toThrow();
+  expect(() => verifyVaultWireEvidence(records, source, image, 'backup-kernel')).toThrow();
+  expect(() => verifyVaultWireEvidence(records, source, image, 'mail-credentials-kernel')).not.toThrow();
+});
 it.each(['source', 'image', 'missing-wire', 'disk-key', 'recovery', 'kernel', 'duplicate', 'keychain'])(
   'denies %s evidence instead of manufacturing a separate wire pass',
   (reason) => {
