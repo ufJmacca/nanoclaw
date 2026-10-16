@@ -6,7 +6,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import { after, test } from 'node:test';
 import type pg from 'pg';
 import Database from 'better-sqlite3';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, createCipheriv, randomUUID } from 'node:crypto';
 import { verifyRecoveredTargetVaultState } from '../../modules/chief-of-staff/ops/backup-recovered-state.js';
 import { restoreRecoveredCoordinatedTestScope } from '../../modules/chief-of-staff/ops/coordinated-backup.js';
 import { withPinnedBackupTestRestoreReservation } from '../../modules/chief-of-staff/ops/backup-test-restore-reservation.js';
@@ -919,7 +919,133 @@ test('guarded transfer authenticates read-back and reconciles the same operation
   assert.equal(captureProducers, 1);
   body.fill(0);
   assert.deepEqual(fs.readdirSync(transferCache), []);
+  await verifyMaximumCredentialCaptureCache();
 });
+/** Transport fixture only: every allowed source slot carries a maximum-size
+ * synthetic token. This does not claim that these are valid primary profiles. */
+async function verifyMaximumCredentialCaptureCache() {
+  const owner = 'a'.repeat(64),
+    cycle = '2026-10-16T01:00:00.000Z';
+  const sources = Array.from({ length: 1024 }, (_, i) => {
+    const key = createHash('sha256')
+        .update('SYNTHETIC_BUDGET_' + i)
+        .digest(),
+      bytes = createCipheriv('aes-256-ctr', key, Buffer.alloc(16)).update(Buffer.alloc(65536)),
+      event = makeCredentialEvent(
+        {
+          sourceKind: 'mail_reader',
+          sourceKey: key.toString('hex'),
+          generation: 1,
+          phase: 'ready',
+          files: [{ name: 'credential.json', bytes }],
+        },
+        owner,
+      );
+    key.fill(0);
+    return {
+      event,
+      files: [
+        {
+          name: 'credential.json',
+          bytes,
+          destination:
+            'google/calendar/mail-reader/credentials/10000000-0000-4000-8000-' + String(i).padStart(12, '0') + '.json',
+        },
+      ],
+    };
+  });
+  const capture = makeCredentialCapture(owner, cycle, makeRoutedCredentialRecoveryManifest(owner, sources));
+  let archive: { bytes: number; sha256: string };
+  try {
+    archive = await streamCredentialCapture(
+      { ownerDigest: owner, sources, assertCurrent() {} },
+      capture,
+      async () => {},
+    );
+  } finally {
+    for (const source of sources) for (const file of source.files) file.bytes.fill(0);
+  }
+  const producer = () => [
+    process.execPath,
+    ...childImports,
+    '--input-type=module',
+    '-e',
+    `
+    import {createHash,createCipheriv} from 'node:crypto';
+    import {makeCredentialEvent} from ${JSON.stringify(moduleUrl('backup-credential-event'))};
+    import {makeRoutedCredentialRecoveryManifest} from ${JSON.stringify(moduleUrl('credential-recovery-routing'))};
+    import {makeCredentialCapture,streamCredentialCapture} from ${JSON.stringify(moduleUrl('credential-capture'))};
+    const owner='a'.repeat(64),sources=Array.from({length:1024},(_,i)=>{
+      const key=createHash('sha256').update('SYNTHETIC_BUDGET_'+i).digest();
+      const bytes=createCipheriv('aes-256-ctr',key,Buffer.alloc(16)).update(Buffer.alloc(65536));
+      const event=makeCredentialEvent({sourceKind:'mail_reader',sourceKey:key.toString('hex'),generation:1,phase:'ready',files:[{name:'credential.json',bytes}]},owner);
+      key.fill(0);
+      return {event,files:[{name:'credential.json',bytes,destination:'google/calendar/mail-reader/credentials/10000000-0000-4000-8000-'+String(i).padStart(12,'0')+'.json'}]};
+    });
+    const capture=makeCredentialCapture(owner,${JSON.stringify(cycle)},makeRoutedCredentialRecoveryManifest(owner,sources));
+    try {await streamCredentialCapture({ownerDigest:owner,sources,assertCurrent(){}},capture,bytes=>new Promise((resolve,reject)=>process.stdout.write(bytes,error=>error?reject(error):resolve())));}
+    catch {process.exitCode=77;} finally {for(const source of sources)for(const file of source.files)file.bytes.fill(0);}
+  `,
+  ];
+  let peak = 0;
+  const observe = () => {
+    let used = 0;
+    const measure = (directory: string) => {
+      for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+        const file = path.join(directory, entry.name);
+        try {
+          const stat = fs.lstatSync(file);
+          if (stat.isDirectory()) measure(file);
+          else {
+            assert(stat.isFile());
+            used += Math.max(stat.size, stat.blocks * 512);
+          }
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        }
+      }
+    };
+    measure(transferCache);
+    peak = Math.max(peak, used);
+    assert(used <= 128 * 1024 ** 2, 'actual credential command cache exceeds admitted bound');
+  };
+  const timer = setInterval(observe, 20);
+  try {
+    await withTransfer(
+      repositoryId,
+      async (kind, bytes) => {
+        assert.equal(kind, 'credentials');
+        assert.equal(bytes, archive.bytes);
+        observe();
+      },
+      async (transfer) => {
+        const result = await transfer.uploadCredentialCapture(capture, archive);
+        assert.equal(result.archiveBytes, archive.bytes);
+        assert.equal(result.archiveSha256, archive.sha256);
+      },
+      transferProducer,
+      900000,
+      observe,
+      producer,
+    );
+    observe();
+  } finally {
+    clearInterval(timer);
+  }
+  assert.deepEqual(fs.readdirSync(transferCache), []);
+  console.log(
+    JSON.stringify({
+      maximumCredentialTransport: 'passed',
+      sourceSlots: 1024,
+      payloadBytes: 64 * 1024 ** 2,
+      archiveBytes: archive.bytes,
+      observedCachePeakBytes: peak,
+      cacheLimitBytes: 128 * 1024 ** 2,
+      allDataSynthetic: true,
+      primaryProfileAdmission: false,
+    }),
+  );
+}
 test('wrong repository identity and exhausted capacity refuse transfer before a new upload', async () => {
   let admissions = 0;
   await assert.rejects(
