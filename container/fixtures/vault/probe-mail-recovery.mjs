@@ -157,11 +157,22 @@ await withVaultDirectory(roots, 'staging', async (directory, vaultCurrent) => {
 });
 
 stage('complete_credential_setup');
-// The base fixture already recovered this one known synthetic canary. It is not
-// a credential source and must not weaken the production unknown-file refusal.
-const canary = '/case/vault/backup-credentials/canary';
-assert.equal(fs.readFileSync(canary, 'utf8'), 'SYNTHETIC_ENCRYPTED_CANARY');
-fs.unlinkSync(canary);
+// The base fixture already recovered both exact synthetic canaries. Neither is
+// a credential source; retain the production catalogue's unknown-file refusal.
+for (const [name, expected] of [
+  ['canary', 'SYNTHETIC_ENCRYPTED_CANARY'],
+  ['race-canary', 'SYNTHETIC_RACE_CANARY'],
+]) {
+  const canary = '/case/vault/backup-credentials/' + name,
+    stat = fs.lstatSync(canary);
+  assert.equal(stat.isFile(), true);
+  assert.equal(stat.nlink, 1);
+  assert.equal(stat.uid, 1000);
+  assert.equal(stat.mode & 0o7777, 0o600);
+  assert.equal(stat.dev, fs.statSync('/case/vault').dev);
+  assert.equal(fs.readFileSync(canary, 'utf8'), expected);
+  fs.unlinkSync(canary);
+}
 const binding = {
   hostFingerprint: machineFingerprint(),
   databaseFingerprint: digest('synthetic-mail-recovery-target'),
