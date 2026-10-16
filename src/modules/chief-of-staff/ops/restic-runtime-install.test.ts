@@ -45,6 +45,20 @@ it.skipIf(!process.env.COS_BACKUP_PACKAGE_FIXTURE_BINARY)(
     expect(fs.statSync(file).ino).toBe(inode);
   },
 );
+it.skipIf(!process.env.COS_BACKUP_PACKAGE_FIXTURE_BINARY).each(['G03', 'G04'] as const)(
+  '%s verifies the same pinned utility at its fixed runtime location without replacing it',
+  async (slice) => {
+    const f = officialFixture();
+    f.manifest = fixtureVaultRelease(slice);
+    const first = await installResticRuntimeArtifact(f),
+      file = f.installationRoot + '/libexec/restic';
+    const before = fs.statSync(file);
+    expect(first.status).toBe('installed');
+    expect(first.sha256).toBe(RESTIC_ARTIFACT.sha256);
+    expect(await installResticRuntimeArtifact(f)).toEqual({ ...first, status: 'already_installed' });
+    expect(fs.statSync(file).ino).toBe(before.ino);
+  },
+);
 it.each(['absent-payload', 'wrong-slice', 'unverified-binary', 'closed-caller'])(
   'refuses %s before creating a runtime utility or changing existing application files',
   async (reason) => {

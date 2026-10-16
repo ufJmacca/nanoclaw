@@ -35,29 +35,32 @@ const observation = {
   cwd: settings.installationRoot,
   state: null,
 };
-it.each(['G01', 'G02'] as const)('%s requires the existing protected installed target before transfer', (slice) => {
-  const manifest = fixtureVaultRelease(slice),
-    state = {
-      version: 1,
-      binding: {
-        hostFingerprint: settings.hostFingerprint,
-        databaseFingerprint: settings.databaseFingerprint,
-        service: settings.service,
-        installationRoot: settings.installationRoot,
-        dataRoot: settings.dataRoot,
-      },
-      lifecycle: 'protected',
-      generation: 4,
-      maintenance: false,
-      releaseId: 'release-reviewed-s11',
-    };
-  expect(validateReleaseTargetObservation(settings, manifest, { ...observation, state })).toEqual(state);
-  for (const current of [null, { ...state, lifecycle: 'implementation_disposable' }, { ...state, releaseId: null }])
-    expect(() => validateReleaseTargetObservation(settings, manifest, { ...observation, state: current })).toThrow(
-      'protected_extension_target_required',
-    );
-  expect(validateReleaseTargetObservation(settings, fixtureRelease('S11'), observation)).toBeNull();
-});
+it.each(['G01', 'G02', 'G03', 'G04'] as const)(
+  '%s requires the existing protected installed target before transfer',
+  (slice) => {
+    const manifest = fixtureVaultRelease(slice),
+      state = {
+        version: 1,
+        binding: {
+          hostFingerprint: settings.hostFingerprint,
+          databaseFingerprint: settings.databaseFingerprint,
+          service: settings.service,
+          installationRoot: settings.installationRoot,
+          dataRoot: settings.dataRoot,
+        },
+        lifecycle: 'protected',
+        generation: 4,
+        maintenance: false,
+        releaseId: 'release-reviewed-s11',
+      };
+    expect(validateReleaseTargetObservation(settings, manifest, { ...observation, state })).toEqual(state);
+    for (const current of [null, { ...state, lifecycle: 'implementation_disposable' }, { ...state, releaseId: null }])
+      expect(() => validateReleaseTargetObservation(settings, manifest, { ...observation, state: current })).toThrow(
+        'protected_extension_target_required',
+      );
+    expect(validateReleaseTargetObservation(settings, fixtureRelease('S11'), observation)).toBeNull();
+  },
+);
 it('requires the bound Pi, installed service directory and native ARM64 Docker before staging', () => {
   expect(validateTargetObservation(settings, observation)).toBeNull();
   for (const patch of [

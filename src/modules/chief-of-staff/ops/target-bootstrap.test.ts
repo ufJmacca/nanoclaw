@@ -122,87 +122,90 @@ it('refuses incomplete local checks before loading an archive', async () => {
   expect(docker).not.toHaveBeenCalled();
 });
 
-it('G02 preparation delivers the pinned utility before acknowledgement and refuses a busy independent uploader', async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-g02-preparation-'));
-  const settings = {
-    releaseRoot: root + '/releases',
-    installationRoot: root + '/app',
-    stateRoot: root + '/state',
-  } as DeploymentSettings;
-  const manifest = fixtureVaultRelease('G02'),
-    source = root + '/fixture-payload';
-  fs.mkdirSync(source, { mode: 0o700 });
-  fs.mkdirSync(settings.installationRoot, { mode: 0o700 });
-  fs.writeFileSync(source + '/fixture.txt', 'tested payload');
-  manifest.hostPayloadDigest = await payloadDigest(source);
-  const manifestFile = root + '/release.json';
-  fs.writeFileSync(manifestFile, JSON.stringify(manifest), { mode: 0o600 });
-  const docker = vi.fn<BootstrapDocker>(async (args) => {
-    if (args[0] === 'image' && args[1] === 'inspect')
-      return JSON.stringify([
-        {
-          Id: args[2],
-          Os: 'linux',
-          Architecture: 'arm64',
-          Config: {
-            Labels: {
-              'org.opencontainers.image.revision': manifest.source.commit,
-              'nanoclaw.worker-assets': manifest.workerAssetsDigest,
+it.each(['G02', 'G03', 'G04'] as const)(
+  '%s preparation delivers the pinned utility before acknowledgement and refuses a busy independent uploader',
+  async (slice) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-g02-preparation-'));
+    const settings = {
+      releaseRoot: root + '/releases',
+      installationRoot: root + '/app',
+      stateRoot: root + '/state',
+    } as DeploymentSettings;
+    const manifest = fixtureVaultRelease(slice),
+      source = root + '/fixture-payload';
+    fs.mkdirSync(source, { mode: 0o700 });
+    fs.mkdirSync(settings.installationRoot, { mode: 0o700 });
+    fs.writeFileSync(source + '/fixture.txt', 'tested payload');
+    manifest.hostPayloadDigest = await payloadDigest(source);
+    const manifestFile = root + '/release.json';
+    fs.writeFileSync(manifestFile, JSON.stringify(manifest), { mode: 0o600 });
+    const docker = vi.fn<BootstrapDocker>(async (args) => {
+      if (args[0] === 'image' && args[1] === 'inspect')
+        return JSON.stringify([
+          {
+            Id: args[2],
+            Os: 'linux',
+            Architecture: 'arm64',
+            Config: {
+              Labels: {
+                'org.opencontainers.image.revision': manifest.source.commit,
+                'nanoclaw.worker-assets': manifest.workerAssetsDigest,
+              },
             },
           },
-        },
-      ]);
-    if (args[0] === 'container')
-      return JSON.stringify([
-        {
-          Id: 'e'.repeat(64),
-          Image: manifest.images[0].id,
-          State: { Running: false, Status: 'created' },
-          Mounts: [],
-          Config: { Labels: { 'nanoclaw.extract-release': manifest.releaseId } },
-        },
-      ]);
-    if (args[0] === 'rm') return '';
-    throw Error('unexpected docker operation');
-  });
-  const extract = async (_id: string, destination: string) => {
-    fs.copyFileSync(source + '/fixture.txt', destination + '/fixture.txt');
-  };
-  const install = vi.spyOn(runtimeArtifact, 'installResticRuntimeArtifact').mockImplementation(async (input) => {
-    input.check();
-    return { status: 'installed', bytes: manifest.backupArtifact!.bytes, sha256: manifest.backupArtifact!.sha256 };
-  });
-  try {
-    await withDeploymentLock(settings.stateRoot + '.backup-upload.lock', async () => {
-      await expect(
-        prepareTargetArtifacts(settings, manifest, manifestFile, root + '/images.tar.gz', docker, extract),
-      ).rejects.toThrow('target_deployment_locked');
-      expect(install).not.toHaveBeenCalled();
+        ]);
+      if (args[0] === 'container')
+        return JSON.stringify([
+          {
+            Id: 'e'.repeat(64),
+            Image: manifest.images[0].id,
+            State: { Running: false, Status: 'created' },
+            Mounts: [],
+            Config: { Labels: { 'nanoclaw.extract-release': manifest.releaseId } },
+          },
+        ]);
+      if (args[0] === 'rm') return '';
+      throw Error('unexpected docker operation');
     });
-    const result = await prepareTargetArtifacts(
-      settings,
-      manifest,
-      manifestFile,
-      root + '/images.tar.gz',
-      docker,
-      extract,
-    );
-    expect(install).toHaveBeenCalledWith({
-      installationRoot: settings.installationRoot,
-      payload: result.payload,
-      manifest,
-      check: expect.any(Function),
+    const extract = async (_id: string, destination: string) => {
+      fs.copyFileSync(source + '/fixture.txt', destination + '/fixture.txt');
+    };
+    const install = vi.spyOn(runtimeArtifact, 'installResticRuntimeArtifact').mockImplementation(async (input) => {
+      input.check();
+      return { status: 'installed', bytes: manifest.backupArtifact!.bytes, sha256: manifest.backupArtifact!.sha256 };
     });
-    const receipt = JSON.parse(
-      fs.readFileSync(settings.releaseRoot + '/' + manifest.releaseId + '/runtime-artifact.json', 'utf8'),
-    );
-    expect(receipt).toMatchObject({
-      contract: 'cos-backup-runtime-artifact/v1',
-      sha256: manifest.backupArtifact!.sha256,
-      verifiedBySourceCommit: manifest.source.commit,
-    });
-  } finally {
-    vi.restoreAllMocks();
-    fs.rmSync(root, { recursive: true, force: true });
-  }
-});
+    try {
+      await withDeploymentLock(settings.stateRoot + '.backup-upload.lock', async () => {
+        await expect(
+          prepareTargetArtifacts(settings, manifest, manifestFile, root + '/images.tar.gz', docker, extract),
+        ).rejects.toThrow('target_deployment_locked');
+        expect(install).not.toHaveBeenCalled();
+      });
+      const result = await prepareTargetArtifacts(
+        settings,
+        manifest,
+        manifestFile,
+        root + '/images.tar.gz',
+        docker,
+        extract,
+      );
+      expect(install).toHaveBeenCalledWith({
+        installationRoot: settings.installationRoot,
+        payload: result.payload,
+        manifest,
+        check: expect.any(Function),
+      });
+      const receipt = JSON.parse(
+        fs.readFileSync(settings.releaseRoot + '/' + manifest.releaseId + '/runtime-artifact.json', 'utf8'),
+      );
+      expect(receipt).toMatchObject({
+        contract: 'cos-backup-runtime-artifact/v1',
+        sha256: manifest.backupArtifact!.sha256,
+        verifiedBySourceCommit: manifest.source.commit,
+      });
+    } finally {
+      vi.restoreAllMocks();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  },
+);

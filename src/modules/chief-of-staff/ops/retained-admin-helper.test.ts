@@ -13,7 +13,7 @@ const roots: string[] = [];
 afterEach(() => {
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
-async function fixture(slice: 'S11' | 'G01' | 'G02' = 'G01') {
+async function fixture(slice: 'S11' | 'G01' | 'G02' | 'G03' | 'G04' = 'G01') {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'retained-admin-'));
   roots.push(root);
   const binding = {
@@ -26,7 +26,7 @@ async function fixture(slice: 'S11' | 'G01' | 'G02' = 'G01') {
     settings = { releaseRoot: root + '/releases', stateRoot: root + '/state' };
   initializeTarget(settings.stateRoot, binding);
   protectTarget(settings.stateRoot, binding);
-  const manifest = slice === 'G02' ? fixtureVaultRelease('G02') : fixtureRelease(slice);
+  const manifest = slice === 'S11' || slice === 'G01' ? fixtureRelease(slice) : fixtureVaultRelease(slice);
   manifest.releaseId = 'release-aaaaaaaaaaaa-20261008011204';
   if (slice === 'G01') {
     const seal = {
@@ -93,6 +93,22 @@ it('admits the healthy sealed G02 admin payload with all backup gates on the pro
     'programme_completion_unverified',
   );
 });
+it.each(['G03', 'G04'] as const)(
+  'admits only a healthy sealed %s admin helper on the protected target without reopening S11 closure',
+  async (slice) => {
+    const f = await fixture(slice);
+    await expect(verifyRetainedAdminHelper(f.settings, f.binding, f.helper)).resolves.toEqual(f.manifest);
+    await expect(verifyProtectionHelper(f.settings, f.binding, f.helper)).rejects.toThrow(
+      'programme_completion_unverified',
+    );
+    fs.unlinkSync(f.settings.stateRoot + '/protected.json');
+    const state = readPrivate<Record<string, unknown>>(f.settings.stateRoot + '/state.json');
+    writeAtomic(f.settings.stateRoot, 'state.json', { ...state, lifecycle: 'implementation_disposable' });
+    await expect(verifyRetainedAdminHelper(f.settings, f.binding, f.helper)).rejects.toThrow(
+      'retained_admin_helper_unverified',
+    );
+  },
+);
 it.each(['unprotected', 'backup-gate'])('refuses G02 helper %s before owner administration', async (reason) => {
   const f = await fixture('G02');
   if (reason === 'unprotected') {

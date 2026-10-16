@@ -617,7 +617,7 @@ it('prepares a stopped-service recovery baseline without adopting a failed candi
   }
 });
 
-async function vaultDeploymentFixture(maintain = true) {
+async function vaultDeploymentFixture(maintain = true, slice: 'G02' | 'G03' | 'G04' = 'G02') {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-g02-deployment-'));
   fs.chmodSync(root, 0o700);
   const settings: DeploymentSettings = {
@@ -640,8 +640,11 @@ async function vaultDeploymentFixture(maintain = true) {
   fs.mkdirSync(settings.dataRoot, { recursive: true, mode: 0o700 });
   const binding = targetBinding(settings),
     initial = initializeTarget(settings.stateRoot, binding),
-    manifest = fixtureVaultRelease('G02'),
-    previous = { ...fixtureVaultRelease('G01'), releaseId: 'release-reviewed-g01' },
+    manifest = fixtureVaultRelease(slice),
+    previous = {
+      ...fixtureVaultRelease(slice === 'G04' ? 'G03' : 'G01'),
+      releaseId: slice === 'G04' ? 'release-reviewed-g03' : 'release-reviewed-g01',
+    },
     recovery = recoveryReleaseForManifest(previous),
     receipt = settings.stateRoot + '/releases/' + manifest.releaseId;
   writeAtomic(settings.stateRoot, 'protected.json', { bindingDigest: digest(binding), generation: 1 });
@@ -762,6 +765,43 @@ it('the current helper verifies a historical G02 vault checkpoint but refuses it
     s.capture.mockClear();
     await s.effects.backup();
     expect(s.capture).not.toHaveBeenCalled();
+  } finally {
+    s.close();
+  }
+});
+it('G04 captures its installed G03 predecessor in the encrypted slot and rechecks that exact snapshot before additive schema-19 migration', async () => {
+  const s = await vaultDeploymentFixture(true, 'G04');
+  try {
+    await s.effects.backup();
+    expect(s.capture).toHaveBeenCalledWith(s.settings, s.manifest.releaseId, undefined, s.recovery);
+    expect(s.recovery.software.schemaVersion).toBe(18);
+    expect(readPrivate(s.receipt + '/vault-state.json')).toEqual(s.snapshot);
+    await s.effects.migrate();
+    expect(s.verify).toHaveBeenCalledWith(
+      s.settings,
+      s.manifest.releaseId,
+      undefined,
+      s.recovery,
+      s.snapshot.snapshotDigest,
+    );
+    expect(s.migrate).toHaveBeenCalledOnce();
+    expect(s.legacy).not.toHaveBeenCalled();
+    expect(s.nativeBackup).not.toHaveBeenCalled();
+    expect(s.calendarBackup).not.toHaveBeenCalled();
+    expect(fs.existsSync(s.receipt + '/native-state.json')).toBe(false);
+  } finally {
+    s.close();
+  }
+});
+it('G04 denies a changed encrypted checkpoint before either native or PostgreSQL migration', async () => {
+  const s = await vaultDeploymentFixture(true, 'G04');
+  try {
+    await s.effects.backup();
+    const before = fs.readFileSync(s.settings.dataRoot + '/v2.db');
+    s.verify.mockRejectedValue(Error('target_vault_capture_unavailable'));
+    await expect(s.effects.migrate()).rejects.toThrow('target_vault_capture_unavailable');
+    expect(s.migrate).not.toHaveBeenCalled();
+    expect(fs.readFileSync(s.settings.dataRoot + '/v2.db')).toEqual(before);
   } finally {
     s.close();
   }
