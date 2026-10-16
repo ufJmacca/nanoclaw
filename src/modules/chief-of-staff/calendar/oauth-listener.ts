@@ -22,13 +22,23 @@ export async function startCalendarWriterAuthorization(
 ): Promise<CalendarAuthorizationListener> {
   return startAuthorization(client, options, 'owned_event_writer');
 }
+/** Separate owner Mail consent. It cannot combine a Calendar grant or request
+ * Gmail writes, and uses the same fixed IPv4 loopback/state/PKCE protections.
+ */
+export async function startMailAuthorization(
+  client: GoogleOAuthClient,
+  options: OAuthTransport & { timeoutMs?: number } = {},
+): Promise<CalendarAuthorizationListener> {
+  return startAuthorization(client, options, 'mail_reader');
+}
 async function startAuthorization(
   client: GoogleOAuthClient,
   options: OAuthTransport & { timeoutMs?: number },
   profile: OAuthScopeProfile,
 ): Promise<CalendarAuthorizationListener> {
   const checked = checkedClient(client),
-    timeoutMs = options.timeoutMs ?? 600000;
+    timeoutMs = options.timeoutMs ?? 600000,
+    source = profile === 'mail_reader' ? 'Mail' : 'Calendar';
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 600000)
     throw new CalendarReadError('calendar_oauth_configuration_invalid');
   let resolve!: (tokens: GoogleCalendarTokens) => void, reject!: (error: CalendarReadError) => void;
@@ -100,7 +110,7 @@ async function startAuthorization(
       try {
         const tokens = await flow.exchange('http://' + expectedHost + request.url);
         settle(tokens);
-        send(response, 200, 'Calendar authorization received. You can close this window.', true);
+        send(response, 200, source + ' authorization received. You can close this window.', true);
         // eslint-disable-next-line no-catch-all/no-catch-all -- An unknown exchange outcome is fenced as uncertain and never retried.
       } catch (error) {
         const classified =
@@ -111,7 +121,7 @@ async function startAuthorization(
           return;
         }
         settle(classified);
-        send(response, 400, 'Calendar authorization did not complete. Return to the operator command.', true);
+        send(response, 400, source + ' authorization did not complete. Return to the operator command.', true);
       }
     })();
   });
