@@ -212,27 +212,44 @@ it('maps the registered Mac workspace to this release CA without reading inspect
     ),
   ).toBe('/Users/fixture/project/.cos-plan-state/release-tests/' + rid + '/ca.pem');
 });
-it.each(['missing', 'duplicate', 'volume', 'readonly', 'relative', 'parent', 'root', 'release', 'extra-inspection'])(
-  'refuses %s Mac workspace mapping instead of substituting a different CA',
-  (reason) => {
-    const mount = { Type: 'bind', Source: '/Users/fixture/project', Destination: '/workspace', RW: true },
-      inspected = [{ Mounts: [mount] }];
-    if (reason === 'missing') inspected[0].Mounts = [];
-    if (reason === 'duplicate') inspected[0].Mounts.push({ ...mount });
-    if (reason === 'volume') mount.Type = 'volume';
-    if (reason === 'readonly') mount.RW = false;
-    if (reason === 'relative') mount.Source = 'relative';
-    if (reason === 'parent') mount.Source = '/Users/fixture/../foreign';
-    if (reason === 'root') mount.Source = '/';
-    if (reason === 'extra-inspection') inspected.push({ Mounts: [] });
-    expect(() =>
-      mailArtifactFixtureCertificate(
-        inspected,
-        reason === 'release' ? '../foreign' : 'release-aaaaaaaaaaaa-20261016000000',
-      ),
-    ).toThrow('mail_fixture_workspace_unverified');
-  },
-);
+it('maps the observed Docker Desktop host_mnt Users prefix to the same Mac certificate path', () => {
+  expect(
+    mailArtifactFixtureCertificate(
+      [{ Mounts: [{ Type: 'bind', Source: '/host_mnt/Users/fixture/project', Destination: '/workspace', RW: true }] }],
+      'release-aaaaaaaaaaaa-20261016000000',
+    ),
+  ).toBe('/Users/fixture/project/.cos-plan-state/release-tests/release-aaaaaaaaaaaa-20261016000000/ca.pem');
+});
+it.each([
+  'missing',
+  'duplicate',
+  'volume',
+  'readonly',
+  'relative',
+  'parent',
+  'root',
+  'release',
+  'extra-inspection',
+  'unknown-host-mount',
+])('refuses %s Mac workspace mapping instead of substituting a different CA', (reason) => {
+  const mount = { Type: 'bind', Source: '/Users/fixture/project', Destination: '/workspace', RW: true },
+    inspected = [{ Mounts: [mount] }];
+  if (reason === 'missing') inspected[0].Mounts = [];
+  if (reason === 'duplicate') inspected[0].Mounts.push({ ...mount });
+  if (reason === 'volume') mount.Type = 'volume';
+  if (reason === 'readonly') mount.RW = false;
+  if (reason === 'relative') mount.Source = 'relative';
+  if (reason === 'parent') mount.Source = '/Users/fixture/../foreign';
+  if (reason === 'root') mount.Source = '/';
+  if (reason === 'unknown-host-mount') mount.Source = '/host_mnt/private/foreign';
+  if (reason === 'extra-inspection') inspected.push({ Mounts: [] });
+  expect(() =>
+    mailArtifactFixtureCertificate(
+      inspected,
+      reason === 'release' ? '../foreign' : 'release-aaaaaaaaaaaa-20261016000000',
+    ),
+  ).toThrow('mail_fixture_workspace_unverified');
+});
 it.each(['mail_capture', 'mail_evidence', 'mail_retention'])('requires complete artifact proof for %s', (gate) => {
   expect(verifyMailReleaseEvidence(gate, serialize(fixture()), identity)).toMatchObject({
     status: 'passed',

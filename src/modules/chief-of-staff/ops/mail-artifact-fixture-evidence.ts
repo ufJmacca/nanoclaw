@@ -70,7 +70,12 @@ export function mailArtifactFixtureCertificate(inspection: unknown, releaseId: s
       path.resolve(root.Source) !== root.Source
     )
       throw Error('workspace');
-    return path.join(root.Source, '.cos-plan-state/release-tests', releaseId, 'ca.pem');
+    // Docker Desktop registers this Mac bind with its fixed VM prefix, while
+    // a new CA bind is reported using the original Mac path. Translate only
+    // the observed Users mapping; never treat an unknown VM path as a Mac root.
+    const source = root.Source.startsWith('/host_mnt/Users/') ? root.Source.slice('/host_mnt'.length) : root.Source;
+    if (source === '/host_mnt' || source.startsWith('/host_mnt/')) throw Error('workspace_mapping');
+    return path.join(source, '.cos-plan-state/release-tests', releaseId, 'ca.pem');
   } catch {
     // eslint-disable-next-line preserve-caught-error -- Inspection may contain unrelated private configuration; return only a fixed mapping failure.
     throw Error('mail_fixture_workspace_unverified');
