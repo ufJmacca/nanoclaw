@@ -82,8 +82,8 @@ import { runMigrations } from '../../../db/migrations/index.js';
 import { subscribeMattermostChannelStrict } from '../../../channels/mattermost-subscription.js';
 import { resolveSession, openInboundDb, openOutboundDb } from '../../../session-manager.js';
 import { bindCoordinator } from './bind.js';
-import { initializeTarget, writeAtomic, readTarget } from './target-state.js';
-import { beginMaintenance, confirmQuiescence } from './maintenance.js';
+import { initializeTarget, writeAtomic, readTarget, protectTarget } from './target-state.js';
+import { beginMaintenance, confirmQuiescence, finishMaintenance, activeMaintenanceLease } from './maintenance.js';
 import { contextAdminCommand } from './context-admin.js';
 import { reserveSubscriptionAttempt, type SubscriptionActivation } from '../bridge/model-policy.js';
 const root = '/tmp/nanoclaw-context-admin',
@@ -904,12 +904,27 @@ it('account linking uses the same paused native authority and cannot run after i
   expect(() => run.mock.calls.at(-1)![0].assertAuthority()).toThrow();
   expect(fs.existsSync(state + '/model-activation.json')).toBe(false);
 });
+async function currentMailRelease(protectedTarget = true) {
+  const release = fixtureVaultRelease('G04');
+  await finishMaintenance(state, targetBinding, activeMaintenanceLease(state, targetBinding), async () => true);
+  writeAtomic(state, 'state.json', {
+    ...readTarget(state, targetBinding),
+    releaseId: release.releaseId,
+  });
+  if (protectedTarget) protectTarget(state, targetBinding);
+  const lease = beginMaintenance(state, targetBinding, 'fixture-mail-owner', 'deployment');
+  await confirmQuiescence(state, targetBinding, lease, async () => ({
+    activeCoordinators: 0,
+    activeDatabaseOperations: 0,
+  }));
+  return release;
+}
 it.each(['mail-setup', 'mail-link'] as const)(
   '%s requires the G04 payload, native pause, private membership and current maintenance even while execution is disabled',
   async (command) => {
     fs.rmSync(state + '/codex-auth', { recursive: true });
     const run = vi.mocked(runMailAccountAdmin),
-      release = fixtureVaultRelease('G04');
+      release = await currentMailRelease();
     let retained!: () => Promise<void>;
     run.mockImplementation(async (o) => {
       await o.check();
@@ -939,6 +954,7 @@ it.each(['mail-setup', 'mail-link'] as const)(
 it.each(['membership', 'running', 'unpaused', 'maintenance', 'missing-release', 'old-release'])(
   'refuses Mail linking with %s before invoking its credential owner',
   async (reason) => {
+    const current = await currentMailRelease();
     if (reason === 'membership')
       facts.mockResolvedValueOnce({
         id: 'private',
@@ -968,10 +984,87 @@ it.each(['membership', 'running', 'unpaused', 'maintenance', 'missing-release', 
         dependencies,
         reason === 'missing-release'
           ? undefined
-          : { release: fixtureVaultRelease(reason === 'old-release' ? 'G03' : 'G04'), payloadRoot: '/fixture/payload' },
+          : {
+              release: reason === 'old-release' ? fixtureVaultRelease('G03') : current,
+              payloadRoot: '/fixture/payload',
+            },
       ),
     ).rejects.toThrow();
     expect(runMailAccountAdmin).not.toHaveBeenCalled();
+  },
+);
+it.each(['mail-setup', 'mail-link'] as const)(
+  '%s refuses a retired healthy G04 helper before invoking account administration',
+  async (command) => {
+    const release = await currentMailRelease();
+    const args = {
+      command,
+      scopeId: 'fixture',
+      requestId: randomUUID(),
+      bindingId: randomUUID(),
+      manifestFile: state + '/selection.json',
+    };
+    vi.mocked(runMailAccountAdmin).mockResolvedValue({ status: 'ok' });
+    await expect(
+      contextAdminCommand(args, env, dependencies, {
+        release: { ...release, releaseId: 'release-retired-g04' },
+        payloadRoot: '/fixture/retired-payload',
+      }),
+    ).rejects.toThrow('mail_account_operation_unavailable');
+    expect(runMailAccountAdmin).not.toHaveBeenCalled();
+  },
+);
+it.each(['not-protected', 'no-installed-release'])(
+  'Mail setup refuses %s target state despite a retained healthy G04 payload',
+  async (reason) => {
+    const release = await currentMailRelease(reason !== 'not-protected'),
+      target = readTarget(state, targetBinding);
+    writeAtomic(state, 'state.json', {
+      ...target,
+      ...(reason === 'not-protected' ? { lifecycle: 'implementation_disposable' } : { releaseId: null }),
+    });
+    vi.mocked(runMailAccountAdmin).mockResolvedValue({ status: 'ok' });
+    await expect(
+      contextAdminCommand({ command: 'mail-setup', scopeId: 'fixture', requestId: randomUUID() }, env, dependencies, {
+        release,
+        payloadRoot: '/fixture/payload',
+      }),
+    ).rejects.toThrow('mail_account_operation_unavailable');
+    expect(runMailAccountAdmin).not.toHaveBeenCalled();
+  },
+);
+it.each(['release', 'protection-history'])(
+  'Mail authority closes on a changed current %s after awaited work even while its native lease is retained',
+  async (reason) => {
+    const release = await currentMailRelease();
+    vi.mocked(runMailAccountAdmin).mockImplementation(async (o) => {
+      await o.check();
+      const target = readTarget(state, targetBinding);
+      if (reason === 'release') writeAtomic(state, 'state.json', { ...target, releaseId: 'release-new-current-g04' });
+      else fs.unlinkSync(state + '/protected.json');
+      o.assertAuthority();
+      return { status: 'ok' };
+    });
+    await expect(
+      contextAdminCommand(
+        {
+          command: 'mail-link',
+          scopeId: 'fixture',
+          requestId: randomUUID(),
+          bindingId: randomUUID(),
+          manifestFile: state + '/selection.json',
+        },
+        env,
+        dependencies,
+        {
+          release,
+          payloadRoot: '/fixture/payload',
+        },
+      ),
+    ).rejects.toThrow(
+      reason === 'release' ? 'mail_account_operation_unavailable' : 'target_protection_history_missing',
+    );
+    expect(runMailAccountAdmin).toHaveBeenCalledOnce();
   },
 );
 it.each(['action-setup', 'action-link', 'action-configure', 'action-disable'] as const)(

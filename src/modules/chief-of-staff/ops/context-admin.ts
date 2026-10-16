@@ -380,6 +380,8 @@ export async function contextAdminCommand(
       }
     }
   }
+  const mailReleaseId =
+    isMailAccountCommand(args) && vaultRelease?.release.slice === 'G04' ? vaultRelease.release.releaseId : null;
   const unlock = acquireTargetLock(root);
   let db: Database.Database | undefined, hostLease: HostExecutionLease | undefined;
   let inbound: Database.Database | undefined, outbound: Database.Database | undefined;
@@ -396,7 +398,12 @@ export async function contextAdminCommand(
         lease = hostLease,
         binding = bindingFor(db, args.scopeId);
       const assertAuthority = () => {
-        assertMaintenanceLease(root, target.binding, maintenance);
+        const currentTarget = assertMaintenanceLease(root, target.binding, maintenance);
+        if (
+          isMailAccountCommand(args) &&
+          (!mailReleaseId || currentTarget.lifecycle !== 'protected' || currentTarget.releaseId !== mailReleaseId)
+        )
+          throw Error('mail_account_operation_unavailable');
         assertHostExecutionLease(native, lease);
         if (!nativeBinding(binding)) throw new Error('context_binding_changed');
         const boundary = cosBoundary(getSession(binding.sessionId)!);
