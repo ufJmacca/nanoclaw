@@ -1033,7 +1033,8 @@ try {
         .sort();
     assert.deepEqual(declared(requests[5]), ['clock__curr_time', ...s01Tools, ...mcpResourceTools].sort());
     const expected = ['clock__curr_time', ...cosDynamicTools.map((tool) => tool.name), ...mcpResourceTools].sort();
-    assert.equal(expected.length, 42, 'the refreshed catalogue includes owner inspection');
+    for (const name of ['cos_status', 'cos_mail_search', 'cos_mail_thread_get'])
+      assert.ok(expected.includes(name), 'the refreshed catalogue includes ' + name);
     assert.deepEqual(declared(requests[6]), expected);
     assert.deepEqual(declared(requests.at(-1)), expected);
   }
