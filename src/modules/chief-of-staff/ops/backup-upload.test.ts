@@ -9,6 +9,8 @@ import type { RemoteCheckpoint } from './backup-restic-transfer.js';
 import { streamBackupArchive } from './backup-archive.js';
 import { readBackupArchive } from './backup-archive-reader.js';
 import { makeCredentialEvent } from './backup-credential-event.js';
+import { makeRoutedCredentialRecoveryManifest } from './credential-recovery-routing.js';
+import { makeCredentialCapture, streamCredentialCapture, readCredentialCaptureArchive } from './credential-capture.js';
 const f = vi.hoisted(() => ({
   vault: vi.fn(),
   access: vi.fn(),
@@ -27,6 +29,7 @@ const f = vi.hoisted(() => ({
   restore: vi.fn(),
   credentialSnapshot: vi.fn(),
   captureUpload: vi.fn(),
+  captureRestore: vi.fn(),
   admitted: vi.fn(),
   deps: undefined as undefined | Record<string, unknown>,
   producerFile: '',
@@ -61,6 +64,7 @@ import {
   maintainVaultBackups,
   restoreVaultBackup,
   uploadVaultCredentialCapture,
+  restoreVaultCredentialCapture,
 } from './backup-upload.js';
 const temporary: string[] = [],
   held: number[] = [];
@@ -162,6 +166,7 @@ async function fixture() {
       maintain: f.maintain,
       restore: f.restore,
       uploadCredentialCapture: f.captureUpload,
+      restoreCredentialCapture: f.captureRestore,
     };
   });
   let recorded: RemoteCheckpoint | undefined;
@@ -353,6 +358,172 @@ it('refuses a changed installed capture producer during awaited upload work', as
   );
 });
 const restoreRequest = '14d948fc-4d6d-4e88-851b-257b701b4088';
+async function credentialRestoreFixture() {
+  const s = await fixture(),
+    ownerDigest = digest({ targetDigest: digest(s.roots.targetRoot), filesystemUuid: s.profile.filesystemUuid }),
+    bytes = Buffer.from('PRIVATE_ISOLATED_CREDENTIAL_RECOVERY'),
+    event = makeCredentialEvent(
+      {
+        sourceKind: 'backup_repository',
+        sourceKey: 'd'.repeat(64),
+        generation: 1,
+        phase: 'ready',
+        files: [{ name: 'repository.json', bytes }],
+      },
+      ownerDigest,
+    ),
+    sources = [
+      { event, files: [{ name: 'repository.json', destination: 'backup-credentials/backup-repository.json', bytes }] },
+    ],
+    capture = makeCredentialCapture(
+      ownerDigest,
+      '2026-10-16T00:00:00.000Z',
+      makeRoutedCredentialRecoveryManifest(ownerDigest, sources),
+    ),
+    chunks: Buffer[] = [];
+  await streamCredentialCapture({ ownerDigest, sources, assertCurrent() {} }, capture, async (chunk) => {
+    chunks.push(Buffer.from(chunk));
+  });
+  f.captureRestore.mockImplementation(async (id, owner, sink, admit) => {
+    await admit();
+    const decoded = await readCredentialCaptureArchive(
+      (async function* () {
+        for (const chunk of chunks) yield Buffer.from(chunk);
+      })(),
+      { operationId: id, ownerDigest: owner },
+      () => {},
+      sink,
+    );
+    await admit();
+    return {
+      contract: 'cos-backup-credential-capture-restore/v1',
+      repositoryId: s.profile.repositoryId,
+      ownerDigest: (f.deps! as { ownerDigest: string }).ownerDigest,
+      kind: 'credentials',
+      operationId: id,
+      snapshotId: 'c'.repeat(64),
+      snapshotAt: new Date().toISOString(),
+      verifiedAt: new Date().toISOString(),
+      archiveBytes: decoded.archiveBytes,
+      archiveSha256: decoded.archiveSha256,
+      capture: decoded.capture,
+    };
+  });
+  const invoke = <T>(validate: Parameters<typeof restoreVaultCredentialCapture<T>>[4], current = () => {}) =>
+    restoreVaultCredentialCapture(s.roots, capture.operationId, restoreRequest, current, validate);
+  return { ...s, capture, bytes, invoke };
+}
+it('recovers a complete credential capture only into a fresh encrypted workspace under both actual writers', async () => {
+  const s = await credentialRestoreFixture(),
+    before = await s.queue.pending('state');
+  let escaped: (() => void) | undefined;
+  const result = await s.invoke(async (scope, remote) => {
+    scope.assertPayloadCurrent();
+    escaped = scope.assertCurrent;
+    expect(scope).not.toHaveProperty('sink');
+    expect(Object.isFrozen(scope)).toBe(true);
+    const name = 'credential-sources/' + remote.capture.set.origins[0].source + '/repository.json';
+    expect(scope.withFileBytes(name, 1024, (bytes) => bytes.toString())).toBe(s.bytes.toString());
+    expect(fs.existsSync(s.areas['backup-credentials'] + '/backup-repository.json')).toBe(true);
+    await expect(s.queue.capture('state', restoreRequest, async () => {}, 65536)).rejects.toThrow(
+      'backup_queue_unavailable',
+    );
+    await expect(maintainVaultBackups(s.roots, () => {})).rejects.toThrow('backup_maintenance_unavailable');
+    return { credentialsActivated: false };
+  });
+  expect(result.validation).toEqual({ credentialsActivated: false });
+  expect(result.remote.capture).toEqual(s.capture);
+  expect(result.remote).not.toHaveProperty('receipt');
+  expect(f.restore).not.toHaveBeenCalled();
+  expect(f.upload).not.toHaveBeenCalled();
+  expect(f.credentialSnapshot).not.toHaveBeenCalled();
+  expect(await s.queue.pending('state')).toEqual(before);
+  expect(fs.readdirSync(s.areas.staging)).toEqual(['backup-queue']);
+  expect(() => escaped!()).toThrow();
+});
+it.each(['caller', 'validator', 'request', 'operation', 'capacity'])(
+  'denies complete credential recovery before readback for invalid %s',
+  async (reason) => {
+    const s = await credentialRestoreFixture(),
+      validate = vi.fn(async () => {});
+    if (reason === 'capacity')
+      f.capacity.mockResolvedValue({
+        staging: 4096,
+        cache: 96 * 1024 ** 2,
+        credentials: 4096,
+        repository: 4096,
+        nasFree: 2 ** 42,
+        vaultFree: 1024 ** 3,
+      });
+    await expect(
+      restoreVaultCredentialCapture(
+        s.roots,
+        reason === 'operation' ? '../foreign' : s.capture.operationId,
+        reason === 'request' ? '../foreign' : restoreRequest,
+        reason === 'caller' ? (undefined as never) : () => {},
+        reason === 'validator' ? (undefined as never) : validate,
+      ),
+    ).rejects.toThrow(/^backup_credential_restore_check_unavailable$/);
+    expect(validate).not.toHaveBeenCalled();
+    expect(f.captureRestore).not.toHaveBeenCalled();
+    expect(fs.readdirSync(s.areas.staging)).toEqual(['backup-queue']);
+  },
+);
+it.each(['repository', 'owner', 'capture', 'bytes', 'operation'])(
+  'rejects changed complete credential %s evidence before the validator',
+  async (reason) => {
+    const s = await credentialRestoreFixture(),
+      read = f.captureRestore.getMockImplementation()!,
+      validate = vi.fn(async () => {});
+    f.captureRestore.mockImplementation(async (...args) => {
+      const remote = await read(...args);
+      if (reason === 'repository') remote.repositoryId = 'e'.repeat(64);
+      if (reason === 'owner') remote.ownerDigest = 'e'.repeat(64);
+      if (reason === 'capture') remote.capture.ownerDigest = 'e'.repeat(64);
+      if (reason === 'bytes') remote.archiveBytes++;
+      if (reason === 'operation') remote.operationId = restoreRequest;
+      return remote;
+    });
+    await expect(s.invoke(validate)).rejects.toThrow(/^backup_credential_restore_check_unavailable$/);
+    expect(validate).not.toHaveBeenCalled();
+  },
+);
+it.each(['payload', 'evidence', 'caller', 'validator', 'capacity'])(
+  'rechecks complete credential %s after awaited validation and preserves original pending work',
+  async (reason) => {
+    const s = await credentialRestoreFixture(),
+      before = await s.queue.pending('state'),
+      guard = vi.fn();
+    await expect(
+      s.invoke(async (scope, remote) => {
+        await Promise.resolve();
+        if (reason === 'payload')
+          fs.writeFileSync(
+            scope.directory + '/credential-sources/' + remote.capture.set.origins[0].source + '/repository.json',
+            'CHANGED',
+          );
+        if (reason === 'evidence') remote.capture.cycleAt = '2026-10-16T01:00:00.000Z';
+        if (reason === 'caller')
+          guard.mockImplementation(() => {
+            throw Error('PRIVATE_WITHDRAWN');
+          });
+        if (reason === 'validator') throw Error('PRIVATE_VALIDATOR');
+        if (reason === 'capacity')
+          f.capacity.mockResolvedValue({
+            staging: 4096,
+            cache: 129 * 1024 ** 2,
+            credentials: 4096,
+            repository: 4096,
+            nasFree: 2 ** 42,
+            vaultFree: 1024 ** 3,
+          });
+      }, guard),
+    ).rejects.toThrow(/^backup_credential_restore_check_unavailable$/);
+    expect(await s.queue.pending('state')).toEqual(before);
+    if (['payload', 'caller'].includes(reason))
+      expect(fs.readdirSync(s.areas.staging)).toContain('.cos-restore-' + restoreRequest);
+  },
+);
 it('recovers through the installed gates and actual shared writers, then validates only the new isolated files', async () => {
   const s = await fixture(),
     before = await s.queue.pending('state'),

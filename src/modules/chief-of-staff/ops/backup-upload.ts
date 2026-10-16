@@ -18,6 +18,7 @@ import {
   type RemoteCheckpoint,
   type BackupMaintenanceResult,
   type BackupRemoteRestore,
+  type BackupCredentialCaptureRestore,
 } from './backup-restic-transfer.js';
 import type { BackupRestoreValidationScope } from './backup-restore-workspace.js';
 import {
@@ -27,7 +28,7 @@ import {
 import { withVaultCredentialSnapshot } from './credential-vault-snapshot.js';
 import { admittedGeneration } from './maintenance.js';
 import { makeRoutedCredentialRecoveryManifest } from './credential-recovery-routing.js';
-import { makeCredentialCapture, streamCredentialCapture } from './credential-capture.js';
+import { makeCredentialCapture, streamCredentialCapture, credentialCaptureArchiveBytes } from './credential-capture.js';
 const pinned = (fd: number) => '/proc/self/fd/' + fd;
 type RepositoryScope = {
   queue: ReturnType<typeof createVaultBackupQueue>;
@@ -573,5 +574,98 @@ export async function restoreVaultBackup<T>(
   } catch {
     // eslint-disable-next-line preserve-caught-error -- Recovered payload, credential, repository and validator diagnostics stay private.
     throw Error('backup_restore_check_unavailable');
+  }
+}
+
+/** Read a complete credential capture into a new isolated encrypted workspace.
+ * It remains historical evidence: routes never become live destination paths,
+ * and no queue receipt, credential activation or restored lease is invented. */
+export async function restoreVaultCredentialCapture<T>(
+  roots: CalendarStorageRoots,
+  operationId: string,
+  requestId: string,
+  assertCaller: () => void,
+  validate: (scope: BackupRestoreValidationScope, remote: BackupCredentialCaptureRestore) => Promise<T>,
+): Promise<{ remote: BackupCredentialCaptureRestore; validation: T }> {
+  try {
+    const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
+    if (
+      typeof operationId !== 'string' ||
+      !uuid.test(operationId) ||
+      typeof requestId !== 'string' ||
+      !uuid.test(requestId) ||
+      typeof assertCaller !== 'function' ||
+      typeof validate !== 'function'
+    )
+      throw Error('restore_scope_required');
+    return await withVaultBackupRepository(roots, assertCaller, async (scope) => {
+      const transportReserve = 64 * 1024 ** 2;
+      const admit = async () => {
+        scope.assertCurrent();
+        const usage = await readBackupCapacity(roots, scope.repository);
+        scope.assertCurrent();
+        admitBackupCapacity(usage, { kind: 'credentials', bytes: 1 }, 'remote');
+        if (
+          usage.cache + transportReserve > BACKUP_LIMITS.cache ||
+          usage.vaultFree < transportReserve + BACKUP_LIMITS.vaultReserve
+        )
+          throw Error('backup_capacity_unavailable');
+      };
+      await admit();
+      return await scope.queue.withRestoreWorkspace(
+        requestId,
+        scope.assertCurrent,
+        async (workspace) => {
+          const transfer = scope.transfer(async () => {
+            throw Error('restore_cannot_upload');
+          });
+          const remote = await transfer.restoreCredentialCapture(
+            operationId,
+            scope.queueOwnerDigest,
+            workspace.sink,
+            admit,
+          );
+          workspace.assertPayloadCurrent();
+          if (
+            remote.contract !== 'cos-backup-credential-capture-restore/v1' ||
+            remote.repositoryId !== scope.repositoryId ||
+            remote.ownerDigest !== scope.ownerDigest ||
+            remote.kind !== 'credentials' ||
+            remote.operationId !== operationId ||
+            remote.capture.ownerDigest !== scope.queueOwnerDigest ||
+            remote.capture.operationId !== operationId ||
+            remote.archiveBytes !== credentialCaptureArchiveBytes(remote.capture, scope.queueOwnerDigest) ||
+            !/^[a-f0-9]{64}$/.test(remote.archiveSha256) ||
+            !/^[a-f0-9]{64}$/.test(remote.snapshotId) ||
+            !Number.isFinite(Date.parse(remote.snapshotAt)) ||
+            !Number.isFinite(Date.parse(remote.verifiedAt))
+          )
+            throw Error('backup_restore_identity_changed');
+          await admit();
+          workspace.assertPayloadCurrent();
+          const identity = digest(remote);
+          const validation = await validate(
+            Object.freeze({
+              directory: workspace.directory,
+              assertCurrent: workspace.assertCurrent,
+              assertPayloadCurrent: workspace.assertPayloadCurrent,
+              ensureDirectory: workspace.ensureDirectory,
+              inspectFile: workspace.inspectFile,
+              withFileBytes: workspace.withFileBytes,
+            }),
+            remote,
+          );
+          workspace.assertPayloadCurrent();
+          if (digest(remote) !== identity) throw Error('backup_restore_evidence_changed');
+          await admit();
+          workspace.assertPayloadCurrent();
+          return { remote, validation };
+        },
+        transportReserve,
+      );
+    });
+  } catch {
+    // eslint-disable-next-line preserve-caught-error -- Credential payloads, repository and isolated validator diagnostics stay private.
+    throw Error('backup_credential_restore_check_unavailable');
   }
 }
