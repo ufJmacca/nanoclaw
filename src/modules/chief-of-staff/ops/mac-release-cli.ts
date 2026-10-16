@@ -46,8 +46,9 @@ export function releaseCheckImageIds(
   images: ReadonlyArray<Pick<ReleaseManifest['images'][number], 'role' | 'id'>>,
   name: string,
 ): string[] {
-  const hostOnly = name.startsWith('vault_') || name.startsWith('backup_'),
-    allImages = name.includes('image') || name === 'protected_state';
+  const hostOnly =
+      name.startsWith('vault_') || name.startsWith('backup_') || (name.startsWith('mail_') && name !== 'mail_evidence'),
+    allImages = name.includes('image') || name === 'protected_state' || name === 'mail_evidence';
   if (!hostOnly && !allImages) return [];
   if (
     images.length !== BUILD_TARGETS.length ||

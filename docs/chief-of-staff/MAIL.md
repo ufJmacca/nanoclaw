@@ -2,6 +2,8 @@
 
 G04 adds a host-only Gmail reader for the selected owner's Inbox and Sent mail. Its separate Desktop OAuth client uses only `gmail.readonly`. Calendar credentials and grants do not provide mail authority. Owner account selection, Google consent and model data-control verification remain prerequisites for live use.
 
+G04 release manifests require exact PostgreSQL schema 19 with its sealed mail migration, native schema 22 and all 24 required checks. The five mail checks cover credentials, capture, evidence, retention and recovery in addition to every inherited vault and backup gate. Evidence checks bind the complete host/worker image set; the other mail checks bind the immutable host. A schema 18 release is not a compatible rollback for schema 19. This manifest contract does not itself produce final-image evidence or enable candidate creation before the remaining build and delivery support is complete.
+
 The implementation is in progress. The collector, store, evidence publication, read adapters, encrypted profile, host scheduler and disabled-service maintenance have fixture coverage; owner setup and G04 deployment/recovery acceptance remain pending. The accepted G03 installation does not yet expose these mail tools.
 
 ## Encrypted profile

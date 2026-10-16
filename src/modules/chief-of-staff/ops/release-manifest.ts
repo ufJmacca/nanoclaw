@@ -16,6 +16,7 @@ import { MANDATE_CHECKSUM } from '../store/mandate-schema.js';
 import { ACTION_CHECKSUM } from '../store/action-schema.js';
 import { STRATEGY_CHECKSUM } from '../store/strategy-schema.js';
 import { STRATEGY_CHAIN_CHECKSUM } from '../store/strategy-chain-schema.js';
+import { MAIL_CHECKSUM } from '../store/mail-schema.js';
 import { digest } from '../domain/contracts.js';
 import { vaultRootArtifactSeal, type VaultRootArtifactSeal } from './vault-root-artifact.js';
 import { validateResticArtifactSeal, type RESTIC_ARTIFACT } from './restic-artifact.js';
@@ -45,7 +46,17 @@ export const BACKUP_RELEASE_CHECKS = [
   'backup_recovery',
   'backup_units',
 ] as const;
+/** New immutable G04 evidence supplements every inherited vault/backup gate. */
+export const MAIL_RELEASE_CHECKS = [
+  'mail_credentials',
+  'mail_capture',
+  'mail_evidence',
+  'mail_retention',
+  'mail_recovery',
+] as const;
 export function requiredReleaseChecks(slice: ReleaseManifest['slice']): readonly string[] {
+  if (slice === 'G04')
+    return [...REQUIRED_RELEASE_CHECKS, ...VAULT_RELEASE_CHECKS, ...BACKUP_RELEASE_CHECKS, ...MAIL_RELEASE_CHECKS];
   if (slice === 'G02' || slice === 'G03')
     return [...REQUIRED_RELEASE_CHECKS, ...VAULT_RELEASE_CHECKS, ...BACKUP_RELEASE_CHECKS];
   return slice === 'G01' ? [...REQUIRED_RELEASE_CHECKS, ...VAULT_RELEASE_CHECKS] : REQUIRED_RELEASE_CHECKS;
@@ -103,7 +114,7 @@ export function validateReleaseManifest(value: unknown): ReleaseManifest {
     !object(value) ||
     value.contract !== 'cos-release/v1' ||
     typeof value.slice !== 'string' ||
-    !['S01', 'S02', 'S03', 'S04', 'S05', 'S06', 'S07', 'S08', 'S09', 'S10', 'S11', 'G01', 'G02', 'G03'].includes(
+    !['S01', 'S02', 'S03', 'S04', 'S05', 'S06', 'S07', 'S08', 'S09', 'S10', 'S11', 'G01', 'G02', 'G03', 'G04'].includes(
       value.slice,
     ) ||
     value.platform !== 'linux/arm64' ||
@@ -145,7 +156,9 @@ export function validateReleaseManifest(value: unknown): ReleaseManifest {
                       ? 15
                       : value.slice === 'S09'
                         ? 16
-                        : 18;
+                        : value.slice === 'G04'
+                          ? 19
+                          : 18;
   const checksums = [
     INITIAL_CHECKSUM,
     KNOWLEDGE_CHECKSUM,
@@ -165,6 +178,7 @@ export function validateReleaseManifest(value: unknown): ReleaseManifest {
     ACTION_CHECKSUM,
     STRATEGY_CHECKSUM,
     STRATEGY_CHAIN_CHECKSUM,
+    MAIL_CHECKSUM,
   ];
   if (
     !object(postgres) ||
@@ -209,7 +223,7 @@ export function validateReleaseManifest(value: unknown): ReleaseManifest {
     if (image.role === 'host') hosts++;
   }
   if (hosts !== 1 || !object(value.checks)) return reject();
-  if (value.slice === 'G02' || value.slice === 'G03') {
+  if (value.slice === 'G02' || value.slice === 'G03' || value.slice === 'G04') {
     try {
       validateResticArtifactSeal(value.backupArtifact);
       // eslint-disable-next-line no-catch-all/no-catch-all -- Invalid pinned executable identity denies release admission.
@@ -217,7 +231,7 @@ export function validateReleaseManifest(value: unknown): ReleaseManifest {
       return reject();
     }
   }
-  if (value.slice === 'G01' || value.slice === 'G02' || value.slice === 'G03') {
+  if (value.slice === 'G01' || value.slice === 'G02' || value.slice === 'G03' || value.slice === 'G04') {
     try {
       const artifact = value.vaultArtifact;
       if (
@@ -254,12 +268,14 @@ export function validateReleaseManifest(value: unknown): ReleaseManifest {
     )
       return reject();
     if (
-      (name.startsWith('vault_') || name.startsWith('backup_')) &&
+      (name.startsWith('vault_') ||
+        name.startsWith('backup_') ||
+        (name.startsWith('mail_') && name !== 'mail_evidence')) &&
       (check.imageIds.length !== 1 || check.imageIds[0] !== host?.id)
     )
       return reject();
     if (
-      name === 'protected_state' &&
+      (name === 'protected_state' || name === 'mail_evidence') &&
       (check.imageIds.length !== images.size || new Set(check.imageIds).size !== images.size)
     )
       return reject();

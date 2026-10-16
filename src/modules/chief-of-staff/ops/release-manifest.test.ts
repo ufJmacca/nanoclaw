@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   REQUIRED_RELEASE_CHECKS,
   requiredReleaseChecks,
+  MAIL_RELEASE_CHECKS,
   validateReleaseManifest,
   supportsReleaseSchema,
   type ReleaseManifest,
@@ -11,6 +12,7 @@ import { digest } from '../domain/contracts.js';
 import type { VaultRootArtifactSeal } from './vault-root-artifact.js';
 import { RESTIC_ARTIFACT } from './restic-artifact.js';
 import { recoveryReleaseForManifest } from './recovery-manifest.js';
+import { MAIL_CHECKSUM } from '../store/mail-schema.js';
 const sha = 'a'.repeat(40),
   tree = 'b'.repeat(40),
   image = 'sha256:' + 'c'.repeat(64),
@@ -71,6 +73,74 @@ function vaultManifest() {
     checks: { ...manifest().checks, ...checks },
   };
 }
+const mailChecks = ['mail_credentials', 'mail_capture', 'mail_evidence', 'mail_retention', 'mail_recovery'];
+function mailManifest() {
+  const value = backupManifest('G03');
+  value.slice = 'G04';
+  value.postgres = { minimum: 19, maximum: 19 };
+  value.migrations = MIGRATIONS.slice(0, 19).map(({ version, checksum }) => ({ version, checksum }));
+  value.previousReleaseIds = ['release-reviewed-g03'];
+  for (const name of mailChecks)
+    value.checks[name] = {
+      status: 'passed',
+      at: '2026-10-16T00:00:00Z',
+      sourceCommit: sha,
+      imageIds: name === 'mail_evidence' ? [image, agent] : [image],
+    };
+  return value;
+}
+it('G04 admits only exact schema19 with sealed mail migration and every inherited and mail image gate', () => {
+  const value = mailManifest(),
+    checked = validateReleaseManifest(value);
+  expect(MAIL_RELEASE_CHECKS).toEqual(mailChecks);
+  expect(requiredReleaseChecks(checked.slice)).toEqual([...requiredReleaseChecks('G03'), ...mailChecks]);
+  expect(checked.migrations[18]).toEqual({ version: 19, checksum: MAIL_CHECKSUM });
+  expect(supportsReleaseSchema(checked, 19, 22)).toBe(true);
+  expect(supportsReleaseSchema(checked, 18, 22)).toBe(false);
+  expect(supportsReleaseSchema(checked, 19, 21)).toBe(false);
+  expect(recoveryReleaseForManifest(checked).software.schemaVersion).toBe(19);
+  expect(supportsReleaseSchema(validateReleaseManifest(backupManifest('G03')), 19, 22)).toBe(false);
+});
+it.each(mailChecks)('G04 denies missing, failed, wrong-source or wrongly bound %s evidence', (name) => {
+  const invalidImages =
+    name === 'mail_evidence'
+      ? [[], [image], [agent], [image, image], [agent, agent]]
+      : [[], [agent], [image, image], [image, agent]];
+  for (const patch of [
+    { status: 'failed' },
+    { sourceCommit: '0'.repeat(40) },
+    { at: 'invalid' },
+    ...invalidImages.map((imageIds) => ({ imageIds })),
+  ]) {
+    const value = mailManifest();
+    Object.assign(value.checks[name], patch);
+    expect(() => validateReleaseManifest(value)).toThrow('release_not_transferable');
+  }
+  const value = mailManifest();
+  delete value.checks[name];
+  expect(() => validateReleaseManifest(value)).toThrow('release_not_transferable');
+});
+it.each([
+  'schema18',
+  'mixed-schema',
+  'missing-migration',
+  'wrong-checksum',
+  'missing-vault',
+  'missing-backup',
+  'missing-inherited-check',
+  'future-slice',
+] as const)('G04 refuses %s without widening original release or rollback authority', (problem) => {
+  const value = mailManifest();
+  if (problem === 'schema18') value.postgres = { minimum: 18, maximum: 18 };
+  if (problem === 'mixed-schema') value.postgres.minimum = 18;
+  if (problem === 'missing-migration') value.migrations.pop();
+  if (problem === 'wrong-checksum') value.migrations[18].checksum = '0'.repeat(64);
+  if (problem === 'missing-vault') Object.assign(value, { vaultArtifact: undefined });
+  if (problem === 'missing-backup') Object.assign(value, { backupArtifact: undefined });
+  if (problem === 'missing-inherited-check') delete value.checks.backup_recovery;
+  if (problem === 'future-slice') value.slice = 'G05';
+  expect(() => validateReleaseManifest(value)).toThrow('release_not_transferable');
+});
 it('G01 requires its sealed helper and additional immutable vault gates while preserving schema18', () => {
   const value = vaultManifest();
   expect(validateReleaseManifest(value)).toEqual(value);
