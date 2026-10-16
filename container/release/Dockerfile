@@ -101,7 +101,10 @@ COPY container/CLAUDE.md /app/CLAUDE.md
 COPY src/deep-research-workflow /app/deep-research-workflow
 COPY build-info.json /app/build-info.json
 COPY container/entrypoint.sh /app/entrypoint.sh
-RUN chmod +x /app/entrypoint.sh && mkdir -p /workspace/agent && chown -R node:node /workspace && chmod 1777 /home/node
+# Import the baked runtime dependencies before publishing the worker layer.
+# This catches damaged dependency files even when the package installer exited successfully.
+RUN chmod +x /app/entrypoint.sh && mkdir -p /workspace/agent && chown -R node:node /workspace && chmod 1777 /home/node && \
+    cd /app && bun --eval 'await import("@modelcontextprotocol/sdk/server/mcp.js"); await import("@modelcontextprotocol/sdk/client/index.js"); await import("@anthropic-ai/claude-agent-sdk"); await import("cron-parser"); await import("zod")'
 USER node
 WORKDIR /workspace/agent
 ENTRYPOINT ["/usr/bin/tini", "--", "/app/entrypoint.sh"]
