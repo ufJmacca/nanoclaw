@@ -82,8 +82,10 @@ if (releaseSlice === 'G04') {
   const priorInstaller = createBackupJobInstaller(settings, prior, controls);
   await priorInstaller.install();
   await priorInstaller.activate();
-  assert((await controls.inspectManager()).timersActive);
-  assert(!(await controls.inspectManager()).timersRunning);
+  const priorManager = await controls.inspectManager();
+  assert(priorManager.timersActive);
+  assert(priorManager.timersRunning);
+  assert(priorManager.jobsIdle);
   assert(
     fs
       .readFileSync(units + '/nanoclaw-cos-backup-upload.service', 'utf8')
@@ -95,6 +97,7 @@ const first = await installer.install();
 assert.equal(first.status, 'backup_jobs_enabled');
 assert((await controls.inspectManager()).definitionsLoaded);
 assert(!(await controls.inspectManager()).timersRunning);
+assert((await controls.inspectManager()).jobsIdle);
 if (releaseSlice === 'G04') {
   assert(
     fs
