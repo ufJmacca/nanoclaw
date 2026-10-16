@@ -7,7 +7,7 @@ const images = [
   { role: 'agent' as const, id: 'sha256:' + 'b'.repeat(64) },
   { role: 'agent' as const, id: 'sha256:' + 'c'.repeat(64) },
 ];
-it('admits G02 and G03 candidate syntax while refusing historical and future release creation', async () => {
+it('admits G02 through G04 candidate syntax while refusing historical and unimplemented future release creation', async () => {
   const args = (slice: string) => [
     'init',
     'release-' + '1'.repeat(12) + '-20261011000000',
@@ -17,7 +17,8 @@ it('admits G02 and G03 candidate syntax while refusing historical and future rel
   ];
   await expect(macReleaseCommand(args('G02'))).rejects.toThrow('invalid_candidate_source');
   await expect(macReleaseCommand(args('G03'))).rejects.toThrow('invalid_candidate_source');
-  for (const slice of ['S10', 'G04', 'G07'])
+  await expect(macReleaseCommand(args('G04'))).rejects.toThrow('invalid_candidate_source');
+  for (const slice of ['S10', 'G05', 'G06', 'G07'])
     await expect(macReleaseCommand(args(slice))).rejects.toThrow('current_release_slice_required');
 });
 it.each([

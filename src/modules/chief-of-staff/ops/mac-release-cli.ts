@@ -106,7 +106,7 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
   if (operation === 'init' && values.length === 3) {
     const [commit, fetchRef, slice] = values;
     // Only the current implemented slice may create a new release; historical manifests remain readable.
-    if (!['S11', 'G01', 'G02', 'G03'].includes(slice) || Number(SCHEMA_VERSION) !== MIGRATIONS.length)
+    if (!['S11', 'G01', 'G02', 'G03', 'G04'].includes(slice) || Number(SCHEMA_VERSION) !== MIGRATIONS.length)
       throw new Error('current_release_slice_required');
     if (!/^[a-f0-9]{40}$/.test(commit) || !/^refs\/heads\/[a-zA-Z0-9_./-]+$/.test(fetchRef) || fetchRef.includes('..'))
       throw new Error('invalid_candidate_source');
@@ -140,7 +140,7 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
       images: [],
       checks: {},
       targetDigest: digest(target),
-      ...(['G02', 'G03'].includes(slice)
+      ...(['G02', 'G03', 'G04'].includes(slice)
         ? {
             backupArtifact: packageResticReleaseArtifact({
               binary: path.resolve('.cos-plan-state/g02-restic-0.19.1/restic'),
@@ -161,13 +161,13 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
   }
   const { root, plan } = checkedPlan(id);
   if (operation === 'backup-input' && !values.length) {
-    if (!['G02', 'G03'].includes(plan.slice)) throw Error('backup_release_required');
+    if (!['G02', 'G03', 'G04'].includes(plan.slice)) throw Error('backup_release_required');
     validateResticArtifactSeal(plan.backupArtifact);
     verifyResticReleaseArtifactInput(path.join(root, 'backup-artifact-input'));
     return;
   }
   if (operation === 'backup-job-fixture' && !values.length) {
-    if (!['G02', 'G03'].includes(plan.slice)) throw Error('backup_release_required');
+    if (!['G02', 'G03', 'G04'].includes(plan.slice)) throw Error('backup_release_required');
     const [hostImage] = releaseCheckImageIds(plan.images, 'backup_units');
     const image = verifyBackupJobFixtureImage(
       readPrivate(path.join(root, 'backup-jobs-fixture-inspect.json')),
@@ -179,7 +179,7 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
     return image;
   }
   if (operation === 'backup-smb-fixture' && !values.length) {
-    if (!['G02', 'G03'].includes(plan.slice)) throw Error('backup_release_required');
+    if (!['G02', 'G03', 'G04'].includes(plan.slice)) throw Error('backup_release_required');
     const [hostImage] = releaseCheckImageIds(plan.images, 'backup_mount');
     const images = verifyBackupSmbFixtureImages(
       readPrivate(path.join(root, 'backup-smb-server-inspect.json')),
@@ -323,7 +323,7 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
       !/^[a-zA-Z0-9_.-]+$/.test(volume)
     )
       throw new Error('invalid_fixture_configuration');
-    if (['G02', 'G03'].includes(plan.slice)) {
+    if (['G02', 'G03', 'G04'].includes(plan.slice)) {
       validateResticArtifactSeal(plan.backupArtifact);
       verifyResticReleaseArtifactInput(path.join(root, 'backup-artifact-input'));
     }
@@ -347,12 +347,12 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
           COS_FIXTURE_HOST_ROOT: hostRoot,
           COS_FIXTURE_IMAGE: image,
           COS_FIXTURE_RUNNER_VOLUME: volume,
-          ...(['G02', 'G03'].includes(plan.slice)
+          ...(['G02', 'G03', 'G04'].includes(plan.slice)
             ? { COS_BACKUP_FIXTURE_BINARY: path.join(root, 'backup-artifact-input/restic') }
             : {}),
         },
         stdio: 'inherit',
-        timeout: ['G02', 'G03'].includes(plan.slice)
+        timeout: ['G02', 'G03', 'G04'].includes(plan.slice)
           ? 1260000
           : ['S10', 'S11', 'G01'].includes(plan.slice)
             ? 960000
