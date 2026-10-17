@@ -128,7 +128,11 @@ export async function nativeFixtureSmoke(options: { root: string; hostRoot: stri
     launch.args = launch.args.map((arg) =>
       arg.startsWith('type=bind,') ? arg.replace('src=' + options.root + '/', 'src=' + options.hostRoot + '/') : arg,
     );
-    client = new McpFixture(options.root, session, options.hostRoot, options.image, '', launch);
+    // Newly imported Pi images can need longer to mount and start. Only the
+    // initialization handshake gets this budget; subsequent RPC stays bounded.
+    client = new McpFixture(options.root, session, options.hostRoot, options.image, '', launch, {
+      startupTimeoutMs: 90000,
+    });
     await client.start();
     const tools = await client.request('tools/list', {});
     assert.deepEqual(tools.tools.map((tool: { name: string }) => tool.name).sort(), [

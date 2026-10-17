@@ -39,6 +39,18 @@ it.each([
   [new Error('target_host_ownership_mismatch'), 'target_host_ownership_mismatch'],
   [Object.assign(new Error('private path'), { code: 'EACCES' }), 'EACCES'],
   [Object.assign(new Error('private expected value'), { name: 'AssertionError' }), 'fixture_assertion_failed'],
+  [
+    Object.assign(new Error('private startup diagnostics'), { code: 'fixture_mcp_startup_deadline' }),
+    'fixture_mcp_startup_deadline',
+  ],
+  [
+    Object.assign(new Error('private RPC diagnostics'), { code: 'fixture_mcp_request_deadline' }),
+    'fixture_mcp_request_deadline',
+  ],
+  [
+    Object.assign(new Error('private worker diagnostics'), { code: 'fixture_mcp_transport_unavailable' }),
+    'fixture_mcp_transport_unavailable',
+  ],
 ])('records only admitted failure classifications', async (error, code) => {
   const write = vi.fn();
   await expect(
