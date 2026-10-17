@@ -7,7 +7,7 @@ import { KnowledgeArtifacts } from '../../modules/chief-of-staff/knowledge/artif
 import pg from 'pg';
 import type { CosBinding } from '../../cos-boundary.js';
 import { fixtureDatabaseConfig, connectFixtureDatabase } from './fixture-database.js';
-import { BoundedDatabase } from '../../modules/chief-of-staff/store/client.js';
+import { createNativeFixtureDatabase } from './native-fixture-database.js';
 import type { PriorityStore } from '../../modules/chief-of-staff/store/priorities.js';
 import { connectionFault } from './connection-fault.js';
 import { CalendarStore } from '../../modules/chief-of-staff/calendar/store.js';
@@ -38,6 +38,7 @@ async function start(input: {
   knowledgeRoot?: string;
   calendar?: boolean;
   mail?: boolean;
+  strategy?: true;
   brief?: { clock: string; events: unknown[] };
   mandate?: { events: unknown[] };
   actions?: ActionFixtureConfiguration;
@@ -77,9 +78,7 @@ async function start(input: {
       !input.knowledgeRoot.startsWith(path.join(os.tmpdir(), 'cos-knowledge-demo-')))
   )
     throw new Error('fixture_knowledge_root_required');
-  // Real Docker ownership probes can occupy this fixture event loop for over 600 ms.
-  // Keep outage detection bounded without changing production database deadlines.
-  const database = new BoundedDatabase(new pg.Pool(relay.config), input.mission ? 3000 : 600);
+  const database = createNativeFixtureDatabase(new pg.Pool(relay.config), input);
   const databaseFailures: Array<{ code: string; frame: string; elapsed: number }> = [];
   if (input.mission) {
     const run = database.run.bind(database);
