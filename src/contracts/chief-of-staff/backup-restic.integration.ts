@@ -6,7 +6,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import { after, test } from 'node:test';
 import type pg from 'pg';
 import Database from 'better-sqlite3';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, createCipheriv, randomUUID } from 'node:crypto';
 import { verifyRecoveredTargetVaultState } from '../../modules/chief-of-staff/ops/backup-recovered-state.js';
 import { restoreRecoveredCoordinatedTestScope } from '../../modules/chief-of-staff/ops/coordinated-backup.js';
 import { withPinnedBackupTestRestoreReservation } from '../../modules/chief-of-staff/ops/backup-test-restore-reservation.js';
@@ -47,6 +47,17 @@ import {
 import { MIGRATIONS, SCHEMA_VERSION } from '../../modules/chief-of-staff/store/migrations.js';
 import { digest } from '../../modules/chief-of-staff/domain/contracts.js';
 import { BackupQueue } from '../../modules/chief-of-staff/ops/backup-queue.js';
+import { makeCredentialEvent } from '../../modules/chief-of-staff/ops/backup-credential-event.js';
+import {
+  makeCredentialCapture,
+  streamCredentialCapture,
+  type CredentialCapture,
+} from '../../modules/chief-of-staff/ops/credential-capture.js';
+import {
+  makeRoutedCredentialRecoveryManifest,
+  routedCredentialRecoveryFiles,
+  type RoutedCredentialInventory,
+} from '../../modules/chief-of-staff/ops/credential-recovery-routing.js';
 import { BackupResticTransfer } from '../../modules/chief-of-staff/ops/backup-restic-transfer.js';
 import { BackupResticInitializer } from '../../modules/chief-of-staff/ops/backup-restic-initialize.js';
 import { initializePinnedBackupRepository } from '../../modules/chief-of-staff/ops/backup-repository-initialize.js';
@@ -148,6 +159,7 @@ const withTransfer = async <T>(
   producer = transferProducer,
   timeoutMs = 900000,
   guard: () => void = () => {},
+  credentialProducer?: (capture: CredentialCapture) => string[],
 ) =>
   withVerifiedResticBinary(binary, async (executable) =>
     transferWriter.exclusive(async (writer) => {
@@ -176,6 +188,7 @@ const withTransfer = async <T>(
           },
         },
         producer: (_kind, operationId) => producer(operationId),
+        credentialProducer,
         admitUpload,
         timeoutMs,
       });
@@ -192,6 +205,7 @@ const maintenanceOwner = 'a'.repeat(64),
   maintenanceLock = path.join(root, 'maintenance-lock');
 fs.mkdirSync(maintenanceLock, { mode: 0o700 });
 const maintenanceWriter = new BackupRepositoryWriter(maintenanceOwner, async (operation) => operation(maintenanceLock));
+let maintenanceCredentialInventory: RoutedCredentialInventory | undefined;
 /** Real transport and kernel writer, synthetic repository credentials/scopes only. */
 const maintainRepository = (admit: () => Promise<void> = async () => {}, expectedId = repositoryId) =>
   withVerifiedResticBinary(binary, async (executable) =>
@@ -201,6 +215,10 @@ const maintainRepository = (admit: () => Promise<void> = async () => {}, expecte
         writer,
         repositoryId: expectedId,
         ownerDigest: maintenanceOwner,
+        credentialInventory: async () => {
+          assert(maintenanceCredentialInventory);
+          return { ownerDigest: maintenanceOwner, sources: maintenanceCredentialInventory };
+        },
         password: {
           fd: passwordFd,
           assertCurrent() {
@@ -789,8 +807,245 @@ test('guarded transfer authenticates read-back and reconciles the same operation
   const snapshots = JSON.parse(run(['snapshots', '--tag', 'cos-operation=' + transferOperation])) as unknown[];
   assert.equal(snapshots.length, 1);
   assert.equal((await transferQueue.pending('credentials'))[0].state, 'pending');
+  const body = Buffer.from(canary),
+    event = makeCredentialEvent(
+      {
+        sourceKind: 'backup_repository',
+        sourceKey: '5'.repeat(64),
+        generation: 1,
+        phase: 'ready',
+        files: [{ name: 'repository.json', bytes: body }],
+      },
+      'a'.repeat(64),
+    );
+  const sources = [
+      {
+        event,
+        files: [{ name: 'repository.json', destination: 'backup-credentials/backup-repository.json', bytes: body }],
+      },
+    ],
+    capture = makeCredentialCapture(
+      'a'.repeat(64),
+      '2026-10-16T00:00:00.000Z',
+      makeRoutedCredentialRecoveryManifest('a'.repeat(64), sources),
+    ),
+    archive = await streamCredentialCapture(
+      { ownerDigest: 'a'.repeat(64), sources, assertCurrent: () => {} },
+      capture,
+      async () => {},
+    );
+  let captureAdmissions = 0,
+    captureProducers = 0;
+  const completeProducer = () => {
+    captureProducers++;
+    return [
+      process.execPath,
+      ...childImports,
+      '--input-type=module',
+      '-e',
+      `
+      import {makeCredentialEvent} from ${JSON.stringify(moduleUrl('backup-credential-event'))};
+      import {makeRoutedCredentialRecoveryManifest} from ${JSON.stringify(moduleUrl('credential-recovery-routing'))};
+      import {makeCredentialCapture,streamCredentialCapture} from ${JSON.stringify(moduleUrl('credential-capture'))};
+      const owner='a'.repeat(64),bytes=Buffer.from(${JSON.stringify(canary)});
+      const event=makeCredentialEvent({sourceKind:'backup_repository',sourceKey:'5'.repeat(64),generation:1,phase:'ready',files:[{name:'repository.json',bytes}]},owner);
+      const sources=[{event,files:[{name:'repository.json',destination:'backup-credentials/backup-repository.json',bytes}]}];
+      const capture=makeCredentialCapture(owner,${JSON.stringify(capture.cycleAt)},makeRoutedCredentialRecoveryManifest(owner,sources));
+      try { await streamCredentialCapture({ownerDigest:owner,sources,assertCurrent(){}},capture,bytes=>new Promise((resolve,reject)=>process.stdout.write(bytes,error=>error?reject(error):resolve()))); }
+      catch {process.exitCode=77;} finally {bytes.fill(0);}
+    `,
+    ];
+  };
+  await withTransfer(
+    repositoryId,
+    async (kind, bytes) => {
+      assert.equal(kind, 'credentials');
+      assert.equal(bytes, archive.bytes);
+      captureAdmissions++;
+    },
+    async (transfer, current) => {
+      const first = await transfer.uploadCredentialCapture(capture, archive),
+        replay = await transfer.uploadCredentialCapture(capture, archive);
+      assert.equal(first.reconciled, false);
+      assert.equal(replay.reconciled, true);
+      assert.equal(first.snapshotId, replay.snapshotId);
+      const destination = path.join(restore, 'complete-credential-capture');
+      fs.mkdirSync(destination, { mode: 0o700 });
+      const recovered = await transfer.restoreCredentialCapture(
+        capture.operationId,
+        capture.ownerDigest,
+        {
+          open: async (name) => {
+            current();
+            const file = path.join(destination, name);
+            fs.mkdirSync(path.dirname(file), { mode: 0o700, recursive: true });
+            const fd = fs.openSync(file, 'wx', 0o600);
+            return {
+              write: async (bytes) => {
+                current();
+                fs.writeSync(fd, bytes);
+              },
+              close: async () => {
+                fs.closeSync(fd);
+              },
+            };
+          },
+        },
+        async () => {
+          current();
+        },
+      );
+      assert.equal(recovered.capture.operationId, capture.operationId);
+      assert.equal('receipt' in recovered, false);
+      assert.equal(
+        fs.readFileSync(
+          path.join(
+            destination,
+            'credential-sources',
+            digest({ sourceKind: event.sourceKind, sourceKey: event.sourceKey }),
+            'repository.json',
+          ),
+          'utf8',
+        ),
+        canary,
+      );
+    },
+    transferProducer,
+    900000,
+    () => {},
+    completeProducer,
+  );
+  assert.equal(captureAdmissions, 1);
+  assert.equal(captureProducers, 1);
+  body.fill(0);
   assert.deepEqual(fs.readdirSync(transferCache), []);
+  await verifyMaximumCredentialCaptureCache();
 });
+/** Transport fixture only: every allowed source slot carries a maximum-size
+ * synthetic token. This does not claim that these are valid primary profiles. */
+async function verifyMaximumCredentialCaptureCache() {
+  const owner = 'a'.repeat(64),
+    cycle = '2026-10-16T01:00:00.000Z';
+  const sources = Array.from({ length: 1024 }, (_, i) => {
+    const key = createHash('sha256')
+        .update('SYNTHETIC_BUDGET_' + i)
+        .digest(),
+      bytes = createCipheriv('aes-256-ctr', key, Buffer.alloc(16)).update(Buffer.alloc(65536)),
+      event = makeCredentialEvent(
+        {
+          sourceKind: 'mail_reader',
+          sourceKey: key.toString('hex'),
+          generation: 1,
+          phase: 'ready',
+          files: [{ name: 'credential.json', bytes }],
+        },
+        owner,
+      );
+    key.fill(0);
+    return {
+      event,
+      files: [
+        {
+          name: 'credential.json',
+          bytes,
+          destination:
+            'google/calendar/mail-reader/credentials/10000000-0000-4000-8000-' + String(i).padStart(12, '0') + '.json',
+        },
+      ],
+    };
+  });
+  const capture = makeCredentialCapture(owner, cycle, makeRoutedCredentialRecoveryManifest(owner, sources));
+  let archive: { bytes: number; sha256: string };
+  try {
+    archive = await streamCredentialCapture(
+      { ownerDigest: owner, sources, assertCurrent() {} },
+      capture,
+      async () => {},
+    );
+  } finally {
+    for (const source of sources) for (const file of source.files) file.bytes.fill(0);
+  }
+  const producer = () => [
+    process.execPath,
+    ...childImports,
+    '--input-type=module',
+    '-e',
+    `
+    import {createHash,createCipheriv} from 'node:crypto';
+    import {makeCredentialEvent} from ${JSON.stringify(moduleUrl('backup-credential-event'))};
+    import {makeRoutedCredentialRecoveryManifest} from ${JSON.stringify(moduleUrl('credential-recovery-routing'))};
+    import {makeCredentialCapture,streamCredentialCapture} from ${JSON.stringify(moduleUrl('credential-capture'))};
+    const owner='a'.repeat(64),sources=Array.from({length:1024},(_,i)=>{
+      const key=createHash('sha256').update('SYNTHETIC_BUDGET_'+i).digest();
+      const bytes=createCipheriv('aes-256-ctr',key,Buffer.alloc(16)).update(Buffer.alloc(65536));
+      const event=makeCredentialEvent({sourceKind:'mail_reader',sourceKey:key.toString('hex'),generation:1,phase:'ready',files:[{name:'credential.json',bytes}]},owner);
+      key.fill(0);
+      return {event,files:[{name:'credential.json',bytes,destination:'google/calendar/mail-reader/credentials/10000000-0000-4000-8000-'+String(i).padStart(12,'0')+'.json'}]};
+    });
+    const capture=makeCredentialCapture(owner,${JSON.stringify(cycle)},makeRoutedCredentialRecoveryManifest(owner,sources));
+    try {await streamCredentialCapture({ownerDigest:owner,sources,assertCurrent(){}},capture,bytes=>new Promise((resolve,reject)=>process.stdout.write(bytes,error=>error?reject(error):resolve())));}
+    catch {process.exitCode=77;} finally {for(const source of sources)for(const file of source.files)file.bytes.fill(0);}
+  `,
+  ];
+  let peak = 0;
+  const observe = () => {
+    let used = 0;
+    const measure = (directory: string) => {
+      for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+        const file = path.join(directory, entry.name);
+        try {
+          const stat = fs.lstatSync(file);
+          if (stat.isDirectory()) measure(file);
+          else {
+            assert(stat.isFile());
+            used += Math.max(stat.size, stat.blocks * 512);
+          }
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        }
+      }
+    };
+    measure(transferCache);
+    peak = Math.max(peak, used);
+    assert(used <= 128 * 1024 ** 2, 'actual credential command cache exceeds admitted bound');
+  };
+  const timer = setInterval(observe, 20);
+  try {
+    await withTransfer(
+      repositoryId,
+      async (kind, bytes) => {
+        assert.equal(kind, 'credentials');
+        assert.equal(bytes, archive.bytes);
+        observe();
+      },
+      async (transfer) => {
+        const result = await transfer.uploadCredentialCapture(capture, archive);
+        assert.equal(result.archiveBytes, archive.bytes);
+        assert.equal(result.archiveSha256, archive.sha256);
+      },
+      transferProducer,
+      900000,
+      observe,
+      producer,
+    );
+    observe();
+  } finally {
+    clearInterval(timer);
+  }
+  assert.deepEqual(fs.readdirSync(transferCache), []);
+  console.log(
+    JSON.stringify({
+      maximumCredentialTransport: 'passed',
+      sourceSlots: 1024,
+      payloadBytes: 64 * 1024 ** 2,
+      archiveBytes: archive.bytes,
+      observedCachePeakBytes: peak,
+      cacheLimitBytes: 128 * 1024 ** 2,
+      allDataSynthetic: true,
+      primaryProfileAdmission: false,
+    }),
+  );
+}
 test('wrong repository identity and exhausted capacity refuse transfer before a new upload', async () => {
   let admissions = 0;
   await assert.rejects(
@@ -2167,6 +2422,87 @@ test('real maintenance keeps 14 daily and four weekly checkpoints per kind witho
     JSON.parse(run(['snapshots', '--host', host, '--tag', 'cos-owner=' + owner + ',cos-kind=' + kind])) as Array<{
       id: string;
     }>;
+  const queueArea = path.join(root, 'maintenance-credential-queue');
+  fs.mkdirSync(queueArea, { mode: 0o700 });
+  const queue = new BackupQueue(owner, async (_kind, operation) => operation(queueArea));
+  const credentialArchive = async (generation: number) => {
+    const token = Buffer.from('SYNTHETIC_MAINTENANCE_TOKEN_' + generation),
+      config = Buffer.from('SYNTHETIC_MAINTENANCE_REPOSITORY');
+    const sources = [
+      {
+        event: makeCredentialEvent(
+          {
+            sourceKind: 'mail_reader',
+            sourceKey: '1'.repeat(64),
+            generation,
+            phase: 'ready',
+            files: [{ name: 'credential.json', bytes: token }],
+          },
+          owner,
+        ),
+        files: [
+          {
+            name: 'credential.json',
+            destination: 'google/calendar/mail-reader/credentials/10000000-0000-4000-8000-000000000001.json',
+          },
+        ],
+      },
+      {
+        event: makeCredentialEvent(
+          {
+            sourceKind: 'backup_repository',
+            sourceKey: '2'.repeat(64),
+            generation: 1,
+            phase: 'ready',
+            files: [{ name: 'repository.json', bytes: config }],
+          },
+          owner,
+        ),
+        files: [{ name: 'repository.json', destination: 'backup-credentials/backup-repository.json' }],
+      },
+    ];
+    const manifest = makeRoutedCredentialRecoveryManifest(owner, sources),
+      metadata = Buffer.from(JSON.stringify(manifest) + '\n');
+    try {
+      if (generation === 20) {
+        const capture = makeCredentialCapture(owner, '2026-09-27T04:00:00.000Z', manifest),
+          parts: Buffer[] = [];
+        await streamCredentialCapture(
+          {
+            ownerDigest: owner,
+            sources: sources.map((source) => ({
+              ...source,
+              files: source.files.map((file) => ({ ...file, bytes: file.name === 'credential.json' ? token : config })),
+            })),
+            assertCurrent: () => {},
+          },
+          capture,
+          async (bytes) => {
+            parts.push(Buffer.from(bytes));
+          },
+        );
+        maintenanceCredentialInventory = sources;
+        return { operationId: capture.operationId, bytes: Buffer.concat(parts) };
+      }
+      await queue.capture('credentials', manifest.operationId, async (sink) => {
+        for (const file of routedCredentialRecoveryFiles(manifest, owner))
+          sink.write(
+            file.name,
+            file.name === 'credential-set.json' ? metadata : file.name.endsWith('/repository.json') ? config : token,
+          );
+      });
+      const parts: Buffer[] = [];
+      await streamQueuedBackup(queue, 'credentials', manifest.operationId, async (bytes) => {
+        parts.push(Buffer.from(bytes));
+      });
+      maintenanceCredentialInventory = sources;
+      return { operationId: manifest.operationId, bytes: Buffer.concat(parts) };
+    } finally {
+      token.fill(0);
+      config.fill(0);
+      metadata.fill(0);
+    }
+  };
   for (const [kindIndex, kind] of (['state', 'credentials'] as const).entries()) {
     const dates = [
       '2026-08-31 03:30:00',
@@ -2174,7 +2510,9 @@ test('real maintenance keeps 14 daily and four weekly checkpoints per kind witho
     ];
     if (kind === 'credentials') dates.push('2026-09-27 04:30:00');
     for (const [index, time] of dates.entries()) {
-      const operationId = '0000000' + (kindIndex + 1) + '-0000-4000-8000-' + String(index + 1).padStart(12, '0');
+      const archive = kind === 'credentials' ? await credentialArchive(index + 1) : undefined;
+      const operationId =
+        archive?.operationId ?? '0000000' + (kindIndex + 1) + '-0000-4000-8000-' + String(index + 1).padStart(12, '0');
       run(
         [
           'backup',
@@ -2187,8 +2525,9 @@ test('real maintenance keeps 14 daily and four weekly checkpoints per kind witho
           time,
           ...backupSnapshotTags(owner, kind, operationId).flatMap((tag) => ['--tag', tag]),
         ],
-        Buffer.from('synthetic-retention-checkpoint'),
+        archive?.bytes ?? Buffer.from('synthetic-retention-checkpoint'),
       );
+      archive?.bytes.fill(0);
     }
     assert.equal(selected(kind).length, dates.length);
   }

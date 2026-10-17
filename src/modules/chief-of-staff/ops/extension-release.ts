@@ -41,7 +41,7 @@ export type ExtensionReleaseState = {
   goal: 'nanoclaw-google-mail-storage';
   plan_revision: 1;
   published_specification_commit: string;
-  active_slice: 'G01' | 'G02' | 'G03';
+  active_slice: 'G01' | 'G02' | 'G03' | 'G04';
   status: string;
   slices: Record<string, Record<string, unknown>>;
   [key: string]: unknown;
@@ -79,7 +79,7 @@ export function readExtensionRelease(root: string, forRelease = false): Extensio
       ledger.goal !== 'nanoclaw-google-mail-storage' ||
       ledger.plan_revision !== 1 ||
       !/^[a-f0-9]{40}$/.test(ledger.published_specification_commit) ||
-      !['G01', 'G02', 'G03'].includes(ledger.active_slice) ||
+      !['G01', 'G02', 'G03', 'G04'].includes(ledger.active_slice) ||
       ledger.status !== 'in_progress' ||
       !ledger.slices ||
       typeof ledger.slices !== 'object' ||
@@ -92,7 +92,7 @@ export function readExtensionRelease(root: string, forRelease = false): Extensio
     )
       throw Error('active_extension_slice_required');
     if (ledger.active_slice !== 'G01') {
-      const predecessorId = ledger.active_slice === 'G02' ? 'G01' : 'G02',
+      const predecessorId = { G02: 'G01', G03: 'G02', G04: 'G03' }[ledger.active_slice],
         predecessor = ledger.slices[predecessorId];
       const object = (value: unknown): value is Record<string, unknown> =>
         !!value && typeof value === 'object' && !Array.isArray(value);
@@ -145,6 +145,28 @@ export function readExtensionRelease(root: string, forRelease = false): Extensio
           upload.credentials.held !== 0
         )
           throw Error('extension_predecessor_backup_acceptance_required');
+      }
+      if (ledger.active_slice === 'G04') {
+        const live = predecessor.merged_acceptance,
+          upload = predecessor.actual_merged_remote_checkpoint;
+        if (
+          !object(live) ||
+          live.commit !== current.commit ||
+          live.tree !== current.tree ||
+          live.releaseId !== current.releaseId ||
+          live.livePrimaryCalendarAnswerIndependentlyVerified !== true ||
+          live.currentEncryptedCheckpointUploaded !== true ||
+          live.originalContextAndCountersPreserved !== true ||
+          !object(upload) ||
+          upload.status !== 'backup_uploaded' ||
+          !object(upload.state) ||
+          upload.state.pending !== 0 ||
+          upload.state.held !== 0 ||
+          !object(upload.credentials) ||
+          upload.credentials.pending !== 0 ||
+          upload.credentials.held !== 0
+        )
+          throw Error('extension_predecessor_live_acceptance_required');
       }
     }
     return ledger;

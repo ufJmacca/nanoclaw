@@ -10,12 +10,16 @@ import { initializeTarget, protectTarget, readPrivate, readTarget, writeAtomic }
 import { initializeTargetActionWitness } from '../actions/host-ownership.js';
 import { withDeploymentLock } from './deployment-lock.js';
 import type { DeploymentSettings } from './deployment-settings.js';
+import { makeCredentialEvent } from './backup-credential-event.js';
+import { makeRoutedCredentialRecoveryManifest } from './credential-recovery-routing.js';
+import { makeCredentialCapture } from './credential-capture.js';
 const ports = vi.hoisted(() => ({
   verify: vi.fn(),
   healthy: vi.fn(),
   mount: vi.fn(),
   separate: vi.fn(),
   restore: vi.fn(),
+  credentials: vi.fn(),
 }));
 vi.mock('./target-host.js', async (original) => ({
   ...(await original<typeof import('./target-host.js')>()),
@@ -26,13 +30,14 @@ vi.mock('./backup-upload-job-effects.js', () => ({
 }));
 vi.mock('./backup-test-database.js', () => ({ withSeparateBackupTestDatabase: ports.separate }));
 vi.mock('./backup-target-restore.js', () => ({ restoreTargetVaultBackupTestScope: ports.restore }));
+vi.mock('./backup-upload.js', () => ({ restoreVaultCredentialCapture: ports.credentials }));
 import { parseBackupOwnerRestoreArguments, restoreOwnerVaultBackup } from './backup-owner-restore.js';
 const cleanup: Array<() => void> = [];
 afterEach(() => {
   for (const close of cleanup.splice(0).reverse()) close();
   vi.resetAllMocks();
 });
-function fixture() {
+function fixture(slice: 'G02' | 'G04' = 'G02') {
   const root = fs.mkdtempSync(os.tmpdir() + '/cos-owner-restore-');
   fs.chmodSync(root, 0o700);
   cleanup.push(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -53,7 +58,7 @@ function fixture() {
       hostFingerprint: digest('host'),
       databaseFingerprint: digest('source database'),
     },
-    manifest = fixtureVaultRelease('G02'),
+    manifest = fixtureVaultRelease(slice),
     binding = targetBinding(settings);
   fs.mkdirSync(settings.dataRoot, { recursive: true, mode: 0o700 });
   const state = initializeTarget(settings.stateRoot, binding);
@@ -165,6 +170,143 @@ function fixture() {
     });
   return { root, settings, manifest, binding, owner, native, args, order, checkDatabase, receiptRoot, invoke };
 }
+function credentialFixture(slice: 'G02' | 'G04' = 'G04') {
+  const f = fixture(slice),
+    owner = digest('vault owner'),
+    bytes = Buffer.from('SYNTHETIC_RESTORED_CREDENTIAL'),
+    event = makeCredentialEvent(
+      {
+        sourceKind: 'backup_repository',
+        sourceKey: 'd'.repeat(64),
+        generation: 1,
+        phase: 'ready',
+        files: [{ name: 'repository.json', bytes }],
+      },
+      owner,
+    ),
+    capture = makeCredentialCapture(
+      owner,
+      '2026-10-16T00:00:00.000Z',
+      makeRoutedCredentialRecoveryManifest(owner, [
+        { event, files: [{ name: 'repository.json', destination: 'backup-credentials/backup-repository.json' }] },
+      ]),
+    ),
+    args = {
+      command: 'backup-credentials-restore-check' as const,
+      scopeId: 'scope',
+      requestId: f.args.requestId,
+      captureOperationId: capture.operationId,
+    },
+    inspect = vi.fn((name) => ({ file: name, ...event.files[0] })),
+    payloadCurrent = vi.fn();
+  ports.credentials.mockImplementation(async (roots, op, request, current, validate) => {
+    current();
+    expect(roots).toEqual({
+      targetRoot: f.settings.stateRoot,
+      installationRoot: f.settings.installationRoot,
+      dataRoot: f.settings.dataRoot,
+    });
+    expect(op).toBe(capture.operationId);
+    expect(request).toBe(args.requestId);
+    const remote = {
+        contract: 'cos-backup-credential-capture-restore/v1',
+        operationId: op,
+        capture,
+        kind: 'credentials',
+      },
+      validation = await validate(
+        { assertCurrent: current, assertPayloadCurrent: payloadCurrent, inspectFile: inspect },
+        remote,
+      );
+    current();
+    return { remote, validation };
+  });
+  const invoke = () =>
+    restoreOwnerVaultBackup({
+      settingsFile: f.root + '/settings.json',
+      invokedHelper:
+        f.settings.releaseRoot +
+        '/' +
+        f.manifest.releaseId +
+        '/payload/dist/modules/chief-of-staff/ops/target-helper.js',
+      args,
+    });
+  return { ...f, args, capture, inspect, payloadCurrent, invoke };
+}
+it('checks complete credential recovery for the current owner without a database profile, live activation or model use', async () => {
+  const f = credentialFixture(),
+    before = f.native.serialize(),
+    state = readTarget(f.settings.stateRoot, f.binding);
+  await expect(f.invoke()).resolves.toEqual({
+    status: 'backup_credentials_restore_verified',
+    request_id: f.args.requestId,
+    capture_operation_id: f.capture.operationId,
+    source_count: 1,
+    file_count: 1,
+    credential_set_digest: digest(f.capture.set),
+    credentials_activated: false,
+    admission_restored: false,
+    event_journal_restored: false,
+    writer_activated: false,
+  });
+  expect(f.inspect).toHaveBeenCalledOnce();
+  expect(f.payloadCurrent).toHaveBeenCalled();
+  expect(ports.mount).toHaveBeenCalledOnce();
+  expect(ports.separate).not.toHaveBeenCalled();
+  expect(ports.restore).not.toHaveBeenCalled();
+  expect(f.native.serialize()).toEqual(before);
+  expect(readTarget(f.settings.stateRoot, f.binding)).toEqual(state);
+});
+it.each(['slice', 'scope', 'health', 'payload', 'helper', 'evidence', 'args'])(
+  'denies complete credential recovery on changed %s with no state import',
+  async (reason) => {
+    const f = credentialFixture(reason === 'slice' ? 'G02' : 'G04');
+    if (reason === 'scope') f.args.scopeId = 'foreign';
+    if (reason === 'health') ports.healthy.mockResolvedValue(false);
+    if (reason === 'payload')
+      f.inspect.mockImplementation((name) => ({
+        file: name,
+        ...f.capture.set.contents.sources[0].files[0],
+        sha256: 'e'.repeat(64),
+      }));
+    if (reason === 'helper') ports.verify.mockRejectedValue(Error('PRIVATE_HELPER'));
+    if (reason === 'evidence') ports.credentials.mockResolvedValue({ remote: {}, validation: {} });
+    if (reason === 'args') Object.assign(f.args, { destination: '/foreign' });
+    await expect(f.invoke()).rejects.toThrow('backup_owner_restore_unavailable');
+    expect(ports.separate).not.toHaveBeenCalled();
+    expect(ports.restore).not.toHaveBeenCalled();
+  },
+);
+it.each(['owner', 'generation', 'journal', 'settings', 'args'])(
+  'denies complete credential recovery after awaited %s changes',
+  async (reason) => {
+    const f = credentialFixture(),
+      read = ports.credentials.getMockImplementation()!;
+    ports.credentials.mockImplementation(async (...args) => {
+      const result = await read(...args);
+      await Promise.resolve();
+      if (reason === 'owner')
+        f.native
+          .prepare('UPDATE cos_identity_boundaries SET binding=?')
+          .run(JSON.stringify({ ...f.owner, sessionId: 'later-owner' }));
+      if (reason === 'generation') {
+        const state = readTarget(f.settings.stateRoot, f.binding);
+        writeAtomic(f.settings.stateRoot, 'state.json', { ...state, generation: state.generation + 1 });
+      }
+      if (reason === 'journal') {
+        const file = f.settings.stateRoot + '/actions/owner.json';
+        const witness = readPrivate<Record<string, unknown>>(file);
+        writeAtomic(f.settings.stateRoot + '/actions', 'owner.json', { ...witness, journalGeneration: randomUUID() });
+      }
+      if (reason === 'settings') writeAtomic(f.root, 'settings.json', { ...f.settings, service: 'foreign.service' });
+      if (reason === 'args') f.args.captureOperationId = f.args.requestId;
+      return result;
+    });
+    await expect(f.invoke()).rejects.toThrow('backup_owner_restore_unavailable');
+    expect(ports.separate).not.toHaveBeenCalled();
+    expect(ports.restore).not.toHaveBeenCalled();
+  },
+);
 it('accepts only exact checkpoint, snapshot and retained release selections', () => {
   const f = fixture(),
     args = [

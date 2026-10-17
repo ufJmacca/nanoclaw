@@ -35,11 +35,13 @@ import { ActionNotificationDelivery } from './actions/notification-delivery.js';
 import type { KnowledgeContext } from './knowledge/store.js';
 import { renderOperatorStatus } from './ops/operator-status-render.js';
 import { renderOwnerControl } from './ops/owner-control-render.js';
+import type { MailAuthorities } from './mail/authority.js';
 
 export type RuntimeDependencies = {
   db: Database.Database;
   enabled: boolean;
   admission?(): boolean;
+  mailAuthority?: MailAuthorities;
   store?: PriorityStore;
   facts(binding: CosBinding): Promise<ChannelFacts>;
   session(id: string): Session | undefined;
@@ -576,6 +578,18 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
     reconcile,
     pump: async (binding: CosBinding) => {
       await reconcile(binding);
+      if (enabled() && d.mailAuthority)
+        d.store?.mail?.poke(
+          {
+            scopeId: binding.scopeId,
+            ownerId: binding.ownerId,
+            agentGroupId: binding.agentGroupId,
+            sessionId: binding.sessionId,
+            ingressId: 'mail-maintenance',
+            provider: binding.provider,
+          },
+          d.mailAuthority,
+        );
       if (enabled()) await invalidations?.drain(binding);
       const recovered = enabled() ? await briefReconciliation?.drain(binding) : undefined;
       if (enabled()) await reviewDispatch?.drain(binding);

@@ -7,6 +7,7 @@ import path from 'node:path';
 import pg from 'pg';
 import Database from 'better-sqlite3';
 import { setTimeout as delay } from 'node:timers/promises';
+import { performance } from 'node:perf_hooks';
 import { connectFixtureDatabase, fixtureDatabaseConfig, fixtureRuntimeUser } from './fixture-database.js';
 import { migrate } from '../../modules/chief-of-staff/store/migrations.js';
 import { BoundedDatabase } from '../../modules/chief-of-staff/store/client.js';
@@ -26,6 +27,7 @@ import { digest, type ProposalChange, type Result } from '../../modules/chief-of
 import type { MissionChange } from '../../modules/chief-of-staff/contracts/protocol.js';
 import { installReviewedMissionTemplate } from '../../modules/chief-of-staff/missions/template-admin.js';
 import { connectionFault } from './connection-fault.js';
+import { scheduledReviewFixtureWake } from './scheduled-review-fixture.js';
 import { CosController } from '../../modules/chief-of-staff/bridge/controller.js';
 import { installCosBoundary, cosBoundary } from '../../cos-boundary.js';
 import type { Session } from '../../types.js';
@@ -1239,7 +1241,8 @@ test('S08-T06 recorded due commitments trigger preparation; completed commitment
 test('S08-T06 native scheduled review waits for the database clock and coalesces duplicated wakes into one root', async () => {
   await publishMeetings(['scheduled-review']);
   const now = (await admin.query('SELECT clock_timestamp() AS now')).rows[0].now.getTime();
-  const wake = Math.floor(now / 60000) * 60000 + 60000;
+  const wake = scheduledReviewFixtureWake(now);
+  const deadline = performance.now() + wake - now + 10000;
   const selected: MandateChange = {
     ...change,
     definition: {
@@ -1254,13 +1257,17 @@ test('S08-T06 native scheduled review waits for the database clock and coalesces
     },
   };
   const id = String((await approve(await propose(selected))).record_id);
+  assert.ok(
+    (await admin.query('SELECT clock_timestamp() AS now')).rows[0].now.getTime() < wake,
+    'fixture activation must complete before the scheduled review minute',
+  );
   const initial = await store.mandates.evaluate(context, id);
   assert.equal(initial.status, 'ok');
   assert.deepEqual(initial.mission_ids, []);
-  for (let n = 0; n < 3100; n++) {
+  for (;;) {
     const clock = (await admin.query('SELECT clock_timestamp() AS now')).rows[0].now.getTime();
     if (clock >= wake) break;
-    if (n === 3099) assert.fail('bounded native review clock deadline');
+    assert.ok(performance.now() < deadline, 'bounded native review clock deadline');
     await delay(20);
   }
   const first = await store.mandates.evaluate(context, id);

@@ -33,7 +33,7 @@ afterEach(() => {
   vi.resetAllMocks();
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
-function fixture(slice: 'G02' | 'G03' = 'G02') {
+function fixture(slice: 'G02' | 'G03' | 'G04' = 'G02') {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-job-configure-'));
   roots.push(home);
   fs.chmodSync(home, 0o700);
@@ -61,8 +61,7 @@ function fixture(slice: 'G02' | 'G03' = 'G02') {
       installationRoot: settings.installationRoot,
       dataRoot: settings.dataRoot,
     },
-    manifest = fixtureVaultRelease('G02');
-  manifest.slice = slice;
+    manifest = fixtureVaultRelease(slice);
   const initial = initializeTarget(settings.stateRoot, binding);
   writeAtomic(settings.stateRoot, 'state.json', { ...initial, releaseId: manifest.releaseId, maintenance: false });
   const state = protectTarget(settings.stateRoot, binding);
@@ -94,7 +93,7 @@ function fixture(slice: 'G02' | 'G03' = 'G02') {
     invoke: () => configureTargetBackupJobs(settings, '/fixture/target-helper.js'),
   };
 }
-it.each(['G02', 'G03'] as const)(
+it.each(['G02', 'G03', 'G04'] as const)(
   '%s holds real operation/job locks during publication and releases them before activation',
   async (slice) => {
     const fxt = fixture(slice),

@@ -8,6 +8,34 @@ const request = {
   params: { view: 'today' },
 };
 describe('S01-T09 canonical bounded RPC contract', () => {
+  it('G04 admits bounded selected-mail reads without provider queries or caller authority', () => {
+    for (const [method, params] of [
+      ['cos_mail_search', { binding_id: request.request_id, query: 'alpha', limit: 5, offset: 0 }],
+      ['cos_mail_thread_get', { binding_id: request.request_id, thread_id: 'ab01', limit: 5, offset: 0 }],
+    ] as const) {
+      expect(validRequest({ ...request, method, params })).toBe(true);
+      for (const extra of [
+        { binding_id: 'foreign' },
+        { limit: 6 },
+        { offset: 10001 },
+        { scope_id: 'foreign' },
+        { url: 'https://gmail.googleapis.com/' },
+        { mailbox_email: 'other@example.invalid' },
+        { include_spam: true },
+        { query: 'x'.repeat(401) },
+        { method: 'POST' },
+      ]) {
+        expect(validRequest({ ...request, method, params: { ...params, ...extra } })).toBe(false);
+      }
+    }
+    expect(
+      validRequest({
+        ...request,
+        method: 'cos_mail_thread_get',
+        params: { binding_id: request.request_id, thread_id: '../messages' },
+      }),
+    ).toBe(false);
+  });
   it('S03 admits bounded calendar reads and rejects model-supplied authority or write options', () => {
     const calendar = {
       ...request,

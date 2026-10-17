@@ -196,6 +196,122 @@ it('validates the recovered coordinated checkpoint directly through owned descri
   expect(fs.readFileSync(f.options.witness.root + '/owner.json')).toEqual(journal);
   expect(fs.readdirSync(f.root + '/queue-state')).toEqual(['backup-queue']);
 });
+function legacy18(files: Map<string, Buffer>, receipt: CoordinatedBackupReceipt) {
+  const checkpoint = JSON.parse(files.get('coordinated/remote.json')!.toString());
+  const legacy = MIGRATIONS.filter((m) => m.version <= 18),
+    schemaDigest = digest(legacy.map(({ version, checksum }) => ({ version, checksum })));
+  const tables = new Set(
+    legacy.flatMap((m) => [...m.sql.matchAll(/CREATE TABLE cos\.([a-z_]+)\s*\(/g)].map((match) => match[1])),
+  );
+  for (const table of Object.keys(checkpoint.rows))
+    if (!tables.has(table)) {
+      expect(checkpoint.rows[table]).toEqual([]);
+      delete checkpoint.rows[table];
+      delete checkpoint.columns[table];
+    }
+  checkpoint.schemaVersion = 18;
+  checkpoint.schemaDigest = schemaDigest;
+  receipt.schemaVersion = 18;
+  receipt.schemaDigest = schemaDigest;
+  const bytes = Buffer.from(JSON.stringify(checkpoint) + '\n');
+  files.set('coordinated/remote.json', bytes);
+  receipt.remote = { ...receipt.remote, bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') };
+}
+it('reads a genuine schema-18-shaped encrypted archive after mail schema 19 without restoring admission or journals', async () => {
+  const f = await recoveredFixture(legacy18),
+    before = fs.readFileSync(f.options.witness.root + '/owner.json');
+  const checked = await f.recover(true);
+  expect(checked.receipt.schemaVersion).toBe(18);
+  expect(checked.checkpoint.schemaVersion).toBe(18);
+  expect(Object.keys(checked.checkpoint.rows)).toHaveLength(75);
+  expect(checked.admissionRestored).toBe(false);
+  expect(checked.eventJournalRestored).toBe(false);
+  expect(fs.readFileSync(f.options.witness.root + '/owner.json')).toEqual(before);
+});
+it.each(['legacy-with-mail-tables', 'current-with-missing-mail-table', 'mixed-schema-identities', 'unknown-schema'])(
+  'refuses an authenticated archive with %s',
+  async (boundary) => {
+    const f = await recoveredFixture((files, receipt) => {
+      if (boundary === 'legacy-with-mail-tables' || boundary === 'mixed-schema-identities') legacy18(files, receipt);
+      const checkpoint = JSON.parse(files.get('coordinated/remote.json')!.toString());
+      if (boundary === 'legacy-with-mail-tables') {
+        checkpoint.rows.mail_messages = [];
+        checkpoint.columns.mail_messages = ['scope_id'];
+      }
+      if (boundary === 'current-with-missing-mail-table') {
+        delete checkpoint.rows.mail_messages;
+        delete checkpoint.columns.mail_messages;
+      }
+      if (boundary === 'mixed-schema-identities') {
+        checkpoint.schemaVersion = 19;
+        checkpoint.schemaDigest = digest(MIGRATIONS.map(({ version, checksum }) => ({ version, checksum })));
+      }
+      if (boundary === 'unknown-schema') {
+        checkpoint.schemaVersion = 99;
+        receipt.schemaVersion = 99;
+      }
+      const bytes = Buffer.from(JSON.stringify(checkpoint) + '\n');
+      files.set('coordinated/remote.json', bytes);
+      receipt.remote = {
+        ...receipt.remote,
+        bytes: bytes.length,
+        sha256: createHash('sha256').update(bytes).digest('hex'),
+      };
+    });
+    await expect(f.recover(true)).rejects.toThrow('coordinated_recovery_check_unavailable');
+  },
+);
+it.each(['stream', 'local'])(
+  'captures an explicitly selected actual predecessor schema before upgrading (%s)',
+  async (mode) => {
+    const f = fixture(),
+      original = f.query.getMockImplementation()!;
+    f.query.mockImplementation(async (sql, values) =>
+      sql.includes('FROM cos.schema_migrations')
+        ? { rows: MIGRATIONS.filter((m) => m.version <= 18).map(({ version, checksum }) => ({ version, checksum })) }
+        : original(sql, values),
+    );
+    const options = { ...f.options, schemaVersion: 18 },
+      files = new Map<string, Buffer>();
+    const receipt =
+      mode === 'stream'
+        ? await captureCoordinatedState(options, {
+            write(name, bytes) {
+              files.set(name, Buffer.from(bytes));
+            },
+          })
+        : await backupCoordinatedState(options);
+    const remote = JSON.parse(
+      (mode === 'stream'
+        ? files.get('coordinated/remote.json')!
+        : fs.readFileSync(path.join(f.archive, 'remote.json'))
+      ).toString(),
+    );
+    expect(receipt.schemaVersion).toBe(18);
+    expect(remote.schemaVersion).toBe(18);
+    expect(Object.keys(remote.rows)).toHaveLength(75);
+    expect(remote.rows.mail_messages).toBeUndefined();
+    expect(f.query.mock.calls.filter(([sql]) => sql.includes('cos."mail_'))).toEqual([]);
+  },
+);
+it.each([18, 19, 99])(
+  'refuses selected schema %s when it does not match the actual migration epoch',
+  async (selected) => {
+    const f = fixture(),
+      original = f.query.getMockImplementation()!;
+    if (selected === 19)
+      f.query.mockImplementation(async (sql, values) =>
+        sql.includes('FROM cos.schema_migrations')
+          ? { rows: MIGRATIONS.filter((m) => m.version <= 18).map(({ version, checksum }) => ({ version, checksum })) }
+          : original(sql, values),
+      );
+    const sink = { write: vi.fn() };
+    await expect(captureCoordinatedState({ ...f.options, schemaVersion: selected }, sink)).rejects.toThrow(
+      'coordinated_backup_unavailable',
+    );
+    expect(sink.write).not.toHaveBeenCalled();
+  },
+);
 it.each([
   'schema',
   'context',
@@ -280,6 +396,50 @@ function liveRestoreReservation() {
     });
   return { assertCurrent, read, create, replace: (value: unknown) => (record = value) };
 }
+it('imports a legacy checkpoint into the current isolated schema with the four new mail tables empty', async () => {
+  const f = await recoveredFixture(legacy18),
+    reservation = liveRestoreReservation();
+  f.query.mockClear();
+  const result = await f.restore(
+    (scope, entries) =>
+      restoreRecoveredCoordinatedTestScope(
+        f.options,
+        scope,
+        entries,
+        { client: f.options.client, config: sandboxConfig, testTargetId: 'fixture-protected-test' },
+        reservation,
+        async () => {},
+      ),
+    true,
+  );
+  expect(result).toMatchObject({ inserted: true, admissionRestored: false, eventJournalRestored: false });
+  expect(f.query.mock.calls.filter(([sql]) => sql.startsWith('INSERT INTO cos."mail_'))).toEqual([]);
+});
+it('refuses legacy restore reconciliation if a current-only mail table contains scoped data', async () => {
+  const f = await recoveredFixture(legacy18),
+    reservation = liveRestoreReservation(),
+    original = f.query.getMockImplementation()!;
+  f.query.mockImplementation(async (sql, values) =>
+    sql.includes('to_jsonb(t)') && sql.includes('cos."mail_messages"')
+      ? { rows: [{ body: { scope_id: 'scope' } }] }
+      : original(sql, values),
+  );
+  await expect(
+    f.restore(
+      (scope, entries) =>
+        restoreRecoveredCoordinatedTestScope(
+          f.options,
+          scope,
+          entries,
+          { client: f.options.client, config: sandboxConfig, testTargetId: 'fixture-protected-test' },
+          reservation,
+          async () => {},
+        ),
+      true,
+    ),
+  ).rejects.toThrow('coordinated_test_restore_unavailable');
+  expect(f.query.mock.calls.filter(([sql]) => /^(UPDATE|DELETE|TRUNCATE|DROP|ALTER|CREATE)/.test(sql))).toEqual([]);
+});
 it('imports the owned recovered checkpoint through the insert-only core without a second payload copy', async () => {
   const f = await recoveredFixture(),
     reservation = liveRestoreReservation(),

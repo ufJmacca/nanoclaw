@@ -2,9 +2,11 @@
 # Mac-only orchestration of a disposable, source-bound user service manager.
 set -euo pipefail
 umask 077
-[[ "$(uname -s)" == Darwin && $# == 1 ]] || exit 1
+[[ "$(uname -s)" == Darwin && $# == 2 ]] || exit 1
 [[ -z "${DOCKER_HOST:-}${DOCKER_CONTEXT:-}${DOCKER_TLS_VERIFY:-}${DOCKER_CERT_PATH:-}" ]] || exit 1
 image=$1
+slice=$2
+[[ "$slice" == G02 || "$slice" == G03 || "$slice" == G04 ]] || exit 1
 [[ "$image" =~ ^sha256:[a-f0-9]{64}$ ]] || exit 1
 [[ "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$image")" == linux/arm64 ]] || exit 1
 [[ "$(docker image inspect --format '{{index .Config.Labels "nanoclaw.release-role"}}' "$image")" == backup-job-manager-fixture ]] || exit 1
@@ -24,7 +26,7 @@ runtime=$(docker run --rm --pull=never --network=none --read-only --entrypoint /
   --input-type=module -e 'if(process.platform!=="linux"||process.arch!=="arm64"||process.version!=="v22.23.2")process.exit(1);const fs=await import("node:fs");const source=JSON.parse(fs.readFileSync("/release/build-info.json","utf8"));if(source.commit!==process.argv[1]||source.tree!==process.argv[2])process.exit(1);const {verifyResticReleasePayload}=await import("/release/dist/modules/chief-of-staff/ops/restic-release-payload.js");verifyResticReleasePayload("/release/libexec");const {default:Database}=await import("/release/node_modules/better-sqlite3/lib/index.js");const db=new Database(":memory:");if(db.prepare("select 1 as n").get().n!==1)process.exit(1);db.close();process.stdout.write("backup-job-runtime-verified")' \
   "$source_commit" "$source_tree")
 [[ "$runtime" == backup-job-runtime-verified ]] || exit 1
-scope="cos-g02-jobs-${source_commit:0:8}-$$"
+scope="cos-backup-jobs-${source_commit:0:8}-$$"
 owned=false
 cleanup() { [[ "$owned" != true ]] || docker rm -f "$scope" >/dev/null; }
 trap cleanup EXIT
@@ -40,9 +42,10 @@ for ((attempt=0;attempt<30;attempt++)); do
   sleep 1
 done
 [[ "$ready" == true ]] || exit 1
-printf '{"jobFixtureImage":"%s","testedHost":"%s","sourceCommit":"%s","sourceTree":"%s","privateCgroupNamespace":true,"hostDataMounted":false,"ownerCredentialsUsed":false}\n' \
-  "$image" "$host_image" "$source_commit" "$source_tree"
+printf '{"jobFixtureImage":"%s","testedHost":"%s","sourceCommit":"%s","sourceTree":"%s","releaseSlice":"%s","privateCgroupNamespace":true,"hostDataMounted":false,"ownerCredentialsUsed":false}\n' \
+  "$image" "$host_image" "$source_commit" "$source_tree" "$slice"
 docker inspect --format '{{json .HostConfig}}' "$scope"
 docker exec --user 1000:1000 --workdir /home/fixture \
   -e "COS_BACKUP_FIXTURE_SOURCE_COMMIT=$source_commit" -e "COS_BACKUP_FIXTURE_SOURCE_TREE=$source_tree" \
+  -e "COS_BACKUP_FIXTURE_SLICE=$slice" \
   "$scope" /release/node/bin/node /fixture/probe-release.mjs

@@ -27,6 +27,50 @@ import { isCosMissionStopped } from '../../cos-mission-stop.js';
 import { NativeMandateTasks } from './automation/mandate-native.js';
 
 let runtime: ReturnType<typeof createCosRuntime> | undefined;
+it('G04 schedules owned no-model mail maintenance for a paused native owner without waiting for Google', async () => {
+  const db = initTestDb();
+  const binding: CosBinding = {
+    scopeId: 'mail-scope',
+    ownerId: 'owner',
+    botId: 'bot',
+    instanceId: 'fixture',
+    channelId: 'private',
+    agentGroupId: 'group',
+    messagingGroupId: 'mg',
+    sessionId: 'session',
+    provider: 'codex',
+  };
+  installCosBoundary(binding, db); // The native scope starts paused.
+  const poke = vi.fn();
+  const mailAuthority = { retention: vi.fn(() => true), poll: vi.fn(() => false) };
+  runtime = createCosRuntime({
+    db,
+    enabled: true,
+    admission: () => true,
+    mailAuthority,
+    store: { mail: { poke } } as unknown as PriorityStore,
+    facts: vi.fn(),
+    session: () => undefined,
+    destination: () => undefined,
+    stop: vi.fn(),
+    wake: vi.fn(),
+  });
+  await runtime.pump(binding);
+  expect(poke).toHaveBeenCalledWith(
+    {
+      scopeId: binding.scopeId,
+      ownerId: binding.ownerId,
+      agentGroupId: binding.agentGroupId,
+      sessionId: binding.sessionId,
+      ingressId: 'mail-maintenance',
+      provider: binding.provider,
+    },
+    mailAuthority,
+  );
+  runtime.dispose();
+  await runtime.pump(binding);
+  expect(poke).toHaveBeenCalledOnce();
+});
 it('S11-UI01 the outage-only host acknowledges pause privately without a database or model and does not resend a replay', async () => {
   const db = initTestDb(),
     binding: CosBinding = {

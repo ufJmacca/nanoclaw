@@ -180,6 +180,83 @@ it('admits G03 after reviewed matching G02 delivery, encrypted backup and isolat
   expect(saved.unknown).toEqual(f.extension.unknown);
   expect(fs.readFileSync(f.root + '/execution.json')).toEqual(original);
 });
+function completedG03(f: ReturnType<typeof fixture>) {
+  completedG02(f);
+  const commit = '1'.repeat(40),
+    tree = '2'.repeat(40),
+    releaseId = 'release-reviewed-g03';
+  const predecessor = {
+    status: 'complete',
+    review: { status: 'human_review_and_merge_verified', reviewed: true, merged: true, mergeCommit: commit },
+    current_source: { commit, tree, releaseId },
+    deployed_source_sha: commit,
+    pi_smoke_status: 'passed',
+    merged_release_reconciliation: {
+      status: 'passed',
+      commit,
+      tree,
+      releaseId,
+      humanReview: 'verified',
+      allMandatoryGates: 'passed',
+      actualPiAcceptance: 'passed',
+    },
+    merged_acceptance: {
+      commit,
+      tree,
+      releaseId,
+      livePrimaryCalendarAnswerIndependentlyVerified: true,
+      currentEncryptedCheckpointUploaded: true,
+      originalContextAndCountersPreserved: true,
+    },
+    actual_merged_remote_checkpoint: {
+      status: 'backup_uploaded',
+      state: { pending: 0, held: 0 },
+      credentials: { pending: 0, held: 0 },
+    },
+  };
+  Object.assign(f.extension.slices, {
+    G03: predecessor,
+    G04: { status: 'in_progress', depends_on: 'G03', unknown: 'retain-g04' },
+  });
+  f.extension.active_slice = 'G04';
+  f.save();
+  return predecessor;
+}
+it('admits G04 only after reviewed matching G03, live Calendar acceptance and a current encrypted checkpoint', () => {
+  const f = fixture();
+  completedG03(f);
+  const original = fs.readFileSync(f.root + '/execution.json'),
+    g03 = structuredClone((f.extension.slices as Record<string, unknown>).G03);
+  expect(readExtensionRelease(f.root, true)).toEqual(f.extension);
+  expect(readReleaseExecution(f.root, 'G04', true)).toEqual(f.extension);
+  checkpointReleaseExecution(f.root, 'G04', { release_status: 'g04_local_checks_pending' });
+  const saved = JSON.parse(fs.readFileSync(f.root + '/google-mail-storage-execution.json', 'utf8'));
+  expect(saved.slices.G04).toMatchObject({ unknown: 'retain-g04', release_status: 'g04_local_checks_pending' });
+  expect(saved.slices.G03).toEqual(g03);
+  expect(fs.readFileSync(f.root + '/execution.json')).toEqual(original);
+});
+it.each(['review', 'source', 'live', 'context', 'checkpoint', 'pending', 'held', 'acceptance-source'])(
+  'refuses G04 without G03 %s evidence and preserves both ledgers',
+  (boundary) => {
+    const f = fixture(),
+      p = completedG03(f);
+    if (boundary === 'review') p.review.reviewed = false;
+    if (boundary === 'source') p.current_source.commit = '0'.repeat(40);
+    if (boundary === 'live') p.merged_acceptance.livePrimaryCalendarAnswerIndependentlyVerified = false;
+    if (boundary === 'context') p.merged_acceptance.originalContextAndCountersPreserved = false;
+    if (boundary === 'checkpoint') p.merged_acceptance.currentEncryptedCheckpointUploaded = false;
+    if (boundary === 'pending') p.actual_merged_remote_checkpoint.state.pending = 1;
+    if (boundary === 'held') p.actual_merged_remote_checkpoint.credentials.held = 1;
+    if (boundary === 'acceptance-source') p.merged_acceptance.commit = '0'.repeat(40);
+    f.save();
+    const original = fs.readFileSync(f.root + '/execution.json'),
+      extension = fs.readFileSync(f.root + '/google-mail-storage-execution.json');
+    expect(() => readExtensionRelease(f.root, true)).toThrow('extension_release_not_admitted');
+    expect(() => checkpointReleaseExecution(f.root, 'G04', { release_status: 'must_not_write' })).toThrow();
+    expect(fs.readFileSync(f.root + '/execution.json')).toEqual(original);
+    expect(fs.readFileSync(f.root + '/google-mail-storage-execution.json')).toEqual(extension);
+  },
+);
 it.each(['review', 'source', 'delivery', 'health', 'restore', 'upload', 'integrity', 'pending', 'held'])(
   'refuses G03 while G02 %s acceptance is incomplete and preserves both ledgers',
   (boundary) => {

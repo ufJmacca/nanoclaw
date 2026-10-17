@@ -9,6 +9,29 @@ const request: CosRequest = {
   params: { view: 'today' },
 };
 const previous = process.env.NANOCLAW_COS_PROTOCOL;
+test('G04 mail tools expose bounded capture reads without account or write overrides', async () => {
+  initTestSessionDb();
+  for (const [name, field] of [
+    ['cos_mail_search', 'query'],
+    ['cos_mail_thread_get', 'thread_id'],
+  ] as const) {
+    const definition = cosTools.find(({ tool }) => tool.name === name);
+    expect(definition).toBeDefined();
+    expect(Object.keys(definition!.tool.inputSchema.properties!)).toEqual(['binding_id', field, 'limit', 'offset']);
+    expect(definition!.tool.inputSchema.required).toEqual(['binding_id', field]);
+    expect(definition!.tool.inputSchema.additionalProperties).toBe(false);
+    expect(
+      JSON.stringify(
+        await definition!.handler({
+          binding_id: request.request_id,
+          [field]: 'ab01',
+          mailbox_email: 'other@example.invalid',
+        }),
+      ),
+    ).toContain('denied');
+  }
+  expect(getOutboundDb().query('SELECT count(*) AS n FROM messages_out').get()).toEqual({ n: 0 });
+});
 test('S10 strategic tools expose exact bounded requests without owner or publication authority', async () => {
   initTestSessionDb();
   for (const [name, keys] of [

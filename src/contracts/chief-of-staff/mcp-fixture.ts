@@ -9,10 +9,12 @@ export class McpFixture {
   private sequence = 0;
   private pending = new Map<
     number,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Synthetic RPC envelopes differ by scenario; callers assert their case-specific shape.
     { resolve: (value: any) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }
   >();
   private buffer = '';
   private diagnostic = '';
+  private readonly startupTimeoutMs: number;
   readonly name = 'cos-fixture-' + randomUUID();
   constructor(
     repository: string,
@@ -21,7 +23,12 @@ export class McpFixture {
     image: string,
     dependenciesVolume: string,
     launch?: { containerName: string; args: string[] },
+    options: { startupTimeoutMs?: number } = {},
   ) {
+    const startupTimeoutMs = options.startupTimeoutMs ?? 25000;
+    if (!Number.isSafeInteger(startupTimeoutMs) || startupTimeoutMs < 1 || startupTimeoutMs > 120000)
+      throw Error('invalid_fixture_startup_timeout');
+    this.startupTimeoutMs = startupTimeoutMs;
     if (launch) this.name = launch.containerName;
     if (dependenciesVolume && !/^[a-zA-Z0-9][a-zA-Z0-9_.-]+$/.test(dependenciesVolume))
       throw new Error('Explicit runner dependency volume required');
@@ -43,6 +50,8 @@ export class McpFixture {
         '--pull=never',
         '--name',
         this.name,
+        '--label',
+        'nanoclaw.cos-protocol=cos-rpc/v1',
         '--network=none',
         '--read-only',
         '--user=1000:1000',
@@ -98,6 +107,7 @@ export class McpFixture {
             if (response.error) waiter.reject(new Error('Fixture MCP error'));
             else waiter.resolve(response.result);
           }
+          // eslint-disable-next-line no-catch-all/no-catch-all -- Malformed fixture responses close every pending request instead of leaving a live unverified worker.
         } catch {
           this.fail();
         }
@@ -109,27 +119,41 @@ export class McpFixture {
   private fail() {
     for (const waiter of this.pending.values()) {
       clearTimeout(waiter.timer);
-      waiter.reject(new Error('Fixture MCP transport unavailable: ' + this.diagnostic));
+      waiter.reject(
+        Object.assign(new Error('Fixture MCP transport unavailable: ' + this.diagnostic), {
+          code: 'fixture_mcp_transport_unavailable',
+        }),
+      );
     }
     this.pending.clear();
   }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Fixture callers validate each heterogeneous JSON RPC result before using it.
   request(method: string, params: unknown): Promise<any> {
+    return this.exchange(method, params, 25000, 'fixture_mcp_request_deadline');
+  }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- The caller checks each synthetic RPC result.
+  private exchange(method: string, params: unknown, timeoutMs: number, code: string): Promise<any> {
     const id = ++this.sequence;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error('Fixture MCP deadline'));
-      }, 25000);
+        reject(Object.assign(new Error('Fixture MCP deadline'), { code }));
+      }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer });
       this.child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
     });
   }
   async start(): Promise<void> {
-    await this.request('initialize', {
-      protocolVersion: '2024-11-05',
-      capabilities: {},
-      clientInfo: { name: 'cos-fixture', version: '1' },
-    });
+    await this.exchange(
+      'initialize',
+      {
+        protocolVersion: '2024-11-05',
+        capabilities: {},
+        clientInfo: { name: 'cos-fixture', version: '1' },
+      },
+      this.startupTimeoutMs,
+      'fixture_mcp_startup_deadline',
+    );
     this.child.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n');
   }
   async call(name: string, args: Record<string, unknown>) {

@@ -16,13 +16,12 @@ afterEach(() => {
   vi.restoreAllMocks();
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
-function fixture(slice: 'G02' | 'G03' = 'G02') {
+function fixture(slice: 'G02' | 'G03' | 'G04' = 'G02') {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-backup-schedule-'));
   roots.push(base);
   fs.chmodSync(base, 0o700);
   const root = base + '/state',
-    manifest = fixtureVaultRelease('G02');
-  manifest.slice = slice;
+    manifest = fixtureVaultRelease(slice);
   const binding = {
     hostFingerprint: 'a'.repeat(64),
     databaseFingerprint: 'b'.repeat(64),
@@ -74,7 +73,7 @@ function fixture(slice: 'G02' | 'G03' = 'G02') {
   const invoke = (job: 'capture' | 'upload' = 'capture') => scheduledBackupJob({ root, binding, job, effects });
   return { root, manifest, binding, effects, invoke, events };
 }
-it.each(['G02', 'G03'] as const)(
+it.each(['G02', 'G03', 'G04'] as const)(
   '%s reconciles the same maintenance lease after interrupted stop, captures once and dispatches after restart',
   async (slice) => {
     const f = fixture(slice);

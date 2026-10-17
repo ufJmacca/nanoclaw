@@ -45,8 +45,8 @@ export async function withSignedBackupShare<T>(
     active = false;
   try {
     if (process.platform !== 'linux') throw Error('linux_required');
-    const assertKernel = pinKernelMountTable();
     const binding = Object.freeze({ ...input });
+    const assertKernel = pinKernelMountTable([binding.mount]);
     const mountIdentity = () => {
       const text = inspect('/usr/bin/findmnt', [
         '--json',

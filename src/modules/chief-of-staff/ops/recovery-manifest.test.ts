@@ -177,6 +177,34 @@ it('S11-PG02 captures a new logical checkpoint without requiring its future chec
   ).toEqual(manifest);
   expect(f.base.quiescent).not.toHaveBeenCalled();
 });
+it('selects the reviewed predecessor software epoch explicitly for the pre-upgrade checkpoint', async () => {
+  const f = fixture(),
+    remoteFile = path.join(f.root, 'coordinated/remote.json'),
+    remote = JSON.parse(fs.readFileSync(remoteFile, 'utf8'));
+  remote.schemaVersion = 18;
+  fs.writeFileSync(remoteFile, JSON.stringify(remote), { mode: 0o600 });
+  f.receipt.schemaVersion = 18;
+  const bytes = fs.readFileSync(remoteFile);
+  f.receipt.remote = {
+    ...f.receipt.remote,
+    bytes: bytes.length,
+    sha256: createHash('sha256').update(bytes).digest('hex'),
+  };
+  const manifest = await backupOperationsState({
+    ...f.options,
+    software: { ...f.software, schemaVersion: 18 },
+    externalCheckpoint: { kind: 'application_scope_logical' },
+  });
+  expect(manifest.software.schemaVersion).toBe(18);
+  expect(foundation.backup).toHaveBeenCalledWith(expect.objectContaining({ schemaVersion: 18 }));
+});
+it('refuses a selected base epoch that contradicts the verified software release', async () => {
+  const f = fixture();
+  await expect(backupOperationsState({ ...f.options, base: { ...f.base, schemaVersion: 18 } })).rejects.toThrow(
+    'operations_backup_unavailable',
+  );
+  expect(foundation.backup).not.toHaveBeenCalled();
+});
 it('S11-T03 rejects a changed maintenance generation and preserves an immutable published manifest on conflicting replay', async () => {
   const f = fixture(),
     first = await backupOperationsState(f.options),

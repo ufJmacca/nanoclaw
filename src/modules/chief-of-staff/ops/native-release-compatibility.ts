@@ -8,12 +8,13 @@ const specialistTables = [
 ] as const;
 /** Candidate manifests are verified by the release path. Never erase identity records to make old code compatible. */
 export function assertNativeReleaseCompatibility(db: Database.Database, candidate: ReleaseManifest | null): void {
-  // Both storage releases retain the completed S11 controls and permanent specialist identities.
+  // Google/storage extensions retain the completed S11 controls and permanent specialist identities.
   if (
     candidate?.slice !== 'S11' &&
     candidate?.slice !== 'G01' &&
     candidate?.slice !== 'G02' &&
-    candidate?.slice !== 'G03'
+    candidate?.slice !== 'G03' &&
+    candidate?.slice !== 'G04'
   ) {
     const entry = db.prepare('SELECT type FROM sqlite_master WHERE name=?').get('cos_operator_denials') as
       | { type: string }
@@ -21,7 +22,10 @@ export function assertNativeReleaseCompatibility(db: Database.Database, candidat
     if (entry && (entry.type !== 'table' || db.prepare('SELECT 1 FROM cos_operator_denials LIMIT 1').get()))
       throw new Error('operator_denial_release_required');
   }
-  if (candidate && ['S05', 'S06', 'S07', 'S08', 'S09', 'S10', 'S11', 'G01', 'G02', 'G03'].includes(candidate.slice))
+  if (
+    candidate &&
+    ['S05', 'S06', 'S07', 'S08', 'S09', 'S10', 'S11', 'G01', 'G02', 'G03', 'G04'].includes(candidate.slice)
+  )
     return;
   for (const name of specialistTables) {
     const entry = db.prepare('SELECT type FROM sqlite_master WHERE name=?').get(name) as { type: string } | undefined;

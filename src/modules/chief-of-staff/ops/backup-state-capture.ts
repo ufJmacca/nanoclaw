@@ -3,7 +3,7 @@ import path from 'node:path';
 import Database from 'better-sqlite3';
 import { createHash } from 'node:crypto';
 import { digest } from '../domain/contracts.js';
-import { SCHEMA_VERSION } from '../store/migrations.js';
+import { checkpointSchema } from './checkpoint-schema.js';
 import { openTargetActionWitness } from '../actions/host-ownership.js';
 import { captureCalendarState } from '../calendar/backup.js';
 import { assertHostExecutionLease } from '../../../db/host-execution-lease.js';
@@ -215,7 +215,7 @@ function captureAuthority(
     !/^[a-f0-9]{40}$/.test(recovery.software.sourceCommit) ||
     !/^[a-f0-9]{40}$/.test(recovery.software.sourceTree) ||
     !/^[a-f0-9]{64}$/.test(recovery.software.hostPayloadSha256) ||
-    recovery.software.schemaVersion !== SCHEMA_VERSION ||
+    checkpointSchema(recovery.software.schemaVersion).version !== recovery.software.schemaVersion ||
     !Number.isSafeInteger(recovery.software.nativeSchemaVersion) ||
     recovery.software.nativeSchemaVersion < 1
   )

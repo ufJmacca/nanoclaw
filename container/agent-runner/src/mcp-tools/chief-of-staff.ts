@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
 import { createAnswerTools } from './answer-tools.js';
+import { createMailTools } from './mail-tools.js';
 import { scheduleChangeSchema } from './generated/schedule-protocol.js';
 import { proactiveCoordinatorTools } from './proactive-coordinator-tools.js';
 import { missionCoordinatorTools } from './mission-coordinator-tools.js';
@@ -157,6 +158,7 @@ const knowledgeTools: McpToolDefinition[] = (
   },
 }));
 const answerTools = createAnswerTools(executeCosRequest);
+const mailTools = createMailTools(executeCosRequest);
 const calendarTool: McpToolDefinition = {
   tool: {
     name: 'cos_calendar_read',
@@ -312,6 +314,7 @@ export const cosTools: McpToolDefinition[] = [
   ...knowledgeTools,
   ...answerTools,
   calendarTool,
+  ...mailTools,
   ...workTools,
   workReadTool,
   briefTool,

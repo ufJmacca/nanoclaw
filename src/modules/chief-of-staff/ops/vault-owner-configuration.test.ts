@@ -31,11 +31,11 @@ function fixture() {
     owner: { uid: 1000, gid: 1000, home: '/home/fixture', targetRoot: '/home/fixture/.config/nanoclaw-cos/state' },
   };
 }
-function backupUpgrade() {
+function backupUpgrade(slice: 'G02' | 'G03' | 'G04' = 'G02') {
   const input = fixture(),
     previous = vaultOwnerConfiguration(input),
     nonce = randomUUID(),
-    release = fixtureVaultRelease('G02');
+    release = fixtureVaultRelease(slice);
   release.source.commit = 'e'.repeat(40);
   release.source.tree = 'f'.repeat(40);
   release.releaseId = 'release-backup-fixture';
@@ -72,6 +72,22 @@ it('G02 refuses to create a fresh vault when the existing configuration is absen
   const { previous: _previous, ...input } = backupUpgrade();
   expect(() => vaultOwnerConfiguration(input)).toThrow('vault_owner_configuration_unavailable');
 });
+it.each(['G03', 'G04'] as const)(
+  '%s advances only the sealed helper and current lease while preserving every existing vault identity',
+  (slice) => {
+    const input = backupUpgrade(slice),
+      config = vaultOwnerConfiguration(input);
+    expect(config.identity).toEqual(input.previous.identity);
+    expect(config.owner).toEqual(input.previous.owner);
+    expect(config.artifact.digest).toBe(input.release.vaultArtifact!.digest);
+    expect(config.target.minimumGeneration).toBe(input.maintenance.generation);
+    const { previous: _previous, ...missing } = input;
+    expect(() => vaultOwnerConfiguration(missing)).toThrow('vault_owner_configuration_unavailable');
+    expect(() =>
+      vaultOwnerConfiguration({ ...input, maintenance: { ...input.maintenance, nonce: randomUUID() } }),
+    ).toThrow('vault_owner_configuration_unavailable');
+  },
+);
 it.each(['owner', 'binding', 'generation', 'reused-operation', 'backup-gate', 'artifact'])(
   'G02 refuses a conflicting %s upgrade',
   (reason) => {

@@ -7,7 +7,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import { digest, type Context } from '../domain/contracts.js';
 import type { KnowledgeArtifacts } from '../knowledge/artifacts.js';
 import type { ActionWitness } from '../actions/witness.js';
-import { MIGRATIONS, SCHEMA_VERSION, migrationStatus } from '../store/migrations.js';
+import { SCHEMA_VERSION, migrationStatus } from '../store/migrations.js';
+import { checkpointSchema } from './checkpoint-schema.js';
 import { backupNativeDatabase } from './native-installation.js';
 import { captureNativeDatabase, verifyRecoveredNativeDatabase } from './backup-native.js';
 import type { BackupSnapshotSink, BackupQueueReceipt } from './backup-queue.js';
@@ -24,6 +25,8 @@ export type QuiescentCheckpoint = {
   effectsEnabled: false;
 };
 export type CoordinatedBackupOptions = {
+  /** Trusted pre-upgrade captures may select the actual predecessor epoch. */
+  schemaVersion?: number;
   client: pg.Client;
   context: Context;
   databaseFingerprint: string;
@@ -96,13 +99,8 @@ export type CoordinatedRestoreProof = {
   eventJournalRestored: false;
   verifiedAt: string;
 };
-const schemaDigest = digest(MIGRATIONS.map(({ version, checksum }) => ({ version, checksum })));
 /** Only application tables created by the reviewed migration history. No cos_admin or foreign schemas. */
-export const CHECKPOINT_TABLES = [
-  ...new Set(
-    MIGRATIONS.flatMap((m) => [...m.sql.matchAll(/CREATE TABLE cos\.([a-z_]+)\s*\(/g)].map((match) => match[1])),
-  ),
-].sort();
+export const CHECKPOINT_TABLES = checkpointSchema(SCHEMA_VERSION).tables;
 const maximumRemoteBytes = 64 * 1024 * 1024;
 const inputsDigest = (
   options: Pick<CoordinatedRecoveryIdentity, 'nativeDatabases' | 'restrictionFiles' | 'artifacts'>,
@@ -220,6 +218,7 @@ function parameters(options: CoordinatedBackupIdentity) {
   return root;
 }
 function identityParameters(options: CoordinatedRecoveryIdentity, root?: string) {
+  if (options.schemaVersion !== undefined) checkpointSchema(options.schemaVersion);
   if (
     !/^[a-zA-Z0-9_-]{1,200}$/.test(options.context.scopeId) ||
     options.context.origin ||
@@ -252,13 +251,14 @@ function identityParameters(options: CoordinatedRecoveryIdentity, root?: string)
     throw new Error('unsafe_coordinated_backup');
 }
 async function remoteSnapshot(
-  options: Pick<CoordinatedBackupOptions, 'client' | 'context' | 'databaseFingerprint'>,
+  options: Pick<CoordinatedBackupOptions, 'client' | 'context' | 'databaseFingerprint' | 'schemaVersion'>,
 ): Promise<ScopeCheckpoint> {
-  const client = options.client;
+  const client = options.client,
+    schema = checkpointSchema(options.schemaVersion ?? SCHEMA_VERSION);
   await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
   try {
     await client.query("SET LOCAL TIME ZONE 'UTC'");
-    if ((await migrationStatus(client)) !== SCHEMA_VERSION) throw new Error('coordinated_backup_schema_incompatible');
+    if ((await migrationStatus(client)) !== schema.version) throw new Error('coordinated_backup_schema_incompatible');
     const scope = (
       await client.query('SELECT owner_id,agent_group_id FROM cos.scopes WHERE id=$1', [options.context.scopeId])
     ).rows[0];
@@ -267,7 +267,7 @@ async function remoteSnapshot(
     const columns: ScopeCheckpoint['columns'] = {},
       rows: ScopeCheckpoint['rows'] = {};
     let bytes = 0;
-    for (const table of CHECKPOINT_TABLES) {
+    for (const table of schema.tables) {
       const fields = (
         await client.query(
           `SELECT attname FROM pg_attribute WHERE attrelid=$1::regclass AND attnum>0 AND NOT attisdropped AND attgenerated='' ORDER BY attnum`,
@@ -297,8 +297,8 @@ async function remoteSnapshot(
     return {
       format: 'cos-scoped-checkpoint/v1',
       scopeId: options.context.scopeId,
-      schemaVersion: SCHEMA_VERSION,
-      schemaDigest,
+      schemaVersion: schema.version,
+      schemaDigest: schema.digest,
       databaseFingerprint: options.databaseFingerprint,
       at,
       columns,
@@ -405,8 +405,8 @@ export async function captureCoordinatedState(
           contextDigest: digest(options.context),
           inputsDigest: inputsDigest(options),
           databaseFingerprint: options.databaseFingerprint,
-          schemaVersion: SCHEMA_VERSION,
-          schemaDigest,
+          schemaVersion: snapshot.schemaVersion,
+          schemaDigest: snapshot.schemaDigest,
           barrierDigest: epoch,
           admissionRestored: false,
           journal: { installationDigest: options.witness.installationDigest, generation: options.witness.generation },
@@ -491,6 +491,7 @@ async function verify(options: CoordinatedBackupIdentity): Promise<CoordinatedBa
     }
   };
   visit('', 0);
+  scopedCheckpoint(options, value);
   return value;
 }
 function receiptIdentity(options: CoordinatedRecoveryIdentity, value: CoordinatedBackupReceipt) {
@@ -501,8 +502,8 @@ function receiptIdentity(options: CoordinatedRecoveryIdentity, value: Coordinate
     value.contextDigest !== digest(options.context) ||
     value.inputsDigest !== inputsDigest(options) ||
     value.databaseFingerprint !== options.databaseFingerprint ||
-    value.schemaVersion !== SCHEMA_VERSION ||
-    value.schemaDigest !== schemaDigest ||
+    (options.schemaVersion !== undefined && value.schemaVersion !== options.schemaVersion) ||
+    value.schemaDigest !== checkpointSchema(value.schemaVersion).digest ||
     value.admissionRestored !== false ||
     digest(value.journal) !==
       digest({ installationDigest: options.witness.installationDigest, generation: options.witness.generation }) ||
@@ -592,24 +593,34 @@ export async function restoreCoordinatedSandbox(
     throw new Error('coordinated_restore_unavailable');
   }
 }
-const checkpointState = (snapshot: ScopeCheckpoint) => ({
-  columns: snapshot.columns,
-  rows: Object.fromEntries(
-    CHECKPOINT_TABLES.map((table) => [table, snapshot.rows[table].map((row) => digest(row)).sort()]),
-  ),
-});
+function checkpointState(snapshot: ScopeCheckpoint, version = snapshot.schemaVersion) {
+  const tables = checkpointSchema(version).tables;
+  // A legacy comparison may project empty newly added tables, never discard data.
+  if (Object.entries(snapshot.rows).some(([table, rows]) => !tables.includes(table) && rows.length))
+    throw Error('coordinated_restore_conflict');
+  return {
+    columns: Object.fromEntries(tables.map((table) => [table, snapshot.columns[table]])),
+    rows: Object.fromEntries(tables.map((table) => [table, snapshot.rows[table].map((row) => digest(row)).sort()])),
+  };
+}
+function matchingCheckpoint(receipt: CoordinatedBackupReceipt, value: ScopeCheckpoint) {
+  if (receipt.schemaVersion !== value.schemaVersion || receipt.schemaDigest !== value.schemaDigest)
+    throw Error('coordinated_restore_conflict');
+  return value;
+}
 function scopedCheckpoint(options: CoordinatedBackupIdentity, receipt: CoordinatedBackupReceipt): ScopeCheckpoint {
   if (receipt.remote.file !== 'remote.json') throw Error('coordinated_restore_conflict');
   const value = JSON.parse(
     privateBytes(path.join(parameters(options), 'remote.json'), maximumRemoteBytes).toString('utf8'),
   ) as ScopeCheckpoint;
-  return validateScopedCheckpoint(options, value);
+  return matchingCheckpoint(receipt, validateScopedCheckpoint(options, value));
 }
 function validateScopedCheckpoint(
   options: Pick<CoordinatedRecoveryIdentity, 'context' | 'databaseFingerprint'>,
   value: ScopeCheckpoint,
 ): ScopeCheckpoint {
   const record = (x: unknown): x is Record<string, unknown> => !!x && typeof x === 'object' && !Array.isArray(x);
+  const schema = checkpointSchema(value?.schemaVersion);
   if (
     !record(value) ||
     Object.keys(value).sort().join(',') !==
@@ -617,16 +628,15 @@ function validateScopedCheckpoint(
     value.format !== 'cos-scoped-checkpoint/v1' ||
     value.scopeId !== options.context.scopeId ||
     value.databaseFingerprint !== options.databaseFingerprint ||
-    value.schemaVersion !== SCHEMA_VERSION ||
-    value.schemaDigest !== schemaDigest ||
+    value.schemaDigest !== schema.digest ||
     !Number.isFinite(Date.parse(value.at)) ||
     !record(value.columns) ||
     !record(value.rows) ||
-    Object.keys(value.columns).sort().join(',') !== CHECKPOINT_TABLES.join(',') ||
-    Object.keys(value.rows).sort().join(',') !== CHECKPOINT_TABLES.join(',')
+    Object.keys(value.columns).sort().join(',') !== schema.tables.join(',') ||
+    Object.keys(value.rows).sort().join(',') !== schema.tables.join(',')
   )
     throw Error('coordinated_restore_conflict');
-  for (const table of CHECKPOINT_TABLES) {
+  for (const table of schema.tables) {
     const columns = value.columns[table],
       rows = value.rows[table],
       scopeColumn = table === 'scopes' ? 'id' : 'scope_id';
@@ -740,7 +750,10 @@ export function verifyRecoveredCoordinatedState(
       throw Error('coordinated_recovery_graph_changed');
     if (receipt.remote.file !== 'remote.json') throw Error('coordinated_recovery_file_changed');
     checkFile(receipt.remote, maximumRemoteBytes);
-    const checkpoint = validateScopedCheckpoint(options, readJson<ScopeCheckpoint>('remote.json', maximumRemoteBytes));
+    const checkpoint = matchingCheckpoint(
+      receipt,
+      validateScopedCheckpoint(options, readJson<ScopeCheckpoint>('remote.json', maximumRemoteBytes)),
+    );
     for (const [index, item] of receipt.sqlite.entries()) {
       if (item.file !== 'sqlite/' + index + '/native.sqlite') throw Error('coordinated_recovery_native_changed');
       checkFile(item, maximumRemoteBytes);
@@ -895,6 +908,7 @@ async function restoreCheckedTestScope(
         context: options.context,
         databaseFingerprint: options.databaseFingerprint,
         operationId: options.operationId,
+        schemaVersion: options.schemaVersion,
         nativeDatabases: options.nativeDatabases,
         restrictionFiles: options.restrictionFiles,
         artifactsRoot: options.artifacts.root,
@@ -938,7 +952,8 @@ async function restoreCheckedTestScope(
     if (!(await client.query('SELECT pg_try_advisory_lock(73101003) AS locked')).rows[0]?.locked)
       throw Error('coordinated_restore_busy');
     locked = true;
-    for (const table of CHECKPOINT_TABLES) {
+    const tables = checkpointSchema(original.schemaVersion).tables;
+    for (const table of tables) {
       const columns = (
         await client.query(
           "SELECT attname FROM pg_attribute WHERE attrelid=$1::regclass AND attnum>0 AND NOT attisdropped AND attgenerated='' ORDER BY attnum",
@@ -1001,7 +1016,7 @@ async function restoreCheckedTestScope(
         current();
       }
       if (digest(readStart()) !== digest(reservation)) throw Error('coordinated_restore_conflict');
-      let remaining = CHECKPOINT_TABLES.filter((table) => original.rows[table].length > 0);
+      let remaining = tables.filter((table) => original.rows[table].length > 0);
       while (remaining.length) {
         const retry: string[] = [];
         for (const table of remaining) {
@@ -1038,7 +1053,7 @@ async function restoreCheckedTestScope(
     await checked();
     const restored = await remoteSnapshot({ context: options.context, databaseFingerprint: fingerprint, client });
     if (
-      digest(checkpointState(restored)) !== digest(checkpointState(original)) ||
+      digest(checkpointState(restored, original.schemaVersion)) !== digest(checkpointState(original)) ||
       digest(readStart()) !== digest(reservation)
     )
       throw Error('coordinated_restore_conflict');
@@ -1049,7 +1064,7 @@ async function restoreCheckedTestScope(
       format: 'cos-sandbox-scope-restore/v1',
       checkpointDigest: digest(receipt),
       sandboxDatabaseFingerprint: fingerprint,
-      restoredStateDigest: digest(checkpointState(restored)),
+      restoredStateDigest: digest(checkpointState(restored, original.schemaVersion)),
       inserted: !exists,
       admissionRestored: false,
       eventJournalRestored: false,
@@ -1067,7 +1082,7 @@ async function verifySandboxCopy(checkpoint: CoordinatedBackupReceipt, destinati
   const expected = {
     format: 'cos-coordinated-sandbox/v1',
     manifestDigest: digest(checkpoint),
-    schemaVersion: SCHEMA_VERSION,
+    schemaVersion: checkpoint.schemaVersion,
     admissionRestored: false,
     eventJournalRestored: false,
   };
@@ -1168,9 +1183,14 @@ export async function verifyCoordinatedSandbox(
     // The protected marker and actual server identity are checked before inspecting restored scope data.
     await assertTestTarget(sandbox.client, sandbox.testTargetId);
     const fingerprint = await databaseFingerprint(sandbox.client, sandbox.config),
-      restored = await remoteSnapshot({ ...options, client: sandbox.client, databaseFingerprint: fingerprint }),
-      original = JSON.parse(fs.readFileSync(path.join(root, 'remote.json'), 'utf8')) as ScopeCheckpoint;
-    if (digest(checkpointState(restored)) !== digest(checkpointState(original)))
+      restored = await remoteSnapshot({
+        ...options,
+        schemaVersion: SCHEMA_VERSION,
+        client: sandbox.client,
+        databaseFingerprint: fingerprint,
+      }),
+      original = scopedCheckpoint(options, checkpoint);
+    if (digest(checkpointState(restored, original.schemaVersion)) !== digest(checkpointState(original)))
       throw new Error('coordinated_restore_conflict');
     if (digest(await verify(options)) !== digest(checkpoint)) throw new Error('coordinated_restore_conflict');
     await verifySandboxCopy(checkpoint, destination);
@@ -1184,9 +1204,9 @@ export async function verifyCoordinatedSandbox(
       sandboxDatabaseFingerprint: fingerprint,
       sandboxSeparated: fingerprint !== options.databaseFingerprint,
       testMarkerDigest: digest(sandbox.testTargetId),
-      schemaVersion: SCHEMA_VERSION,
-      schemaDigest,
-      restoredStateDigest: digest(checkpointState(restored)),
+      schemaVersion: checkpoint.schemaVersion,
+      schemaDigest: checkpoint.schemaDigest,
+      restoredStateDigest: digest(checkpointState(restored, original.schemaVersion)),
       sqliteCount: checkpoint.sqlite.length,
       journal: checkpoint.journal,
       admissionRestored: false,
@@ -1251,8 +1271,8 @@ export async function backupCoordinatedState(options: CoordinatedBackupOptions):
           contextDigest: digest(options.context),
           inputsDigest: inputsDigest(options),
           databaseFingerprint: options.databaseFingerprint,
-          schemaVersion: SCHEMA_VERSION,
-          schemaDigest,
+          schemaVersion: snapshot.schemaVersion,
+          schemaDigest: snapshot.schemaDigest,
           barrierDigest: epoch,
           admissionRestored: false,
           journal: { installationDigest: options.witness.installationDigest, generation: options.witness.generation },

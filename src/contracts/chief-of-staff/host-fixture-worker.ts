@@ -7,7 +7,7 @@ import { KnowledgeArtifacts } from '../../modules/chief-of-staff/knowledge/artif
 import pg from 'pg';
 import type { CosBinding } from '../../cos-boundary.js';
 import { fixtureDatabaseConfig, connectFixtureDatabase } from './fixture-database.js';
-import { BoundedDatabase } from '../../modules/chief-of-staff/store/client.js';
+import { createNativeFixtureDatabase } from './native-fixture-database.js';
 import type { PriorityStore } from '../../modules/chief-of-staff/store/priorities.js';
 import { connectionFault } from './connection-fault.js';
 import { CalendarStore } from '../../modules/chief-of-staff/calendar/store.js';
@@ -16,6 +16,9 @@ import { CalendarView } from '../../modules/chief-of-staff/calendar/view.js';
 import { CalendarEvidence } from '../../modules/chief-of-staff/calendar/evidence.js';
 import { CalendarConnector } from '../../modules/chief-of-staff/calendar/connector.js';
 import { fixtureCalendarReader } from '../../modules/chief-of-staff/calendar/fixture-reader.js';
+import { MailStore } from '../../modules/chief-of-staff/mail/store.js';
+import { MailView } from '../../modules/chief-of-staff/mail/view.js';
+import { MailHost } from '../../modules/chief-of-staff/mail/host.js';
 import { renewBriefContext } from '../../modules/chief-of-staff/bridge/brief-context-renewal.js';
 import {
   reserveSubscriptionAttempt,
@@ -34,6 +37,8 @@ async function start(input: {
   ordinarySessionId: string;
   knowledgeRoot?: string;
   calendar?: boolean;
+  mail?: boolean;
+  strategy?: true;
   brief?: { clock: string; events: unknown[] };
   mandate?: { events: unknown[] };
   actions?: ActionFixtureConfiguration;
@@ -73,9 +78,7 @@ async function start(input: {
       !input.knowledgeRoot.startsWith(path.join(os.tmpdir(), 'cos-knowledge-demo-')))
   )
     throw new Error('fixture_knowledge_root_required');
-  // Real Docker ownership probes can occupy this fixture event loop for over 600 ms.
-  // Keep outage detection bounded without changing production database deadlines.
-  const database = new BoundedDatabase(new pg.Pool(relay.config), input.mission ? 3000 : 600);
+  const database = createNativeFixtureDatabase(new pg.Pool(relay.config), input);
   const databaseFailures: Array<{ code: string; frame: string; elapsed: number }> = [];
   if (input.mission) {
     const run = database.run.bind(database);
@@ -118,6 +121,7 @@ async function start(input: {
   }
 
   if (input.calendar && !input.knowledgeRoot) throw new Error('fixture_calendar_requires_knowledge_root');
+  if (input.mail && !input.knowledgeRoot) throw new Error('fixture_mail_requires_knowledge_root');
   if (input.brief && (!input.calendar || !Number.isFinite(Date.parse(input.brief.clock))))
     throw new Error('fixture_brief_requires_calendar_clock');
   if (
@@ -144,6 +148,7 @@ async function start(input: {
   const fences = input.calendar
     ? new CalendarAccessFences(path.join(input.knowledgeRoot!, 'calendar-fences'))
     : undefined;
+  const mailFences = input.mail ? new CalendarAccessFences(path.join(input.knowledgeRoot!, 'mail-fences')) : undefined;
   const knowledge = input.knowledgeRoot
     ? new KnowledgeStore(
         database,
@@ -156,6 +161,12 @@ async function start(input: {
             fences.assertOpen(scope, binding);
             return true;
           },
+          mailEnabled: () => !!input.mail,
+          mailAccess: (scope, binding) => {
+            if (!mailFences) return false;
+            mailFences.assertOpen(scope, binding);
+            return true;
+          },
         },
       )
     : undefined;
@@ -166,6 +177,42 @@ async function start(input: {
           knowledge,
           enabled: () => true,
           assertOpen: (scope, binding) => fences.assertOpen(scope, binding),
+        })
+      : undefined;
+  const mailStore = input.mail && knowledge ? new MailStore(database, knowledge.artifacts) : undefined;
+  const mailView =
+    mailStore && knowledge && mailFences
+      ? new MailView({
+          store: mailStore,
+          knowledge,
+          enabled: () => true,
+          assertOpen: (scope, binding) => mailFences.assertOpen(scope, binding),
+        })
+      : undefined;
+  // Explicit synthetic profile admission. Native routing/maintenance is real;
+  // encrypted mounts and credential-bearing processes have separate gates.
+  let mailClosed = false;
+  const mailHost =
+    mailStore && mailFences
+      ? new MailHost({
+          store: mailStore,
+          resource: {
+            fences: mailFences,
+            verifyStorage() {
+              const stat = fs.lstatSync(path.join(input.knowledgeRoot!, 'mail-fences'));
+              if (
+                mailClosed ||
+                !stat.isDirectory() ||
+                stat.uid !== process.getuid?.() ||
+                (stat.mode & 0o7777) !== 0o700
+              )
+                throw Error('fixture_mail_profile_closed');
+            },
+            close: async () => {
+              mailClosed = true;
+            },
+            closed: () => mailClosed,
+          },
         })
       : undefined;
   const connector =
@@ -216,6 +263,8 @@ async function start(input: {
     authority,
     teamAuthority,
     actions?.dependencies,
+    mailView,
+    mailHost,
   );
   if (input.brief) {
     store.briefs.options.clock = () => new Date(fixtureClock!);
@@ -270,6 +319,18 @@ async function start(input: {
     session: getSession,
     destination: getMessagingGroup,
     missionExecution: specialists?.execution,
+    ...(mailHost
+      ? {
+          mailAuthority: {
+            poll: () => false,
+            retention: (context) =>
+              context.scopeId === binding.scopeId &&
+              context.ownerId === binding.ownerId &&
+              context.agentGroupId === binding.agentGroupId &&
+              context.sessionId === binding.sessionId,
+          },
+        }
+      : {}),
     stop: (id) => {
       specialists?.stopSession(id);
     },
@@ -336,7 +397,7 @@ async function start(input: {
       await routeInbound({
         channelType: 'mattermost',
         platformId: destination.platform_id,
-        threadId: null,
+        threadId: input.mail ? (value.threadId ?? null) : null,
         message: {
           id: value.id,
           kind: 'chat',
@@ -413,7 +474,7 @@ async function start(input: {
       specialists!.failStep(value);
       return true;
     }
-    if (input.mission && command === 'main-context-generation')
+    if ((input.mission || input.mail) && command === 'main-context-generation')
       return (
         db.prepare('SELECT generation FROM cos_conversation_states WHERE scope_id=?').get(binding.scopeId) as {
           generation: string;
@@ -518,6 +579,7 @@ async function start(input: {
       await Promise.all(drains.values());
       await specialists?.close();
       runtime.dispose();
+      await mailHost?.close();
       await store.database.pool.end();
       await relay.close();
       closeDb();

@@ -27,6 +27,8 @@ const vaultFiles = new Set([
     'probe-backup-credentials.mjs',
     'probe-backup-journal.mjs',
     'probe-backup-postgres.mjs',
+    'probe-mail.mjs',
+    'probe-mail-recovery.mjs',
   ].map((name) => 'container/fixtures/vault/' + name),
   'scripts/cos-vault-fixture.sh',
   'scripts/cos-vault-keychain.swift',
@@ -44,6 +46,7 @@ const vaultFiles = new Set([
   'container/fixtures/backup-jobs/probe-release.mjs',
   'scripts/cos-backup-jobs-fixture.sh',
   'scripts/cos-backup-repository-fixture.sh',
+  'scripts/cos-mail-artifact-fixture.sh',
 ]);
 function allowed(name: string): boolean {
   const pieces = name.split('/');

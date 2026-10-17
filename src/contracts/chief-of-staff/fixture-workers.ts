@@ -14,13 +14,15 @@ export async function stopFixtureWorkers(
   hostRoot: string,
   image: string,
   run: (args: string[]) => string = execute,
+  protocol: 'cos-mission-rpc/v1' | 'cos-rpc/v1' = 'cos-mission-rpc/v1',
 ): Promise<void> {
   if (
     !path.isAbsolute(hostRoot) ||
     hostRoot === '/' ||
     path.resolve(hostRoot) !== hostRoot ||
     /[\r\n\0]/.test(hostRoot) ||
-    !/^sha256:[a-f0-9]{64}$/.test(image)
+    !/^sha256:[a-f0-9]{64}$/.test(image) ||
+    !['cos-mission-rpc/v1', 'cos-rpc/v1'].includes(protocol)
   )
     throw Error('invalid_fixture_worker_root');
   const prefix = hostRoot + '/.cos-plan-state/fixtures/';
@@ -30,7 +32,7 @@ export async function stopFixtureWorkers(
       '-a',
       '--no-trunc',
       '--filter',
-      'label=nanoclaw.cos-protocol=cos-mission-rpc/v1',
+      'label=nanoclaw.cos-protocol=' + protocol,
       '--format',
       '{{.ID}}',
     ])
