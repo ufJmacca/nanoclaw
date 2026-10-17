@@ -621,6 +621,69 @@ try {
   owner('denied');
   fs.unlinkSync('/case/vault/cache');
   fs.renameSync('/case/vault/cache-original', '/case/vault/cache');
+  if (process.env.NANOCLAW_COS_MAIL_CREDENTIAL_FIXTURE === '1') {
+    const state = '/home/fixture/.config/nanoclaw-cos/state',
+      unrelated = '/case/unrelated-worker';
+    fs.mkdirSync(unrelated, { mode: 0o700 });
+    let mountedWorker = false,
+      output = '';
+    mailRace = spawn(
+      '/usr/bin/setpriv',
+      [
+        '--clear-groups',
+        '--reuid=1000',
+        '--regid=1000',
+        '--bounding-set=-all',
+        '--no-new-privs',
+        '--',
+        process.execPath,
+        '/probe/probe-mail.mjs',
+        'unrelated-worker-mount',
+      ],
+      { env: { PATH: '/usr/sbin:/usr/bin:/sbin:/bin' }, stdio: ['ignore', 'pipe', 'pipe'], timeout: 20000 },
+    );
+    mailRace.stdout.on('data', (bytes) => {
+      output += bytes.toString('utf8');
+      if (output.length > 8192) mailRace.kill();
+    });
+    mailRace.stderr.resume();
+    const exited = new Promise((resolve, reject) => {
+      mailRace.once('error', reject);
+      mailRace.once('close', (code, signal) =>
+        code === 0 && !signal ? resolve() : reject(Error('mail_worker_mount_fixture_unavailable')),
+      );
+    });
+    exited.catch(() => {});
+    const wait = async (name) => {
+      for (let attempt = 0; attempt < 200; attempt++) {
+        if (fs.existsSync(state + '/' + name)) return;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      throw Error('mail_worker_mount_handshake_unavailable');
+    };
+    const signal = (name) => {
+      fs.writeFileSync(state + '/' + name, 'synthetic', { mode: 0o600, flag: 'wx' });
+      fs.chownSync(state + '/' + name, 1000, 1000);
+    };
+    try {
+      await wait('mail-worker-ready');
+      run('/usr/bin/mount', ['-t', 'tmpfs', '-o', 'size=1m,nosuid,nodev,noexec', 'tmpfs', unrelated]);
+      mountedWorker = true;
+      signal('mail-worker-mounted');
+      await wait('mail-worker-checked');
+      run('/usr/bin/umount', [unrelated]);
+      mountedWorker = false;
+      signal('mail-worker-unmounted');
+      await exited;
+      const record = JSON.parse(output);
+      assert.equal(record.mailVaultStage, 'unrelated_worker_mount');
+      assert.equal(record.credentialsUsableMountedAndUnmounted, true);
+      console.log(JSON.stringify(record));
+    } finally {
+      if (mountedWorker) run('/usr/bin/umount', [unrelated]);
+      if (mailRace.exitCode === null) mailRace.kill();
+    }
+  }
   let mailExited;
   if (process.env.NANOCLAW_COS_MAIL_CREDENTIAL_FIXTURE === '1') {
     mailRace = spawn(

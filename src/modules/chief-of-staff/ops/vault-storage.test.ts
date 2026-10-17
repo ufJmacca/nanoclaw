@@ -142,6 +142,36 @@ it('withdraws the fresh guard on a kernel mount-table change before another priv
   ).rejects.toThrow(/^vault_storage_unavailable$/);
   expect(fs.existsSync(f.vault + '/staging/must-not-write')).toBe(false);
 });
+it('keeps its held encrypted accessor usable across an unrelated worker mount', async () => {
+  const f = fixture();
+  configureVaultStorage(f.roots, f.vault, f.inspect);
+  const table = fs.readFileSync('/proc/self/mountinfo', 'utf8');
+  const read = fs.readSync;
+  await withVaultDirectory(
+    f.roots,
+    'staging',
+    async (_directory, current) => {
+      vi.spyOn(fs, 'readSync').mockImplementation(((
+        fd: number,
+        buffer: Buffer,
+        offset: number,
+        length: number,
+        position: number,
+      ) => {
+        if (!fs.readlinkSync('/proc/self/fd/' + fd).endsWith('/mountinfo'))
+          return Reflect.apply(read, fs, [fd, buffer, offset, length, position]);
+        return Buffer.from(table + '2000000000 1 0:99 / /var/lib/docker/synthetic-worker rw - tmpfs tmpfs rw\n')
+          .subarray(Number(position), Number(position) + length)
+          .copy(buffer, offset);
+      }) as typeof fs.readSync);
+      current();
+      await Promise.resolve();
+      current();
+    },
+    f.inspect,
+    () => {},
+  );
+});
 it('pins every required encrypted area and the canonical Calendar credential path', () => {
   const f = fixture();
   const first = configureVaultStorage(f.roots, f.vault, f.inspect);

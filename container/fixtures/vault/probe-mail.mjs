@@ -11,6 +11,7 @@ import { createVaultBackupQueue } from '/code/modules/chief-of-staff/ops/backup-
 import { createVaultCredentialJournal } from '/code/modules/chief-of-staff/ops/backup-credential-journal.js';
 import { writeAtomic } from '/code/modules/chief-of-staff/ops/target-state.js';
 import { digest } from '/code/modules/chief-of-staff/domain/contracts.js';
+import { pinKernelMountTable } from '/code/modules/chief-of-staff/ops/kernel-mount-guard.js';
 
 assert.equal(process.getuid(), 1000);
 assert.equal(process.platform, 'linux');
@@ -274,6 +275,44 @@ if (mode === 'install') {
     journals: snapshot('/case/vault/journals/backup-queue'),
   });
   console.log(JSON.stringify({ mailVaultStage: 'directory_races', deniedCases: cases, replacementWrites: 0 }));
+} else if (mode === 'unrelated-worker-mount') {
+  stage('mail_unrelated_worker_mount');
+  const metadata = JSON.parse(fs.readFileSync(metadataFile, 'utf8')),
+    strictKernel = pinKernelMountTable(),
+    host = await openMailCredentials(roots);
+  const wait = async (name) => {
+    for (let attempt = 0; attempt < 500; attempt++) {
+      if (fs.existsSync(roots.targetRoot + '/' + name)) return;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    throw Error('unrelated_mount_handshake_unavailable');
+  };
+  const usable = async () => {
+    host.verifyStorage();
+    host.fences.assertOpen(scope, metadata.binding);
+    assert.equal(await host.credentials.token(scope, metadata.binding, metadata.reference), 'SYNTHETIC_ROTATED_ACCESS');
+  };
+  try {
+    await usable();
+    writeAtomic(roots.targetRoot, 'mail-worker-ready', { ready: true });
+    await wait('mail-worker-mounted');
+    assert.throws(strictKernel, /^Error: kernel_mount_unverified$/);
+    await usable();
+    writeAtomic(roots.targetRoot, 'mail-worker-checked', { checked: true });
+    await wait('mail-worker-unmounted');
+    await usable();
+  } finally {
+    await close(host);
+  }
+  console.log(
+    JSON.stringify({
+      mailVaultStage: 'unrelated_worker_mount',
+      actualKernelChange: true,
+      sameHeldMailHost: true,
+      credentialsUsableMountedAndUnmounted: true,
+      ownerCredentialsUsed: false,
+    }),
+  );
 } else if (mode === 'mount-loss') {
   stage('mail_mount_race');
   const metadata = JSON.parse(fs.readFileSync(metadataFile, 'utf8')),

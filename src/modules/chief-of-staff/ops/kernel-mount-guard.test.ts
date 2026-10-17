@@ -1,7 +1,73 @@
 import fs from 'node:fs';
 import { afterEach, expect, it, vi } from 'vitest';
 import { pinKernelMountTable } from './kernel-mount-guard.js';
+function kernelTable(initial: string) {
+  let table = initial;
+  const read = fs.readSync;
+  vi.spyOn(fs, 'readSync').mockImplementation(((
+    fd: number,
+    buffer: Buffer,
+    offset: number,
+    length: number,
+    position: number,
+  ) => {
+    if (!fs.readlinkSync('/proc/self/fd/' + fd).endsWith('/mountinfo'))
+      return Reflect.apply(read, fs, [fd, buffer, offset, length, position]);
+    return Buffer.from(table)
+      .subarray(Number(position), Number(position) + length)
+      .copy(buffer, offset);
+  }) as typeof fs.readSync);
+  return (next: string) => {
+    table = next;
+  };
+}
+const rootMount = '1 0 8:1 / / rw - ext4 /dev/root rw\n';
+const vaultMount = '2 1 253:0 / /private/vault rw - ext4 /dev/mapper/vault rw\n';
+const workerMount = '3 1 0:45 / /var/lib/docker/overlay2/worker/merged rw - overlay overlay rw\n';
 afterEach(() => vi.restoreAllMocks());
+it('keeps a protected storage scope open while an unrelated worker mount starts and stops', () => {
+  const change = kernelTable(rootMount + vaultMount);
+  const current = pinKernelMountTable(['/private/vault', '/private/target']);
+  change(rootMount + vaultMount + workerMount);
+  expect(() => current()).not.toThrow();
+  change(rootMount + vaultMount);
+  expect(() => current()).not.toThrow();
+});
+it.each([
+  rootMount,
+  rootMount + vaultMount.replace('rw - ext4', 'ro - ext4'),
+  rootMount + vaultMount.replace('2 1', '4 1'),
+  rootMount + vaultMount + '4 2 0:46 / /private/vault/credentials rw - tmpfs tmpfs rw\n',
+  rootMount + vaultMount + '4 1 0:46 / /private rw - tmpfs tmpfs rw\n',
+  rootMount.replace('rw - ext4', 'ro - ext4') + vaultMount,
+])('refuses a changed vault, ancestor, nested mount or mount instance', (changed) => {
+  const change = kernelTable(rootMount + vaultMount);
+  const current = pinKernelMountTable(['/private/vault']);
+  change(changed);
+  expect(() => current()).toThrow(/^kernel_mount_unverified$/);
+});
+it('compares path components and decodes escaped kernel mountpoints', () => {
+  const escaped = vaultMount.replace('/private/vault', '/private/secret\\040vault');
+  const change = kernelTable(rootMount + escaped);
+  const current = pinKernelMountTable(['/private/secret vault']);
+  change(rootMount + escaped + '4 1 0:46 / /private/secret\\040vault-other rw - tmpfs tmpfs rw\n');
+  expect(() => current()).not.toThrow();
+  change(rootMount + escaped + '4 2 0:46 / /private/secret\\040vault/child rw - tmpfs tmpfs rw\n');
+  expect(() => current()).toThrow(/^kernel_mount_unverified$/);
+});
+it.each(['broken\n', rootMount + rootMount, rootMount + vaultMount.replace('/private/vault', '/private/\\999')])(
+  'refuses malformed or duplicate kernel records in a scoped proof',
+  (table) => {
+    kernelTable(table);
+    expect(() => pinKernelMountTable(['/private/vault'])).toThrow(/^kernel_mount_unverified$/);
+  },
+);
+it.each([{ paths: [] }, { paths: ['relative'] }, { paths: ['/private/../vault'] }])(
+  'refuses invalid protected path selections',
+  ({ paths }) => {
+    expect(() => pinKernelMountTable(paths)).toThrow(/^kernel_mount_unverified$/);
+  },
+);
 it('reads the current kernel table again on every assertion without retaining its private paths', () => {
   const read = vi.spyOn(fs, 'readSync'),
     current = pinKernelMountTable(),

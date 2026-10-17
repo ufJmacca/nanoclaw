@@ -156,6 +156,33 @@ it('rechecks the kernel mount and descriptors for every block without spawning r
   );
   expect(s.inspect).toHaveBeenCalledTimes(2);
 });
+it('keeps the signed repository usable across an unrelated worker mount', async () => {
+  const s = fixture();
+  const table = fs.readFileSync('/proc/self/mountinfo', 'utf8'),
+    read = fs.readSync;
+  await withSignedBackupRepository(
+    s.binding,
+    async (repository) => {
+      vi.spyOn(fs, 'readSync').mockImplementation(((
+        fd: number,
+        buffer: Buffer,
+        offset: number,
+        length: number,
+        position: number,
+      ) => {
+        if (!fs.readlinkSync('/proc/self/fd/' + fd).endsWith('/mountinfo'))
+          return Reflect.apply(read, fs, [fd, buffer, offset, length, position]);
+        return Buffer.from(table + '2000000000 1 0:99 / /var/lib/docker/synthetic-worker rw - tmpfs tmpfs rw\n')
+          .subarray(Number(position), Number(position) + length)
+          .copy(buffer, offset);
+      }) as typeof fs.readSync);
+      repository.assertCurrent();
+      await Promise.resolve();
+      repository.assertCurrent();
+    },
+    s.inspect,
+  );
+});
 it('refuses a local underlay before calling any credential-bearing operation', async () => {
   const s = fixture(),
     operation = vi.fn();
