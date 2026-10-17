@@ -4,6 +4,76 @@ import os from 'node:os';
 import path from 'node:path';
 import { createCosToolDispatch } from './codex-cos-tools.js';
 import { createMandateToolBridge, callNativeMandateTool } from './codex-mandate-bridge.js';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { cosTools } from '../mcp-tools/chief-of-staff.js';
+
+test('G04 retained conversations can read selected Mail through the current native turn fence', async () => {
+  const f = await fixture();
+  const binding_id = '11111111-1111-4111-8111-111111111111';
+  const reads = [
+    ['cos_mail_search', { binding_id, query: 'fixture subject' }],
+    ['cos_mail_thread_get', { binding_id, thread_id: 'ab01', limit: 5, offset: 0 }],
+  ] as const;
+  try {
+    for (const [tool, args] of reads)
+      expect((await callNativeMandateTool(f.bridge.socket, tool, args)).isError).toBe(true);
+    f.bridge.beginTurn('existing-retained-conversation', 'owner-mail-turn');
+    for (const [tool, args] of reads) {
+      expect((await callNativeMandateTool(f.bridge.socket, tool, args)).isError).toBe(false);
+      expect((await callNativeMandateTool(f.bridge.socket, tool, { ...args, mailbox_email: 'foreign' })).isError).toBe(
+        true,
+      );
+      expect((await callNativeMandateTool(f.bridge.socket, tool, { ...args, limit: 6 })).isError).toBe(true);
+    }
+    for (const tool of ['cos_mail_send', 'cos_mail_refresh', 'cos_mail_link'])
+      expect((await callNativeMandateTool(f.bridge.socket, tool, {})).isError).toBe(true);
+    f.bridge.endTurn();
+    for (const [tool, args] of reads)
+      expect((await callNativeMandateTool(f.bridge.socket, tool, args)).isError).toBe(true);
+    expect(f.calls).toEqual(['cos_mail_search', 'cos_mail_thread_get']);
+  } finally {
+    await f.close();
+  }
+});
+
+test('G04 the actual retained-context MCP entry point advertises and routes the same bounded Mail readers', async () => {
+  const f = await fixture();
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [path.join(import.meta.dir, '../mcp-tools/native-mandate-server.ts')],
+    env: { NANOCLAW_COS_TOOL_SOCKET: f.bridge.socket },
+    stderr: 'pipe',
+  });
+  const client = new Client({ name: 'retained-mail-fixture', version: '1' });
+  try {
+    await client.connect(transport);
+    const { tools } = await client.listTools();
+    const config = Bun.TOML.parse(f.bridge.configuration) as {
+      mcp_servers: {
+        nanoclaw_cos_mandates: { enabled_tools: string[]; tools: Record<string, { approval_mode: string }> };
+      };
+    };
+    for (const name of ['cos_mail_search', 'cos_mail_thread_get']) {
+      expect(tools.find((t) => t.name === name)).toEqual(cosTools.find(({ tool }) => tool.name === name)!.tool);
+      expect(config.mcp_servers.nanoclaw_cos_mandates.enabled_tools).toContain(name);
+      expect(config.mcp_servers.nanoclaw_cos_mandates.tools[name].approval_mode).toBe('approve');
+    }
+    expect(tools.some((t) => /mail_(send|refresh|link)/.test(t.name))).toBe(false);
+    f.bridge.beginTurn('existing-retained-conversation', 'owner-mail-turn');
+    const result = await client.callTool({
+      name: 'cos_mail_search',
+      arguments: { binding_id: '11111111-1111-4111-8111-111111111111', query: 'fixture subject' },
+    });
+    expect(result.isError).toBe(false);
+    expect(f.calls).toEqual(['cos_mail_search']);
+    f.bridge.endTurn();
+    expect((await client.callTool({ name: 'cos_mail_search', arguments: {} })).isError).toBe(true);
+  } finally {
+    await client.close();
+    await f.close();
+  }
+}, 20000);
 test('G03 retained conversations can prepare a checked empty calendar window without a context reset', async () => {
   const f = await fixture();
   const args = {
@@ -143,6 +213,8 @@ test('S08/S09 retained-thread coordinator MCP shares the current native turn fen
       'cos_review_get',
       'cos_answer_prepare',
       'cos_answer_get',
+      'cos_mail_search',
+      'cos_mail_thread_get',
     ]);
     expect(config.mcp_servers.nanoclaw_cos_mandates.default_tools_approval_mode).toBe('prompt');
     expect(Object.keys(config.mcp_servers.nanoclaw_cos_mandates.tools)).toEqual([
@@ -159,6 +231,8 @@ test('S08/S09 retained-thread coordinator MCP shares the current native turn fen
       'cos_review_get',
       'cos_answer_prepare',
       'cos_answer_get',
+      'cos_mail_search',
+      'cos_mail_thread_get',
     ]);
   } finally {
     await f.close();
