@@ -121,6 +121,13 @@ function records(): Record<string, unknown>[] {
       installedAcceptance: false,
       compiledProductionPayload: true,
     },
+    {
+      mailVaultStage: 'unrelated_worker_mount',
+      actualKernelChange: true,
+      sameHeldMailHost: true,
+      credentialsUsableMountedAndUnmounted: true,
+      ownerCredentialsUsed: false,
+    },
   ];
 }
 const report = (values = records()) => values.map((value) => JSON.stringify(value)).join('\n') + '\n';
@@ -165,7 +172,7 @@ it('admits recovery only through the matching host/fixture dispatch and never re
     'vault_fixture_identity_mismatch',
   );
 });
-it.each([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11])('refuses missing or duplicated required record %i', (index) => {
+it.each(records().map((_, index) => index))('refuses missing or duplicated required record %i', (index) => {
   const missing = records();
   missing.splice(index, 1);
   expect(() => verifyMailRecoveryFixtureEvidence(report(missing), identity)).toThrow(
@@ -175,7 +182,7 @@ it.each([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11])('refuses missing or duplicated r
   duplicate.push(duplicate[index]);
   expect(() => verifyMailRecoveryFixtureEvidence(report(duplicate), identity)).toThrow();
 });
-it.each([10, 11].flatMap((index) => Object.keys(records()[index]).map((key) => ({ index, key }))))(
+it.each([10, 11, 12].flatMap((index) => Object.keys(records()[index]).map((key) => ({ index, key }))))(
   'refuses altered $index/$key recovery proof',
   ({ index, key }) => {
     const changed = records();

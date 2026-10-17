@@ -57,6 +57,13 @@ function records(): Record<string, unknown>[] {
     },
     { mailVaultStage: 'recovered', credentialsPreserved: true, denialPreserved: true, journalPreserved: true },
     { mailVaultStage: 'unavailable', openDenied: true, setupDenied: true, plaintextWrites: 0 },
+    {
+      mailVaultStage: 'unrelated_worker_mount',
+      actualKernelChange: true,
+      sameHeldMailHost: true,
+      credentialsUsableMountedAndUnmounted: true,
+      ownerCredentialsUsed: false,
+    },
   ];
 }
 const report = (values = records()) => values.map((value) => JSON.stringify(value)).join('\n') + '\n';
@@ -124,7 +131,7 @@ it.each(['sourceCommit', 'sourceTree', 'fixtureImage'] as const)('refuses a fore
     }),
   ).toThrow('mail_vault_evidence_unavailable');
 });
-it.each([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])('refuses missing or duplicate required record %i', (index) => {
+it.each(records().map((_, index) => index))('refuses missing or duplicate required record %i', (index) => {
   const missing = records();
   missing.splice(index, 1);
   expect(() => verifyMailVaultFixtureEvidence(report(missing), identity)).toThrow();
@@ -132,6 +139,15 @@ it.each([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])('refuses missing or duplicate required r
   duplicate.push(duplicate[index]);
   expect(() => verifyMailVaultFixtureEvidence(report(duplicate), identity)).toThrow();
 });
+it.each(['actualKernelChange', 'sameHeldMailHost', 'credentialsUsableMountedAndUnmounted', 'ownerCredentialsUsed'])(
+  'refuses an unverified unrelated worker mount %s claim',
+  (key) => {
+    const changed = records(),
+      proof = changed.find((record) => record.mailVaultStage === 'unrelated_worker_mount')!;
+    proof[key] = !proof[key];
+    expect(() => verifyMailVaultFixtureEvidence(report(changed), identity)).toThrow('mail_vault_evidence_unavailable');
+  },
+);
 it.each(records().flatMap((record, index) => Object.keys(record).map((key) => ({ index, key }))))(
   'refuses altered $index/$key evidence',
   ({ index, key }) => {

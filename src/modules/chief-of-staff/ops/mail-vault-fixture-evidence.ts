@@ -53,6 +53,12 @@ export function verifyMailVaultFixtureEvidence(
         denialPreserved: true,
       },
       directory_races: { deniedCases: 7, replacementWrites: 0 },
+      unrelated_worker_mount: {
+        actualKernelChange: true,
+        sameHeldMailHost: true,
+        credentialsUsableMountedAndUnmounted: true,
+        ownerCredentialsUsed: false,
+      },
       mount_loss: {
         heldHostDenied: true,
         tokenDenied: true,
