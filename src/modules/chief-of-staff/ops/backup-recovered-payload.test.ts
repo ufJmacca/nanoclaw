@@ -310,3 +310,26 @@ it.each(['conversation-auth', 'mission-control', 'mission-master', 'foreign-rece
     });
   },
 );
+
+it.each(['conversation', 'mission'] as const)(
+  'round-trips zero-length %s history files without restoring newer live bytes',
+  async (profile) => {
+    const f = historyFixture(profile),
+      empty = f.base + '/empty-marker';
+    fs.writeFileSync(empty, '', { mode: 0o600 });
+    const receipt = await capturePrivateHistory(f.source, f.sink, profile);
+    fs.writeFileSync(empty, 'CURRENT_LATER_MARKER', { mode: 0o600 });
+    const result = await f.recover(async (scope, entries) => {
+      const checked = verifyRecoveredPrivateHistory(scope, entries, f.source, profile);
+      const prefix =
+        profile +
+        '-backup/history/' +
+        (profile === 'conversation' ? generation : 'missions/' + generation + '/provider');
+      expect(entries.find((entry) => entry.name === prefix + '/empty-marker')?.bytes).toBe(0);
+      expect(scope.withFileBytes(prefix + '/empty-marker', 1024, (bytes) => bytes.length)).toBe(0);
+      return checked;
+    }, true);
+    expect(result).toEqual(receipt);
+    expect(fs.readFileSync(empty, 'utf8')).toBe('CURRENT_LATER_MARKER');
+  },
+);

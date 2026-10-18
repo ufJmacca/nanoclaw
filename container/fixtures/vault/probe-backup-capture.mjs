@@ -145,6 +145,7 @@ if (mode === 'unavailable') {
       history = stateRoot + '/conversations/' + generation;
     directory(history);
     file(history + '/history', 'SYNTHETIC_MAIN_HISTORY');
+    file(history + '/empty-marker', '');
     file(history + '/auth.json', 'SYNTHETIC_PROVIDER_CACHE');
     file(history + '/.sandbox-migration', 'SYNTHETIC_PROVIDER_MARKER');
     directory(history + '/skills/.system');
@@ -153,6 +154,7 @@ if (mode === 'unavailable') {
     directory(mission + '/provider');
     directory(mission + '/context');
     file(mission + '/provider/history', 'SYNTHETIC_SPECIALIST_HISTORY');
+    file(mission + '/provider/empty-marker', '');
     file(mission + '/provider/auth.json', 'SYNTHETIC_SPECIALIST_CACHE');
     directory('/case/vault/journals/empty');
     writeAtomic('/case/vault/journals', 'credential-event.json', { event: 'synthetic-change' });
@@ -212,6 +214,7 @@ if (mode === 'unavailable') {
           'SYNTHETIC_MAIN_HISTORY',
         );
         assert.equal(fs.existsSync(directory + '/conversation-backup/history/' + generation + '/auth.json'), false);
+        assert.equal(fs.statSync(directory + '/conversation-backup/history/' + generation + '/empty-marker').size, 0);
         assert.equal(fs.readFileSync(directory + '/conversation-backup/history/' + generation + '/.sandbox-migration', 'utf8'), 'SYNTHETIC_PROVIDER_MARKER');
         assert.equal(fs.readFileSync(directory + '/conversation-backup/history/' + generation + '/skills/.system/SKILL.md', 'utf8'), 'SYNTHETIC_PROVIDER_SKILL');
         assert.equal(
@@ -226,6 +229,12 @@ if (mode === 'unavailable') {
             directory + '/mission-backup/history/missions/' + mission.split('/').at(-1) + '/provider/auth.json',
           ),
           false,
+        );
+        assert.equal(
+          fs.statSync(
+            directory + '/mission-backup/history/missions/' + mission.split('/').at(-1) + '/provider/empty-marker',
+          ).size,
+          0,
         );
         assert.equal(
           fs.readFileSync(directory + '/coordinated/artifacts/' + artifactName, 'utf8'),

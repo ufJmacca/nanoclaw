@@ -165,6 +165,8 @@ async function inventory(root: string, profile: Profile, destination?: string, a
         }
         const after = fs.fstatSync(fd);
         if (length !== stat.size || after.mtimeMs !== stat.mtimeMs || after.ctimeMs !== stat.ctimeMs) throw unsafe();
+        // Empty files emit no stream chunks, but still belong to the portable inventory.
+        if (length === 0) capture?.write?.(relative, Buffer.alloc(0));
         if (output !== undefined) fs.fsyncSync(output);
         hash.update(JSON.stringify([relative, 'file', length, fileHash.digest('hex')]) + '\n');
         files++;
