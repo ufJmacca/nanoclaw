@@ -11,6 +11,12 @@ function mountpoint(encoded: string): string {
   return decoded;
 }
 const within = (file: string, root: string) => file === root || file.startsWith(root === '/' ? '/' : root + '/');
+function mountRoot(encoded: string, filesystem: string): void {
+  // nsfs show_path emits a namespace name and inode, rather than an absolute path.
+  // Keep the complete record in the digest whenever its mountpoint is protected.
+  if (filesystem === 'nsfs' && /^[a-z][a-z0-9_]{0,31}:\[[1-9][0-9]{0,19}\]$/.test(encoded)) return;
+  mountpoint(encoded);
+}
 function scopedTable(bytes: Buffer, paths: readonly string[]): string {
   const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
   if (!text.endsWith('\n')) throw Error('kernel_mount_table_invalid');
@@ -31,7 +37,7 @@ function scopedTable(bytes: Buffer, paths: readonly string[]): string {
     )
       throw Error('kernel_mount_table_invalid');
     ids.add(fields[0]);
-    mountpoint(fields[3]);
+    mountRoot(fields[3], fields[separator + 1]);
     const named = mountpoint(fields[4]);
     root ||= named === '/';
     if (paths.some((file) => within(file, named) || within(named, file))) selected.push(line);

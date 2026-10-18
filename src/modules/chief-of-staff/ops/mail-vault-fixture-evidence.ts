@@ -55,6 +55,9 @@ export function verifyMailVaultFixtureEvidence(
       directory_races: { deniedCases: 7, replacementWrites: 0 },
       unrelated_worker_mount: {
         actualKernelChange: true,
+        actualNamespaceBind: true,
+        namespaceRootObserved: true,
+        credentialsUsableAcrossNamespaceChanges: true,
         sameHeldMailHost: true,
         credentialsUsableMountedAndUnmounted: true,
         ownerCredentialsUsed: false,

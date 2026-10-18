@@ -60,6 +60,9 @@ function records(): Record<string, unknown>[] {
     {
       mailVaultStage: 'unrelated_worker_mount',
       actualKernelChange: true,
+      actualNamespaceBind: true,
+      namespaceRootObserved: true,
+      credentialsUsableAcrossNamespaceChanges: true,
       sameHeldMailHost: true,
       credentialsUsableMountedAndUnmounted: true,
       ownerCredentialsUsed: false,
@@ -139,12 +142,25 @@ it.each(records().map((_, index) => index))('refuses missing or duplicate requir
   duplicate.push(duplicate[index]);
   expect(() => verifyMailVaultFixtureEvidence(report(duplicate), identity)).toThrow();
 });
-it.each(['actualKernelChange', 'sameHeldMailHost', 'credentialsUsableMountedAndUnmounted', 'ownerCredentialsUsed'])(
-  'refuses an unverified unrelated worker mount %s claim',
+it.each([
+  'actualKernelChange',
+  'actualNamespaceBind',
+  'namespaceRootObserved',
+  'credentialsUsableAcrossNamespaceChanges',
+  'sameHeldMailHost',
+  'credentialsUsableMountedAndUnmounted',
+  'ownerCredentialsUsed',
+])('refuses an unverified unrelated worker mount %s claim', (key) => {
+  const changed = records(),
+    proof = changed.find((record) => record.mailVaultStage === 'unrelated_worker_mount')!;
+  proof[key] = !proof[key];
+  expect(() => verifyMailVaultFixtureEvidence(report(changed), identity)).toThrow('mail_vault_evidence_unavailable');
+});
+it.each(['actualNamespaceBind', 'namespaceRootObserved', 'credentialsUsableAcrossNamespaceChanges'])(
+  'requires the namespace fixture proof %s',
   (key) => {
-    const changed = records(),
-      proof = changed.find((record) => record.mailVaultStage === 'unrelated_worker_mount')!;
-    proof[key] = !proof[key];
+    const changed = records();
+    delete changed.find((record) => record.mailVaultStage === 'unrelated_worker_mount')![key];
     expect(() => verifyMailVaultFixtureEvidence(report(changed), identity)).toThrow('mail_vault_evidence_unavailable');
   },
 );

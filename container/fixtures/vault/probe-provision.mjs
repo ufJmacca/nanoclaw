@@ -623,9 +623,13 @@ try {
   fs.renameSync('/case/vault/cache-original', '/case/vault/cache');
   if (process.env.NANOCLAW_COS_MAIL_CREDENTIAL_FIXTURE === '1') {
     const state = '/home/fixture/.config/nanoclaw-cos/state',
-      unrelated = '/case/unrelated-worker';
+      unrelated = '/case/unrelated-worker',
+      namespace = '/case/unrelated-worker-netns';
     fs.mkdirSync(unrelated, { mode: 0o700 });
+    fs.writeFileSync(namespace, '', { mode: 0o600, flag: 'wx' });
+    run('/usr/bin/mount', ['--bind', '/proc/self/ns/net', namespace]);
     let mountedWorker = false,
+      mountedNamespace = true,
       output = '';
     mailRace = spawn(
       '/usr/bin/setpriv',
@@ -674,13 +678,26 @@ try {
       run('/usr/bin/umount', [unrelated]);
       mountedWorker = false;
       signal('mail-worker-unmounted');
+      await wait('mail-namespace-ready');
+      run('/usr/bin/umount', [namespace]);
+      mountedNamespace = false;
+      signal('mail-namespace-unmounted');
+      await wait('mail-namespace-checked');
+      run('/usr/bin/mount', ['--bind', '/proc/self/ns/net', namespace]);
+      mountedNamespace = true;
+      signal('mail-namespace-remounted');
       await exited;
       const record = JSON.parse(output);
       assert.equal(record.mailVaultStage, 'unrelated_worker_mount');
       assert.equal(record.credentialsUsableMountedAndUnmounted, true);
+      assert.equal(record.actualNamespaceBind, true);
+      assert.equal(record.namespaceRootObserved, true);
+      assert.equal(record.credentialsUsableAcrossNamespaceChanges, true);
       console.log(JSON.stringify(record));
     } finally {
       if (mountedWorker) run('/usr/bin/umount', [unrelated]);
+      if (mountedNamespace) run('/usr/bin/umount', [namespace]);
+      fs.unlinkSync(namespace);
       if (mailRace.exitCode === null) mailRace.kill();
     }
   }

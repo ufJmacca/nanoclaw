@@ -124,6 +124,9 @@ function records(): Record<string, unknown>[] {
     {
       mailVaultStage: 'unrelated_worker_mount',
       actualKernelChange: true,
+      actualNamespaceBind: true,
+      namespaceRootObserved: true,
+      credentialsUsableAcrossNamespaceChanges: true,
       sameHeldMailHost: true,
       credentialsUsableMountedAndUnmounted: true,
       ownerCredentialsUsed: false,

@@ -280,6 +280,21 @@ if (mode === 'install') {
   const metadata = JSON.parse(fs.readFileSync(metadataFile, 'utf8')),
     strictKernel = pinKernelMountTable(),
     host = await openMailCredentials(roots);
+  const namespaceMounted = () => {
+    const expectedRoot = fs.readlinkSync('/proc/self/ns/net');
+    assert.match(expectedRoot, /^net:\[[1-9][0-9]*\]$/);
+    const entries = fs
+      .readFileSync('/proc/self/mountinfo', 'utf8')
+      .trim()
+      .split('\n')
+      .map((line) => line.split(' '))
+      .filter((fields) => fields[4] === '/case/unrelated-worker-netns');
+    if (!entries.length) return false;
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0][3], expectedRoot);
+    assert.equal(entries[0][entries[0].indexOf('-') + 1], 'nsfs');
+    return true;
+  };
   const wait = async (name) => {
     for (let attempt = 0; attempt < 500; attempt++) {
       if (fs.existsSync(roots.targetRoot + '/' + name)) return;
@@ -293,6 +308,7 @@ if (mode === 'install') {
     assert.equal(await host.credentials.token(scope, metadata.binding, metadata.reference), 'SYNTHETIC_ROTATED_ACCESS');
   };
   try {
+    assert.equal(namespaceMounted(), true);
     await usable();
     writeAtomic(roots.targetRoot, 'mail-worker-ready', { ready: true });
     await wait('mail-worker-mounted');
@@ -301,6 +317,15 @@ if (mode === 'install') {
     writeAtomic(roots.targetRoot, 'mail-worker-checked', { checked: true });
     await wait('mail-worker-unmounted');
     await usable();
+    writeAtomic(roots.targetRoot, 'mail-namespace-ready', { ready: true });
+    await wait('mail-namespace-unmounted');
+    assert.equal(namespaceMounted(), false);
+    await usable();
+    writeAtomic(roots.targetRoot, 'mail-namespace-checked', { checked: true });
+    await wait('mail-namespace-remounted');
+    assert.equal(namespaceMounted(), true);
+    assert.throws(strictKernel, /^Error: kernel_mount_unverified$/);
+    await usable();
   } finally {
     await close(host);
   }
@@ -308,6 +333,9 @@ if (mode === 'install') {
     JSON.stringify({
       mailVaultStage: 'unrelated_worker_mount',
       actualKernelChange: true,
+      actualNamespaceBind: true,
+      namespaceRootObserved: true,
+      credentialsUsableAcrossNamespaceChanges: true,
       sameHeldMailHost: true,
       credentialsUsableMountedAndUnmounted: true,
       ownerCredentialsUsed: false,
