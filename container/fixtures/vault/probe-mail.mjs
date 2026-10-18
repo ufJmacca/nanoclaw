@@ -321,10 +321,11 @@ if (mode === 'install') {
     await wait('mail-namespace-unmounted');
     assert.equal(namespaceMounted(), false);
     await usable();
+    const namespaceAbsentKernel = pinKernelMountTable();
     writeAtomic(roots.targetRoot, 'mail-namespace-checked', { checked: true });
     await wait('mail-namespace-remounted');
     assert.equal(namespaceMounted(), true);
-    assert.throws(strictKernel, /^Error: kernel_mount_unverified$/);
+    assert.throws(namespaceAbsentKernel, /^Error: kernel_mount_unverified$/);
     await usable();
   } finally {
     await close(host);
