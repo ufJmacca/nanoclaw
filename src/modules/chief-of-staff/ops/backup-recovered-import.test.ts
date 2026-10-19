@@ -25,6 +25,7 @@ import { BackupQueue } from './backup-queue.js';
 import { streamBackupArchive } from './backup-archive.js';
 import { readBackupArchive } from './backup-archive-reader.js';
 import { withPinnedBackupTestRestoreReservation } from './backup-test-restore-reservation.js';
+import { databaseSchemaCompatible } from './operations-maintenance-effects.js';
 
 it.runIf(process.env.COS_TEST_TARGET_ID !== undefined).each([false, true])(
   'uses the admitted separate PostgreSQL target for owned recovered import and retained-commit reconciliation (sameDatabase=%s)',
@@ -48,6 +49,29 @@ it.runIf(process.env.COS_TEST_TARGET_ID !== undefined).each([false, true])(
       locked = true;
       expect(await migrationStatus(admin)).toBe(SCHEMA_VERSION);
       await admin.query("SET TIME ZONE 'UTC'");
+      if (!sameDatabase) {
+        // Exercise the compiled health fence inside the existing admitted case
+        // so the immutable vault report keeps its exact required identities.
+        const reader = await connectFixtureDatabase(process.env, 'runtime'),
+          probe = await connectFixtureDatabase(process.env, 'runtime'),
+          range = { minimum: SCHEMA_VERSION, maximum: SCHEMA_VERSION };
+        try {
+          await reader.query('SELECT pg_advisory_lock_shared(73101003)');
+          expect(await databaseSchemaCompatible(probe, range, true)).toBe(true);
+          expect(await databaseSchemaCompatible(probe, range)).toBe(false);
+          await reader.query('SELECT pg_advisory_unlock_shared(73101003)');
+          await reader.query('SELECT pg_advisory_lock(73101003)');
+          expect(await databaseSchemaCompatible(probe, range, true)).toBe(false);
+          await reader.query('SELECT pg_advisory_unlock(73101003)');
+          expect(
+            await databaseSchemaCompatible(probe, { minimum: SCHEMA_VERSION - 1, maximum: SCHEMA_VERSION - 1 }, true),
+          ).toBe(false);
+          expect((await reader.query('SELECT pg_try_advisory_lock(73101003) AS locked')).rows[0].locked).toBe(true);
+          await reader.query('SELECT pg_advisory_unlock(73101003)');
+        } finally {
+          await Promise.all([reader.end(), probe.end()]);
+        }
+      }
       for (const scope of [sourceScope, foreignScope]) {
         await admin.query(
           "INSERT INTO cos.scopes(id,owner_id,instance_id,channel_id,agent_group_id,status) VALUES($1,'owner','fixture',$1,$1,'active')",

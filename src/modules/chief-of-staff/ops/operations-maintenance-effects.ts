@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import Database from 'better-sqlite3';
+import type pg from 'pg';
 import type { DeploymentSettings } from './deployment-settings.js';
 import {
   targetBinding,
@@ -34,6 +35,35 @@ export function runtimeServiceEnvironmentMatches(selected: NodeJS.ProcessEnv, by
     observed[key] = item.slice(separator + 1);
   }
   return Object.entries(selected).every(([key, value]) => value !== undefined && observed[key] === value);
+}
+
+/** The checked caller owns the connection. Release only this check's fence;
+ * live health shares it with readers, while quiescence remains exclusive. */
+export async function databaseSchemaCompatible(
+  client: pg.Client,
+  range: ReleaseManifest['postgres'],
+  readOnly = false,
+): Promise<boolean> {
+  const locked = await client.query(
+    readOnly
+      ? 'SELECT pg_try_advisory_lock_shared(73101003) AS locked'
+      : 'SELECT pg_try_advisory_lock(73101003) AS locked',
+  );
+  if (locked.rows[0]?.locked !== true) return false;
+  let compatible = false;
+  try {
+    // Acquire the fence before observing a version that a migration can change.
+    const version = await migrationStatus(client);
+    compatible = version >= range.minimum && version <= range.maximum;
+  } finally {
+    const released = await client.query(
+      readOnly
+        ? 'SELECT pg_advisory_unlock_shared(73101003) AS unlocked'
+        : 'SELECT pg_advisory_unlock(73101003) AS unlocked',
+    );
+    compatible = released.rows[0]?.unlocked === true && compatible;
+  }
+  return compatible;
 }
 
 /** Fixed installed-service operation. No Docker stops, restore, migration or provider/model calls. */
@@ -76,17 +106,12 @@ function maintenanceEffects(
         throw new Error('operations_maintenance_unverified');
       assertNativeReleaseCompatibility(db, manifest);
     });
-  const databaseCompatible = async () => {
+  const databaseCompatible = async (readOnly = false) => {
     if (!manifest) return false;
     let client: Awaited<ReturnType<typeof checkedTargetDatabase>> | undefined;
     try {
       client = await checkedTargetDatabase(settings);
-      const version = await migrationStatus(client);
-      return (
-        version >= manifest.postgres.minimum &&
-        version <= manifest.postgres.maximum &&
-        (await client.query('SELECT pg_try_advisory_lock(73101003) AS locked')).rows[0]?.locked === true
-      );
+      return await databaseSchemaCompatible(client, manifest.postgres, readOnly);
       // eslint-disable-next-line no-catch-all/no-catch-all -- Missing old/new access leaves the maintenance latch closed and exposes no credential or driver diagnostics.
     } catch {
       return false;
@@ -167,7 +192,7 @@ function maintenanceEffects(
       } finally {
         environment.fill(0);
       }
-      return injected && (await databaseCompatible());
+      return injected && (await databaseCompatible(true));
     },
   };
 }
