@@ -113,13 +113,16 @@ export async function restoreTargetVaultBackupTestScope(
               snapshotDigest: string;
             };
           } = {};
-          const payloadCurrent = () => {
+          const payloadIdentityCurrent = () => {
             currentScope();
             if (
               digest(remote) !== remoteDigest ||
               (proof.complete && digest(proof.complete.header) !== proof.complete.snapshotDigest)
             )
               throw Error('restore_snapshot_changed');
+          };
+          const payloadCurrent = () => {
+            payloadIdentityCurrent();
             workspace.assertPayloadCurrent();
             currentScope();
           };
@@ -189,9 +192,12 @@ export async function restoreTargetVaultBackupTestScope(
                 sandbox,
                 reservation,
                 async () => {
-                  payloadCurrent();
+                  // The scoped importer walks the full inventory before and
+                  // after this await. Keep its callback's authority pinned
+                  // without repeating those same synchronous inventory walks.
+                  payloadIdentityCurrent();
                   await checkDatabase();
-                  payloadCurrent();
+                  payloadIdentityCurrent();
                 },
               );
               payloadCurrent();
