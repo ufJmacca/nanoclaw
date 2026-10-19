@@ -26,14 +26,13 @@ import { streamBackupArchive } from './backup-archive.js';
 import { readBackupArchive } from './backup-archive-reader.js';
 import { withPinnedBackupTestRestoreReservation } from './backup-test-restore-reservation.js';
 
-it.runIf(process.env.COS_TEST_TARGET_ID !== undefined).each([
-  { sameDatabase: false, slowVerification: false },
-  { sameDatabase: true, slowVerification: false },
-  { sameDatabase: false, slowVerification: true },
-])(
-  'uses the admitted separate PostgreSQL target for recovered import (sameDatabase=$sameDatabase, slowVerification=$slowVerification)',
-  async ({ sameDatabase, slowVerification }) => {
+it.runIf(process.env.COS_TEST_TARGET_ID !== undefined).each([false, true])(
+  'uses the admitted separate PostgreSQL target for owned recovered import and retained-commit reconciliation (sameDatabase=%s)',
+  async (sameDatabase) => {
     expect(fixtureProfile()).toBe('test');
+    // Keep the two identities required by the compiled vault fixture's report.
+    // Its admitted import also exercises verification beyond the session idle limit.
+    const slowVerification = !sameDatabase;
     const admin = await connectFixtureDatabase(process.env, 'migration'),
       config = await fixtureDatabaseConfig(process.env, 'migration'),
       root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-owned-pg-import-')),
