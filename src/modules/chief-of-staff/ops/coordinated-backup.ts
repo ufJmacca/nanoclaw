@@ -1005,6 +1005,10 @@ async function restoreCheckedTestScope(
     await admit();
     await client.query('BEGIN');
     transaction = true;
+    // Rechecking the encrypted payload can outlast the normal short idle
+    // timeout. Bound only this isolated restore transaction to its owner deadline;
+    // statement/lock limits and all live authority checks remain in force.
+    await client.query("SET LOCAL idle_in_transaction_session_timeout = '45min'");
     await client.query('SET CONSTRAINTS ALL DEFERRED');
     const exists =
       (await client.query('SELECT id FROM cos.scopes WHERE id=$1 FOR UPDATE', [original.scopeId])).rows.length > 0;

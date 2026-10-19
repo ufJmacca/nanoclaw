@@ -26,9 +26,13 @@ import { streamBackupArchive } from './backup-archive.js';
 import { readBackupArchive } from './backup-archive-reader.js';
 import { withPinnedBackupTestRestoreReservation } from './backup-test-restore-reservation.js';
 
-it.runIf(process.env.COS_TEST_TARGET_ID !== undefined).each([false, true])(
-  'uses the admitted separate PostgreSQL target for owned recovered import and retained-commit reconciliation (sameDatabase=%s)',
-  async (sameDatabase) => {
+it.runIf(process.env.COS_TEST_TARGET_ID !== undefined).each([
+  { sameDatabase: false, slowVerification: false },
+  { sameDatabase: true, slowVerification: false },
+  { sameDatabase: false, slowVerification: true },
+])(
+  'uses the admitted separate PostgreSQL target for recovered import (sameDatabase=$sameDatabase, slowVerification=$slowVerification)',
+  async ({ sameDatabase, slowVerification }) => {
     expect(fixtureProfile()).toBe('test');
     const admin = await connectFixtureDatabase(process.env, 'migration'),
       config = await fixtureDatabaseConfig(process.env, 'migration'),
@@ -38,6 +42,7 @@ it.runIf(process.env.COS_TEST_TARGET_ID !== undefined).each([false, true])(
       foreignScope = 'recovered-foreign-' + randomUUID();
     fs.chmodSync(root, 0o700);
     let locked = false;
+    let restoreClient: pg.Client | undefined;
     const created = new Set<string>();
     try {
       expect((await admin.query('SELECT pg_try_advisory_lock(73101002) AS locked')).rows[0].locked).toBe(true);
@@ -151,12 +156,31 @@ it.runIf(process.env.COS_TEST_TARGET_ID !== undefined).each([false, true])(
       const archive = Buffer.concat(chunks),
         pendingBefore = await queue.pending('state'),
         archiveSha256 = createHash('sha256').update(archive).digest('hex');
+      if (slowVerification) {
+        restoreClient = await connectFixtureDatabase(process.env, 'migration');
+        restoreClient.on('error', () => {});
+        await restoreClient.query("SET TIME ZONE 'UTC'");
+        await restoreClient.query("SET idle_in_transaction_session_timeout = '1s'");
+      }
+      const transport = restoreClient ?? admin,
+        timeouts = async () => ({
+          idle: (await transport.query('SHOW idle_in_transaction_session_timeout')).rows[0]
+            .idle_in_transaction_session_timeout,
+          statement: (await transport.query('SHOW statement_timeout')).rows[0].statement_timeout,
+          lock: (await transport.query('SHOW lock_timeout')).rows[0].lock_timeout,
+        }),
+        originalTimeouts = await timeouts();
       let loseCommitAck = !sameDatabase,
-        insertQueries = 0;
+        insertQueries = 0,
+        inTransaction = false,
+        verifiedSlowTransaction = false,
+        rejectVerification = false;
       const sandboxClient = {
         query: async (sql: string, values?: unknown[]) => {
           if (sql.startsWith('INSERT INTO cos.')) insertQueries++;
-          const result = await admin.query(sql, values);
+          const result = await transport.query(sql, values);
+          if (sql === 'BEGIN') inTransaction = true;
+          if (sql === 'COMMIT' || sql === 'ROLLBACK') inTransaction = false;
           if (sql === 'COMMIT' && loseCommitAck) {
             loseCommitAck = false;
             throw Error('PRIVATE_ACTUAL_COMMIT_ACK_LOST');
@@ -211,7 +235,16 @@ it.runIf(process.env.COS_TEST_TARGET_ID !== undefined).each([false, true])(
                     recovered.receipt.files,
                     { client: sandboxClient, config, testTargetId: process.env.COS_TEST_TARGET_ID ?? '' },
                     port,
-                    async () => {},
+                    async () => {
+                      if (slowVerification && inTransaction && !verifiedSlowTransaction) {
+                        // Exercise an actual server idle timeout while the trusted
+                        // verifier is working, using a separate fixture connection.
+                        await new Promise((resolve) => setTimeout(resolve, 1250));
+                        expect(await timeouts()).toEqual({ ...originalTimeouts, idle: '45min' });
+                        verifiedSlowTransaction = true;
+                      }
+                      if (rejectVerification && inTransaction) throw Error('PRIVATE_VERIFICATION_REVOKED');
+                    },
                   ),
               );
             } finally {
@@ -227,6 +260,11 @@ it.runIf(process.env.COS_TEST_TARGET_ID !== undefined).each([false, true])(
         expect(insertQueries).toBe(0);
       } else {
         expect(exists).toBe(true);
+        expect(await timeouts()).toEqual(originalTimeouts);
+        if (slowVerification) {
+          expect(verifiedSlowTransaction).toBe(true);
+          expect(originalTimeouts.idle).toBe('1s');
+        }
         // The sorted records table precedes scopes; its first FK attempt is
         // rolled back to the savepoint, then retried after the scope exists.
         expect(insertQueries).toBe(3);
@@ -241,6 +279,13 @@ it.runIf(process.env.COS_TEST_TARGET_ID !== undefined).each([false, true])(
         expect(checked.sandboxDatabaseFingerprint).toBe(fingerprint);
         expect(fs.readFileSync(startFile)).toEqual(startBefore);
         expect(insertQueries).toBe(3);
+        if (slowVerification) {
+          rejectVerification = true;
+          await expect(run()).rejects.toThrow(/^backup_restore_workspace_unavailable$/);
+          rejectVerification = false;
+          expect(inTransaction).toBe(false);
+          expect(await timeouts()).toEqual(originalTimeouts);
+        }
         await expect(run(randomUUID())).rejects.toThrow(/^backup_restore_workspace_unavailable$/);
         expect(insertQueries).toBe(3);
         await admin.query("UPDATE cos.records SET title='SYNTHETIC_CHANGED' WHERE scope_id=$1", [restoredScope]);
@@ -262,8 +307,12 @@ it.runIf(process.env.COS_TEST_TARGET_ID !== undefined).each([false, true])(
       try {
         if (locked) await admin.query('SELECT pg_advisory_unlock(73101002)');
       } finally {
-        await admin.end();
-        fs.rmSync(root, { recursive: true, force: true });
+        try {
+          await restoreClient?.end();
+        } finally {
+          await admin.end();
+          fs.rmSync(root, { recursive: true, force: true });
+        }
       }
     }
   },
