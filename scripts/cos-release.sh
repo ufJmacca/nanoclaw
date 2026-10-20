@@ -39,7 +39,9 @@ dev=${COS_DEVCONTAINER_ID:-$(docker compose -f .devcontainer/compose.yaml -p nan
 docker inspect "$dev" > "$directory/devcontainer.json"
 cli() { docker exec -w /workspace "$dev" node --import tsx src/modules/chief-of-staff/ops/mac-release-cli.ts "$@"; }
 cli init "$id" "$commit" "$branch" "$slice"
-source "$directory/context/scripts/cos-stage-timing.sh"
+timing_helper="$directory/context/scripts/cos-stage-timing.sh"
+[[ -f "$timing_helper" && -r "$timing_helper" ]] || { echo 'Pinned release timing helper is unavailable.' >&2; exit 1; }
+source "$timing_helper"
 docker context inspect --format '{{json .}}' > "$directory/context.json"
 docker info --format '{{json .}}' > "$directory/engine.json"
 docker buildx ls --format '{{json .}}' > "$directory/builders.jsonl"

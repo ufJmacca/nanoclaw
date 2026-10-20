@@ -37,6 +37,7 @@ const vaultFiles = new Set([
   'scripts/cos-root-unit-fixture.sh',
   'scripts/cos-source-fixture.sh',
   'scripts/cos-release.sh',
+  'scripts/cos-stage-timing.sh',
   'container/fixtures/backup-smb/Dockerfile.server',
   'container/fixtures/backup-smb/Dockerfile.client',
   'container/fixtures/backup-smb/server.sh',

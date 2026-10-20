@@ -9,6 +9,34 @@ const roots: string[] = [];
 afterEach(() => {
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
+it.each([0, 37])('preserves release exit %i through the actual host cleanup trap', async (exitCode) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-release-cleanup-status-'));
+  roots.push(root);
+  const lock = path.join(root, 'lock');
+  fs.mkdirSync(lock);
+  fs.writeFileSync(path.join(lock, 'pid'), 'fixture');
+  const source = fs.readFileSync('scripts/cos-release.sh', 'utf8');
+  const cleanup = source.slice(source.indexOf('cleanup() {'), source.indexOf('\nstamp='));
+  const script = 'set -euo pipefail\nlock=$1\ncarrier=""\n' + cleanup + '\n(exit "$2")\n';
+  const run = promisify(execFile)('bash', ['-c', script, '_', lock, String(exitCode)]);
+  if (exitCode) await expect(run).rejects.toMatchObject({ code: exitCode });
+  else await expect(run).resolves.toBeDefined();
+  expect(fs.existsSync(lock)).toBe(false);
+});
+it('refuses a missing pinned timing helper before loading it', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-release-missing-helper-'));
+  roots.push(root);
+  const lock = path.join(root, 'lock');
+  fs.mkdirSync(lock);
+  fs.writeFileSync(path.join(lock, 'pid'), 'fixture');
+  const source = fs.readFileSync('scripts/cos-release.sh', 'utf8');
+  const cleanup = source.slice(source.indexOf('cleanup() {'), source.indexOf('\nstamp='));
+  const marker = 'cli init "$id" "$commit" "$branch" "$slice"\n';
+  const load = source.slice(source.indexOf(marker) + marker.length, source.indexOf('\ndocker context inspect'));
+  const script = 'set -euo pipefail\nlock=$1\ndirectory=$2\ncarrier=""\n' + cleanup + '\n' + load + '\n';
+  await expect(promisify(execFile)('bash', ['-c', script, '_', lock, root])).rejects.toMatchObject({ code: 1 });
+  expect(fs.existsSync(lock)).toBe(false);
+});
 it('stops the actual export function at a failed image save rather than publishing a manifest', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-timing-export-'));
   roots.push(root);

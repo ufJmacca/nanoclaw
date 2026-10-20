@@ -45,6 +45,7 @@ function fixture() {
     'scripts/cos-root-unit-fixture.sh': 'isolated root administration source fixture',
     'scripts/cos-source-fixture.sh': 'public source-only Docker fixture driver',
     'scripts/cos-release.sh': 'source-pinned host release coordinator',
+    'scripts/cos-stage-timing.sh': 'source-pinned release timing wrapper',
     'scripts/cos-backup-repository-fixture.sh': 'immutable host encrypted repository fixture driver',
     'scripts/cos-mail-artifact-fixture.sh': 'immutable mail artifact fixture driver',
     'container/fixtures/backup-smb/Dockerfile.server': 'pinned synthetic SMB server',
@@ -220,6 +221,7 @@ it('exports only immutable job-manager fixtures and binds their committed bytes'
 it.each([
   'scripts/cos-source-fixture.sh',
   'scripts/cos-release.sh',
+  'scripts/cos-stage-timing.sh',
   'scripts/cos-backup-repository-fixture.sh',
   'container/fixtures/vault/probe-backup-postgres.mjs',
   'container/fixtures/vault/probe-mail.mjs',
