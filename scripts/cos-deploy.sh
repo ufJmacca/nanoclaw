@@ -60,7 +60,9 @@ fi
 directory=${manifest%/release.json}
 id=${directory##*/}
 cli verify "$id"
-source "$root/scripts/cos-stage-timing.sh"
+timing_helper="$root/scripts/cos-stage-timing.sh"
+[[ -f "$timing_helper" && -r "$timing_helper" ]] || { echo 'Release timing helper is unavailable.' >&2; exit 1; }
+source "$timing_helper"
 release_timing_cli() { docker exec -w /workspace "$dev" node --import tsx src/modules/chief-of-staff/ops/mac-release-cli.ts timing "$id" "$@"; }
 # Close disposal before target/migration/health repair can delay the final release.
 slice=$(cli field "$id" slice)
@@ -89,11 +91,12 @@ cli checkpoint "$id" source_pushed
 stage=$(cli field "$id" stage)
 remote "$(cli stage-command "$id")"
 transfer() {
-  local name=$1
-  timed_release_stage "transfer_${name//[.-]/_}" "$name-transfer.log" scp "${ssh_options[@]}" "$directory/$name" "$alias_name:$stage/$name.partial" > "$directory/$name-transfer.log" 2>&1 || return
+  local name=$1 timing_name
+  timing_name=$(printf '%s' "${name//[.-]/_}" | tr '[:upper:]' '[:lower:]') || return
+  timed_release_stage "transfer_$timing_name" "$name-transfer.log" scp "${ssh_options[@]}" "$directory/$name" "$alias_name:$stage/$name.partial" > "$directory/$name-transfer.log" 2>&1 || return
   local seal_command
   seal_command=$(cli seal-command "$id" "$name") || return
-  timed_release_stage "seal_${name//[.-]/_}" "$name-transfer.log" remote "$seal_command"
+  timed_release_stage "seal_$timing_name" "$name-transfer.log" remote "$seal_command"
 }
 for name in release.json SHA256SUMS bootstrap.mjs target.json; do transfer "$name"; done
 [[ ! -f "$directory/binding.json" ]] || transfer binding.json
