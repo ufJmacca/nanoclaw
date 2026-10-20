@@ -23,6 +23,7 @@ import { recoverConversation } from '../../modules/chief-of-staff/ops/conversati
 import type { ProactiveCandidate } from '../../modules/chief-of-staff/automation/proactive-policy.js';
 import type { ProactiveDraft } from '../../modules/chief-of-staff/contracts/proactive-protocol.js';
 import type { BriefRecord, BriefWork } from '../../modules/chief-of-staff/automation/brief-snapshot.js';
+import { fixtureBriefRequest } from './fixture-brief-request.js';
 
 test(
   'S07 native synthetic week bounds recommendations, survives dismissal replay, source replacement and an actual partition',
@@ -499,8 +500,28 @@ test(
           0,
           'suggestions do not create missions',
         );
-        const prepared = await client!.call('cos_brief_request', { request_id: randomUUID(), time_zone: 'UTC' });
-        assert.equal(prepared.status, 'ok');
+        const briefRequest = { request_id: randomUUID(), time_zone: 'UTC' };
+        let briefCalls = 0;
+        const prepared = await fixtureBriefRequest(async (request) => {
+          briefCalls++;
+          const result = await client!.call('cos_brief_request', request);
+          // Lose one completed reply, then require the existing request to reconcile.
+          if (day === 0 && briefCalls === 1 && result.status === 'ok')
+            return { protocol: result.protocol, request_id: result.request_id, status: 'pending' };
+          return result;
+        }, briefRequest);
+        assert.equal(prepared.status, 'ok', JSON.stringify({ day, status: prepared.status, briefCalls }));
+        if (day === 0) assert.equal(briefCalls, 2, 'one lost reply must reconcile the same request');
+        assert.equal(
+          (
+            await admin.query(
+              "SELECT count(*)::int n FROM cos.artifacts WHERE scope_id=$1 AND kind='summary' AND provenance->>'format'='cos-brief/v1' AND provenance->'origin_run'->>'id'=$2",
+              [scope, current.id],
+            )
+          ).rows[0].n,
+          1,
+          'pending reconciliation cannot publish another brief artifact',
+        );
         assert.ok(prepared.result.snapshot.suggested_work.length <= 1);
         await complete();
         await host!.request('pump');

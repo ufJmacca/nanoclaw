@@ -85,11 +85,23 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
       ).status === 'ok'
     );
   };
-  const reserveAutomaticCall = async (context: Context, callId: string, kind: 'model' | 'tool'): Promise<Result> => {
+  const reserveAutomaticCall = async (
+    context: Context,
+    callId: string,
+    kind: 'model' | 'tool',
+    readback?: import('./automation/brief-store.js').PreparedBriefReadback,
+  ): Promise<Result> => {
     if (!enabled() || !context.origin || !d.store) return { status: 'denied' };
     const origin = context.origin;
     if (origin.kind === 'schedule')
-      return d.store.briefs.reserveCall(context, origin.runId, origin.generation, kind, callId);
+      return d.store.briefs.reserveCall(
+        context,
+        origin.runId,
+        origin.generation,
+        kind,
+        callId,
+        ...(readback ? [readback] : []),
+      );
     const session = d.session(context.sessionId),
       retained = session && resolveKnowledgeContext(session, context, d.db);
     if (!retained || !reviewRuns) return { status: 'denied' };
@@ -544,7 +556,7 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
       'cos_rpc',
       createRpcHandler({
         resolveContext: (session) => controller.context(session),
-        reserveTool: (context, callId) => reserveAutomaticCall(context, callId, 'tool'),
+        reserveTool: (context, callId, readback) => reserveAutomaticCall(context, callId, 'tool', readback),
         store: d.store!,
         cancelMission: createMissionCancellation({
           db: d.db,

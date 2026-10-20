@@ -22,6 +22,12 @@ export type BriefArtifactReference = {
   context_generation: string;
   provider: string;
 };
+export type PreparedBriefReadback = {
+  requestId: string;
+  timeZone: string;
+  provider: string;
+  contextGeneration: string;
+};
 export type BriefDeliveryOutcome =
   | { state: 'delivered'; platform_receipt: string }
   | { state: 'uncertain' }
@@ -608,6 +614,7 @@ export class BriefRunStore {
     generation: number,
     kind: 'model' | 'tool',
     callId: string,
+    readback?: PreparedBriefReadback,
   ): Promise<Result> {
     if (
       !id(runId) ||
@@ -621,12 +628,38 @@ export class BriefRunStore {
       const run = await this.currentRun(client, context, runId);
       if (
         !run ||
-        run.state !== 'dispatched' ||
+        !['dispatched', 'prepared'].includes(run.state) ||
         !run.lease_current ||
         run.generation !== generation ||
         (kind === 'model' ? run.model_calls >= run.limits.max_turns : run.tool_calls >= run.limits.max_tool_calls)
       )
         return { status: 'denied' };
+      if (run.state === 'prepared') {
+        if (
+          kind !== 'tool' ||
+          !readback ||
+          run.snapshot?.provider !== readback.provider ||
+          run.snapshot?.context_generation !== readback.contextGeneration
+        )
+          return { status: 'denied' };
+        const receipt = (
+          await client.query(
+            "SELECT result FROM cos.operations WHERE scope_id=$1 AND session_id=$2 AND request_id=$3 AND method='cos_brief_request' AND payload_hash=$4",
+            [
+              context.scopeId,
+              context.sessionId,
+              readback.requestId,
+              digest({
+                method: 'cos_brief_request',
+                time_zone: readback.timeZone,
+                provider: readback.provider,
+                origin: context.origin ?? null,
+              }),
+            ],
+          )
+        ).rows[0]?.result;
+        if (receipt?.status !== 'ok' || receipt.artifact_id !== run.snapshot.artifact_id) return { status: 'denied' };
+      }
       const reserved = await client.query(
         'INSERT INTO cos.brief_call_reservations(scope_id,run_id,call_id,kind,generation) VALUES($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING RETURNING call_id',
         [context.scopeId, runId, callId, kind, generation],
