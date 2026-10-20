@@ -9,7 +9,7 @@ import { safeHostEnvironment } from '../../../host-environment.js';
 import type { Session } from '../../../types.js';
 import type { PriorityStore } from '../store/priorities.js';
 import { ensureRpcSchema, createRpcHandler } from '../bridge/rpc.js';
-import { restrictedLaunch } from '../bridge/restricted-launch.js';
+import { nativeSmokeLaunch } from './native-smoke-launch.js';
 import { startModelGateway } from '../bridge/model-gateway.js';
 
 /** Runs the real restricted launch and native SQLite RPC with synthetic records and no real adapters. */
@@ -116,7 +116,7 @@ export async function nativeFixtureSmoke(options: { root: string; hostRoot: stri
         };
       },
     });
-    const launch = restrictedLaunch({
+    const launch = nativeSmokeLaunch({
       image: options.image,
       sessionDirectory: session,
       configurationFile: config,
