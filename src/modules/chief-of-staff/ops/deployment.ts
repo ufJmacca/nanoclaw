@@ -12,6 +12,7 @@ import {
 } from './maintenance.js';
 import { validateReleaseManifest, type ReleaseManifest } from './release-manifest.js';
 import { recoverFailedDeployment } from './deployment-recovery.js';
+import { withStageTiming } from './stage-timing.js';
 
 const phases = ['source', 'artifacts', 'quiesce', 'backup', 'migrate', 'activate', 'health'] as const;
 export type DeploymentPhase = (typeof phases)[number];
@@ -131,6 +132,20 @@ export async function deployRelease(request: {
     record.updatedAt = new Date().toISOString();
     writeAtomic(directory, 'deployment.json', record);
   };
+  const timingIdentity = {
+    releaseId: manifest.releaseId,
+    sourceCommit: manifest.source.commit,
+    sourceTree: manifest.source.tree,
+    buildInputDigest: manifest.buildInputDigest,
+  };
+  const timed = <T>(stage: string, operation: () => Promise<T>) =>
+    withStageTiming(
+      directory,
+      timingIdentity,
+      stage,
+      stage === 'health' ? 'health.json' : 'deployment.json',
+      operation,
+    );
   if (record.status === 'superseded') throw new Error('deployment_superseded');
   if (record.status === 'healthy') {
     if (
@@ -173,7 +188,7 @@ export async function deployRelease(request: {
   const tryPreviousRelease = async (): Promise<void> => {
     if (!record.lease) throw new Error('deployment_receipt_conflict');
     assertMaintenanceLease(root, binding, record.lease);
-    if (await effects.rollback(record.previousReleaseId).catch(() => false)) {
+    if (await timed('rollback', () => effects.rollback(record.previousReleaseId)).catch(() => false)) {
       withTargetLock(root, () => {
         const current = assertMaintenanceLease(root, binding, record.lease!);
         writeAtomic(root, 'state.json', { ...current, releaseId: record.previousReleaseId });
@@ -205,7 +220,8 @@ export async function deployRelease(request: {
   save();
   for (const phase of phases.slice(record.completed.length)) {
     if (phase === 'quiesce' && !record.lease) {
-      if (record.recoveryFrom) await recoverFailedDeployment({ root, binding, replacement: record, effects });
+      if (record.recoveryFrom)
+        await timed('recovery', () => recoverFailedDeployment({ root, binding, replacement: record, effects }));
       record.lease = beginMaintenance(root, binding, manifest.releaseId, 'deployment');
       save();
     }
@@ -224,10 +240,12 @@ export async function deployRelease(request: {
         assertMaintenanceLease(root, binding, record.lease);
       }
       // Quiescence and health are observations and always refreshed, even after a lost reply.
-      if (phase === 'quiesce') await confirmQuiescence(root, binding, record.lease!, effects.quiesce);
-      else if (phase === 'health') {
-        if (!(await effects.health().catch(() => false))) throw new Error('release_health_failed');
-      } else if (!reconciled) await effects[phase]();
+      await timed(phase, async () => {
+        if (phase === 'quiesce') await confirmQuiescence(root, binding, record.lease!, effects.quiesce);
+        else if (phase === 'health') {
+          if (!(await effects.health().catch(() => false))) throw new Error('release_health_failed');
+        } else if (!reconciled) await effects[phase]();
+      });
       if (phase === 'activate')
         withTargetLock(root, () => {
           const current = assertMaintenanceLease(root, binding, record.lease!);

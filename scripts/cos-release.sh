@@ -39,6 +39,7 @@ dev=${COS_DEVCONTAINER_ID:-$(docker compose -f .devcontainer/compose.yaml -p nan
 docker inspect "$dev" > "$directory/devcontainer.json"
 cli() { docker exec -w /workspace "$dev" node --import tsx src/modules/chief-of-staff/ops/mac-release-cli.ts "$@"; }
 cli init "$id" "$commit" "$branch" "$slice"
+source "$directory/context/scripts/cos-stage-timing.sh"
 docker context inspect --format '{{json .}}' > "$directory/context.json"
 docker info --format '{{json .}}' > "$directory/engine.json"
 docker buildx ls --format '{{json .}}' > "$directory/builders.jsonl"
@@ -65,7 +66,7 @@ check() {
   local name=$1
   shift
   printf 'Running %s checks for %s\n' "$name" "$id"
-  if "$@" > "$directory/$name.log" 2>&1; then
+  if timed_release_stage "check_$name" "$name.log" "$@" > "$directory/$name.log" 2>&1; then
     cli record "$id" "$name" 0
   else
     cli record "$id" "$name" 1
@@ -120,7 +121,7 @@ for target in host agent-standard agent-documents; do
     backup_build=(--build-arg RELEASE_FLAVOUR=backup --build-context "backup-artifact-input=$directory/backup-artifact-input")
   fi
   printf 'Building Linux/ARM64 %s\n' "$target"
-  docker --context "$context" buildx build --builder "$builder" --platform linux/arm64 --provenance=false \
+  timed_release_stage "build_$target" "$target-build.log" docker --context "$context" buildx build --builder "$builder" --platform linux/arm64 --provenance=false \
     --load --target "$target" ${backup_build[@]+"${backup_build[@]}"} --build-arg "SOURCE_COMMIT=$commit" --build-arg "SOURCE_TREE=$tree" --build-arg "RELEASE_SLICE=$slice" --build-arg "WORKER_ASSETS_DIGEST=$assets" \
     -f "$directory/context/container/release/Dockerfile" -t "$tag" "$directory/context" \
     > "$directory/$target-build.log" 2>&1
@@ -139,7 +140,7 @@ if [[ "$slice" == G01 || "$slice" == G02 || "$slice" == G03 || "$slice" == G04 ]
   vault_tag="nanoclaw-cos-vault-fixture:$id"
   docker tag "$host_image" "$vault_host"
   [[ "$(docker image inspect --format '{{.Id}}' "$vault_host")" == "$host_image" ]] || exit 1
-  docker --context "$context" buildx build --builder "$builder" --platform linux/arm64 --provenance=false --load \
+  timed_release_stage build_vault_fixture vault-fixture-build.log docker --context "$context" buildx build --builder "$builder" --platform linux/arm64 --provenance=false --load \
     --build-arg "HOST_IMAGE=$vault_host" --build-arg "HOST_IMAGE_ID=$host_image" --build-arg "SOURCE_COMMIT=$commit" \
     -f "$directory/context/container/fixtures/vault/Dockerfile.release" -t "$vault_tag" \
     "$directory/context/container/fixtures/vault" > "$directory/vault-fixture-build.log" 2>&1
@@ -163,11 +164,11 @@ if [[ "$slice" == G02 || "$slice" == G03 || "$slice" == G04 ]]; then
   smb_server_tag="nanoclaw-cos-backup-smb-server:$id"
   smb_client_tag="nanoclaw-cos-backup-smb-client:$id"
   [[ "$(docker image inspect --format '{{.Id}}' "$vault_host")" == "$host_image" ]] || exit 1
-  docker --context "$context" buildx build --builder "$builder" --platform linux/arm64 --provenance=false --load \
+  timed_release_stage build_smb_server backup-smb-server-build.log docker --context "$context" buildx build --builder "$builder" --platform linux/arm64 --provenance=false --load \
     --build-arg "SOURCE_COMMIT=$commit" --build-arg "SOURCE_TREE=$tree" \
     -f "$directory/context/container/fixtures/backup-smb/Dockerfile.server" -t "$smb_server_tag" \
     "$directory/context/container/fixtures/backup-smb" > "$directory/backup-smb-server-build.log" 2>&1
-  docker --context "$context" buildx build --builder "$builder" --platform linux/arm64 --provenance=false --load \
+  timed_release_stage build_smb_client backup-smb-client-build.log docker --context "$context" buildx build --builder "$builder" --platform linux/arm64 --provenance=false --load \
     --build-arg "HOST_IMAGE=$vault_host" --build-arg "HOST_IMAGE_ID=$host_image" \
     --build-arg "SOURCE_COMMIT=$commit" --build-arg "SOURCE_TREE=$tree" \
     -f "$directory/context/container/fixtures/backup-smb/Dockerfile.client" -t "$smb_client_tag" \
@@ -180,7 +181,7 @@ if [[ "$slice" == G02 || "$slice" == G03 || "$slice" == G04 ]]; then
   check backup_mount bash "$directory/context/scripts/cos-backup-smb-fixture.sh" "$smb_server_image" "$smb_client_image"
   jobs_tag="nanoclaw-cos-backup-jobs-fixture:$id"
   [[ "$(docker image inspect --format '{{.Id}}' "$vault_host")" == "$host_image" ]] || exit 1
-  docker --context "$context" buildx build --builder "$builder" --platform linux/arm64 --provenance=false --load \
+  timed_release_stage build_jobs_fixture backup-jobs-fixture-build.log docker --context "$context" buildx build --builder "$builder" --platform linux/arm64 --provenance=false --load \
     --build-arg "HOST_IMAGE=$vault_host" --build-arg "HOST_IMAGE_ID=$host_image" \
     --build-arg "SOURCE_COMMIT=$commit" --build-arg "SOURCE_TREE=$tree" \
     -f "$directory/context/container/fixtures/backup-jobs/Dockerfile.release" -t "$jobs_tag" \
@@ -274,7 +275,7 @@ if [[ "$slice" == G04 ]]; then
   check mail_recovery bash "$directory/context/scripts/cos-vault-fixture.sh" mail-recovery-kernel "$vault_image" "$directory/context/scripts/cos-vault-keychain.swift" "$test_directory/test.env" "$test_directory/ca.pem"
   # One actual compiled database run and one native conversation per worker.
   # The release CLI independently consumes this private, source-bound report.
-  if bash "$directory/context/scripts/cos-mail-artifact-fixture.sh" "$host_image" "$standard_image" "$documents_image" \
+  if timed_release_stage check_mail_artifacts mail_artifacts.log bash "$directory/context/scripts/cos-mail-artifact-fixture.sh" "$host_image" "$standard_image" "$documents_image" \
       "$test_directory/test.env" "$test_directory/ca.pem" > "$directory/mail_artifacts.log" 2>&1; then
     for gate in mail_capture mail_evidence mail_retention; do cli record "$id" "$gate" 0; done
   else
@@ -290,15 +291,21 @@ if [[ "$slice" == G01 || "$slice" == G02 || "$slice" == G03 || "$slice" == G04 ]
     /release/dist/contracts/chief-of-staff/vault-protected-state.integration.js
 fi
 # Export the existing tested identities, without rebuilding. Configuration IDs are hashed from this archive.
-docker save -o "$directory/images.tar" \
-  "$(cli field "$id" host-tag)" "$(cli field "$id" agent-standard-tag)" "$(cli field "$id" agent-documents-tag)"
-gzip -n "$directory/images.tar"
-carrier=$(docker create --pull=never --network=none --entrypoint /bin/true "$host_image")
-docker cp "$carrier:/release/bootstrap.mjs" "$directory/bootstrap.mjs"
-chmod 600 "$directory/bootstrap.mjs"
-docker rm "$carrier" > /dev/null
-carrier=''
-cli finish "$id" > "$directory/manifest.sha256"
+export_bundle() {
+  local host_tag standard_tag documents_tag
+  host_tag=$(cli field "$id" host-tag) || return
+  standard_tag=$(cli field "$id" agent-standard-tag) || return
+  documents_tag=$(cli field "$id" agent-documents-tag) || return
+  docker save -o "$directory/images.tar" "$host_tag" "$standard_tag" "$documents_tag" || return
+  gzip -n "$directory/images.tar" || return
+  carrier=$(docker create --pull=never --network=none --entrypoint /bin/true "$host_image") || return
+  docker cp "$carrier:/release/bootstrap.mjs" "$directory/bootstrap.mjs" || return
+  chmod 600 "$directory/bootstrap.mjs" || return
+  docker rm "$carrier" > /dev/null || return
+  carrier=''
+  cli finish "$id" > "$directory/manifest.sha256"
+}
+timed_release_stage export_bundle manifest.sha256 export_bundle
 printf 'Transferable release: %s/release.json\n' "$directory"
 if [[ "${7:-}" == --local-only ]]; then
   printf 'Local verification complete; source sync, transfer and deployment have not run.\n'

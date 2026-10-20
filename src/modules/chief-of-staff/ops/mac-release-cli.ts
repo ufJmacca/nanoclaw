@@ -4,6 +4,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { spawnSync, execFileSync } from 'node:child_process';
 import { createGunzip } from 'node:zlib';
+import { randomUUID } from 'node:crypto';
 import { pipeline } from 'node:stream/promises';
 import { readEnvFile } from '../../../env.js';
 import { safeHostEnvironment } from '../../../host-environment.js';
@@ -13,7 +14,7 @@ import { readPrivate, writeAtomic } from './target-state.js';
 import { deploymentSettings } from './deployment-settings.js';
 import { digest } from '../domain/contracts.js';
 import { MIGRATIONS, SCHEMA_VERSION } from '../store/migrations.js';
-import { requiredReleaseChecks, type ReleaseManifest } from './release-manifest.js';
+import { requiredReleaseChecks, validateReleaseManifest, type ReleaseManifest } from './release-manifest.js';
 import { vaultRootArtifactSeal } from './vault-root-artifact.js';
 import { verifyVaultWireEvidence, verifyVaultFixtureImage } from './vault-fixture-evidence.js';
 import {
@@ -27,6 +28,7 @@ import { imageConfigurations } from './image-archive.js';
 import { artifactHash, verifyReleaseBundle } from './release-artifacts.js';
 import { validateBuildTargetObservation } from './mac-deploy.js';
 import { packageResticReleaseArtifact, verifyResticReleaseArtifactInput } from './restic-release-package.js';
+import { beginStageTiming, finishStageTiming, readStageTimings } from './stage-timing.js';
 import { validateResticArtifactSeal } from './restic-artifact.js';
 import { verifyBackupJobFixtureImage, verifyBackupJobFixtureEvidence } from './backup-job-fixture-evidence.js';
 import { verifyBackupSmbFixtureImages, verifyBackupSmbFixtureEvidence } from './backup-smb-fixture-evidence.js';
@@ -158,6 +160,46 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
     });
     fs.mkdirSync(testRoot(id), { recursive: true, mode: 0o700 });
     return;
+  }
+  if (operation === 'timing') {
+    const root = releaseRoot(id);
+    // A completed bundle can continue delivery after HEAD advances. Timing grants no gate credit.
+    const manifestFile = path.join(root, 'release.json');
+    const plan = fs.lstatSync(manifestFile, { throwIfNoEntry: false })
+      ? validateReleaseManifest(readPrivate(manifestFile))
+      : checkedPlan(id).plan;
+    if (plan.releaseId !== id) throw Error('stage_timing_unverified');
+    const identity = {
+      releaseId: plan.releaseId,
+      sourceCommit: plan.source.commit,
+      sourceTree: plan.source.tree,
+      buildInputDigest: plan.buildInputDigest,
+    };
+    if (values.length === 3 && values[0] === 'start') {
+      const spanId = randomUUID();
+      writeAtomic(
+        root,
+        'stage-timings.json',
+        beginStageTiming(readStageTimings(root), identity, {
+          id: spanId,
+          stage: values[1],
+          evidence: values[2],
+          at: new Date().toISOString(),
+        }),
+      );
+      return spanId;
+    }
+    if (values.length === 3 && values[0] === 'end' && /^[0-9]{1,3}$/.test(values[2])) {
+      const previous = readStageTimings(root);
+      if (!previous) throw Error('stage_timing_unverified');
+      writeAtomic(
+        root,
+        'stage-timings.json',
+        finishStageTiming(previous, identity, values[1], new Date().toISOString(), Number(values[2])),
+      );
+      return;
+    }
+    throw Error('invalid_stage_timing_arguments');
   }
   const { root, plan } = checkedPlan(id);
   if (operation === 'backup-input' && !values.length) {

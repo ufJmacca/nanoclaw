@@ -1,6 +1,53 @@
-import { expect, it } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { afterEach, expect, it, vi } from 'vitest';
 import { macReleaseCommand, releaseCheckImageIds } from './mac-release-cli.js';
 import { BACKUP_RELEASE_CHECKS, MAIL_RELEASE_CHECKS } from './release-manifest.js';
+import { fixtureRelease } from '../../../contracts/chief-of-staff/release-fixture.js';
+import { writeAtomic } from './target-state.js';
+import { readStageTimings } from './stage-timing.js';
+
+const roots: string[] = [];
+afterEach(() => {
+  vi.restoreAllMocks();
+  for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
+});
+
+it('measures a completed bundle from its validated manifest without requiring the old checkout or a new build', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-complete-bundle-timing-'));
+  roots.push(root);
+  vi.spyOn(process, 'cwd').mockReturnValue(root);
+  const manifest = { ...fixtureRelease(), releaseId: 'release-aaaaaaaaaaaa-20261020070000' };
+  const directory = path.join(root, '.cos-plan-state/releases', manifest.releaseId);
+  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  writeAtomic(directory, 'release.json', manifest);
+  const span = await macReleaseCommand([
+    'timing',
+    manifest.releaseId,
+    'start',
+    'transfer_images',
+    'images.tar.gz-transfer.log',
+  ]);
+  expect(span).toEqual(expect.any(String));
+  await macReleaseCommand(['timing', manifest.releaseId, 'end', span!, '37']);
+  expect(readStageTimings(directory)).toMatchObject({
+    identity: {
+      releaseId: manifest.releaseId,
+      sourceCommit: manifest.source.commit,
+      sourceTree: manifest.source.tree,
+      buildInputDigest: manifest.buildInputDigest,
+    },
+    spans: [{ exitCode: 37 }],
+  });
+  expect(fs.existsSync(path.join(directory, 'plan.json'))).toBe(false);
+  expect(JSON.parse(fs.readFileSync(path.join(directory, 'release.json'), 'utf8'))).toEqual(manifest);
+  writeAtomic(directory, 'release.json', { ...manifest, checks: {} });
+  await expect(
+    macReleaseCommand(['timing', manifest.releaseId, 'start', 'transfer_images', 'images.tar.gz-transfer.log']),
+  ).rejects.toThrow('release_not_transferable');
+  expect(readStageTimings(directory)!.spans).toHaveLength(1);
+});
 
 const images = [
   { role: 'host' as const, id: 'sha256:' + 'a'.repeat(64) },
