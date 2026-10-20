@@ -786,7 +786,7 @@ export function verifyRecoveredCoordinatedState(
   }
 }
 /** Import only a fresh owned scope into an independently admitted test database. Never update, clear or replace
- * an existing scope. A durable start reservation permits read-only reconciliation of an unknown commit.
+ * a previously existing scope. A durable start reservation permits read-only reconciliation of an unknown commit.
  * This restores data for a drill; it grants no account, model, effect or notification admission.
  */
 export async function restoreCoordinatedTestScope(
@@ -1020,7 +1020,31 @@ async function restoreCheckedTestScope(
         current();
       }
       if (digest(readStart()) !== digest(reservation)) throw Error('coordinated_restore_conflict');
-      let remaining = tables.filter((table) => original.rows[table].length > 0);
+      // These nullable pointers close cycles with rows that reference their
+      // parent. Stage only the new scope's pointers, then restore their exact
+      // values in this transaction with every foreign key still enforced.
+      const backReferences = [
+        { table: 'sources', keys: ['id'], columns: ['current_revision_id'] },
+        {
+          table: 'calendar_states',
+          keys: ['binding_id', 'calendar_id'],
+          columns: ['current_snapshot', 'last_attempt'],
+        },
+      ].filter((rule) => tables.includes(rule.table));
+      const insertRows = (table: string) => {
+        const rule = backReferences.find((entry) => entry.table === table);
+        return rule
+          ? original.rows[table].map((row) => ({
+              ...row,
+              ...Object.fromEntries(rule.columns.map((name) => [name, null])),
+            }))
+          : original.rows[table];
+      };
+      // Every scoped table depends on this parent. Avoid an initial round of
+      // known foreign-key failures and repeated owner/payload verification.
+      let remaining = ['scopes', ...tables.filter((table) => table !== 'scopes')].filter(
+        (table) => original.rows[table].length > 0,
+      );
       while (remaining.length) {
         const retry: string[] = [];
         for (const table of remaining) {
@@ -1035,7 +1059,7 @@ async function restoreCheckedTestScope(
             const columns = original.columns[table].map((name) => '"' + name + '"').join(',');
             await client.query(
               `INSERT INTO cos."${table}"(${columns}) SELECT ${columns} FROM jsonb_populate_recordset(NULL::cos."${table}",$1::jsonb)`,
-              [JSON.stringify(original.rows[table])],
+              [JSON.stringify(insertRows(table))],
             );
             await client.query('RELEASE SAVEPOINT cos_sandbox_restore');
           } catch (error) {
@@ -1047,6 +1071,21 @@ async function restoreCheckedTestScope(
         }
         if (retry.length === remaining.length) throw Error('coordinated_restore_dependency_conflict');
         remaining = retry;
+      }
+      for (const rule of backReferences) {
+        const rows = original.rows[rule.table];
+        if (!rows.length) continue;
+        await admit();
+        if (digest(original) !== originalDigest || digest(readStart()) !== digest(reservation))
+          throw Error('coordinated_restore_conflict');
+        const changed = await client.query(
+          `UPDATE cos."${rule.table}" AS destination SET ${rule.columns.map((column) => '"' + column + '"=recovered."' + column + '"').join(',')}
+           FROM jsonb_populate_recordset(NULL::cos."${rule.table}",$2::jsonb) AS recovered
+           WHERE destination.scope_id=$1 AND recovered.scope_id=$1
+           AND ${rule.keys.map((key) => 'destination."' + key + '"=recovered."' + key + '"').join(' AND ')}`,
+          [original.scopeId, JSON.stringify(rows)],
+        );
+        if (changed.rowCount !== rows.length) throw Error('coordinated_restore_conflict');
       }
     }
     await unchanged();

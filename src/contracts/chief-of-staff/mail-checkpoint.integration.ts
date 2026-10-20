@@ -44,6 +44,15 @@ after(async () => {
       ]);
       for (const table of ['mail_captures', 'mail_states', 'mail_bindings'])
         await admin.query('DELETE FROM cos.' + table + ' WHERE scope_id=ANY($1)', [scopes]);
+      await admin.query(
+        'UPDATE cos.calendar_states SET current_snapshot=NULL,last_attempt=NULL WHERE scope_id=ANY($1)',
+        [scopes],
+      );
+      for (const table of ['calendar_snapshots', 'calendar_states', 'calendar_bindings'])
+        await admin.query('DELETE FROM cos.' + table + ' WHERE scope_id=ANY($1)', [scopes]);
+      await admin.query('UPDATE cos.sources SET current_revision_id=NULL WHERE scope_id=ANY($1)', [scopes]);
+      for (const table of ['derivation_links', 'evidence_refs', 'chunks', 'source_revisions', 'sources', 'artifacts'])
+        await admin.query('DELETE FROM cos.' + table + ' WHERE scope_id=ANY($1)', [scopes]);
       await admin.query('DELETE FROM cos.records WHERE scope_id=ANY($1)', [scopes]);
       await admin.query('DELETE FROM cos.scopes WHERE id=ANY($1)', [scopes]);
     }
@@ -53,7 +62,7 @@ after(async () => {
     for (const root of roots) fs.rmSync(root, { recursive: true, force: true });
   }
 });
-async function fixture(version: number) {
+async function fixture(version: number, danglingRevision = false) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-mail-checkpoint-'));
   roots.push(root);
   fs.chmodSync(root, 0o700);
@@ -262,6 +271,142 @@ async function fixture(version: number) {
       },
     ];
   }
+  const sourceId = 'source-' + scope,
+    revisionId = 'revision-' + scope,
+    sourceText =
+      version === 19
+        ? (rows.mail_messages[0].message as { text: string }).text
+        : 'Synthetic selected source under recovery.',
+    sourceArtifact = await artifacts.exclusive(async (lease) => artifacts.publishText(scope, sourceText, lease)),
+    calendarBinding = randomUUID(),
+    snapshotId = randomUUID(),
+    lastAttemptId = randomUUID();
+  rows.artifacts = [
+    {
+      id: sourceArtifact.id,
+      scope_id: scope,
+      kind: 'source',
+      digest: sourceArtifact.digest,
+      byte_length: sourceArtifact.byteLength,
+      lifecycle: 'published',
+      version: 1,
+      provenance: { origin: 'synthetic_checkpoint' },
+      created_at: storedAt,
+      updated_at: storedAt,
+    },
+  ];
+  rows.sources = [
+    {
+      id: sourceId,
+      scope_id: scope,
+      source_key: 'fixture:cyclic-source',
+      title: 'Synthetic retained source',
+      project_id: rows.records[0].id,
+      current_revision_id: danglingRevision ? 'missing-revision' : revisionId,
+      status: 'current',
+      processing_providers: ['codex'],
+      access_policy: {},
+      version: 1,
+      provenance: { origin: 'synthetic_checkpoint' },
+      created_at: storedAt,
+      updated_at: storedAt,
+    },
+  ];
+  rows.source_revisions = [
+    {
+      id: revisionId,
+      scope_id: scope,
+      source_id: sourceId,
+      artifact_id: sourceArtifact.id,
+      digest: sourceArtifact.digest,
+      version: 1,
+      supersedes: null,
+      locator_format: 'normalized-utf8-lines/v1',
+      provenance: { origin: 'synthetic_checkpoint' },
+      captured_at: storedAt,
+      created_at: storedAt,
+      updated_at: storedAt,
+    },
+  ];
+  rows.chunks = [
+    {
+      scope_id: scope,
+      revision_id: revisionId,
+      ordinal: 0,
+      start_line: 1,
+      end_line: 1,
+      heading: '',
+      text: sourceText,
+      created_at: storedAt,
+    },
+  ];
+  rows.evidence_refs = [
+    {
+      id: 'evidence-' + scope,
+      scope_id: scope,
+      source_id: sourceId,
+      revision_id: revisionId,
+      revision_digest: sourceArtifact.digest,
+      source_version: 1,
+      start_line: 1,
+      end_line: 1,
+      session_id: context.sessionId,
+      context_generation: 'fixture-generation',
+      processing_provider: 'codex',
+      created_at: storedAt,
+    },
+  ];
+  rows.derivation_links = [
+    {
+      scope_id: scope,
+      artifact_id: sourceArtifact.id,
+      evidence_id: rows.evidence_refs[0].id,
+      created_at: storedAt,
+    },
+  ];
+  rows.calendar_bindings = [
+    {
+      scope_id: scope,
+      id: calendarBinding,
+      provider: 'fixture',
+      selected_calendar_ids: ['primary'],
+      permission_scopes: ['https://www.googleapis.com/auth/calendar.events.readonly'],
+      credential_ref: null,
+      time_zone: 'Australia/Sydney',
+      processing_providers: ['codex'],
+      auth: 'ready',
+      version: 1,
+      provenance: { origin: 'synthetic_checkpoint' },
+      created_at: storedAt,
+      updated_at: storedAt,
+    },
+  ];
+  rows.calendar_states = [
+    {
+      scope_id: scope,
+      binding_id: calendarBinding,
+      calendar_id: 'primary',
+      current_snapshot: snapshotId,
+      last_attempt: lastAttemptId,
+      last_attempt_at: storedAt,
+      last_success_at: storedAt,
+    },
+  ];
+  rows.calendar_snapshots = [
+    { id: snapshotId, status: 'complete', content_digest: digest('synthetic snapshot'), failure_code: null },
+    { id: lastAttemptId, status: 'failed', content_digest: null, failure_code: 'fixture_unavailable' },
+  ].map((snapshot) => ({
+    ...snapshot,
+    scope_id: scope,
+    binding_id: calendarBinding,
+    calendar_id: 'primary',
+    binding_version: 1,
+    coverage_window: {},
+    result: null,
+    created_at: storedAt,
+    completed_at: storedAt,
+  }));
+  if (version === 19) rows.mail_messages[0].source_id = sourceId;
   const checkpoint: ScopeCheckpoint = {
     format: 'cos-scoped-checkpoint/v1',
     scopeId: scope,
@@ -299,7 +444,13 @@ async function fixture(version: number) {
     journal: { installationDigest, generation: owner.generation },
     remote: publish('remote.json', Buffer.from(JSON.stringify(checkpoint) + '\n')),
     sqlite: [publish('sqlite/0/native.sqlite', fs.readFileSync(native))],
-    artifacts: [publish('artifacts/.cos-artifacts', fs.readFileSync(artifacts.root + '/.cos-artifacts'))],
+    artifacts: [
+      publish('artifacts/.cos-artifacts', fs.readFileSync(artifacts.root + '/.cos-artifacts')),
+      publish(
+        'artifacts/' + sourceArtifact.id + '.blob',
+        fs.readFileSync(artifacts.root + '/' + sourceArtifact.id + '.blob'),
+      ),
+    ],
     restrictions: [],
   };
   publish('manifest.json', Buffer.from(JSON.stringify(receipt) + '\n'));
@@ -322,6 +473,7 @@ for (const version of [18, 19])
   test(`G04 schema-${version} synthetic checkpoint restores insert-only into the actual current test database`, async () => {
     const f = await fixture(version),
       sandbox = { client, config: await fixtureDatabaseConfig(), testTargetId: process.env.COS_TEST_TARGET_ID! };
+    const originalRowsDigest = digest(f.checkpoint.rows);
     const journal = fs.readFileSync(f.options.witness.root + '/owner.json');
     await restoreCoordinatedSandbox({ ...f.options, quiescent: f.quiescent }, f.root + '/sandbox');
     const first = await restoreCoordinatedTestScope(f.options, f.root + '/restore', sandbox, async () => {});
@@ -336,6 +488,27 @@ for (const version of [18, 19])
     assert.equal(proof.schemaVersion, version);
     assert.equal(proof.schemaDigest, f.receipt.schemaDigest);
     assert.equal(proof.restoredStateDigest, first.restoredStateDigest);
+    assert.equal(digest(f.checkpoint.rows), originalRowsDigest);
+    const pointers = (
+      await admin.query('SELECT current_snapshot,last_attempt FROM cos.calendar_states WHERE scope_id=$1', [f.scope])
+    ).rows[0];
+    assert.equal(pointers.current_snapshot, f.checkpoint.rows.calendar_states[0].current_snapshot);
+    assert.equal(pointers.last_attempt, f.checkpoint.rows.calendar_states[0].last_attempt);
+    assert.notEqual(pointers.current_snapshot, pointers.last_attempt);
+    assert.equal(
+      (await admin.query('SELECT current_revision_id FROM cos.sources WHERE scope_id=$1', [f.scope])).rows[0]
+        .current_revision_id,
+      f.checkpoint.rows.source_revisions[0].id,
+    );
+    assert.deepEqual(
+      (
+        await admin.query(
+          "SELECT condeferrable FROM pg_constraint WHERE connamespace='cos'::regnamespace AND conname=ANY($1)",
+          [['current_source_revision', 'calendar_current_snapshot', 'calendar_last_attempt']],
+        )
+      ).rows.map((row) => row.condeferrable),
+      [false, false, false],
+    );
     assert.equal((await admin.query('SELECT status FROM cos.scopes WHERE id=$1', [f.scope])).rows[0].status, 'paused');
     assert.equal(
       (await admin.query('SELECT count(*)::int AS n FROM cos.records WHERE scope_id=$1', [f.scope])).rows[0].n,
@@ -348,13 +521,15 @@ for (const version of [18, 19])
       );
     if (version === 19) {
       const message = (
-        await admin.query('SELECT message,selection_id,last_capture FROM cos.mail_messages WHERE scope_id=$1', [
-          f.scope,
-        ])
+        await admin.query(
+          'SELECT message,selection_id,last_capture,source_id FROM cos.mail_messages WHERE scope_id=$1',
+          [f.scope],
+        )
       ).rows[0];
       assert.deepEqual(message.message, f.checkpoint.rows.mail_messages[0].message);
       assert.equal(message.selection_id, f.checkpoint.rows.mail_messages[0].selection_id);
       assert.equal(message.last_capture, f.checkpoint.rows.mail_states[0].current_capture);
+      assert.equal(message.source_id, f.checkpoint.rows.sources[0].id);
       assert.equal(
         (await admin.query('SELECT history_cursor FROM cos.mail_states WHERE scope_id=$1', [f.scope])).rows[0]
           .history_cursor,
@@ -362,4 +537,24 @@ for (const version of [18, 19])
       );
     }
     assert.deepEqual(fs.readFileSync(f.options.witness.root + '/owner.json'), journal);
+    const invalid = await fixture(version, true);
+    await assert.rejects(
+      restoreCoordinatedTestScope(invalid.options, invalid.root + '/restore', sandbox, async () => {}),
+      /^Error: coordinated_test_restore_unavailable$/,
+    );
+    for (const table of checkpointSchema(version).tables)
+      assert.equal(
+        (
+          await admin.query(
+            'SELECT count(*)::int AS n FROM cos."' +
+              table +
+              '" WHERE "' +
+              (table === 'scopes' ? 'id' : 'scope_id') +
+              '"=$1',
+            [invalid.scope],
+          )
+        ).rows[0].n,
+        0,
+        table,
+      );
   });
