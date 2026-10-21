@@ -16,6 +16,20 @@ import {
 import type { BackupQueueReceipt } from './backup-queue.js';
 import { backupArchiveReceiptPrefix } from './backup-archive.js';
 import { readBackupArchive, type BackupArchiveRestoreSink } from './backup-archive-reader.js';
+import { readCredentialRecoveryArchive, type CredentialRecoveryArchive } from './credential-recovery-archive.js';
+import {
+  makeRoutedCredentialRecoveryManifest,
+  routedCredentialRecoveryCovers,
+  type RoutedCredentialInventory,
+  type RoutedCredentialRecoveryManifest,
+} from './credential-recovery-routing.js';
+import { credentialRecoveryCovers } from './credential-recovery-set.js';
+import {
+  credentialCaptureArchiveBytes,
+  readCredentialCaptureArchive,
+  type CredentialCapture,
+} from './credential-capture.js';
+import { digest } from '../domain/contracts.js';
 type Descriptor = Readonly<{ fd: number; assertCurrent(): void }>;
 type Dependencies = {
   binary: VerifiedResticBinary;
@@ -26,7 +40,9 @@ type Dependencies = {
   repositoryId: string;
   ownerDigest: string;
   producer(kind: BackupKind, operationId: string): string[];
+  credentialProducer?(capture: CredentialCapture): string[];
   admitUpload(kind: BackupKind, bytes: number): Promise<void>;
+  credentialInventory?(): Promise<{ ownerDigest: string; sources: RoutedCredentialInventory }>;
   timeoutMs?: number;
 };
 type Archive = { bytes: number; sha256: string };
@@ -59,6 +75,10 @@ export type BackupRemoteRestore = Omit<RemoteCheckpoint, 'contract' | 'reconcile
   contract: 'cos-backup-remote-restore/v1';
   receipt: BackupQueueReceipt;
 };
+export type BackupCredentialCaptureRestore = Omit<RemoteCheckpoint, 'contract' | 'reconciled'> & {
+  contract: 'cos-backup-credential-capture-restore/v1';
+  capture: CredentialCapture;
+};
 const hex = /^[a-f0-9]{64}$/,
   uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 function verifiedInput(kind: BackupKind, operationId: string, input: Archive): Archive {
@@ -88,7 +108,9 @@ export class BackupResticTransfer {
       typeof options.ownerDigest !== 'string' ||
       !hex.test(options.ownerDigest) ||
       typeof options.producer !== 'function' ||
+      (options.credentialProducer !== undefined && typeof options.credentialProducer !== 'function') ||
       typeof options.admitUpload !== 'function' ||
+      (options.credentialInventory !== undefined && typeof options.credentialInventory !== 'function') ||
       (options.timeoutMs !== undefined &&
         (!Number.isSafeInteger(options.timeoutMs) || options.timeoutMs < 1000 || options.timeoutMs > 900000))
     )
@@ -161,10 +183,85 @@ export class BackupResticTransfer {
         const fresh = (await list()).map((snapshot) => snapshot.id).sort();
         if (fresh.join(',') !== [...expected].sort().join(',')) throw Error('maintenance_inventory_changed');
       };
+      const keptCredentials: RoutedCredentialRecoveryManifest[] = [];
+      let queueOwner: string | undefined;
+      const credentialCoverage = async (removed?: CredentialRecoveryArchive) => {
+        if (!this.options.credentialInventory) throw Error('credential_primary_inventory_required');
+        this.current();
+        await admit();
+        this.current();
+        const inventory = await this.options.credentialInventory();
+        this.current();
+        await admit();
+        this.current();
+        if (queueOwner !== undefined && inventory.ownerDigest !== queueOwner) throw Error('credential_owner_changed');
+        const required = makeRoutedCredentialRecoveryManifest(inventory.ownerDigest, inventory.sources);
+        queueOwner = inventory.ownerDigest;
+        if (!keptCredentials.some((set) => routedCredentialRecoveryCovers(set, queueOwner!, required)))
+          throw Error('retained_current_credentials_missing');
+        if (removed) {
+          const contents = removed.contents;
+          const covered = keptCredentials.some((set) =>
+            contents.kind === 'set-v2'
+              ? routedCredentialRecoveryCovers(set, queueOwner!, contents.manifest)
+              : credentialRecoveryCovers(
+                  set.contents,
+                  queueOwner!,
+                  contents.kind === 'change' ? [contents.event] : contents.manifest.sources,
+                ),
+          );
+          if (!covered) throw Error('removed_credentials_not_covered');
+        }
+      };
+      if (plans.credentials.remove.length) {
+        if (!this.options.credentialInventory) throw Error('credential_primary_inventory_required');
+        this.current();
+        await admit();
+        this.current();
+        const inventory = await this.options.credentialInventory();
+        makeRoutedCredentialRecoveryManifest(inventory.ownerDigest, inventory.sources);
+        queueOwner = inventory.ownerDigest;
+        const read = async (id: string) => {
+          const selected = snapshots.find((snapshot) => snapshot.id === id),
+            tags = selected?.tags;
+          const operation = Array.isArray(tags)
+            ? tags.find((tag) => typeof tag === 'string' && tag.startsWith('cos-operation='))
+            : undefined;
+          if (typeof operation !== 'string') throw Error('credential_snapshot_identity_missing');
+          this.current();
+          await admit();
+          this.current();
+          const config = await this.run(['cat', 'config'], 65536);
+          try {
+            verifyResticRepositoryIdentity(config.toString('utf8'), this.options.repositoryId);
+          } finally {
+            config.fill(0);
+          }
+          await admit();
+          this.current();
+          const archive = await readCredentialRecoveryArchive(
+            this.output(['dump', id, 'checkpoint.tar'], BACKUP_LIMITS.credentials + 2 * 1024 ** 2),
+            { ownerDigest: queueOwner!, operationId: operation.slice('cos-operation='.length) },
+            () => this.current(),
+          );
+          await admit();
+          this.current();
+          return archive;
+        };
+        await unchanged();
+        for (const id of plans.credentials.keep) {
+          const archive = await read(id);
+          if (archive.contents.kind === 'set-v2') keptCredentials.push(archive.contents.manifest);
+        }
+        await credentialCoverage();
+        for (const id of plans.credentials.remove) await credentialCoverage(await read(id));
+        await unchanged();
+      }
       for (const kind of ['state', 'credentials'] as const) {
         const ids = plans[kind].remove;
         for (let start = 0; start < ids.length; start += 128) {
           await unchanged();
+          if (kind === 'credentials') await credentialCoverage();
           const batch = ids.slice(start, start + 128);
           await discard(['forget', ...batch]);
           for (const id of batch) expected.delete(id);
@@ -172,6 +269,7 @@ export class BackupResticTransfer {
         }
       }
       await unchanged();
+      if (plans.credentials.remove.length) await credentialCoverage();
       await discard(['prune', '--max-repack-size', '16M']);
       await unchanged();
       await discard(['check', '--read-data', '--with-cache']);
@@ -305,6 +403,63 @@ export class BackupResticTransfer {
       throw Error('backup_restore_unavailable');
     }
   }
+  /** Explicit isolated sink only. A direct complete capture never fabricates a
+   * queue receipt, changes a primary credential or restores live authority. */
+  async restoreCredentialCapture(
+    operationId: string,
+    queueOwnerDigest: string,
+    sink: BackupArchiveRestoreSink,
+    admit: () => Promise<void>,
+  ): Promise<BackupCredentialCaptureRestore> {
+    try {
+      if (
+        !uuid.test(operationId) ||
+        !hex.test(queueOwnerDigest) ||
+        typeof sink?.open !== 'function' ||
+        typeof admit !== 'function'
+      )
+        throw Error('credential_restore_scope_required');
+      this.current();
+      await admit();
+      this.current();
+      const snapshot = await this.find('credentials', operationId);
+      if (!snapshot) throw Error('remote_checkpoint_missing');
+      await admit();
+      this.current();
+      const config = await this.run(['cat', 'config'], 65536);
+      try {
+        verifyResticRepositoryIdentity(config.toString('utf8'), this.options.repositoryId);
+      } finally {
+        config.fill(0);
+      }
+      await admit();
+      this.current();
+      const decoded = await readCredentialCaptureArchive(
+        this.output(['dump', snapshot.id, 'checkpoint.tar'], BACKUP_LIMITS.credentials + 2 * 1024 ** 2),
+        { ownerDigest: queueOwnerDigest, operationId },
+        () => this.current(),
+        sink,
+      );
+      await admit();
+      this.current();
+      return {
+        contract: 'cos-backup-credential-capture-restore/v1',
+        repositoryId: this.options.repositoryId,
+        ownerDigest: this.options.ownerDigest,
+        kind: 'credentials',
+        operationId,
+        snapshotId: snapshot.id,
+        snapshotAt: snapshot.time,
+        archiveBytes: decoded.archiveBytes,
+        archiveSha256: decoded.archiveSha256,
+        capture: decoded.capture,
+        verifiedAt: new Date().toISOString(),
+      };
+    } catch {
+      // eslint-disable-next-line preserve-caught-error -- Remote credential content and private recovery diagnostics remain contained.
+      throw Error('backup_restore_unavailable');
+    }
+  }
   /** Fresh readback only. Durable local metadata is never a repository lease. */
   async verify(
     kind: BackupKind,
@@ -372,12 +527,59 @@ export class BackupResticTransfer {
     };
   }
   async upload(kind: BackupKind, operationId: string, input: Archive): Promise<RemoteCheckpoint> {
+    return this.uploadWithProducer(kind, operationId, input, () => this.options.producer(kind, operationId));
+  }
+  /** Complete captures have their own producer/identity and never retire a local
+   * queue item. Both the transport hash and actual canonical capture readback
+   * must match before delivery is reported, including after a lost acknowledgement. */
+  async uploadCredentialCapture(value: CredentialCapture, input: Archive): Promise<RemoteCheckpoint> {
+    try {
+      const capture = structuredClone(value),
+        expectedBytes = credentialCaptureArchiveBytes(capture, capture.ownerDigest),
+        archive = verifiedInput('credentials', capture.operationId, input);
+      if (!this.options.credentialProducer || archive.bytes !== expectedBytes)
+        throw Error('credential_producer_required');
+      const checkpoint = await this.uploadWithProducer('credentials', capture.operationId, archive, () =>
+        this.options.credentialProducer!(capture),
+      );
+      const config = await this.run(['cat', 'config'], 65536);
+      try {
+        verifyResticRepositoryIdentity(config.toString('utf8'), this.options.repositoryId);
+      } finally {
+        config.fill(0);
+      }
+      this.current();
+      const read = await readCredentialRecoveryArchive(
+        this.output(['dump', checkpoint.snapshotId, 'checkpoint.tar'], archive.bytes),
+        { ownerDigest: capture.ownerDigest, operationId: capture.operationId },
+        () => this.current(),
+      );
+      this.current();
+      if (
+        read.contract !== 'cos-credential-capture-read/v1' ||
+        digest(read.capture) !== digest(capture) ||
+        read.archiveBytes !== archive.bytes ||
+        read.archiveSha256 !== archive.sha256
+      )
+        throw Error('credential_capture_readback_changed');
+      return checkpoint;
+    } catch {
+      // eslint-disable-next-line preserve-caught-error -- Captured credentials, repository metadata and producer diagnostics remain private.
+      throw Error('backup_transfer_unavailable');
+    }
+  }
+  private async uploadWithProducer(
+    kind: BackupKind,
+    operationId: string,
+    input: Archive,
+    produce: () => string[],
+  ): Promise<RemoteCheckpoint> {
     try {
       const archive = verifiedInput(kind, operationId, input);
       let snapshot = await this.find(kind, operationId);
       const reconciled = !!snapshot;
       if (!snapshot) {
-        const producer = this.options.producer(kind, operationId);
+        const producer = produce();
         if (
           !Array.isArray(producer) ||
           !producer.length ||

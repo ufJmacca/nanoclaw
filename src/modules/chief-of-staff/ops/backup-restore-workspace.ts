@@ -74,10 +74,13 @@ export async function withIsolatedBackupRestore<T>(
     const stage = fs.fstatSync(stageFd);
     if (!stage.isDirectory() || stage.uid !== process.getuid?.() || (stage.mode & 0o7777) !== 0o700)
       throw Error('restore_stage_unverified');
-    const stageCurrent = () => {
-      assertCaller();
+    const stageIdentityCurrent = () => {
       same(stage, fs.fstatSync(stageFd!), true);
       same(stage, fs.statSync(directory), true);
+    };
+    const stageCurrent = () => {
+      assertCaller();
+      stageIdentityCurrent();
     };
     const capacity = (growth: number, reserve = true) => {
       stageCurrent();
@@ -103,14 +106,24 @@ export async function withIsolatedBackupRestore<T>(
     fs.fsyncSync(stageFd);
     used = 8192;
     active = true;
-    const current = () => {
+    const ownedCurrent = () => {
       if (!active) throw Error('restore_scope_released');
-      stageCurrent();
+      stageIdentityCurrent();
       same(rootStat!, fs.fstatSync(rootFd!), true);
       same(rootStat!, fs.lstatSync(rootPath), true);
     };
-    const parents = <U>(name: string, create: boolean, use: (fd: number, basename: string) => U): U => {
-      current();
+    const current = () => {
+      if (!active) throw Error('restore_scope_released');
+      assertCaller();
+      ownedCurrent();
+    };
+    const parents = <U>(
+      name: string,
+      create: boolean,
+      use: (fd: number, basename: string) => U,
+      check = current,
+    ): U => {
+      check();
       let parent = rootFd!,
         prefix = '';
       const held: number[] = [],
@@ -138,7 +151,7 @@ export async function withIsolatedBackupRestore<T>(
           same(known.stat, fs.lstatSync(pathname), true);
           parent = child;
         }
-        current();
+        check();
         return use(parent, basename);
       } finally {
         for (const fd of held.reverse()) fs.closeSync(fd);
@@ -317,6 +330,9 @@ export async function withIsolatedBackupRestore<T>(
     };
     const assertPayloadCurrent = () => {
       try {
+        // This inventory is synchronous and read-only. Revalidate the complete
+        // caller before and after it, keeping descriptor/graph checks at every
+        // node without multiplying nested owner checks by the payload size.
         current();
         if (closeFiles.size) throw Error('restore_files_unclosed');
         const children = new Map<string, string[]>([['', []]]);
@@ -325,18 +341,23 @@ export async function withIsolatedBackupRestore<T>(
           else if (!node.sha256) throw Error('restore_file_unclosed');
         }
         for (const [name, node] of nodes) {
-          parents(name, false, (parent, basename) =>
-            same(node.stat, fs.lstatSync(path.join(pinned(parent), basename)), node.directory),
+          parents(
+            name,
+            false,
+            (parent, basename) => same(node.stat, fs.lstatSync(path.join(pinned(parent), basename)), node.directory),
+            ownedCurrent,
           );
           const parent = path.posix.dirname(name);
           children.get(parent === '.' ? '' : parent)!.push(path.posix.basename(name));
         }
         for (const [name, expected] of children) {
           const check = (fd: number) => {
+            ownedCurrent();
             if (fs.readdirSync(pinned(fd)).sort().join('\0') !== expected.sort().join('\0'))
               throw Error('restore_graph_unowned');
+            ownedCurrent();
           };
-          if (name) parents(name + '/placeholder', false, check);
+          if (name) parents(name + '/placeholder', false, check, ownedCurrent);
           else check(rootFd!);
         }
         current();

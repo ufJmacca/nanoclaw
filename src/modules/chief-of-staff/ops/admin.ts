@@ -4,6 +4,7 @@ import { validStatusInput, type StatusInput } from '../contracts/operations-prot
 import { isKnowledgeCommand, parseKnowledgeArguments } from './knowledge-admin.js';
 import { isCalendarCommand, parseCalendarArguments } from './calendar-admin.js';
 import { isCalendarAccountCommand, parseCalendarAccountArguments } from './calendar-account-admin.js';
+import { isMailAccountCommand, parseMailAccountArguments } from './mail-account-arguments.js';
 import { isMissionCommand, parseMissionArguments } from './mission-admin.js';
 import { isActionAccountCommand, parseActionAccountArguments } from './action-account-admin.js';
 import { isActionAdminCommand, parseActionAdminArguments } from './action-admin.js';
@@ -103,6 +104,7 @@ export function parseAdminArguments(args: string[]): AdminArguments {
   if (isKnowledgeCommand({ command: args[0] })) return parseKnowledgeArguments(args);
   if (isCalendarCommand({ command: args[0] })) return parseCalendarArguments(args);
   if (isCalendarAccountCommand({ command: args[0] })) return parseCalendarAccountArguments(args);
+  if (isMailAccountCommand({ command: args[0] })) return parseMailAccountArguments(args);
   if (args.length === 1 && args[0] === 'status') return { command: 'status' };
   if (['context-status', 'context-prepare', 'context-recover', 'model-activate', 'context-resume'].includes(args[0])) {
     const values: Record<string, string> = {};
@@ -232,6 +234,12 @@ export function safeAdminError(error: unknown): string {
         'team_template_conflict',
         'invalid_source_manifest',
         'invalid_calendar_manifest',
+        'invalid_mail_manifest',
+        'mail_account_operation_unavailable',
+        'mail_client_input_unavailable',
+        'mail_operation_conflict',
+        'mail_link_uncertain',
+        'mail_interactive_terminal_required',
         'invalid_action_manifest',
         'action_setup_required',
         'action_setup_conflict',

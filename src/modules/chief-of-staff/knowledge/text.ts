@@ -21,6 +21,7 @@ export function extractChunks(text: string): TextChunk[] {
   if (lines.at(-1) === '') lines.pop();
   const chunks: TextChunk[] = [];
   let start = 0,
+    selectedLength = 0,
     heading = '',
     selected: string[] = [];
   const flush = () => {
@@ -28,13 +29,15 @@ export function extractChunks(text: string): TextChunk[] {
     if (selected.length)
       chunks.push({ text: selected.join('\n'), startLine: start + 1, endLine: start + selected.length, heading });
     selected = [];
+    selectedLength = 0;
   };
   for (const [index, line] of lines.entries()) {
     if (line.length > 2000) throw new Error('source_line_too_long');
     const title = /^#{1,6}\s+(.+)$/.exec(line);
-    if (selected.length && (title || selected.join('\n').length + 1 + line.length > 2000)) flush();
+    if (selected.length && (title || selectedLength + 1 + line.length > 2000)) flush();
     if (!selected.length) start = index;
     if (title) heading = title[1].slice(0, 200);
+    selectedLength += (selected.length ? 1 : 0) + line.length;
     selected.push(line);
   }
   flush();

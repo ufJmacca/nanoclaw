@@ -7,6 +7,7 @@ import { COS_MAX_BYTES, COS_WAIT_MS } from '../mcp-tools/generated/cos-protocol.
 import { tomlBasicString } from './codex-app-server.js';
 import type { createCosToolDispatch } from './codex-cos-tools.js';
 import { strategyCoordinatorToolNames } from '../mcp-tools/strategy-coordinator-tools.js';
+import { mailToolNames } from '../mcp-tools/mail-tools.js';
 
 type McpResult = { content: { type: 'text'; text: string }[]; isError: boolean };
 const unavailable = (): McpResult => ({ content: [{ type: 'text', text: 'CoS tool unavailable.' }], isError: true });
@@ -19,6 +20,7 @@ const tools = new Set([
   ...strategyCoordinatorToolNames,
   'cos_answer_prepare',
   'cos_answer_get',
+  ...mailToolNames,
 ]);
 
 export async function createMandateToolBridge(

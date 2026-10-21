@@ -4,13 +4,15 @@ import type { DeploymentSettings } from './deployment-settings.js';
 import type { BackupUploadJobEffects } from './backup-upload-job.js';
 import { createScheduledMaintenanceEffects } from './operations-maintenance-effects.js';
 import { createVaultBackupQueue } from './backup-queue.js';
-import { uploadVaultBackup, maintainVaultBackups } from './backup-upload.js';
+import { uploadVaultBackup, maintainVaultBackups, uploadVaultCredentialCapture } from './backup-upload.js';
+import { recordScheduledCredentialRecoveryPage } from './credential-recovery-page.js';
 import { verifyVaultMemory } from './vault-memory.js';
 import { verifyTargetPaths } from './target-host.js';
 const execute = promisify(execFile);
-/** Installed background ports verify the service, recover owned incomplete
- * copies and use the fixed root mount helper. Repository initialization, mount
- * recovery, primary credentials, maintenance and native start/stop are excluded. */
+/** Installed background ports verify the service and use fixed local/repository
+ * wrappers. G04 adds bounded local configuration/denial journaling and direct
+ * primary capture; it never refreshes tokens, initializes/repairs a repository,
+ * invokes a model, pauses native work or starts/stops the runtime service. */
 export function createBackupUploadJobEffects(
   settings: DeploymentSettings,
   invokedHelper: string,
@@ -21,6 +23,11 @@ export function createBackupUploadJobEffects(
       installationRoot: settings.installationRoot,
       dataRoot: settings.dataRoot,
     };
+  const guardFor = (assertCurrent: () => void) => () => {
+    assertCurrent();
+    verifyVaultMemory();
+    verifyTargetPaths(settings, 0);
+  };
   return {
     async verify() {
       verifyVaultMemory();
@@ -32,11 +39,7 @@ export function createBackupUploadJobEffects(
       return createVaultBackupQueue(roots).inspectDelivery(kind);
     },
     async reconcile(kind, assertCurrent) {
-      const guard = () => {
-        assertCurrent();
-        verifyVaultMemory();
-        verifyTargetPaths(settings, 0);
-      };
+      const guard = guardFor(assertCurrent);
       guard();
       await createVaultBackupQueue(roots).reconcileIncompleteCapture(kind, guard);
       guard();
@@ -60,5 +63,19 @@ export function createBackupUploadJobEffects(
     },
     upload: (kind, operationId, assertCurrent) => uploadVaultBackup(roots, kind, operationId, assertCurrent),
     maintain: (assertCurrent) => maintainVaultBackups(roots, assertCurrent),
+    async journalCredentials(scope, assertCurrent) {
+      const guard = guardFor(assertCurrent);
+      guard();
+      const page = await recordScheduledCredentialRecoveryPage(roots, { ...scope, assertAuthority: guard });
+      guard();
+      return page;
+    },
+    async captureCredentials(cycleAt, assertCurrent) {
+      const guard = guardFor(assertCurrent);
+      guard();
+      const capture = await uploadVaultCredentialCapture(roots, cycleAt, guard);
+      guard();
+      return capture;
+    },
   };
 }

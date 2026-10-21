@@ -43,6 +43,76 @@ it('checks the complete owned payload graph between awaits without borrowing ano
   expect(fs.existsSync(f.destination)).toBe(false);
   expect(() => expired()).toThrow(/^backup_restore_payload_unavailable$/);
 });
+it('bounds complete caller revalidation while still checking every node in a deep recovery inventory', async () => {
+  const f = fixture();
+  const observations: Array<{ callerChecks: number; filesChecked: number }> = [];
+  await f.invoke(
+    async (scope) => {
+      for (let i = 0; i < 256; i++) {
+        const file = await scope.sink.open('d0/d1/d2/d3/d4/d5/g' + (i % 104) + '/f' + i, 0);
+        await file.close();
+      }
+      const lstat = fs.lstatSync;
+      const checked = new Set<string>();
+      const spy = vi.spyOn(fs, 'lstatSync').mockImplementation(((...args: unknown[]) => {
+        const name = path.basename(String(args[0]));
+        if (/^f\d+$/.test(name)) checked.add(name);
+        return Reflect.apply(lstat, fs, args);
+      }) as typeof fs.lstatSync);
+      try {
+        for (let pass = 0; pass < 2; pass++) {
+          checked.clear();
+          const before = f.guard.mock.calls.length;
+          scope.assertPayloadCurrent();
+          observations.push({ callerChecks: f.guard.mock.calls.length - before, filesChecked: checked.size });
+          await Promise.resolve();
+        }
+      } finally {
+        spy.mockRestore();
+      }
+    },
+    8 * 1024 ** 2,
+  );
+  expect(observations).toHaveLength(2);
+  for (const observation of observations) {
+    expect(observation.filesChecked).toBe(256);
+    expect(observation.callerChecks).toBeGreaterThanOrEqual(2);
+    expect(observation.callerChecks).toBeLessThanOrEqual(4);
+  }
+  expect(fs.existsSync(f.destination)).toBe(false);
+});
+it('rechecks caller permission after the last synchronous inventory read before returning success', async () => {
+  const f = fixture();
+  let returned = false;
+  await expect(
+    f.invoke(async (scope) => {
+      const file = await scope.sink.open('tree/file', 6);
+      await file.write(Buffer.from('secret'));
+      await file.close();
+      const readdir = fs.readdirSync;
+      let directoriesRead = 0;
+      const spy = vi.spyOn(fs, 'readdirSync').mockImplementation(((...args: unknown[]) => {
+        const result = Reflect.apply(readdir, fs, args);
+        if (++directoriesRead === 2)
+          f.guard.mockImplementation(() => {
+            throw Error('PRIVATE_WITHDRAWN');
+          });
+        return result;
+      }) as typeof fs.readdirSync);
+      try {
+        expect(() => {
+          scope.assertPayloadCurrent();
+          returned = true;
+        }).toThrow(/^backup_restore_payload_unavailable$/);
+      } finally {
+        spy.mockRestore();
+      }
+    }),
+  ).rejects.toThrow(/^backup_restore_workspace_unavailable$/);
+  expect(returned).toBe(false);
+  expect(fs.readFileSync(f.destination + '/tree/file', 'utf8')).toBe('secret');
+  expect(fs.readFileSync(f.root + '/live-sentinel', 'utf8')).toBe('CURRENT_MESSAGES_COUNTERS_REVOCATIONS');
+});
 it.each(['content', 'missing', 'extra-file', 'extra-directory', 'parent', 'mode'])(
   'refuses complete payload continuity after an awaited %s change',
   async (kind) => {

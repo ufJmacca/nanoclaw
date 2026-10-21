@@ -983,10 +983,114 @@ test('S04 scheduled briefs require a terminal refresh result and retain its cove
       assert.equal((await runs.beginRefresh(context, run.id, scheduled.origin.generation, 'codex')).status, 'ok');
       assert.equal((await artifacts.prepare(scheduled, randomUUID(), 'UTC')).status, 'denied');
       assert.equal((await runs.finishRefresh(context, run.id, scheduled.origin.generation, outcome)).status, 'ok');
-      const prepared = await artifacts.prepare(scheduled, randomUUID(), 'UTC');
+      const request = randomUUID();
+      const prepared = await artifacts.prepare(scheduled, request, 'UTC');
       assert.equal(prepared.status, 'ok');
       assert.equal((prepared.snapshot as BriefSnapshot).coverage.refresh, outcome);
       assert.ok(String(prepared.text).includes('Refresh: ' + outcome.replaceAll('_', ' ') + '.'));
+      assert.equal(
+        (
+          await runs.prepare(context, run.id, scheduled.origin.generation, {
+            artifact_id: String(prepared.artifact_id),
+            output_digest: digest(prepared.text),
+            context_generation: scheduled.generation,
+            provider: 'codex',
+          })
+        ).status,
+        'ok',
+      );
+      const replayed = await artifacts.prepare(scheduled, request, 'UTC');
+      assert.equal(replayed.status, 'ok', 'a saved brief must survive a lost reply under its original request');
+      assert.equal(replayed.artifact_id, prepared.artifact_id);
+      assert.equal(replayed.text, prepared.text);
+      const readback = {
+        requestId: request,
+        timeZone: 'UTC',
+        provider: 'codex',
+        contextGeneration: scheduled.generation,
+      };
+      const reserve = (callId: string, candidate?: typeof readback, kind: 'model' | 'tool' = 'tool') =>
+        runs.reserveCall(scheduled, run.id, scheduled.origin.generation, kind, callId, candidate);
+      assert.equal((await reserve(randomUUID())).status, 'denied');
+      assert.equal((await reserve(randomUUID(), readback, 'model')).status, 'denied');
+      for (const changed of [
+        { requestId: randomUUID() },
+        { timeZone: 'Australia/Sydney' },
+        { provider: 'claude' },
+        { contextGeneration: randomUUID() },
+      ])
+        assert.equal((await reserve(randomUUID(), { ...readback, ...changed })).status, 'denied');
+      const callsBefore = (
+        await pool.query('SELECT tool_calls FROM cos.brief_runs WHERE scope_id=$1 AND id=$2', [scope, run.id])
+      ).rows[0].tool_calls;
+      const readbackCall = randomUUID();
+      assert.equal((await reserve(readbackCall, readback)).status, 'ok');
+      assert.equal(
+        (await reserve(readbackCall, readback)).status,
+        'denied',
+        'a physical invocation reservation cannot be replayed',
+      );
+      assert.equal(
+        (await pool.query('SELECT tool_calls FROM cos.brief_runs WHERE scope_id=$1 AND id=$2', [scope, run.id])).rows[0]
+          .tool_calls,
+        callsBefore + 1,
+      );
+      assert.equal(
+        (await artifacts.prepare(scheduled, randomUUID(), 'UTC')).status,
+        'denied',
+        'prepared state grants no new preparation',
+      );
+      assert.equal((await artifacts.prepare(scheduled, request, 'Australia/Sydney')).status, 'denied');
+      assert.equal(
+        (
+          await artifacts.prepare(
+            { ...scheduled, origin: { ...scheduled.origin, generation: scheduled.origin.generation + 1 } },
+            request,
+            'UTC',
+          )
+        ).status,
+        'denied',
+      );
+      const savedRun = (
+        await pool.query('SELECT snapshot FROM cos.brief_runs WHERE scope_id=$1 AND id=$2', [scope, run.id])
+      ).rows[0].snapshot;
+      await admin.query(
+        "UPDATE cos.brief_runs SET snapshot=jsonb_set(snapshot,'{artifact_id}',to_jsonb($3::text)) WHERE scope_id=$1 AND id=$2",
+        [scope, run.id, 'a'.repeat(64) + '-' + 'b'.repeat(64)],
+      );
+      assert.equal(
+        (await artifacts.prepare(scheduled, request, 'UTC')).status,
+        'denied',
+        'another prepared artifact cannot authorize replay',
+      );
+      await admin.query('UPDATE cos.brief_runs SET snapshot=$3 WHERE scope_id=$1 AND id=$2', [
+        scope,
+        run.id,
+        JSON.stringify(savedRun),
+      ]);
+      if (outcome === 'failed') {
+        await admin.query(
+          "UPDATE cos.brief_runs SET lease_until=clock_timestamp()-interval '1 second' WHERE scope_id=$1 AND id=$2",
+          [scope, run.id],
+        );
+        assert.equal(
+          (await artifacts.prepare(scheduled, request, 'UTC')).status,
+          'denied',
+          'expired preparation cannot authorize replay',
+        );
+      } else {
+        const get = artifacts.get.bind(artifacts);
+        artifacts.get = async (...args) => {
+          const result = await get(...args);
+          await runs.cancel(context, run.id, scheduled.origin.generation);
+          return result;
+        };
+        assert.equal(
+          (await artifacts.prepare(scheduled, request, 'UTC')).status,
+          'denied',
+          'cancellation during readback must prevent disclosure',
+        );
+      }
       assert.equal((await collector.collect({ ...scheduled, provider: 'claude' }, 'UTC')).status, 'denied');
       await runs.cancel(context, run.id, scheduled.origin.generation);
       assert.equal((await artifacts.get(scheduled, String(prepared.artifact_id), true)).status, 'denied');

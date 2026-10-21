@@ -13,7 +13,9 @@ export type BackupArchiveReadResult = {
   archiveBytes: number;
   archiveSha256: string;
 };
-class Reader {
+/** Internal canonical-stream primitive. High-level readers bind formats,
+ * identities, limits and sinks; this class grants no restore authority. */
+export class BackupArchiveStreamReader {
   private chunk: Buffer = Buffer.alloc(0);
   private offset = 0;
   private readonly iterator: AsyncIterator<Buffer>;
@@ -140,7 +142,10 @@ export async function readBackupArchive(
   sink: BackupArchiveRestoreSink,
   assertCurrent: () => void,
 ): Promise<BackupArchiveReadResult> {
-  let reader: Reader | undefined, metadata: Buffer | undefined, first: Buffer | undefined, prefix: Buffer | undefined;
+  let reader: BackupArchiveStreamReader | undefined,
+    metadata: Buffer | undefined,
+    first: Buffer | undefined,
+    prefix: Buffer | undefined;
   let result: BackupArchiveReadResult | undefined,
     failed = false;
   try {
@@ -156,7 +161,7 @@ export async function readBackupArchive(
     )
       throw Error('archive_reader_scope_required');
     assertCurrent();
-    reader = new Reader(
+    reader = new BackupArchiveStreamReader(
       source,
       (expected.kind === 'state' ? BACKUP_LIMITS.staging : BACKUP_LIMITS.credentials) + 2 * 1024 ** 2,
       assertCurrent,

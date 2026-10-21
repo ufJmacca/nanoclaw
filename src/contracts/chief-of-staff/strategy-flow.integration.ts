@@ -89,7 +89,7 @@ test(
       closeDb();
       const start = async () => {
         host = new HostFixture();
-        await host.request('start', { root, binding, ordinarySessionId: ordinary.id, knowledgeRoot });
+        await host.request('start', { root, binding, ordinarySessionId: ordinary.id, knowledgeRoot, strategy: true });
       };
       await start();
       client = new McpFixture(

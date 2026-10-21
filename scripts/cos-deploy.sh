@@ -60,9 +60,13 @@ fi
 directory=${manifest%/release.json}
 id=${directory##*/}
 cli verify "$id"
+timing_helper="$root/scripts/cos-stage-timing.sh"
+[[ -f "$timing_helper" && -r "$timing_helper" ]] || { echo 'Release timing helper is unavailable.' >&2; exit 1; }
+source "$timing_helper"
+release_timing_cli() { docker exec -w /workspace "$dev" node --import tsx src/modules/chief-of-staff/ops/mac-release-cli.ts timing "$id" "$@"; }
 # Close disposal before target/migration/health repair can delay the final release.
 slice=$(cli field "$id" slice)
-if [[ "$slice" != G01 && "$slice" != G02 && "$slice" != G03 ]]; then bash scripts/cos-protect-programme.sh --release-manifest "$manifest"; fi
+if [[ "$slice" != G01 && "$slice" != G02 && "$slice" != G03 && "$slice" != G04 ]]; then bash scripts/cos-protect-programme.sh --release-manifest "$manifest"; fi
 remote "$(cli preflight-command)" > "$directory/target-observation.json"
 cli target-check "$id"
 command=$(cli protected-release-command "$id")
@@ -82,32 +86,37 @@ commit=$(cli field "$id" commit)
 tree=$(cli field "$id" tree)
 fetch_ref=$(cli field "$id" fetchRef)
 [[ "$(git rev-parse "$commit^{tree}")" == "$tree" ]] || exit 1
-bash scripts/cos-push-source.sh "$commit" "$fetch_ref" > "$directory/source-push.log" 2>&1
+timed_release_stage source_push source-push.log bash scripts/cos-push-source.sh "$commit" "$fetch_ref" > "$directory/source-push.log" 2>&1
 cli checkpoint "$id" source_pushed
 stage=$(cli field "$id" stage)
 remote "$(cli stage-command "$id")"
 transfer() {
-  local name=$1
-  scp "${ssh_options[@]}" "$directory/$name" "$alias_name:$stage/$name.partial" > "$directory/$name-transfer.log" 2>&1
-  remote "$(cli seal-command "$id" "$name")"
+  local name=$1 timing_name
+  timing_name=$(printf '%s' "${name//[.-]/_}" | tr '[:upper:]' '[:lower:]') || return
+  timed_release_stage "transfer_$timing_name" "$name-transfer.log" scp "${ssh_options[@]}" "$directory/$name" "$alias_name:$stage/$name.partial" > "$directory/$name-transfer.log" 2>&1 || return
+  local seal_command
+  seal_command=$(cli seal-command "$id" "$name") || return
+  timed_release_stage "seal_$timing_name" "$name-transfer.log" remote "$seal_command"
 }
 for name in release.json SHA256SUMS bootstrap.mjs target.json; do transfer "$name"; done
 [[ ! -f "$directory/binding.json" ]] || transfer binding.json
 printf 'Verifying pinned source on the Pi for %s\n' "$id"
-remote "$(cli bootstrap-command "$id" source)" > "$directory/source-result.json"
+command=$(cli bootstrap-command "$id" source)
+timed_release_stage source_verify source-result.json remote "$command" > "$directory/source-result.json"
 cli checkpoint "$id" source_verified
 printf 'Transferring the tested image archive for %s\n' "$id"
 transfer images.tar.gz
 cli checkpoint "$id" transferred
-remote "$(cli bootstrap-command "$id" prepare)" > "$directory/prepare-result.json"
+command=$(cli bootstrap-command "$id" prepare)
+timed_release_stage prepare_import prepare-result.json remote "$command" > "$directory/prepare-result.json"
 cli checkpoint "$id" prepared
 printf 'Activating %s. The existing NanoClaw service will briefly stop while protected state is backed up and migrated.\n' "$id"
 command=$(cli deploy-command "$id" ${recovery_args[@]+"${recovery_args[@]}"})
 [[ -n "$command" ]] || { echo 'Empty remote command refused.' >&2; exit 1; }
-if [[ "$slice" == G01 || "$slice" == G02 || "$slice" == G03 ]]; then
+if [[ "$slice" == G01 || "$slice" == G02 || "$slice" == G03 || "$slice" == G04 ]]; then
   # Protect the actual credential/backup process before it reads private state.
   command="systemd-run --user --quiet --pipe --wait --collect --unit=nanoclaw-cos-deploy-$id.service --property=LimitCORE=0 --property=MemorySwapMax=0 --property=RuntimeMaxSec=1900 -- /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C LC_ALL=C $command"
 fi
-remote "$command" > "$directory/deploy-result.json"
+timed_release_stage activation deploy-result.json remote "$command" > "$directory/deploy-result.json"
 cli checkpoint "$id" healthy
 cat "$directory/deploy-result.json"

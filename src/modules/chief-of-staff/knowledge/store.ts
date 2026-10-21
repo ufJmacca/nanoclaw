@@ -14,10 +14,12 @@ import {
 } from './artifacts.js';
 import { purgeKnowledge, type PurgeHooks } from './purge.js';
 import { KnowledgeAnswers, type AnswerHooks } from './answer-store.js';
-import { calendarSourceAccess } from '../calendar/source-access.js';
+import { sourceAccess } from './source-access.js';
+import { GOOGLE_MAIL_READ_SCOPE } from '../calendar/oauth-core.js';
 import { hasCalendarReadScope } from '../calendar/reader.js';
 import { calendarAnswerNotice, checkCalendarContext, type CalendarAnswerNotice } from '../calendar/answer-notice.js';
 import { calendarEmptyWindowNotice } from '../calendar/empty-window-notice.js';
+import { mailAnswerNotice, checkMailContext, type MailAnswerNotice } from '../mail/answer-notice.js';
 export type KnowledgeContext = Context & { provider: string; generation: string };
 export type ImportSource = {
   sourceKey: string;
@@ -82,7 +84,9 @@ export class KnowledgeStore {
   readonly answers: KnowledgeAnswers;
   readonly retrievalEnabled: () => boolean;
   private readonly calendarAccess: (scopeId: string, bindingId: string) => boolean;
+  private readonly mailAccess: (scopeId: string, bindingId: string) => boolean;
   private readonly calendarNotice: (client: PoolClient, context: KnowledgeContext) => Promise<CalendarAnswerNotice>;
+  private readonly mailNotice?: (client: PoolClient, context: KnowledgeContext) => Promise<MailAnswerNotice>;
   constructor(
     readonly database: BoundedDatabase,
     readonly artifacts: KnowledgeArtifacts,
@@ -93,10 +97,20 @@ export class KnowledgeStore {
       retrievalEnabled?(): boolean;
       calendarAccess?(scopeId: string, bindingId: string): boolean;
       calendarEnabled?(): boolean;
+      mailAccess?(scopeId: string, bindingId: string): boolean;
+      mailEnabled?(): boolean;
     } = {},
   ) {
     this.retrievalEnabled = options.retrievalEnabled ?? (() => true);
     this.calendarAccess = options.calendarAccess ?? (() => false);
+    this.mailAccess = (scope, binding) =>
+      this.retrievalEnabled() && (options.mailEnabled?.() ?? false) && (options.mailAccess?.(scope, binding) ?? false);
+    if (options.mailEnabled)
+      this.mailNotice = (client, context) =>
+        mailAnswerNotice(client, context, {
+          enabled: () => this.retrievalEnabled() && options.mailEnabled!(),
+          access: this.mailAccess,
+        });
     this.calendarNotice = (client, context) =>
       calendarAnswerNotice(client, context, {
         enabled: () => this.retrievalEnabled() && (options.calendarEnabled?.() ?? false),
@@ -111,6 +125,13 @@ export class KnowledgeStore {
       sourcesReadable: (client, context, ids) => this.sourcesReadable(client, context, ids),
       retrievalEnabled: this.retrievalEnabled,
       calendarNotice: this.calendarNotice,
+      ...(this.mailNotice
+        ? {
+            mailNotice: this.mailNotice,
+            mailContext: (client: PoolClient, context: KnowledgeContext, register = false) =>
+              checkMailContext(client, context, () => this.mailNotice!(client, context), register),
+          }
+        : {}),
       calendarContext: (client, context, register) =>
         checkCalendarContext(client, context, () => this.calendarNotice(client, context), register),
       calendarEmptyWindow: (client, context, request) =>
@@ -394,32 +415,38 @@ export class KnowledgeStore {
       return result.status === 'pending' ? { ...result, request_id: requestId } : result;
     });
   }
-  private async openCalendarBindings(client: PoolClient, context: KnowledgeContext): Promise<string[]> {
+  private async openSourceBindings(client: PoolClient, context: KnowledgeContext): Promise<string[]> {
     const rows = (
       await client.query(
-        "SELECT id::text,permission_scopes FROM cos.calendar_bindings WHERE scope_id=$1 AND auth='ready' AND $2=ANY(processing_providers)",
+        `SELECT 'calendar' AS kind,id::text,permission_scopes FROM cos.calendar_bindings WHERE scope_id=$1 AND auth='ready' AND $2=ANY(processing_providers)
+         UNION ALL SELECT 'mail' AS kind,id::text,permission_scopes FROM cos.mail_bindings WHERE scope_id=$1 AND auth='ready' AND $2=ANY(processing_providers)`,
         [context.scopeId, context.provider],
       )
-    ).rows as Array<{ id: string; permission_scopes: string[] }>;
+    ).rows as Array<{ kind: 'calendar' | 'mail'; id: string; permission_scopes: string[] }>;
     return rows
-      .filter(({ id, permission_scopes }) => {
+      .filter(({ kind, id, permission_scopes }) => {
         try {
-          return hasCalendarReadScope(permission_scopes) && this.calendarAccess(context.scopeId, id) === true;
+          return kind === 'calendar'
+            ? hasCalendarReadScope(permission_scopes) && this.calendarAccess(context.scopeId, id) === true
+            : kind === 'mail' &&
+                permission_scopes.length === 1 &&
+                permission_scopes[0] === GOOGLE_MAIL_READ_SCOPE &&
+                this.mailAccess(context.scopeId, id) === true;
           // eslint-disable-next-line no-catch-all/no-catch-all -- Missing/corrupt journals and recorded access loss deny disclosure without revealing private paths.
         } catch {
           return false;
         }
       })
-      .map(({ id }) => id);
+      .map(({ kind, id }) => kind + ':' + id);
   }
   private async sourcesReadable(client: PoolClient, context: KnowledgeContext, ids: string[]): Promise<boolean> {
     const unique = [...new Set(ids)];
     if (!unique.length) return true;
-    const allowed = await this.openCalendarBindings(client, context);
+    const allowed = await this.openSourceBindings(client, context);
     return (
       (
         await client.query(
-          `SELECT s.id FROM cos.sources s WHERE s.scope_id=$1 AND s.id=ANY($2::text[]) AND ${calendarSourceAccess('$3')}`,
+          `SELECT s.id FROM cos.sources s WHERE s.scope_id=$1 AND s.id=ANY($2::text[]) AND ${sourceAccess('$3')}`,
           [context.scopeId, unique, allowed],
         )
       ).rowCount === unique.length
@@ -432,7 +459,7 @@ export class KnowledgeStore {
       `SELECT 1 FROM cos.evidence_refs e JOIN cos.sources s ON s.scope_id=e.scope_id AND s.id=e.source_id
       WHERE e.scope_id=$1 AND e.session_id=$2 AND e.context_generation=$3 AND
       (NOT $5::boolean OR s.version<>e.source_version OR s.current_revision_id<>e.revision_id OR s.status NOT IN ('current','stale')
-        OR NOT $4=ANY(s.processing_providers) OR e.processing_provider<>$4 OR NOT ${calendarSourceAccess('$6')}
+        OR NOT $4=ANY(s.processing_providers) OR e.processing_provider<>$4 OR NOT ${sourceAccess('$6')}
         OR EXISTS(SELECT 1 FROM cos.revocation_tombstones t WHERE t.scope_id=s.scope_id AND t.source_id=s.id)) LIMIT 1`,
       [
         context.scopeId,
@@ -440,11 +467,16 @@ export class KnowledgeStore {
         context.generation,
         context.provider,
         this.retrievalEnabled(),
-        await this.openCalendarBindings(client, context),
+        await this.openSourceBindings(client, context),
       ],
     );
     if (invalid.rowCount) return false;
-    return (await checkCalendarContext(client, context, () => this.calendarNotice(client, context))).status === 'ok';
+    if ((await checkCalendarContext(client, context, () => this.calendarNotice(client, context))).status !== 'ok')
+      return false;
+    return (
+      !this.mailNotice ||
+      (await checkMailContext(client, context, () => this.mailNotice!(client, context))).status === 'ok'
+    );
   }
   async contextReady(context: KnowledgeContext): Promise<Result> {
     return this.transaction(async (client) => ({ status: (await this.current(client, context)) ? 'ok' : 'denied' }));
@@ -463,7 +495,7 @@ export class KnowledgeStore {
     WHERE s.scope_id=$1 AND s.id=$2 AND r.id=$3 AND s.status IN ('current','stale')
       AND $4=ANY(s.processing_providers) AND a.lifecycle='published' AND a.kind='source' AND a.digest=r.digest
       AND ((s.provenance->>'origin'='selected_staging_file' AND s.access_policy='{"scope_owner_only":true}'::jsonb)
-        OR (s.provenance->>'origin'='calendar_observation' AND s.access_policy->>'scope_owner_only'='true' AND ${calendarSourceAccess('$5')}))
+        OR (s.provenance->>'origin' IN ('calendar_observation','mail_message') AND s.access_policy->>'scope_owner_only'='true' AND ${sourceAccess('$5')}))
       AND NOT EXISTS(SELECT 1 FROM cos.revocation_tombstones t WHERE t.scope_id=s.scope_id AND t.source_id=s.id)
     FOR SHARE OF s,r,a`,
         [
@@ -471,7 +503,7 @@ export class KnowledgeStore {
           selection.source_id,
           selection.revision_id,
           context.provider,
-          await this.openCalendarBindings(client, context),
+          await this.openSourceBindings(client, context),
         ],
       )
     ).rows[0];
@@ -506,7 +538,7 @@ export class KnowledgeStore {
     return (
       this.retrievalEnabled() &&
       (await this.current(client, context)) &&
-      (await this.openCalendarBindings(client, context)).includes(bindingId)
+      (await this.openSourceBindings(client, context)).includes('calendar:' + bindingId)
     );
   }
   /** Trusted mission admission only. Caller owns the transaction; no worker receives this client or artifact root. */
@@ -566,6 +598,18 @@ export class KnowledgeStore {
       return { status: result.status };
     }, true);
   }
+  /** Record mailbox metadata exposure without binding the conversation to each
+   * polling refresh. A real account/access change still closes the context. */
+  async recordMailContext(context: KnowledgeContext): Promise<Result> {
+    if (!this.mailNotice) return { status: 'unavailable' };
+    return this.transaction(async (client) => {
+      if (!(await this.current(client, context))) return { status: 'denied' };
+      const result = await checkMailContext(client, context, () => this.mailNotice!(client, context), true);
+      return result.status === 'ok' && (await this.current(client, context))
+        ? { status: 'ok', notice: result.notice }
+        : { status: 'denied' };
+    }, true);
+  }
   /** Trusted host reconciliation, including paused scopes. No agent RPC exposes these methods. */
   async pendingInvalidations(scopeId: string): Promise<Result> {
     return this.transaction(async (client) => ({
@@ -595,6 +639,18 @@ export class KnowledgeStore {
     );
   }
   async search(context: KnowledgeContext, input: Search): Promise<Result> {
+    return this.searchRestricted(context, input, null);
+  }
+  /** Trusted mail adapter: constrain the source set before ranking and paging. */
+  async searchMail(context: KnowledgeContext, binding: string, input: Search): Promise<Result> {
+    if (!uuid.test(binding)) return { status: 'denied' };
+    return this.searchRestricted(context, input, binding);
+  }
+  private async searchRestricted(
+    context: KnowledgeContext,
+    input: Search,
+    mailBinding: string | null,
+  ): Promise<Result> {
     if (!this.retrievalEnabled()) return { status: 'unavailable' };
     if (
       typeof input?.query !== 'string' ||
@@ -616,7 +672,8 @@ export class KnowledgeStore {
         await client.query(
           `${candidateSelect},ts_rank(c.search,plainto_tsquery('simple',$3)) AS score ${candidateJoin}
         AND c.search @@ plainto_tsquery('simple',$3) AND ($4::text IS NULL OR s.id=$4) AND ($5::text IS NULL OR s.project_id=$5)
-        AND ${calendarSourceAccess('$8')}
+        AND ${sourceAccess('$8')}
+        AND ($9::text IS NULL OR (s.provenance->>'origin'='mail_message' AND s.access_policy->>'mail_binding_id'=$9))
         ORDER BY score DESC,s.id,c.ordinal LIMIT $6 OFFSET $7`,
           [
             context.scopeId,
@@ -626,7 +683,8 @@ export class KnowledgeStore {
             input.projectId ?? null,
             input.limit ?? 5,
             input.offset ?? 0,
-            await this.openCalendarBindings(client, context),
+            await this.openSourceBindings(client, context),
+            mailBinding,
           ],
         )
       ).rows;
@@ -649,14 +707,14 @@ export class KnowledgeStore {
       if (!(await this.current(client, context))) return { status: 'denied' };
       const items = (
         await client.query(
-          `${candidateSelect},0 AS score ${candidateJoin} AND s.id=$3 AND r.id=$4 AND c.ordinal=$5 AND ${calendarSourceAccess('$6')}`,
+          `${candidateSelect},0 AS score ${candidateJoin} AND s.id=$3 AND r.id=$4 AND c.ordinal=$5 AND ${sourceAccess('$6')}`,
           [
             context.scopeId,
             context.provider,
             sourceId,
             revisionId,
             ordinal,
-            await this.openCalendarBindings(client, context),
+            await this.openSourceBindings(client, context),
           ],
         )
       ).rows;
@@ -694,6 +752,19 @@ export class KnowledgeStore {
         ))
       )
         return { status: 'denied' };
+      if (this.mailNotice && candidates.length) {
+        const mail = (
+          await client.query(
+            "SELECT 1 FROM cos.sources WHERE scope_id=$1 AND id=ANY($2::text[]) AND provenance->>'origin'='mail_message' LIMIT 1",
+            [context.scopeId, candidates.map((row) => row.source_id)],
+          )
+        ).rowCount;
+        if (
+          mail &&
+          (await checkMailContext(client, context, () => this.mailNotice!(client, context), true)).status !== 'ok'
+        )
+          return { status: 'denied' };
+      }
       const items: Evidence[] = [];
       for (const row of candidates) {
         const allowed = await client.query(

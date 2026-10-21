@@ -35,6 +35,8 @@ function fixture() {
     'container/fixtures/vault/probe-backup-journal.mjs': 'synthetic encrypted credential journal probe',
     'container/fixtures/vault/probe-backup-postgres.mjs':
       'compiled actual test database inside encrypted kernel storage',
+    'container/fixtures/vault/probe-mail.mjs': 'compiled mail credential kernel probe',
+    'container/fixtures/vault/probe-mail-recovery.mjs': 'compiled complete mail recovery kernel probe',
     'container/fixtures/vault/unadmitted.mjs': 'UNADMITTED_VAULT_CANARY',
     'scripts/cos-vault-fixture.sh': 'host-only private pipe orchestration',
     'scripts/cos-vault-keychain.swift': 'trusted keychain code, never key bytes',
@@ -43,7 +45,9 @@ function fixture() {
     'scripts/cos-root-unit-fixture.sh': 'isolated root administration source fixture',
     'scripts/cos-source-fixture.sh': 'public source-only Docker fixture driver',
     'scripts/cos-release.sh': 'source-pinned host release coordinator',
+    'scripts/cos-stage-timing.sh': 'source-pinned release timing wrapper',
     'scripts/cos-backup-repository-fixture.sh': 'immutable host encrypted repository fixture driver',
+    'scripts/cos-mail-artifact-fixture.sh': 'immutable mail artifact fixture driver',
     'container/fixtures/backup-smb/Dockerfile.server': 'pinned synthetic SMB server',
     'container/fixtures/backup-smb/Dockerfile.client': 'immutable tested host CIFS client',
     'container/fixtures/backup-smb/server.sh': 'dedicated synthetic account and share',
@@ -90,6 +94,9 @@ describe('S01-REL03 pinned source-only build context', () => {
     expect(fs.statSync(path.join(out, 'container/agent-runner/src')).mode & 0o777).toBe(0o755);
     expect(fs.statSync(path.join(out, 'container/agent-runner/src/index.ts')).mode & 0o777).toBe(0o644);
     expect(fs.readFileSync(path.join(out, 'src/index.ts'), 'utf8')).toBe('console.log("fixture")');
+    expect(fs.readFileSync(path.join(out, 'scripts/cos-mail-artifact-fixture.sh'), 'utf8')).toBe(
+      'immutable mail artifact fixture driver',
+    );
     expect(
       fs.readFileSync(path.join(out, 'container/agent-runner/fixtures/cos-subscription-capability.ts'), 'utf8'),
     ).toBe('offline native protocol fixture');
@@ -214,8 +221,11 @@ it('exports only immutable job-manager fixtures and binds their committed bytes'
 it.each([
   'scripts/cos-source-fixture.sh',
   'scripts/cos-release.sh',
+  'scripts/cos-stage-timing.sh',
   'scripts/cos-backup-repository-fixture.sh',
   'container/fixtures/vault/probe-backup-postgres.mjs',
+  'container/fixtures/vault/probe-mail.mjs',
+  'container/fixtures/vault/probe-mail-recovery.mjs',
 ])('binds committed %s bytes without exporting arbitrary scripts or changing worker assets', async (script) => {
   const f = fixture(),
     before = await prepareBuildContext(f.repo, f.commit, path.join(f.root, 'first'));

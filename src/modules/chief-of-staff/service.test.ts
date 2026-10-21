@@ -42,8 +42,43 @@ function fixture(enabled: boolean, specialists?: (store: PriorityStore) => Speci
     specialists,
   });
   services.push(service);
-  return { db, service, connect, end, query, admission, stop, session };
+  return { db, service, connect, end, query, admission, stop, session, store };
 }
+it('G04 retires actual mail work and pinned credentials before releasing the shared pool', async () => {
+  const f = fixture(true);
+  let release!: () => void;
+  const close = vi.fn(
+    () =>
+      new Promise<void>((resolve) => {
+        release = resolve;
+      }),
+  );
+  Object.assign(f.store, { mail: { close } });
+  await f.service.tick();
+  f.admission.mockReturnValue(false);
+  const retiring = f.service.tick();
+  await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
+  expect(f.end).not.toHaveBeenCalled();
+  release();
+  await retiring;
+  expect(f.end).toHaveBeenCalledOnce();
+});
+it('G04 retains uncertain mail retirement and never opens a replacement owner over it', async () => {
+  const f = fixture(true),
+    close = vi.fn(async () => {});
+  Object.assign(f.store, { mail: { close } });
+  await f.service.tick();
+  close.mockRejectedValue(Error('mail_host_retirement_unavailable'));
+  f.admission.mockReturnValue(false);
+  await f.service.tick();
+  f.admission.mockReturnValue(true);
+  await f.service.tick();
+  expect(f.connect).toHaveBeenCalledOnce();
+  expect(f.end).not.toHaveBeenCalled();
+  close.mockResolvedValue();
+  await f.service.tick();
+  expect(f.connect).toHaveBeenCalledTimes(2);
+});
 function specialist() {
   return { pump: vi.fn(async (_binding: CosBinding) => {}), fenceLocal: vi.fn(), close: vi.fn(async () => {}) };
 }
@@ -61,12 +96,13 @@ it('reports the failing readiness stage without private errors and deduplicates 
     });
     f.query.mockRejectedValueOnce(Error('DIFFERENT_PRIVATE_ERROR'));
     await f.service.tick();
-    expect(warn).toHaveBeenCalledTimes(1);
+    const readinessWarnings = () => warn.mock.calls.filter(([message]) => message === 'CoS readiness check failed');
+    expect(readinessWarnings()).toHaveLength(1);
     await f.service.tick();
     expect(f.service.healthStatus()).toMatchObject({ component_phase: 'ready' });
     f.query.mockRejectedValueOnce(Error('PRIVATE_ERROR_AFTER_RECOVERY'));
     await f.service.tick();
-    expect(warn).toHaveBeenCalledTimes(2);
+    expect(readinessWarnings()).toHaveLength(2);
     expect(JSON.stringify(warn.mock.calls)).not.toContain('PRIVATE');
   } finally {
     warn.mockRestore();

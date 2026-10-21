@@ -1,9 +1,55 @@
 import fs from 'node:fs';
+import path from 'node:path';
 import { createHash } from 'node:crypto';
-function mountTableDigest(): string {
+function mountpoint(encoded: string): string {
+  if (/\\(?!040|011|012|134)/.test(encoded)) throw Error('kernel_mount_path_invalid');
+  const decoded = encoded.replace(/\\(040|011|012|134)/g, (_, octal: string) =>
+    String.fromCharCode(Number.parseInt(octal, 8)),
+  );
+  if (!decoded.startsWith('/') || decoded.includes('\0') || path.posix.normalize(decoded) !== decoded)
+    throw Error('kernel_mount_path_invalid');
+  return decoded;
+}
+const within = (file: string, root: string) => file === root || file.startsWith(root === '/' ? '/' : root + '/');
+function mountRoot(encoded: string, filesystem: string): void {
+  // nsfs show_path emits a namespace name and inode, rather than an absolute path.
+  // Keep the complete record in the digest whenever its mountpoint is protected.
+  if (filesystem === 'nsfs' && /^[a-z][a-z0-9_]{0,31}:\[[1-9][0-9]{0,19}\]$/.test(encoded)) return;
+  mountpoint(encoded);
+}
+function scopedTable(bytes: Buffer, paths: readonly string[]): string {
+  const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  if (!text.endsWith('\n')) throw Error('kernel_mount_table_invalid');
+  const ids = new Set<string>(),
+    selected: string[] = [];
+  let root = false;
+  for (const line of text.slice(0, -1).split('\n')) {
+    const fields = line.split(' '),
+      separator = fields.indexOf('-');
+    if (
+      separator < 6 ||
+      fields.length !== separator + 4 ||
+      fields.some((field) => !field) ||
+      !/^[1-9][0-9]*$/.test(fields[0]) ||
+      !/^[0-9]+$/.test(fields[1]) ||
+      !/^[0-9]+:[0-9]+$/.test(fields[2]) ||
+      ids.has(fields[0])
+    )
+      throw Error('kernel_mount_table_invalid');
+    ids.add(fields[0]);
+    mountRoot(fields[3], fields[separator + 1]);
+    const named = mountpoint(fields[4]);
+    root ||= named === '/';
+    if (paths.some((file) => within(file, named) || within(named, file))) selected.push(line);
+  }
+  if (!root || !selected.length) throw Error('kernel_mount_table_invalid');
+  return selected.sort().join('\n') + '\n';
+}
+function mountTableDigest(paths?: readonly string[]): string {
   let fd: number | undefined;
   const buffer = Buffer.alloc(65536),
-    hash = createHash('sha256');
+    hash = createHash('sha256'),
+    chunks: Buffer[] = [];
   try {
     if (process.platform !== 'linux') throw Error('linux_required');
     fd = fs.openSync('/proc/self/mountinfo', fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
@@ -15,27 +61,53 @@ function mountTableDigest(): string {
       if (!count) break;
       total += count;
       if (total > 1024 ** 2) throw Error('kernel_mount_table_bounds');
-      hash.update(buffer.subarray(0, count));
+      if (paths) chunks.push(Buffer.from(buffer.subarray(0, count)));
+      else hash.update(buffer.subarray(0, count));
       buffer.fill(0);
     }
     if (!total) throw Error('kernel_mount_table_required');
+    if (paths) {
+      const bytes = Buffer.concat(chunks);
+      try {
+        hash.update(scopedTable(bytes, paths));
+      } finally {
+        bytes.fill(0);
+      }
+    }
     return hash.digest('hex');
   } finally {
     buffer.fill(0);
+    for (const chunk of chunks) chunk.fill(0);
     if (fd !== undefined) fs.closeSync(fd);
   }
 }
 /** Continuity only, never mount or encryption admission. A trusted caller must
  * verify its complete storage policy while this table is unchanged, pin its
  * named descriptors, and repeat full verification before returning success.
- * Every assertion reads the current kernel table; any namespace mount change,
- * including remount options, withdraws the scope. No clock cache is used. */
-export function pinKernelMountTable(): () => void {
+ * Every assertion rereads the kernel table. With explicit protected paths, all
+ * ancestor, covering and descendant mount records remain fixed, including IDs,
+ * bind roots, propagation and remount options. Unrelated worker mounts may change.
+ * Omitting paths retains the strict whole-namespace proof. No clock cache is used. */
+export function pinKernelMountTable(protectedPaths?: readonly string[]): () => void {
   try {
-    const initial = mountTableDigest();
+    const paths = protectedPaths === undefined ? undefined : Object.freeze([...protectedPaths]);
+    if (
+      paths &&
+      (!paths.length ||
+        paths.length > 32 ||
+        paths.some(
+          (file) =>
+            typeof file !== 'string' ||
+            !file.startsWith('/') ||
+            /[\0\r\n]/.test(file) ||
+            path.posix.normalize(file) !== file,
+        ))
+    )
+      throw Error('kernel_mount_paths_invalid');
+    const initial = mountTableDigest(paths);
     return () => {
       try {
-        if (mountTableDigest() !== initial) throw Error('kernel_mount_table_changed');
+        if (mountTableDigest(paths) !== initial) throw Error('kernel_mount_table_changed');
       } catch {
         // eslint-disable-next-line preserve-caught-error -- Kernel paths and mount data never leave the trusted process.
         throw Error('kernel_mount_unverified');

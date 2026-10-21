@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import http from 'node:http';
-import { startCalendarAuthorization, type CalendarAuthorizationListener } from './oauth-listener.js';
+import {
+  startCalendarAuthorization,
+  startMailAuthorization,
+  type CalendarAuthorizationListener,
+} from './oauth-listener.js';
+import { GOOGLE_MAIL_READ_SCOPE } from './oauth-core.js';
 import { GOOGLE_EVENT_READ_SCOPE } from './reader.js';
 const client = { clientId: 'fixture-client.apps.googleusercontent.com' };
 const listeners: CalendarAuthorizationListener[] = [];
@@ -17,6 +22,45 @@ const reply = () =>
       scope: GOOGLE_EVENT_READ_SCOPE,
     }),
   );
+it.each([
+  GOOGLE_MAIL_READ_SCOPE,
+  GOOGLE_EVENT_READ_SCOPE,
+  GOOGLE_MAIL_READ_SCOPE + ' https://www.googleapis.com/auth/gmail.modify',
+])('keeps the explicit Mail listener on its separate exact read-only scope: %s', async (scope) => {
+  const provider = vi.fn(
+    async () =>
+      new Response(
+        JSON.stringify({
+          access_token: 'FIXTURE_MAIL_ACCESS',
+          refresh_token: 'FIXTURE_MAIL_REFRESH',
+          expires_in: 3600,
+          token_type: 'Bearer',
+          scope,
+        }),
+      ),
+  );
+  const listener = await startMailAuthorization(client, { fetch: provider });
+  listeners.push(listener);
+  const authorization = new URL(listener.authorizationUrl);
+  expect(authorization.searchParams.get('scope')).toBe(GOOGLE_MAIL_READ_SCOPE);
+  expect(authorization.searchParams.get('include_granted_scopes')).not.toBe('true');
+  expect(authorization.searchParams.get('code_challenge_method')).toBe('S256');
+  const callback = new URL(authorization.searchParams.get('redirect_uri')!);
+  expect(callback.hostname).toBe('127.0.0.1');
+  callback.searchParams.set('code', 'fixture-code');
+  callback.searchParams.set('state', authorization.searchParams.get('state')!);
+  const result = listener.result.catch((error: Error) => error);
+  const response = await fetch(callback);
+  expect(await response.text()).not.toContain('FIXTURE_');
+  if (scope === GOOGLE_MAIL_READ_SCOPE) {
+    expect(response.status).toBe(200);
+    expect(await result).toMatchObject({ scopes: [GOOGLE_MAIL_READ_SCOPE] });
+  } else {
+    expect(response.status).toBe(400);
+    expect(await result).toBeInstanceOf(Error);
+  }
+  expect(provider).toHaveBeenCalledOnce();
+});
 async function setup(options: Parameters<typeof startCalendarAuthorization>[1] = {}) {
   const provider = vi.fn(async (_url: string, _init: RequestInit) => reply());
   const listener = await startCalendarAuthorization(client, { fetch: provider, ...options });

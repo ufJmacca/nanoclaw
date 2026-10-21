@@ -9,7 +9,7 @@ import { safeHostEnvironment } from '../../../host-environment.js';
 import type { Session } from '../../../types.js';
 import type { PriorityStore } from '../store/priorities.js';
 import { ensureRpcSchema, createRpcHandler } from '../bridge/rpc.js';
-import { restrictedLaunch } from '../bridge/restricted-launch.js';
+import { nativeSmokeLaunch } from './native-smoke-launch.js';
 import { startModelGateway } from '../bridge/model-gateway.js';
 
 /** Runs the real restricted launch and native SQLite RPC with synthetic records and no real adapters. */
@@ -116,7 +116,7 @@ export async function nativeFixtureSmoke(options: { root: string; hostRoot: stri
         };
       },
     });
-    const launch = restrictedLaunch({
+    const launch = nativeSmokeLaunch({
       image: options.image,
       sessionDirectory: session,
       configurationFile: config,
@@ -128,7 +128,11 @@ export async function nativeFixtureSmoke(options: { root: string; hostRoot: stri
     launch.args = launch.args.map((arg) =>
       arg.startsWith('type=bind,') ? arg.replace('src=' + options.root + '/', 'src=' + options.hostRoot + '/') : arg,
     );
-    client = new McpFixture(options.root, session, options.hostRoot, options.image, '', launch);
+    // Newly imported Pi images can need longer to mount and start. Only the
+    // initialization handshake gets this budget; subsequent RPC stays bounded.
+    client = new McpFixture(options.root, session, options.hostRoot, options.image, '', launch, {
+      startupTimeoutMs: 90000,
+    });
     await client.start();
     const tools = await client.request('tools/list', {});
     assert.deepEqual(tools.tools.map((tool: { name: string }) => tool.name).sort(), [
@@ -143,6 +147,8 @@ export async function nativeFixtureSmoke(options: { root: string; hostRoot: stri
       'cos_change_propose',
       'cos_context_get',
       'cos_knowledge_search',
+      'cos_mail_search',
+      'cos_mail_thread_get',
       'cos_mandate_activity',
       'cos_mandate_propose',
       'cos_mission_cancel',

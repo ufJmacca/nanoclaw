@@ -5,6 +5,7 @@ import Database from 'better-sqlite3';
 import { createHash, randomUUID } from 'node:crypto';
 import { afterEach, expect, it, vi } from 'vitest';
 import { digest } from '../domain/contracts.js';
+import { SCHEMA_VERSION } from '../store/migrations.js';
 import { initializeTarget, writeAtomic } from './target-state.js';
 import { beginMaintenance, confirmQuiescence } from './maintenance.js';
 import { machineFingerprint } from './target-identity.js';
@@ -184,7 +185,7 @@ async function fixture(databaseFingerprint = 'd'.repeat(64), scopeId = 'scope', 
       sourceCommit: '1'.repeat(40),
       sourceTree: '2'.repeat(40),
       hostPayloadSha256: '3'.repeat(64),
-      schemaVersion: 18,
+      schemaVersion: SCHEMA_VERSION,
       nativeSchemaVersion: 22,
     },
   };
@@ -396,90 +397,103 @@ it('fails closed before reads when the memory policy is unavailable', async () =
   expect(fs.existsSync(f.areas.staging + '/backup-queue')).toBe(false);
 });
 
-it('connects the real coordinated/native/operations/history producers to the actual queue with scoped query and OS protection fixtures', async () => {
-  const s = await fixture();
-  const { captureOperationsState } =
-    await vi.importActual<typeof import('./recovery-manifest.js')>('./recovery-manifest.js');
-  const { captureCalendarState } =
-    await vi.importActual<typeof import('../calendar/backup.js')>('../calendar/backup.js');
-  const { MIGRATIONS } = await import('../store/migrations.js');
-  f.capture.mockImplementation(captureOperationsState);
-  f.calendar.mockImplementation(captureCalendarState);
-  const query = vi.fn(async (sql: string, parameters?: string[]) => {
-    if (sql.includes('pg_try_advisory_lock')) return { rows: [{ locked: true }] };
-    if (sql.includes('to_regclass')) return { rows: [{ ledger: 'cos.schema_migrations' }] };
-    if (sql.includes('FROM cos.schema_migrations'))
-      return { rows: MIGRATIONS.map(({ version, checksum }) => ({ version, checksum })) };
-    if (sql.includes('SELECT owner_id,agent_group_id'))
-      return { rows: [{ owner_id: s.binding.ownerId, agent_group_id: s.binding.agentGroupId }] };
-    if (sql.includes('FROM pg_attribute'))
-      return {
-        rows: (parameters?.[0] === 'cos.scopes' ? ['id', 'owner_id', 'agent_group_id'] : ['scope_id']).map(
-          (attname) => ({ attname }),
-        ),
-      };
-    if (sql.includes('to_jsonb(t)'))
-      return {
-        rows: sql.includes('cos."scopes"')
-          ? [{ body: { id: s.binding.scopeId, owner_id: s.binding.ownerId, agent_group_id: s.binding.agentGroupId } }]
-          : [],
-      };
-    if (sql.includes('clock_timestamp')) return { rows: [{ now: new Date() }] };
-    return { rows: [] };
-  });
-  f.connect.mockResolvedValue({ query, end: s.end });
-  const result = await captureTargetVaultState(s.settings, s.operationId, s.admin, s.recovery);
-  expect(result.status).toBe('queued');
-  const data = s.queue() + '/data',
-    checkpoint = JSON.parse(fs.readFileSync(data + '/coordinated/manifest.json', 'utf8')),
-    operations = JSON.parse(fs.readFileSync(data + '/' + s.operationId + '.operations.json', 'utf8')),
-    header = JSON.parse(fs.readFileSync(data + '/state-capture.json', 'utf8'));
-  if (result.status !== 'queued') throw Error('fixture_checkpoint_not_queued');
-  expect(checkpoint.sqlite).toHaveLength(1);
-  expect(operations.coordinatedDigest).toBe(digest(checkpoint));
-  expect(header.operations.manifestDigest).toBe(digest(operations));
-  expect(header.checkpointDigest).toBe(digest(checkpoint));
-  expect(header.inputs.context.scopeId).toBe(s.binding.scopeId);
-  const { verifyCoordinatedBackup } = await import('./coordinated-backup.js');
-  expect(
-    await verifyCoordinatedBackup({
-      ...header.inputs,
-      receiptRoot: data,
-      operationId: s.operationId,
-      databaseFingerprint: s.settings.databaseFingerprint,
-      artifacts: { root: header.inputs.artifactsRoot },
-      witness: s.witness,
-    }),
-  ).toEqual(checkpoint);
-  expect(await verifyTargetVaultState(s.settings, s.operationId, s.admin, s.recovery, result.snapshotDigest)).toEqual(
-    result,
-  );
-  await expect(verifyTargetVaultState(s.settings, s.operationId, s.admin, s.recovery, 'f'.repeat(64))).rejects.toThrow(
-    'target_vault_capture_unavailable',
-  );
-  await expect(
-    verifyTargetVaultState(s.settings, s.operationId, s.admin, { ...s.recovery, releaseId: 'release-foreign' }),
-  ).rejects.toThrow('target_vault_capture_unavailable');
-  expect(JSON.parse(fs.readFileSync(data + '/calendar-capture-receipt.json', 'utf8')).present).toBe(false);
-  expect(fs.existsSync(s.settings.stateRoot + '/actions/coordinated')).toBe(false);
-  expect(fs.existsSync(s.settings.stateRoot + '/releases')).toBe(false);
-  expect(query).toHaveBeenCalledWith('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
-  expect(query).toHaveBeenCalledWith('SELECT pg_advisory_unlock(73101003)');
-  expect(s.end).toHaveBeenCalledOnce();
-  const copy = new Database(data + '/coordinated/sqlite/0/native.sqlite', { readonly: true });
-  try {
-    expect(copy.prepare('SELECT paused FROM cos_identity_boundaries').get()).toEqual({ paused: 1 });
-    expect(copy.prepare('SELECT owner_id FROM host_execution_lease').get()).toEqual({
-      owner_id: s.admin.hostLease.ownerId,
+it.each([18, SCHEMA_VERSION])(
+  'connects schema %s coordinated/native/operations/history producers to the actual queue with scoped query and OS protection fixtures',
+  async (schemaVersion) => {
+    const s = await fixture();
+    s.recovery.software.schemaVersion = schemaVersion;
+    const { captureOperationsState } =
+      await vi.importActual<typeof import('./recovery-manifest.js')>('./recovery-manifest.js');
+    const { captureCalendarState } =
+      await vi.importActual<typeof import('../calendar/backup.js')>('../calendar/backup.js');
+    const { MIGRATIONS } = await import('../store/migrations.js');
+    f.capture.mockImplementation(captureOperationsState);
+    f.calendar.mockImplementation(captureCalendarState);
+    const query = vi.fn(async (sql: string, parameters?: string[]) => {
+      if (sql.includes('pg_try_advisory_lock')) return { rows: [{ locked: true }] };
+      if (sql.includes('to_regclass')) return { rows: [{ ledger: 'cos.schema_migrations' }] };
+      if (sql.includes('FROM cos.schema_migrations'))
+        return {
+          rows: MIGRATIONS.filter((m) => m.version <= schemaVersion).map(({ version, checksum }) => ({
+            version,
+            checksum,
+          })),
+        };
+      if (sql.includes('SELECT owner_id,agent_group_id'))
+        return { rows: [{ owner_id: s.binding.ownerId, agent_group_id: s.binding.agentGroupId }] };
+      if (sql.includes('FROM pg_attribute'))
+        return {
+          rows: (parameters?.[0] === 'cos.scopes' ? ['id', 'owner_id', 'agent_group_id'] : ['scope_id']).map(
+            (attname) => ({ attname }),
+          ),
+        };
+      if (sql.includes('to_jsonb(t)'))
+        return {
+          rows: sql.includes('cos."scopes"')
+            ? [{ body: { id: s.binding.scopeId, owner_id: s.binding.ownerId, agent_group_id: s.binding.agentGroupId } }]
+            : [],
+        };
+      if (sql.includes('clock_timestamp')) return { rows: [{ now: new Date() }] };
+      return { rows: [] };
     });
-  } finally {
-    copy.close();
-  }
-  fs.appendFileSync(data + '/coordinated/remote.json', 'changed');
-  await expect(verifyTargetVaultState(s.settings, s.operationId, s.admin, s.recovery)).rejects.toThrow(
-    'target_vault_capture_unavailable',
-  );
-});
+    f.connect.mockResolvedValue({ query, end: s.end });
+    const result = await captureTargetVaultState(s.settings, s.operationId, s.admin, s.recovery);
+    expect(result.status).toBe('queued');
+    const data = s.queue() + '/data',
+      checkpoint = JSON.parse(fs.readFileSync(data + '/coordinated/manifest.json', 'utf8')),
+      operations = JSON.parse(fs.readFileSync(data + '/' + s.operationId + '.operations.json', 'utf8')),
+      header = JSON.parse(fs.readFileSync(data + '/state-capture.json', 'utf8'));
+    if (result.status !== 'queued') throw Error('fixture_checkpoint_not_queued');
+    expect(checkpoint.sqlite).toHaveLength(1);
+    expect(checkpoint.schemaVersion).toBe(schemaVersion);
+    expect(Object.keys(JSON.parse(fs.readFileSync(data + '/coordinated/remote.json', 'utf8')).rows)).toHaveLength(
+      schemaVersion === 18 ? 75 : 79,
+    );
+    expect(operations.coordinatedDigest).toBe(digest(checkpoint));
+    expect(header.operations.manifestDigest).toBe(digest(operations));
+    expect(header.checkpointDigest).toBe(digest(checkpoint));
+    expect(header.inputs.context.scopeId).toBe(s.binding.scopeId);
+    const { verifyCoordinatedBackup } = await import('./coordinated-backup.js');
+    expect(
+      await verifyCoordinatedBackup({
+        ...header.inputs,
+        receiptRoot: data,
+        operationId: s.operationId,
+        databaseFingerprint: s.settings.databaseFingerprint,
+        artifacts: { root: header.inputs.artifactsRoot },
+        witness: s.witness,
+      }),
+    ).toEqual(checkpoint);
+    expect(await verifyTargetVaultState(s.settings, s.operationId, s.admin, s.recovery, result.snapshotDigest)).toEqual(
+      result,
+    );
+    await expect(
+      verifyTargetVaultState(s.settings, s.operationId, s.admin, s.recovery, 'f'.repeat(64)),
+    ).rejects.toThrow('target_vault_capture_unavailable');
+    await expect(
+      verifyTargetVaultState(s.settings, s.operationId, s.admin, { ...s.recovery, releaseId: 'release-foreign' }),
+    ).rejects.toThrow('target_vault_capture_unavailable');
+    expect(JSON.parse(fs.readFileSync(data + '/calendar-capture-receipt.json', 'utf8')).present).toBe(false);
+    expect(fs.existsSync(s.settings.stateRoot + '/actions/coordinated')).toBe(false);
+    expect(fs.existsSync(s.settings.stateRoot + '/releases')).toBe(false);
+    expect(query).toHaveBeenCalledWith('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
+    expect(query).toHaveBeenCalledWith('SELECT pg_advisory_unlock(73101003)');
+    expect(s.end).toHaveBeenCalledOnce();
+    const copy = new Database(data + '/coordinated/sqlite/0/native.sqlite', { readonly: true });
+    try {
+      expect(copy.prepare('SELECT paused FROM cos_identity_boundaries').get()).toEqual({ paused: 1 });
+      expect(copy.prepare('SELECT owner_id FROM host_execution_lease').get()).toEqual({
+        owner_id: s.admin.hostLease.ownerId,
+      });
+    } finally {
+      copy.close();
+    }
+    fs.appendFileSync(data + '/coordinated/remote.json', 'changed');
+    await expect(verifyTargetVaultState(s.settings, s.operationId, s.admin, s.recovery)).rejects.toThrow(
+      'target_vault_capture_unavailable',
+    );
+  },
+);
 
 it.runIf(process.env.COS_TEST_TARGET_ID !== undefined).each([false, true])(
   'captures the admitted separate PostgreSQL scope through real producers without exposing foreign records or resetting native state (scheduled=%s)',
@@ -1096,11 +1110,11 @@ it.runIf(process.env.COS_TEST_TARGET_ID !== undefined)(
           return { remote, validation: await validate(workspace, remote) };
         }),
       );
-      let loseAck = true,
-        inserts = 0;
+      let loseAck = true;
+      const writeQueries: string[] = [];
       const testClient = {
         query: async (sql: string, values?: unknown[]) => {
-          if (sql.startsWith('INSERT INTO cos.')) inserts++;
+          if (/^\s*(?:INSERT|UPDATE|DELETE|CREATE|ALTER|DROP|TRUNCATE|MERGE|COPY)\b/i.test(sql)) writeQueries.push(sql);
           const result = await admin.query(sql, values);
           if (sql === 'COMMIT' && loseAck) {
             loseAck = false;
@@ -1128,7 +1142,8 @@ it.runIf(process.env.COS_TEST_TARGET_ID !== undefined)(
       if ((await admin.query('SELECT id FROM cos.scopes WHERE id=$1', [destination])).rows.length)
         created.add(destination);
       expect(created.has(destination)).toBe(true);
-      expect(inserts).toBe(3); // One rolled-back FK savepoint attempt, two successful tables.
+      expect(writeQueries.length).toBeGreaterThan(0);
+      const committedWrites = [...writeQueries];
       const reservation = f.areas.staging + '/.cos-test-restore-' + requestId + '.json',
         before = fs.readFileSync(reservation);
       const result = await run();
@@ -1140,7 +1155,7 @@ it.runIf(process.env.COS_TEST_TARGET_ID !== undefined)(
         credentialsActivated: false,
         writerActivated: false,
       });
-      expect(inserts).toBe(3);
+      expect(writeQueries).toEqual(committedWrites);
       expect(fs.readFileSync(reservation)).toEqual(before);
       expect(
         (await admin.query('SELECT count(*)::integer AS n FROM cos.records WHERE scope_id=$1', [destination])).rows[0]

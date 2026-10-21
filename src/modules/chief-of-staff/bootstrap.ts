@@ -14,7 +14,7 @@ import { validateMattermostSessionForExecution } from '../../channels/mattermost
 import { createMattermostFacts } from './bridge/mattermost-facts.js';
 import { guardConversationAccess } from './bridge/conversation-access.js';
 import type { CosBinding } from '../../cos-boundary.js';
-import { connectCosHostStore } from './host-store.js';
+import { connectCosHostStore, connectCosMailMaintenanceStore } from './host-store.js';
 import { CosService } from './service.js';
 import { createCoordinatorLauncher } from './bridge/coordinator-launcher.js';
 import { RestrictedExecutionProbe } from './bridge/native-execution.js';
@@ -24,6 +24,8 @@ import { createActionAuthorityResolver, createMissionAuthorityResolver } from '.
 import { createTeamAuthorityResolver } from './missions/team-authority.js';
 import { MissionHost } from './missions/host.js';
 import { createMissionExecution } from './missions/execution.js';
+import { createMailAuthorities } from './mail/authority.js';
+import { MailMaintenance, mailMaintenanceContexts } from './mail/maintenance.js';
 import { cosMissionIdentities, hasCosMissionBoundary } from '../../cos-mission-boundary.js';
 
 /** Narrow host-service profile: never load migration or test credentials into this module. */
@@ -32,6 +34,7 @@ export function startCosHostModule(assertHostAuthority: () => void): { service: 
     'COS_ENABLED',
     'COS_KNOWLEDGE_ENABLED',
     'COS_CALENDAR_ENABLED',
+    'COS_MAIL_ENABLED',
     'COS_ACTIONS_ENABLED',
     'COS_KNOWLEDGE_RETENTION_DAYS',
     'COS_TARGET_STATE_DIR',
@@ -116,6 +119,7 @@ export function startCosHostModule(assertHostAuthority: () => void): { service: 
   }
   const admitted = () => {
     try {
+      assertHostAuthority();
       const target = localTarget(targetRoot, process.cwd(), DATA_DIR);
       return admittedGeneration(targetRoot, target.binding) !== null;
       // eslint-disable-next-line no-catch-all/no-catch-all -- Missing/corrupt target maintenance history closes CoS admission without stopping unrelated startup.
@@ -165,6 +169,7 @@ export function startCosHostModule(assertHostAuthority: () => void): { service: 
   const missionAuthority = createMissionAuthorityResolver({ targetRoot, db: getDb(), admitted, assertHostAuthority });
   const actionAuthority = createActionAuthorityResolver({ targetRoot, db: getDb(), admitted, assertHostAuthority });
   const teamAuthority = createTeamAuthorityResolver({ targetRoot, db: getDb(), missionAuthority });
+  const mailAuthority = createMailAuthorities({ db: getDb(), admitted, assertHostAuthority });
   const facts = guardConversationAccess({
     active: activeBinding,
     facts: transportFacts,
@@ -181,6 +186,7 @@ export function startCosHostModule(assertHostAuthority: () => void): { service: 
     db: getDb(),
     enabled: selected.COS_ENABLED === 'true',
     admission: admitted,
+    mailAuthority,
     facts,
     session: getSession,
     destination: getMessagingGroup,
@@ -214,16 +220,36 @@ export function startCosHostModule(assertHostAuthority: () => void): { service: 
         teamAuthority,
         undefined,
         actionAuthority,
+        mailAuthority.poll,
       ),
   });
   // PostgreSQL availability never holds up unrelated channel startup.
+  const maintenance =
+    selected.COS_ENABLED !== 'true' && releaseMode() && targetRoot
+      ? new MailMaintenance({
+          admitted,
+          authority: mailAuthority,
+          contexts: mailMaintenanceContexts(getDb()),
+          connect: () =>
+            connectCosMailMaintenanceStore(
+              selected,
+              { targetRoot, installationRoot: process.cwd(), dataRoot: DATA_DIR },
+              admitted,
+            ),
+        })
+      : undefined;
   void service.tick();
-  const timer = setInterval(() => void service.tick(), 5000);
+  void maintenance?.tick();
+  const timer = setInterval(() => {
+    void service.tick();
+    void maintenance?.tick();
+  }, 5000);
   timer.unref();
   return {
     service,
     async stop() {
       clearInterval(timer);
+      await maintenance?.close();
       await credentials?.coordinator.close();
       await service.stop();
       await launcher.close();

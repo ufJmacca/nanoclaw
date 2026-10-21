@@ -19,12 +19,12 @@ afterEach(() => {
   vi.restoreAllMocks();
   vi.useRealTimers();
 });
-function fixture(slice: 'G02' | 'G03' = 'G02') {
+function fixture(slice: 'G02' | 'G03' | 'G04' = 'G02') {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-upload-job-'));
   fs.chmodSync(base, 0o700);
   cleanup.push(() => fs.rmSync(base, { recursive: true, force: true }));
   const root = base + '/target',
-    manifest = fixtureVaultRelease('G02'),
+    manifest = fixtureVaultRelease(slice),
     requestId = randomUUID();
   manifest.slice = slice;
   const binding = {
@@ -92,6 +92,35 @@ function fixture(slice: 'G02' | 'G03' = 'G02') {
         integrity: 'verified' as const,
       };
     }),
+    journalCredentials: vi.fn(async (_scope: { releaseId: string; generation: number }, assertCurrent: () => void) => {
+      assertCurrent();
+      events.push('journal');
+      return {
+        contract: 'cos-credential-recovery-page/v1' as const,
+        ownerDigest: 'd'.repeat(64),
+        status: 'recorded' as const,
+        recorded: 0,
+        next_after: null,
+        open_checks: 0,
+      };
+    }),
+    captureCredentials: vi.fn(async (_cycleAt: string, assertCurrent: () => void) => {
+      assertCurrent();
+      events.push('complete');
+      return {
+        contract: 'cos-backup-remote-checkpoint/v1' as const,
+        repositoryId: 'c'.repeat(64),
+        ownerDigest: 'd'.repeat(64),
+        kind: 'credentials' as const,
+        operationId: randomUUID(),
+        snapshotId: 'e'.repeat(64),
+        snapshotAt: new Date().toISOString(),
+        archiveBytes: 16384,
+        archiveSha256: 'f'.repeat(64),
+        reconciled: false,
+        verifiedAt: new Date().toISOString(),
+      };
+    }),
   };
   const add = (
     kind: BackupKind,
@@ -105,6 +134,151 @@ function fixture(slice: 'G02' | 'G03' = 'G02') {
   const invoke = (mode?: 'deliver' | 'maintain') => uploadBackupJob({ root, binding, requestId, effects, mode });
   return { root, binding, manifest, queues, effects, events, native, requestId, add, invoke };
 }
+it('G04 drains existing work, journals a bounded page, delivers newly queued changes, then verifies a complete capture', async () => {
+  const f = fixture('G04'),
+    first = f.add('credentials');
+  let next!: string;
+  f.effects.journalCredentials.mockImplementation(async (_scope, guard) => {
+    guard();
+    f.events.push('journal');
+    next = f.add('credentials');
+    return {
+      contract: 'cos-credential-recovery-page/v1',
+      ownerDigest: 'd'.repeat(64),
+      status: 'recorded',
+      recorded: 1,
+      next_after: null,
+      open_checks: 0,
+    };
+  });
+  const before = f.native.prepare('SELECT * FROM state').get();
+  const result = await f.invoke();
+  expect(f.events).toEqual(['mount', 'credentials:' + first, 'journal', 'credentials:' + next, 'complete']);
+  expect(result).toMatchObject({
+    contract: 'cos-backup-upload-job/v2',
+    status: 'backup_uploaded',
+    uploaded: 3,
+    credentialJournal: { status: 'recorded', recorded: 1 },
+    completeCredentials: { status: 'verified', lastSnapshotAt: expect.any(String) },
+  });
+  expect(f.effects.maintain).toHaveBeenCalledOnce();
+  expect(f.native.prepare('SELECT * FROM state').get()).toEqual(before);
+  expect(f.native.prepare('SELECT body FROM messages').get()).toEqual({ body: 'ordinary-message' });
+});
+it('G04 creates a current complete capture even when both legacy queues are empty', async () => {
+  const f = fixture('G04');
+  expect(await f.invoke()).toMatchObject({
+    status: 'backup_uploaded',
+    uploaded: 1,
+    completeCredentials: { status: 'verified' },
+  });
+  expect(f.events).toEqual(['mount', 'journal', 'complete']);
+});
+it('G04 queues local journal work during a NAS outage while preserving the last verified complete capture age', async () => {
+  const f = fixture('G04');
+  await f.invoke();
+  const previous = readPrivate<Record<string, unknown>>(f.root + '/backup-upload-status.json');
+  f.effects.mount.mockRejectedValue(Error('PRIVATE_NAS_OUTAGE'));
+  f.effects.journalCredentials.mockImplementation(async (_scope, guard) => {
+    guard();
+    f.events.push('journal');
+    f.add('credentials');
+    return {
+      contract: 'cos-credential-recovery-page/v1',
+      ownerDigest: 'd'.repeat(64),
+      status: 'recorded',
+      recorded: 1,
+      next_after: null,
+      open_checks: 0,
+    };
+  });
+  const result = await f.invoke();
+  expect(result).toMatchObject({
+    status: 'backup_upload_failed',
+    credentialJournal: { status: 'recorded', recorded: 1 },
+    credentials: { pending: 1 },
+    completeCredentials: {
+      status: 'not_attempted',
+      lastSnapshotAt: (previous.completeCredentials as Record<string, unknown>).lastSnapshotAt,
+    },
+  });
+  expect(f.effects.captureCredentials).toHaveBeenCalledOnce();
+});
+it('G04 drains pending uploads before a full local journal can deny new page work', async () => {
+  const f = fixture('G04'),
+    first = f.add('credentials');
+  f.effects.journalCredentials.mockImplementation(async () => {
+    f.events.push('journal');
+    throw Error('PRIVATE_QUEUE_FULL');
+  });
+  expect(await f.invoke()).toMatchObject({
+    status: 'backup_uploaded_journal_held',
+    uploaded: 2,
+    credentialJournal: { status: 'failed', recorded: null },
+    completeCredentials: { status: 'verified' },
+  });
+  expect(f.events).toEqual(['mount', 'credentials:' + first, 'journal', 'complete']);
+});
+it('G04 does not prune after complete-capture failure and retains prior success times', async () => {
+  const f = fixture('G04');
+  await f.invoke();
+  f.effects.captureCredentials.mockRejectedValue(Error('PRIVATE_PRODUCER_CHANGED'));
+  f.effects.maintain.mockClear();
+  expect(await f.invoke()).toMatchObject({
+    status: 'backup_upload_failed',
+    completeCredentials: { status: 'failed', lastSnapshotAt: expect.any(String) },
+  });
+  expect(f.effects.maintain).not.toHaveBeenCalled();
+});
+it('G04 maintain-only mode never collects a page or creates another capture', async () => {
+  const f = fixture('G04');
+  expect(await f.invoke('maintain')).toMatchObject({ status: 'backup_maintenance_verified' });
+  expect(f.effects.journalCredentials).not.toHaveBeenCalled();
+  expect(f.effects.captureCredentials).not.toHaveBeenCalled();
+});
+it('G04 requires installed page and capture ports instead of silently behaving like G03', async () => {
+  const f = fixture('G04');
+  Object.assign(f.effects, { captureCredentials: undefined });
+  await expect(f.invoke()).rejects.toThrow('backup_upload_job_unavailable');
+  expect(f.effects.mount).not.toHaveBeenCalled();
+});
+it('G04 rejects malformed completion evidence and closes an escaped job guard after return', async () => {
+  const f = fixture('G04');
+  let escaped!: () => void;
+  f.effects.captureCredentials.mockImplementation(async (_cycleAt, guard) => {
+    escaped = guard;
+    return {
+      contract: 'cos-backup-remote-checkpoint/v1',
+      repositoryId: 'c'.repeat(64),
+      ownerDigest: 'd'.repeat(64),
+      kind: 'credentials',
+      operationId: randomUUID(),
+      snapshotId: 'e'.repeat(64),
+      snapshotAt: 'invalid',
+      archiveBytes: 16384,
+      archiveSha256: 'f'.repeat(64),
+      reconciled: false,
+      verifiedAt: new Date().toISOString(),
+    };
+  });
+  expect(await f.invoke()).toMatchObject({
+    status: 'backup_upload_failed',
+    completeCredentials: { status: 'failed', lastSnapshotAt: null },
+  });
+  expect(f.effects.maintain).not.toHaveBeenCalled();
+  expect(() => escaped()).toThrow('backup_upload_job_unavailable');
+});
+it('G04 preserves a later owner pause, consumed attempts and the shared main context during capture', async () => {
+  const f = fixture('G04'),
+    capture = f.effects.captureCredentials.getMockImplementation()!;
+  f.effects.captureCredentials.mockImplementation(async (...args) => {
+    f.native.prepare('UPDATE state SET paused=1,used=4').run();
+    return capture(...args);
+  });
+  expect(await f.invoke()).toMatchObject({ status: 'backup_uploaded', completeCredentials: { status: 'verified' } });
+  expect(f.native.prepare('SELECT * FROM state').get()).toEqual({ paused: 1, context: 'main-context', used: 4 });
+  expect(f.native.prepare('SELECT body FROM messages').get()).toEqual({ body: 'ordinary-message' });
+});
 it.each(['G02', 'G03'] as const)(
   '%s performs daily integrity and retention after delivery, retaining the verified time across idle runs',
   async (slice) => {

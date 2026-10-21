@@ -7,6 +7,8 @@ import { withDeploymentLock } from '../ops/deployment-lock.js';
 
 const markerName = '.cos-calendar-fences';
 const marker = 'cos-calendar-access-fences/v1\n';
+/** Shared marker data for trusted descriptor-based initialization. */
+export const accessFenceRootMarker = () => ({ name: markerName, contents: marker });
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 type Denial = {
   version: 1;

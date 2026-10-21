@@ -1,13 +1,60 @@
-import { expect, it } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { afterEach, expect, it, vi } from 'vitest';
 import { macReleaseCommand, releaseCheckImageIds } from './mac-release-cli.js';
-import { BACKUP_RELEASE_CHECKS } from './release-manifest.js';
+import { BACKUP_RELEASE_CHECKS, MAIL_RELEASE_CHECKS } from './release-manifest.js';
+import { fixtureRelease } from '../../../contracts/chief-of-staff/release-fixture.js';
+import { writeAtomic } from './target-state.js';
+import { readStageTimings } from './stage-timing.js';
+
+const roots: string[] = [];
+afterEach(() => {
+  vi.restoreAllMocks();
+  for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
+});
+
+it('measures a completed bundle from its validated manifest without requiring the old checkout or a new build', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-complete-bundle-timing-'));
+  roots.push(root);
+  vi.spyOn(process, 'cwd').mockReturnValue(root);
+  const manifest = { ...fixtureRelease(), releaseId: 'release-aaaaaaaaaaaa-20261020070000' };
+  const directory = path.join(root, '.cos-plan-state/releases', manifest.releaseId);
+  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  writeAtomic(directory, 'release.json', manifest);
+  const span = await macReleaseCommand([
+    'timing',
+    manifest.releaseId,
+    'start',
+    'transfer_images',
+    'images.tar.gz-transfer.log',
+  ]);
+  expect(span).toEqual(expect.any(String));
+  await macReleaseCommand(['timing', manifest.releaseId, 'end', span!, '37']);
+  expect(readStageTimings(directory)).toMatchObject({
+    identity: {
+      releaseId: manifest.releaseId,
+      sourceCommit: manifest.source.commit,
+      sourceTree: manifest.source.tree,
+      buildInputDigest: manifest.buildInputDigest,
+    },
+    spans: [{ exitCode: 37 }],
+  });
+  expect(fs.existsSync(path.join(directory, 'plan.json'))).toBe(false);
+  expect(JSON.parse(fs.readFileSync(path.join(directory, 'release.json'), 'utf8'))).toEqual(manifest);
+  writeAtomic(directory, 'release.json', { ...manifest, checks: {} });
+  await expect(
+    macReleaseCommand(['timing', manifest.releaseId, 'start', 'transfer_images', 'images.tar.gz-transfer.log']),
+  ).rejects.toThrow('release_not_transferable');
+  expect(readStageTimings(directory)!.spans).toHaveLength(1);
+});
 
 const images = [
   { role: 'host' as const, id: 'sha256:' + 'a'.repeat(64) },
   { role: 'agent' as const, id: 'sha256:' + 'b'.repeat(64) },
   { role: 'agent' as const, id: 'sha256:' + 'c'.repeat(64) },
 ];
-it('admits G02 and G03 candidate syntax while refusing historical and future release creation', async () => {
+it('admits G02 through G04 candidate syntax while refusing historical and unimplemented future release creation', async () => {
   const args = (slice: string) => [
     'init',
     'release-' + '1'.repeat(12) + '-20261011000000',
@@ -17,24 +64,29 @@ it('admits G02 and G03 candidate syntax while refusing historical and future rel
   ];
   await expect(macReleaseCommand(args('G02'))).rejects.toThrow('invalid_candidate_source');
   await expect(macReleaseCommand(args('G03'))).rejects.toThrow('invalid_candidate_source');
-  for (const slice of ['S10', 'G04', 'G07'])
+  await expect(macReleaseCommand(args('G04'))).rejects.toThrow('invalid_candidate_source');
+  for (const slice of ['S10', 'G05', 'G06', 'G07'])
     await expect(macReleaseCommand(args(slice))).rejects.toThrow('current_release_slice_required');
 });
-it.each([...BACKUP_RELEASE_CHECKS, 'vault_helper', 'vault_kernel', 'vault_wire', 'vault_units'])(
-  'binds %s only to the registered immutable host, refusing partial image sets',
-  (name) => {
-    expect(releaseCheckImageIds(images, name)).toEqual([images[0].id]);
-    expect(() => releaseCheckImageIds([], name)).toThrow('image_identity_required');
-    expect(() => releaseCheckImageIds(images.slice(0, 1), name)).toThrow('image_identity_required');
-    expect(() =>
-      releaseCheckImageIds(
-        images.map((image) => ({ ...image, role: 'agent' as const })),
-        name,
-      ),
-    ).toThrow('image_identity_required');
-  },
-);
-it.each(['protected_state', 'host_image', 'agent_image', 'image_isolation'])(
+it.each([
+  ...BACKUP_RELEASE_CHECKS,
+  ...MAIL_RELEASE_CHECKS.filter((name) => name !== 'mail_evidence'),
+  'vault_helper',
+  'vault_kernel',
+  'vault_wire',
+  'vault_units',
+])('binds %s only to the registered immutable host, refusing partial image sets', (name) => {
+  expect(releaseCheckImageIds(images, name)).toEqual([images[0].id]);
+  expect(() => releaseCheckImageIds([], name)).toThrow('image_identity_required');
+  expect(() => releaseCheckImageIds(images.slice(0, 1), name)).toThrow('image_identity_required');
+  expect(() =>
+    releaseCheckImageIds(
+      images.map((image) => ({ ...image, role: 'agent' as const })),
+      name,
+    ),
+  ).toThrow('image_identity_required');
+});
+it.each(['protected_state', 'mail_evidence', 'host_image', 'agent_image', 'image_isolation'])(
   'binds the %s gate to the complete immutable host and worker set',
   (name) => {
     expect(releaseCheckImageIds(images, name)).toEqual(images.map((image) => image.id));

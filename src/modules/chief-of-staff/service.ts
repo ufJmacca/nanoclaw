@@ -39,6 +39,8 @@ const fixedFailureReasons = new Set([
   'unsafe_role',
   'runtime_can_migrate',
   'authentication_denied',
+  'mail_host_retirement_unavailable',
+  'mail_refresh_retirement_unavailable',
   'unreachable',
   'tls_required',
   'tls_rejected',
@@ -138,6 +140,7 @@ export class CosService {
     if (!old) return;
     // Retain uncertainty until the old connections actually close. Never connect a replacement over it.
     this.retiringStore = old;
+    await old.mail?.close();
     await old.database.pool.end();
     if (this.store === old) this.store = undefined;
     if (this.retiringStore === old) this.retiringStore = undefined;

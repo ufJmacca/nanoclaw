@@ -9,6 +9,7 @@ export async function briefRefreshCoverage(
   context: KnowledgeContext,
   timeZone: string,
   publication = false,
+  preparedArtifactId?: string,
 ): Promise<{ refresh: BriefCoverage['refresh']; truncated: boolean } | null> {
   if (!context.origin) return { refresh: 'not_requested', truncated: false };
   const run = (
@@ -16,7 +17,8 @@ export async function briefRefreshCoverage(
       `SELECT r.limits,r.provenance FROM cos.brief_runs r
       JOIN cos.brief_schedules s ON s.scope_id=r.scope_id AND s.id=r.schedule_id AND s.version=r.schedule_version
       WHERE r.scope_id=$1 AND r.id=$2 AND r.generation=$3 AND r.owner_id=$4 AND r.session_id=$5 AND r.agent_group_id=$6
-      AND (r.state='dispatched' OR ($8::boolean AND r.state='prepared'))
+      AND (r.state='dispatched' OR (r.state='prepared' AND
+        ($8::boolean OR ($9::text IS NOT NULL AND r.snapshot->>'artifact_id'=$9))))
       AND r.deadline_at>clock_timestamp() AND r.lease_until>clock_timestamp()
       AND s.policy->>'state'='active' AND s.policy->>'time_zone'=$7`,
       [
@@ -28,6 +30,7 @@ export async function briefRefreshCoverage(
         context.agentGroupId,
         timeZone,
         publication,
+        preparedArtifactId ?? null,
       ],
     )
   ).rows[0];

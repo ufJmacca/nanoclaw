@@ -166,10 +166,12 @@ export async function withVaultDirectory<T>(
     if (!VAULT_DIRECTORIES.includes(area)) throw new Error('unknown_vault_area');
     roots = Object.freeze({ ...roots });
     memory();
-    const assertKernel = pinKernelMountTable();
+    const recordedPolicy = existingPolicy(roots);
+    const assertKernel = pinKernelMountTable([...Object.values(roots), recordedPolicy.vaultRoot]);
     const policy = verifyVaultStorage(roots, inspect),
       directory = path.join(policy.vaultRoot, area),
       before = privateRoot(directory);
+    if (digest(policy) !== digest(recordedPolicy)) throw Error('vault_policy_changed');
     fd = fs.openSync(directory, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
     const pinned = fs.fstatSync(fd);
     if (pinned.dev !== before.dev || pinned.ino !== before.ino) throw new Error('vault_changed');

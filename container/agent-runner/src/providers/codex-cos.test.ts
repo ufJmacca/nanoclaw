@@ -168,6 +168,8 @@ test('CoS keeps one native thread across queued replies and a new provider query
     'cos_answer_prepare',
     'cos_answer_get',
     'cos_calendar_read',
+    'cos_mail_search',
+    'cos_mail_thread_get',
     'cos_work_change_propose',
     'cos_brief_schedule_propose',
     'cos_work_read',

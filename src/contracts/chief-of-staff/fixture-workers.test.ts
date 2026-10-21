@@ -10,6 +10,37 @@ const row = (Id = id, Source = root + '/.cos-plan-state/fixtures/flow-s05-one/se
   State: 'running',
   Mounts: [{ Type: 'bind', Source, Destination: '/workspace' }],
 });
+it('can stop an explicitly selected ordinary MCP fixture protocol without widening its image or workspace', async () => {
+  let stopped = false;
+  await stopFixtureWorkers(
+    root,
+    image,
+    (args) => {
+      if (args[0] === 'ps') {
+        expect(args).toContain('label=nanoclaw.cos-protocol=cos-rpc/v1');
+        return stopped ? '' : id;
+      }
+      if (args[0] === 'inspect') return JSON.stringify(row());
+      expect(args).toEqual(['stop', '-t', '1', id]);
+      stopped = true;
+      return id;
+    },
+    'cos-rpc/v1',
+  );
+  expect(stopped).toBe(true);
+});
+it('rejects unknown protocol selectors before inspecting or stopping any fixture', async () => {
+  await expect(
+    stopFixtureWorkers(
+      root,
+      image,
+      () => {
+        throw Error('must_not_inspect');
+      },
+      'arbitrary' as never,
+    ),
+  ).rejects.toThrow('invalid_fixture_worker_root');
+});
 it('stops only the exact selected image and fixture workspace, then verifies absence', async () => {
   let stopped = false;
   const stops: string[][] = [];

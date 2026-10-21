@@ -15,6 +15,8 @@ import { readBackupNativeIdentity } from './target-backup-native.js';
 import { createBackupUploadJobEffects } from './backup-upload-job-effects.js';
 import { withSeparateBackupTestDatabase } from './backup-test-database.js';
 import { restoreTargetVaultBackupTestScope } from './backup-target-restore.js';
+import { restoreVaultCredentialCapture } from './backup-upload.js';
+import { routedCredentialRecoveryFiles } from './credential-recovery-routing.js';
 import {
   parseBackupOwnerRestoreArguments,
   type BackupOwnerRestoreArguments,
@@ -27,7 +29,7 @@ export type { BackupOwnerRestoreArguments } from './backup-owner-restore-argumen
  * credentials remain recovered evidence, with no native stop/start or writes. */
 export async function restoreOwnerVaultBackup(input: {
   settingsFile: string;
-  testEnvironmentFile: string;
+  testEnvironmentFile?: string;
   invokedHelper: string;
   args: BackupOwnerRestoreArguments;
 }): Promise<Record<string, unknown>> {
@@ -35,10 +37,15 @@ export async function restoreOwnerVaultBackup(input: {
     const { settingsFile, testEnvironmentFile, invokedHelper, args } = input,
       settings = deploymentSettings(readPrivate(settingsFile)),
       settingsDigest = digest(settings),
-      argsDigest = digest(args);
+      argsDigest = digest(args),
+      stateArgs = args.command === 'backup-restore-check' ? args : null;
     if (
       Object.keys(args).sort().join(',') !==
-        'backupReleaseId,command,queueOperationId,requestId,scopeId,snapshotDigest' ||
+        (stateArgs
+          ? 'backupReleaseId,command,queueOperationId,requestId,scopeId,snapshotDigest'
+          : 'captureOperationId,command,requestId,scopeId') ||
+      (!stateArgs && testEnvironmentFile !== undefined) ||
+      (stateArgs && typeof testEnvironmentFile !== 'string') ||
       digest(
         parseBackupOwnerRestoreArguments([
           args.command,
@@ -46,12 +53,19 @@ export async function restoreOwnerVaultBackup(input: {
           args.scopeId,
           '--request-id',
           args.requestId,
-          '--backup-operation-id',
-          args.queueOperationId,
-          '--backup-release',
-          args.backupReleaseId,
-          '--snapshot-digest',
-          args.snapshotDigest,
+          ...(stateArgs
+            ? [
+                '--backup-operation-id',
+                stateArgs.queueOperationId,
+                '--backup-release',
+                stateArgs.backupReleaseId,
+                '--snapshot-digest',
+                stateArgs.snapshotDigest,
+              ]
+            : [
+                '--capture-operation-id',
+                args.command === 'backup-credentials-restore-check' ? args.captureOperationId : '',
+              ]),
         ]),
       ) !== argsDigest
     )
@@ -66,18 +80,20 @@ export async function restoreOwnerVaultBackup(input: {
         generation = admittedGeneration(settings.stateRoot, binding),
         targetDigest = digest(binding),
         witness = openTargetActionWitness(settings.stateRoot, targetDigest),
-        recovery = recordedRelease(settings, args.backupReleaseId),
+        recovery = stateArgs ? recordedRelease(settings, stateArgs.backupReleaseId) : null,
         recoveryDigest = digest(recovery),
         deadline = performance.now() + 45 * 60 * 1000;
       if (
-        !['G02', 'G03'].includes(manifest.slice) ||
+        !(stateArgs ? ['G02', 'G03', 'G04'] : ['G04']).includes(manifest.slice) ||
         state.lifecycle !== 'protected' ||
         state.releaseId !== manifest.releaseId ||
         generation === null ||
-        !['G02', 'G03'].includes(
-          validateReleaseManifest(readPrivate(path.join(settings.releaseRoot, args.backupReleaseId, 'release.json')))
-            .slice,
-        )
+        (stateArgs &&
+          !['G02', 'G03', 'G04'].includes(
+            validateReleaseManifest(
+              readPrivate(path.join(settings.releaseRoot, stateArgs.backupReleaseId, 'release.json')),
+            ).slice,
+          ))
       )
         throw Error('restore_owner_required');
       const central = path.join(settings.dataRoot, 'v2.db'),
@@ -113,7 +129,7 @@ export async function restoreOwnerVaultBackup(input: {
             journal.installationDigest !== witness.installationDigest ||
             digest(readBackupNativeIdentity(nativeDb).binding) !== ownerDigest ||
             owner.scopeId !== args.scopeId ||
-            digest(recordedRelease(settings, args.backupReleaseId)) !== recoveryDigest
+            (stateArgs && digest(recordedRelease(settings, stateArgs.backupReleaseId)) !== recoveryDigest)
           )
             throw Error('restore_owner_changed');
         };
@@ -127,6 +143,66 @@ export async function restoreOwnerVaultBackup(input: {
         };
         current();
         await healthy();
+        if (args.command === 'backup-credentials-restore-check') {
+          await effects.mount(current);
+          await healthy();
+          const result = await restoreVaultCredentialCapture(
+            {
+              targetRoot: settings.stateRoot,
+              installationRoot: settings.installationRoot,
+              dataRoot: settings.dataRoot,
+            },
+            args.captureOperationId,
+            args.requestId,
+            current,
+            async (workspace, remote) => {
+              await healthy();
+              workspace.assertPayloadCurrent();
+              const files = routedCredentialRecoveryFiles(remote.capture.set, remote.capture.ownerDigest).filter(
+                (file) => file.name !== 'credential-set.json',
+              );
+              for (const file of files) {
+                current();
+                const actual = workspace.inspectFile(file.name);
+                if (actual.file !== file.name || actual.bytes !== file.bytes || actual.sha256 !== file.sha256)
+                  throw Error('restore_credential_payload_changed');
+              }
+              workspace.assertPayloadCurrent();
+              await healthy();
+              return {
+                setDigest: digest(remote.capture.set),
+                sources: remote.capture.set.contents.sources.length,
+                files: files.length,
+              };
+            },
+          );
+          await healthy();
+          const { remote, validation } = result;
+          if (
+            remote.contract !== 'cos-backup-credential-capture-restore/v1' ||
+            remote.kind !== 'credentials' ||
+            remote.operationId !== args.captureOperationId ||
+            remote.capture.operationId !== args.captureOperationId ||
+            validation.setDigest !== digest(remote.capture.set) ||
+            validation.sources !== remote.capture.set.contents.sources.length ||
+            validation.files !==
+              routedCredentialRecoveryFiles(remote.capture.set, remote.capture.ownerDigest).length - 1
+          )
+            throw Error('restore_credential_proof_invalid');
+          return {
+            status: 'backup_credentials_restore_verified',
+            request_id: args.requestId,
+            capture_operation_id: args.captureOperationId,
+            source_count: validation.sources,
+            file_count: validation.files,
+            credential_set_digest: validation.setDigest,
+            credentials_activated: false,
+            admission_restored: false,
+            event_journal_restored: false,
+            writer_activated: false,
+          };
+        }
+        if (!stateArgs || !recovery || !testEnvironmentFile) throw Error('restore_scope_required');
         return await withSeparateBackupTestDatabase(
           settings,
           testEnvironmentFile,
@@ -145,9 +221,9 @@ export async function restoreOwnerVaultBackup(input: {
                 settings,
                 binding: owner,
                 witness,
-                queueOperationId: args.queueOperationId,
+                queueOperationId: stateArgs.queueOperationId,
                 recovery,
-                expectedSnapshotDigest: args.snapshotDigest,
+                expectedSnapshotDigest: stateArgs.snapshotDigest,
                 current,
               },
               args.requestId,
@@ -159,10 +235,10 @@ export async function restoreOwnerVaultBackup(input: {
             if (
               result.remote.contract !== 'cos-backup-remote-restore/v1' ||
               result.remote.kind !== 'state' ||
-              result.remote.operationId !== args.queueOperationId ||
+              result.remote.operationId !== stateArgs.queueOperationId ||
               proof.format !== 'cos-sandbox-scope-restore/v1' ||
               typeof proof.inserted !== 'boolean' ||
-              proof.snapshotDigest !== args.snapshotDigest ||
+              proof.snapshotDigest !== stateArgs.snapshotDigest ||
               !/^[a-f0-9]{64}$/.test(proof.checkpointDigest) ||
               !/^[a-f0-9]{64}$/.test(proof.sandboxDatabaseFingerprint) ||
               proof.admissionRestored !== false ||
@@ -174,7 +250,7 @@ export async function restoreOwnerVaultBackup(input: {
             return {
               status: 'backup_test_restore_verified',
               request_id: args.requestId,
-              queue_operation_id: args.queueOperationId,
+              queue_operation_id: stateArgs.queueOperationId,
               snapshot_digest: proof.snapshotDigest,
               checkpoint_digest: proof.checkpointDigest,
               inserted: proof.inserted,

@@ -27,7 +27,7 @@ afterEach(() => {
   vi.resetAllMocks();
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
-async function fixture() {
+async function fixture(slice: 'G02' | 'G03' | 'G04' = 'G02') {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-capture-command-'));
   roots.push(home);
   fs.chmodSync(home, 0o700);
@@ -55,7 +55,7 @@ async function fixture() {
       installationRoot: settings.installationRoot,
       dataRoot: settings.dataRoot,
     },
-    manifest = fixtureVaultRelease('G02'),
+    manifest = fixtureVaultRelease(slice),
     id = randomUUID();
   const initial = initializeTarget(settings.stateRoot, binding);
   writeAtomic(settings.stateRoot, 'state.json', { ...initial, releaseId: manifest.releaseId, maintenance: false });
@@ -102,19 +102,22 @@ async function fixture() {
     invoke: () => reconcileTargetBackupCapture(settings, '/fixture/target-helper.js', 'state', id),
   };
 }
-it('the owner command retires a known incomplete copy under current admission and supports stable replay', async () => {
-  const x = await fixture();
-  expect(await x.invoke()).toEqual({
-    status: 'capture_retired',
-    kind: 'state',
-    operationId: x.id,
-    releaseId: x.manifest.releaseId,
-  });
-  expect(fs.existsSync(x.slot)).toBe(false);
-  expect(await x.invoke()).toMatchObject({ status: 'capture_retired' });
-  expect(f.paths).toHaveBeenCalledWith(x.settings, 0);
-  expect(f.healthy).toHaveBeenCalled();
-});
+it.each(['G02', 'G03', 'G04'] as const)(
+  '%s owner command retires a known incomplete copy under current admission and supports stable replay',
+  async (slice) => {
+    const x = await fixture(slice);
+    expect(await x.invoke()).toEqual({
+      status: 'capture_retired',
+      kind: 'state',
+      operationId: x.id,
+      releaseId: x.manifest.releaseId,
+    });
+    expect(fs.existsSync(x.slot)).toBe(false);
+    expect(await x.invoke()).toMatchObject({ status: 'capture_retired' });
+    expect(f.paths).toHaveBeenCalledWith(x.settings, 0);
+    expect(f.healthy).toHaveBeenCalled();
+  },
+);
 it('the owner command does not steal the operation lock', async () => {
   const x = await fixture();
   await withDeploymentLock(x.settings.stateRoot + '.operation.lock', async () => {

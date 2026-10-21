@@ -74,6 +74,8 @@ Acquire an exclusive Mac programme lock and reuse the existing Pi deployment/mai
 
 ## Repeating execution loop
 
+Apply the [iteration procedure](#iteration-procedure) during each correction. It separates debugging from release acceptance; all existing deployment, recovery and review gates still apply.
+
 1. Reconcile the current checkout, published specification, fork, PRs, reviews, merges, original/extension ledgers and actual Pi receipts. Preserve uncommitted work and select the earliest eligible unfinished slice or necessary correction.
 2. Verify the Mac devcontainer and local Docker builder, Linux/ARM64 support, test profile and bound targets. Use host tools for GitHub, Docker, SSH and credentials. Resolve certificates correctly inside containers; never dump or forward the whole `.env`.
 3. Implement on the Mac using red → green → refactor and small commits. Source development, project dependencies, tooling and builds stay in the devcontainer. New helpers, schemas and commands are implementation work, not assumed installed facilities.
@@ -84,6 +86,42 @@ Acquire an exclusive Mac programme lock and reuse the existing Pi deployment/mai
 8. Verify one healthy runtime, correct data roots/schema/images/source and ordinary chat health. Run installed no-send/native isolation checks. Live demonstrations require current account/channel/model authority. Reconcile interrupted operations by stable IDs; uncertain drafts must not be replayed.
 9. Update the private ledger, sanitized receipt and slice PR. Stop dependent work at a legitimate review gate. After an actual reviewed merge, compare source/tree identity, build/test the merged-source release on the Mac, verify/redeploy it as required by the release contract, and advance to the next eligible slice.
 10. After all slices are reviewed and reconciled, run G07's combined operating/recovery checks. Verify current data remains protected and the final release is healthy. Report live capabilities and outstanding prerequisites accurately; only then mark the goal complete.
+
+## Iteration procedure
+
+### Debug before building a release
+
+For each failed attempt, record the failing stage, its actual error, the current installed release and whether recovery is complete. Identify one testable cause and the smallest experiment that distinguishes it from competing explanations. Reconcile uncertain target state before any further target mutation.
+
+Reproduce the failure in the Mac devcontainer with isolated fixtures. Show the regression failing before the fix, then passing with the fix. During editing, run that regression and affected tests; start the full release cycle only after those pass. If a failure cannot be reproduced locally, record the missing target condition and use a bounded, authorised diagnostic to establish it. A diagnostic pass does not erase a failed deployment receipt.
+
+For startup and worker-lifecycle failures, exercise the interacting components together: startup cleanup, health-probe ownership, worker communication and teardown. A probe passing alone does not establish that it survives concurrent startup cleanup. Use deterministic coordination where possible rather than longer sleeps or repeated deployment attempts.
+
+### Validate once per exact candidate
+
+Before a full release, record the regression evidence, affected-test results and any unresolved deployment assumptions. Verify Docker readiness and read-only Mac/Pi capacity early enough to avoid discovering predictable capacity failures after a long build. Preserve the existing staging capacity checks and cleanup authority.
+
+Run every required source and immutable-image gate for the committed candidate. Once a complete bundle passes, continue source verification, staging and deployment with that exact tested bundle. Do not start a fresh release merely because a tool session ended, a local protection lease expired or an external service recovered. Revalidate the existing identities and reconcile the operation through supported paths. Fresh leases never revive expired remote authority.
+
+Reuse evidence only for its recorded source, inputs and image identities. Source or build-input changes require a new candidate and all mandatory acceptance checks. Never copy successful receipts onto another release, relabel images, bypass a gate, or retry a terminal deployment operation. Resume only when the existing helper supports it; otherwise preserve the failure and use the normal new-operation path.
+
+### Measure and simplify orchestration
+
+Record UTC start/end times, elapsed time, outcome and evidence references for focused tests, full source tests, image builds, immutable-image tests, export, transfer, activation, health checks and recovery. Summarise each attempt in one row in the private extension ledger, referencing existing logs instead of duplicating them. Keep source commits, release attempts and live model attempts as separate counts.
+
+After a failed release, report what was learned, which next test will resolve the cause and the measured slowest stage. If the same failure recurs without new evidence, stop deployment retries and improve the reproduction. A focused loop exceeding 15 minutes should trigger a check for setup overhead, an unnecessarily broad test selection or an unbounded operation; this is a diagnostic target, not a timeout that weakens a required check.
+
+Prefer the checked-in release/deployment runners and their stable operation records. Add repeated orchestration to those runners through tested changes rather than creating another copied controller for each attempt. Preserve required atomic checkpoints, original failure records, locks and authority checks. Do not run competing release writers or change an in-flight controller.
+
+### Tooling improvements still require implementation
+
+This procedure does not claim that a deployment rehearsal, automatic per-stage timing or a general resumable runner already exists. Implement these as small tested changes, using the existing slice PR where appropriate:
+
+1. Add the deterministic regression for the current startup-cleanup/health-probe interaction and fix its cause.
+2. Extend the local lifecycle fixture to rehearse startup, cleanup, health failure and rollback with synthetic state. Verify both worker profiles where affected. Actual Pi acceptance remains mandatory.
+3. Add stage timing to the existing runner, then use measurements to select the next optimisation. Consolidate repeated continuation logic only after tests prove identity validation, failure preservation, lease handling and rejection of terminal-operation replay.
+
+Adopt this procedure in the active implementation chat at its next safe checkpoint. Repository edits alone do not establish that an already-running chat has read them. Preserve its in-progress regression and current recovery work; do not interrupt an activation or recovery to change process.
 
 ## Acceptance and blocking conditions
 

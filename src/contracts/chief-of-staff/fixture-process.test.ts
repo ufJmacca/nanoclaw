@@ -1,7 +1,48 @@
 import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import { expect, it, vi } from 'vitest';
 import { startFixtureProcess } from './fixture-process.js';
+it('runs an owned fixture process group in its private installation directory', async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-fixture-cwd-'));
+  const output = new PassThrough();
+  let observed = '';
+  output.on('data', (chunk) => {
+    observed += chunk.toString();
+  });
+  const child = startFixtureProcess(
+    ['-e', 'process.stdout.write(process.cwd());'],
+    { PATH: process.env.PATH },
+    output,
+    { cwd },
+  );
+  try {
+    await child.finished;
+    expect(observed).toBe(cwd);
+  } finally {
+    await child.stop();
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+it('refuses a shared or substituted fixture working directory before spawning', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-fixture-cwd-denied-'));
+  const linked = root + '-link';
+  try {
+    fs.chmodSync(root, 0o755);
+    expect(() => startFixtureProcess(['-e', 'process.exit(0)'], {}, undefined, { cwd: root })).toThrow(
+      /^private_fixture_working_directory_required$/,
+    );
+    fs.chmodSync(root, 0o700);
+    fs.symlinkSync(root, linked);
+    expect(() => startFixtureProcess(['-e', 'process.exit(0)'], {}, undefined, { cwd: linked })).toThrow(
+      /^private_fixture_working_directory_required$/,
+    );
+  } finally {
+    fs.rmSync(linked, { force: true });
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
 it('waits for fixture completion and leaves no live local process group', async () => {
   const output = new PassThrough();
   output.resume();

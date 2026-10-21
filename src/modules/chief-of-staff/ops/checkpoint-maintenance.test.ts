@@ -26,11 +26,11 @@ const binding = {
   installationRoot: '/home/pi/nano',
   dataRoot: '/home/pi/nano/data',
 };
-function fixture() {
+function fixture(slice: 'G02' | 'G03' | 'G04' = 'G02') {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-checkpoint-maintenance-'));
   roots.push(base);
   const root = path.join(base, 'target');
-  const manifest = fixtureVaultRelease('G02'),
+  const manifest = fixtureVaultRelease(slice),
     requestId = randomUUID(),
     events: string[] = [];
   const state = initializeTarget(root, binding);
@@ -91,19 +91,22 @@ function fixture() {
   const invoke = () => checkpointMaintenance({ root, binding, requestId, effects });
   return { root, manifest, requestId, effects, native, readNative, events, snapshot, invoke };
 }
-it('captures under owned maintenance and restarts healthy admission without changing context, pause, counters or messages', async () => {
-  const f = fixture(),
-    before = f.readNative();
-  await expect(f.invoke()).resolves.toMatchObject({
-    status: 'backup_queued',
-    admissionRestored: true,
-    remoteCheckpoint: false,
-  });
-  expect(f.events).toEqual(['stop', 'capture', 'readback', 'start', 'health', 'health']);
-  expect(f.readNative()).toEqual(before);
-  expect(admittedGeneration(f.root, binding)).not.toBeNull();
-  expect(readTarget(f.root, binding).lifecycle).toBe('protected');
-});
+it.each(['G02', 'G03', 'G04'] as const)(
+  '%s captures under owned maintenance and restarts healthy admission without changing context, pause, counters or messages',
+  async (slice) => {
+    const f = fixture(slice),
+      before = f.readNative();
+    await expect(f.invoke()).resolves.toMatchObject({
+      status: 'backup_queued',
+      admissionRestored: true,
+      remoteCheckpoint: false,
+    });
+    expect(f.events).toEqual(['stop', 'capture', 'readback', 'start', 'health', 'health']);
+    expect(f.readNative()).toEqual(before);
+    expect(admittedGeneration(f.root, binding)).not.toBeNull();
+    expect(readTarget(f.root, binding).lifecycle).toBe('protected');
+  },
+);
 it('preserves a later owner pause and never recaptures or reopens work on a completed retry', async () => {
   const f = fixture();
   f.effects.capture.mockImplementationOnce(async () => {

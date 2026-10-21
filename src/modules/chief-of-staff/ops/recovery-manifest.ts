@@ -3,7 +3,7 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import Database from 'better-sqlite3';
 import { digest } from '../domain/contracts.js';
-import { SCHEMA_VERSION } from '../store/migrations.js';
+import { checkpointSchema } from './checkpoint-schema.js';
 import {
   backupCoordinatedState,
   captureCoordinatedState,
@@ -35,12 +35,9 @@ export type RecoveryRelease = { releaseId: string; manifestDigest: string; softw
 /** Project only tested release identity. Neither paths nor arbitrary manifest fields enter portable recovery metadata. */
 export function recoveryReleaseForManifest(value: unknown): RecoveryRelease {
   const manifest = validateReleaseManifest(value);
-  if (
-    manifest.postgres.minimum !== SCHEMA_VERSION ||
-    manifest.postgres.maximum !== SCHEMA_VERSION ||
-    manifest.sqlite.minimum !== manifest.sqlite.maximum
-  )
+  if (manifest.postgres.minimum !== manifest.postgres.maximum || manifest.sqlite.minimum !== manifest.sqlite.maximum)
     throw Error('operations_backup_schema_incompatible');
+  checkpointSchema(manifest.postgres.maximum);
   return {
     releaseId: manifest.releaseId,
     manifestDigest: digest(manifest),
@@ -113,7 +110,7 @@ function portableParameters(options: PortableRecoveryIdentity) {
     !/^[a-f0-9]{40}$/.test(software.sourceCommit) ||
     !/^[a-f0-9]{40}$/.test(software.sourceTree) ||
     !hex.test(software.hostPayloadSha256) ||
-    software.schemaVersion !== SCHEMA_VERSION ||
+    (base.schemaVersion !== undefined && base.schemaVersion !== software.schemaVersion) ||
     !Number.isSafeInteger(software.nativeSchemaVersion) ||
     software.nativeSchemaVersion < 1 ||
     !externalCheckpoint ||
@@ -127,6 +124,7 @@ function portableParameters(options: PortableRecoveryIdentity) {
     !identifier.test(base.context.scopeId)
   )
     throw Error('invalid_operations_backup');
+  checkpointSchema(software.schemaVersion);
 }
 function epoch(value: QuiescentCheckpoint) {
   if (
@@ -412,7 +410,7 @@ export async function backupOperationsState(
           throw Error('operations_backup_changed');
         return prior;
       }
-      const receipt = await backupCoordinatedState(options.base),
+      const receipt = await backupCoordinatedState({ ...options.base, schemaVersion: options.software.schemaVersion }),
         checked = await verifyCoordinatedBackup(options.base);
       if (digest(receipt) !== digest(checked)) throw Error('operations_backup_changed');
       const manifest = await projection(options, receipt, before.generation);
@@ -447,6 +445,7 @@ export async function captureOperationsState(
         receiptRoot: options.base.receiptRoot,
         context: options.base.context,
         databaseFingerprint: options.base.databaseFingerprint,
+        schemaVersion: options.base.schemaVersion,
         nativeDatabases: options.base.nativeDatabases,
         restrictionFiles: options.base.restrictionFiles,
       });
@@ -462,58 +461,61 @@ export async function captureOperationsState(
       if (digest(epoch(await options.base.quiescent())) !== digest(before)) throw Error('operations_capture_changed');
       current();
     };
-    const checkpoint = await captureCoordinatedState(options.base, {
-      write(name, bytes) {
-        current();
-        if (!Buffer.isBuffer(bytes) || bytes.length > 64 * 1024 * 1024) throw Error('operations_capture_bounds');
-        const identity = { bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') };
-        if (name === 'coordinated/remote.json') {
-          if (captured.remote) throw Error('operations_capture_duplicate');
-          const value = JSON.parse(bytes.toString('utf8')) as ScopeCheckpoint;
-          if (
-            !value ||
-            !Array.isArray(value.rows?.revocation_tombstones) ||
-            value.rows.revocation_tombstones.length > 10000
-          )
-            throw Error('operations_capture_bounds');
-          // Preserve only the bounded recovery projection; private row bodies are not retained.
-          captured.remote = {
-            ...identity,
-            checkpoint: {
-              format: value.format,
-              scopeId: value.scopeId,
-              schemaVersion: value.schemaVersion,
-              schemaDigest: value.schemaDigest,
-              databaseFingerprint: value.databaseFingerprint,
-              at: value.at,
-              columns: {},
-              rows: {
-                revocation_tombstones: value.rows.revocation_tombstones.map((row) => ({
-                  scope_id: row.scope_id,
-                  source_id: row.source_id,
-                  kind: row.kind,
-                  version: row.version,
-                })),
+    const checkpoint = await captureCoordinatedState(
+      { ...options.base, schemaVersion: options.software.schemaVersion },
+      {
+        write(name, bytes) {
+          current();
+          if (!Buffer.isBuffer(bytes) || bytes.length > 64 * 1024 * 1024) throw Error('operations_capture_bounds');
+          const identity = { bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') };
+          if (name === 'coordinated/remote.json') {
+            if (captured.remote) throw Error('operations_capture_duplicate');
+            const value = JSON.parse(bytes.toString('utf8')) as ScopeCheckpoint;
+            if (
+              !value ||
+              !Array.isArray(value.rows?.revocation_tombstones) ||
+              value.rows.revocation_tombstones.length > 10000
+            )
+              throw Error('operations_capture_bounds');
+            // Preserve only the bounded recovery projection; private row bodies are not retained.
+            captured.remote = {
+              ...identity,
+              checkpoint: {
+                format: value.format,
+                scopeId: value.scopeId,
+                schemaVersion: value.schemaVersion,
+                schemaDigest: value.schemaDigest,
+                databaseFingerprint: value.databaseFingerprint,
+                at: value.at,
+                columns: {},
+                rows: {
+                  revocation_tombstones: value.rows.revocation_tombstones.map((row) => ({
+                    scope_id: row.scope_id,
+                    source_id: row.source_id,
+                    kind: row.kind,
+                    version: row.version,
+                  })),
+                },
               },
-            },
-          };
-        } else if (/^coordinated\/sqlite\/(?:0|[1-9][0-9]*)\/native\.sqlite$/.test(name)) {
-          const file = name.slice('coordinated/'.length);
-          if (captured.sqlite.has(file) || captured.sqlite.size >= 4096 || bytes.length < 512)
-            throw Error('operations_capture_bounds');
-          const db = new Database(bytes, { readonly: true });
-          try {
-            if (db.pragma('quick_check', { simple: true }) !== 'ok') throw Error('operations_capture_invalid');
-            const rows = denialRows(db, options.base.context.scopeId);
-            mergeNativeDenials(canonicalDenials, rows);
-            captured.sqlite.set(file, { ...identity, rows: rows.map((row) => canonicalDenials.get(row.ingressId)!) });
-          } finally {
-            db.close();
+            };
+          } else if (/^coordinated\/sqlite\/(?:0|[1-9][0-9]*)\/native\.sqlite$/.test(name)) {
+            const file = name.slice('coordinated/'.length);
+            if (captured.sqlite.has(file) || captured.sqlite.size >= 4096 || bytes.length < 512)
+              throw Error('operations_capture_bounds');
+            const db = new Database(bytes, { readonly: true });
+            try {
+              if (db.pragma('quick_check', { simple: true }) !== 'ok') throw Error('operations_capture_invalid');
+              const rows = denialRows(db, options.base.context.scopeId);
+              mergeNativeDenials(canonicalDenials, rows);
+              captured.sqlite.set(file, { ...identity, rows: rows.map((row) => canonicalDenials.get(row.ingressId)!) });
+            } finally {
+              db.close();
+            }
           }
-        }
-        sink.write(name, bytes);
+          sink.write(name, bytes);
+        },
       },
-    });
+    );
     await sameEpoch();
     const operations = await projection(options, checkpoint, before.generation, captured);
     await sameEpoch();

@@ -5,7 +5,7 @@ const sourceCommit = 'a'.repeat(40),
   sourceTree = 'b'.repeat(40),
   hostImage = 'sha256:' + 'c'.repeat(64),
   fixtureImage = 'sha256:' + 'd'.repeat(64);
-const identity = { sourceCommit, sourceTree, hostImage, fixtureImage };
+const identity = { sourceCommit, sourceTree, hostImage, fixtureImage, releaseSlice: 'G02' as const };
 const inspection = [
   {
     Id: fixtureImage,
@@ -30,6 +30,7 @@ const binding = {
   privateCgroupNamespace: true,
   hostDataMounted: false,
   ownerCredentialsUsed: false,
+  releaseSlice: 'G02',
 };
 const scope = {
   Privileged: true,
@@ -44,9 +45,12 @@ const scope = {
   Tmpfs: { '/run': 'rw,nosuid,nodev,size=64m', '/tmp': 'rw,nosuid,nodev,size=128m' },
 };
 const probe = {
-  contract: 'cos-g02-backup-job-release-fixture/v1',
+  contract: 'cos-backup-job-release-fixture/v2',
   status: 'passed',
   cases: 7,
+  releaseSlice: 'G02',
+  schemaVersion: 18,
+  actualG03ToG04Upgrade: false,
   sealedSourceCommit: sourceCommit,
   sealedSourceTree: sourceTree,
   backupArtifact: RESTIC_ARTIFACT,
@@ -92,6 +96,41 @@ it('requires actual manager lifecycle and default-entry refusal without claiming
     installedAcceptance: false,
   });
 });
+it.each(['G02', 'G03', 'G04'] as const)(
+  'requires the actual selected %s lifecycle and exact schema in immutable manager evidence',
+  (releaseSlice) => {
+    const selected = { ...identity, releaseSlice },
+      rows = [
+        { ...binding, releaseSlice },
+        scope,
+        {
+          ...probe,
+          releaseSlice,
+          schemaVersion: releaseSlice === 'G04' ? 19 : 18,
+          actualG03ToG04Upgrade: releaseSlice === 'G04',
+          cases: releaseSlice === 'G04' ? 8 : 7,
+        },
+      ];
+    expect(verifyBackupJobFixtureEvidence(rows, selected)).toMatchObject({
+      status: 'passed',
+      cases: releaseSlice === 'G04' ? 8 : 7,
+    });
+    for (const change of [
+      { releaseSlice: 'G02' },
+      { schemaVersion: 18 },
+      { actualG03ToG04Upgrade: false },
+      { cases: 7 },
+    ])
+      if (releaseSlice === 'G04') {
+        expect(() => verifyBackupJobFixtureEvidence([rows[0], scope, { ...rows[2], ...change }], selected)).toThrow(
+          'backup_job_fixture_evidence_unavailable',
+        );
+      }
+    expect(() =>
+      verifyBackupJobFixtureEvidence([{ ...binding, releaseSlice: 'foreign' }, scope, rows[2]], selected),
+    ).toThrow();
+  },
+);
 it.each([
   'actualUserManager',
   'actualStaticCompiler',

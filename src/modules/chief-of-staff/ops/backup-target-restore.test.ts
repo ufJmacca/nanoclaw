@@ -160,18 +160,22 @@ function fixture() {
     check();
     return use(port);
   });
-  f.importer.mockImplementation(async (_options, _scope, _entries, _sandbox, _port, check) => {
+  const imported = {
+    format: 'cos-sandbox-scope-restore/v1',
+    inserted: true,
+    admissionRestored: false,
+    eventJournalRestored: false,
+    checkpointDigest: header.checkpointDigest,
+    sandboxDatabaseFingerprint: digest('separate test'),
+    restoredStateDigest: digest('readback'),
+  };
+  f.importer.mockImplementation(async (_options, validation, _entries, _sandbox, _port, check) => {
     order.push('import');
+    // The real scoped importer owns this boundary around each database await.
+    validation.assertPayloadCurrent();
     await check();
-    return {
-      format: 'cos-sandbox-scope-restore/v1',
-      inserted: true,
-      admissionRestored: false,
-      eventJournalRestored: false,
-      checkpointDigest: header.checkpointDigest,
-      sandboxDatabaseFingerprint: digest('separate test'),
-      restoredStateDigest: digest('readback'),
-    };
+    validation.assertPayloadCurrent();
+    return imported;
   });
   return {
     settings,
@@ -189,6 +193,7 @@ function fixture() {
     scopeGuard,
     payloadGuard,
     databaseGuard,
+    imported,
     run: () => restoreTargetVaultBackupTestScope(options, requestId, sandbox, databaseGuard),
   };
 }
@@ -244,6 +249,63 @@ it('withholds any reservation or import after complete verification fails', asyn
   await expect(s.run()).rejects.toThrow(/^target_vault_test_restore_unavailable$/);
   expect(f.reservation).not.toHaveBeenCalled();
   expect(f.importer).not.toHaveBeenCalled();
+});
+it('walks the complete recovered inventory once on each side of a scoped database await', async () => {
+  const s = fixture();
+  let inventoryWalks = 0,
+    databaseChecks = 0;
+  f.importer.mockImplementation(async (_identity, validation, _entries, _sandbox, _reservation, check) => {
+    const before = s.payloadGuard.mock.calls.length,
+      databaseBefore = s.databaseGuard.mock.calls.length;
+    // Each imported table needs several database admission checks. Repeating
+    // the full inventory walk inside that same boundary amplifies Pi I/O.
+    for (let index = 0; index < 3; index++) {
+      validation.assertPayloadCurrent();
+      await check();
+      validation.assertPayloadCurrent();
+    }
+    inventoryWalks = s.payloadGuard.mock.calls.length - before;
+    databaseChecks = s.databaseGuard.mock.calls.length - databaseBefore;
+    return s.imported;
+  });
+  await expect(s.run()).resolves.toMatchObject({ validation: { inserted: true } });
+  expect(databaseChecks).toBe(3);
+  expect(inventoryWalks).toBe(6);
+});
+it.each([
+  ['payload', false],
+  ['payload', true],
+  ['remote', false],
+  ['remote', true],
+  ['caller', false],
+  ['caller', true],
+] as const)('refuses %s withdrawal around the importer database await (during=%s)', async (kind, during) => {
+  const s = fixture();
+  const withdraw = () => {
+    if (kind === 'remote') s.remote.archiveSha256 = digest('changed');
+    if (kind === 'caller')
+      s.current.mockImplementation(() => {
+        throw Error('PRIVATE_WITHDRAWN');
+      });
+    if (kind === 'payload')
+      s.payloadGuard.mockImplementation(() => {
+        throw Error('PRIVATE_CHANGED_FILE');
+      });
+  };
+  s.databaseGuard.mockResolvedValueOnce(undefined).mockImplementationOnce(async () => {
+    await Promise.resolve();
+    withdraw();
+  });
+  f.importer.mockImplementation(async (_identity, validation, _entries, _sandbox, _reservation, check) => {
+    if (!during) withdraw();
+    validation.assertPayloadCurrent();
+    await check();
+    validation.assertPayloadCurrent();
+    return s.imported;
+  });
+  await expect(s.run()).rejects.toThrow(/^target_vault_test_restore_unavailable$/);
+  expect(s.databaseGuard).toHaveBeenCalledTimes(during ? 2 : 1);
+  expect(f.complete).toHaveBeenCalledTimes(1);
 });
 it.each([
   'caller',

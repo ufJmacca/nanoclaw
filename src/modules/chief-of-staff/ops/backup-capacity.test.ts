@@ -4,7 +4,7 @@ import path from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
 const f = vi.hoisted(() => ({ access: vi.fn() }));
 vi.mock('./vault-storage.js', () => ({ withVaultDirectory: f.access }));
-import { readBackupCapacity, readBackupInitializationCapacity } from './backup-capacity.js';
+import { readBackupCapacity, readBackupInitializationCapacity, readPinnedBackupJournals } from './backup-capacity.js';
 const temporary: string[] = [],
   held: number[] = [];
 const roots = { targetRoot: '/synthetic/state', installationRoot: '/synthetic/install', dataRoot: '/synthetic/data' };
@@ -36,6 +36,22 @@ function fixture() {
   } as fs.BigIntStatsFs);
   return { areas, repository, check };
 }
+it('measures held journal capacity without reading credential payloads and refuses an ordinary path', () => {
+  const s = fixture(),
+    fd = fs.openSync(s.areas.journals, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY);
+  held.push(fd);
+  fs.writeFileSync(s.areas.journals + '/private-record', Buffer.alloc(513, 65), { mode: 0o600 });
+  const read = vi.spyOn(fs, 'readFileSync').mockImplementation(() => {
+    throw Error('payload_must_not_be_read');
+  });
+  expect(readPinnedBackupJournals('/proc/self/fd/' + fd)).toMatchObject({
+    bytes: expect.any(Number),
+    free: expect.any(Number),
+  });
+  expect(readPinnedBackupJournals('/proc/self/fd/' + fd).bytes).toBeGreaterThanOrEqual(4096);
+  expect(read).not.toHaveBeenCalled();
+  expect(() => readPinnedBackupJournals(s.areas.journals)).toThrow('backup_capacity_unavailable');
+});
 it.each([false, true])('initialization counts only the fixed repository with existing=%s', async (existing) => {
   const s = fixture();
   fs.mkdirSync(s.areas.repository + '/@Recently-Snapshot', { mode: 0o500 });

@@ -8,7 +8,14 @@ import { COS_PROTOCOL, validRequest, validResponse, type CosResponse } from '../
 import type { Change, SourceChange, Result } from '../domain/contracts.js';
 import type { PriorityStore } from '../store/priorities.js';
 import type { KnowledgeStore, KnowledgeContext } from '../knowledge/store.js';
-import type { CalendarReadInput, WorkChange, WorkRead } from '../contracts/protocol.js';
+import type { PreparedBriefReadback } from '../automation/brief-store.js';
+import type {
+  CalendarReadInput,
+  MailSearchInput,
+  MailThreadInput,
+  WorkChange,
+  WorkRead,
+} from '../contracts/protocol.js';
 import type { ScheduleChange } from '../contracts/schedule-protocol.js';
 import type { MissionRequest } from '../contracts/mission-protocol.js';
 import type { TeamRequest } from '../contracts/team-protocol.js';
@@ -35,7 +42,7 @@ export function ensureRpcSchema(db: Database.Database): void {
 export function createRpcHandler(dependencies: {
   resolveContext(session: Session, db: Database.Database): Promise<Context | null>;
   store: PriorityStore;
-  reserveTool?(context: Context, callId: string): Promise<Result>;
+  reserveTool?(context: Context, callId: string, readback?: PreparedBriefReadback): Promise<Result>;
   cancelMission?(context: Context, missionId: string): Promise<Result>;
   cancelTeam?(context: Context, teamId: string): Promise<Result>;
   knowledge?: KnowledgeStore;
@@ -67,6 +74,19 @@ export function createRpcHandler(dependencies: {
           ? ((await dependencies.reserveTool?.(
               context,
               'rpc-' + digest({ request_id: request.request_id, delivery_id: content.delivery_id }),
+              ...(context.origin.kind === 'schedule' &&
+              knowledgeContext &&
+              request.method === 'cos_brief_request' &&
+              request.params.artifact_id === undefined
+                ? [
+                    {
+                      requestId: request.request_id,
+                      timeZone: String(request.params.time_zone),
+                      provider: knowledgeContext.provider,
+                      contextGeneration: knowledgeContext.generation,
+                    },
+                  ]
+                : []),
             )) ?? { status: 'denied' as const })
           : null;
       if (reservation?.status === 'ok') {
@@ -174,6 +194,10 @@ export function createRpcHandler(dependencies: {
                     knowledgeContext,
                     Number(request.params.calendar_offset ?? 0),
                   )
+                : { status: 'unavailable', coverage: 'not_configured', items: [] },
+            mail:
+              dependencies.store.mailView && knowledgeContext
+                ? await dependencies.store.mailView.coverage(knowledgeContext)
                 : { status: 'unavailable', coverage: 'not_configured', items: [] },
           };
       } else if (request.method === 'cos_change_propose')
@@ -298,6 +322,14 @@ export function createRpcHandler(dependencies: {
       } else if (request.method === 'cos_calendar_read')
         result = dependencies.store.calendarView
           ? await dependencies.store.calendarView.read(knowledgeContext, request.params as CalendarReadInput)
+          : { status: 'unavailable' };
+      else if (request.method === 'cos_mail_search')
+        result = dependencies.store.mailView
+          ? await dependencies.store.mailView.search(knowledgeContext, request.params as MailSearchInput)
+          : { status: 'unavailable' };
+      else if (request.method === 'cos_mail_thread_get')
+        result = dependencies.store.mailView
+          ? await dependencies.store.mailView.thread(knowledgeContext, request.params as MailThreadInput)
           : { status: 'unavailable' };
       else if (request.method === 'cos_knowledge_search')
         result = await dependencies.knowledge.search(knowledgeContext, {

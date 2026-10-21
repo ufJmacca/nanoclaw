@@ -11,6 +11,8 @@ const f = vi.hoisted(() => ({
   upload: vi.fn(),
   maintain: vi.fn(),
   exec: vi.fn(),
+  journal: vi.fn(),
+  complete: vi.fn(),
 }));
 vi.mock('./vault-memory.js', () => ({ verifyVaultMemory: f.memory }));
 vi.mock('./operations-maintenance-effects.js', () => ({
@@ -20,7 +22,12 @@ vi.mock('./backup-queue.js', () => ({
   createVaultBackupQueue: () => ({ inspectDelivery: f.inspect, reconcileIncompleteCapture: f.reconcile }),
 }));
 vi.mock('./target-host.js', () => ({ verifyTargetPaths: f.paths }));
-vi.mock('./backup-upload.js', () => ({ uploadVaultBackup: f.upload, maintainVaultBackups: f.maintain }));
+vi.mock('./backup-upload.js', () => ({
+  uploadVaultBackup: f.upload,
+  maintainVaultBackups: f.maintain,
+  uploadVaultCredentialCapture: f.complete,
+}));
+vi.mock('./credential-recovery-page.js', () => ({ recordScheduledCredentialRecoveryPage: f.journal }));
 vi.mock('node:child_process', () => ({ execFile: f.exec }));
 import { createBackupUploadJobEffects } from './backup-upload-job-effects.js';
 afterEach(() => vi.resetAllMocks());
@@ -39,6 +46,35 @@ function fixture() {
   f.inspect.mockResolvedValue({ items: [], lastRemoteCheckpointAt: null });
   return createBackupUploadJobEffects(settings, '/fixture/target-helper.js');
 }
+it('connects local non-token journaling and complete capture to fixed installed wrappers under live guards', async () => {
+  const effects = fixture(),
+    guard = vi.fn(),
+    scope = { releaseId: 'release-current', generation: 7 },
+    cycleAt = '2026-10-16T00:00:00.000Z';
+  f.journal.mockImplementation(async (_roots, options) => {
+    options.assertAuthority();
+    return { syntheticPage: true };
+  });
+  f.complete.mockImplementation(async (_roots, _cycle, current) => {
+    current();
+    return { syntheticCapture: true };
+  });
+  expect(await effects.journalCredentials!(scope, guard)).toEqual({ syntheticPage: true });
+  expect(f.journal).toHaveBeenCalledWith(
+    { targetRoot: settings.stateRoot, installationRoot: settings.installationRoot, dataRoot: settings.dataRoot },
+    { ...scope, assertAuthority: expect.any(Function) },
+  );
+  expect(await effects.captureCredentials!(cycleAt, guard)).toEqual({ syntheticCapture: true });
+  expect(f.complete).toHaveBeenCalledWith(
+    { targetRoot: settings.stateRoot, installationRoot: settings.installationRoot, dataRoot: settings.dataRoot },
+    cycleAt,
+    expect.any(Function),
+  );
+  expect(guard).toHaveBeenCalled();
+  expect(f.paths).toHaveBeenCalledWith(settings, 0);
+  expect(f.exec).not.toHaveBeenCalled();
+  expect(f.upload).not.toHaveBeenCalled();
+});
 it('connects maintenance to the fixed admitted repository wrapper with its live caller guard', async () => {
   const effects = fixture(),
     guard = vi.fn();

@@ -191,6 +191,23 @@ function fixture() {
   dispatch.beginTurn('thread', 'turn');
   return { dispatch, calls };
 }
+test('G04 native dispatch validates scoped mail references and rejects broader read or write options', async () => {
+  const { dispatch, calls } = fixture();
+  const binding = '11111111-1111-4111-8111-111111111111';
+  for (const [tool, args] of [
+    ['cos_mail_search', { binding_id: binding, query: 'alpha' }],
+    ['cos_mail_thread_get', { binding_id: binding, thread_id: 'ab01' }],
+  ] as const) {
+    expect((await dispatch.handle(call({ callId: tool, tool, arguments: args }))).success).toBe(true);
+    expect(calls.at(-1)).toMatchObject({ method: tool, params: args });
+    const count = calls.length;
+    expect(
+      (await dispatch.handle(call({ callId: tool + '-denied', tool, arguments: { ...args, include_spam: true } })))
+        .success,
+    ).toBe(false);
+    expect(calls.length).toBe(count);
+  }
+});
 test('native CoS exposes only its fixed approved tools and dispatches validated RPC', async () => {
   const { dispatch, calls } = fixture();
   expect(cosDynamicTools.map((tool) => tool.name)).toEqual([
@@ -204,6 +221,8 @@ test('native CoS exposes only its fixed approved tools and dispatches validated 
     'cos_answer_prepare',
     'cos_answer_get',
     'cos_calendar_read',
+    'cos_mail_search',
+    'cos_mail_thread_get',
     'cos_work_change_propose',
     'cos_brief_schedule_propose',
     'cos_work_read',

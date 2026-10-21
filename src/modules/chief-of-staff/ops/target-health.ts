@@ -30,6 +30,9 @@ const admittedErrors = new Set([
   'ETIMEDOUT',
   'ECONNRESET',
   'ECONNREFUSED',
+  'fixture_mcp_startup_deadline',
+  'fixture_mcp_request_deadline',
+  'fixture_mcp_transport_unavailable',
 ]);
 /** Persist the gate and a fixed classification; errors can contain tokens, paths or model text. */
 function failureCode(error: unknown): string {
@@ -52,6 +55,7 @@ export async function runTargetHealth(options: {
     let failure: { code: string } | undefined;
     try {
       await check.run();
+      // eslint-disable-next-line no-catch-all/no-catch-all -- Persist a fixed failed-gate classification; raw adapter errors may contain secrets.
     } catch (error) {
       failure = { code: failureCode(error) };
     }

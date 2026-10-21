@@ -12,7 +12,7 @@ it.each(
     'cos_mission_allocations',
     'cos_mission_stop_attempts',
     'cos_mission_stop_families',
-  ].flatMap((table) => (['G01', 'G02'] as const).map((slice) => ({ table, slice }))),
+  ].flatMap((table) => (['G01', 'G02', 'G03', 'G04'] as const).map((slice) => ({ table, slice }))),
 )('verified $slice preserves permanent S11 $table without admitting a legacy downgrade', ({ table, slice }) => {
   const db = new Database(':memory:');
   try {

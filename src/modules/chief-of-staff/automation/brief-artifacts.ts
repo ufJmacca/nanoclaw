@@ -37,26 +37,34 @@ export class BriefArtifacts {
   private get knowledge() {
     return this.collector.options.knowledge;
   }
-  private async originAllowed(client: PoolClient, context: KnowledgeContext, timeZone: string): Promise<boolean> {
-    return (await briefRefreshCoverage(client, context, timeZone)) !== null;
+  private async originAllowed(
+    client: PoolClient,
+    context: KnowledgeContext,
+    timeZone: string,
+    preparedArtifactId?: string,
+  ): Promise<boolean> {
+    return (await briefRefreshCoverage(client, context, timeZone, false, preparedArtifactId)) !== null;
   }
 
   private async receipt(context: KnowledgeContext, request: string, hash: string, timeZone: string): Promise<Result> {
     const d = this.knowledge.answers.dependencies;
     return d.transaction(async (client) => {
-      if (!(await d.current(client, context)) || !(await this.originAllowed(client, context, timeZone)))
-        return { status: 'denied' };
+      if (!(await d.current(client, context))) return { status: 'denied' };
       const old = (
         await client.query(
           'SELECT scope_id,method,payload_hash,result FROM cos.operations WHERE session_id=$1 AND request_id=$2',
           [context.sessionId, request],
         )
       ).rows[0];
-      return !old
-        ? { status: 'ok' }
-        : old.scope_id === context.scopeId && old.method === 'cos_brief_request' && old.payload_hash === hash
-          ? (old.result ?? { status: 'pending' })
-          : { status: 'conflict' };
+      const matches =
+        old?.scope_id === context.scopeId && old.method === 'cos_brief_request' && old.payload_hash === hash;
+      // Prepared runs authorize only readback of this exact completed request.
+      const preparedArtifactId =
+        matches && old.result?.status === 'ok' && isArtifactIdentity(old.result.artifact_id)
+          ? old.result.artifact_id
+          : undefined;
+      if (!(await this.originAllowed(client, context, timeZone, preparedArtifactId))) return { status: 'denied' };
+      return !old ? { status: 'ok' } : matches ? (old.result ?? { status: 'pending' }) : { status: 'conflict' };
     });
   }
   async prepare(context: KnowledgeContext, request: string, timeZone: string): Promise<Result> {
@@ -71,7 +79,17 @@ export class BriefArtifacts {
       });
     const old = await this.receipt(context, request, hash, timeZone);
     if (old.status !== 'ok') return old;
-    if (old.artifact_id) return this.get(context, String(old.artifact_id));
+    if (old.artifact_id) {
+      const existing = await this.get(context, String(old.artifact_id));
+      if (existing.status !== 'ok') return existing;
+      // Readback may await storage; cancellation or expiry must still win.
+      const current = await this.receipt(context, request, hash, timeZone);
+      return current.status !== 'ok'
+        ? current
+        : current.artifact_id === old.artifact_id
+          ? existing
+          : { status: 'denied' };
+    }
     const collected = await this.collector.collect(context, timeZone);
     if (collected.status !== 'ok') return collected;
     const snapshot = collected.snapshot as BriefSnapshot,

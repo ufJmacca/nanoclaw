@@ -35,11 +35,13 @@ import { ActionNotificationDelivery } from './actions/notification-delivery.js';
 import type { KnowledgeContext } from './knowledge/store.js';
 import { renderOperatorStatus } from './ops/operator-status-render.js';
 import { renderOwnerControl } from './ops/owner-control-render.js';
+import type { MailAuthorities } from './mail/authority.js';
 
 export type RuntimeDependencies = {
   db: Database.Database;
   enabled: boolean;
   admission?(): boolean;
+  mailAuthority?: MailAuthorities;
   store?: PriorityStore;
   facts(binding: CosBinding): Promise<ChannelFacts>;
   session(id: string): Session | undefined;
@@ -83,11 +85,23 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
       ).status === 'ok'
     );
   };
-  const reserveAutomaticCall = async (context: Context, callId: string, kind: 'model' | 'tool'): Promise<Result> => {
+  const reserveAutomaticCall = async (
+    context: Context,
+    callId: string,
+    kind: 'model' | 'tool',
+    readback?: import('./automation/brief-store.js').PreparedBriefReadback,
+  ): Promise<Result> => {
     if (!enabled() || !context.origin || !d.store) return { status: 'denied' };
     const origin = context.origin;
     if (origin.kind === 'schedule')
-      return d.store.briefs.reserveCall(context, origin.runId, origin.generation, kind, callId);
+      return d.store.briefs.reserveCall(
+        context,
+        origin.runId,
+        origin.generation,
+        kind,
+        callId,
+        ...(readback ? [readback] : []),
+      );
     const session = d.session(context.sessionId),
       retained = session && resolveKnowledgeContext(session, context, d.db);
     if (!retained || !reviewRuns) return { status: 'denied' };
@@ -542,7 +556,7 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
       'cos_rpc',
       createRpcHandler({
         resolveContext: (session) => controller.context(session),
-        reserveTool: (context, callId) => reserveAutomaticCall(context, callId, 'tool'),
+        reserveTool: (context, callId, readback) => reserveAutomaticCall(context, callId, 'tool', readback),
         store: d.store!,
         cancelMission: createMissionCancellation({
           db: d.db,
@@ -576,6 +590,18 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
     reconcile,
     pump: async (binding: CosBinding) => {
       await reconcile(binding);
+      if (enabled() && d.mailAuthority)
+        d.store?.mail?.poke(
+          {
+            scopeId: binding.scopeId,
+            ownerId: binding.ownerId,
+            agentGroupId: binding.agentGroupId,
+            sessionId: binding.sessionId,
+            ingressId: 'mail-maintenance',
+            provider: binding.provider,
+          },
+          d.mailAuthority,
+        );
       if (enabled()) await invalidations?.drain(binding);
       const recovered = enabled() ? await briefReconciliation?.drain(binding) : undefined;
       if (enabled()) await reviewDispatch?.drain(binding);

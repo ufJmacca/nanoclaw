@@ -10,6 +10,7 @@ import { readPrivate } from './target-state.js';
 import type { DeploymentReceipt } from './deployment.js';
 import * as targetState from './target-state.js';
 import { maintenanceLeaseForOwner, beginMaintenance } from './maintenance.js';
+import { readStageTimings } from './stage-timing.js';
 
 const roots: string[] = [];
 afterEach(() => {
@@ -280,6 +281,19 @@ it('failed health keeps CoS closed and only records rollback after compatible re
   f.effects.rollback = vi.fn(async () => true);
   await expect(deployRelease(f)).rejects.toThrow('deployment_rolled_back');
   expect(readTarget(f.root, f.binding)).toMatchObject({ releaseId: null, maintenance: true });
+  const directory = path.join(f.root, 'releases', f.manifest.releaseId);
+  const timings = readStageTimings(directory)!;
+  expect(timings.identity).toEqual({
+    releaseId: f.manifest.releaseId,
+    sourceCommit: f.manifest.source.commit,
+    sourceTree: f.manifest.source.tree,
+    buildInputDigest: f.manifest.buildInputDigest,
+  });
+  expect(timings.spans.filter((span) => span.stage === 'health').map((span) => span.exitCode)).toEqual([1]);
+  expect(timings.spans.filter((span) => span.stage === 'rollback').map((span) => span.exitCode)).toEqual([1, 0]);
+  const original = fs.readFileSync(path.join(directory, 'stage-timings.json'));
+  await expect(deployRelease(f)).rejects.toThrow('deployment_rolled_back');
+  expect(fs.readFileSync(path.join(directory, 'stage-timings.json'))).toEqual(original);
 });
 
 it('attempts compatible recovery when service activation fails after migration', async () => {

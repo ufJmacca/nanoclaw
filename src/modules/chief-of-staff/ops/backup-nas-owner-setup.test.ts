@@ -34,9 +34,9 @@ const cli = (a: ReturnType<typeof args>) => [
   '--credential-reference',
   a.credentialReference,
 ];
-function fixture(selectedRoot = os.homedir() + '/.config/nanoclaw-cos/state') {
+function fixture(selectedRoot = os.homedir() + '/.config/nanoclaw-cos/state', slice: 'G02' | 'G03' | 'G04' = 'G02') {
   const selected = args(),
-    release = fixtureVaultRelease('G02'),
+    release = fixtureVaultRelease(slice),
     root = selectedRoot,
     nonce = randomUUID(),
     binding = {
@@ -208,21 +208,24 @@ it.each([
   if (reason === 'scope') values[2] = '../foreign';
   expect(() => parseBackupNasConfigureArguments(values)).toThrow(/^invalid_admin_arguments$/);
 });
-it('uses a fresh live setup proof and verifies the exact source-bound root receipt while preserving the accepted owner configuration', async () => {
-  const f = fixture(),
-    before = digest(f.vault),
-    result = await runBackupNasConfigureAdmin(f.input, f.controls);
-  expect(result.status).toBe('configured');
-  expect(digest(f.vault)).toBe(before);
-  expect(f.openAuthority).toHaveBeenCalledOnce();
-  const selected = f.openAuthority.mock.calls[0]![0];
-  expect(selected.operationId).toBe(f.input.args.requestId);
-  expect(selected.configuration.identity).toEqual(f.vault.identity);
-  expect(selected.nas).toEqual(f.nas);
-  expect(f.proof.authority.close).toHaveBeenCalledOnce();
-  expect(JSON.stringify(result)).not.toContain(f.proof.authority.token);
-  expect(JSON.stringify(result)).not.toContain(f.nas.host);
-});
+it.each(['G02', 'G03', 'G04'] as const)(
+  '%s uses a fresh live setup proof and verifies the exact source-bound root receipt while preserving the accepted owner configuration',
+  async (slice) => {
+    const f = fixture(undefined, slice),
+      before = digest(f.vault),
+      result = await runBackupNasConfigureAdmin(f.input, f.controls);
+    expect(result.status).toBe('configured');
+    expect(digest(f.vault)).toBe(before);
+    expect(f.openAuthority).toHaveBeenCalledOnce();
+    const selected = f.openAuthority.mock.calls[0]![0];
+    expect(selected.operationId).toBe(f.input.args.requestId);
+    expect(selected.configuration.identity).toEqual(f.vault.identity);
+    expect(selected.nas).toEqual(f.nas);
+    expect(f.proof.authority.close).toHaveBeenCalledOnce();
+    expect(JSON.stringify(result)).not.toContain(f.proof.authority.token);
+    expect(JSON.stringify(result)).not.toContain(f.nas.host);
+  },
+);
 it('selects only the installed sealed helper with core/swap limits and a minimal environment', async () => {
   const f = fixture();
   await runBackupNasConfigureAdmin(f.input, f.controls);

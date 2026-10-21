@@ -19,12 +19,36 @@ import { assertCalendarActive, awaitCalendarCredential } from './cancellation.js
 import type { CredentialJournal } from '../ops/backup-credential-event.js';
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const profiles = {
-  reader: { marker: '.cos-calendar-credentials', contract: 'cos-calendar-credentials/v1' },
-  owned_event_writer: { marker: '.cos-calendar-writer-credentials', contract: 'cos-calendar-writer-credentials/v1' },
-};
+  reader: {
+    marker: '.cos-calendar-credentials',
+    contract: 'cos-calendar-credentials/v1',
+    sourceKind: 'calendar_reader',
+  },
+  owned_event_writer: {
+    marker: '.cos-calendar-writer-credentials',
+    contract: 'cos-calendar-writer-credentials/v1',
+    sourceKind: 'calendar_owned_event_writer',
+  },
+  mail_reader: {
+    marker: '.cos-mail-reader-credentials',
+    contract: 'cos-mail-reader-credentials/v1',
+    sourceKind: 'mail_reader',
+  },
+} as const;
 function profileSpec(profile: OAuthScopeProfile) {
-  if (profile !== 'reader' && profile !== 'owned_event_writer') throw new Error('unsafe_calendar_credential_profile');
+  if (profile !== 'reader' && profile !== 'owned_event_writer' && profile !== 'mail_reader')
+    throw new Error('unsafe_calendar_credential_profile');
   return profiles[profile];
+}
+/** Marker data for trusted descriptor-based setup; it grants no credential access. */
+export function credentialRootMarker(profile: OAuthScopeProfile): { name: string; contents: string } {
+  const { marker, contract } = profileSpec(profile);
+  return { name: marker, contents: JSON.stringify({ contract }) + '\n' };
+}
+/** Metadata for trusted backup readers; never an account or token admission grant. */
+export function credentialProfileMetadata(profile: OAuthScopeProfile) {
+  const { contract, sourceKind } = profileSpec(profile);
+  return { contract, sourceKind };
 }
 type State = {
   contract: string;
@@ -235,7 +259,7 @@ export class CalendarCredentialCore {
       assertCurrent();
       await this.journal(
         {
-          sourceKind: this.#profile === 'reader' ? 'calendar_reader' : 'calendar_owned_event_writer',
+          sourceKind: profileSpec(this.#profile).sourceKind,
           sourceKey: digest({ identity: state.identity, clientId: state.clientId, profile: this.#profile }),
           generation: state.generation,
           phase: state.phase,

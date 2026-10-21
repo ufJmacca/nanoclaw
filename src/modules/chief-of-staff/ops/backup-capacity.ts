@@ -153,6 +153,18 @@ export function readPinnedBackupStaging(directory: string): { bytes: number; fre
     throw Error('backup_capacity_unavailable');
   }
 }
+/** Metadata-only journal measurement under the held vault accessor. Its one
+ * root-owned canary is counted by metadata and never read or made portable. */
+export function readPinnedBackupJournals(directory: string): { bytes: number; free: number } {
+  try {
+    if (process.platform !== 'linux' || !/^\/proc\/self\/fd\/\d+$/.test(directory))
+      throw Error('held_journals_required');
+    return { bytes: measure(directory, undefined, 0, { count: 0 }, { vaultProof: true }), free: free(directory) };
+  } catch {
+    // eslint-disable-next-line preserve-caught-error -- Private journal paths and canary metadata are not capacity diagnostics.
+    throw Error('backup_capacity_unavailable');
+  }
+}
 /** Admission consumes measured usage, never receipt claims or a configured free-space value.
  * All local paths come from the protected vault accessor; the repository is already pinned
  * by signed NAS access. This reads metadata only and never acquires a queue writer lease. */

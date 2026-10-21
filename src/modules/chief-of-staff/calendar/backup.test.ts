@@ -8,12 +8,16 @@ import {
   verifyCalendarBackup,
   verifyCalendarWriterBackup,
 } from './backup.js';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { digest } from '../domain/contracts.js';
 import { GOOGLE_CALENDAR_METADATA_SCOPE, GOOGLE_OWNED_EVENT_WRITE_SCOPE } from '../actions/writer.js';
 import { configureCalendarStorage } from './storage-policy.js';
 import type { StorageInspection } from './storage-protection.js';
 import { verifyVaultMemory } from '../ops/vault-memory.js';
+import { MailCredentialOwner } from '../mail/credentials.js';
+import { CalendarAccessFences } from './access-fences.js';
+import { GOOGLE_MAIL_READ_SCOPE } from '../mail/oauth.js';
+import { mailReaderRootIdentity } from '../mail/storage.js';
 vi.mock('../ops/vault-memory.js', () => ({ verifyVaultMemory: vi.fn() }));
 const bases: string[] = [];
 function setup(configured = true) {
@@ -77,6 +81,70 @@ it('G02 captures credentials and denial journals through a sink without creating
   expect(fs.readdirSync(f.backupRoot)).toEqual(['.cos-calendar-backups']);
   expect(fs.readdirSync(f.options.receiptRoot)).toEqual([]);
   expect(verifyVaultMemory).toHaveBeenCalled();
+});
+it('G04 captures the separate mail client, credentials and denial journals through the existing protected Google subtree', async () => {
+  const f = setup(),
+    mail = f.source + '/mail-reader';
+  fs.mkdirSync(mail, { mode: 0o700 });
+  for (const child of ['credentials', 'access-denials']) fs.mkdirSync(mail + '/' + child, { mode: 0o700 });
+  const client = { clientId: 'separate-mail.apps.googleusercontent.com', clientSecret: 'PRIVATE_MAIL_CLIENT_CANARY' };
+  fs.writeFileSync(mail + '/oauth-client.json', JSON.stringify(client), { mode: 0o600 });
+  fs.writeFileSync(
+    mail + '/.cos-mail-reader',
+    JSON.stringify(
+      mailReaderRootIdentity(f.roots, {
+        filesystemUuid: 'fixture-private-volume',
+        directoryInodes: {
+          profile: fs.statSync(mail).ino,
+          credentials: fs.statSync(mail + '/credentials').ino,
+          accessDenials: fs.statSync(mail + '/access-denials').ino,
+        },
+        clientSha256: createHash('sha256')
+          .update(fs.readFileSync(mail + '/oauth-client.json'))
+          .digest('hex'),
+      }),
+    ),
+    { mode: 0o600 },
+  );
+  MailCredentialOwner.initialize(mail + '/credentials');
+  const fences = CalendarAccessFences.initialize(mail + '/access-denials'),
+    binding = randomUUID(),
+    reference = randomUUID();
+  const owner = new MailCredentialOwner(mail + '/credentials', client, fences);
+  await owner.install('scope', binding, reference, {
+    accessToken: 'PRIVATE_MAIL_ACCESS_CANARY',
+    refreshToken: 'PRIVATE_MAIL_REFRESH_CANARY',
+    expiresAt: Date.now() + 3600000,
+    refreshExpiresAt: null,
+    scopes: [GOOGLE_MAIL_READ_SCOPE],
+  });
+  fences.deny('scope', binding, 'revoked');
+  const files = new Map<string, Buffer>();
+  const capture = await captureCalendarState(f.options, {
+    write: (name, bytes) => {
+      files.set(name, Buffer.from(bytes));
+    },
+  });
+  expect(capture.directories).toContain('mail-reader/credentials');
+  expect(capture.directories).toContain('mail-reader/access-denials');
+  expect(files.get('calendar-state/mail-reader/oauth-client.json')!.toString()).toContain('PRIVATE_MAIL_CLIENT_CANARY');
+  expect(files.get('calendar-state/mail-reader/credentials/' + reference + '.json')!.toString()).toContain(
+    'PRIVATE_MAIL_REFRESH_CANARY',
+  );
+  const denial = digest({ scope: 'scope', binding }) + '.json';
+  expect(files.get('calendar-state/mail-reader/access-denials/' + denial)!.toString()).toContain('revoked');
+  expect(files.has('calendar-state/mail-reader/credentials/.cos-mail-reader-credentials')).toBe(true);
+  expect(JSON.stringify(capture)).not.toContain('CANARY');
+  const backup = await backupCalendarState(f.options),
+    copy = f.backupRoot + '/' + backup.snapshot + '/state/mail-reader';
+  expect(fs.readFileSync(copy + '/credentials/' + reference + '.json', 'utf8')).toContain(
+    'PRIVATE_MAIL_REFRESH_CANARY',
+  );
+  expect(fs.readFileSync(copy + '/access-denials/' + denial, 'utf8')).toContain('revoked');
+  expect(await verifyCalendarBackup(f.options)).toEqual(backup);
+  fs.writeFileSync(copy + '/oauth-client.json', 'TAMPERED_MAIL_CLIENT');
+  await expect(verifyCalendarBackup(f.options)).rejects.toThrow('calendar_backup_unavailable');
+  await expect(owner.inspect('scope', binding, reference)).rejects.toThrow('calendar_auth_revoked');
 });
 it('G02 denies credential streaming before the sink when memory protection is absent', async () => {
   const f = setup();
