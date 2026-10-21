@@ -1,4 +1,5 @@
 import type { PoolClient } from 'pg';
+import { createHash } from 'node:crypto';
 import { digest } from '../domain/contracts.js';
 import type { KnowledgeContext } from '../knowledge/store.js';
 import { GOOGLE_MAIL_READ_SCOPE } from './oauth.js';
@@ -50,28 +51,41 @@ export async function mailAnswerNotice(
       [context.scopeId, context.provider],
     )
   ).rows;
-  if (rows.length > 10) throw Error('mail_inventory_limit');
-  const policies: Array<unknown> = [],
+  const more = rows.length > 10;
+  rows.length = Math.min(rows.length, 10);
+  type PolicyRow = {
+    binding_id: string;
+    mailbox_email: string;
+    auth: string;
+    version: number;
+    permission_scopes: string[];
+  };
+  const policy = (row: PolicyRow) => {
+    let accessible =
+      row.auth === 'ready' &&
+      Array.isArray(row.permission_scopes) &&
+      row.permission_scopes.length === 1 &&
+      row.permission_scopes[0] === GOOGLE_MAIL_READ_SCOPE;
+    try {
+      accessible = accessible && options.access(context.scopeId, row.binding_id);
+      // eslint-disable-next-line no-catch-all/no-catch-all -- Missing or corrupt host denial/storage proofs close metadata disclosure without revealing private diagnostics.
+    } catch {
+      accessible = false;
+    }
+    return {
+      binding: row.binding_id,
+      version: row.version,
+      auth: row.auth,
+      scopes: row.permission_scopes,
+      mailbox: digest(row.mailbox_email),
+      accessible,
+    };
+  };
+  const policies: Array<ReturnType<typeof policy>> = [],
     states = rows.map((row) => {
-      let accessible =
-        row.auth === 'ready' &&
-        Array.isArray(row.permission_scopes) &&
-        row.permission_scopes.length === 1 &&
-        row.permission_scopes[0] === GOOGLE_MAIL_READ_SCOPE;
-      try {
-        accessible = accessible && options.access(context.scopeId, row.binding_id);
-        // eslint-disable-next-line no-catch-all/no-catch-all -- Missing or corrupt host denial/storage proofs close metadata disclosure without revealing private diagnostics.
-      } catch {
-        accessible = false;
-      }
-      policies.push({
-        binding: row.binding_id,
-        version: row.version,
-        auth: row.auth,
-        scopes: row.permission_scopes,
-        mailbox: digest(row.mailbox_email),
-        accessible,
-      });
+      const current = policy(row),
+        accessible = current.accessible;
+      policies.push(current);
       if (!accessible) return { binding: row.binding_id, accessible: false, text: 'Mail access is unavailable.' };
       const m = row.metadata,
         w = m?.window,
@@ -124,14 +138,39 @@ export async function mailAnswerNotice(
         text,
       };
     });
+  let identityDigest = digest(policies);
+  if (more) {
+    // Keep the displayed notice bounded while checking every linked policy,
+    // including host fences outside that page. Pages hold metadata only and
+    // remain subject to the caller's existing database deadline.
+    const inventory = createHash('sha256').update('cos-mail-policy-inventory/v1\n');
+    for (const current of policies) inventory.update(digest(current));
+    let after = rows.at(-1)!.binding_id;
+    while (true) {
+      const page = (
+        await client.query<PolicyRow>(
+          `SELECT b.id::text AS binding_id,b.mailbox_email,b.auth,b.version,b.permission_scopes
+           FROM cos.mail_bindings b JOIN cos.mail_states ms ON ms.scope_id=b.scope_id AND ms.binding_id=b.id
+           WHERE b.scope_id=$1 AND $2=ANY(b.processing_providers) AND b.id>$3::uuid
+           ORDER BY b.id LIMIT 100`,
+          [context.scopeId, context.provider, after],
+        )
+      ).rows;
+      for (const row of page) inventory.update(digest(policy(row)));
+      if (page.length < 100) break;
+      after = page.at(-1)!.binding_id;
+    }
+    identityDigest = digest({ contract: 'cos-mail-policy-inventory/v1', inventory: inventory.digest('hex') });
+  }
   const text = [
     'Mailbox coverage (stored Inbox/Sent selection from the most recent 30 days only):',
     ...(states.length
       ? states.map((s) => s.text)
       : ['Incomplete: no mailbox is connected for this processing provider.']),
+    ...(more ? ['Additional connected mailboxes are not shown here; this notice covers only the first ten.'] : []),
     'This is an as-of observation recorded with this answer. It does not establish that the inbox is empty or that all mail has been reviewed.',
   ].join('\n\n');
-  return { text, fingerprint: digest(states), identityDigest: digest(policies) };
+  return { text, fingerprint: more ? digest({ states, more }) : digest(states), identityDigest };
 }
 /** Bind exposure to account/access policy, not refresh IDs. Ordinary polling
  * must not discard the shared main conversation merely to update freshness. */
