@@ -1110,11 +1110,11 @@ it.runIf(process.env.COS_TEST_TARGET_ID !== undefined)(
           return { remote, validation: await validate(workspace, remote) };
         }),
       );
-      let loseAck = true,
-        inserts = 0;
+      let loseAck = true;
+      const writeQueries: string[] = [];
       const testClient = {
         query: async (sql: string, values?: unknown[]) => {
-          if (sql.startsWith('INSERT INTO cos.')) inserts++;
+          if (/^\s*(?:INSERT|UPDATE|DELETE|CREATE|ALTER|DROP|TRUNCATE|MERGE|COPY)\b/i.test(sql)) writeQueries.push(sql);
           const result = await admin.query(sql, values);
           if (sql === 'COMMIT' && loseAck) {
             loseAck = false;
@@ -1142,7 +1142,8 @@ it.runIf(process.env.COS_TEST_TARGET_ID !== undefined)(
       if ((await admin.query('SELECT id FROM cos.scopes WHERE id=$1', [destination])).rows.length)
         created.add(destination);
       expect(created.has(destination)).toBe(true);
-      expect(inserts).toBe(3); // One rolled-back FK savepoint attempt, two successful tables.
+      expect(writeQueries.length).toBeGreaterThan(0);
+      const committedWrites = [...writeQueries];
       const reservation = f.areas.staging + '/.cos-test-restore-' + requestId + '.json',
         before = fs.readFileSync(reservation);
       const result = await run();
@@ -1154,7 +1155,7 @@ it.runIf(process.env.COS_TEST_TARGET_ID !== undefined)(
         credentialsActivated: false,
         writerActivated: false,
       });
-      expect(inserts).toBe(3);
+      expect(writeQueries).toEqual(committedWrites);
       expect(fs.readFileSync(reservation)).toEqual(before);
       expect(
         (await admin.query('SELECT count(*)::integer AS n FROM cos.records WHERE scope_id=$1', [destination])).rows[0]

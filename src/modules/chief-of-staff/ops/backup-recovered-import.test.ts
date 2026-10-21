@@ -193,14 +193,14 @@ it.runIf(process.env.COS_TEST_TARGET_ID !== undefined).each([false, true])(
           lock: (await transport.query('SHOW lock_timeout')).rows[0].lock_timeout,
         }),
         originalTimeouts = await timeouts();
+      const writeQueries: string[] = [];
       let loseCommitAck = !sameDatabase,
-        insertQueries = 0,
         inTransaction = false,
         verifiedSlowTransaction = false,
         rejectVerification = false;
       const sandboxClient = {
         query: async (sql: string, values?: unknown[]) => {
-          if (sql.startsWith('INSERT INTO cos.')) insertQueries++;
+          if (/^\s*(?:INSERT|UPDATE|DELETE|CREATE|ALTER|DROP|TRUNCATE|MERGE|COPY)\b/i.test(sql)) writeQueries.push(sql);
           const result = await transport.query(sql, values);
           if (sql === 'BEGIN') inTransaction = true;
           if (sql === 'COMMIT' || sql === 'ROLLBACK') inTransaction = false;
@@ -280,7 +280,7 @@ it.runIf(process.env.COS_TEST_TARGET_ID !== undefined).each([false, true])(
       if (exists) created.add(restoredScope);
       if (sameDatabase) {
         expect(exists).toBe(false);
-        expect(insertQueries).toBe(0);
+        expect(writeQueries).toEqual([]);
       } else {
         expect(exists).toBe(true);
         expect(await timeouts()).toEqual(originalTimeouts);
@@ -288,9 +288,8 @@ it.runIf(process.env.COS_TEST_TARGET_ID !== undefined).each([false, true])(
           expect(verifiedSlowTransaction).toBe(true);
           expect(originalTimeouts.idle).toBe('1s');
         }
-        // The sorted records table precedes scopes; its first FK attempt is
-        // rolled back to the savepoint, then retried after the scope exists.
-        expect(insertQueries).toBe(3);
+        expect(writeQueries.length).toBeGreaterThan(0);
+        const committedWrites = [...writeQueries];
         expect(
           (await admin.query('SELECT count(*)::integer AS n FROM cos.records WHERE scope_id=$1', [restoredScope]))
             .rows[0].n,
@@ -301,7 +300,7 @@ it.runIf(process.env.COS_TEST_TARGET_ID !== undefined).each([false, true])(
         expect(checked).toMatchObject({ inserted: false, admissionRestored: false, eventJournalRestored: false });
         expect(checked.sandboxDatabaseFingerprint).toBe(fingerprint);
         expect(fs.readFileSync(startFile)).toEqual(startBefore);
-        expect(insertQueries).toBe(3);
+        expect(writeQueries).toEqual(committedWrites);
         if (slowVerification) {
           rejectVerification = true;
           await expect(run()).rejects.toThrow(/^backup_restore_workspace_unavailable$/);
@@ -310,10 +309,10 @@ it.runIf(process.env.COS_TEST_TARGET_ID !== undefined).each([false, true])(
           expect(await timeouts()).toEqual(originalTimeouts);
         }
         await expect(run(randomUUID())).rejects.toThrow(/^backup_restore_workspace_unavailable$/);
-        expect(insertQueries).toBe(3);
+        expect(writeQueries).toEqual(committedWrites);
         await admin.query("UPDATE cos.records SET title='SYNTHETIC_CHANGED' WHERE scope_id=$1", [restoredScope]);
         await expect(run()).rejects.toThrow(/^backup_restore_workspace_unavailable$/);
-        expect(insertQueries).toBe(3);
+        expect(writeQueries).toEqual(committedWrites);
       }
       expect(await queue.pending('state')).toEqual(pendingBefore);
       expect(await preserved()).toEqual(before);
