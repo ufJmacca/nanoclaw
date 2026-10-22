@@ -67,7 +67,7 @@ function verifyMailProfileVaultEvidence(
         journalEvents: 3,
         deniedCrossAccount: true,
         denialPreserved: true,
-        ...(drafts ? { readerProfilePreserved: true, readerOnlyScope: true, readerJournalEvents: 2 } : {}),
+        ...(drafts ? { readerProfilePreserved: true, readerOnlyScope: true, readerJournalEvents: 1 } : {}),
       },
       directory_races: { deniedCases: 7, replacementWrites: 0 },
       unrelated_worker_mount: {

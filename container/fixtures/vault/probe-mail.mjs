@@ -229,7 +229,7 @@ if (mode === 'install') {
   }
   const queue = createVaultBackupQueue(roots),
     pending = await queue.pending('credentials');
-  assert.equal(pending.length, drafts ? 5 : 3);
+  assert.equal(pending.length, drafts ? 4 : 3);
   let journalEvents = 0,
     readerJournalEvents = 0;
   for (const receipt of pending)
@@ -243,7 +243,7 @@ if (mode === 'install') {
       }
     });
   assert.equal(journalEvents, 3);
-  assert.equal(readerJournalEvents, drafts ? 2 : 0);
+  assert.equal(readerJournalEvents, drafts ? 1 : 0);
   if (drafts) {
     assert.equal(snapshot(readerProfile), reader.snapshot);
     await assertReader(reader);

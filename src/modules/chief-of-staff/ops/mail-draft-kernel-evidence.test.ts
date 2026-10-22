@@ -42,7 +42,7 @@ it.each([
   [4, 'credentialProfile', 'mail_reader'],
   [5, 'readerProfilePreserved', false],
   [5, 'readerOnlyScope', false],
-  [5, 'readerJournalEvents', 1],
+  [5, 'readerJournalEvents', 2],
   [6, 'deniedCases', 6],
   [10, 'sourceCommit', 'c'.repeat(40)],
   [10, 'databaseProfile', 'runtime-disposable'],

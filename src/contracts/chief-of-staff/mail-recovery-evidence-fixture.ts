@@ -138,7 +138,7 @@ export function mailRecoveryEvidenceFixture(drafts = false): Record<string, unkn
     rows[0].mode = 'draft-recovery-kernel';
     rows[4].contract = 'cos-g05-draft-vault-fixture/v1';
     rows[4].credentialProfile = 'mail_draft_writer';
-    Object.assign(rows[5], { readerProfilePreserved: true, readerOnlyScope: true, readerJournalEvents: 2 });
+    Object.assign(rows[5], { readerProfilePreserved: true, readerOnlyScope: true, readerJournalEvents: 1 });
     delete rows[10].encryptedMailCheckpoint;
     rows[10].encryptedMailDraftCheckpoint = 'passed';
     rows[10].tap = tap.replaceAll('G04 schema-18', 'G05 schema-19').replaceAll('G04 schema-19', 'G05 schema-20');
