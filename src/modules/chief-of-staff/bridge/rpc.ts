@@ -21,6 +21,7 @@ import type { MissionRequest } from '../contracts/mission-protocol.js';
 import type { TeamRequest } from '../contracts/team-protocol.js';
 import type { MandateChange } from '../contracts/mandate-protocol.js';
 import type { CalendarActionRequest } from '../contracts/action-protocol.js';
+import type { MailDraftCreateInput, MailDraftStatusInput } from '../contracts/mail-draft-protocol.js';
 import type { StrategyChange } from '../strategy/approval-store.js';
 import type { ReviewDraft, ReviewRequest, DirectionRequest } from '../contracts/strategy-protocol.js';
 import type {
@@ -70,7 +71,10 @@ export function createRpcHandler(dependencies: {
       const access =
         dependencies.knowledge && knowledgeContext ? await dependencies.knowledge.contextReady(knowledgeContext) : null;
       let reservation =
-        context?.origin && (!dependencies.knowledge || knowledgeContext) && (!access || access.status === 'ok')
+        context?.origin &&
+        !request.method.startsWith('cos_mail_draft_') &&
+        (!dependencies.knowledge || knowledgeContext) &&
+        (!access || access.status === 'ok')
           ? ((await dependencies.reserveTool?.(
               context,
               'rpc-' + digest({ request_id: request.request_id, delivery_id: content.delivery_id }),
@@ -97,7 +101,11 @@ export function createRpcHandler(dependencies: {
       else if (dependencies.knowledge && !knowledgeContext) result = { status: 'denied' };
       else if (access && access.status !== 'ok') result = { status: access.status };
       else if (reservation && reservation.status !== 'ok') result = { status: reservation.status };
-      else if (request.method.startsWith('cos_action_') && context.origin) result = { status: 'denied' };
+      else if (
+        (request.method.startsWith('cos_action_') || request.method.startsWith('cos_mail_draft_')) &&
+        context.origin
+      )
+        result = { status: 'denied' };
       else if (request.method === 'cos_status')
         result = context.origin
           ? { status: 'denied' }
@@ -331,6 +339,14 @@ export function createRpcHandler(dependencies: {
         result = dependencies.store.mailView
           ? await dependencies.store.mailView.thread(knowledgeContext, request.params as MailThreadInput)
           : { status: 'unavailable' };
+      else if (request.method === 'cos_mail_draft_create')
+        result = await dependencies.store.mailDrafts.create(
+          knowledgeContext,
+          request.request_id,
+          request.params as MailDraftCreateInput,
+        );
+      else if (request.method === 'cos_mail_draft_status')
+        result = await dependencies.store.mailDrafts.status(knowledgeContext, request.params as MailDraftStatusInput);
       else if (request.method === 'cos_knowledge_search')
         result = await dependencies.knowledge.search(knowledgeContext, {
           query: String(request.params.query),

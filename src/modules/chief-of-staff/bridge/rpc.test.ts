@@ -73,6 +73,73 @@ const calendarAction = {
   mission_id: null,
   attendees: [],
 };
+it('G05 routes typed draft requests only through the current retained main context and never reserves an automatic-origin tool', async () => {
+  const f = fixture(),
+    context = {
+      scopeId: 'fixture',
+      ownerId: 'owner',
+      sessionId: 'session',
+      agentGroupId: 'group',
+      ingressId: 'verified',
+    },
+    retained = { ...context, provider: 'codex', generation: '33333333-3333-4333-8333-333333333333' },
+    drafts = {
+      create: vi.fn().mockResolvedValue({ status: 'ok', draft_status: 'verified', operation_id: 'a'.repeat(64) }),
+      status: vi.fn().mockResolvedValue({ status: 'ok', draft_status: 'edited', operation_id: 'a'.repeat(64) }),
+    },
+    store = { ...f.store, mailDrafts: drafts } as unknown as PriorityStore,
+    knowledge = { contextReady: vi.fn().mockResolvedValue({ status: 'ok' }) } as unknown as KnowledgeStore,
+    resolveKnowledgeContext = vi.fn().mockResolvedValue(retained),
+    reserveTool = vi.fn().mockResolvedValue({ status: 'ok' }),
+    handler = createRpcHandler({
+      resolveContext: f.resolveContext,
+      resolveKnowledgeContext,
+      reserveTool,
+      store,
+      knowledge,
+    });
+  const create = {
+      ...request,
+      method: 'cos_mail_draft_create',
+      params: {
+        writer_binding_id: '44444444-4444-4444-8444-444444444444',
+        source_message_id: 'aa01',
+        reply_text: 'A fixture reply',
+      },
+    },
+    delivery_id = '22222222-2222-4222-8222-222222222222';
+  await handler({ action: 'cos_rpc', request: create, delivery_id }, { id: 'session' } as Session, f.db);
+  expect(drafts.create).toHaveBeenCalledWith(retained, request.request_id, create.params);
+  await handler(
+    {
+      action: 'cos_rpc',
+      request: { ...create, method: 'cos_mail_draft_status', params: { operation_id: 'a'.repeat(64) } },
+      delivery_id,
+    },
+    { id: 'session' } as Session,
+    f.db,
+  );
+  expect(drafts.status).toHaveBeenCalledWith(retained, { operation_id: 'a'.repeat(64) });
+  for (const origin of [
+    { kind: 'schedule', runId: 'run', generation: 1 },
+    { kind: 'mission_review', runId: 'run', generation: 1, submissionId: 'submission', owner: 'worker', fence: 1 },
+  ]) {
+    f.resolveContext.mockResolvedValue({ ...context, origin });
+    resolveKnowledgeContext.mockResolvedValue({ ...retained, origin });
+    await handler({ action: 'cos_rpc', request: create, delivery_id }, { id: 'session' } as Session, f.db);
+  }
+  expect(drafts.create).toHaveBeenCalledTimes(1);
+  expect(reserveTool).not.toHaveBeenCalled();
+  expect(
+    JSON.parse(
+      (
+        f.db.prepare('SELECT response FROM cos_rpc_responses WHERE payload_hash=?').get(digest(create)) as {
+          response: string;
+        }
+      ).response,
+    ).status,
+  ).toBe('denied');
+});
 it('S11 cos_status uses current main-context authority and never grants an automatic task inspection', async () => {
   const f = fixture();
   const statusRequest = { ...request, method: 'cos_status', params: { category: 'actions', limit: 5 } };
