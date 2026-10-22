@@ -1,6 +1,9 @@
 /** Exact flat TAP contracts; aggregate counts and successful exits alone are insufficient. */
 export const MAIL_STORE_CASES = [
   'G04 host inventory pages all retention bindings without account or message content',
+  'G04 mailbox overflow keeps bounded notices and retained context while checking undisplayed access',
+  'G04 mailbox legacy context identity remains valid with 1 bindings',
+  'G04 mailbox legacy context identity remains valid with 10 bindings',
   'G04 only one concurrent host claims a due poll; claims never fabricate a capture or success',
   'G04 mailbox schema is additive, constrained and included in coordinated checkpoints',
   'G04 binding replay preserves identity and refuses broader grants and foreign owners',

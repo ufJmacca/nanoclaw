@@ -53,9 +53,11 @@ it.each([
   'empty',
   'non-text',
 ])('refuses %s mail evidence', (change) => {
+  const count = cases('all').length;
   let text = report();
-  if (change === 'missing') text = text.replace(/^ok 46 - .*\n/m, '');
-  if (change === 'duplicate') text = text.replace(/^ok 46 - .*$/m, 'ok 1 - ' + MAIL_STORE_CASES[0]);
+  if (change === 'missing') text = text.replace(new RegExp(`^ok ${count} - .*\\n`, 'm'), '');
+  if (change === 'duplicate')
+    text = text.replace(new RegExp(`^ok ${count} - .*$`, 'm'), 'ok 1 - ' + MAIL_STORE_CASES[0]);
   if (change === 'unknown') text = text.replace(MAIL_CHECKPOINT_CASES[1], 'mocked empty recovery');
   if (change === 'zero-id') text = text.replace('ok 1 -', 'ok 0 -');
   if (change === 'malformed') text += '\nok 00 - invented';
@@ -64,8 +66,8 @@ it.each([
   if (change === 'skip')
     text = text.replace('ok 2 - ' + MAIL_STORE_CASES[1], 'ok 2 - ' + MAIL_STORE_CASES[1] + ' # SKIP');
   if (change === 'todo') text = text.replace('# todo 0', '# todo 1');
-  if (change === 'summary') text = text.replace('# pass 46', '# pass 45');
-  if (change === 'plan') text = text.replace('1..46', '1..45');
+  if (change === 'summary') text = text.replace(`# pass ${count}`, `# pass ${count - 1}`);
+  if (change === 'plan') text = text.replace(`1..${count}`, `1..${count - 1}`);
   if (change === 'duplicate-summary') text += '\n# fail 0';
   if (change === 'foreign-suite') text = report('native');
   if (change === 'oversize') text += 'x'.repeat(1024 ** 2);

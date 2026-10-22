@@ -287,6 +287,7 @@ export function verifyMailArtifactFixtureEvidence(text: string, identity: Identi
       root !== '/var/lib/docker/volumes/' + volume + '/_data'
     )
       throw Error('set');
+    let actualDatabaseCases = 0;
     for (const worker of [null, ...identity.workerImages]) {
       const native = worker !== null,
         suite = native ? 'native' : 'database';
@@ -322,12 +323,13 @@ export function verifyMailArtifactFixtureEvidence(text: string, identity: Identi
       const next = lines.findIndex((line) => line.startsWith('{')),
         end = next < 0 ? lines.length : next,
         report = lines.splice(0, end).join('\n');
-      verifyMailFixtureReport(report, suite);
+      const verified = verifyMailFixtureReport(report, suite);
+      if (suite === 'database') actualDatabaseCases = verified.actualCases;
     }
     if (lines.some((line) => line.trim())) throw Error('extra');
     return Object.freeze({
       status: 'passed' as const,
-      actualDatabaseCases: 45,
+      actualDatabaseCases,
       actualNativeRuns: 2,
       sourceOverrides: false as const,
       installedAcceptance: false as const,

@@ -312,7 +312,7 @@ it('rejects unsupported mail checks before interpreting their report', () => {
 it('requires the complete immutable host database run and both actual worker conversations', () => {
   expect(verifyMailArtifactFixtureEvidence(serialize(fixture()), identity)).toEqual({
     status: 'passed',
-    actualDatabaseCases: 45,
+    actualDatabaseCases: MAIL_STORE_CASES.length + MAIL_CHECKPOINT_CASES.length,
     actualNativeRuns: 2,
     sourceOverrides: false,
     installedAcceptance: false,
@@ -391,7 +391,11 @@ it.each([
   if (reason === 'extra-header') Object.assign(f.header, { ownerApproval: true });
   if (reason === 'missing-run') f.runs.pop();
   if (reason === 'duplicate-worker') f.runs[2].binding.workerImage = native.binding.workerImage;
-  if (reason === 'missing-case') run.report = run.report.replace(/^ok 45 - .*\n/m, '');
+  if (reason === 'missing-case')
+    run.report = run.report.replace(
+      new RegExp(`^ok ${MAIL_STORE_CASES.length + MAIL_CHECKPOINT_CASES.length} - .*\\n`, 'm'),
+      '',
+    );
   if (reason === 'skipped') native.report += '\n# skipped 1';
   if (reason === 'different-suite') run.binding.suite = 'all';
   if (reason === 'source-override') run.binding.sourceOverrides = true;
