@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
 import { macReleaseCommand, releaseCheckImageIds } from './mac-release-cli.js';
-import { BACKUP_RELEASE_CHECKS, MAIL_RELEASE_CHECKS } from './release-manifest.js';
+import { BACKUP_RELEASE_CHECKS, MAIL_RELEASE_CHECKS, MAIL_DRAFT_RELEASE_CHECKS } from './release-manifest.js';
 import { fixtureRelease } from '../../../contracts/chief-of-staff/release-fixture.js';
 import { writeAtomic } from './target-state.js';
 import { readStageTimings } from './stage-timing.js';
@@ -54,7 +54,7 @@ const images = [
   { role: 'agent' as const, id: 'sha256:' + 'b'.repeat(64) },
   { role: 'agent' as const, id: 'sha256:' + 'c'.repeat(64) },
 ];
-it('admits G02 through G04 candidate syntax while refusing historical and unimplemented future release creation', async () => {
+it('admits G02 through G05 candidate syntax while refusing historical and unimplemented future release creation', async () => {
   const args = (slice: string) => [
     'init',
     'release-' + '1'.repeat(12) + '-20261011000000',
@@ -65,12 +65,14 @@ it('admits G02 through G04 candidate syntax while refusing historical and unimpl
   await expect(macReleaseCommand(args('G02'))).rejects.toThrow('invalid_candidate_source');
   await expect(macReleaseCommand(args('G03'))).rejects.toThrow('invalid_candidate_source');
   await expect(macReleaseCommand(args('G04'))).rejects.toThrow('invalid_candidate_source');
-  for (const slice of ['S10', 'G05', 'G06', 'G07'])
+  await expect(macReleaseCommand(args('G05'))).rejects.toThrow('invalid_candidate_source');
+  for (const slice of ['S10', 'G06', 'G07'])
     await expect(macReleaseCommand(args(slice))).rejects.toThrow('current_release_slice_required');
 });
 it.each([
   ...BACKUP_RELEASE_CHECKS,
   ...MAIL_RELEASE_CHECKS.filter((name) => name !== 'mail_evidence'),
+  ...MAIL_DRAFT_RELEASE_CHECKS.filter((name) => name !== 'draft_transport'),
   'vault_helper',
   'vault_kernel',
   'vault_wire',
@@ -86,7 +88,7 @@ it.each([
     ),
   ).toThrow('image_identity_required');
 });
-it.each(['protected_state', 'mail_evidence', 'host_image', 'agent_image', 'image_isolation'])(
+it.each(['protected_state', 'mail_evidence', 'draft_transport', 'host_image', 'agent_image', 'image_isolation'])(
   'binds the %s gate to the complete immutable host and worker set',
   (name) => {
     expect(releaseCheckImageIds(images, name)).toEqual(images.map((image) => image.id));
@@ -104,7 +106,14 @@ it.each(['duplicate', 'invalid-id', 'two-hosts'])(
     if (reason === 'duplicate') current[1].id = current[0].id;
     if (reason === 'invalid-id') current[1].id = 'mutable-image-tag';
     if (reason === 'two-hosts') Object.assign(current[1], { role: 'host' });
-    for (const name of ['backup_recovery', 'vault_kernel', 'protected_state', 'host_image'])
+    for (const name of [
+      'backup_recovery',
+      'vault_kernel',
+      'protected_state',
+      'host_image',
+      'draft_policy',
+      'draft_transport',
+    ])
       expect(() => releaseCheckImageIds(current, name)).toThrow('image_identity_required');
   },
 );

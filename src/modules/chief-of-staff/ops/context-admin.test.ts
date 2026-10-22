@@ -1060,12 +1060,16 @@ it.each(['old-release', 'retired-release', 'membership', 'running', 'unpaused', 
     expect(runMailDraftAccountAdmin).not.toHaveBeenCalled();
   },
 );
-it.each(['mail-setup', 'mail-link'] as const)(
-  '%s requires the G04 payload, native pause, private membership and current maintenance even while execution is disabled',
-  async (command) => {
+it.each(
+  (['G04', 'G05'] as const).flatMap((slice) =>
+    (['mail-setup', 'mail-link'] as const).map((command) => ({ slice, command })),
+  ),
+)(
+  '$command requires the $slice payload, native pause, private membership and current maintenance even while execution is disabled',
+  async ({ command, slice }) => {
     fs.rmSync(state + '/codex-auth', { recursive: true });
     const run = vi.mocked(runMailAccountAdmin),
-      release = await currentMailRelease();
+      release = await currentMailRelease(true, slice);
     let retained!: () => Promise<void>;
     run.mockImplementation(async (o) => {
       await o.check();

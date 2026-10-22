@@ -52,7 +52,7 @@ export async function verifyRetainedAdminHelper(
     const manifest = await verifyRetainedReleaseHelper(settings, binding, invoked);
     if (manifest.slice === 'S11') return manifest;
     if (
-      !['G01', 'G02', 'G03', 'G04'].includes(manifest.slice) ||
+      !['G01', 'G02', 'G03', 'G04', 'G05'].includes(manifest.slice) ||
       readTarget(settings.stateRoot, binding).lifecycle !== 'protected'
     )
       throw Error('helper_scope_conflict');

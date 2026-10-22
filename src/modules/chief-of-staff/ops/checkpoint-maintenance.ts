@@ -51,7 +51,7 @@ export async function checkpointMaintenance(input: {
     state = readTarget(root, binding),
     owner = 'release-backup-' + requestId;
   if (
-    !['G02', 'G03', 'G04'].includes(manifest.slice) ||
+    !['G02', 'G03', 'G04', 'G05'].includes(manifest.slice) ||
     state.lifecycle !== 'protected' ||
     state.releaseId !== manifest.releaseId
   )

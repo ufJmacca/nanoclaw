@@ -391,7 +391,7 @@ export async function contextAdminCommand(
     }
   }
   const mailReleaseId =
-    (isMailAccountCommand(args) && vaultRelease?.release.slice === 'G04') ||
+    (isMailAccountCommand(args) && ['G04', 'G05'].includes(vaultRelease?.release.slice ?? '')) ||
     ((isMailDraftAccountCommand(args) || isMailDraftAdminCommand(args)) && vaultRelease?.release.slice === 'G05')
       ? vaultRelease!.release.releaseId
       : null;
@@ -468,7 +468,8 @@ export async function contextAdminCommand(
         });
       }
       if (isMailAccountCommand(args)) {
-        if (!vaultRelease || vaultRelease.release.slice !== 'G04') throw Error('mail_account_operation_unavailable');
+        if (!vaultRelease || !['G04', 'G05'].includes(vaultRelease.release.slice))
+          throw Error('mail_account_operation_unavailable');
         return runMailAccountAdmin({
           args,
           env,

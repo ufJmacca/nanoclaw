@@ -27,7 +27,7 @@ afterEach(() => {
   vi.clearAllMocks();
   for (const root of cleanup.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
-function fixture() {
+function fixture(slice: 'G04' | 'G05' = 'G04') {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-mail-account-'));
   cleanup.push(base);
   const roots = { targetRoot: base + '/target', installationRoot: base + '/app', dataRoot: base + '/data' },
@@ -89,7 +89,7 @@ function fixture() {
     roots,
     env: {},
     binding,
-    release: fixtureVaultRelease('G04'),
+    release: fixtureVaultRelease(slice),
     check: vi.fn(async () => {}),
     assertAuthority: vi.fn(),
   };
@@ -232,41 +232,44 @@ it('configures only the dedicated protected profile and leaves Calendar, runtime
   expect(backupCalendarState).toHaveBeenCalledTimes(4);
   expect(fs.readFileSync(path.dirname(f.root) + '/oauth-client.json', 'utf8')).toContain('PRIVATE_CALENDAR_CANARY');
 });
-it('verifies the intended provider mailbox before persisting tokens, backs up and binds only read access while paused', async () => {
-  const f = fixture();
-  await f.configure();
-  expect(await runMailAccountAdmin({ ...f.options, args: f.link }, f.dependencies)).toEqual({
-    status: 'ok',
-    scope_id: 'fixture',
-    binding_id: f.link.bindingId,
-    paused: true,
-    live_model: 'not_invoked',
-  });
-  expect(f.display).toHaveBeenCalledOnce();
-  expect(f.provider).toHaveBeenCalledTimes(2);
-  expect(f.journal).toHaveBeenCalledWith(
-    expect.objectContaining({ sourceKind: 'mail_reader', generation: 1, phase: 'ready' }),
-    expect.any(Function),
-  );
-  expect(f.store.bind).toHaveBeenCalledWith(expect.objectContaining({ ownerId: 'owner', scopeId: 'fixture' }), {
-    id: f.link.bindingId,
-    provider: 'google',
-    mailboxEmail: f.selection.mailboxEmail,
-    processingProviders: ['codex'],
-    credentialRef: f.link.bindingId,
-    scopes: [GOOGLE_MAIL_READ_SCOPE],
-  });
-  expect(backupCalendarState).toHaveBeenCalledTimes(4);
-  expect(f.store.database.pool.end).toHaveBeenCalledOnce();
-  const host = await openMailCredentials(f.roots, f.dependencies.inspect, f.dependencies.memory, f.journal);
-  try {
-    expect(await host.credentials.inspect('fixture', f.link.bindingId, f.link.bindingId)).toMatchObject({
+it.each(['G04', 'G05'] as const)(
+  '%s verifies the intended provider mailbox before persisting tokens, backs up and binds only read access while paused',
+  async (slice) => {
+    const f = fixture(slice);
+    await f.configure();
+    expect(await runMailAccountAdmin({ ...f.options, args: f.link }, f.dependencies)).toEqual({
+      status: 'ok',
+      scope_id: 'fixture',
+      binding_id: f.link.bindingId,
+      paused: true,
+      live_model: 'not_invoked',
+    });
+    expect(f.display).toHaveBeenCalledOnce();
+    expect(f.provider).toHaveBeenCalledTimes(2);
+    expect(f.journal).toHaveBeenCalledWith(
+      expect.objectContaining({ sourceKind: 'mail_reader', generation: 1, phase: 'ready' }),
+      expect.any(Function),
+    );
+    expect(f.store.bind).toHaveBeenCalledWith(expect.objectContaining({ ownerId: 'owner', scopeId: 'fixture' }), {
+      id: f.link.bindingId,
+      provider: 'google',
+      mailboxEmail: f.selection.mailboxEmail,
+      processingProviders: ['codex'],
+      credentialRef: f.link.bindingId,
       scopes: [GOOGLE_MAIL_READ_SCOPE],
     });
-  } finally {
-    await host.close();
-  }
-});
+    expect(backupCalendarState).toHaveBeenCalledTimes(4);
+    expect(f.store.database.pool.end).toHaveBeenCalledOnce();
+    const host = await openMailCredentials(f.roots, f.dependencies.inspect, f.dependencies.memory, f.journal);
+    try {
+      expect(await host.credentials.inspect('fixture', f.link.bindingId, f.link.bindingId)).toMatchObject({
+        scopes: [GOOGLE_MAIL_READ_SCOPE],
+      });
+    } finally {
+      await host.close();
+    }
+  },
+);
 it('reconciles an interrupted bind without replaying OAuth and preserves a later independent denial', async () => {
   const f = fixture();
   await f.configure();

@@ -38,7 +38,7 @@ export async function installResticRuntimeArtifact(input: {
       source = path.join(input.payload, 'libexec'),
       destination = path.join(root, 'restic');
     if (
-      !['G02', 'G03', 'G04'].includes(manifest.slice) ||
+      !['G02', 'G03', 'G04', 'G05'].includes(manifest.slice) ||
       !manifest.backupArtifact ||
       !path.isAbsolute(app) ||
       path.resolve(app) !== app ||

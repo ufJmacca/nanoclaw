@@ -27,7 +27,7 @@ afterEach(() => {
   vi.resetAllMocks();
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
-async function fixture(slice: 'G02' | 'G03' | 'G04' = 'G02') {
+async function fixture(slice: 'G02' | 'G03' | 'G04' | 'G05' = 'G02') {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-capture-command-'));
   roots.push(home);
   fs.chmodSync(home, 0o700);
@@ -102,7 +102,7 @@ async function fixture(slice: 'G02' | 'G03' | 'G04' = 'G02') {
     invoke: () => reconcileTargetBackupCapture(settings, '/fixture/target-helper.js', 'state', id),
   };
 }
-it.each(['G02', 'G03', 'G04'] as const)(
+it.each(['G02', 'G03', 'G04', 'G05'] as const)(
   '%s owner command retires a known incomplete copy under current admission and supports stable replay',
   async (slice) => {
     const x = await fixture(slice);

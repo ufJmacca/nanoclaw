@@ -77,7 +77,7 @@ function operation(roots: CalendarStorageRoots, id: string, request: unknown): s
   }
   return root;
 }
-/** Requires the installed healthy G04 payload plus enclosing target, maintenance,
+/** Requires the installed healthy G04/G05 payload plus enclosing target, maintenance,
  * native host and paused private owner checks. Linking leaves all those pauses,
  * model counters and conversation identities unchanged. It reads only /profile.
  */
@@ -110,12 +110,13 @@ export async function runMailAccountAdmin(o: Options, d: Dependencies = {}): Pro
             o.args.manifestFile,
           ],
     );
+    const schema = o.release.slice === 'G04' ? 19 : o.release.slice === 'G05' ? 20 : null;
     if (
       args.scopeId !== o.binding.scopeId ||
       o.binding.provider !== 'codex' ||
-      o.release.slice !== 'G04' ||
-      o.release.postgres.minimum !== 19 ||
-      o.release.postgres.maximum !== 19
+      schema === null ||
+      o.release.postgres.minimum !== schema ||
+      o.release.postgres.maximum !== schema
     )
       throw Error('mail_account_operation_unavailable');
     const base = { scope_id: args.scopeId, paused: true, live_model: 'not_invoked' };
