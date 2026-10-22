@@ -23,6 +23,17 @@ const replace = (name: string, value: string) => {
 };
 
 describe('G05 bound plain-text reply envelope', () => {
+  it('binds semantic content before reserving a correlation without making retries into new content', () => {
+    const first = plainTextReply(source(), 'A reply\nSecond line', correlation);
+    const other = plainTextReply(source(), 'A reply\r\nSecond line', 'b'.repeat(64));
+    expect(other.contentDigest).toBe(first.contentDigest);
+    expect(other.raw).not.toBe(first.raw);
+    expect(other.correlationMessageId).not.toBe(first.correlationMessageId);
+    expect(plainTextReply(source(), 'Changed reply', correlation).contentDigest).not.toBe(first.contentDigest);
+    expect(
+      plainTextReply(replace('Reply-To', 'other@example.test'), 'A reply\nSecond line', correlation).contentDigest,
+    ).not.toBe(first.contentDigest);
+  });
   it('uses one validated Reply-To without copying other recipients', () => {
     const input = source();
     input.headers.push({ name: 'Reply-To', value: '"Support, Team" <reply@example.test>' });

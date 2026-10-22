@@ -190,6 +190,6 @@ export function plainTextReply(
     threadId: envelope.threadId,
     raw,
     correlationMessageId,
-    contentDigest: digest({ threadId: envelope.threadId, raw }),
+    contentDigest: digest({ format: 'cos-mail-reply-content/v1', envelope, text: normalized }),
   };
 }
