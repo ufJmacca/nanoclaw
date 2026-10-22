@@ -31,6 +31,13 @@ export async function startMailAuthorization(
 ): Promise<CalendarAuthorizationListener> {
   return startAuthorization(client, options, 'mail_reader');
 }
+/** Separate explicit draft-writer consent. It cannot adopt or widen the reader's grant. */
+export async function startMailDraftAuthorization(
+  client: GoogleOAuthClient,
+  options: OAuthTransport & { timeoutMs?: number } = {},
+): Promise<CalendarAuthorizationListener> {
+  return startAuthorization(client, options, 'mail_draft_writer');
+}
 async function startAuthorization(
   client: GoogleOAuthClient,
   options: OAuthTransport & { timeoutMs?: number },
@@ -38,7 +45,7 @@ async function startAuthorization(
 ): Promise<CalendarAuthorizationListener> {
   const checked = checkedClient(client),
     timeoutMs = options.timeoutMs ?? 600000,
-    source = profile === 'mail_reader' ? 'Mail' : 'Calendar';
+    source = profile === 'mail_reader' || profile === 'mail_draft_writer' ? 'Mail' : 'Calendar';
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 600000)
     throw new CalendarReadError('calendar_oauth_configuration_invalid');
   let resolve!: (tokens: GoogleCalendarTokens) => void, reject!: (error: CalendarReadError) => void;
