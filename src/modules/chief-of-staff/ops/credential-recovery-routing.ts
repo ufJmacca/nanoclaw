@@ -44,10 +44,14 @@ function destinationAllowed(event: CredentialEvent, file: CredentialRecoveryRout
       file.destination === 'backup-credentials/' + file.name
     );
   }
-  if (!['calendar_reader', 'calendar_owned_event_writer', 'mail_reader'].includes(event.sourceKind)) return false;
-  const mail = event.sourceKind === 'mail_reader',
+  if (
+    !['calendar_reader', 'calendar_owned_event_writer', 'mail_reader', 'mail_draft_writer'].includes(event.sourceKind)
+  )
+    return false;
+  const draft = event.sourceKind === 'mail_draft_writer',
+    mail = event.sourceKind === 'mail_reader' || draft,
     writer = event.sourceKind === 'calendar_owned_event_writer';
-  const base = mail ? 'google/calendar/mail-reader' : 'google/calendar',
+  const base = mail ? 'google/calendar/' + (draft ? 'mail-draft-writer' : 'mail-reader') : 'google/calendar',
     credentials = writer ? 'writer-credentials' : 'credentials',
     fences = writer ? 'writer-access-denials' : 'access-denials';
   if (file.name === 'credential.json')
@@ -74,11 +78,14 @@ function destinationAllowed(event: CredentialEvent, file: CredentialRecoveryRout
         '/' +
         credentials +
         '/' +
-        credentialRootMarker(mail ? 'mail_reader' : writer ? 'owned_event_writer' : 'reader').name
+        credentialRootMarker(
+          draft ? 'mail_draft_writer' : mail ? 'mail_reader' : writer ? 'owned_event_writer' : 'reader',
+        ).name
     );
   if (file.name === 'denial-profile.txt')
     return file.destination === base + '/' + fences + '/' + accessFenceRootMarker().name;
-  if (file.name === 'profile-proof.json') return file.destination === (mail ? base + '/.cos-mail-reader' : null);
+  if (file.name === 'profile-proof.json')
+    return file.destination === (mail ? base + (draft ? '/.cos-mail-draft-writer' : '/.cos-mail-reader') : null);
   return false;
 }
 function id(value: unknown): string {

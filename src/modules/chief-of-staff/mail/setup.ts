@@ -10,10 +10,9 @@ import { accessFenceRootMarker } from '../calendar/access-fences.js';
 import { verifyVaultStorage, withVaultDirectory } from '../ops/vault-storage.js';
 import { verifyVaultMemory } from '../ops/vault-memory.js';
 import { digest } from '../domain/contracts.js';
-import { MAIL_READER_ROOT_MARKER, mailReaderRootIdentity, withMailReaderStorage } from './storage.js';
+import { mailProfileRootIdentity, withMailProfileStorage } from './storage.js';
+import { mailProfile, type MailCredentialProfile } from './profile.js';
 type Step = 'intent' | 'directories' | 'client' | 'markers' | 'proof';
-const intentName = '.cos-mail-reader-initializing';
-const directoryProofName = '.cos-mail-reader-setup-directories';
 const descriptor = (fd: number) => '/proc/self/fd/' + fd;
 const fileIdentity = (stat: fs.Stats) =>
   digest({
@@ -57,6 +56,20 @@ export async function initializeMailProfile(
   memory: () => void = verifyVaultMemory,
   hooks: { afterStep?(step: Step): Promise<void> } = {},
 ): Promise<{ status: 'ready' }> {
+  return initializeMailProfileFor('mail_reader', roots, client, authority, inspect, memory, hooks);
+}
+export async function initializeMailProfileFor(
+  profile: MailCredentialProfile,
+  roots: CalendarStorageRoots,
+  client: GoogleOAuthClient,
+  authority: { operationId: string; assertAuthority(): void },
+  inspect?: StorageInspection,
+  memory: () => void = verifyVaultMemory,
+  hooks: { afterStep?(step: Step): Promise<void> } = {},
+): Promise<{ status: 'ready' }> {
+  const selected = mailProfile(profile),
+    intentName = selected.marker + '-initializing',
+    directoryProofName = selected.marker + '-setup-directories';
   let clientBytes: Buffer | undefined;
   try {
     if (!authority || !uuid(authority.operationId) || typeof authority.assertAuthority !== 'function')
@@ -72,7 +85,7 @@ export async function initializeMailProfile(
       }) + '\n',
     );
     const policy = verifyVaultStorage(roots, inspect),
-      namedRoot = path.join(policy.vaultRoot, 'google/calendar/mail-reader');
+      namedRoot = path.join(policy.vaultRoot, 'google/calendar', selected.directory);
     return await withVaultDirectory(
       roots,
       'google/calendar',
@@ -80,17 +93,17 @@ export async function initializeMailProfile(
         parentLock(parent, async () => {
           const handles: number[] = [],
             directories: Array<{ named: string; fd: number; ino: number }> = [];
-          let calendarClient: { fd: number; name: string; identity: string } | undefined;
+          const existingClients: Array<{ fd: number; name: string; identity: string }> = [];
           const device = fs.statSync(parent).dev;
           const current = () => {
             authority.assertAuthority();
             parentCurrent();
-            if (
-              calendarClient &&
-              (fileIdentity(fs.fstatSync(calendarClient.fd)) !== calendarClient.identity ||
-                fileIdentity(fs.lstatSync(calendarClient.name)) !== calendarClient.identity)
-            )
-              throw Error('calendar_client_changed');
+            for (const pinned of existingClients)
+              if (
+                fileIdentity(fs.fstatSync(pinned.fd)) !== pinned.identity ||
+                fileIdentity(fs.lstatSync(pinned.name)) !== pinned.identity
+              )
+                throw Error('calendar_client_changed');
             for (const { named, fd, ino } of directories) {
               const held = fs.fstatSync(fd),
                 now = fs.lstatSync(named);
@@ -198,58 +211,62 @@ export async function initializeMailProfile(
           };
           try {
             current();
-            const calendarName = parent + '/oauth-client.json';
-            const calendarFd = fs.openSync(
-              calendarName,
-              fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK,
-            );
-            handles.push(calendarFd);
-            const stat = fs.fstatSync(calendarFd);
-            if (
-              !stat.isFile() ||
-              stat.dev !== device ||
-              stat.uid !== process.getuid?.() ||
-              (stat.mode & 0o7777) !== 0o600 ||
-              stat.nlink !== 1 ||
-              stat.size < 1 ||
-              stat.size > 16384
-            )
-              throw Error('calendar_client_unavailable');
-            calendarClient = { fd: calendarFd, name: calendarName, identity: fileIdentity(stat) };
-            const bytes = Buffer.alloc(stat.size + 1);
-            try {
-              if (fs.readSync(calendarFd, bytes, 0, bytes.length, 0) !== stat.size)
-                throw Error('calendar_client_changed');
-              current();
-              const calendar = checkedClient(
-                JSON.parse(
-                  new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(0, stat.size)),
-                ) as GoogleOAuthClient,
+            for (const name of ['oauth-client.json', 'writer-oauth-client.json']) {
+              const calendarName = parent + '/' + name;
+              if (name !== 'oauth-client.json' && !fs.lstatSync(calendarName, { throwIfNoEntry: false })) continue;
+              const calendarFd = fs.openSync(
+                calendarName,
+                fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK,
               );
-              if (calendar.clientId === client.clientId) throw Error('separate_mail_client_required');
-            } finally {
-              bytes.fill(0);
+              handles.push(calendarFd);
+              const stat = fs.fstatSync(calendarFd);
+              if (
+                !stat.isFile() ||
+                stat.dev !== device ||
+                stat.uid !== process.getuid?.() ||
+                (stat.mode & 0o7777) !== 0o600 ||
+                stat.nlink !== 1 ||
+                stat.size < 1 ||
+                stat.size > 16384
+              )
+                throw Error('calendar_client_unavailable');
+              existingClients.push({ fd: calendarFd, name: calendarName, identity: fileIdentity(stat) });
+              const bytes = Buffer.alloc(stat.size + 1);
+              try {
+                if (fs.readSync(calendarFd, bytes, 0, bytes.length, 0) !== stat.size)
+                  throw Error('calendar_client_changed');
+                current();
+                const calendar = checkedClient(
+                  JSON.parse(
+                    new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(0, stat.size)),
+                  ) as GoogleOAuthClient,
+                );
+                if (calendar.clientId === client.clientId) throw Error('separate_mail_client_required');
+              } finally {
+                bytes.fill(0);
+              }
             }
-            const root = pin(parent, 'mail-reader', namedRoot),
+            const root = pin(parent, selected.directory, namedRoot),
               rootPath = descriptor(root);
             const names = fs.readdirSync(rootPath);
             shape(root, [
               intentName,
               directoryProofName,
-              MAIL_READER_ROOT_MARKER,
+              selected.marker,
               'credentials',
               'access-denials',
               'oauth-client.json',
             ]);
             const verifyCompleted = () =>
-              withMailReaderStorage(
+              withMailProfileStorage(
+                profile,
                 roots,
                 async (storage) => {
                   current();
                   if (digest(checkedClient(storage.readClient() as GoogleOAuthClient)) !== digest(client))
                     throw Error('setup_client_changed');
                   for (const [child, marker] of [
-                    ['credentials', credentialRootMarker('mail_reader')],
+                    ['credentials', credentialRootMarker(profile)],
                     ['access-denials', accessFenceRootMarker()],
                   ] as const) {
                     storage.assertCurrent();
@@ -296,13 +313,13 @@ export async function initializeMailProfile(
                 inspect,
                 memory,
               );
-            if (!names.includes(intentName) && names.includes(MAIL_READER_ROOT_MARKER)) {
+            if (!names.includes(intentName) && names.includes(selected.marker)) {
               return await verifyCompleted();
             }
             if (names.length && !names.includes(intentName)) throw Error('unowned_mail_setup');
             const intent = Buffer.from(
               JSON.stringify({
-                contract: 'cos-mail-profile-setup/v1',
+                contract: selected.setupContract,
                 targetDigest: digest(roots.targetRoot),
                 operationId: authority.operationId,
                 filesystemUuid: policy.volume.filesystemUuid,
@@ -319,7 +336,7 @@ export async function initializeMailProfile(
             await step('intent');
             const credentials = pin(rootPath, 'credentials', namedRoot + '/credentials'),
               fences = pin(rootPath, 'access-denials', namedRoot + '/access-denials');
-            const credentialMarker = credentialRootMarker('mail_reader'),
+            const credentialMarker = credentialRootMarker(profile),
               fenceMarker = accessFenceRootMarker();
             shape(credentials, [credentialMarker.name]);
             shape(fences, [fenceMarker.name]);
@@ -328,7 +345,7 @@ export async function initializeMailProfile(
               directoryProofName,
               Buffer.from(
                 JSON.stringify({
-                  contract: 'cos-mail-profile-setup-directories/v1',
+                  contract: selected.directoriesContract,
                   intentDigest: createHash('sha256').update(intent).digest('hex'),
                   credentialsInode: fs.fstatSync(credentials).ino,
                   accessDenialsInode: fs.fstatSync(fences).ino,
@@ -343,10 +360,10 @@ export async function initializeMailProfile(
             await step('markers');
             ensure(
               root,
-              MAIL_READER_ROOT_MARKER,
+              selected.marker,
               Buffer.from(
                 JSON.stringify(
-                  mailReaderRootIdentity(roots, {
+                  mailProfileRootIdentity(profile, roots, {
                     filesystemUuid: policy.volume.filesystemUuid,
                     directoryInodes: {
                       profile: fs.fstatSync(root).ino,

@@ -12,6 +12,8 @@ import { GOOGLE_EVENT_READ_SCOPE } from '../calendar/reader.js';
 import { GOOGLE_MAIL_READ_SCOPE } from '../mail/oauth.js';
 import { GOOGLE_OWNED_EVENT_WRITE_SCOPE, GOOGLE_CALENDAR_METADATA_SCOPE } from '../actions/writer.js';
 import { initializeMailProfile } from '../mail/setup.js';
+import { initializeMailDraftProfile } from '../mail-drafts/setup.js';
+import { GOOGLE_MAIL_DRAFT_SCOPE } from '../mail-drafts/oauth.js';
 import { recordMailRecoveryPage } from '../mail/recovery.js';
 import { makeCredentialEvent, type CredentialEvent, type CredentialJournal } from './backup-credential-event.js';
 import {
@@ -36,7 +38,7 @@ afterEach(() => {
   vi.restoreAllMocks();
   for (const root of cleanup.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
-async function fixture() {
+async function fixture(includeDraft = false) {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-vault-credential-snapshot-'));
   cleanup.push(base);
   const roots = { targetRoot: base + '/target', installationRoot: base + '/app', dataRoot: base + '/data' },
@@ -81,16 +83,36 @@ async function fixture() {
     memory,
   );
   writeAtomic(calendar, 'writer-oauth-client.json', { clientId: 'writer-fixture.apps.googleusercontent.com' });
+  if (includeDraft)
+    await initializeMailDraftProfile(
+      roots,
+      { clientId: 'draft-fixture.apps.googleusercontent.com' },
+      { operationId: randomUUID(), assertAuthority: authority },
+      inspect,
+      memory,
+    );
   const profiles = [],
     events: CredentialEvent[] = [];
-  for (const profile of ['reader', 'owned_event_writer', 'mail_reader'] as const) {
-    const root = profile === 'mail_reader' ? calendar + '/mail-reader' : calendar,
+  const configuredProfiles: OAuthScopeProfile[] = ['reader', 'owned_event_writer', 'mail_reader'];
+  if (includeDraft) configuredProfiles.push('mail_draft_writer');
+  for (const profile of configuredProfiles) {
+    const root =
+        profile === 'mail_reader'
+          ? calendar + '/mail-reader'
+          : profile === 'mail_draft_writer'
+            ? calendar + '/mail-draft-writer'
+            : calendar,
       credentials = root + (profile === 'owned_event_writer' ? '/writer-credentials' : '/credentials'),
       denial = root + (profile === 'owned_event_writer' ? '/writer-access-denials' : '/access-denials'),
       clientId =
-        (profile === 'reader' ? 'reader' : profile === 'mail_reader' ? 'mail' : 'writer') +
-        '-fixture.apps.googleusercontent.com';
-    if (profile !== 'mail_reader') {
+        (profile === 'reader'
+          ? 'reader'
+          : profile === 'mail_reader'
+            ? 'mail'
+            : profile === 'mail_draft_writer'
+              ? 'draft'
+              : 'writer') + '-fixture.apps.googleusercontent.com';
+    if (profile !== 'mail_reader' && profile !== 'mail_draft_writer') {
       fs.mkdirSync(credentials, { mode: 0o700 });
       fs.mkdirSync(denial, { mode: 0o700 });
       CalendarCredentialCore.initialize(credentials, profile);
@@ -120,7 +142,9 @@ async function fixture() {
           ? [GOOGLE_EVENT_READ_SCOPE]
           : profile === 'mail_reader'
             ? [GOOGLE_MAIL_READ_SCOPE]
-            : [GOOGLE_OWNED_EVENT_WRITE_SCOPE, GOOGLE_CALENDAR_METADATA_SCOPE],
+            : profile === 'mail_draft_writer'
+              ? [GOOGLE_MAIL_DRAFT_SCOPE]
+              : [GOOGLE_OWNED_EVENT_WRITE_SCOPE, GOOGLE_CALENDAR_METADATA_SCOPE],
     };
     await ownerCore.install('scope', binding, reference, tokens);
     fences.deny('scope', binding, 'disconnected');
@@ -158,6 +182,34 @@ async function fixture() {
     withVaultCredentialSnapshot(roots, { assertAuthority: authority }, operation, inspect, memory);
   return { base, roots, vault, calendar, backup, owner, profiles, events, memory, authority, inspect, run };
 }
+it('includes the complete separate draft-writer configuration, tokens and denial without changing the original profiles', async () => {
+  const f = await fixture(true);
+  await f.run(async (snapshot) => {
+    expect(snapshot.sources).toHaveLength(14);
+    const draft = snapshot.sources.filter((source) => source.event.sourceKind === 'mail_draft_writer');
+    expect(draft).toHaveLength(3);
+    expect(
+      draft
+        .flatMap((source) => source.files)
+        .filter((file) => file.destination !== null)
+        .every((file) => file.destination!.startsWith('google/calendar/mail-draft-writer/')),
+    ).toBe(true);
+    expect(
+      draft
+        .flatMap((source) => source.files)
+        .some((file) => file.destination === 'google/calendar/mail-draft-writer/.cos-mail-draft-writer'),
+    ).toBe(true);
+    for (const expected of f.events)
+      expect(snapshot.sources.some((source) => digest(source.event) === digest(expected))).toBe(true);
+    expect(() => makeRoutedCredentialRecoveryManifest(f.owner, snapshot.sources)).not.toThrow();
+    snapshot.assertPrimaryUnchanged();
+  });
+});
+it('refuses a configured draft-writer profile whose independently owned proof is missing', async () => {
+  const f = await fixture(true);
+  fs.unlinkSync(f.calendar + '/mail-draft-writer/.cos-mail-draft-writer');
+  await expect(f.run(async () => {})).rejects.toThrow('credential_vault_snapshot_unavailable');
+});
 it('independently selects all configured Google clients, tokens, permanent denials and backup credentials with checked origins', async () => {
   const f = await fixture();
   const borrowed: Buffer[] = [];
