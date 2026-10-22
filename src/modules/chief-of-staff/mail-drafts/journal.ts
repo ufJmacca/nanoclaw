@@ -218,7 +218,7 @@ export class DraftJournal {
   close(): void {
     if (this.db.open) this.db.close();
   }
-  private assertCurrent(): void {
+  assertCurrent(): void {
     readOwner(this.root, this.installationDigest, this.generation);
     if (
       !this.db.open ||
