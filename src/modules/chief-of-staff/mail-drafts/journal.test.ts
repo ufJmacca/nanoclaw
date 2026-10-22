@@ -54,6 +54,25 @@ function child(code: string): Promise<{ code: number | null; signal: string | nu
 }
 const childImport = `import {DraftJournal} from ${JSON.stringify(new URL('./journal.ts', import.meta.url).href)};`;
 describe('independent Gmail draft effect journal', () => {
+  it('records a provider candidate as uncertain metadata without promoting it to verified success', () => {
+    const f = fixture(),
+      first = f.journal.reserve(input(), now);
+    const candidate = { draftId: 'r-123', messageId: 'a'.repeat(16) };
+    const tracked = f.journal.acknowledge(first.record.operationId, candidate, now + 1);
+    expect(tracked).toMatchObject({ state: 'reserved', candidate, saved: null });
+    expect(f.open().find(first.record.operationId)).toEqual(tracked);
+    expect(() =>
+      f.journal.acknowledge(first.record.operationId, { ...candidate, messageId: 'b'.repeat(16) }, now + 2),
+    ).toThrow('mail_draft_observation_conflict');
+  });
+  it('finds an original effect by the mailbox/source pair independently of restored request or binding rows', () => {
+    const f = fixture();
+    expect(f.journal.findSource(input().mailboxDigest, input().sourceMessageId)).toBeNull();
+    const first = f.journal.reserve(input(), now);
+    expect(f.open().findSource(input().mailboxDigest, input().sourceMessageId)).toEqual(first.record);
+    expect(f.journal.findSource(digest('other mailbox'), input().sourceMessageId)).toBeNull();
+    expect(() => f.journal.findSource('unsafe', '../outside')).toThrow();
+  });
   it('retains the reservation after an actual process kill immediately following its commit', async () => {
     const f = fixture();
     const result = await child(

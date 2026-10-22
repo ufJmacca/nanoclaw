@@ -36,6 +36,7 @@ export type DraftEffect = DraftReservation & {
   day: string;
   state: DraftEffectState;
   observedAt: string | null;
+  candidate: { draftId: string; messageId: string } | null;
   saved: { draftId: string; messageId: string } | null;
 };
 export type DraftObservation =
@@ -246,7 +247,7 @@ export class DraftJournal {
       !value ||
       !keys(
         value,
-        'bindingId,contentDigest,contextGeneration,correlation,day,format,mailboxDigest,observedAt,operationId,requestId,reservedAt,saved,scopeId,sourceMessageId,state,threadId',
+        'bindingId,candidate,contentDigest,contextGeneration,correlation,day,format,mailboxDigest,observedAt,operationId,requestId,reservedAt,saved,scopeId,sourceMessageId,state,threadId',
       )
     )
       throw new Error('unsafe_mail_draft_journal');
@@ -291,7 +292,14 @@ export class DraftJournal {
         (!keys(value.saved, 'draftId,messageId') ||
           !draftId(value.saved.draftId) ||
           !providerId(value.saved.messageId))) ||
-      (value.state === 'reserved' ? value.observedAt !== null || value.saved !== null : value.observedAt === null) ||
+      (value.candidate !== null &&
+        (!keys(value.candidate, 'draftId,messageId') ||
+          !draftId(value.candidate.draftId) ||
+          !providerId(value.candidate.messageId))) ||
+      (value.saved !== null && (!value.candidate || digest(value.saved) !== digest(value.candidate))) ||
+      (value.state === 'reserved'
+        ? (value.candidate === null ? value.observedAt !== null : value.observedAt === null) || value.saved !== null
+        : value.observedAt === null) ||
       (value.state === 'verified' && value.saved === null)
     )
       throw new Error('unsafe_mail_draft_journal');
@@ -302,6 +310,10 @@ export class DraftJournal {
     if (!hash(operationId)) throw new Error('unsafe_mail_draft_journal');
     const row = this.db.prepare('SELECT * FROM effects WHERE operation_id=?').get(operationId) as Row | undefined;
     return row ? this.record(row) : null;
+  }
+  findSource(mailboxDigest: string, sourceMessageId: string): DraftEffect | null {
+    if (!hash(mailboxDigest) || !providerId(sourceMessageId)) throw new Error('unsafe_mail_draft_journal');
+    return this.find(this.identity(mailboxDigest, sourceMessageId));
   }
   /** Exactly one caller receives created=true. A crash or uncertain POST never makes that permission repeatable. */
   reserve(input: DraftReservation, now: number): { created: boolean; record: DraftEffect } {
@@ -350,6 +362,7 @@ export class DraftJournal {
           day,
           state: 'reserved',
           observedAt: null,
+          candidate: null,
           saved: null,
         };
         this.db
@@ -365,6 +378,31 @@ export class DraftJournal {
             JSON.stringify(record),
           );
         return { created: true, record };
+      })
+      .immediate();
+  }
+  /** Provider IDs are denial/reconciliation metadata, never proof that intended content was saved. */
+  acknowledge(operationId: string, candidate: { draftId: string; messageId: string }, now: number): DraftEffect {
+    this.assertCurrent();
+    const at = instant(now);
+    if (
+      !candidate ||
+      !keys(candidate, 'draftId,messageId') ||
+      !draftId(candidate.draftId) ||
+      !providerId(candidate.messageId)
+    )
+      throw new Error('unsafe_mail_draft_journal');
+    return this.db
+      .transaction(() => {
+        const record = this.find(operationId);
+        if (!record) throw new Error('mail_draft_effect_missing');
+        if (now < Date.parse(record.observedAt ?? record.reservedAt)) throw new Error('mail_draft_clock_regressed');
+        if (record.state !== 'reserved' || (record.candidate && digest(record.candidate) !== digest(candidate)))
+          throw new Error('mail_draft_observation_conflict');
+        record.candidate = { ...candidate };
+        record.observedAt = at;
+        this.db.prepare('UPDATE effects SET record=? WHERE operation_id=?').run(JSON.stringify(record), operationId);
+        return record;
       })
       .immediate();
   }
@@ -401,10 +439,14 @@ export class DraftJournal {
             observation.threadId !== record.threadId ||
             observation.contentDigest !== record.contentDigest ||
             (record.saved &&
-              (record.saved.draftId !== observation.draftId || record.saved.messageId !== observation.messageId))
+              (record.saved.draftId !== observation.draftId || record.saved.messageId !== observation.messageId)) ||
+            (record.candidate &&
+              (record.candidate.draftId !== observation.draftId ||
+                record.candidate.messageId !== observation.messageId))
           )
             throw new Error('mail_draft_observation_conflict');
           record.saved = { draftId: observation.draftId, messageId: observation.messageId };
+          record.candidate = { ...record.saved };
         }
         record.state = observation.state;
         record.observedAt = at;
