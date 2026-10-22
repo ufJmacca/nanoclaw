@@ -1,6 +1,6 @@
 import type { CalendarStorageRoots } from '../calendar/storage-policy.js';
 import type { StorageInspection } from '../calendar/storage-protection.js';
-import type { GoogleOAuthClient } from '../calendar/oauth-core.js';
+import { checkedClient, type GoogleOAuthClient } from '../calendar/oauth-core.js';
 import { DatabaseConfigurationError } from '../store/config.js';
 import { verifyVaultMemory } from '../ops/vault-memory.js';
 import type { CredentialJournal } from '../ops/backup-credential-event.js';
@@ -13,7 +13,10 @@ export function mailDraftSettings(env: NodeJS.ProcessEnv): { enabled: boolean } 
     throw new DatabaseConfigurationError('COS_MAIL_DRAFTS_ENABLED');
   return { enabled: enabled === 'true' };
 }
-export type MailDraftHostCredentials = MailHostFences & { credentials: MailDraftCredentialOwner };
+export type MailDraftHostCredentials = MailHostFences & {
+  readonly clientId: string;
+  credentials: MailDraftCredentialOwner;
+};
 /** Opening an installed profile never creates directories, installs a token or enables draft authority. */
 export function openMailDraftCredentials(
   roots: CalendarStorageRoots,
@@ -27,6 +30,7 @@ export function openMailDraftCredentials(
     'mail_draft_writer',
     roots,
     (storage, fences) => ({
+      clientId: checkedClient(storage.readClient() as GoogleOAuthClient).clientId,
       credentials: new MailDraftCredentialOwner(
         storage.root + '/credentials',
         storage.readClient() as GoogleOAuthClient,

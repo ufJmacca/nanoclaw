@@ -69,6 +69,7 @@ function fixture() {
     revision_digest: digest('source'),
     thread_id: 'bb02',
     current_capture: 'capture',
+    internal_date_ms: 1792713600000,
   };
   const operations = new Map<string, Record<string, unknown>>();
   let scope = true,

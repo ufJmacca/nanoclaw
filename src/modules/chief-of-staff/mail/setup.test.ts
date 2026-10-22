@@ -72,6 +72,7 @@ it('initializes only the dedicated encrypted profile and an exact retry preserve
   const identity = fs.statSync(f.root),
     client = fs.statSync(f.root + '/oauth-client.json');
   const host = await openMailCredentials(f.roots, f.inspect, f.memory, async () => {});
+  expect(host.clientId).toBe(f.client.clientId);
   await host.close();
   expect(await initializeMailProfile(f.roots, f.client, f.authority, f.inspect, f.memory)).toEqual({ status: 'ready' });
   expect(fs.statSync(f.root).ino).toBe(identity.ino);

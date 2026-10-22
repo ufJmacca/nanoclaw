@@ -4,7 +4,7 @@ import type { StorageInspection } from '../calendar/storage-protection.js';
 import { verifyVaultMemory } from '../ops/vault-memory.js';
 import { CalendarAccessFences } from '../calendar/access-fences.js';
 import { MailCredentialOwner } from './credentials.js';
-import type { GoogleOAuthClient } from '../calendar/oauth-core.js';
+import { checkedClient, type GoogleOAuthClient } from '../calendar/oauth-core.js';
 import type { CredentialJournal } from '../ops/backup-credential-event.js';
 import { createVaultCredentialJournal } from '../ops/backup-credential-journal.js';
 import { withMailProfileStorage, type PinnedMailStorage } from './storage.js';
@@ -21,7 +21,7 @@ export type MailHostFences = {
   /** Terminal lifetime settlement, including a lost-proof close diagnostic. */
   closed(): boolean;
 };
-export type MailHostCredentials = MailHostFences & { credentials: MailCredentialOwner };
+export type MailHostCredentials = MailHostFences & { readonly clientId: string; credentials: MailCredentialOwner };
 /** The credential core can persist denial after an awaited token exchange, so
  * its fence object must enforce the same held vault proof on every operation. */
 class ProtectedMailFences extends CalendarAccessFences {
@@ -132,6 +132,7 @@ export function openMailCredentials(
     'mail_reader',
     roots,
     (storage, fences) => ({
+      clientId: checkedClient(storage.readClient() as GoogleOAuthClient).clientId,
       credentials: new MailCredentialOwner(
         storage.root + '/credentials',
         storage.readClient() as GoogleOAuthClient,

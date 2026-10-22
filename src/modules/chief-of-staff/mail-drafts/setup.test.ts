@@ -188,6 +188,7 @@ it('holds the actual draft credential vault proof and denials for its complete h
   const f = await fixture();
   await initializeMailDraftProfile(f.roots, f.client, f.authority, f.inspect, f.memory);
   const host = await openMailDraftCredentials(f.roots, f.inspect, f.memory, async () => {});
+  expect(host.clientId).toBe(f.client.clientId);
   try {
     const binding = randomUUID(),
       reference = randomUUID();

@@ -29,15 +29,16 @@ export type MailDraftSelection = {
   processing_providers: string[];
   reader_credential_ref: string | null;
 };
-type SourceSelection = {
+export type MailDraftSourceSelection = {
   source_id: string;
   source_version: number;
   revision_id: string;
   revision_digest: string;
   thread_id: string;
   current_capture: string;
+  internal_date_ms: number;
 };
-type Admission = { binding: MailDraftSelection; source: SourceSelection; authority: MailDraftAuthority };
+type Admission = { binding: MailDraftSelection; source: MailDraftSourceSelection; authority: MailDraftAuthority };
 export type MailDraftDependencies = {
   journal: DraftJournal;
   authority: MailDraftAuthorityResolver;
@@ -48,6 +49,7 @@ export type MailDraftDependencies = {
     context: KnowledgeContext,
     binding: MailDraftSelection,
     current: () => Promise<boolean>,
+    source: MailDraftSourceSelection,
   ): ReturnType<typeof googleMailDraftWriter> | null;
 };
 const hash = (value: unknown): value is string => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
@@ -146,7 +148,8 @@ export class MailDraftStore {
     const source = (
       await client.query(
         `SELECT s.id AS source_id,s.version AS source_version,r.id AS revision_id,r.digest AS revision_digest,
-       mm.provider_thread_id AS thread_id,ms.current_capture
+       mm.provider_thread_id AS thread_id,ms.current_capture,
+       floor(extract(epoch FROM mm.internal_date)*1000)::double precision AS internal_date_ms
        FROM cos.mail_messages mm
        JOIN cos.mail_states ms ON ms.scope_id=mm.scope_id AND ms.binding_id=mm.binding_id
        JOIN cos.sources s ON s.scope_id=mm.scope_id AND s.id=mm.source_id
@@ -160,8 +163,14 @@ export class MailDraftStore {
        AND ${mailSourceAccess("ARRAY['mail:'||$2::text]")} FOR SHARE OF mm,ms,s,r,a`,
         [context.scopeId, row.body.readerBindingId, messageId, context.provider],
       )
-    ).rows[0] as SourceSelection | undefined;
-    if (!source || !dependencies.matches(context, row) || digest(this.native(context)) !== digest(authority))
+    ).rows[0] as MailDraftSourceSelection | undefined;
+    if (
+      !source ||
+      !Number.isSafeInteger(source.internal_date_ms) ||
+      source.internal_date_ms < 0 ||
+      !dependencies.matches(context, row) ||
+      digest(this.native(context)) !== digest(authority)
+    )
       return null;
     return { binding: structuredClone(row), source: structuredClone(source), authority };
   }
@@ -234,7 +243,7 @@ export class MailDraftStore {
       const pinned = prepared.admission!;
       if (!(await this.current(retained, pinned, selected.source_message_id))) return { status: 'denied' };
       const current = () => this.current(retained, pinned, selected.source_message_id),
-        writer = this.dependencies!.writer(retained, pinned.binding, current);
+        writer = this.dependencies!.writer(retained, pinned.binding, current, pinned.source);
       if (!writer) return { status: 'denied' };
       // A persisted success is an observation, never permission to claim that an owner-edited draft is unchanged.
       const prior = prepared.prior;
@@ -290,7 +299,7 @@ export class MailDraftStore {
       if (!pinned || !this.effectMatches(operationId, retained, pinned, record.sourceMessageId))
         return { status: 'denied' };
       const current = () => this.current(retained, pinned, record.sourceMessageId),
-        writer = this.dependencies!.writer(retained, pinned.binding, current);
+        writer = this.dependencies!.writer(retained, pinned.binding, current, pinned.source);
       if (!writer || !(await current())) return { status: 'denied' };
       const result = receipt(await writer.status(operationId));
       return (await current()) ? result : { status: 'denied' };
