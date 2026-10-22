@@ -7,7 +7,6 @@ import type { CalendarStorageRoots } from '../calendar/storage-policy.js';
 import type { StorageInspection } from '../calendar/storage-protection.js';
 import { backupCalendarState } from '../calendar/backup.js';
 import { checkedClient, GOOGLE_MAIL_READ_SCOPE, type OAuthTransport } from '../calendar/oauth-core.js';
-import { startMailAuthorization } from '../calendar/oauth-listener.js';
 import { object } from '../calendar/normalization.js';
 import { initializeMailProfile } from '../mail/setup.js';
 import { withMailReaderStorage } from '../mail/storage.js';
@@ -22,6 +21,7 @@ import { verifyVaultMemory } from './vault-memory.js';
 import { readCalendarAdminJson as readJson, calendarAdminDirectory as directory } from './calendar-admin.js';
 import { writeAtomic } from './target-state.js';
 import type { ReleaseManifest } from './release-manifest.js';
+import { authorizeMailProfile } from './mail-authorization.js';
 
 import { parseMailAccountArguments, type MailAccountArguments } from './mail-account-arguments.js';
 export {
@@ -228,41 +228,21 @@ export async function runMailAccountAdmin(o: Options, d: Dependencies = {}): Pro
             await check();
             current();
           };
-          const attempt = journal + '/authorization.json',
-            marker = { contract: 'cos-mail-authorization/v1', attempted: true };
-          if (!fs.lstatSync(attempt, { throwIfNoEntry: false })) {
-            if (fs.lstatSync(storage.root + '/credentials/' + args.bindingId + '.json', { throwIfNoEntry: false }))
-              throw Error('mail_operation_conflict');
-            if (!d.display && !process.stderr.isTTY) throw Error('mail_interactive_terminal_required');
-            writeAtomic(journal, 'authorization.json', marker);
-            const listener = await startMailAuthorization(client, { fetch });
-            try {
-              await (
-                d.display ??
-                ((url: string) => {
-                  process.stderr.write('Open this private Mail authorization URL in your browser:\n' + url + '\n');
-                })
-              )(listener.authorizationUrl);
-              const tokens = await listener.result;
-              await check();
-              current();
-              await verifyMailbox(async () => tokens.accessToken);
-              await credentials.install(args.scopeId, args.bindingId, args.bindingId, tokens);
-              await check();
-              current();
-            } finally {
-              await listener.close();
-            }
-          } else {
-            if (digest(readJson(attempt)) !== digest(marker)) throw Error('mail_link_uncertain');
-            try {
-              await credentials.inspect(args.scopeId, args.bindingId, args.bindingId);
-            } catch {
-              // eslint-disable-next-line preserve-caught-error -- A spent/uncertain consent cannot be silently replayed or disclose credential state.
-              throw Error('mail_link_uncertain');
-            }
-            await verifyMailbox(() => credentials.token(args.scopeId, args.bindingId, args.bindingId));
-          }
+          await authorizeMailProfile({
+            root: journal,
+            profile: 'mail_reader',
+            scopeId: args.scopeId,
+            bindingId: args.bindingId,
+            reference: args.bindingId,
+            client,
+            credentials,
+            credentialsPresent: () =>
+              !!fs.lstatSync(storage.root + '/credentials/' + args.bindingId + '.json', { throwIfNoEntry: false }),
+            verifyMailbox,
+            check,
+            fetch,
+            display: d.display,
+          });
           const credential = await credentials.inspect(args.scopeId, args.bindingId, args.bindingId);
           await check();
           current();
@@ -280,6 +260,7 @@ export async function runMailAccountAdmin(o: Options, d: Dependencies = {}): Pro
           await check();
           current();
           return { ...base, binding_id: args.bindingId, status: result.status };
+          // eslint-disable-next-line no-catch-all/no-catch-all -- Carry only the fixed owner result until the vault callback verifies and closes every held descriptor.
         } catch (error) {
           // Carry only our fixed owner result across the vault callback. The vault
           // deliberately replaces thrown callback/storage diagnostics; it must still
@@ -300,7 +281,7 @@ export async function runMailAccountAdmin(o: Options, d: Dependencies = {}): Pro
     if (reportedFailure) throw reportedFailure;
     return result;
   } catch (error) {
-    // eslint-disable-next-line preserve-caught-error -- Tokens, client bytes, selected accounts, callbacks and nested storage/driver diagnostics stay private.
+    // Tokens, client bytes, selected accounts, callbacks and nested storage/driver diagnostics stay private.
     throw accountFailure(error);
   } finally {
     stream?.destroy();
