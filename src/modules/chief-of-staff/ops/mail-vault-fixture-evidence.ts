@@ -7,8 +7,23 @@ export function verifyMailVaultFixtureEvidence(
   identity: Identity,
   mode: 'mail-credentials-kernel' | 'mail-recovery-kernel' = 'mail-credentials-kernel',
 ): { credentialGeneration: 2; journalEvents: 3; deniedDirectoryCases: 7 } {
+  return verifyMailProfileVaultEvidence(text, identity, mode, false);
+}
+export function verifyMailDraftVaultFixtureEvidence(
+  text: string,
+  identity: Identity,
+  mode: 'draft-credentials-kernel' | 'draft-recovery-kernel' = 'draft-credentials-kernel',
+): { credentialGeneration: 2; journalEvents: 3; deniedDirectoryCases: 7 } {
+  return verifyMailProfileVaultEvidence(text, identity, mode, true);
+}
+function verifyMailProfileVaultEvidence(
+  text: string,
+  identity: Identity,
+  mode: 'mail-credentials-kernel' | 'mail-recovery-kernel' | 'draft-credentials-kernel' | 'draft-recovery-kernel',
+  drafts: boolean,
+): { credentialGeneration: 2; journalEvents: 3; deniedDirectoryCases: 7 } {
   const deny = (): never => {
-    throw Error('mail_vault_evidence_unavailable');
+    throw Error(drafts ? 'mail_draft_vault_evidence_unavailable' : 'mail_vault_evidence_unavailable');
   };
   try {
     if (!/^[a-f0-9]{40}$/.test(identity.sourceTree) || Buffer.byteLength(text) > 2 * 1024 ** 2) deny();
@@ -27,7 +42,7 @@ export function verifyMailVaultFixtureEvidence(
       for (const [key, value] of Object.entries(expected)) if (record[key] !== value) deny();
     };
     matches(one('rootOrchestration'), { managerActivation: 'modeled', targetLeases: 'not_exercised' });
-    matches(one('contract', 'cos-g04-mail-vault-fixture/v1'), {
+    matches(one('contract', drafts ? 'cos-g05-draft-vault-fixture/v1' : 'cos-g04-mail-vault-fixture/v1'), {
       sourceCommit: identity.sourceCommit,
       sourceTree: identity.sourceTree,
       compiledProductionPayload: true,
@@ -41,6 +56,7 @@ export function verifyMailVaultFixtureEvidence(
       setupAuthority: 'fixture',
       liveAccountAcceptance: false,
       installedAcceptance: false,
+      ...(drafts ? { credentialProfile: 'mail_draft_writer' } : {}),
     });
     const stages = {
       install: {
@@ -51,6 +67,7 @@ export function verifyMailVaultFixtureEvidence(
         journalEvents: 3,
         deniedCrossAccount: true,
         denialPreserved: true,
+        ...(drafts ? { readerProfilePreserved: true, readerOnlyScope: true, readerJournalEvents: 2 } : {}),
       },
       directory_races: { deniedCases: 7, replacementWrites: 0 },
       unrelated_worker_mount: {

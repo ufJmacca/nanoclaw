@@ -2,8 +2,11 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { verifyMailFixtureReport } from '../../../contracts/chief-of-staff/mail-fixture-report.js';
 import { verifyMailDraftFixtureReport } from '../../../contracts/chief-of-staff/mail-draft-fixture-report.js';
-import { verifyMailVaultFixtureEvidence } from './mail-vault-fixture-evidence.js';
-import { verifyMailRecoveryFixtureEvidence } from './mail-recovery-fixture-evidence.js';
+import { verifyMailVaultFixtureEvidence, verifyMailDraftVaultFixtureEvidence } from './mail-vault-fixture-evidence.js';
+import {
+  verifyMailRecoveryFixtureEvidence,
+  verifyMailDraftRecoveryFixtureEvidence,
+} from './mail-recovery-fixture-evidence.js';
 import { verifyVaultFixtureImage } from './vault-fixture-evidence.js';
 type Identity = {
   sourceCommit: string;
@@ -26,9 +29,21 @@ export function readMailCredentialFixtureText(file: string): string {
 export function readMailRecoveryFixtureText(file: string): string {
   return readMailFixtureText(file, 'mail_recovery.log');
 }
+export function readMailDraftCredentialFixtureText(file: string): string {
+  return readMailFixtureText(file, 'draft_credentials.log');
+}
+export function readMailDraftRecoveryFixtureText(file: string): string {
+  return readMailFixtureText(file, 'draft_recovery.log');
+}
 function readMailFixtureText(
   file: string,
-  expectedName: 'mail_artifacts.log' | 'mail_credentials.log' | 'mail_recovery.log' | 'draft_artifacts.log',
+  expectedName:
+    | 'mail_artifacts.log'
+    | 'mail_credentials.log'
+    | 'mail_recovery.log'
+    | 'draft_artifacts.log'
+    | 'draft_credentials.log'
+    | 'draft_recovery.log',
 ): string {
   let fd: number | undefined, bytes: Buffer | undefined;
   try {
@@ -124,6 +139,18 @@ export function verifyMailReleaseEvidence(gate: string, text: string, identity: 
   return verifyMailArtifactFixtureEvidence(text, identity);
 }
 export function verifyMailDraftReleaseEvidence(gate: string, text: string, identity: Identity | KernelIdentity) {
+  if (gate === 'draft_credentials' || gate === 'draft_recovery') {
+    if (!('fixtureImage' in identity) || !('fixtureInspection' in identity))
+      throw Error('mail_draft_kernel_release_evidence_required');
+    if (
+      verifyVaultFixtureImage(identity.fixtureInspection, identity.sourceCommit, identity.hostImage) !==
+      identity.fixtureImage
+    )
+      throw Error('vault_fixture_identity_mismatch');
+    return gate === 'draft_credentials'
+      ? verifyMailDraftVaultFixtureEvidence(text, identity)
+      : verifyMailDraftRecoveryFixtureEvidence(text, identity);
+  }
   if (!['draft_policy', 'draft_transport', 'draft_reconciliation'].includes(gate) || !('workerImages' in identity))
     throw Error('mail_draft_release_check_unavailable');
   return verifyMailDraftArtifactFixtureEvidence(text, identity);

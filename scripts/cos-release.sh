@@ -287,6 +287,8 @@ if [[ "$slice" == G04 || "$slice" == G05 ]]; then
   fi
 fi
 if [[ "$slice" == G05 ]]; then
+  check draft_credentials bash "$directory/context/scripts/cos-vault-fixture.sh" draft-credentials-kernel "$vault_image" "$directory/context/scripts/cos-vault-keychain.swift"
+  check draft_recovery bash "$directory/context/scripts/cos-vault-fixture.sh" draft-recovery-kernel "$vault_image" "$directory/context/scripts/cos-vault-keychain.swift" "$test_directory/test.env" "$test_directory/ca.pem"
   if timed_release_stage check_draft_artifacts draft_artifacts.log bash "$directory/context/scripts/cos-mail-artifact-fixture.sh" "$host_image" "$standard_image" "$documents_image" \
       "$test_directory/test.env" "$test_directory/ca.pem" --drafts > "$directory/draft_artifacts.log" 2>&1; then
     for gate in draft_policy draft_transport draft_reconciliation; do cli record "$id" "$gate" 0; done

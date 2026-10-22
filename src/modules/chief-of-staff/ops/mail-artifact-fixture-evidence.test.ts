@@ -20,6 +20,8 @@ import {
   verifyMailDraftArtifactFixtureEvidence,
   verifyMailDraftReleaseEvidence,
   readMailDraftArtifactFixtureText,
+  readMailDraftCredentialFixtureText,
+  readMailDraftRecoveryFixtureText,
 } from './mail-artifact-fixture-evidence.js';
 const roots: string[] = [];
 afterEach(() => {
@@ -240,6 +242,20 @@ function privateReport() {
   fs.writeFileSync(file, text, { mode: 0o600 });
   return { root, file, text };
 }
+it.each([
+  ['draft_credentials.log', readMailDraftCredentialFixtureText],
+  ['draft_recovery.log', readMailDraftRecoveryFixtureText],
+] as const)('keeps %s private and distinct from the reader and artifact reports', (name, read) => {
+  const f = privateReport(),
+    file = f.root + '/' + name;
+  fs.renameSync(f.file, file);
+  expect(read(file)).toBe(f.text);
+  expect(() => readMailArtifactFixtureText(file)).toThrow();
+  expect(() => readMailCredentialFixtureText(file)).toThrow();
+  expect(() => readMailRecoveryFixtureText(file)).toThrow();
+  fs.linkSync(file, file + '.alias');
+  expect(() => read(file)).toThrow();
+});
 it('reads only the private canonical bounded report used by the release coordinator', () => {
   const f = privateReport();
   expect(readMailArtifactFixtureText(f.file)).toBe(f.text);

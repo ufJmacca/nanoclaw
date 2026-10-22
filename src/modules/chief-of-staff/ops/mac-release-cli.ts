@@ -39,6 +39,8 @@ import {
   mailArtifactFixtureCertificate,
   readMailArtifactFixtureText,
   readMailDraftArtifactFixtureText,
+  readMailDraftCredentialFixtureText,
+  readMailDraftRecoveryFixtureText,
   readMailCredentialFixtureText,
   readMailRecoveryFixtureText,
   verifyMailReleaseEvidence,
@@ -445,7 +447,9 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
     if (!requiredReleaseChecks(plan.slice).includes(name) || !['0', '1'].includes(status))
       throw new Error('invalid_check_result');
     const imageIds = releaseCheckImageIds(plan.images, name);
-    if (['mail_credentials', 'mail_recovery'].includes(name) && status === '0') {
+    if (['mail_credentials', 'mail_recovery', 'draft_credentials', 'draft_recovery'].includes(name) && status === '0') {
+      const drafts = name.startsWith('draft_');
+      if (drafts && plan.slice !== 'G05') throw Error('draft_release_required');
       const fixture = readPrivate<{
         image: string;
         hostImage: string;
@@ -459,18 +463,26 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
         digest(fixture.source) !== digest(plan.source)
       )
         throw Error('vault_fixture_identity_mismatch');
-      const text =
-        name === 'mail_credentials'
-          ? readMailCredentialFixtureText(path.join(root, 'mail_credentials.log'))
-          : readMailRecoveryFixtureText(path.join(root, 'mail_recovery.log'));
-      const proof = verifyMailReleaseEvidence(name, text, {
+      const read =
+        name === 'draft_credentials'
+          ? readMailDraftCredentialFixtureText
+          : name === 'draft_recovery'
+            ? readMailDraftRecoveryFixtureText
+            : name === 'mail_credentials'
+              ? readMailCredentialFixtureText
+              : readMailRecoveryFixtureText;
+      const text = read(path.join(root, name + '.log'));
+      const proof = (drafts ? verifyMailDraftReleaseEvidence : verifyMailReleaseEvidence)(name, text, {
         sourceCommit: plan.source.commit,
         sourceTree: plan.source.tree,
         hostImage: imageIds[0],
         fixtureImage: fixture.image,
         fixtureInspection: readPrivate(path.join(root, 'vault-fixture-inspect.json'), 1024 ** 2),
       });
-      writeAtomic(root, name === 'mail_credentials' ? 'mail-credential-evidence.json' : 'mail-recovery-evidence.json', {
+      const evidence =
+        (drafts ? 'draft' : 'mail') +
+        (name.endsWith('_credentials') ? '-credential-evidence.json' : '-recovery-evidence.json');
+      writeAtomic(root, evidence, {
         ...proof,
         at: new Date().toISOString(),
         source: plan.source,
