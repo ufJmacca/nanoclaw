@@ -25,6 +25,7 @@ import { MailPump } from '../../modules/chief-of-staff/mail/pump.js';
 import { MailHost } from '../../modules/chief-of-staff/mail/host.js';
 import { MailMaintenance } from '../../modules/chief-of-staff/mail/maintenance.js';
 import { setTimeout as delay } from 'node:timers/promises';
+import { checkMailContext, mailAnswerNotice } from '../../modules/chief-of-staff/mail/answer-notice.js';
 const scopes: string[] = [],
   roots: string[] = [];
 let admin: pg.Client, database: BoundedDatabase;
@@ -152,6 +153,96 @@ test('G04 host inventory pages all retention bindings without account or message
     'denied',
   );
 });
+test('G04 mailbox overflow keeps bounded notices and retained context while checking undisplayed access', async () => {
+  const f = await fixture();
+  const ids = Array.from({ length: 113 }, (_, i) => `00000000-0000-4000-8000-${i.toString(16).padStart(12, '0')}`);
+  for (const [index, id] of ids.entries()) {
+    assert.equal(
+      (await f.store.bind(f.context, { ...f.binding, id, mailboxEmail: `mailbox-${index}@example.invalid` })).status,
+      'ok',
+    );
+  }
+  const context = { ...f.context, generation: randomUUID() };
+  const fenced = new Set<string>();
+  const options = { enabled: () => true, access: (_scope: string, id: string) => !fenced.has(id) };
+  const projection = await database.run(async (client) => {
+    try {
+      return { status: 'ok' as const, notice: await mailAnswerNotice(client, context, options) };
+    } catch (error) {
+      // Preserve the notice failure category before the database port's fixed
+      // unavailable wrapper, so the regression cannot be mistaken for an outage.
+      if (!(error instanceof Error) || error.message !== 'mail_inventory_limit') throw error;
+      return {
+        status: 'failed' as const,
+        reason: error.message,
+      };
+    }
+  });
+  assert.equal(projection.status, 'ok', projection.status === 'failed' ? projection.reason : undefined);
+  const read = (register = false) =>
+    database.run(
+      async (client) => checkMailContext(client, context, () => mailAnswerNotice(client, context, options), register),
+      register,
+    );
+  const registered = await read(true);
+  assert.equal(registered.status, 'ok');
+  assert.ok(registered.status === 'ok' && registered.notice);
+  const original = registered.notice;
+  assert.match(original.text, /additional.*mailbox|mailbox.*not shown/i);
+  assert.equal((original.text.match(/Mailbox mailbox-/g) ?? []).length, 10);
+  assert.doesNotMatch(original.text, /mailbox-112@example\.invalid/);
+  assert.match(original.text, /does not establish that the inbox is empty or that all mail has been reviewed/);
+  assert.deepEqual(await read(), registered);
+
+  const other = await fixture();
+  const undisplayed = 'ffffffff-ffff-4fff-8fff-ffffffffffff';
+  assert.equal((await other.store.bind(other.context, { ...other.binding, id: undisplayed })).status, 'ok');
+  assert.equal(
+    (await f.store.bind(f.context, { ...f.binding, id: undisplayed, processingProviders: ['claude'] })).status,
+    'ok',
+  );
+  assert.deepEqual(await read(), registered);
+
+  // Access outside the displayed page must still invalidate exposure in the
+  // retained main context, without throwing or silently forgetting that policy.
+  fenced.add(ids.at(-1)!);
+  assert.deepEqual(await read(), { status: 'denied' });
+  fenced.clear();
+  assert.deepEqual(await read(), registered);
+  await f.store.setAuth(f.context, ids.at(-1)!, 'revoked');
+  assert.deepEqual(await read(), { status: 'denied' });
+});
+for (const count of [1, 10]) {
+  test(`G04 mailbox legacy context identity remains valid with ${count} bindings`, async () => {
+    const f = await fixture();
+    const ids = Array.from({ length: count }, () => randomUUID()).sort();
+    for (const id of ids) assert.equal((await f.store.bind(f.context, { ...f.binding, id })).status, 'ok');
+    const context = { ...f.context, generation: randomUUID() };
+    const policies = ids.map((id) => ({
+      binding: id,
+      version: 1,
+      auth: 'ready',
+      scopes: f.binding.scopes,
+      mailbox: digest(f.binding.mailboxEmail),
+      accessible: true,
+    }));
+    const result = { generation: context.generation, provider: context.provider, identity_digest: digest(policies) };
+    const ticket =
+      'mail-context-' + digest({ scope: f.scope, generation: context.generation, provider: context.provider });
+    await admin.query(
+      "INSERT INTO cos.operations(session_id,request_id,scope_id,method,payload_hash,result) VALUES($1,$2,$3,'cos_mail_context',$4,$5)",
+      [f.context.sessionId, ticket, f.scope, digest(result), JSON.stringify(result)],
+    );
+    const checked = await database.run((client) =>
+      checkMailContext(client, context, () =>
+        mailAnswerNotice(client, context, { enabled: () => true, access: () => true }),
+      ),
+    );
+    assert.ok(checked.status === 'ok' && checked.notice);
+    assert.equal(checked.notice.identityDigest, result.identity_digest);
+    assert.doesNotMatch(checked.notice.text, /Additional connected mailboxes/);
+  });
+}
 test('G04 only one concurrent host claims a due poll; claims never fabricate a capture or success', async () => {
   const f = await fixture();
   await f.store.bind(f.context, f.binding);
