@@ -240,7 +240,7 @@ function fixture() {
   const client = {
     query: vi.fn(
       async (sql: string, values: unknown[] = []): Promise<{ rows: Record<string, unknown>[]; rowCount: number }> => {
-        if (sql.includes('pg_try_advisory_lock')) return { rows: [{ locked: true }], rowCount: 1 };
+        if (sql.includes('pg_try_advisory_')) return { rows: [{ locked: true }], rowCount: 1 };
         if (sql.includes('FROM cos.scopes'))
           return { rows: flags.scope ? [{ id: binding.scopeId }] : [], rowCount: flags.scope ? 1 : 0 };
         if (sql.includes('FROM cos.mail_bindings')) return { rows: [structuredClone(readerRow)], rowCount: 1 };

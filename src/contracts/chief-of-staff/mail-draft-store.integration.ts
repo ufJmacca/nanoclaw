@@ -26,6 +26,10 @@ import { googleMailDraftWriter } from '../../modules/chief-of-staff/mail-drafts/
 import { MailDraftStore } from '../../modules/chief-of-staff/mail-drafts/store.js';
 import type { MailDraftBinding } from '../../modules/chief-of-staff/mail-drafts/binding.js';
 import { digest } from '../../modules/chief-of-staff/domain/contracts.js';
+import type { CosBinding } from '../../cos-boundary.js';
+import type { MailDraftHostGrant } from '../../modules/chief-of-staff/mail-drafts/profile.js';
+import type { MailDraftAccountConsent } from '../../modules/chief-of-staff/ops/mail-draft-consent.js';
+import { writeMailDraftStandingPolicy } from '../../modules/chief-of-staff/ops/mail-draft-policy-store.js';
 
 const scopes: string[] = [],
   roots: string[] = [],
@@ -111,6 +115,146 @@ function saved(raw: string) {
     },
   };
 }
+/** Synthetic metadata only. This exercises the exact trusted SQL transaction, not
+ * Google consent, encrypted recovery, host-grant publication or provider access. */
+async function ownerPolicyFixture() {
+  const scope = 'fixture-draft-policy-' + randomUUID(),
+    readerId = randomUUID(),
+    writerId = randomUUID(),
+    reference = randomUUID();
+  scopes.push(scope);
+  const binding = {
+    scopeId: scope,
+    ownerId: 'fixture-owner',
+    agentGroupId: scope,
+    sessionId: scope,
+    messagingGroupId: scope,
+    instanceId: 'fixture',
+    channelId: scope,
+    botId: 'fixture-bot',
+    provider: 'codex',
+  } as CosBinding;
+  await admin.query(
+    "INSERT INTO cos.scopes(id,owner_id,instance_id,channel_id,agent_group_id,status) VALUES($1,$2,$3,$4,$5,'active')",
+    [scope, binding.ownerId, binding.instanceId, binding.channelId, binding.agentGroupId],
+  );
+  await admin.query(
+    "INSERT INTO cos.mail_bindings(scope_id,id,provider,mailbox_email,permission_scopes,credential_ref,processing_providers,auth,provenance) VALUES($1,$2,'google','owner@example.test',$3,$4,ARRAY['codex'],'ready','{}'::jsonb)",
+    [scope, readerId, [GOOGLE_MAIL_READ_SCOPE], reference],
+  );
+  const selection = {
+    scopeId: scope,
+    readerBindingId: readerId,
+    writerBindingId: writerId,
+    readerReference: reference,
+    writerReference: writerId,
+    mailboxDigest: digest('owner@example.test'),
+    readerClientDigest: digest('reader-fixture'),
+    writerClientDigest: digest('writer-fixture'),
+  };
+  const consent: MailDraftAccountConsent = {
+    format: 'cos-mail-draft-account-consent/v1',
+    installationDigest: digest('fixture installation'),
+    nativeBindingDigest: digest(binding),
+    journalGeneration: randomUUID(),
+    requestId: randomUUID(),
+    readerConnectionDigest: digest({
+      status: 'ok',
+      binding: {
+        id: readerId,
+        provider: 'google',
+        mailboxEmail: 'owner@example.test',
+        scopes: [GOOGLE_MAIL_READ_SCOPE],
+        credentialRef: reference,
+        processingProviders: ['codex'],
+        auth: 'ready',
+        version: 1,
+      },
+    }),
+    selection,
+  };
+  const grant: MailDraftHostGrant = {
+    scopeId: binding.scopeId,
+    ownerId: binding.ownerId,
+    agentGroupId: binding.agentGroupId,
+    sessionId: binding.sessionId,
+    id: writerId,
+    version: 1,
+    backupOperationId: 'release-action-' + randomUUID(),
+    targetBackupDigest: digest('fixture snapshot'),
+    writeEnabled: true,
+    binding: {
+      format: 'cos-mail-draft-binding/v1',
+      provider: 'google',
+      readerBindingId: readerId,
+      mailboxDigest: selection.mailboxDigest,
+      readerClientDigest: selection.readerClientDigest,
+      writerClientDigest: selection.writerClientDigest,
+      credentialReference: writerId,
+      nativeBindingDigest: digest(binding),
+      journalGeneration: consent.journalGeneration,
+      maxPerDay: 5,
+      timeZone: 'Australia/Sydney',
+      replyMode: 'plain_text_reply',
+      permissionScopes: [GOOGLE_MAIL_DRAFT_SCOPE],
+      recoveryProofDigest: digest('fixture proof'),
+    },
+  };
+  return { scope, binding, readerId, writerId, grant, consent };
+}
+test('G05 actual owner policy transaction installs one immutable revision and reconciles identical metadata', async () => {
+  const f = await ownerPolicyFixture();
+  await writeMailDraftStandingPolicy(admin, f.binding, f.grant, f.consent, async () => {});
+  await writeMailDraftStandingPolicy(admin, f.binding, f.grant, f.consent, async () => {});
+  const rows = (
+    await admin.query(
+      'SELECT b.state,r.body,r.digest,r.consent_ref FROM cos.mail_draft_writer_bindings b JOIN cos.mail_draft_writer_revisions r ON r.scope_id=b.scope_id AND r.binding_id=b.id WHERE b.scope_id=$1',
+      [f.scope],
+    )
+  ).rows;
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].state, 'enabled');
+  assert.equal(rows[0].digest, digest(f.grant.binding));
+  assert.equal(rows[0].consent_ref, digest(f.consent));
+  await assert.rejects(
+    writeMailDraftStandingPolicy(
+      admin,
+      f.binding,
+      { ...f.grant, binding: { ...f.grant.binding, recoveryProofDigest: digest('changed proof') } },
+      f.consent,
+      async () => {},
+    ),
+  );
+  assert.equal(
+    (await admin.query('SELECT count(*)::int AS n FROM cos.mail_draft_writer_revisions WHERE scope_id=$1', [f.scope]))
+      .rows[0].n,
+    1,
+  );
+});
+test('G05 actual owner policy rollback preserves a failed final authority check without creating policy rows', async () => {
+  const f = await ownerPolicyFixture();
+  let checks = 0;
+  await assert.rejects(
+    writeMailDraftStandingPolicy(admin, f.binding, f.grant, f.consent, async () => {
+      if (++checks === 2) throw Error('fixture authority lost before commit');
+    }),
+  );
+  assert.equal(
+    (await admin.query('SELECT count(*)::int AS n FROM cos.mail_draft_writer_bindings WHERE scope_id=$1', [f.scope]))
+      .rows[0].n,
+    0,
+  );
+});
+test('G05 actual owner policy refuses a changed reader and never enables another scope', async () => {
+  const f = await ownerPolicyFixture();
+  await admin.query("UPDATE cos.mail_bindings SET auth='revoked' WHERE scope_id=$1", [f.scope]);
+  await assert.rejects(writeMailDraftStandingPolicy(admin, f.binding, f.grant, f.consent, async () => {}));
+  assert.equal(
+    (await admin.query('SELECT count(*)::int AS n FROM cos.mail_draft_writer_bindings WHERE scope_id=$1', [f.scope]))
+      .rows[0].n,
+    0,
+  );
+});
 async function fixture() {
   const scope = 'fixture-draft-' + randomUUID(),
     readerId = randomUUID(),
