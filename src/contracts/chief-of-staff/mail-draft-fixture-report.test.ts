@@ -2,15 +2,18 @@ import { expect, it } from 'vitest';
 import {
   MAIL_DRAFT_DATABASE_CASES,
   MAIL_DRAFT_NATIVE_CASES,
+  MAIL_DRAFT_CHECKPOINT_CASES,
   verifyMailDraftFixtureReport,
 } from './mail-draft-fixture-report.js';
-const names = (suite: 'database' | 'native' | 'all') =>
+const names = (suite: 'database' | 'native' | 'checkpoint' | 'all') =>
   suite === 'database'
     ? [...MAIL_DRAFT_DATABASE_CASES]
     : suite === 'native'
       ? [...MAIL_DRAFT_NATIVE_CASES]
-      : [...MAIL_DRAFT_DATABASE_CASES, ...MAIL_DRAFT_NATIVE_CASES];
-const report = (suite: 'database' | 'native' | 'all') => {
+      : suite === 'checkpoint'
+        ? [...MAIL_DRAFT_CHECKPOINT_CASES]
+        : [...MAIL_DRAFT_DATABASE_CASES, ...MAIL_DRAFT_NATIVE_CASES, ...MAIL_DRAFT_CHECKPOINT_CASES];
+const report = (suite: 'database' | 'native' | 'checkpoint' | 'all') => {
   const cases = names(suite),
     n = cases.length;
   return [
@@ -26,7 +29,7 @@ const report = (suite: 'database' | 'native' | 'all') => {
     '# todo 0',
   ].join('\n');
 };
-it.each(['database', 'native', 'all'] as const)(
+it.each(['database', 'native', 'checkpoint', 'all'] as const)(
   'requires every distinct actual %s draft case with no failed, skipped or missing execution',
   (suite) => {
     expect(verifyMailDraftFixtureReport(report(suite), suite)).toEqual({ suite, actualCases: names(suite).length });

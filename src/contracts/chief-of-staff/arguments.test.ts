@@ -5,6 +5,7 @@ it('G05 inherits every protected Mail/Calendar/storage regression and adds the a
   expect(fixtureFiles(args)).toEqual([
     ...fixtureFiles({ slice: 'G04', demo: false }),
     'mail-draft-store.integration',
+    'mail-draft-checkpoint.integration',
     'mail-draft-flow.integration',
   ]);
   const demo = parseFixtureArguments(['--slice', 'G05', '--db-profile', 'test', '--demo', '--fixture']);

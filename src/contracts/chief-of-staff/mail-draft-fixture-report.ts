@@ -18,20 +18,26 @@ export const MAIL_DRAFT_DATABASE_CASES = [
 export const MAIL_DRAFT_NATIVE_CASES = [
   'G05 native reply drafts reconcile across restart, preserve the main context, and enforce the independent Sydney-day cap without model calls or sends',
 ] as const;
-export type MailDraftFixtureSuite = 'database' | 'native' | 'all';
+export const MAIL_DRAFT_CHECKPOINT_CASES = [
+  'G05 schema-19 synthetic checkpoint restores insert-only into the actual current test database',
+  'G05 schema-20 synthetic checkpoint restores insert-only into the actual current test database',
+] as const;
+export type MailDraftFixtureSuite = 'database' | 'native' | 'checkpoint' | 'all';
 /** Source/image/kernel/account identities remain separately mandatory. */
 export function verifyMailDraftFixtureReport(
   text: string,
   suite: MailDraftFixtureSuite,
 ): { suite: MailDraftFixtureSuite; actualCases: number } {
   try {
-    if (!['database', 'native', 'all'].includes(suite)) throw Error('suite');
+    if (!['database', 'native', 'checkpoint', 'all'].includes(suite)) throw Error('suite');
     const required =
       suite === 'database'
         ? MAIL_DRAFT_DATABASE_CASES
         : suite === 'native'
           ? MAIL_DRAFT_NATIVE_CASES
-          : [...MAIL_DRAFT_DATABASE_CASES, ...MAIL_DRAFT_NATIVE_CASES];
+          : suite === 'checkpoint'
+            ? MAIL_DRAFT_CHECKPOINT_CASES
+            : [...MAIL_DRAFT_DATABASE_CASES, ...MAIL_DRAFT_NATIVE_CASES, ...MAIL_DRAFT_CHECKPOINT_CASES];
     return { suite, ...verifyExactFlatTap(text, required) };
   } catch {
     // eslint-disable-next-line preserve-caught-error -- Raw private fixture diagnostics cannot become release authority.

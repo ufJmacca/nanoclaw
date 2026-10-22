@@ -68,7 +68,7 @@ export function fixtureFiles(args: Pick<FixtureArguments, 'slice' | 'demo'>): st
       ...fixtureFiles({ slice: 'G04', demo: args.demo }),
       ...(args.demo
         ? ['mail-draft-flow.integration']
-        : ['mail-draft-store.integration', 'mail-draft-flow.integration']),
+        : ['mail-draft-store.integration', 'mail-draft-checkpoint.integration', 'mail-draft-flow.integration']),
     ];
   if (args.slice === 'G04')
     return [
