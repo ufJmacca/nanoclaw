@@ -397,7 +397,7 @@ it('fails closed before reads when the memory policy is unavailable', async () =
   expect(fs.existsSync(f.areas.staging + '/backup-queue')).toBe(false);
 });
 
-it.each([18, SCHEMA_VERSION])(
+it.each([18, 19, SCHEMA_VERSION])(
   'connects schema %s coordinated/native/operations/history producers to the actual queue with scoped query and OS protection fixtures',
   async (schemaVersion) => {
     const s = await fixture();
@@ -447,7 +447,7 @@ it.each([18, SCHEMA_VERSION])(
     expect(checkpoint.sqlite).toHaveLength(1);
     expect(checkpoint.schemaVersion).toBe(schemaVersion);
     expect(Object.keys(JSON.parse(fs.readFileSync(data + '/coordinated/remote.json', 'utf8')).rows)).toHaveLength(
-      schemaVersion === 18 ? 75 : 79,
+      schemaVersion === 18 ? 75 : schemaVersion === 19 ? 79 : 81,
     );
     expect(operations.coordinatedDigest).toBe(digest(checkpoint));
     expect(header.operations.manifestDigest).toBe(digest(operations));
