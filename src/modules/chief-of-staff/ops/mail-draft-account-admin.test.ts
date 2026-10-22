@@ -18,6 +18,7 @@ import { configureVaultStorage, VAULT_DIRECTORIES } from './vault-storage.js';
 import { initializeTarget, protectTarget, writeAtomic } from './target-state.js';
 import { machineFingerprint } from './target-identity.js';
 import { runMailDraftAccountAdmin } from './mail-draft-account-admin.js';
+import { readMailDraftAccountConsent } from './mail-draft-consent.js';
 
 vi.mock('./vault-memory.js', () => ({ verifyVaultMemory: vi.fn() }));
 vi.mock('../calendar/backup.js', () => ({
@@ -251,6 +252,31 @@ it('links only the exact compose grant for the existing ready reader mailbox, jo
     write_enabled: false,
   };
   expect(await runMailDraftAccountAdmin({ ...f.options, args: f.link }, f.dependencies)).toEqual(result);
+  const history = openTargetDraftJournal(f.roots.targetRoot, digest(f.targetBinding));
+  try {
+    const consent = readMailDraftAccountConsent(
+      f.roots.targetRoot,
+      digest(f.targetBinding),
+      f.options.binding,
+      f.link.writerBindingId,
+      history,
+    );
+    expect(consent).toMatchObject({
+      nativeBindingDigest: digest(f.options.binding),
+      selection: {
+        readerBindingId: f.link.readerBindingId,
+        writerBindingId: f.link.writerBindingId,
+        readerReference: f.reference,
+        writerReference: f.link.writerBindingId,
+        mailboxDigest: digest(f.selection.mailboxEmail),
+        readerClientDigest: digest('reader-fixture.apps.googleusercontent.com'),
+        writerClientDigest: digest(f.client.clientId),
+      },
+    });
+    expect(JSON.stringify(consent)).not.toMatch(/PRIVATE|owner@example/);
+  } finally {
+    history.close();
+  }
   const host = await openMailDraftCredentials(f.roots, f.dependencies.inspect, f.dependencies.memory, f.journal);
   try {
     expect(await host.credentials.inspect('fixture', f.link.writerBindingId, f.link.writerBindingId)).toMatchObject({
@@ -346,6 +372,26 @@ it('does not reconstruct a deleted independent history during a repeated setup',
   fs.unlinkSync(f.roots.targetRoot + '/mail-drafts/effects/effects.sqlite');
   await expect(f.configure()).rejects.toThrow('mail_draft_account_operation_unavailable');
   expect(fs.existsSync(f.roots.targetRoot + '/mail-drafts/effects/effects.sqlite')).toBe(false);
+});
+it('publishes no completed consent after a failed post-install backup and reconciles the installed grant without repeating consent', async () => {
+  const f = await fixture();
+  await f.configure();
+  vi.mocked(backupCalendarState)
+    .mockImplementationOnce(vi.mocked(backupCalendarState).getMockImplementation()!)
+    .mockRejectedValueOnce(Error('PRIVATE_BACKUP_FAILURE'));
+  await expect(runMailDraftAccountAdmin({ ...f.options, args: f.link }, f.dependencies)).rejects.toThrow(
+    'mail_draft_account_operation_unavailable',
+  );
+  expect(fs.existsSync(f.roots.targetRoot + '/mail-draft-admin/' + f.link.writerBindingId + '/consent.json')).toBe(
+    false,
+  );
+  expect(fs.existsSync(f.writerRoot + '/credentials/' + f.link.writerBindingId + '.json')).toBe(true);
+  expect(await runMailDraftAccountAdmin({ ...f.options, args: f.link }, f.dependencies)).toMatchObject({
+    status: 'linked_paused',
+    write_enabled: false,
+  });
+  expect(f.display).toHaveBeenCalledOnce();
+  expect(f.provider.mock.calls.filter(([url]) => url === 'https://oauth2.googleapis.com/token')).toHaveLength(1);
 });
 it('cannot use a fresh setup request to adopt an empty history after the whole independent root is lost', async () => {
   const f = await fixture();

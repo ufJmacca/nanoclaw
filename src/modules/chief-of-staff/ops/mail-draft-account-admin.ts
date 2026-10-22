@@ -26,6 +26,7 @@ import { consumeMailClientStream } from './mail-client-stream.js';
 import { connectOwnerMailStore } from './owner-mail-store.js';
 import { authorizeMailProfile } from './mail-authorization.js';
 import { parseMailSelection } from './mail-account-admin.js';
+import { readMailDraftAccountConsent, type MailDraftAccountConsent } from './mail-draft-consent.js';
 import { createVaultCredentialJournal } from './backup-credential-journal.js';
 import type { CredentialJournal } from './backup-credential-event.js';
 import { verifyVaultMemory } from './vault-memory.js';
@@ -326,6 +327,46 @@ export async function runMailDraftAccountAdmin(o: Options, d: Dependencies = {})
                 await checked();
                 await backup(journal, 'after');
                 await checked();
+                const consent: MailDraftAccountConsent = {
+                  format: 'cos-mail-draft-account-consent/v1',
+                  installationDigest,
+                  nativeBindingDigest: digest(o.binding),
+                  journalGeneration: witness.generation,
+                  requestId: args.requestId,
+                  readerConnectionDigest: selectedDigest,
+                  selection: {
+                    scopeId: args.scopeId,
+                    readerBindingId: args.readerBindingId,
+                    writerBindingId: args.writerBindingId,
+                    readerReference: reference,
+                    writerReference: args.writerBindingId,
+                    mailboxDigest: digest(selection.mailboxEmail),
+                    readerClientDigest: digest(readerClient.clientId),
+                    writerClientDigest: digest(client.clientId),
+                  },
+                };
+                if (fs.lstatSync(journal + '/consent.json', { throwIfNoEntry: false })) {
+                  if (
+                    digest(
+                      readMailDraftAccountConsent(
+                        o.roots.targetRoot,
+                        installationDigest,
+                        o.binding,
+                        args.writerBindingId,
+                        witness,
+                      ),
+                    ) !== digest(consent)
+                  )
+                    throw Error('mail_draft_operation_conflict');
+                } else writeAtomic(journal, 'consent.json', consent);
+                await checked();
+                readMailDraftAccountConsent(
+                  o.roots.targetRoot,
+                  installationDigest,
+                  o.binding,
+                  args.writerBindingId,
+                  witness,
+                );
                 return {
                   ...base,
                   status: 'linked_paused',
