@@ -31,6 +31,7 @@ const drafts = process.env.NANOCLAW_COS_MAIL_DRAFT_FIXTURE === '1',
   initializeMailProfile = drafts ? initializeMailDraftProfile : initializeMailReaderProfile,
   openMailCredentials = drafts ? openMailDraftCredentials : openMailReaderCredentials,
   permission = drafts ? GOOGLE_MAIL_DRAFT_SCOPE : GOOGLE_MAIL_READ_SCOPE,
+  setupError = drafts ? /^Error: vault_storage_unavailable$/ : /mail_profile_initialization_unavailable/,
   calendar = '/case/vault/google/calendar',
   readerProfile = calendar + '/mail-reader',
   profile = calendar + (drafts ? '/mail-draft-writer' : '/mail-reader');
@@ -159,16 +160,10 @@ if (mode === 'install') {
       await close(host);
     }
     reader.snapshot = snapshot(readerProfile);
-    await assert.rejects(
-      initializeMailProfile(roots, readerClient, authority(operationId)),
-      /separate_mail_draft_client_required/,
-    );
+    await assert.rejects(initializeMailProfile(roots, readerClient, authority(operationId)), setupError);
     assert.equal(fs.existsSync(profile), false);
   }
-  await assert.rejects(
-    initializeMailProfile(roots, calendarClient, authority(operationId)),
-    /mail_profile_initialization_unavailable/,
-  );
+  await assert.rejects(initializeMailProfile(roots, calendarClient, authority(operationId)), setupError);
   assert.equal(fs.existsSync(profile), false);
   await assert.rejects(openMailCredentials(roots), /mail_configuration_unavailable/);
   assert.equal(fs.existsSync(profile), false);
@@ -453,10 +448,7 @@ if (mode === 'install') {
   } finally {
     bytes.fill(0);
   }
-  await assert.rejects(
-    initializeMailProfile(roots, client, authority(metadata.operationId)),
-    /mail_profile_initialization_unavailable/,
-  );
+  await assert.rejects(initializeMailProfile(roots, client, authority(metadata.operationId)), setupError);
   await close(host, true);
   console.log(
     JSON.stringify({
@@ -501,10 +493,7 @@ if (mode === 'install') {
 } else if (mode === 'unavailable') {
   stage('mail_unavailable');
   await assert.rejects(openMailCredentials(roots), /mail_configuration_unavailable/);
-  await assert.rejects(
-    initializeMailProfile(roots, client, authority(randomUUID())),
-    /mail_profile_initialization_unavailable/,
-  );
+  await assert.rejects(initializeMailProfile(roots, client, authority(randomUUID())), setupError);
   // Plaintext underlays are root-owned mode 000. The owner must be unable to
   // read or write them; the root orchestrator separately verifies both empty.
   for (const directory of ['/case/vault', roots.targetRoot + '/calendar']) {

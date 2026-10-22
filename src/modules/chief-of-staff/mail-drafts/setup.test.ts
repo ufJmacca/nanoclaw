@@ -118,7 +118,7 @@ it.each(['intent', 'directories', 'client', 'markers', 'proof'] as const)(
   },
 );
 it.each(['calendar-fixture', 'calendar-writer-fixture', 'mail-reader-fixture'])(
-  'refuses reusing the existing %s client',
+  'refuses reusing the existing %s client through the fixed private vault error',
   async (name) => {
     const f = await fixture();
     await expect(
@@ -129,7 +129,7 @@ it.each(['calendar-fixture', 'calendar-writer-fixture', 'mail-reader-fixture'])(
         f.inspect,
         f.memory,
       ),
-    ).rejects.toThrow();
+    ).rejects.toThrow(/^vault_storage_unavailable$/);
     expect(fs.existsSync(f.writer)).toBe(false);
   },
 );
