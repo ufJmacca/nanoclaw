@@ -90,8 +90,12 @@ export function createMailDraftFixtureHost(
       const session = getSession(context.sessionId),
         boundary = session && cosBoundary(session, native),
         retained = native
-          .prepare('SELECT generation,status,binding_digest FROM cos_conversation_states WHERE scope_id=?')
-          .get(binding.scopeId) as { generation: string; status: string; binding_digest: string } | undefined;
+          .prepare(
+            'SELECT generation,status,binding_digest,account_fingerprint FROM cos_conversation_states WHERE scope_id=?',
+          )
+          .get(binding.scopeId) as
+          | { generation: string; status: string; binding_digest: string; account_fingerprint: string }
+          | undefined;
       if (
         shutdown.signal.aborted ||
         !readerFences ||
@@ -101,6 +105,7 @@ export function createMailDraftFixtureHost(
         !retained ||
         retained.status !== 'active' ||
         retained.binding_digest !== digest(binding) ||
+        retained.account_fingerprint !== 'a'.repeat(64) ||
         context.origin ||
         retained.generation !== input.authority.contextGeneration ||
         context.scopeId !== binding.scopeId ||
@@ -116,7 +121,10 @@ export function createMailDraftFixtureHost(
           'a'.repeat(64),
         ),
         owner = readConversationOwner(root, retained.generation, binding);
-      return policy && digest(policy) === input.authority.provider.policyDigest && owner.state === 'retained'
+      return policy &&
+        digest(policy) === input.authority.provider.policyDigest &&
+        owner.state === 'retained' &&
+        owner.accountFingerprint === 'a'.repeat(64)
         ? structuredClone(input.authority)
         : null;
       // eslint-disable-next-line no-catch-all/no-catch-all -- Lost synthetic native/retained ownership denies fixture authority just as the production resolver does.
