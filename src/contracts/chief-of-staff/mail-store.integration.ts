@@ -7,6 +7,8 @@ import { randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import { connectFixtureDatabase, fixtureDatabaseConfig, fixtureRuntimeUser } from './fixture-database.js';
 import { migrate, SCHEMA_VERSION } from '../../modules/chief-of-staff/store/migrations.js';
+import { MAIL_CHECKSUM } from '../../modules/chief-of-staff/store/mail-schema.js';
+import { checkpointSchema } from '../../modules/chief-of-staff/ops/checkpoint-schema.js';
 import { CHECKPOINT_TABLES } from '../../modules/chief-of-staff/ops/coordinated-backup.js';
 import { BoundedDatabase } from '../../modules/chief-of-staff/store/client.js';
 import { KnowledgeArtifacts } from '../../modules/chief-of-staff/knowledge/artifacts.js';
@@ -271,9 +273,15 @@ test('G04 only one concurrent host claims a due poll; claims never fabricate a c
   assert.equal((await f.store.claimPoll(f.context, f.binding.id)).claimed, false);
 });
 test('G04 mailbox schema is additive, constrained and included in coordinated checkpoints', async () => {
-  assert.equal(SCHEMA_VERSION, 19);
-  for (const table of ['mail_bindings', 'mail_states', 'mail_captures', 'mail_messages'])
+  assert(Number(SCHEMA_VERSION) >= 19);
+  assert.equal(
+    (await admin.query('SELECT checksum FROM cos.schema_migrations WHERE version=19')).rows[0].checksum,
+    MAIL_CHECKSUM,
+  );
+  for (const table of ['mail_bindings', 'mail_states', 'mail_captures', 'mail_messages']) {
+    assert(checkpointSchema(19).tables.includes(table));
     assert(CHECKPOINT_TABLES.includes(table));
+  }
   const f = await fixture();
   assert.equal((await f.store.bind(f.context, f.binding)).status, 'ok');
   await assert.rejects(
