@@ -20,6 +20,7 @@ const ports = vi.hoisted(() => ({
   separate: vi.fn(),
   restore: vi.fn(),
   credentials: vi.fn(),
+  drafts: vi.fn(),
 }));
 vi.mock('./target-host.js', async (original) => ({
   ...(await original<typeof import('./target-host.js')>()),
@@ -31,13 +32,14 @@ vi.mock('./backup-upload-job-effects.js', () => ({
 vi.mock('./backup-test-database.js', () => ({ withSeparateBackupTestDatabase: ports.separate }));
 vi.mock('./backup-target-restore.js', () => ({ restoreTargetVaultBackupTestScope: ports.restore }));
 vi.mock('./backup-upload.js', () => ({ restoreVaultCredentialCapture: ports.credentials }));
+vi.mock('./mail-draft-recovery-admin.js', () => ({ restoreOwnerMailDraftBaseline: ports.drafts }));
 import { parseBackupOwnerRestoreArguments, restoreOwnerVaultBackup } from './backup-owner-restore.js';
 const cleanup: Array<() => void> = [];
 afterEach(() => {
   for (const close of cleanup.splice(0).reverse()) close();
   vi.resetAllMocks();
 });
-function fixture(slice: 'G02' | 'G04' = 'G02') {
+function fixture(slice: 'G02' | 'G04' | 'G05' = 'G02') {
   const root = fs.mkdtempSync(os.tmpdir() + '/cos-owner-restore-');
   fs.chmodSync(root, 0o700);
   cleanup.push(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -170,6 +172,65 @@ function fixture(slice: 'G02' | 'G04' = 'G02') {
     });
   return { root, settings, manifest, binding, owner, native, args, order, checkDatabase, receiptRoot, invoke };
 }
+it('routes G05 combined draft recovery through the same healthy protected owner and separate marked test database lifetime', async () => {
+  const f = fixture('G05'),
+    args = {
+      ...f.args,
+      command: 'mail-draft-restore-check' as const,
+      writerBindingId: randomUUID(),
+      captureOperationId: randomUUID(),
+      credentialRequestId: randomUUID(),
+    };
+  let retained!: () => void;
+  ports.drafts.mockImplementation(async (input) => {
+    input.target.current();
+    await input.checkDatabase();
+    retained = input.target.current;
+    expect(input.args).toEqual(args);
+    expect(input.target.binding).toEqual(f.owner);
+    expect(input.target.recovery.software.schemaVersion).toBe(20);
+    expect(input.target.expectedSnapshotDigest).toBe(args.snapshotDigest);
+    expect(input.sandbox.testTargetId).toBe('fixture-test');
+    return { status: 'mail_draft_restore_verified', writer_activated: false };
+  });
+  expect(
+    await restoreOwnerVaultBackup({
+      settingsFile: f.root + '/settings.json',
+      testEnvironmentFile: f.root + '/test.env',
+      invokedHelper:
+        f.settings.releaseRoot +
+        '/' +
+        f.manifest.releaseId +
+        '/payload/dist/modules/chief-of-staff/ops/target-helper.js',
+      args,
+    }),
+  ).toEqual({ status: 'mail_draft_restore_verified', writer_activated: false });
+  expect(f.order).toEqual(['database', 'mount']);
+  expect(ports.drafts).toHaveBeenCalledOnce();
+  expect(ports.restore).not.toHaveBeenCalled();
+  expect(ports.credentials).not.toHaveBeenCalled();
+  expect(() => retained()).toThrow();
+});
+it('does not admit the draft recovery command through a G04 retained helper', async () => {
+  const f = fixture('G04'),
+    args = {
+      ...f.args,
+      command: 'mail-draft-restore-check' as const,
+      writerBindingId: randomUUID(),
+      captureOperationId: randomUUID(),
+      credentialRequestId: randomUUID(),
+    };
+  await expect(
+    restoreOwnerVaultBackup({
+      settingsFile: f.root + '/settings.json',
+      testEnvironmentFile: f.root + '/test.env',
+      invokedHelper: '/fixture/retained/helper.js',
+      args,
+    }),
+  ).rejects.toThrow('backup_owner_restore_unavailable');
+  expect(ports.drafts).not.toHaveBeenCalled();
+  expect(ports.mount).not.toHaveBeenCalled();
+});
 function credentialFixture(slice: 'G02' | 'G04' = 'G04') {
   const f = fixture(slice),
     owner = digest('vault owner'),

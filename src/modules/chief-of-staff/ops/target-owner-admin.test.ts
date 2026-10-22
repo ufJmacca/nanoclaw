@@ -3,6 +3,47 @@ import { parseOwnerAdminArguments, selectedOwnerAdminProfile, ownerDatabasePrefl
 import { fixtureRelease } from '../../../contracts/chief-of-staff/release-fixture.js';
 import { DatabasePreflightError } from '../store/preflight.js';
 const request = ['owner-export', '--scope', 'fixture', '--request-id', '01234567-89ab-4def-8123-456789abcdef'];
+it('admits combined draft recovery only with the separate test environment and fixed identities', async () => {
+  const admin = [
+    'mail-draft-restore-check',
+    '--scope',
+    'fixture',
+    '--request-id',
+    '01234567-89ab-4def-8123-456789abcdef',
+    '--backup-operation-id',
+    '48f99256-b105-4ee3-848c-00140c98151d',
+    '--backup-release',
+    'release-g05-fixture',
+    '--snapshot-digest',
+    'a'.repeat(64),
+    '--writer-binding',
+    '01234567-89ab-4def-8123-456789abcdea',
+    '--capture-operation-id',
+    '01234567-89ab-4def-8123-456789abcdeb',
+    '--credential-request-id',
+    '01234567-89ab-4def-8123-456789abcdec',
+  ];
+  expect(
+    parseOwnerAdminArguments([
+      '--settings',
+      '/private/settings.json',
+      '--database-environment',
+      '/private/test.env',
+      '--',
+      ...admin,
+    ]),
+  ).toMatchObject({ admin, databaseEnvironment: '/private/test.env' });
+  expect(() => parseOwnerAdminArguments(['--settings', '/private/settings.json', '--', ...admin])).toThrow();
+  const test = { COS_TEST_TARGET_ID: 'marked-test' };
+  await expect(
+    selectedOwnerAdminProfile(admin[0], {
+      runtime() {
+        throw Error('runtime_forbidden');
+      },
+      test: () => test,
+    }),
+  ).resolves.toBe(test);
+});
 it.each(['mail-setup', 'mail-link', 'mail-draft-setup', 'mail-draft-link'])(
   'admits %s only through the scoped retained helper, with selected runtime settings and no secret arguments',
   async (command) => {

@@ -32,6 +32,7 @@ const commands = [
   'mail-link',
   'mail-draft-setup',
   'mail-draft-link',
+  'mail-draft-restore-check',
 ];
 export function parseOwnerAdminArguments(args: string[]): {
   settings: string;
@@ -57,11 +58,12 @@ export function parseOwnerAdminArguments(args: string[]): {
   if (
     !canonical(flags[1]) ||
     (flags.length === 4 && !canonical(flags[3])) ||
-    ['operations-restore-check', 'backup-restore-check'].includes(admin[0]) !== (flags.length === 4) ||
+    ['operations-restore-check', 'backup-restore-check', 'mail-draft-restore-check'].includes(admin[0]) !==
+      (flags.length === 4) ||
     (['database-check', 'vault-status'].includes(admin[0]) && admin.length !== 1)
   )
     return invalid();
-  if (['backup-restore-check', 'backup-credentials-restore-check'].includes(admin[0]))
+  if (['backup-restore-check', 'backup-credentials-restore-check', 'mail-draft-restore-check'].includes(admin[0]))
     parseBackupOwnerRestoreArguments(admin);
   if (isMailAccountCommand({ command: admin[0] })) parseMailAccountArguments(admin);
   if (isMailDraftAccountCommand({ command: admin[0] })) parseMailDraftAccountArguments(admin);
@@ -96,7 +98,7 @@ export async function selectedOwnerAdminProfile(
   if (!commands.includes(command)) throw new Error('invalid_owner_admin_arguments');
   return ['operator-control', 'vault-status', 'backup-credentials-restore-check'].includes(command)
     ? {}
-    : ['operations-restore-check', 'backup-restore-check'].includes(command)
+    : ['operations-restore-check', 'backup-restore-check', 'mail-draft-restore-check'].includes(command)
       ? profiles.test()
       : profiles.runtime();
 }
@@ -104,7 +106,9 @@ export async function targetOwnerAdmin(args: string[]): Promise<Record<string, u
   const request = parseOwnerAdminArguments(args),
     settings = deploymentSettings(readPrivate(request.settings));
   process.chdir(settings.installationRoot);
-  if (['backup-restore-check', 'backup-credentials-restore-check'].includes(request.admin[0])) {
+  if (
+    ['backup-restore-check', 'backup-credentials-restore-check', 'mail-draft-restore-check'].includes(request.admin[0])
+  ) {
     const { restoreOwnerVaultBackup } = await import('./backup-owner-restore.js');
     return restoreOwnerVaultBackup({
       settingsFile: request.settings,

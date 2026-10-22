@@ -8,15 +8,36 @@ export type BackupOwnerRestoreArguments = Common &
         snapshotDigest: string;
       }
     | { command: 'backup-credentials-restore-check'; captureOperationId: string }
+    | {
+        command: 'mail-draft-restore-check';
+        queueOperationId: string;
+        backupReleaseId: string;
+        snapshotDigest: string;
+        writerBindingId: string;
+        captureOperationId: string;
+        credentialRequestId: string;
+      }
   );
 export function parseBackupOwnerRestoreArguments(args: string[]): BackupOwnerRestoreArguments {
   const invalid = () => Error('invalid_owner_admin_arguments'),
     credential = args[0] === 'backup-credentials-restore-check',
+    draft = args[0] === 'mail-draft-restore-check',
     allowed = credential
       ? ['--scope', '--request-id', '--capture-operation-id']
-      : ['--scope', '--request-id', '--backup-operation-id', '--backup-release', '--snapshot-digest'],
+      : [
+          '--scope',
+          '--request-id',
+          '--backup-operation-id',
+          '--backup-release',
+          '--snapshot-digest',
+          ...(draft ? ['--writer-binding', '--capture-operation-id', '--credential-request-id'] : []),
+        ],
     values: Record<string, string> = {};
-  if ((!credential && args[0] !== 'backup-restore-check') || args.length !== (credential ? 7 : 11)) throw invalid();
+  if (
+    (!credential && !draft && args[0] !== 'backup-restore-check') ||
+    args.length !== (credential ? 7 : draft ? 17 : 11)
+  )
+    throw invalid();
   for (let i = 1; i < args.length; i += 2) {
     if (!allowed.includes(args[i]) || values[args[i]] !== undefined || !args[i + 1]) throw invalid();
     values[args[i]] = args[i + 1];
@@ -39,6 +60,31 @@ export function parseBackupOwnerRestoreArguments(args: string[]): BackupOwnerRes
     !/^[a-f0-9]{64}$/.test(values['--snapshot-digest'] ?? '')
   )
     throw invalid();
+  if (draft) {
+    if (
+      !uuid.test(values['--writer-binding'] ?? '') ||
+      !uuid.test(values['--capture-operation-id'] ?? '') ||
+      !uuid.test(values['--credential-request-id'] ?? '') ||
+      new Set([
+        values['--request-id'],
+        values['--backup-operation-id'],
+        values['--capture-operation-id'],
+        values['--credential-request-id'],
+      ]).size !== 4
+    )
+      throw invalid();
+    return {
+      command: 'mail-draft-restore-check',
+      scopeId: values['--scope'],
+      requestId: values['--request-id'],
+      queueOperationId: values['--backup-operation-id'],
+      backupReleaseId: values['--backup-release'],
+      snapshotDigest: values['--snapshot-digest'],
+      writerBindingId: values['--writer-binding'],
+      captureOperationId: values['--capture-operation-id'],
+      credentialRequestId: values['--credential-request-id'],
+    };
+  }
   return {
     command: 'backup-restore-check',
     scopeId: values['--scope'],
