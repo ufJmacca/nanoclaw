@@ -11,6 +11,7 @@ export type MailDraftHostGrant = Pick<Context, 'scopeId' | 'ownerId' | 'agentGro
   id: string;
   version: number;
   backupOperationId: string;
+  /** Logical state snapshot digest returned by the combined encrypted G05 recovery proof. */
   targetBackupDigest: string;
   writeEnabled: boolean;
   binding: MailDraftBinding;

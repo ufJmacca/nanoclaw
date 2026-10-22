@@ -26,7 +26,7 @@ export type MailDraftCredentialRecoveryIdentity = {
 const object = (value: unknown): value is Record<string, unknown> =>
   !!value && typeof value === 'object' && !Array.isArray(value);
 const hash = (value: unknown): value is string => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
-function validIdentity(value: MailDraftCredentialRecoveryIdentity): boolean {
+export function validMailDraftCredentialRecoveryIdentity(value: MailDraftCredentialRecoveryIdentity): boolean {
   return (
     object(value) &&
     Object.keys(value).sort().join(',') ===
@@ -52,7 +52,11 @@ export function verifyRecoveredMailDraftCredentialSet(
   identity: MailDraftCredentialRecoveryIdentity,
 ): { setDigest: string; selectionDigest: string; sourceCount: number; fileCount: number } {
   try {
-    if (!validIdentity(identity) || !hash(expectedSetDigest) || digest(set) !== expectedSetDigest)
+    if (
+      !validMailDraftCredentialRecoveryIdentity(identity) ||
+      !hash(expectedSetDigest) ||
+      digest(set) !== expectedSetDigest
+    )
       throw Error('credential_selection_changed');
     const selectionDigest = digest(identity);
     scope.assertCurrent();
@@ -148,7 +152,7 @@ export async function restoreMailDraftCredentialBaseline(
       caller = input.assertAuthority,
       configuration = digest({ roots, selected, captureId, requestId });
     if (
-      !validIdentity(selected) ||
+      !validMailDraftCredentialRecoveryIdentity(selected) ||
       !contextGenerationPattern.test(captureId) ||
       !contextGenerationPattern.test(requestId) ||
       typeof input.assertAuthority !== 'function'
