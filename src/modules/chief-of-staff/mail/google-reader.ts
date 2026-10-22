@@ -11,6 +11,8 @@ import {
 } from './normalization.js';
 import { GOOGLE_MAIL_READ_SCOPE } from '../calendar/oauth-core.js';
 import { digest } from '../domain/contracts.js';
+import { replyEnvelope, type ReplySource } from '../mail-drafts/reply.js';
+import type { MailReplySourceReader } from '../mail-drafts/source.js';
 export type GoogleMailReaderOptions = {
   access(): Promise<MailAccess>;
   token(): Promise<string>;
@@ -40,7 +42,7 @@ type Kind = 'profile' | 'list' | 'message' | 'thread' | 'history';
 /** Fixed GET endpoints only. A token's mailbox is independently checked before its
  * first content request, then bound to that exact grant and token in memory.
  */
-export function googleMailReader(options: GoogleMailReaderOptions): MailReader {
+export function googleMailReader(options: GoogleMailReaderOptions): MailReader & MailReplySourceReader {
   const fetch = options.fetch ?? globalThis.fetch,
     now = options.now ?? Date.now;
   let verifiedToken: string | null = null;
@@ -226,6 +228,88 @@ export function googleMailReader(options: GoogleMailReaderOptions): MailReader {
     }
   };
   return {
+    async replySource(id, window) {
+      if (!validId(id) || !validWindow(window) || window.capturedAt > now() || window.capturedAt < now() - 60000)
+        return fail('mail_request_invalid');
+      const grant = await admit();
+      const sourceUrl = new URL(root + '/messages/' + id);
+      sourceUrl.searchParams.set('format', 'metadata');
+      sourceUrl.searchParams.set('fields', 'id,threadId,historyId,internalDate,labelIds,payload(headers)');
+      for (const header of ['From', 'To', 'Reply-To', 'Subject', 'Message-ID', 'References'])
+        sourceUrl.searchParams.append('metadataHeaders', header);
+      const body = await request(sourceUrl, 'message');
+      const metadata = (value: unknown) => {
+        if (
+          !object(value) ||
+          !validId(value.id) ||
+          !validId(value.threadId) ||
+          typeof value.internalDate !== 'string' ||
+          !/^[1-9][0-9]{0,15}$/.test(value.internalDate) ||
+          !Number.isSafeInteger(Number(value.internalDate)) ||
+          !Array.isArray(value.labelIds) ||
+          value.labelIds.length > 100 ||
+          value.labelIds.some((label) => typeof label !== 'string' || !/^[a-zA-Z0-9_-]{1,200}$/.test(label)) ||
+          new Set(value.labelIds).size !== value.labelIds.length
+        )
+          return fail('mail_invalid_response');
+        return {
+          id: value.id,
+          threadId: value.threadId,
+          internalDate: Number(value.internalDate),
+          labels: (value.labelIds as string[]).slice().sort(),
+        };
+      };
+      const selected = metadata(body);
+      if (
+        selected.id !== id ||
+        !mailHistoryId(body.historyId) ||
+        selected.internalDate < window.since ||
+        selected.internalDate > window.capturedAt ||
+        !selected.labels.some((label) => ['INBOX', 'SENT'].includes(label)) ||
+        selected.labels.some((label) => ['SPAM', 'TRASH', 'DRAFT'].includes(label))
+      )
+        return fail('mail_draft_source_denied');
+      if (!object(body.payload) || !Array.isArray(body.payload.headers) || body.payload.headers.length > 12)
+        return fail('mail_invalid_response');
+      const source: ReplySource = {
+        id,
+        threadId: selected.threadId,
+        mailboxEmail: grant.mailboxEmail,
+        headers: body.payload.headers as ReplySource['headers'],
+      };
+      replyEnvelope(source);
+      const threadUrl = new URL(root + '/threads/' + selected.threadId);
+      threadUrl.searchParams.set('format', 'metadata');
+      threadUrl.searchParams.set('fields', 'id,historyId,messages(id,threadId,internalDate,labelIds)');
+      const thread = await request(threadUrl, 'thread');
+      if (
+        thread.id !== selected.threadId ||
+        !mailHistoryId(thread.historyId) ||
+        BigInt(thread.historyId) < BigInt(body.historyId) ||
+        !Array.isArray(thread.messages) ||
+        thread.messages.length < 1 ||
+        thread.messages.length > 100
+      )
+        return fail('mail_invalid_response');
+      const members = thread.messages.map(metadata);
+      if (
+        members.some((member) => member.threadId !== selected.threadId) ||
+        new Set(members.map((member) => member.id)).size !== members.length ||
+        digest(members.find((member) => member.id === id)) !== digest(selected)
+      )
+        return fail('mail_draft_source_changed');
+      await admit(grant);
+      return {
+        source,
+        internalDate: selected.internalDate,
+        observedAt: now(),
+        historyId: thread.historyId,
+        hasDraft: members.some((member) => member.labels.includes('DRAFT')),
+        alreadyAnswered: members.some(
+          (member) => member.labels.includes('SENT') && member.internalDate > selected.internalDate,
+        ),
+      };
+    },
     async profile() {
       const body = await request(profileUrl(), 'profile');
       return { mailboxEmail: String(body.emailAddress).toLowerCase(), historyId: String(body.historyId) };
