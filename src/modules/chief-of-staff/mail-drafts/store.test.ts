@@ -132,6 +132,7 @@ function fixture() {
     scopeId: context.scopeId,
     bindingId: input.writer_binding_id,
     sourceMessageId: 'aa01',
+    threadId: 'bb02',
     mailboxDigest: body.mailboxDigest,
   };
   const journal = {
@@ -211,6 +212,13 @@ it('rechecks a saved result rather than repeating creation or claiming stale ver
   });
   expect(f.create).toHaveBeenCalledTimes(1);
   expect(f.status).toHaveBeenCalledWith(operationId);
+});
+it('cannot use a stored request receipt to read a different source effect from the journal', async () => {
+  const f = fixture();
+  await f.store.create(context, requestId, input);
+  f.record.sourceMessageId = 'cc03';
+  expect(await f.store.create(context, requestId, input)).toEqual({ status: 'denied' });
+  expect(f.status).not.toHaveBeenCalled();
 });
 it('rejects the same request ID with changed text, binding, source, method or scope', async () => {
   const f = fixture();

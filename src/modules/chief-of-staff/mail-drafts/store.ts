@@ -117,7 +117,7 @@ export class MailDraftStore {
        JOIN cos.mail_draft_writer_revisions r ON r.scope_id=b.scope_id AND r.binding_id=b.id AND r.version=b.version
        JOIN cos.mail_bindings mb ON mb.scope_id=b.scope_id AND mb.id=b.reader_binding_id
        WHERE b.scope_id=$1 AND b.id=$2 AND b.owner_id=$3 AND b.session_id=$4 AND b.state='enabled'
-       AND r.body->>'readerBindingId'=b.reader_binding_id::text FOR SHARE OF b,r,mb`,
+       AND r.body->>'readerBindingId'=b.reader_binding_id::text FOR SHARE OF mb`,
         [context.scopeId, bindingId, context.ownerId, context.sessionId],
       )
     ).rows[0] as MailDraftSelection | undefined;
@@ -176,6 +176,16 @@ export class MailDraftStore {
       return false;
     }
   }
+  private effectMatches(operationId: string, context: KnowledgeContext, pinned: Admission, messageId: string): boolean {
+    const record = this.dependencies!.journal.find(operationId);
+    return (
+      !!record &&
+      record.scopeId === context.scopeId &&
+      record.sourceMessageId === messageId &&
+      record.threadId === pinned.source.thread_id &&
+      record.mailboxDigest === pinned.binding.body.mailboxDigest
+    );
+  }
   async create(context: KnowledgeContext, requestId: string, input: MailDraftCreateInput): Promise<Result> {
     if (!validMailDraftCreateInput(input) || !contextGenerationPattern.test(requestId) || !this.native(context))
       return { status: 'denied' };
@@ -233,13 +243,23 @@ export class MailDraftStore {
         if (!['open_draft', 'already_answered'].includes(String(prior.reason))) return { status: 'denied' };
         result = { status: 'ok', draft_status: 'skipped', reason: prior.reason };
       } else if (prior) {
-        if (prior.status !== 'ok' || !hash(prior.operation_id)) return { status: 'denied' };
+        if (
+          prior.status !== 'ok' ||
+          !hash(prior.operation_id) ||
+          !this.effectMatches(prior.operation_id, retained, pinned, selected.source_message_id)
+        )
+          return { status: 'denied' };
         result = receipt(await writer.status(prior.operation_id));
       } else {
         result = receipt(
           await writer.create({ requestId, sourceMessageId: selected.source_message_id, text: selected.reply_text }),
         );
       }
+      if (
+        hash(result.operation_id) &&
+        !this.effectMatches(result.operation_id, retained, pinned, selected.source_message_id)
+      )
+        return { status: 'denied' };
       if (!(await current())) return { status: 'denied' };
       return await this.transaction(async (client) => {
         const latest = await this.admission(client, retained, selected.writer_binding_id, selected.source_message_id);
@@ -267,7 +287,8 @@ export class MailDraftStore {
       const pinned = await this.transaction((client) =>
         this.admission(client, retained, record.bindingId, record.sourceMessageId),
       );
-      if (!pinned || record.mailboxDigest !== pinned.binding.body.mailboxDigest) return { status: 'denied' };
+      if (!pinned || !this.effectMatches(operationId, retained, pinned, record.sourceMessageId))
+        return { status: 'denied' };
       const current = () => this.current(retained, pinned, record.sourceMessageId),
         writer = this.dependencies!.writer(retained, pinned.binding, current);
       if (!writer || !(await current())) return { status: 'denied' };
