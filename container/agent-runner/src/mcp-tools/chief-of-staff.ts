@@ -6,6 +6,7 @@ import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
 import { createAnswerTools } from './answer-tools.js';
 import { createMailTools } from './mail-tools.js';
+import { createMailDraftTools } from './mail-draft-tools.js';
 import { scheduleChangeSchema } from './generated/schedule-protocol.js';
 import { proactiveCoordinatorTools } from './proactive-coordinator-tools.js';
 import { missionCoordinatorTools } from './mission-coordinator-tools.js';
@@ -315,6 +316,7 @@ export const cosTools: McpToolDefinition[] = [
   ...answerTools,
   calendarTool,
   ...mailTools,
+  ...createMailDraftTools(executeCosRequest),
   ...workTools,
   workReadTool,
   briefTool,

@@ -4,6 +4,7 @@ import { actionCoordinatorTools } from './action-coordinator-tools.js';
 import { strategyCoordinatorTools } from './strategy-coordinator-tools.js';
 import { createAnswerTools } from './answer-tools.js';
 import { createMailTools } from './mail-tools.js';
+import { createMailDraftTools } from './mail-draft-tools.js';
 import { registerTools, startMcpServer } from './server.js';
 import { callNativeMandateTool } from '../providers/codex-mandate-bridge.js';
 
@@ -21,6 +22,7 @@ registerTools(
     ...strategyCoordinatorTools(unavailable),
     ...createAnswerTools(unavailable),
     ...createMailTools(unavailable),
+    ...createMailDraftTools(unavailable),
   ].map(({ tool }) => ({
     tool,
     handler: (args) => callNativeMandateTool(socket, tool.name, args),

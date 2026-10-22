@@ -8,6 +8,7 @@ import { tomlBasicString } from './codex-app-server.js';
 import type { createCosToolDispatch } from './codex-cos-tools.js';
 import { strategyCoordinatorToolNames } from '../mcp-tools/strategy-coordinator-tools.js';
 import { mailToolNames } from '../mcp-tools/mail-tools.js';
+import { mailDraftToolNames } from '../mcp-tools/mail-draft-tools.js';
 
 type McpResult = { content: { type: 'text'; text: string }[]; isError: boolean };
 const unavailable = (): McpResult => ({ content: [{ type: 'text', text: 'CoS tool unavailable.' }], isError: true });
@@ -21,6 +22,7 @@ const tools = new Set([
   'cos_answer_prepare',
   'cos_answer_get',
   ...mailToolNames,
+  ...mailDraftToolNames,
 ]);
 
 export async function createMandateToolBridge(
@@ -124,8 +126,8 @@ export async function createMandateToolBridge(
     '[mcp_servers.nanoclaw_cos_mandates.env]',
     `NANOCLAW_COS_TOOL_SOCKET = ${tomlBasicString(socket)}`,
     // Keep the existing server key so retained native threads gain tools without a new context.
-    // These internal RPCs cannot grant owner approval or perform an external action.
-    // The dispatcher and trusted host still enforce all actual authority checks.
+    // These RPCs cannot grant owner consent. Draft saves require the host's separate
+    // current owner policy, source access and independent reservation; sending is absent.
     ...[...tools].flatMap((tool) => [`[mcp_servers.nanoclaw_cos_mandates.tools.${tool}]`, 'approval_mode = "approve"']),
     '',
   ].join('\n');

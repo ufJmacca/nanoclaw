@@ -185,7 +185,7 @@ test(
           .map((tool: { name: string }) => tool.name)
           .filter((name: string) => name.startsWith('cos_mail_'))
           .sort(),
-        ['cos_mail_search', 'cos_mail_thread_get'],
+        ['cos_mail_draft_create', 'cos_mail_draft_status', 'cos_mail_search', 'cos_mail_thread_get'],
       );
       await host!.request('ingress', { text: 'What did the Pilot Alpha thread say about launch?', id: randomUUID() });
       const found = await client!.call('cos_mail_search', { binding_id: mailBinding, query: 'Pilot Alpha' });

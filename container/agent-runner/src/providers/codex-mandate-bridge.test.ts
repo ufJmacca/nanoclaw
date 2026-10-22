@@ -7,6 +7,47 @@ import { createMandateToolBridge, callNativeMandateTool } from './codex-mandate-
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { cosTools } from '../mcp-tools/chief-of-staff.js';
+test('G05 the actual retained-context MCP entry point gains only the fixed draft tools behind the existing turn fence', async () => {
+  const f = await fixture();
+  const client = new Client({ name: 'retained-draft-fixture', version: '1' });
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [path.join(import.meta.dir, '../mcp-tools/native-mandate-server.ts')],
+    env: { NANOCLAW_COS_TOOL_SOCKET: f.bridge.socket },
+    stderr: 'pipe',
+  });
+  const args = {
+    request_id: '11111111-1111-4111-8111-111111111111',
+    writer_binding_id: '22222222-2222-4222-8222-222222222222',
+    source_message_id: 'ab01',
+    reply_text: 'An unsent harmless fixture reply',
+  };
+  try {
+    await client.connect(transport);
+    const { tools } = await client.listTools();
+    for (const name of ['cos_mail_draft_create', 'cos_mail_draft_status'])
+      expect(tools.find((tool) => tool.name === name)).toEqual(cosTools.find(({ tool }) => tool.name === name)!.tool);
+    expect((await client.callTool({ name: 'cos_mail_draft_create', arguments: args })).isError).toBe(true);
+    f.bridge.beginTurn('existing-retained-conversation', 'owner-draft-turn');
+    expect((await client.callTool({ name: 'cos_mail_draft_create', arguments: args })).isError).toBe(false);
+    expect(
+      (await client.callTool({ name: 'cos_mail_draft_status', arguments: { operation_id: 'a'.repeat(64) } })).isError,
+    ).toBe(false);
+    expect(
+      (await client.callTool({ name: 'cos_mail_draft_create', arguments: { ...args, to: 'other@example.test' } }))
+        .isError,
+    ).toBe(true);
+    expect(tools.some((tool) => /mail_draft_(send|update|delete|retry)$/.test(tool.name))).toBe(false);
+    f.bridge.endTurn();
+    expect(
+      (await client.callTool({ name: 'cos_mail_draft_status', arguments: { operation_id: 'a'.repeat(64) } })).isError,
+    ).toBe(true);
+    expect(f.calls).toEqual(['cos_mail_draft_create', 'cos_mail_draft_status']);
+  } finally {
+    await client.close();
+    await f.close();
+  }
+}, 20000);
 
 test('G04 retained conversations can read selected Mail through the current native turn fence', async () => {
   const f = await fixture();
@@ -215,6 +256,8 @@ test('S08/S09 retained-thread coordinator MCP shares the current native turn fen
       'cos_answer_get',
       'cos_mail_search',
       'cos_mail_thread_get',
+      'cos_mail_draft_create',
+      'cos_mail_draft_status',
     ]);
     expect(config.mcp_servers.nanoclaw_cos_mandates.default_tools_approval_mode).toBe('prompt');
     expect(Object.keys(config.mcp_servers.nanoclaw_cos_mandates.tools)).toEqual([
@@ -233,6 +276,8 @@ test('S08/S09 retained-thread coordinator MCP shares the current native turn fen
       'cos_answer_get',
       'cos_mail_search',
       'cos_mail_thread_get',
+      'cos_mail_draft_create',
+      'cos_mail_draft_status',
     ]);
   } finally {
     await f.close();

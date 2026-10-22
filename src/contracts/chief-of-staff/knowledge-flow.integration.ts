@@ -121,6 +121,8 @@ test(
           'cos_change_propose',
           'cos_context_get',
           'cos_knowledge_search',
+          'cos_mail_draft_create',
+          'cos_mail_draft_status',
           'cos_mail_search',
           'cos_mail_thread_get',
           'cos_mandate_activity',

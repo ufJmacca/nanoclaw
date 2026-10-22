@@ -223,6 +223,8 @@ test('native CoS exposes only its fixed approved tools and dispatches validated 
     'cos_calendar_read',
     'cos_mail_search',
     'cos_mail_thread_get',
+    'cos_mail_draft_create',
+    'cos_mail_draft_status',
     'cos_work_change_propose',
     'cos_brief_schedule_propose',
     'cos_work_read',
