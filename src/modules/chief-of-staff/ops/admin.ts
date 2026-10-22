@@ -5,6 +5,7 @@ import { isKnowledgeCommand, parseKnowledgeArguments } from './knowledge-admin.j
 import { isCalendarCommand, parseCalendarArguments } from './calendar-admin.js';
 import { isCalendarAccountCommand, parseCalendarAccountArguments } from './calendar-account-admin.js';
 import { isMailAccountCommand, parseMailAccountArguments } from './mail-account-arguments.js';
+import { isMailDraftAccountCommand, parseMailDraftAccountArguments } from './mail-draft-account-arguments.js';
 import { isMissionCommand, parseMissionArguments } from './mission-admin.js';
 import { isActionAccountCommand, parseActionAccountArguments } from './action-account-admin.js';
 import { isActionAdminCommand, parseActionAdminArguments } from './action-admin.js';
@@ -105,6 +106,7 @@ export function parseAdminArguments(args: string[]): AdminArguments {
   if (isCalendarCommand({ command: args[0] })) return parseCalendarArguments(args);
   if (isCalendarAccountCommand({ command: args[0] })) return parseCalendarAccountArguments(args);
   if (isMailAccountCommand({ command: args[0] })) return parseMailAccountArguments(args);
+  if (isMailDraftAccountCommand({ command: args[0] })) return parseMailDraftAccountArguments(args);
   if (args.length === 1 && args[0] === 'status') return { command: 'status' };
   if (['context-status', 'context-prepare', 'context-recover', 'model-activate', 'context-resume'].includes(args[0])) {
     const values: Record<string, string> = {};

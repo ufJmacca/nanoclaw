@@ -6,6 +6,7 @@ import { withDeploymentLock } from './deployment-lock.js';
 import { validateReleaseManifest, type ReleaseManifest } from './release-manifest.js';
 import { parseBackupOwnerRestoreArguments } from './backup-owner-restore-arguments.js';
 import { isMailAccountCommand, parseMailAccountArguments } from './mail-account-arguments.js';
+import { isMailDraftAccountCommand, parseMailDraftAccountArguments } from './mail-draft-account-arguments.js';
 const commands = [
   'vault-status',
   'vault-provision',
@@ -29,6 +30,8 @@ const commands = [
   'backup-credentials-restore-check',
   'mail-setup',
   'mail-link',
+  'mail-draft-setup',
+  'mail-draft-link',
 ];
 export function parseOwnerAdminArguments(args: string[]): {
   settings: string;
@@ -61,6 +64,7 @@ export function parseOwnerAdminArguments(args: string[]): {
   if (['backup-restore-check', 'backup-credentials-restore-check'].includes(admin[0]))
     parseBackupOwnerRestoreArguments(admin);
   if (isMailAccountCommand({ command: admin[0] })) parseMailAccountArguments(admin);
+  if (isMailDraftAccountCommand({ command: admin[0] })) parseMailDraftAccountArguments(admin);
   return { settings: flags[1], databaseEnvironment: flags[3], admin };
 }
 export async function ownerDatabasePreflight(

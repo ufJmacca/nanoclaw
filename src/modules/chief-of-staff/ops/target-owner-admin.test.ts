@@ -3,7 +3,7 @@ import { parseOwnerAdminArguments, selectedOwnerAdminProfile, ownerDatabasePrefl
 import { fixtureRelease } from '../../../contracts/chief-of-staff/release-fixture.js';
 import { DatabasePreflightError } from '../store/preflight.js';
 const request = ['owner-export', '--scope', 'fixture', '--request-id', '01234567-89ab-4def-8123-456789abcdef'];
-it.each(['mail-setup', 'mail-link'])(
+it.each(['mail-setup', 'mail-link', 'mail-draft-setup', 'mail-draft-link'])(
   'admits %s only through the scoped retained helper, with selected runtime settings and no secret arguments',
   async (command) => {
     const admin = [
@@ -12,9 +12,18 @@ it.each(['mail-setup', 'mail-link'])(
       'fixture',
       '--request-id',
       '01234567-89ab-4def-8123-456789abcdef',
-      ...(command === 'mail-link'
-        ? ['--binding', '48f99256-b105-4ee3-848c-00140c98151d', '--manifest', '/private/selection.json']
-        : []),
+      ...(command === 'mail-draft-link'
+        ? [
+            '--reader-binding',
+            '48f99256-b105-4ee3-848c-00140c98151d',
+            '--writer-binding',
+            '01234567-89ab-4def-8123-456789abcdea',
+            '--manifest',
+            '/private/selection.json',
+          ]
+        : command === 'mail-link'
+          ? ['--binding', '48f99256-b105-4ee3-848c-00140c98151d', '--manifest', '/private/selection.json']
+          : []),
     ];
     expect(parseOwnerAdminArguments(['--settings', '/private/settings.json', '--', ...admin])).toMatchObject({ admin });
     expect(() =>
