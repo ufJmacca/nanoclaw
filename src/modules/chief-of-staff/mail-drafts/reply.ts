@@ -145,6 +145,178 @@ function referencesHeader(values: string[]): string {
   lines.push(line);
   return lines.join('\r\n');
 }
+/** Conservative RFC 2047 subset for comparing our emitted UTF-8 words with provider readback. */
+function decodedSubject(value: string): string {
+  const joined = value.replace(/(\?=)[ \t]+(?==\?)/g, '$1');
+  const word = /=\?([^?\s]+)\?([bq])\?([^?\s]+)\?=/gi;
+  if (joined.replace(word, '').includes('=?')) return invalid();
+  const result = joined.replace(word, (whole: string, charset: string, encoding: string, text: string) => {
+    if (whole.length > 75 || !['utf-8', 'us-ascii', 'iso-8859-1'].includes(charset.toLowerCase())) return invalid();
+    let bytes: Buffer;
+    if (encoding.toLowerCase() === 'b') {
+      if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(text)) return invalid();
+      bytes = Buffer.from(text, 'base64');
+      if (bytes.toString('base64') !== text) return invalid();
+    } else {
+      const parts: number[] = [];
+      for (let index = 0; index < text.length; index++) {
+        const character = text[index];
+        if (character === '=') {
+          const escaped = text.slice(index + 1, index + 3);
+          if (!/^[a-f0-9]{2}$/i.test(escaped)) return invalid();
+          parts.push(Number.parseInt(escaped, 16));
+          index += 2;
+        } else {
+          const code = character.charCodeAt(0);
+          if (code < 33 || code > 126) return invalid();
+          parts.push(character === '_' ? 32 : code);
+        }
+      }
+      bytes = Buffer.from(parts);
+    }
+    if (charset.toLowerCase() === 'us-ascii' && bytes.some((byte) => byte > 127)) return invalid();
+    try {
+      return new TextDecoder(charset, { fatal: true }).decode(bytes);
+    } catch (error) {
+      if (error instanceof TypeError) return invalid();
+      throw error;
+    }
+  });
+  if (result.length > 2048 || Buffer.byteLength(result) > 4096 || unsafeHeader(result)) return invalid();
+  return result;
+}
+function replyText(value: string): string {
+  if (
+    typeof value !== 'string' ||
+    value.length > 16384 ||
+    Buffer.byteLength(value) > 16384 ||
+    !value.trim() ||
+    unsafeBody(value)
+  )
+    return invalid();
+  const normalized = value.replace(/\r\n?/g, '\n').replaceAll('\n', '\r\n');
+  if (Buffer.byteLength(normalized) > 16384) return invalid();
+  return normalized;
+}
+function contentDigest(envelope: ReplyEnvelope, text: string): string {
+  return digest({
+    format: 'cos-mail-reply-content/v1',
+    envelope: { ...envelope, subject: decodedSubject(envelope.subject) },
+    text: replyText(text),
+  });
+}
+/** Host-only comparison. An unrelated/edited draft yields no content or new creation authority. */
+export function verifySavedReply(
+  draft: unknown,
+  expected: { threadId: string; correlation: string; contentDigest: string },
+): { draftId: string; messageId: string } | null {
+  try {
+    if (
+      !object(expected) ||
+      Object.keys(expected).sort().join(',') !== 'contentDigest,correlation,threadId' ||
+      !providerId(expected.threadId) ||
+      !/^[a-f0-9]{64}$/.test(expected.correlation) ||
+      !/^[a-f0-9]{64}$/.test(expected.contentDigest) ||
+      !object(draft) ||
+      typeof draft.id !== 'string' ||
+      !/^[a-zA-Z0-9_-]{1,256}$/.test(draft.id) ||
+      !object(draft.message)
+    )
+      return null;
+    const message = draft.message;
+    if (
+      !providerId(message.id) ||
+      message.threadId !== expected.threadId ||
+      !Array.isArray(message.labelIds) ||
+      message.labelIds.length > 100 ||
+      !message.labelIds.includes('DRAFT') ||
+      message.labelIds.some((label) => typeof label !== 'string' || ['SENT', 'SPAM', 'TRASH'].includes(label)) ||
+      !object(message.payload)
+    )
+      return null;
+    const payload = message.payload;
+    if (
+      payload.mimeType !== 'text/plain' ||
+      (payload.filename !== undefined && payload.filename !== '') ||
+      (payload.parts !== undefined && (!Array.isArray(payload.parts) || payload.parts.length !== 0)) ||
+      !object(payload.body) ||
+      payload.body.attachmentId !== undefined ||
+      typeof payload.body.data !== 'string' ||
+      payload.body.data.length > 24000 ||
+      !/^[a-zA-Z0-9_-]*={0,2}$/.test(payload.body.data) ||
+      !Array.isArray(payload.headers) ||
+      payload.headers.length > 100
+    )
+      return null;
+    const bytes = Buffer.from(payload.body.data, 'base64url');
+    if (
+      bytes.length > 16384 ||
+      bytes.toString('base64url') !== payload.body.data.replace(/=+$/, '') ||
+      (payload.body.size !== undefined && payload.body.size !== bytes.length)
+    )
+      return null;
+    const text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
+    const headers = new Map<string, string>();
+    for (const header of payload.headers) {
+      if (
+        !object(header) ||
+        typeof header.name !== 'string' ||
+        !/^[A-Za-z0-9-]{1,128}$/.test(header.name) ||
+        typeof header.value !== 'string' ||
+        header.value.length > 16384
+      )
+        return null;
+      const name = header.name.toLowerCase(),
+        value = header.value
+          .replace(/\r\n[ \t]+/g, ' ')
+          .replaceAll('\t', ' ')
+          .trim();
+      if (unsafeHeader(value) || ['cc', 'bcc', 'reply-to', 'content-disposition'].includes(name)) return null;
+      if (
+        headers.has(name) &&
+        [
+          'from',
+          'to',
+          'subject',
+          'message-id',
+          'in-reply-to',
+          'references',
+          'x-nanoclaw-correlation',
+          'content-type',
+          'mime-version',
+        ].includes(name)
+      )
+        return null;
+      headers.set(name, value);
+    }
+    if (
+      headers.get('x-nanoclaw-correlation') !== expected.correlation ||
+      headers.get('message-id') !== '<cos-draft-' + expected.correlation + '@nanoclaw.invalid>' ||
+      headers.get('mime-version') !== '1.0' ||
+      !/^text\/plain(?:\s*;\s*charset=(?:utf-8|"utf-8"))?$/i.test(headers.get('content-type') ?? '') ||
+      !headers.has('subject')
+    )
+      return null;
+    const inReplyTo = messageId(headers.get('in-reply-to') ?? ''),
+      references = (headers.get('references') ?? '').split(/ +/).filter(Boolean).map(messageId);
+    if (!references.includes(inReplyTo) || references.length > 32 || new Set(references).size !== references.length)
+      return null;
+    const envelope: ReplyEnvelope = {
+      threadId: expected.threadId,
+      sender: mailbox(headers.get('from') ?? ''),
+      recipient: mailbox(headers.get('to') ?? ''),
+      subject: headers.get('subject')!,
+      inReplyTo,
+      references,
+    };
+    if (contentDigest(envelope, text) !== expected.contentDigest) return null;
+    return { draftId: draft.id, messageId: message.id };
+  } catch (error) {
+    if (error instanceof TypeError || (error instanceof Error && error.message === 'mail_draft_reply_invalid'))
+      return null;
+    throw error;
+  }
+}
 /** Pure MIME construction; callers still need source, standing-policy and journal admission. */
 export function plainTextReply(
   source: ReplySource,
@@ -152,18 +324,9 @@ export function plainTextReply(
   correlation: string,
 ): { threadId: string; raw: string; correlationMessageId: string; contentDigest: string } {
   const envelope = replyEnvelope(source);
-  if (
-    typeof text !== 'string' ||
-    text.length > 16384 ||
-    Buffer.byteLength(text) > 16384 ||
-    !text.trim() ||
-    unsafeBody(text) ||
-    typeof correlation !== 'string' ||
-    !/^[a-f0-9]{64}$/.test(correlation)
-  )
-    return invalid();
-  const normalized = text.replace(/\r\n?/g, '\n').replaceAll('\n', '\r\n');
-  if (Buffer.byteLength(normalized) > 16384) return invalid();
+  if (typeof correlation !== 'string' || !/^[a-f0-9]{64}$/.test(correlation)) return invalid();
+  const normalized = replyText(text),
+    semanticDigest = contentDigest(envelope, normalized);
   const correlationMessageId = '<cos-draft-' + correlation + '@nanoclaw.invalid>';
   const body =
     Buffer.from(normalized)
@@ -190,6 +353,6 @@ export function plainTextReply(
     threadId: envelope.threadId,
     raw,
     correlationMessageId,
-    contentDigest: digest({ format: 'cos-mail-reply-content/v1', envelope, text: normalized }),
+    contentDigest: semanticDigest,
   };
 }
