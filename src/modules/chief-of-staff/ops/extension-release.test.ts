@@ -235,6 +235,128 @@ it('admits G04 only after reviewed matching G03, live Calendar acceptance and a 
   expect(saved.slices.G03).toEqual(g03);
   expect(fs.readFileSync(f.root + '/execution.json')).toEqual(original);
 });
+function completedG04(f: ReturnType<typeof fixture>) {
+  completedG03(f);
+  const commit = '3'.repeat(40),
+    tree = '4'.repeat(40),
+    releaseId = 'release-reviewed-g04';
+  const predecessor = {
+    status: 'complete',
+    review: { status: 'human_review_and_merge_verified', reviewed: true, merged: true, mergeCommit: commit },
+    current_source: { commit, tree, releaseId },
+    deployed_source_sha: commit,
+    pi_smoke_status: 'passed',
+    merged_release_reconciliation: {
+      status: 'passed',
+      commit,
+      tree,
+      releaseId,
+      humanReview: 'verified',
+      allMandatoryGates: 'passed',
+      actualPiAcceptance: 'passed',
+    },
+    merged_acceptance: {
+      commit,
+      tree,
+      releaseId,
+      liveMailAnswerIndependentlyVerified: true,
+      currentEncryptedCheckpointUploaded: true,
+      completeCredentialsVerified: true,
+      originalContextAndCountersPreserved: true,
+      allProtectedTablesPreserved: true,
+      actualIsolatedRecoveryApplicable: true,
+    },
+    actual_merged_remote_checkpoint: {
+      status: 'backup_uploaded',
+      maintenance: { status: 'verified' },
+      state: { pending: 0, held: 0 },
+      credentials: { pending: 0, held: 0 },
+    },
+    nativePaused: true,
+    modelPolicyExpired: true,
+    usedModelAttempts: 6,
+  };
+  Object.assign(f.extension.slices, {
+    G04: predecessor,
+    G05: { status: 'in_progress', depends_on: 'G04', unknown: 'retain-g05', composeConsent: false },
+  });
+  f.extension.active_slice = 'G05';
+  f.save();
+  return predecessor;
+}
+it('admits G05 fixtures after exact reviewed G04 acceptance without renewing model or draft authority', () => {
+  const f = fixture();
+  const predecessor = structuredClone(completedG04(f));
+  const original = fs.readFileSync(f.root + '/execution.json');
+  expect(readExtensionRelease(f.root, true)).toEqual(f.extension);
+  expect(readReleaseExecution(f.root, 'G05', true)).toEqual(f.extension);
+  checkpointReleaseExecution(f.root, 'G05', { release_status: 'g05_local_checks_pending' });
+  const saved = JSON.parse(fs.readFileSync(f.root + '/google-mail-storage-execution.json', 'utf8'));
+  expect(saved.slices.G05).toMatchObject({
+    unknown: 'retain-g05',
+    release_status: 'g05_local_checks_pending',
+    composeConsent: false,
+  });
+  expect(saved.slices.G04).toEqual(predecessor);
+  expect(saved.unknown).toEqual(f.extension.unknown);
+  expect(fs.readFileSync(f.root + '/execution.json')).toEqual(original);
+});
+it.each([
+  'review',
+  'source',
+  'delivery',
+  'health',
+  'live-mail',
+  'checkpoint',
+  'credentials',
+  'context',
+  'protected-tables',
+  'recovery',
+  'integrity',
+  'pending',
+  'held',
+  'acceptance-source',
+])('refuses G05 without G04 %s evidence and leaves protected history unchanged', (boundary) => {
+  const f = fixture(),
+    p = completedG04(f);
+  if (boundary === 'review') p.review.reviewed = false;
+  if (boundary === 'source') p.current_source.commit = '0'.repeat(40);
+  if (boundary === 'delivery') p.merged_release_reconciliation.actualPiAcceptance = 'pending';
+  if (boundary === 'health') p.pi_smoke_status = 'pending';
+  if (boundary === 'live-mail') p.merged_acceptance.liveMailAnswerIndependentlyVerified = false;
+  if (boundary === 'checkpoint') p.merged_acceptance.currentEncryptedCheckpointUploaded = false;
+  if (boundary === 'credentials') p.merged_acceptance.completeCredentialsVerified = false;
+  if (boundary === 'context') p.merged_acceptance.originalContextAndCountersPreserved = false;
+  if (boundary === 'protected-tables') p.merged_acceptance.allProtectedTablesPreserved = false;
+  if (boundary === 'recovery') p.merged_acceptance.actualIsolatedRecoveryApplicable = false;
+  if (boundary === 'integrity') p.actual_merged_remote_checkpoint.maintenance.status = 'failed';
+  if (boundary === 'pending') p.actual_merged_remote_checkpoint.state.pending = 1;
+  if (boundary === 'held') p.actual_merged_remote_checkpoint.credentials.held = 1;
+  if (boundary === 'acceptance-source') p.merged_acceptance.commit = '0'.repeat(40);
+  f.save();
+  const original = fs.readFileSync(f.root + '/execution.json');
+  const extension = fs.readFileSync(f.root + '/google-mail-storage-execution.json');
+  expect(() => readExtensionRelease(f.root, true)).toThrow('extension_release_not_admitted');
+  expect(() => checkpointReleaseExecution(f.root, 'G05', { release_status: 'must_not_write' })).toThrow();
+  expect(fs.readFileSync(f.root + '/execution.json')).toEqual(original);
+  expect(fs.readFileSync(f.root + '/google-mail-storage-execution.json')).toEqual(extension);
+});
+it('keeps G05 release admission closed at its human review gate while allowing status inspection', () => {
+  const f = fixture();
+  completedG04(f);
+  (f.extension.slices as Record<string, { status: string }>).G05.status = 'awaiting_review';
+  f.save();
+  expect(readExtensionRelease(f.root)).toEqual(f.extension);
+  expect(() => readExtensionRelease(f.root, true)).toThrow('extension_release_not_admitted');
+});
+it('does not open G06 by admitting G05 development', () => {
+  const f = fixture();
+  completedG04(f);
+  f.extension.active_slice = 'G06';
+  Object.assign(f.extension.slices, { G06: { status: 'in_progress', depends_on: 'G05' } });
+  f.save();
+  expect(() => readExtensionRelease(f.root, true)).toThrow('extension_release_not_admitted');
+});
 it.each(['review', 'source', 'live', 'context', 'checkpoint', 'pending', 'held', 'acceptance-source'])(
   'refuses G04 without G03 %s evidence and preserves both ledgers',
   (boundary) => {
