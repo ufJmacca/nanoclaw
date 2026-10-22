@@ -120,6 +120,7 @@ export class PriorityStore {
     readonly mailView?: MailView,
     readonly mail?: MailHost,
     mailDraftDependencies?: MailDraftDependencies,
+    readonly mailDraftHost?: { close(): Promise<void> },
   ) {
     this.strategy = new StrategyApprovalStore(knowledge, () => this.directions);
     this.actions = new ActionStore(database, knowledge, actionDependencies);

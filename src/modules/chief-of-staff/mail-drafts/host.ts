@@ -9,7 +9,7 @@ import { checkedClient } from '../calendar/oauth-core.js';
 import type { MailDraftHostCredentials } from './config.js';
 import type { MailDraftAuthorityResolver } from './authority.js';
 import type { DraftJournal } from './journal.js';
-import { parseMailDraftHostGrant, type MailDraftHostProfile } from './profile.js';
+import { parseMailDraftHostGrant, type MailDraftHostProfile, type MailDraftHostGrant } from './profile.js';
 import { GOOGLE_MAIL_DRAFT_SCOPE } from './oauth.js';
 import { googleMailDraftWriter, MailDraftWriteError, type MailDraftResult } from './google-writer.js';
 import type { MailDraftDependencies, MailDraftSelection } from './store.js';
@@ -24,7 +24,7 @@ type Options = {
   /** Installed opener pins the real target/profile and validates actual baseline recovery before assembly. */
   assertProfile(): void;
   /** Cheap immutable recovery pin after the opener's complete validation, never a model input. */
-  assertRecovery(): void;
+  assertRecovery(grant?: MailDraftHostGrant, selected?: MailDraftSelection): void;
   fetch?: (url: string, init: RequestInit) => Promise<Response>;
   now?: () => number;
 };
@@ -126,6 +126,7 @@ export function createMailDraftHost(options: Options): { dependencies: MailDraft
           digest(grant.binding) === digest(selected.body),
       );
       if (!grant) return false;
+      options.assertRecovery(grant, selected);
       reader.fences.assertOpen(context.scopeId, selected.body.readerBindingId);
       writer.fences.assertOpen(context.scopeId, selected.id);
       return true;
