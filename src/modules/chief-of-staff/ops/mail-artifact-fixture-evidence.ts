@@ -1,6 +1,7 @@
 import path from 'node:path';
 import fs from 'node:fs';
 import { verifyMailFixtureReport } from '../../../contracts/chief-of-staff/mail-fixture-report.js';
+import { verifyMailDraftFixtureReport } from '../../../contracts/chief-of-staff/mail-draft-fixture-report.js';
 import { verifyMailVaultFixtureEvidence } from './mail-vault-fixture-evidence.js';
 import { verifyMailRecoveryFixtureEvidence } from './mail-recovery-fixture-evidence.js';
 import { verifyVaultFixtureImage } from './vault-fixture-evidence.js';
@@ -16,6 +17,9 @@ type RecordValue = Record<string, unknown>;
 export function readMailArtifactFixtureText(file: string): string {
   return readMailFixtureText(file, 'mail_artifacts.log');
 }
+export function readMailDraftArtifactFixtureText(file: string): string {
+  return readMailFixtureText(file, 'draft_artifacts.log');
+}
 export function readMailCredentialFixtureText(file: string): string {
   return readMailFixtureText(file, 'mail_credentials.log');
 }
@@ -24,7 +28,7 @@ export function readMailRecoveryFixtureText(file: string): string {
 }
 function readMailFixtureText(
   file: string,
-  expectedName: 'mail_artifacts.log' | 'mail_credentials.log' | 'mail_recovery.log',
+  expectedName: 'mail_artifacts.log' | 'mail_credentials.log' | 'mail_recovery.log' | 'draft_artifacts.log',
 ): string {
   let fd: number | undefined, bytes: Buffer | undefined;
   try {
@@ -119,6 +123,11 @@ export function verifyMailReleaseEvidence(gate: string, text: string, identity: 
     throw Error('mail_release_check_unavailable');
   return verifyMailArtifactFixtureEvidence(text, identity);
 }
+export function verifyMailDraftReleaseEvidence(gate: string, text: string, identity: Identity | KernelIdentity) {
+  if (!['draft_policy', 'draft_transport', 'draft_reconciliation'].includes(gate) || !('workerImages' in identity))
+    throw Error('mail_draft_release_check_unavailable');
+  return verifyMailDraftArtifactFixtureEvidence(text, identity);
+}
 function object(value: unknown): RecordValue {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw Error('object');
   return value as RecordValue;
@@ -140,10 +149,17 @@ function one(items: RecordValue[], field: string, value: string): RecordValue {
 /** Independently observed Docker configuration, not a process's assertion of
  * its own privileges. Only the private synthetic volume, selected CA and native
  * fixture Docker socket are admitted. No source/dependency overrides exist. */
-function scope(value: RecordValue, identity: Identity, volume: string, root: string, native: boolean): void {
+function scope(
+  value: RecordValue,
+  identity: Identity,
+  volume: string,
+  root: string,
+  native: boolean,
+  contract: string,
+): void {
   keys(value, 'contract,image,user,workingDirectory,host,mounts');
   if (
-    value.contract !== 'cos-g04-mail-container-scope/v1' ||
+    value.contract !== contract + '-container-scope/v1' ||
     value.image !== identity.hostImage ||
     value.user !== '1000:1000' ||
     value.workingDirectory !== '/release'
@@ -247,7 +263,19 @@ function scope(value: RecordValue, identity: Identity, volume: string, root: str
  * encrypted profile/kernel proof and installed/live acceptance are separate.
  * A bare exit code, source report or synthetic unit receipt cannot supply this. */
 export function verifyMailArtifactFixtureEvidence(text: string, identity: Identity) {
+  return verifyBoundMailArtifactEvidence(text, identity, 'G04');
+}
+export function verifyMailDraftArtifactFixtureEvidence(text: string, identity: Identity) {
   try {
+    return verifyBoundMailArtifactEvidence(text, identity, 'G05');
+  } catch {
+    // eslint-disable-next-line preserve-caught-error -- G05 cannot substitute a reader-only receipt or disclose nested private evidence diagnostics.
+    throw Error('mail_draft_artifact_release_evidence_unavailable');
+  }
+}
+function verifyBoundMailArtifactEvidence(text: string, identity: Identity, profile: 'G04' | 'G05') {
+  try {
+    const contract = profile === 'G05' ? 'cos-g05-draft' : 'cos-g04-mail';
     if (typeof text !== 'string' || Buffer.byteLength(text) > 2 * 1024 ** 2) throw Error('bounds');
     keys(object(identity), 'sourceCommit,sourceTree,workerAssetsDigest,hostImage,workerImages,certificateFile');
     if (
@@ -273,14 +301,16 @@ export function verifyMailArtifactFixtureEvidence(text: string, identity: Identi
     const volume = String(header.fixtureVolume),
       root = String(header.fixtureRoot);
     if (
-      header.contract !== 'cos-g04-mail-artifact-set/v1' ||
+      header.contract !== contract + '-artifact-set/v1' ||
       header.sourceCommit !== identity.sourceCommit ||
       header.sourceTree !== identity.sourceTree ||
       header.workerAssetsDigest !== identity.workerAssetsDigest ||
       header.hostImage !== identity.hostImage ||
       !sameArray(header.workerImages, identity.workerImages) ||
       !new RegExp(
-        '^cos-g04-mail-' +
+        '^' +
+          contract +
+          '-' +
           identity.sourceCommit.slice(0, 8) +
           '-[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$',
       ).test(volume) ||
@@ -291,14 +321,14 @@ export function verifyMailArtifactFixtureEvidence(text: string, identity: Identi
     for (const worker of [null, ...identity.workerImages]) {
       const native = worker !== null,
         suite = native ? 'native' : 'database';
-      scope(object(JSON.parse(lines.shift()!)), identity, volume, root, native);
+      scope(object(JSON.parse(lines.shift()!)), identity, volume, root, native, contract);
       const binding = object(JSON.parse(lines.shift()!));
       keys(
         binding,
         'contract,suite,hostImage,workerImage,sourceCommit,sourceTree,workerAssetsDigest,actualRuntime,actualNativeSqlite,actualMemoryProtection,compiledProductionPayload,databaseProfile,databaseTls,sourceOverrides,workerSourceOverrides,ownerCredentialsUsed,liveAccountAcceptance,installedAcceptance,storageAdmission',
       );
       if (
-        binding.contract !== 'cos-g04-mail-host-run/v1' ||
+        binding.contract !== contract + '-host-run/v1' ||
         binding.suite !== suite ||
         binding.hostImage !== identity.hostImage ||
         binding.workerImage !== worker ||
@@ -323,7 +353,8 @@ export function verifyMailArtifactFixtureEvidence(text: string, identity: Identi
       const next = lines.findIndex((line) => line.startsWith('{')),
         end = next < 0 ? lines.length : next,
         report = lines.splice(0, end).join('\n');
-      const verified = verifyMailFixtureReport(report, suite);
+      const verified =
+        profile === 'G05' ? verifyMailDraftFixtureReport(report, suite) : verifyMailFixtureReport(report, suite);
       if (suite === 'database') actualDatabaseCases = verified.actualCases;
     }
     if (lines.some((line) => line.trim())) throw Error('extra');

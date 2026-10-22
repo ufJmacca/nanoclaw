@@ -2,9 +2,15 @@
 # Mac driver: compiled host plus each immutable worker, selected test profile only.
 set -euo pipefail
 umask 077
-[[ "$(uname -s)" == Darwin && $# == 5 ]] || exit 1
+[[ "$(uname -s)" == Darwin && ( $# == 5 || ( $# == 6 && "${6:-}" == --drafts ) ) ]] || exit 1
 [[ -z "${DOCKER_HOST:-}${DOCKER_CONTEXT:-}${DOCKER_TLS_VERIFY:-}${DOCKER_CERT_PATH:-}" ]] || exit 1
 host=$1 standard=$2 documents=$3 test_environment=$4 certificate=$5
+fixture_contract=cos-g04-mail
+artifact_selection=()
+if [[ $# == 6 ]]; then
+  fixture_contract=cos-g05-draft
+  artifact_selection=(G05)
+fi
 for image in "$host" "$standard" "$documents"; do
   [[ "$image" =~ ^sha256:[a-f0-9]{64}$ ]] || exit 1
   [[ "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$image")" == linux/arm64 ]] || exit 1
@@ -36,7 +42,7 @@ keys=$(cut -d= -f1 "$test_environment" | LC_ALL=C sort | tr '\n' ',')
 [[ "$keys" == 'COS_TEST_PGDATABASE,COS_TEST_PGHOST,COS_TEST_PGPASSWORD,COS_TEST_PGPORT,COS_TEST_PGSSLMODE,COS_TEST_PGSSLROOTCERT,COS_TEST_PGUSER,COS_TEST_PG_MIGRATION_PASSWORD,COS_TEST_PG_MIGRATION_USER,COS_TEST_TARGET_ID,' ]] || exit 1
 nonce=$(uuidgen | tr '[:upper:]' '[:lower:]')
 [[ "$nonce" =~ ^[a-f0-9-]{36}$ ]] || exit 1
-volume="cos-g04-mail-${source_commit:0:8}-$nonce"
+volume="$fixture_contract-${source_commit:0:8}-$nonce"
 owned_volume=false
 containers=()
 cleanup() {
@@ -55,8 +61,8 @@ volume_root=$(docker volume inspect --format '{{.Mountpoint}}' "$volume")
 [[ "$volume_root" == "/var/lib/docker/volumes/$volume/_data" ]] || exit 1
 docker run --rm --pull=never --network=none --user 0:0 --mount "type=volume,src=$volume,dst=/fixture" \
   --entrypoint /release/node/bin/node "$host" -e 'const f=require("fs");for(const p of ["/fixture","/fixture/.cos-plan-state"]){f.mkdirSync(p,{recursive:true,mode:448});f.chmodSync(p,448);f.chownSync(p,1000,1000)}'
-printf '{"contract":"cos-g04-mail-artifact-set/v1","sourceCommit":"%s","sourceTree":"%s","workerAssetsDigest":"%s","hostImage":"%s","workerImages":["%s","%s"],"fixtureVolume":"%s","fixtureRoot":"%s"}\n' \
-  "$source_commit" "$source_tree" "$assets" "$host" "$standard" "$documents" "$volume" "$volume_root"
+printf '{"contract":"%s-artifact-set/v1","sourceCommit":"%s","sourceTree":"%s","workerAssetsDigest":"%s","hostImage":"%s","workerImages":["%s","%s"],"fixtureVolume":"%s","fixtureRoot":"%s"}\n' \
+  "$fixture_contract" "$source_commit" "$source_tree" "$assets" "$host" "$standard" "$documents" "$volume" "$volume_root"
 run_suite() {
   local suite=$1 worker=$2 name="$volume-$1-${2:7:8}"
   local native=()
@@ -71,9 +77,9 @@ run_suite() {
     --mount "type=volume,src=$volume,dst=/release/.cos-plan-state,volume-subpath=.cos-plan-state" \
     -e COS_TEST_PGSSLROOTCERT=/fixture/ca.pem -e COS_FIXTURE_DATABASE_PROFILE=test \
     ${native[@]+"${native[@]}"} --entrypoint /release/node/bin/node "$host" \
-    /release/dist/contracts/chief-of-staff/mail-artifact-fixture.js "$suite" "$host" "$worker" "$source_commit" "$source_tree" "$assets" >/dev/null
+    /release/dist/contracts/chief-of-staff/mail-artifact-fixture.js "$suite" "$host" "$worker" "$source_commit" "$source_tree" "$assets" ${artifact_selection[@]+"${artifact_selection[@]}"} >/dev/null
   containers+=("$name")
-  docker inspect --format '{"contract":"cos-g04-mail-container-scope/v1","image":{{json .Image}},"user":{{json .Config.User}},"workingDirectory":{{json .Config.WorkingDir}},"host":{{json .HostConfig}},"mounts":{{json .Mounts}}}' "$name"
+  docker inspect --format "{\"contract\":\"$fixture_contract-container-scope/v1\",\"image\":{{json .Image}},\"user\":{{json .Config.User}},\"workingDirectory\":{{json .Config.WorkingDir}},\"host\":{{json .HostConfig}},\"mounts\":{{json .Mounts}}}" "$name"
   docker start --attach "$name"
   [[ "$(docker inspect --format '{{.State.ExitCode}}' "$name")" == 0 ]] || return 1
 }
