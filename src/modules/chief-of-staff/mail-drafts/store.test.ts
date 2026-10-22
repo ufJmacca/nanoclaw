@@ -72,7 +72,8 @@ function fixture() {
     internal_date_ms: 1792713600000,
   };
   const operations = new Map<string, Record<string, unknown>>();
-  let scope = true,
+  let candidateCount = 1,
+    scope = true,
     readable = true,
     retained = true,
     host = true,
@@ -90,6 +91,11 @@ function fixture() {
     }
     if (sql.includes('FROM cos.scopes'))
       return { rows: scope ? [{ id: context.scopeId }] : [], rowCount: scope ? 1 : 0 };
+    if (sql.startsWith('SELECT id FROM cos.mail_draft_writer_bindings'))
+      return {
+        rows: Array.from({ length: candidateCount }, () => ({ id: row.id })),
+        rowCount: candidateCount,
+      };
     if (sql.includes('FROM cos.mail_draft_writer_bindings')) return { rows: [structuredClone(row)], rowCount: 1 };
     if (sql.includes('FROM cos.mail_messages'))
       return { rows: readable ? [structuredClone(source)] : [], rowCount: readable ? 1 : 0 };
@@ -185,6 +191,9 @@ function fixture() {
       loseCommit = true;
     },
     record,
+    candidates: (n: number) => {
+      candidateCount = n;
+    },
   };
 }
 
@@ -313,4 +322,38 @@ it('has no local authority fallback when PostgreSQL is unavailable', async () =>
   f.query.mockRejectedValueOnce(new DatabaseUnavailable());
   expect(await f.store.create(context, requestId, input)).toEqual({ status: 'unavailable' });
   expect(f.create).not.toHaveBeenCalled();
+});
+it('discovers only current main-owner writer identifiers and fixed limits without inspecting any message or provider', async () => {
+  const f = fixture();
+  const result = await f.store.bindings(context);
+  expect(result).toEqual({
+    status: 'ok',
+    items: [
+      {
+        writer_binding_id: input.writer_binding_id,
+        reader_binding_id: f.body.readerBindingId,
+        daily_limit: 5,
+        time_zone: 'Australia/Sydney',
+        reply_mode: 'plain_text_reply',
+      },
+    ],
+  });
+  expect(JSON.stringify(result)).not.toMatch(/credential|recovery|owner@example/);
+  expect(f.statements.some((s) => s.sql.includes('FROM cos.mail_messages'))).toBe(false);
+  expect(f.writer).not.toHaveBeenCalled();
+  f.host(false);
+  expect(await f.store.bindings(context)).toEqual({ status: 'ok', items: [] });
+});
+it('writer discovery rejects foreign/automatic or paused scopes and never returns an over-limit partial catalogue', async () => {
+  const f = fixture();
+  expect(await f.store.bindings({ ...context, origin: { kind: 'schedule', runId: 'run', generation: 1 } })).toEqual({
+    status: 'denied',
+    items: [],
+  });
+  f.scope(false);
+  expect(await f.store.bindings(context)).toEqual({ status: 'denied', items: [] });
+  f.scope(true);
+  f.candidates(11);
+  expect(await f.store.bindings(context)).toEqual({ status: 'unavailable', items: [] });
+  expect(f.writer).not.toHaveBeenCalled();
 });

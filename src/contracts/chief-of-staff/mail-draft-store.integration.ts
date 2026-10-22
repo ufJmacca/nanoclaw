@@ -330,6 +330,27 @@ test('G05 runtime policy reads do not require or grant policy mutation rights', 
     }
   });
 });
+test('G05 real writer discovery exposes only current owner-bound identifiers without provider work', async () => {
+  const f = await fixture(),
+    found = await f.store.bindings(f.context);
+  assert.deepEqual(found, {
+    status: 'ok',
+    items: [
+      {
+        writer_binding_id: f.writerId,
+        reader_binding_id: f.readerId,
+        daily_limit: 5,
+        time_zone: 'Australia/Sydney',
+        reply_mode: 'plain_text_reply',
+      },
+    ],
+  });
+  assert(!JSON.stringify(found).includes('credential'));
+  assert.equal(f.posts(), 0);
+  await admin.query("UPDATE cos.mail_draft_writer_bindings SET state='disabled' WHERE scope_id=$1", [f.scope]);
+  assert.deepEqual(await f.store.bindings(f.context), { status: 'ok', items: [] });
+  assert.equal(f.posts(), 0);
+});
 test('G05 real PostgreSQL policies and published read-only source admit one verified draft; retries recheck edits', async () => {
   const f = await fixture(),
     requestId = randomUUID();

@@ -207,6 +207,10 @@ export function createRpcHandler(dependencies: {
               dependencies.store.mailView && knowledgeContext
                 ? await dependencies.store.mailView.coverage(knowledgeContext)
                 : { status: 'unavailable', coverage: 'not_configured', items: [] },
+            mail_draft_writers:
+              dependencies.store.mailDrafts && knowledgeContext
+                ? await dependencies.store.mailDrafts.bindings(knowledgeContext)
+                : { status: 'unavailable', items: [] },
           };
       } else if (request.method === 'cos_change_propose')
         result = await dependencies.store.propose(context, request.request_id, request.params.change as Change);

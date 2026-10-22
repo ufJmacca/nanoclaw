@@ -96,21 +96,23 @@ export class MailDraftStore {
       }
     }, mutation);
   }
-  private async admission(
-    client: PoolClient,
-    context: KnowledgeContext,
-    bindingId: string,
-    messageId: string,
-  ): Promise<Admission | null> {
-    const authority = this.native(context),
-      dependencies = this.dependencies;
-    if (!authority || !dependencies || !this.knowledge) return null;
-    dependencies.journal.assertCurrent();
+  private async retained(client: PoolClient, context: KnowledgeContext): Promise<boolean> {
     const scope = await client.query(
       "SELECT id FROM cos.scopes WHERE id=$1 AND owner_id=$2 AND agent_group_id=$3 AND status='active' FOR SHARE",
       [context.scopeId, context.ownerId, context.agentGroupId],
     );
-    if (scope.rowCount !== 1 || !(await this.knowledge.actionContextCurrent(client, context))) return null;
+    return scope.rowCount === 1 && !!this.knowledge && (await this.knowledge.actionContextCurrent(client, context));
+  }
+  private async policy(
+    client: PoolClient,
+    context: KnowledgeContext,
+    bindingId: string,
+  ): Promise<Pick<Admission, 'binding' | 'authority'> | null> {
+    const authority = this.native(context),
+      dependencies = this.dependencies;
+    if (!authority || !dependencies || !this.knowledge) return null;
+    dependencies.journal.assertCurrent();
+    if (!(await this.retained(client, context))) return null;
     const row = (
       await client.query(
         `SELECT b.id,b.version,r.body,r.digest,r.consent_ref,mb.provider AS reader_provider,mb.mailbox_email,
@@ -142,9 +144,23 @@ export class MailDraftStore {
       row.reader_scopes[0] !== GOOGLE_MAIL_READ_SCOPE ||
       !Array.isArray(row.processing_providers) ||
       !row.processing_providers.includes(context.provider) ||
-      !dependencies.matches(context, row)
+      !dependencies.matches(context, row) ||
+      digest(this.native(context)) !== digest(authority)
     )
       return null;
+    dependencies.journal.assertCurrent();
+    return { binding: structuredClone(row), authority };
+  }
+  private async admission(
+    client: PoolClient,
+    context: KnowledgeContext,
+    bindingId: string,
+    messageId: string,
+  ): Promise<Admission | null> {
+    const policy = await this.policy(client, context, bindingId);
+    if (!policy) return null;
+    const { binding: row, authority } = policy,
+      dependencies = this.dependencies!;
     const source = (
       await client.query(
         `SELECT s.id AS source_id,s.version AS source_version,r.id AS revision_id,r.digest AS revision_digest,
@@ -173,6 +189,50 @@ export class MailDraftStore {
     )
       return null;
     return { binding: structuredClone(row), source: structuredClone(source), authority };
+  }
+  /** Current main-owner metadata only. Discovery reads no message, token, body or provider resource. */
+  async bindings(context: KnowledgeContext): Promise<Result> {
+    if (context.origin) return { status: 'denied', items: [] };
+    const pinned = this.native(context),
+      retained = structuredClone(context);
+    if (!pinned || !this.dependencies || !this.knowledge) return { status: 'unavailable', items: [] };
+    try {
+      return await this.transaction(async (client) => {
+        if (!(await this.retained(client, retained))) return { status: 'denied', items: [] };
+        const candidates = (
+          await client.query(
+            "SELECT id FROM cos.mail_draft_writer_bindings WHERE scope_id=$1 AND owner_id=$2 AND session_id=$3 AND state='enabled' ORDER BY id LIMIT 11",
+            [retained.scopeId, retained.ownerId, retained.sessionId],
+          )
+        ).rows;
+        if (candidates.length > 10) return { status: 'unavailable', items: [] };
+        const items: Array<{
+          writer_binding_id: string;
+          reader_binding_id: string;
+          daily_limit: 5;
+          time_zone: 'Australia/Sydney';
+          reply_mode: 'plain_text_reply';
+        }> = [];
+        for (const candidate of candidates) {
+          const selected = await this.policy(client, retained, candidate.id);
+          if (selected)
+            items.push({
+              writer_binding_id: selected.binding.id,
+              reader_binding_id: selected.binding.body.readerBindingId,
+              daily_limit: 5,
+              time_zone: 'Australia/Sydney',
+              reply_mode: 'plain_text_reply',
+            });
+        }
+        this.dependencies!.journal.assertCurrent();
+        return digest(this.native(retained)) === digest(pinned)
+          ? { status: 'ok', items }
+          : { status: 'denied', items: [] };
+      });
+      // eslint-disable-next-line no-catch-all/no-catch-all -- Current private database/profile failures close catalogue disclosure without exposing credential metadata.
+    } catch {
+      return { status: 'unavailable', items: [] };
+    }
   }
   private async current(context: KnowledgeContext, pinned: Admission, messageId: string): Promise<boolean> {
     try {

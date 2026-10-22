@@ -140,6 +140,45 @@ it('G05 routes typed draft requests only through the current retained main conte
     ).status,
   ).toBe('denied');
 });
+it('G05 main context exposes only its current draft-writer catalogue through the existing context tool', async () => {
+  const f = fixture(),
+    retained = {
+      scopeId: 'fixture',
+      ownerId: 'owner',
+      sessionId: 'session',
+      agentGroupId: 'group',
+      ingressId: 'verified',
+      provider: 'codex',
+      generation: '33333333-3333-4333-8333-333333333333',
+    },
+    catalogue = {
+      status: 'ok',
+      items: [
+        {
+          writer_binding_id: '44444444-4444-4444-8444-444444444444',
+          reader_binding_id: '55555555-5555-4555-8555-555555555555',
+          daily_limit: 5,
+          time_zone: 'Australia/Sydney',
+          reply_mode: 'plain_text_reply',
+        },
+      ],
+    },
+    bindings = vi.fn().mockResolvedValue(catalogue),
+    handler = createRpcHandler({
+      resolveContext: f.resolveContext,
+      resolveKnowledgeContext: async () => retained,
+      store: { ...f.store, mailDrafts: { bindings } } as unknown as PriorityStore,
+      knowledge: { contextReady: async () => ({ status: 'ok' }) } as unknown as KnowledgeStore,
+    });
+  await handler(
+    { action: 'cos_rpc', request, delivery_id: '22222222-2222-4222-8222-222222222222' },
+    { id: 'session' } as Session,
+    f.db,
+  );
+  const saved = f.db.prepare('SELECT response FROM cos_rpc_responses').get() as { response: string };
+  expect(JSON.parse(saved.response).result.mail_draft_writers).toEqual(catalogue);
+  expect(bindings).toHaveBeenCalledWith(retained);
+});
 it('S11 cos_status uses current main-context authority and never grants an automatic task inspection', async () => {
   const f = fixture();
   const statusRequest = { ...request, method: 'cos_status', params: { category: 'actions', limit: 5 } };
