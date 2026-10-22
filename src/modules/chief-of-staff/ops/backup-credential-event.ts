@@ -5,7 +5,12 @@ import { digest } from '../domain/contracts.js';
 import type { BackupQueueReceipt } from './backup-queue.js';
 
 export type CredentialChange = {
-  sourceKind: 'calendar_reader' | 'calendar_owned_event_writer' | 'mail_reader' | 'backup_repository';
+  sourceKind:
+    | 'calendar_reader'
+    | 'calendar_owned_event_writer'
+    | 'mail_reader'
+    | 'mail_draft_writer'
+    | 'backup_repository';
   sourceKey: string;
   generation: number;
   phase: 'ready' | 'refreshing' | 'uncertain' | 'revoked';
@@ -51,9 +56,13 @@ export function validateCredentialEvent(value: CredentialEvent, ownerDigest: str
     value.contract !== 'cos-backup-credential-event/v1' ||
     value.ownerDigest !== ownerDigest ||
     !hex(ownerDigest) ||
-    !['calendar_reader', 'calendar_owned_event_writer', 'mail_reader', 'backup_repository'].includes(
-      value.sourceKind,
-    ) ||
+    ![
+      'calendar_reader',
+      'calendar_owned_event_writer',
+      'mail_reader',
+      'mail_draft_writer',
+      'backup_repository',
+    ].includes(value.sourceKind) ||
     !hex(value.sourceKey) ||
     !Number.isSafeInteger(value.generation) ||
     value.generation < 1 ||

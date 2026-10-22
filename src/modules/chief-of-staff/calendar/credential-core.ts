@@ -34,9 +34,19 @@ const profiles = {
     contract: 'cos-mail-reader-credentials/v1',
     sourceKind: 'mail_reader',
   },
+  mail_draft_writer: {
+    marker: '.cos-mail-draft-writer-credentials',
+    contract: 'cos-mail-draft-writer-credentials/v1',
+    sourceKind: 'mail_draft_writer',
+  },
 } as const;
 function profileSpec(profile: OAuthScopeProfile) {
-  if (profile !== 'reader' && profile !== 'owned_event_writer' && profile !== 'mail_reader')
+  if (
+    profile !== 'reader' &&
+    profile !== 'owned_event_writer' &&
+    profile !== 'mail_reader' &&
+    profile !== 'mail_draft_writer'
+  )
     throw new Error('unsafe_calendar_credential_profile');
   return profiles[profile];
 }
