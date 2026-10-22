@@ -7,6 +7,7 @@ import { validateReleaseManifest, type ReleaseManifest } from './release-manifes
 import { parseBackupOwnerRestoreArguments } from './backup-owner-restore-arguments.js';
 import { isMailAccountCommand, parseMailAccountArguments } from './mail-account-arguments.js';
 import { isMailDraftAccountCommand, parseMailDraftAccountArguments } from './mail-draft-account-arguments.js';
+import { isMailDraftAdminCommand, parseMailDraftAdminArguments } from './mail-draft-admin-arguments.js';
 const commands = [
   'vault-status',
   'vault-provision',
@@ -33,6 +34,8 @@ const commands = [
   'mail-draft-setup',
   'mail-draft-link',
   'mail-draft-restore-check',
+  'mail-draft-configure',
+  'mail-draft-disable',
 ];
 export function parseOwnerAdminArguments(args: string[]): {
   settings: string;
@@ -67,6 +70,7 @@ export function parseOwnerAdminArguments(args: string[]): {
     parseBackupOwnerRestoreArguments(admin);
   if (isMailAccountCommand({ command: admin[0] })) parseMailAccountArguments(admin);
   if (isMailDraftAccountCommand({ command: admin[0] })) parseMailDraftAccountArguments(admin);
+  if (isMailDraftAdminCommand({ command: admin[0] })) parseMailDraftAdminArguments(admin);
   return { settings: flags[1], databaseEnvironment: flags[3], admin };
 }
 export async function ownerDatabasePreflight(
@@ -93,9 +97,13 @@ export async function ownerDatabasePreflight(
 }
 export async function selectedOwnerAdminProfile(
   command: string,
-  profiles: { runtime(): NodeJS.ProcessEnv; test(): NodeJS.ProcessEnv },
+  profiles: { runtime(): NodeJS.ProcessEnv; test(): NodeJS.ProcessEnv; migration?(): NodeJS.ProcessEnv },
 ): Promise<NodeJS.ProcessEnv> {
   if (!commands.includes(command)) throw new Error('invalid_owner_admin_arguments');
+  if (command === 'mail-draft-configure') {
+    if (!profiles.migration) throw Error('invalid_owner_admin_arguments');
+    return profiles.migration();
+  }
   return ['operator-control', 'vault-status', 'backup-credentials-restore-check'].includes(command)
     ? {}
     : ['operations-restore-check', 'backup-restore-check', 'mail-draft-restore-check'].includes(command)
@@ -143,6 +151,7 @@ export async function targetOwnerAdmin(args: string[]): Promise<Record<string, u
   );
   const selected = await selectedOwnerAdminProfile(parsed.command, {
     runtime: () => readTargetDatabaseEnvironment(settings, 'runtime'),
+    migration: () => readTargetDatabaseEnvironment(settings, 'migration'),
     test: () => readTargetTestEnvironment(request.databaseEnvironment!),
   });
   const env =

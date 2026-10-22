@@ -27,6 +27,8 @@ vi.mock('./mail-account-admin.js', async () => ({
 import { runMailAccountAdmin } from './mail-account-admin.js';
 vi.mock('./mail-draft-account-admin.js', () => ({ runMailDraftAccountAdmin: vi.fn() }));
 import { runMailDraftAccountAdmin } from './mail-draft-account-admin.js';
+vi.mock('./mail-draft-admin.js', () => ({ runMailDraftAdmin: vi.fn() }));
+import { runMailDraftAdmin } from './mail-draft-admin.js';
 vi.mock('./action-account-admin.js', async () => ({
   ...(await vi.importActual('./action-account-admin.js')),
   runActionAccountAdmin: vi.fn(),
@@ -560,6 +562,7 @@ afterEach(() => {
   vi.mocked(runBackupNasInspectAdmin).mockReset();
   vi.mocked(runBackupNasInitializationRecoverAdmin).mockReset();
   vi.mocked(runMailAccountAdmin).mockReset();
+  vi.mocked(runMailDraftAdmin).mockReset();
   quiescent.mockResolvedValue(true);
   facts.mockResolvedValue({
     id: 'private',
@@ -922,6 +925,74 @@ async function currentMailRelease(protectedTarget = true, slice: 'G04' | 'G05' =
   }));
   return release;
 }
+it.each(['mail-draft-configure', 'mail-draft-disable'] as const)(
+  '%s requires the exact current G05 helper and paused private owner without activating a model',
+  async (command) => {
+    const release = await currentMailRelease(true, 'G05'),
+      run = vi.mocked(runMailDraftAdmin);
+    let retained!: () => Promise<void>;
+    run.mockImplementation(async (o) => {
+      await o.check();
+      retained = o.check;
+      return { status: 'configured_paused', live_model: 'not_invoked' };
+    });
+    const args = {
+      command,
+      scopeId: 'fixture',
+      requestId: randomUUID(),
+      bindingId: randomUUID(),
+      manifestFile: state + '/grant.json',
+    };
+    expect(
+      await contextAdminCommand(args, { ...env, COS_ENABLED: 'false' }, dependencies, {
+        release,
+        payloadRoot: '/fixture/payload',
+      }),
+    ).toMatchObject({ status: 'configured_paused' });
+    expect(run).toHaveBeenCalledOnce();
+    await expect(retained()).rejects.toThrow();
+    expect(fs.existsSync(state + '/model-activation.json')).toBe(false);
+  },
+);
+it.each(['old-release', 'retired-release', 'unpaused', 'membership'] as const)(
+  'refuses standing draft policy administration with %s before opening credentials or the migration role',
+  async (reason) => {
+    const release = await currentMailRelease(true, 'G05');
+    if (reason === 'unpaused') {
+      const db = initDb(central);
+      db.exec('UPDATE cos_identity_boundaries SET paused=0');
+      closeDb();
+    }
+    if (reason === 'membership')
+      facts.mockResolvedValueOnce({
+        id: 'private',
+        type: 'P',
+        delete_at: 0,
+        members: ['foreign', 'bot'],
+        activeSubscription: true,
+      });
+    const supplied =
+      reason === 'old-release'
+        ? fixtureVaultRelease('G04')
+        : reason === 'retired-release'
+          ? { ...release, releaseId: 'release-retired-g05' }
+          : release;
+    await expect(
+      contextAdminCommand(
+        {
+          command: 'mail-draft-configure',
+          scopeId: 'fixture',
+          requestId: randomUUID(),
+          manifestFile: state + '/grant.json',
+        } as never,
+        env,
+        dependencies,
+        { release: supplied, payloadRoot: '/fixture/payload' },
+      ),
+    ).rejects.toThrow();
+    expect(runMailDraftAdmin).not.toHaveBeenCalled();
+  },
+);
 it.each(['mail-draft-setup', 'mail-draft-link'] as const)(
   '%s uses only the current protected G05 release and paused owner authority with no model activation',
   async (command) => {

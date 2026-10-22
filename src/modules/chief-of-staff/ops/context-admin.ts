@@ -67,6 +67,8 @@ import { isCalendarCommand, runCalendarAdmin, type CalendarAdminArguments } from
 import { isMailAccountCommand, runMailAccountAdmin, type MailAccountArguments } from './mail-account-admin.js';
 import { isMailDraftAccountCommand, type MailDraftAccountArguments } from './mail-draft-account-arguments.js';
 import { runMailDraftAccountAdmin } from './mail-draft-account-admin.js';
+import { isMailDraftAdminCommand, type MailDraftAdminArguments } from './mail-draft-admin-arguments.js';
+import { runMailDraftAdmin } from './mail-draft-admin.js';
 import { isMissionCommand, runMissionAdmin, type MissionAdminArguments } from './mission-admin.js';
 import { isOwnerExportCommand, runOwnerExportAdmin, type OwnerExportArguments } from './owner-export-admin.js';
 import {
@@ -101,6 +103,7 @@ export type ContextAdminArguments =
   | CalendarAccountArguments
   | MailAccountArguments
   | MailDraftAccountArguments
+  | MailDraftAdminArguments
   | { command: 'context-status'; scopeId: string }
   | { command: 'operator-status'; scopeId: string; input: StatusInput }
   | { command: 'operator-control'; scopeId: string; requestId: string; text: string }
@@ -247,6 +250,8 @@ export async function contextAdminCommand(
       'mail-link',
       'mail-draft-setup',
       'mail-draft-link',
+      'mail-draft-configure',
+      'mail-draft-disable',
     ].includes(args.command)
   )
     return { status: 'disabled', live_model: 'not_verified' };
@@ -387,7 +392,7 @@ export async function contextAdminCommand(
   }
   const mailReleaseId =
     (isMailAccountCommand(args) && vaultRelease?.release.slice === 'G04') ||
-    (isMailDraftAccountCommand(args) && vaultRelease?.release.slice === 'G05')
+    ((isMailDraftAccountCommand(args) || isMailDraftAdminCommand(args)) && vaultRelease?.release.slice === 'G05')
       ? vaultRelease!.release.releaseId
       : null;
   const unlock = acquireTargetLock(root);
@@ -408,11 +413,11 @@ export async function contextAdminCommand(
       const assertAuthority = () => {
         const currentTarget = assertMaintenanceLease(root, target.binding, maintenance);
         if (
-          (isMailAccountCommand(args) || isMailDraftAccountCommand(args)) &&
+          (isMailAccountCommand(args) || isMailDraftAccountCommand(args) || isMailDraftAdminCommand(args)) &&
           (!mailReleaseId || currentTarget.lifecycle !== 'protected' || currentTarget.releaseId !== mailReleaseId)
         )
           throw Error(
-            isMailDraftAccountCommand(args)
+            isMailDraftAccountCommand(args) || isMailDraftAdminCommand(args)
               ? 'mail_draft_account_operation_unavailable'
               : 'mail_account_operation_unavailable',
           );
@@ -429,6 +434,22 @@ export async function contextAdminCommand(
         assertAuthority();
       };
       await check();
+      if (isMailDraftAdminCommand(args)) {
+        if (!vaultRelease || vaultRelease.release.slice !== 'G05') throw Error('mail_draft_configuration_unavailable');
+        return runMailDraftAdmin({
+          args,
+          env,
+          roots: {
+            targetRoot: root,
+            installationRoot: target.binding.installationRoot,
+            dataRoot: target.binding.dataRoot,
+          },
+          binding,
+          release: vaultRelease.release,
+          check,
+          assertAuthority,
+        });
+      }
       if (isMailDraftAccountCommand(args)) {
         if (!vaultRelease || vaultRelease.release.slice !== 'G05')
           throw Error('mail_draft_account_operation_unavailable');
