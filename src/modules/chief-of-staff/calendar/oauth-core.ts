@@ -3,9 +3,13 @@ import { CalendarReadError, GOOGLE_EVENT_READ_SCOPE, hasCalendarReadScope } from
 import { object } from './normalization.js';
 import { GOOGLE_OWNED_EVENT_WRITE_SCOPE, GOOGLE_CALENDAR_METADATA_SCOPE } from '../actions/writer.js';
 export const GOOGLE_MAIL_READ_SCOPE = 'https://www.googleapis.com/auth/gmail.readonly';
-export type OAuthScopeProfile = 'reader' | 'owned_event_writer' | 'mail_reader';
+export const GOOGLE_MAIL_DRAFT_SCOPE = 'https://www.googleapis.com/auth/gmail.compose';
+export type OAuthScopeProfile = 'reader' | 'owned_event_writer' | 'mail_reader' | 'mail_draft_writer';
 const validProfile = (profile: unknown): profile is OAuthScopeProfile =>
-  profile === 'reader' || profile === 'owned_event_writer' || profile === 'mail_reader';
+  profile === 'reader' ||
+  profile === 'owned_event_writer' ||
+  profile === 'mail_reader' ||
+  profile === 'mail_draft_writer';
 import { assertCalendarActive, calendarRequestSignal } from './cancellation.js';
 
 export type GoogleOAuthClient = { clientId: string; clientSecret?: string };
@@ -67,10 +71,12 @@ function validScopes(value: unknown, profile: OAuthScopeProfile): value is strin
       ? hasCalendarReadScope(value)
       : profile === 'mail_reader'
         ? value.length === 1 && value[0] === GOOGLE_MAIL_READ_SCOPE
-        : value.length === 2 &&
-          new Set(value).size === 2 &&
-          value.includes(GOOGLE_OWNED_EVENT_WRITE_SCOPE) &&
-          value.includes(GOOGLE_CALENDAR_METADATA_SCOPE))
+        : profile === 'mail_draft_writer'
+          ? value.length === 1 && value[0] === GOOGLE_MAIL_DRAFT_SCOPE
+          : value.length === 2 &&
+            new Set(value).size === 2 &&
+            value.includes(GOOGLE_OWNED_EVENT_WRITE_SCOPE) &&
+            value.includes(GOOGLE_CALENDAR_METADATA_SCOPE))
   );
 }
 export function validCalendarTokens(value: unknown, profile: OAuthScopeProfile): value is GoogleCalendarTokens {
@@ -222,7 +228,9 @@ export class CalendarAuthorization {
           ? GOOGLE_EVENT_READ_SCOPE
           : profile === 'mail_reader'
             ? GOOGLE_MAIL_READ_SCOPE
-            : [GOOGLE_OWNED_EVENT_WRITE_SCOPE, GOOGLE_CALENDAR_METADATA_SCOPE].join(' '),
+            : profile === 'mail_draft_writer'
+              ? GOOGLE_MAIL_DRAFT_SCOPE
+              : [GOOGLE_OWNED_EVENT_WRITE_SCOPE, GOOGLE_CALENDAR_METADATA_SCOPE].join(' '),
       state: this.#state,
       code_challenge_method: 'S256',
       code_challenge: createHash('sha256').update(this.#verifier).digest('base64url'),
