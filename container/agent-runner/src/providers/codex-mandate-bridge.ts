@@ -9,6 +9,7 @@ import type { createCosToolDispatch } from './codex-cos-tools.js';
 import { strategyCoordinatorToolNames } from '../mcp-tools/strategy-coordinator-tools.js';
 import { mailToolNames } from '../mcp-tools/mail-tools.js';
 import { mailDraftToolNames } from '../mcp-tools/mail-draft-tools.js';
+import { coordinatorRequestIdError } from '../mcp-tools/coordinator-request-id.js';
 
 type McpResult = { content: { type: 'text'; text: string }[]; isError: boolean };
 const unavailable = (): McpResult => ({ content: [{ type: 'text', text: 'CoS tool unavailable.' }], isError: true });
@@ -166,6 +167,8 @@ export async function callNativeMandateTool(socket: string, tool: string, args: 
       !tools.has(tool)
     )
       return unavailable();
+    const invalidRequestId = coordinatorRequestIdError(tool, args);
+    if (invalidRequestId) return { content: [{ type: 'text', text: invalidRequestId }], isError: true };
     const body = JSON.stringify({ tool, arguments: args });
     if (Buffer.byteLength(body) > COS_MAX_BYTES) return unavailable();
     return await new Promise<McpResult>((resolve) => {

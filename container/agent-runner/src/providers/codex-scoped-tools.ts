@@ -2,9 +2,9 @@
 import { COS_WAIT_MS } from '../mcp-tools/generated/cos-protocol.js';
 import type { JsonRpcServerRequest } from './codex-app-server.js';
 
-const denied = () => ({
+const denied = (message = 'CoS tool unavailable.') => ({
   success: false,
-  contentItems: [{ type: 'inputText' as const, text: 'CoS tool unavailable.' }],
+  contentItems: [{ type: 'inputText' as const, text: message }],
 });
 
 export function createScopedToolDispatch<
@@ -12,6 +12,7 @@ export function createScopedToolDispatch<
   Response extends { status: string },
 >(options: {
   requestFor(tool: unknown, args: unknown): Request | null;
+  invalidArguments?(tool: unknown, args: unknown): string | null;
   execute(request: Request, signal: AbortSignal): Promise<Response>;
   validResponse(value: unknown, requestId: string): value is Response;
   maxBytes: number;
@@ -60,7 +61,7 @@ export function createScopedToolDispatch<
       } catch {
         return denied();
       }
-      if (!request) return denied();
+      if (!request) return denied(options.invalidArguments?.(params.tool, params.arguments) ?? undefined);
       current.calls.add(params.callId);
       current.busy = true;
       const operation = new AbortController();

@@ -7,6 +7,52 @@ import { createMandateToolBridge, callNativeMandateTool } from './codex-mandate-
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { cosTools } from '../mcp-tools/chief-of-staff.js';
+test('G05 malformed request IDs return a safe correction through the actual MCP entry point without submitting work', async () => {
+  const f = await fixture();
+  const client = new Client({ name: 'request-id-fixture', version: '1' });
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [path.join(import.meta.dir, '../mcp-tools/native-mandate-server.ts')],
+    env: { NANOCLAW_COS_TOOL_SOCKET: f.bridge.socket },
+    stderr: 'pipe',
+  });
+  const create = {
+    writer_binding_id: '22222222-2222-4222-8222-222222222222',
+    source_message_id: 'ab01',
+    reply_text: 'A harmless unsent fixture reply',
+  };
+  try {
+    await client.connect(transport);
+    f.bridge.beginTurn('retained-thread', 'request-id-turn');
+    for (const name of ['cos_mail_draft_create', 'cos_answer_prepare']) {
+      const input =
+        name === 'cos_mail_draft_create' ? create : { draft: { kind: 'answer', coverage: 'insufficient', claims: [] } };
+      for (const request_id of ['g05-fixture-request', '00000000-0000-0000-0000-000000000000']) {
+        const rejected = await client.callTool({ name, arguments: { ...input, request_id } });
+        expect(rejected.isError).toBe(true);
+        const text = JSON.stringify(rejected.content);
+        expect(text).toContain('request_id');
+        expect(text).toContain('UUID');
+        expect(text).toContain('No operation was submitted');
+        expect(text).not.toContain(request_id);
+      }
+    }
+    expect(f.calls).toEqual([]);
+    expect(
+      (
+        await client.callTool({
+          name: 'cos_mail_draft_create',
+          arguments: { ...create, request_id: '11111111-1111-4111-8111-111111111111' },
+        })
+      ).isError,
+    ).toBe(false);
+    expect(f.calls).toEqual(['cos_mail_draft_create']);
+  } finally {
+    await client.close();
+    await f.close();
+  }
+}, 20000);
+
 test('G05 the actual retained-context MCP entry point gains only the fixed draft tools behind the existing turn fence', async () => {
   const f = await fixture();
   const client = new Client({ name: 'retained-draft-fixture', version: '1' });

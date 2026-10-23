@@ -18,6 +18,7 @@ import { actionCoordinatorRequest } from '../mcp-tools/action-coordinator-tools.
 import { mailDraftCoordinatorRequest } from '../mcp-tools/mail-draft-tools.js';
 import { strategyCoordinatorRequest } from '../mcp-tools/strategy-coordinator-tools.js';
 import type { DynamicToolFunctionSpec } from './codex-app-server.js';
+import { coordinatorRequestIdError } from '../mcp-tools/coordinator-request-id.js';
 
 export const cosDynamicTools: DynamicToolFunctionSpec[] = cosTools.map(({ tool }) => ({
   type: 'function',
@@ -95,5 +96,11 @@ export function createCosToolDispatch(
   execute: (request: CosRequest, signal: AbortSignal) => Promise<CosResponse> = (request, signal) =>
     executeCosRequest(request, COS_WAIT_MS, signal),
 ) {
-  return createScopedToolDispatch({ requestFor, execute, validResponse, maxBytes: COS_MAX_BYTES });
+  return createScopedToolDispatch({
+    requestFor,
+    invalidArguments: coordinatorRequestIdError,
+    execute,
+    validResponse,
+    maxBytes: COS_MAX_BYTES,
+  });
 }

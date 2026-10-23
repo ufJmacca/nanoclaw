@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { answerDraftSchema } from './generated/answer-protocol.js';
 import { COS_PROTOCOL, type CosRequest, type CosResponse } from './generated/cos-protocol.js';
 import type { McpToolDefinition } from './types.js';
+import { coordinatorRequestIdSchema } from './coordinator-request-id.js';
 
 /** Shared declarations for native tools and the fixed retained-context MCP adapter. */
 export function createAnswerTools(execute: (request: CosRequest) => Promise<CosResponse>): McpToolDefinition[] {
@@ -10,13 +11,13 @@ export function createAnswerTools(execute: (request: CosRequest) => Promise<CosR
       name: method,
       description:
         method === 'cos_answer_prepare'
-          ? 'Prepare a checked reply with citations, then send only its returned text unchanged. For a complete zero-event calendar read, use kind answer, coverage limited, claims [], calendar coverage and calendar_window with the exact selected binding/calendar and instant bounds. The host proves the empty window and supplies freshness; never invent an uncited claim. Other facts require citations, exact quotations and labelled inferences. Missing evidence uses insufficient coverage with no claims. Clarification uses not_applicable and bounded questions. Retry a pending preparation with the same request ID and unchanged draft.'
+          ? 'Prepare a checked reply with citations, then send only its returned text unchanged. For a complete zero-event calendar read, use kind answer, coverage limited, claims [], calendar coverage and calendar_window with the exact selected binding/calendar and instant bounds. The host proves the empty window and supplies freshness; never invent an uncited claim. Other facts require citations, exact quotations and labelled inferences. Missing evidence uses insufficient coverage with no claims. Clarification uses not_applicable and bounded questions. If supplying request_id, use a fresh valid UUID, not a descriptive label or all-zero UUID. An invalid-ID validation error means no operation was submitted. Retry a pending preparation with the same valid request ID and unchanged draft.'
           : 'Redisplay a checked answer after current source, calendar-window and record-version checks. Use before reusing old text; cached conversation is not publication permission.',
       inputSchema: {
         type: 'object',
         additionalProperties: false,
         properties: (method === 'cos_answer_prepare'
-          ? { request_id: { type: 'string', format: 'uuid' }, draft: answerDraftSchema }
+          ? { request_id: coordinatorRequestIdSchema, draft: answerDraftSchema }
           : { artifact_id: { type: 'string', pattern: '^[0-9a-f]{64}-[0-9a-f]{64}$' } }) as Record<string, object>,
         required: method === 'cos_answer_prepare' ? ['draft'] : ['artifact_id'],
       },

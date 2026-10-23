@@ -1,13 +1,14 @@
 import { randomUUID } from 'node:crypto';
 import { COS_PROTOCOL, validRequest, type CosRequest, type CosResponse } from './generated/cos-protocol.js';
 import { mailDraftCreateSchema, mailDraftStatusSchema } from './generated/mail-draft-protocol.js';
+import { coordinatorRequestIdSchema } from './coordinator-request-id.js';
 import type { McpToolDefinition } from './types.js';
 const definitions = {
   cos_mail_draft_create: {
     required: ['request_id', ...mailDraftCreateSchema.required],
-    properties: { request_id: { type: 'string', format: 'uuid' }, ...mailDraftCreateSchema.properties },
+    properties: { request_id: coordinatorRequestIdSchema, ...mailDraftCreateSchema.properties },
     description:
-      'Save one unsent plain-text reply to a currently selected Inbox/Sent message. Use writer_binding_id from the current cos_context_get mail_draft_writers.items and source_message_id from Mail evidence. The host chooses the source recipient and threading, checks for existing drafts or later replies, and applies the standing five-new-drafts-per-Sydney-day limit. Individual saves need no approval. Supply a stable request_id and reuse it only for the identical request. Only verified confirms saved content. For pending or uncertain results use cos_mail_draft_status with the original operation_id; never blindly create another draft. An existing result refers to the original saved operation and does not apply revised text. No sends, edits, deletions, attachments, reply-all or unrelated new messages.',
+      'Save one unsent plain-text reply to a currently selected Inbox/Sent message. Use writer_binding_id from the current cos_context_get mail_draft_writers.items and source_message_id from Mail evidence. The host chooses the source recipient and threading, checks for existing drafts or later replies, and applies the standing five-new-drafts-per-Sydney-day limit. Individual saves need no approval. Supply a fresh valid UUID as request_id, not a descriptive label or all-zero UUID, and reuse it unchanged only for the identical request. An invalid-ID validation error confirms that no operation was submitted; correct the ID before submission. Only verified confirms saved content. For pending or uncertain results use cos_mail_draft_status with the original operation_id; never blindly create another draft. An existing result refers to the original saved operation and does not apply revised text. No sends, edits, deletions, attachments, reply-all or unrelated new messages.',
   },
   cos_mail_draft_status: {
     required: [...mailDraftStatusSchema.required],
