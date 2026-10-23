@@ -82,7 +82,7 @@ async function start(input: {
     throw new Error('fixture_knowledge_root_required');
   const database = createNativeFixtureDatabase(new pg.Pool(relay.config), input);
   const databaseFailures: Array<{ code: string; frame: string; elapsed: number }> = [];
-  if (input.mission) {
+  if (input.mission || input.actions) {
     const run = database.run.bind(database);
     database.run = ((operation, mutation, signal) => {
       const started = Date.now();
@@ -489,6 +489,8 @@ async function start(input: {
           generation: string;
         }
       )?.generation;
+    if (actions && command === 'action-diagnostics')
+      return { database: databaseFailures, pool: database.inspectPool() };
     if (actions && command === 'action-fixture-state') return actions.state();
     if (mailDrafts && command === 'mail-draft-fixture-state') return mailDrafts.state();
     if (mailDrafts && command === 'mail-draft-fixture-mode') return mailDrafts.mode(value);

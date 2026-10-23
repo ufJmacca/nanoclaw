@@ -211,6 +211,14 @@ test(
         const selected = input ?? { ...request, start: at(86400000 + offset), end: at(90000000 + offset) };
         await ingress('Find an hour tomorrow for Pilot Alpha.');
         const result = await client!.call('cos_action_propose', { request_id: requestId, request: selected });
+        if (result.status !== 'ok')
+          t.diagnostic(
+            JSON.stringify({
+              proposalStatus: result.status,
+              reason: result.result?.reason ?? null,
+              host: await host!.request('action-diagnostics'),
+            }),
+          );
         assert.equal(result.status, 'ok');
         await complete();
         await pump();
@@ -402,6 +410,7 @@ test(
           );
         },
       );
+      t.diagnostic(JSON.stringify({ finalActionDiagnostics: await host!.request('action-diagnostics') }));
       const preserved = initDb(path.join(root, 'central.db'));
       assert.equal(
         (
