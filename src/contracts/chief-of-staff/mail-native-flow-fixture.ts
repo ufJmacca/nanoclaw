@@ -22,6 +22,7 @@ import { issueActivation } from '../../modules/chief-of-staff/ops/model-activati
 import { initializeDraftJournal } from '../../modules/chief-of-staff/mail-drafts/journal.js';
 import { GOOGLE_MAIL_DRAFT_SCOPE } from '../../modules/chief-of-staff/mail-drafts/oauth.js';
 import type { MailDraftFixtureConfiguration } from './mail-draft-fixture-host.js';
+import { draftReplayFailureMetadata } from './draft-fixture-diagnostics.js';
 
 function replyHeaders(id: string) {
   return [
@@ -423,7 +424,16 @@ export async function runMailNativeFixture(drafts = false): Promise<void> {
         (await client!.call('cos_mail_draft_status', { operation_id: last!.result.operation_id })).result.draft_status,
         'edited',
       );
-      assert.equal((await createDraft('aa14')).result.draft_status, 'edited');
+      const editedReplay = await createDraft('aa14');
+      if (editedReplay.status !== 'ok' || editedReplay.result?.draft_status !== 'edited') {
+        const [diagnostics, provider] = await Promise.all([
+          host!.request('mail-draft-diagnostics').catch(() => null),
+          host!.request('mail-draft-fixture-state').catch(() => null),
+        ]);
+        console.error(JSON.stringify(draftReplayFailureMetadata(editedReplay, diagnostics, provider?.writes)));
+      }
+      assert.equal(editedReplay.status, 'ok');
+      assert.equal(editedReplay.result?.draft_status, 'edited');
       await host!.request('mail-draft-fixture-mode', 'missing');
       assert.equal(
         (await client!.call('cos_mail_draft_status', { operation_id: last!.result.operation_id })).result.draft_status,
