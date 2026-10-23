@@ -87,6 +87,11 @@ function releaseRoot(id: string): string {
 function testRoot(id: string) {
   return path.resolve('.cos-plan-state/release-tests', id);
 }
+/** Fixed diagnostic codes distinguish observations without exposing paths or changing admission. */
+export function assertCleanCandidateSource(expected: string, observed: string, dirty: boolean): void {
+  if (expected !== observed) throw new Error('candidate_source_changed');
+  if (dirty) throw new Error('candidate_worktree_dirty');
+}
 function checkedPlan(id: string): { root: string; plan: Plan } {
   const root = releaseRoot(id),
     plan = readPrivate<Plan>(path.join(root, 'plan.json'));
@@ -94,7 +99,7 @@ function checkedPlan(id: string): { root: string; plan: Plan } {
   const dirty = execFileSync('git', ['status', '--porcelain'], { encoding: 'utf8' }).trim();
   if (plan.slice !== readReleaseExecution(path.resolve('.cos-plan-state'), plan.slice).active_slice)
     throw new Error('active_slice_required');
-  if (plan.source.commit !== current || dirty) throw new Error('clean_candidate_required');
+  assertCleanCandidateSource(plan.source.commit, current, dirty !== '');
   const target = deploymentSettings(readPrivate(path.resolve('.cos-plan-state/deployment-target.json')));
   if (digest(target) !== plan.targetDigest) throw new Error('deployment_target_changed');
   return { root, plan };

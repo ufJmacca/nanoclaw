@@ -2,13 +2,20 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
-import { macReleaseCommand, releaseCheckImageIds } from './mac-release-cli.js';
+import { macReleaseCommand, releaseCheckImageIds, assertCleanCandidateSource } from './mac-release-cli.js';
 import { BACKUP_RELEASE_CHECKS, MAIL_RELEASE_CHECKS, MAIL_DRAFT_RELEASE_CHECKS } from './release-manifest.js';
 import { fixtureRelease } from '../../../contracts/chief-of-staff/release-fixture.js';
 import { writeAtomic } from './target-state.js';
 import { readStageTimings } from './stage-timing.js';
 
 const roots: string[] = [];
+it('distinguishes a changed candidate commit from a dirty checkout without revealing file contents', () => {
+  expect(() => assertCleanCandidateSource('a'.repeat(40), 'b'.repeat(40), false)).toThrow('candidate_source_changed');
+  expect(() => assertCleanCandidateSource('a'.repeat(40), 'a'.repeat(40), true)).toThrow('candidate_worktree_dirty');
+  expect(() => assertCleanCandidateSource('a'.repeat(40), 'b'.repeat(40), true)).toThrow('candidate_source_changed');
+  expect(() => assertCleanCandidateSource('a'.repeat(40), 'a'.repeat(40), false)).not.toThrow();
+});
+
 afterEach(() => {
   vi.restoreAllMocks();
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
