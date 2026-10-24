@@ -7,6 +7,8 @@ export const MAIL_DRAFT_DATABASE_CASES = [
   'G05 real writer discovery exposes only current owner-bound identifiers without provider work',
   'G05 real PostgreSQL policies and published read-only source admit one verified draft; retries recheck edits',
   'G05 concurrent retries and an older PostgreSQL request snapshot cannot erase the independent effect reservation',
+  'G05 checked draft answers preserve the exact host receipt and stop publication after an observed edit',
+  'G05 a draft changing during answer publication denies the staged success rather than publishing stale confirmation',
   'G05 real admission denies disabled_policy without any provider draft write',
   'G05 real admission denies foreign_owner without any provider draft write',
   'G05 real admission denies expired_source without any provider draft write',

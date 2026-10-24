@@ -183,7 +183,7 @@ it('binds G05 policy, transport and reconciliation to the complete sealed host/t
   const text = serialize(fixture(true));
   expect(verifyMailDraftArtifactFixtureEvidence(text, identity)).toMatchObject({
     status: 'passed',
-    actualDatabaseCases: 14,
+    actualDatabaseCases: 16,
     actualNativeRuns: 2,
     sourceOverrides: false,
     installedAcceptance: false,
