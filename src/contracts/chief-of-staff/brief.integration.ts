@@ -1,3 +1,4 @@
+import { createFixtureDatabase, createFixturePool } from './fixture-database-readiness.js';
 import { createConversationState } from '../../modules/chief-of-staff/bridge/conversation-state.js';
 import {
   ensureModelBudget,
@@ -68,10 +69,10 @@ before(async () => {
   admin = await connectFixtureDatabase(process.env, 'migration');
   assert.equal((await admin.query('SELECT pg_try_advisory_lock(73101002) AS locked')).rows[0].locked, true);
   await migrate(admin, fixtureRuntimeUser());
-  pool = new pg.Pool(await fixtureDatabaseConfig());
+  pool = await createFixturePool(await fixtureDatabaseConfig());
   base = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-brief-fixture-'));
   for (const dir of ['artifacts', 'staging']) fs.mkdirSync(path.join(base, dir), { mode: 0o700 });
-  const database = BoundedDatabase.fromConfig(await fixtureDatabaseConfig());
+  const database = await createFixtureDatabase(await fixtureDatabaseConfig());
   knowledge = new KnowledgeStore(
     database,
     new KnowledgeArtifacts(path.join(base, 'artifacts'), path.join(base, 'staging')),
@@ -377,7 +378,7 @@ async function nextPreparedBrief() {
 
 test('S04 lost delivery-start acknowledgement cannot authorize a send after restart', async () => {
   const f = await nextPreparedBrief();
-  const faultyPool = new pg.Pool(await fixtureDatabaseConfig()),
+  const faultyPool = await createFixturePool(await fixtureDatabaseConfig()),
     client = await faultyPool.connect(),
     original = client.query.bind(client);
   let started = false,
@@ -461,7 +462,7 @@ test('S04 checked notifications record delivery or ambiguity once and deny chang
 test('S04 brief persistence reconciles a lost commit acknowledgement and blocks on a real database partition', async () => {
   const fixtureContext = { ...context, generation: randomUUID() },
     request = randomUUID();
-  const faultyPool = new pg.Pool(await fixtureDatabaseConfig()),
+  const faultyPool = await createFixturePool(await fixtureDatabaseConfig()),
     client = await faultyPool.connect(),
     original = client.query.bind(client);
   let inserted = false,
@@ -511,7 +512,7 @@ test('S04 brief persistence reconciles a lost commit acknowledgement and blocks 
     await faultyPool.end();
   }
   const relay = await connectionFault(await fixtureDatabaseConfig()),
-    database = new BoundedDatabase(new pg.Pool(relay.config), 350);
+    database = new BoundedDatabase(await createFixturePool(relay.config), 350);
   try {
     await database.run((c) => c.query('SELECT 1'));
     relay.partition();
@@ -625,7 +626,7 @@ test('S04 recurring fixture: approved schedule, native restart, checked briefs a
   let commitment = '';
   try {
     const relay = await connectionFault(await fixtureDatabaseConfig());
-    const partitioned = new BoundedDatabase(new pg.Pool(relay.config), 350);
+    const partitioned = new BoundedDatabase(await createFixturePool(relay.config), 350);
     try {
       await partitioned.run((c) => c.query('SELECT 1'));
       relay.partition();
@@ -642,7 +643,7 @@ test('S04 recurring fixture: approved schedule, native restart, checked briefs a
       await partitioned.pool.end();
       await relay.close();
     }
-    const lostPool = new pg.Pool(await fixtureDatabaseConfig()),
+    const lostPool = await createFixturePool(await fixtureDatabaseConfig()),
       lostClient = await lostPool.connect(),
       original = lostClient.query.bind(lostClient);
     let claimed = false,

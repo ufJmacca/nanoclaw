@@ -1,3 +1,4 @@
+import { createFixtureDatabase } from './fixture-database-readiness.js';
 /** Scripted provider: real owner routing, MCP containers, native queue and external PostgreSQL. */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
@@ -57,7 +58,7 @@ test(
       admin = await connectFixtureDatabase(process.env, 'migration');
       assert.equal((await admin.query('SELECT pg_try_advisory_lock(73101002) AS locked')).rows[0].locked, true);
       await migrate(admin, fixtureRuntimeUser());
-      database = BoundedDatabase.fromConfig(await fixtureDatabaseConfig());
+      database = await createFixtureDatabase(await fixtureDatabaseConfig());
       const priorities = new PriorityStore(database),
         calendar = new CalendarStore(database);
       const db = initDb(path.join(root, 'central.db'));

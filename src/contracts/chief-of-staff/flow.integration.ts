@@ -1,3 +1,4 @@
+import { createFixtureDatabase } from './fixture-database-readiness.js';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import fs from 'node:fs';
@@ -5,7 +6,6 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { fixtureDatabaseConfig, connectFixtureDatabase, fixtureRuntimeUser } from './fixture-database.js';
 import { migrate } from '../../modules/chief-of-staff/store/migrations.js';
-import { BoundedDatabase } from '../../modules/chief-of-staff/store/client.js';
 import type { PriorityStore } from '../../modules/chief-of-staff/store/priorities.js';
 import { McpFixture } from './mcp-fixture.js';
 import { HostFixture } from './host-fixture-client.js';
@@ -39,7 +39,7 @@ test(
       await migrate(admin, fixtureRuntimeUser());
       const runtimeCheck = await connectFixtureDatabase(process.env);
       await runtimeCheck.end();
-      store = new PriorityStore(BoundedDatabase.fromConfig(await fixtureDatabaseConfig(process.env)));
+      store = new PriorityStore(await createFixtureDatabase(await fixtureDatabaseConfig(process.env)));
       const db = initDb(path.join(root, 'central.db'));
       runMigrations(db);
       const subscription = subscribeMattermostChannelStrict({ instanceKey: 'fixture', channelId: scope });
@@ -107,6 +107,8 @@ test(
         'cos_change_propose',
         'cos_context_get',
         'cos_knowledge_search',
+        'cos_mail_draft_create',
+        'cos_mail_draft_status',
         'cos_mail_search',
         'cos_mail_thread_get',
         'cos_mandate_activity',

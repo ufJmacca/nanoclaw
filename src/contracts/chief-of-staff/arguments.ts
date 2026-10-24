@@ -14,7 +14,8 @@ type FixtureArguments = {
     | 'G01'
     | 'G02'
     | 'G03'
-    | 'G04';
+    | 'G04'
+    | 'G05';
   demo: boolean;
   profile: 'test' | 'runtime-disposable';
 };
@@ -30,11 +31,26 @@ export function parseFixtureArguments(args: string[]): FixtureArguments {
   const demo = values.get('--demo') === true,
     profile = values.get('--db-profile');
   if (
-    !['S01', 'S02', 'S03', 'S04', 'S05', 'S06', 'S07', 'S08', 'S09', 'S10', 'S11', 'G01', 'G02', 'G03', 'G04'].includes(
-      String(values.get('--slice')),
-    ) ||
+    ![
+      'S01',
+      'S02',
+      'S03',
+      'S04',
+      'S05',
+      'S06',
+      'S07',
+      'S08',
+      'S09',
+      'S10',
+      'S11',
+      'G01',
+      'G02',
+      'G03',
+      'G04',
+      'G05',
+    ].includes(String(values.get('--slice'))) ||
     !['test', 'runtime-disposable'].includes(String(profile)) ||
-    (['G01', 'G02', 'G03', 'G04'].includes(String(values.get('--slice'))) && profile !== 'test') ||
+    (['G01', 'G02', 'G03', 'G04', 'G05'].includes(String(values.get('--slice'))) && profile !== 'test') ||
     (demo && values.get('--fixture') !== true) ||
     (!demo && values.has('--fixture'))
   )
@@ -47,6 +63,13 @@ export function parseFixtureArguments(args: string[]): FixtureArguments {
 }
 
 export function fixtureFiles(args: Pick<FixtureArguments, 'slice' | 'demo'>): string[] {
+  if (args.slice === 'G05')
+    return [
+      ...fixtureFiles({ slice: 'G04', demo: args.demo }),
+      ...(args.demo
+        ? ['mail-draft-flow.integration']
+        : ['mail-draft-store.integration', 'mail-draft-checkpoint.integration', 'mail-draft-flow.integration']),
+    ];
   if (args.slice === 'G04')
     return [
       ...fixtureFiles({ slice: 'G03', demo: args.demo }),

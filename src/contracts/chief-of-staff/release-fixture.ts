@@ -23,6 +23,7 @@ import { ACTION_CHECKSUM } from '../../modules/chief-of-staff/store/action-schem
 import { STRATEGY_CHECKSUM } from '../../modules/chief-of-staff/store/strategy-schema.js';
 import { STRATEGY_CHAIN_CHECKSUM } from '../../modules/chief-of-staff/store/strategy-chain-schema.js';
 import { MAIL_CHECKSUM } from '../../modules/chief-of-staff/store/mail-schema.js';
+import { MAIL_DRAFT_CHECKSUM } from '../../modules/chief-of-staff/store/mail-draft-schema.js';
 import { RESTIC_ARTIFACT } from '../../modules/chief-of-staff/ops/restic-artifact.js';
 /** Synthetic identities for release-contract tests; never a transferable artifact receipt. */
 export function fixtureRelease(slice: ReleaseManifest['slice'] = 'S01'): ReleaseManifest {
@@ -150,13 +151,18 @@ export function fixtureRelease(slice: ReleaseManifest['slice'] = 'S01'): Release
   };
 }
 /** Synthetic G01/G02 contracts for admin tests; their payload/image identities are never deployment evidence. */
-export function fixtureVaultRelease(slice: 'G01' | 'G02' | 'G03' | 'G04' = 'G01'): ReleaseManifest {
+export function fixtureVaultRelease(slice: 'G01' | 'G02' | 'G03' | 'G04' | 'G05' = 'G01'): ReleaseManifest {
   const manifest = fixtureRelease('S11');
   manifest.slice = slice;
-  if (slice === 'G02' || slice === 'G03' || slice === 'G04') manifest.backupArtifact = RESTIC_ARTIFACT;
-  if (slice === 'G04') {
+  if (slice === 'G02' || slice === 'G03' || slice === 'G04' || slice === 'G05')
+    manifest.backupArtifact = RESTIC_ARTIFACT;
+  if (slice === 'G04' || slice === 'G05') {
     manifest.postgres = { minimum: 19, maximum: 19 };
     manifest.migrations.push({ version: 19, checksum: MAIL_CHECKSUM });
+  }
+  if (slice === 'G05') {
+    manifest.postgres = { minimum: 20, maximum: 20 };
+    manifest.migrations.push({ version: 20, checksum: MAIL_DRAFT_CHECKSUM });
   }
   const seal = {
     contract: 'cos-vault-root-artifact/v1' as const,
@@ -176,7 +182,9 @@ export function fixtureVaultRelease(slice: 'G01' | 'G02' | 'G03' | 'G04' = 'G01'
         ? 'release-reviewed-g01'
         : slice === 'G03'
           ? 'release-reviewed-g02'
-          : 'release-reviewed-g03',
+          : slice === 'G04'
+            ? 'release-reviewed-g03'
+            : 'release-reviewed-g04',
   ];
   manifest.checks = Object.fromEntries(
     requiredReleaseChecks(slice).map((name) => [
@@ -186,9 +194,12 @@ export function fixtureVaultRelease(slice: 'G01' | 'G02' | 'G03' | 'G04' = 'G01'
         at: '2026-10-08T00:00:00Z',
         sourceCommit: manifest.source.commit,
         imageIds:
-          name === 'protected_state' || name === 'mail_evidence' || name.includes('image')
+          name === 'protected_state' || name === 'mail_evidence' || name === 'draft_transport' || name.includes('image')
             ? manifest.images.map(({ id }) => id)
-            : name.startsWith('vault_') || name.startsWith('backup_') || name.startsWith('mail_')
+            : name.startsWith('vault_') ||
+                name.startsWith('backup_') ||
+                name.startsWith('mail_') ||
+                name.startsWith('draft_')
               ? [manifest.images[0]!.id]
               : [],
       },

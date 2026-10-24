@@ -16,6 +16,9 @@ import { checkVaultAuthority } from '/code/modules/chief-of-staff/ops/vault-auth
 import { runtimeTestMessages, writeRuntimeTestMessage } from '/code/modules/chief-of-staff/ops/runtime-test-wire.js';
 import { writeVaultRootRequest } from '/code/modules/chief-of-staff/ops/vault-root-wire.js';
 import { selectedFixtureEnvironment } from '/code/contracts/chief-of-staff/fixture-database.js';
+const mailDraftFixture = process.env.NANOCLAW_COS_MAIL_DRAFT_FIXTURE === '1';
+assert(!mailDraftFixture || process.env.NANOCLAW_COS_MAIL_CREDENTIAL_FIXTURE === '1');
+const mailDraftEnvironment = mailDraftFixture ? { NANOCLAW_COS_MAIL_DRAFT_FIXTURE: '1' } : {};
 const mapping = `cos-vault-fixture-${randomUUID()}`;
 const paths = {
   stateRoot: '/case/control',
@@ -245,6 +248,7 @@ function run(tool, args) {
       LC_ALL: 'C',
       NANOCLAW_COS_VAULT_FIXTURE: '1',
       ...(postgresCapture || mailRecovery ? selectedFixtureEnvironment(process.env, true) : {}),
+      ...(mailCredential || mailRecovery ? mailDraftEnvironment : {}),
     },
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', fullCapture || credentialJournal || mailCredential || mailRecovery ? 'pipe' : 'ignore'],
@@ -644,7 +648,11 @@ try {
         '/probe/probe-mail.mjs',
         'unrelated-worker-mount',
       ],
-      { env: { PATH: '/usr/sbin:/usr/bin:/sbin:/bin' }, stdio: ['ignore', 'pipe', 'pipe'], timeout: 20000 },
+      {
+        env: { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', ...mailDraftEnvironment },
+        stdio: ['ignore', 'pipe', 'pipe'],
+        timeout: 20000,
+      },
     );
     mailRace.stdout.on('data', (bytes) => {
       output += bytes.toString('utf8');
@@ -716,7 +724,11 @@ try {
         '/probe/probe-mail.mjs',
         'mount-loss',
       ],
-      { env: { PATH: '/usr/sbin:/usr/bin:/sbin:/bin' }, stdio: ['ignore', 'pipe', 'pipe'], timeout: 15000 },
+      {
+        env: { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', ...mailDraftEnvironment },
+        stdio: ['ignore', 'pipe', 'pipe'],
+        timeout: 15000,
+      },
     );
     let output = '';
     mailRace.stdout.on('data', (bytes) => {
@@ -810,8 +822,11 @@ try {
       .split('\n')
       .map((line) => JSON.parse(line));
     assert.equal(records.length, 2);
-    assert.equal(records[0].encryptedMailCheckpoint, 'passed');
-    assert.equal(records[1].completeMailCredentialRecovery, 'passed');
+    assert.equal(records[0][mailDraftFixture ? 'encryptedMailDraftCheckpoint' : 'encryptedMailCheckpoint'], 'passed');
+    assert.equal(
+      records[1][mailDraftFixture ? 'completeMailDraftCredentialRecovery' : 'completeMailCredentialRecovery'],
+      'passed',
+    );
     for (const record of records) console.log(JSON.stringify(record));
   }
   run('/usr/bin/umount', ['/home/fixture/.config/nanoclaw-cos/state/calendar']);

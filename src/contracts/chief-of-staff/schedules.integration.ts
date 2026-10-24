@@ -1,3 +1,4 @@
+import { createFixtureDatabase, createFixturePool } from './fixture-database-readiness.js';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { before, after, test } from 'node:test';
@@ -38,8 +39,8 @@ before(async () => {
   admin = await connectFixtureDatabase(process.env, 'migration');
   assert.equal((await admin.query('SELECT pg_try_advisory_lock(73101002) AS locked')).rows[0].locked, true);
   await migrate(admin, fixtureRuntimeUser());
-  pool = new pg.Pool(await fixtureDatabaseConfig());
-  store = new PriorityStore(BoundedDatabase.fromConfig(await fixtureDatabaseConfig()));
+  pool = await createFixturePool(await fixtureDatabaseConfig());
+  store = new PriorityStore(await createFixtureDatabase(await fixtureDatabaseConfig()));
   await pool.query(
     "INSERT INTO cos.scopes(id,owner_id,instance_id,channel_id,agent_group_id,status) VALUES($1,$2,'fixture-instance',$1,$1,'active')",
     [scope, context.ownerId],
@@ -277,7 +278,7 @@ test('S04 run-store outage, lost reservation acknowledgement and expiry never re
   const before = (await pool.query('SELECT count(*)::int AS n FROM cos.brief_runs WHERE scope_id=$1', [scope])).rows[0]
     .n;
   const relay = await connectionFault(await fixtureDatabaseConfig()),
-    database = new BoundedDatabase(new pg.Pool(relay.config), 350);
+    database = new BoundedDatabase(await createFixturePool(relay.config), 350);
   try {
     await database.run((client) => client.query('SELECT 1'));
     relay.partition();
@@ -298,7 +299,7 @@ test('S04 run-store outage, lost reservation acknowledgement and expiry never re
     run = (await briefs.reserveDue(context)).run as any;
   const claimed = await briefs.claim(context, run.id, 'host-recovered');
   assert.equal(claimed.status, 'ok');
-  const faultyPool = new pg.Pool(await fixtureDatabaseConfig()),
+  const faultyPool = await createFixturePool(await fixtureDatabaseConfig()),
     client = await faultyPool.connect(),
     original = client.query.bind(client);
   let dropped = false;

@@ -4,7 +4,7 @@ type Identity = Readonly<{
   sourceTree: string;
   hostImage: string;
   fixtureImage: string;
-  releaseSlice: 'G02' | 'G03' | 'G04';
+  releaseSlice: 'G02' | 'G03' | 'G04' | 'G05';
 }>;
 export function verifyBackupJobFixtureImage(
   value: unknown,
@@ -48,7 +48,7 @@ export function verifyBackupJobFixtureEvidence(records: unknown[], identity: Ide
       records.length !== 3 ||
       !identity ||
       Object.keys(identity).sort().join(',') !== 'fixtureImage,hostImage,releaseSlice,sourceCommit,sourceTree' ||
-      !['G02', 'G03', 'G04'].includes(identity.releaseSlice) ||
+      !['G02', 'G03', 'G04', 'G05'].includes(identity.releaseSlice) ||
       !/^[a-f0-9]{40}$/.test(identity.sourceCommit) ||
       !/^[a-f0-9]{40}$/.test(identity.sourceTree) ||
       !/^sha256:[a-f0-9]{64}$/.test(identity.hostImage) ||
@@ -97,6 +97,8 @@ export function verifyBackupJobFixtureEvidence(records: unknown[], identity: Ide
         !options.split(',').includes('nodev')
       )
         throw Error('ram_scope');
+    const drafts = identity.releaseSlice === 'G05',
+      upgrade = drafts || identity.releaseSlice === 'G04';
     const required = [
       'actualUserManager',
       'actualStaticCompiler',
@@ -127,15 +129,17 @@ export function verifyBackupJobFixtureEvidence(records: unknown[], identity: Ide
       'releaseSlice',
       'schemaVersion',
       'actualG03ToG04Upgrade',
+      ...(drafts ? ['actualG04ToG05Upgrade'] : []),
     ];
     if (
       Object.keys(probe).sort().join(',') !== keys.sort().join(',') ||
-      probe.contract !== 'cos-backup-job-release-fixture/v2' ||
+      probe.contract !== (drafts ? 'cos-backup-job-release-fixture/v3' : 'cos-backup-job-release-fixture/v2') ||
       probe.status !== 'passed' ||
       probe.releaseSlice !== identity.releaseSlice ||
-      probe.schemaVersion !== (identity.releaseSlice === 'G04' ? 19 : 18) ||
+      probe.schemaVersion !== (drafts ? 20 : identity.releaseSlice === 'G04' ? 19 : 18) ||
       probe.actualG03ToG04Upgrade !== (identity.releaseSlice === 'G04') ||
-      probe.cases !== (identity.releaseSlice === 'G04' ? 8 : 7) ||
+      (drafts && probe.actualG04ToG05Upgrade !== true) ||
+      probe.cases !== (upgrade ? 8 : 7) ||
       probe.actualEnablementLinks !== 2 ||
       required.some((key) => probe[key] !== true) ||
       probe.sealedSourceCommit !== identity.sourceCommit ||
@@ -155,7 +159,7 @@ export function verifyBackupJobFixtureEvidence(records: unknown[], identity: Ide
     validateResticArtifactSeal(probe.backupArtifact);
     return Object.freeze({
       status: 'passed' as const,
-      cases: identity.releaseSlice === 'G04' ? 8 : 7,
+      cases: upgrade ? 8 : 7,
       scope: 'immutable_host_local_user_manager' as const,
       installedAcceptance: false as const,
     });

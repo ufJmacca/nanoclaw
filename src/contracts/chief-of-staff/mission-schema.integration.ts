@@ -1,3 +1,4 @@
+import { createFixturePool } from './fixture-database-readiness.js';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { before, after, test } from 'node:test';
@@ -19,7 +20,7 @@ before(async () => {
   admin = await connectFixtureDatabase(process.env, 'migration');
   assert.equal((await admin.query('SELECT pg_try_advisory_lock(73101002) AS locked')).rows[0].locked, true);
   assert.equal(await migrate(admin, fixtureRuntimeUser()), SCHEMA_VERSION);
-  runtime = new pg.Pool(await fixtureDatabaseConfig());
+  runtime = await createFixturePool(await fixtureDatabaseConfig());
   await admin.query(
     "INSERT INTO cos.scopes(id,owner_id,instance_id,channel_id,agent_group_id,status) VALUES($1,'owner','fixture',$1,$1,'active')",
     [scope],

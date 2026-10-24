@@ -1,3 +1,4 @@
+import { createFixtureDatabase, createFixturePool } from './fixture-database-readiness.js';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -57,8 +58,8 @@ before(async () => {
   admin = await connectFixtureDatabase(process.env, 'migration');
   assert.equal((await admin.query('SELECT pg_try_advisory_lock(73101002) AS locked')).rows[0].locked, true);
   await migrate(admin, fixtureRuntimeUser());
-  pool = new pg.Pool(await fixtureDatabaseConfig());
-  database = BoundedDatabase.fromConfig(await fixtureDatabaseConfig());
+  pool = await createFixturePool(await fixtureDatabaseConfig());
+  database = await createFixtureDatabase(await fixtureDatabaseConfig());
   base = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-calendar-evidence-'));
   for (const name of ['artifacts', 'staging', 'fences']) fs.mkdirSync(path.join(base, name), { mode: 0o700 });
   artifacts = new KnowledgeArtifacts(path.join(base, 'artifacts'), path.join(base, 'staging'));
@@ -309,7 +310,7 @@ test('S03 operator flow: explicit loopback link, selected sync, stable retry and
       assert.equal(init.method, 'GET');
       return new Response(JSON.stringify({ accessRole: 'reader', items: [event('OperatorCalendarFixtureCanary')] }));
     };
-    const connect = async () => new PriorityStore(BoundedDatabase.fromConfig(await fixtureDatabaseConfig()));
+    const connect = async () => new PriorityStore(await createFixtureDatabase(await fixtureDatabaseConfig()));
     const dependencies = {
       inspect,
       memory: () => {}, // Offline synthetic storage fixture; actual kernel memory checks have their own gate.
@@ -750,7 +751,7 @@ test('S03-PG01/PG02: lost database connection rolls back snapshot, evidence corr
   await calendar.start(context, s.id, 'selected', attempt, window);
   const snapshot = await collectCalendarSnapshot(s.fixture.reader, 'selected', window);
   const relay = await connectionFault(await fixtureDatabaseConfig());
-  const brokenDatabase = new BoundedDatabase(new pg.Pool(relay.config), 350);
+  const brokenDatabase = new BoundedDatabase(await createFixturePool(relay.config), 350);
   let inject = true;
   const fault = new CalendarStore(
     brokenDatabase,

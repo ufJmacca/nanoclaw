@@ -2,8 +2,11 @@
 import fs from 'node:fs';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
-import { initializeMailProfile } from '/code/modules/chief-of-staff/mail/setup.js';
-import { openMailCredentials } from '/code/modules/chief-of-staff/mail/config.js';
+import { initializeMailProfile as initializeMailReaderProfile } from '/code/modules/chief-of-staff/mail/setup.js';
+import { openMailCredentials as openMailReaderCredentials } from '/code/modules/chief-of-staff/mail/config.js';
+import { initializeMailDraftProfile } from '/code/modules/chief-of-staff/mail-drafts/setup.js';
+import { openMailDraftCredentials } from '/code/modules/chief-of-staff/mail-drafts/config.js';
+import { GOOGLE_MAIL_DRAFT_SCOPE } from '/code/modules/chief-of-staff/mail-drafts/oauth.js';
 import { GOOGLE_MAIL_READ_SCOPE } from '/code/modules/chief-of-staff/mail/oauth.js';
 import { verifyVaultMemory } from '/code/modules/chief-of-staff/ops/vault-memory.js';
 import { verifyVaultStorage } from '/code/modules/chief-of-staff/ops/vault-storage.js';
@@ -24,9 +27,21 @@ const roots = {
   installationRoot: '/case/application',
   dataRoot: '/case/data',
 };
-const calendar = '/case/vault/google/calendar',
-  profile = calendar + '/mail-reader';
-const client = { clientId: 'mail-kernel-fixture.apps.googleusercontent.com', clientSecret: 'SYNTHETIC_MAIL_CLIENT' };
+const drafts = process.env.NANOCLAW_COS_MAIL_DRAFT_FIXTURE === '1',
+  initializeMailProfile = drafts ? initializeMailDraftProfile : initializeMailReaderProfile,
+  openMailCredentials = drafts ? openMailDraftCredentials : openMailReaderCredentials,
+  permission = drafts ? GOOGLE_MAIL_DRAFT_SCOPE : GOOGLE_MAIL_READ_SCOPE,
+  setupError = drafts ? /^Error: vault_storage_unavailable$/ : /mail_profile_initialization_unavailable/,
+  calendar = '/case/vault/google/calendar',
+  readerProfile = calendar + '/mail-reader',
+  profile = calendar + (drafts ? '/mail-draft-writer' : '/mail-reader');
+const readerClient = {
+    clientId: 'mail-kernel-fixture.apps.googleusercontent.com',
+    clientSecret: 'SYNTHETIC_MAIL_CLIENT',
+  },
+  client = drafts
+    ? { clientId: 'draft-kernel-fixture.apps.googleusercontent.com', clientSecret: 'SYNTHETIC_DRAFT_CLIENT' }
+    : readerClient;
 const calendarClient = {
   clientId: 'calendar-kernel-fixture.apps.googleusercontent.com',
   clientSecret: 'SYNTHETIC_CALENDAR_CLIENT',
@@ -78,6 +93,21 @@ async function close(host, denied = false) {
   assert.equal(host.closed(), true);
   assert.throws(host.verifyStorage);
 }
+async function assertReader(reader) {
+  assert.equal(snapshot(readerProfile), reader.snapshot);
+  const host = await openMailReaderCredentials(roots);
+  try {
+    assert.deepEqual(await host.credentials.inspect(scope, reader.binding, reader.reference), {
+      auth: 'ready',
+      scopes: [GOOGLE_MAIL_READ_SCOPE],
+      generation: 1,
+    });
+    assert.throws(() => host.fences.assertOpen(scope, reader.deniedBinding), /calendar_auth_revoked/);
+  } finally {
+    await close(host);
+  }
+  assert.equal(snapshot(readerProfile), reader.snapshot);
+}
 async function deniedUse(host, metadata) {
   assert.throws(host.verifyStorage);
   await assert.rejects(host.credentials.token(scope, metadata.binding, metadata.reference));
@@ -90,7 +120,8 @@ if (mode === 'install') {
   assert.match(source.tree, /^[a-f0-9]{40}$/);
   console.log(
     JSON.stringify({
-      contract: 'cos-g04-mail-vault-fixture/v1',
+      contract: drafts ? 'cos-g05-draft-vault-fixture/v1' : 'cos-g04-mail-vault-fixture/v1',
+      ...(drafts ? { credentialProfile: 'mail_draft_writer' } : {}),
       sourceCommit: source.commit,
       sourceTree: source.tree,
       compiledProductionPayload: true,
@@ -110,10 +141,29 @@ if (mode === 'install') {
   assert.equal(fs.existsSync(profile), false);
   writeAtomic(calendar, 'oauth-client.json', calendarClient);
   const operationId = randomUUID();
-  await assert.rejects(
-    initializeMailProfile(roots, calendarClient, authority(operationId)),
-    /mail_profile_initialization_unavailable/,
-  );
+  let reader;
+  if (drafts) {
+    assert.equal(fs.existsSync(readerProfile), false);
+    await initializeMailReaderProfile(roots, readerClient, authority(randomUUID()));
+    const host = await openMailReaderCredentials(roots);
+    reader = { binding: randomUUID(), reference: randomUUID(), deniedBinding: randomUUID() };
+    try {
+      await host.credentials.install(scope, reader.binding, reader.reference, {
+        accessToken: 'SYNTHETIC_READONLY_ACCESS',
+        refreshToken: 'SYNTHETIC_READONLY_REFRESH',
+        expiresAt: Date.now() + 3600000,
+        refreshExpiresAt: null,
+        scopes: [GOOGLE_MAIL_READ_SCOPE],
+      });
+      host.fences.deny(scope, reader.deniedBinding, 'revoked');
+    } finally {
+      await close(host);
+    }
+    reader.snapshot = snapshot(readerProfile);
+    await assert.rejects(initializeMailProfile(roots, readerClient, authority(operationId)), setupError);
+    assert.equal(fs.existsSync(profile), false);
+  }
+  await assert.rejects(initializeMailProfile(roots, calendarClient, authority(operationId)), setupError);
   assert.equal(fs.existsSync(profile), false);
   await assert.rejects(openMailCredentials(roots), /mail_configuration_unavailable/);
   assert.equal(fs.existsSync(profile), false);
@@ -134,7 +184,7 @@ if (mode === 'install') {
         refresh_token: 'SYNTHETIC_ROTATED_REFRESH',
         token_type: 'Bearer',
         expires_in: 3600,
-        scope: GOOGLE_MAIL_READ_SCOPE,
+        scope: permission,
       }),
     );
   };
@@ -145,14 +195,14 @@ if (mode === 'install') {
       refreshToken: 'SYNTHETIC_REFRESH',
       expiresAt: Date.now() - 1,
       refreshExpiresAt: null,
-      scopes: [GOOGLE_MAIL_READ_SCOPE],
+      scopes: [permission],
     });
     assert.equal(await host.credentials.token(scope, binding, reference), 'SYNTHETIC_ROTATED_ACCESS');
     assert.equal(await host.credentials.token(scope, binding, reference), 'SYNTHETIC_ROTATED_ACCESS');
     assert.equal(exchanges, 1);
     assert.deepEqual(await host.credentials.inspect(scope, binding, reference), {
       auth: 'ready',
-      scopes: [GOOGLE_MAIL_READ_SCOPE],
+      scopes: [permission],
       generation: 2,
     });
     stage('mail_concurrent_metadata_and_tokens');
@@ -165,7 +215,7 @@ if (mode === 'install') {
       }),
     );
     for (const result of concurrent) {
-      assert.deepEqual(result.metadata, { auth: 'ready', scopes: [GOOGLE_MAIL_READ_SCOPE], generation: 2 });
+      assert.deepEqual(result.metadata, { auth: 'ready', scopes: [permission], generation: 2 });
       assert.equal(result.token, 'SYNTHETIC_ROTATED_ACCESS');
     }
     assert.equal(hash(profile + '/credentials/' + reference + '.json'), beforeConcurrent);
@@ -179,12 +229,25 @@ if (mode === 'install') {
   }
   const queue = createVaultBackupQueue(roots),
     pending = await queue.pending('credentials');
-  assert.equal(pending.length, 3);
+  assert.equal(pending.length, drafts ? 4 : 3);
+  let journalEvents = 0,
+    readerJournalEvents = 0;
   for (const receipt of pending)
     await queue.withPending('credentials', receipt.operationId, async (directory) => {
       assert.equal(fs.statSync(directory).dev, fs.statSync('/case/vault').dev);
-      assert.equal(JSON.parse(fs.readFileSync(directory + '/credential-event.json', 'utf8')).sourceKind, 'mail_reader');
+      const kind = JSON.parse(fs.readFileSync(directory + '/credential-event.json', 'utf8')).sourceKind;
+      if (drafts && kind === 'mail_reader') readerJournalEvents++;
+      else {
+        assert.equal(kind, drafts ? 'mail_draft_writer' : 'mail_reader');
+        journalEvents++;
+      }
     });
+  assert.equal(journalEvents, 3);
+  assert.equal(readerJournalEvents, drafts ? 1 : 0);
+  if (drafts) {
+    assert.equal(snapshot(readerProfile), reader.snapshot);
+    await assertReader(reader);
+  }
   stage('mail_retry_preservation');
   // The root-owned .vault-canary is storage proof, never credential payload.
   const before = snapshot(profile),
@@ -195,7 +258,13 @@ if (mode === 'install') {
   const reopened = await openMailCredentials(roots);
   assert.throws(() => reopened.fences.assertOpen(scope, deniedBinding), /calendar_auth_revoked/);
   await close(reopened);
-  writeAtomic(roots.targetRoot, 'mail-fixture.json', { operationId, binding, reference, deniedBinding });
+  writeAtomic(roots.targetRoot, 'mail-fixture.json', {
+    operationId,
+    binding,
+    reference,
+    deniedBinding,
+    ...(drafts ? { reader } : {}),
+  });
   console.log(
     JSON.stringify({
       mailVaultStage: 'install',
@@ -203,7 +272,8 @@ if (mode === 'install') {
       retryPreserved: true,
       credentialGeneration: 2,
       actualEncryptedJournal: true,
-      journalEvents: pending.length,
+      journalEvents,
+      ...(drafts ? { readerProfilePreserved: true, readerOnlyScope: true, readerJournalEvents } : {}),
       deniedCrossAccount: true,
       denialPreserved: true,
     }),
@@ -226,7 +296,7 @@ if (mode === 'install') {
       await close(host);
     }
   }
-  for (const name of ['oauth-client.json', '.cos-mail-reader']) {
+  for (const name of ['oauth-client.json', drafts ? '.cos-mail-draft-writer' : '.cos-mail-reader']) {
     const host = await openMailCredentials(roots),
       named = profile + '/' + name,
       held = calendar + '/held-file';
@@ -270,6 +340,7 @@ if (mode === 'install') {
     }
   }
   assert.equal(cases, 7);
+  if (drafts) await assertReader(reader);
   writeAtomic(roots.targetRoot, 'mail-fixture-snapshot.json', {
     profile: snapshot(profile),
     journals: snapshot('/case/vault/journals/backup-queue'),
@@ -327,6 +398,7 @@ if (mode === 'install') {
     assert.equal(namespaceMounted(), true);
     assert.throws(namespaceAbsentKernel, /^Error: kernel_mount_unverified$/);
     await usable();
+    if (drafts) await assertReader(metadata.reader);
   } finally {
     await close(host);
   }
@@ -363,7 +435,7 @@ if (mode === 'install') {
     await assert.rejects(
       journal(
         {
-          sourceKind: 'mail_reader',
+          sourceKind: drafts ? 'mail_draft_writer' : 'mail_reader',
           sourceKey: digest('synthetic-lost-mount'),
           generation: 1,
           phase: 'ready',
@@ -376,10 +448,7 @@ if (mode === 'install') {
   } finally {
     bytes.fill(0);
   }
-  await assert.rejects(
-    initializeMailProfile(roots, client, authority(metadata.operationId)),
-    /mail_profile_initialization_unavailable/,
-  );
+  await assert.rejects(initializeMailProfile(roots, client, authority(metadata.operationId)), setupError);
   await close(host, true);
   console.log(
     JSON.stringify({
@@ -402,7 +471,7 @@ if (mode === 'install') {
   try {
     assert.deepEqual(await host.credentials.inspect(scope, metadata.binding, metadata.reference), {
       auth: 'ready',
-      scopes: [GOOGLE_MAIL_READ_SCOPE],
+      scopes: [permission],
       generation: 2,
     });
     assert.equal(await host.credentials.token(scope, metadata.binding, metadata.reference), 'SYNTHETIC_ROTATED_ACCESS');
@@ -412,6 +481,7 @@ if (mode === 'install') {
   }
   assert.equal(snapshot(profile), before.profile);
   assert.equal(snapshot('/case/vault/journals/backup-queue'), before.journals);
+  if (drafts) await assertReader(metadata.reader);
   console.log(
     JSON.stringify({
       mailVaultStage: 'recovered',
@@ -423,10 +493,7 @@ if (mode === 'install') {
 } else if (mode === 'unavailable') {
   stage('mail_unavailable');
   await assert.rejects(openMailCredentials(roots), /mail_configuration_unavailable/);
-  await assert.rejects(
-    initializeMailProfile(roots, client, authority(randomUUID())),
-    /mail_profile_initialization_unavailable/,
-  );
+  await assert.rejects(initializeMailProfile(roots, client, authority(randomUUID())), setupError);
   // Plaintext underlays are root-owned mode 000. The owner must be unable to
   // read or write them; the root orchestrator separately verifies both empty.
   for (const directory of ['/case/vault', roots.targetRoot + '/calendar']) {

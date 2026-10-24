@@ -20,7 +20,11 @@ import { createCoordinatorLauncher } from './bridge/coordinator-launcher.js';
 import { RestrictedExecutionProbe } from './bridge/native-execution.js';
 import { getInstallSlug } from '../../install-slug.js';
 import { sessionDir } from '../../session-manager.js';
-import { createActionAuthorityResolver, createMissionAuthorityResolver } from './missions/authority.js';
+import {
+  createActionAuthorityResolver,
+  createMissionAuthorityResolver,
+  createMailDraftAuthorityResolver,
+} from './missions/authority.js';
 import { createTeamAuthorityResolver } from './missions/team-authority.js';
 import { MissionHost } from './missions/host.js';
 import { createMissionExecution } from './missions/execution.js';
@@ -35,6 +39,7 @@ export function startCosHostModule(assertHostAuthority: () => void): { service: 
     'COS_KNOWLEDGE_ENABLED',
     'COS_CALENDAR_ENABLED',
     'COS_MAIL_ENABLED',
+    'COS_MAIL_DRAFTS_ENABLED',
     'COS_ACTIONS_ENABLED',
     'COS_KNOWLEDGE_RETENTION_DAYS',
     'COS_TARGET_STATE_DIR',
@@ -168,6 +173,7 @@ export function startCosHostModule(assertHostAuthority: () => void): { service: 
   const launcher = createCoordinatorLauncher({ targetRoot, db: getDb(), running });
   const missionAuthority = createMissionAuthorityResolver({ targetRoot, db: getDb(), admitted, assertHostAuthority });
   const actionAuthority = createActionAuthorityResolver({ targetRoot, db: getDb(), admitted, assertHostAuthority });
+  const draftAuthority = createMailDraftAuthorityResolver({ targetRoot, db: getDb(), admitted, assertHostAuthority });
   const teamAuthority = createTeamAuthorityResolver({ targetRoot, db: getDb(), missionAuthority });
   const mailAuthority = createMailAuthorities({ db: getDb(), admitted, assertHostAuthority });
   const facts = guardConversationAccess({
@@ -221,6 +227,7 @@ export function startCosHostModule(assertHostAuthority: () => void): { service: 
         undefined,
         actionAuthority,
         mailAuthority.poll,
+        draftAuthority,
       ),
   });
   // PostgreSQL availability never holds up unrelated channel startup.

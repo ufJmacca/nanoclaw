@@ -27,6 +27,7 @@ import {
 import { readPrivate } from '../../modules/chief-of-staff/ops/target-state.js';
 import type { MissionAuthority } from '../../modules/chief-of-staff/missions/proposal-store.js';
 import { createActionFixtureHost, type ActionFixtureConfiguration } from './action-fixture-host.js';
+import { createMailDraftFixtureHost, type MailDraftFixtureConfiguration } from './mail-draft-fixture-host.js';
 
 if (process.env.COS_FIXTURE_HOST_PROCESS !== 'S01' || !process.send) throw new Error('fixture_only');
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Fixture-only command payloads differ per scenario and never enter production routing.
@@ -38,6 +39,7 @@ async function start(input: {
   knowledgeRoot?: string;
   calendar?: boolean;
   mail?: boolean;
+  mailDrafts?: MailDraftFixtureConfiguration;
   strategy?: true;
   brief?: { clock: string; events: unknown[] };
   mandate?: { events: unknown[] };
@@ -80,7 +82,7 @@ async function start(input: {
     throw new Error('fixture_knowledge_root_required');
   const database = createNativeFixtureDatabase(new pg.Pool(relay.config), input);
   const databaseFailures: Array<{ code: string; frame: string; elapsed: number }> = [];
-  if (input.mission) {
+  if (input.mission || input.actions || input.mailDrafts) {
     const run = database.run.bind(database);
     database.run = ((operation, mutation, signal) => {
       const started = Date.now();
@@ -162,6 +164,7 @@ async function start(input: {
             return true;
           },
           mailEnabled: () => !!input.mail,
+          mailDraftNotice: (client, context, request) => store.mailDrafts.answerNotice(client, context, request),
           mailAccess: (scope, binding) => {
             if (!mailFences) return false;
             mailFences.assertOpen(scope, binding);
@@ -255,7 +258,12 @@ async function start(input: {
   const actions = input.actions
     ? createActionFixtureHost(input.knowledgeRoot!, db, database, input.binding, input.actions)
     : undefined;
-  const store = new PriorityStore(
+  if (input.mailDrafts && (!input.mail || !input.knowledgeRoot || !mailFences))
+    throw Error('fixture_drafts_require_mail_reader');
+  const mailDrafts = input.mailDrafts
+    ? createMailDraftFixtureHost(input.knowledgeRoot!, db, input.binding, input.mailDrafts, mailFences)
+    : undefined;
+  const store: PriorityStore = new PriorityStore(
     database,
     knowledge,
     connector,
@@ -265,6 +273,8 @@ async function start(input: {
     actions?.dependencies,
     mailView,
     mailHost,
+    mailDrafts?.dependencies,
+    mailDrafts,
   );
   if (input.brief) {
     store.briefs.options.clock = () => new Date(fixtureClock!);
@@ -480,7 +490,13 @@ async function start(input: {
           generation: string;
         }
       )?.generation;
+    if (actions && command === 'action-diagnostics')
+      return { database: databaseFailures, pool: database.inspectPool() };
     if (actions && command === 'action-fixture-state') return actions.state();
+    if (mailDrafts && command === 'mail-draft-diagnostics')
+      return { database: databaseFailures, pool: database.inspectPool() };
+    if (mailDrafts && command === 'mail-draft-fixture-state') return mailDrafts.state();
+    if (mailDrafts && command === 'mail-draft-fixture-mode') return mailDrafts.mode(value);
     if (actions && command === 'action-fixture-mode') return actions.mode(value);
     if (actions && command === 'action-fixture-subscription') {
       if (typeof value !== 'boolean') throw Error('invalid_fixture_subscription');
@@ -579,6 +595,7 @@ async function start(input: {
       await Promise.all(drains.values());
       await specialists?.close();
       runtime.dispose();
+      await mailDrafts?.close();
       await mailHost?.close();
       await store.database.pool.end();
       await relay.close();

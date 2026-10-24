@@ -1,3 +1,4 @@
+import { createFixtureDatabase, createFixturePool } from './fixture-database-readiness.js';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { before, after, test } from 'node:test';
@@ -64,7 +65,7 @@ before(async () => {
   await migrate(admin, fixtureRuntimeUser());
   base = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-mandate-'));
   for (const dir of ['artifacts', 'staging']) fs.mkdirSync(path.join(base, dir), { mode: 0o700 });
-  const database = BoundedDatabase.fromConfig(await fixtureDatabaseConfig());
+  const database = await createFixtureDatabase(await fixtureDatabaseConfig());
   knowledge = new KnowledgeStore(
     database,
     new KnowledgeArtifacts(path.join(base, 'artifacts'), path.join(base, 'staging')),
@@ -639,7 +640,7 @@ test('S08-PG01/PG02 a real remote partition cannot admit or renew work; an authe
     return boundary.restricted && !boundary.paused;
   };
   const relay = await connectionFault(await fixtureDatabaseConfig());
-  const database = new BoundedDatabase(new pg.Pool(relay.config), 350);
+  const database = new BoundedDatabase(await createFixturePool(relay.config), 350);
   const faulty = new PriorityStore(database, knowledge, undefined, undefined, () =>
     enabled && current() ? authority : null,
   );

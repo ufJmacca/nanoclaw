@@ -1,6 +1,7 @@
 /** Canonical CoS wire contract; copied verbatim into the runner and checked for drift. */
 import { createHash } from 'node:crypto';
 import { validStatusInput } from './operations-protocol.js';
+import { validMailDraftCreateInput, validMailDraftStatusInput } from './mail-draft-protocol.js';
 import { validScheduleChange, type ScheduleChange } from './schedule-protocol.js';
 import { validMissionRequest } from './mission-protocol.js';
 import { validMandateChange, type MandateChange } from './mandate-protocol.js';
@@ -161,7 +162,9 @@ export type CosMethod =
   | 'cos_answer_get'
   | 'cos_calendar_read'
   | 'cos_mail_search'
-  | 'cos_mail_thread_get';
+  | 'cos_mail_thread_get'
+  | 'cos_mail_draft_create'
+  | 'cos_mail_draft_status';
 export type CosRequest = {
   protocol: typeof COS_PROTOCOL;
   request_id: string;
@@ -284,6 +287,8 @@ export function validRequest(value: unknown): value is CosRequest {
   if (value.method === 'cos_calendar_read') return validCalendarReadInput(value.params);
   if (value.method === 'cos_mail_search') return validMailSearchInput(value.params);
   if (value.method === 'cos_mail_thread_get') return validMailThreadInput(value.params);
+  if (value.method === 'cos_mail_draft_create') return validMailDraftCreateInput(value.params);
+  if (value.method === 'cos_mail_draft_status') return validMailDraftStatusInput(value.params);
   if (value.method === 'cos_request_status')
     return (
       keys(value.params, ['request_id']) &&

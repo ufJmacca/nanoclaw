@@ -65,6 +65,10 @@ import { catalogueResumeGuard, resumeCatalogueScope } from './catalogue-resume.j
 import { isKnowledgeCommand, runKnowledgeAdmin, type KnowledgeAdminArguments } from './knowledge-admin.js';
 import { isCalendarCommand, runCalendarAdmin, type CalendarAdminArguments } from './calendar-admin.js';
 import { isMailAccountCommand, runMailAccountAdmin, type MailAccountArguments } from './mail-account-admin.js';
+import { isMailDraftAccountCommand, type MailDraftAccountArguments } from './mail-draft-account-arguments.js';
+import { runMailDraftAccountAdmin } from './mail-draft-account-admin.js';
+import { isMailDraftAdminCommand, type MailDraftAdminArguments } from './mail-draft-admin-arguments.js';
+import { runMailDraftAdmin } from './mail-draft-admin.js';
 import { isMissionCommand, runMissionAdmin, type MissionAdminArguments } from './mission-admin.js';
 import { isOwnerExportCommand, runOwnerExportAdmin, type OwnerExportArguments } from './owner-export-admin.js';
 import {
@@ -98,6 +102,8 @@ export type ContextAdminArguments =
   | CalendarAdminArguments
   | CalendarAccountArguments
   | MailAccountArguments
+  | MailDraftAccountArguments
+  | MailDraftAdminArguments
   | { command: 'context-status'; scopeId: string }
   | { command: 'operator-status'; scopeId: string; input: StatusInput }
   | { command: 'operator-control'; scopeId: string; requestId: string; text: string }
@@ -242,6 +248,10 @@ export async function contextAdminCommand(
       'backup-nas-recover-initialization',
       'mail-setup',
       'mail-link',
+      'mail-draft-setup',
+      'mail-draft-link',
+      'mail-draft-configure',
+      'mail-draft-disable',
     ].includes(args.command)
   )
     return { status: 'disabled', live_model: 'not_verified' };
@@ -381,7 +391,10 @@ export async function contextAdminCommand(
     }
   }
   const mailReleaseId =
-    isMailAccountCommand(args) && vaultRelease?.release.slice === 'G04' ? vaultRelease.release.releaseId : null;
+    (isMailAccountCommand(args) && ['G04', 'G05'].includes(vaultRelease?.release.slice ?? '')) ||
+    ((isMailDraftAccountCommand(args) || isMailDraftAdminCommand(args)) && vaultRelease?.release.slice === 'G05')
+      ? vaultRelease!.release.releaseId
+      : null;
   const unlock = acquireTargetLock(root);
   let db: Database.Database | undefined, hostLease: HostExecutionLease | undefined;
   let inbound: Database.Database | undefined, outbound: Database.Database | undefined;
@@ -400,10 +413,14 @@ export async function contextAdminCommand(
       const assertAuthority = () => {
         const currentTarget = assertMaintenanceLease(root, target.binding, maintenance);
         if (
-          isMailAccountCommand(args) &&
+          (isMailAccountCommand(args) || isMailDraftAccountCommand(args) || isMailDraftAdminCommand(args)) &&
           (!mailReleaseId || currentTarget.lifecycle !== 'protected' || currentTarget.releaseId !== mailReleaseId)
         )
-          throw Error('mail_account_operation_unavailable');
+          throw Error(
+            isMailDraftAccountCommand(args) || isMailDraftAdminCommand(args)
+              ? 'mail_draft_account_operation_unavailable'
+              : 'mail_account_operation_unavailable',
+          );
         assertHostExecutionLease(native, lease);
         if (!nativeBinding(binding)) throw new Error('context_binding_changed');
         const boundary = cosBoundary(getSession(binding.sessionId)!);
@@ -417,8 +434,42 @@ export async function contextAdminCommand(
         assertAuthority();
       };
       await check();
+      if (isMailDraftAdminCommand(args)) {
+        if (!vaultRelease || vaultRelease.release.slice !== 'G05') throw Error('mail_draft_configuration_unavailable');
+        return runMailDraftAdmin({
+          args,
+          env,
+          roots: {
+            targetRoot: root,
+            installationRoot: target.binding.installationRoot,
+            dataRoot: target.binding.dataRoot,
+          },
+          binding,
+          release: vaultRelease.release,
+          check,
+          assertAuthority,
+        });
+      }
+      if (isMailDraftAccountCommand(args)) {
+        if (!vaultRelease || vaultRelease.release.slice !== 'G05')
+          throw Error('mail_draft_account_operation_unavailable');
+        return runMailDraftAccountAdmin({
+          args,
+          env,
+          roots: {
+            targetRoot: root,
+            installationRoot: target.binding.installationRoot,
+            dataRoot: target.binding.dataRoot,
+          },
+          binding,
+          release: vaultRelease.release,
+          check,
+          assertAuthority,
+        });
+      }
       if (isMailAccountCommand(args)) {
-        if (!vaultRelease || vaultRelease.release.slice !== 'G04') throw Error('mail_account_operation_unavailable');
+        if (!vaultRelease || !['G04', 'G05'].includes(vaultRelease.release.slice))
+          throw Error('mail_account_operation_unavailable');
         return runMailAccountAdmin({
           args,
           env,

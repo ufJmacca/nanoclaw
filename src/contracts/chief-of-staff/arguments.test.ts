@@ -1,5 +1,22 @@
 import { describe, it, expect } from 'vitest';
 import { parseFixtureArguments, fixtureFiles } from './arguments.js';
+it('G05 inherits every protected Mail/Calendar/storage regression and adds the actual policy/draft native contracts using only test', () => {
+  const args = parseFixtureArguments(['--slice', 'G05', '--db-profile', 'test']);
+  expect(fixtureFiles(args)).toEqual([
+    ...fixtureFiles({ slice: 'G04', demo: false }),
+    'mail-draft-store.integration',
+    'mail-draft-checkpoint.integration',
+    'mail-draft-flow.integration',
+  ]);
+  const demo = parseFixtureArguments(['--slice', 'G05', '--db-profile', 'test', '--demo', '--fixture']);
+  expect(fixtureFiles(demo)).toEqual([...fixtureFiles({ slice: 'G04', demo: true }), 'mail-draft-flow.integration']);
+  expect(() => parseFixtureArguments(['--slice', 'G05', '--db-profile', 'runtime-disposable'])).toThrow(
+    'explicit_supported_slice_and_profile_required',
+  );
+  expect(() => parseFixtureArguments(['--slice', 'G06', '--db-profile', 'test'])).toThrow(
+    'explicit_supported_slice_and_profile_required',
+  );
+});
 it('G04 regresses the complete protected programme and real mail store/recovery/native conversation only against test', () => {
   const args = parseFixtureArguments(['--slice', 'G04', '--db-profile', 'test']);
   expect(fixtureFiles(args)).toEqual([
@@ -160,7 +177,7 @@ it('G01 regresses the completed programme using only the admitted separate test 
   expect(() => parseFixtureArguments(['--slice', 'G01', '--db-profile', 'runtime-disposable'])).toThrow(
     'explicit_supported_slice_and_profile_required',
   );
-  expect(() => parseFixtureArguments(['--slice', 'G05', '--db-profile', 'test'])).toThrow(
+  expect(() => parseFixtureArguments(['--slice', 'G06', '--db-profile', 'test'])).toThrow(
     'explicit_supported_slice_and_profile_required',
   );
 });

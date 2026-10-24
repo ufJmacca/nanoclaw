@@ -3,7 +3,89 @@ import { parseOwnerAdminArguments, selectedOwnerAdminProfile, ownerDatabasePrefl
 import { fixtureRelease } from '../../../contracts/chief-of-staff/release-fixture.js';
 import { DatabasePreflightError } from '../store/preflight.js';
 const request = ['owner-export', '--scope', 'fixture', '--request-id', '01234567-89ab-4def-8123-456789abcdef'];
-it.each(['mail-setup', 'mail-link'])(
+it('selects existing migration credentials only for trusted draft configuration and never falls back to runtime or test credentials', async () => {
+  const configure = [
+    'mail-draft-configure',
+    '--scope',
+    'fixture',
+    '--request-id',
+    '01234567-89ab-4def-8123-456789abcdef',
+    '--manifest',
+    '/private/grant.json',
+  ];
+  expect(parseOwnerAdminArguments(['--settings', '/private/settings.json', '--', ...configure])).toMatchObject({
+    admin: configure,
+  });
+  const migration = { COS_PG_MIGRATION_USER: 'selected-migrator' };
+  await expect(
+    selectedOwnerAdminProfile('mail-draft-configure', {
+      runtime() {
+        throw Error('runtime_fallback');
+      },
+      test() {
+        throw Error('test_fallback');
+      },
+      migration: () => migration,
+    }),
+  ).resolves.toBe(migration);
+  await expect(
+    selectedOwnerAdminProfile('mail-draft-configure', { runtime: () => ({}), test: () => ({}) }),
+  ).rejects.toThrow();
+  const disable = [
+    'mail-draft-disable',
+    '--scope',
+    'fixture',
+    '--request-id',
+    '01234567-89ab-4def-8123-456789abcdef',
+    '--binding',
+    '48f99256-b105-4ee3-848c-00140c98151d',
+  ];
+  expect(parseOwnerAdminArguments(['--settings', '/private/settings.json', '--', ...disable])).toMatchObject({
+    admin: disable,
+  });
+});
+it('admits combined draft recovery only with the separate test environment and fixed identities', async () => {
+  const admin = [
+    'mail-draft-restore-check',
+    '--scope',
+    'fixture',
+    '--request-id',
+    '01234567-89ab-4def-8123-456789abcdef',
+    '--backup-operation-id',
+    '48f99256-b105-4ee3-848c-00140c98151d',
+    '--backup-release',
+    'release-g05-fixture',
+    '--snapshot-digest',
+    'a'.repeat(64),
+    '--writer-binding',
+    '01234567-89ab-4def-8123-456789abcdea',
+    '--capture-operation-id',
+    '01234567-89ab-4def-8123-456789abcdeb',
+    '--credential-request-id',
+    '01234567-89ab-4def-8123-456789abcdec',
+  ];
+  expect(
+    parseOwnerAdminArguments([
+      '--settings',
+      '/private/settings.json',
+      '--database-environment',
+      '/private/test.env',
+      '--',
+      ...admin,
+    ]),
+  ).toMatchObject({ admin, databaseEnvironment: '/private/test.env' });
+  expect(() => parseOwnerAdminArguments(['--settings', '/private/settings.json', '--', ...admin])).toThrow();
+  const test = { COS_TEST_TARGET_ID: 'marked-test' };
+  await expect(
+    selectedOwnerAdminProfile(admin[0], {
+      runtime() {
+        throw Error('runtime_forbidden');
+      },
+      test: () => test,
+    }),
+  ).resolves.toBe(test);
+});
+it.each(['mail-setup', 'mail-link', 'mail-draft-setup', 'mail-draft-link'])(
   'admits %s only through the scoped retained helper, with selected runtime settings and no secret arguments',
   async (command) => {
     const admin = [
@@ -12,9 +94,18 @@ it.each(['mail-setup', 'mail-link'])(
       'fixture',
       '--request-id',
       '01234567-89ab-4def-8123-456789abcdef',
-      ...(command === 'mail-link'
-        ? ['--binding', '48f99256-b105-4ee3-848c-00140c98151d', '--manifest', '/private/selection.json']
-        : []),
+      ...(command === 'mail-draft-link'
+        ? [
+            '--reader-binding',
+            '48f99256-b105-4ee3-848c-00140c98151d',
+            '--writer-binding',
+            '01234567-89ab-4def-8123-456789abcdea',
+            '--manifest',
+            '/private/selection.json',
+          ]
+        : command === 'mail-link'
+          ? ['--binding', '48f99256-b105-4ee3-848c-00140c98151d', '--manifest', '/private/selection.json']
+          : []),
     ];
     expect(parseOwnerAdminArguments(['--settings', '/private/settings.json', '--', ...admin])).toMatchObject({ admin });
     expect(() =>

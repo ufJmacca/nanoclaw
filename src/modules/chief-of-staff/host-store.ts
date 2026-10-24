@@ -25,6 +25,9 @@ import { MailView } from './mail/view.js';
 import { MailHost, closeMailProfile } from './mail/host.js';
 import type { Context } from './domain/contracts.js';
 import type { MailMaintenanceResources } from './mail/maintenance.js';
+import { mailDraftSettings } from './mail-drafts/config.js';
+import { openMailDraftHost } from './mail-drafts/open-host.js';
+import type { MailDraftAuthorityResolver } from './mail-drafts/authority.js';
 async function optionalGoogleHost<T>(open: () => T | Promise<T>, unavailable: string): Promise<T | undefined> {
   try {
     return await open();
@@ -99,12 +102,15 @@ export async function connectCosHostStore(
   actionDependencies?: ActionDependencies,
   actionAuthority?: ActionAuthorityResolver,
   mailAuthority?: (context: Context & { provider: string }) => boolean,
+  draftAuthority?: MailDraftAuthorityResolver,
 ): Promise<PriorityStore> {
   const settings = knowledgeSettings(env);
   const calendarConfig = calendarSettings(env);
   const actionConfig = actionSettings(env);
   const mailConfig = mailSettings(env);
+  const draftConfig = mailDraftSettings(env);
   if (actionConfig.enabled && !actionAuthority && !actionDependencies) throw new Error('action_authority_required');
+  if (draftConfig.enabled && !draftAuthority) throw new Error('mail_draft_authority_required');
   await checkRuntimeDatabase(env, roots);
   const actions =
     actionDependencies ??
@@ -116,7 +122,9 @@ export async function connectCosHostStore(
     ? await optionalGoogleHost(() => openCalendarCredentials(roots), 'calendar_configuration_unavailable')
     : undefined;
   const database = BoundedDatabase.fromConfig(await externalDatabaseConfig(env, 'runtime'), admitted);
-  let mailResource: MailHostFences | undefined, mail: MailHost | undefined;
+  let mailResource: MailHostFences | undefined,
+    mail: MailHost | undefined,
+    draftHost: Awaited<ReturnType<typeof openMailDraftHost>>;
   try {
     const mailOwner = mailConfig.enabled
       ? await optionalGoogleHost(() => openMailCredentials(roots), 'mail_configuration_unavailable')
@@ -132,6 +140,12 @@ export async function connectCosHostStore(
         })
       : undefined;
     mail = new MailHost({ store: mailStore, connector: mailConnector, resource: mailResource });
+    draftHost = draftConfig.enabled
+      ? await optionalGoogleHost(
+          () => openMailDraftHost(env, roots, admitted, draftAuthority!, mailOwner),
+          'mail_draft_host_unavailable',
+        )
+      : undefined;
     const calendarStore = calendarOwner ? new CalendarStore(database, {}, new CalendarEvidence(artifacts)) : undefined;
     const calendar = calendarOwner
       ? new CalendarConnector({
@@ -151,13 +165,14 @@ export async function connectCosHostStore(
         return true;
       },
       mailEnabled: () => !!mail?.active() && admitted(),
+      mailDraftNotice: (client, context, request) => priorities.mailDrafts.answerNotice(client, context, request),
       mailAccess: (scopeId, bindingId) => {
         if (!mail?.active() || !admitted()) return false;
         mail.connector!.assertOpen(scopeId, bindingId);
         return true;
       },
     });
-    return new PriorityStore(
+    const priorities: PriorityStore = new PriorityStore(
       database,
       knowledge,
       calendar,
@@ -189,9 +204,13 @@ export async function connectCosHostStore(
           })
         : undefined,
       mail,
+      draftHost?.dependencies,
+      draftHost,
     );
+    return priorities;
   } catch (error) {
     try {
+      await draftHost?.close();
       if (mail) await mail.close();
       else if (mailResource) await closeMailProfile(mailResource);
     } finally {

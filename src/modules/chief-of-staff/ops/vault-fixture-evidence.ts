@@ -30,7 +30,9 @@ export function verifyVaultWireEvidence(
     | 'backup-kernel'
     | 'backup-capture-kernel'
     | 'mail-credentials-kernel'
-    | 'mail-recovery-kernel' = 'kernel',
+    | 'mail-recovery-kernel'
+    | 'draft-credentials-kernel'
+    | 'draft-recovery-kernel' = 'kernel',
 ): void {
   const deny = (): never => {
     throw Error('vault_wire_evidence_unavailable');
@@ -38,9 +40,15 @@ export function verifyVaultWireEvidence(
   if (
     !Array.isArray(records) ||
     records.length > 256 ||
-    !['kernel', 'backup-kernel', 'backup-capture-kernel', 'mail-credentials-kernel', 'mail-recovery-kernel'].includes(
-      expectedMode,
-    ) ||
+    ![
+      'kernel',
+      'backup-kernel',
+      'backup-capture-kernel',
+      'mail-credentials-kernel',
+      'mail-recovery-kernel',
+      'draft-credentials-kernel',
+      'draft-recovery-kernel',
+    ].includes(expectedMode) ||
     !/^[a-f0-9]{40}$/.test(sourceCommit) ||
     !/^sha256:[a-f0-9]{64}$/.test(fixtureImage)
   )

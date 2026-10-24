@@ -9,6 +9,45 @@ const call = (extra: Record<string, unknown> = {}) => ({
   method: 'item/tool/call',
   params: { threadId: 'thread', turnId: 'turn', callId: 'call', tool: 'cos_context_get', arguments: {}, ...extra },
 });
+test('G05 malformed request IDs return a safe correction in native dispatch without submitting work', async () => {
+  const f = fixture();
+  const create = {
+    writer_binding_id: '22222222-2222-4222-8222-222222222222',
+    source_message_id: 'ab01',
+    reply_text: 'A harmless fixture reply',
+  };
+  try {
+    for (const tool of ['cos_mail_draft_create', 'cos_answer_prepare']) {
+      const input =
+        tool === 'cos_mail_draft_create' ? create : { draft: { kind: 'answer', coverage: 'insufficient', claims: [] } };
+      for (const [index, request_id] of ['g05-fixture-request', '00000000-0000-0000-0000-000000000000'].entries()) {
+        const rejected = await f.dispatch.handle(
+          call({ callId: tool + index, tool, arguments: { ...input, request_id } }),
+        );
+        expect(rejected.success).toBe(false);
+        expect(rejected.contentItems[0].text).toContain('request_id');
+        expect(rejected.contentItems[0].text).toContain('No operation was submitted');
+        expect(rejected.contentItems[0].text).not.toContain(request_id);
+      }
+    }
+    expect(f.calls).toEqual([]);
+    expect(
+      (
+        await f.dispatch.handle(
+          call({
+            callId: 'corrected',
+            tool: 'cos_mail_draft_create',
+            arguments: { ...create, request_id: '11111111-1111-4111-8111-111111111111' },
+          }),
+        )
+      ).success,
+    ).toBe(true);
+    expect(f.calls).toHaveLength(1);
+  } finally {
+    f.dispatch.close();
+  }
+});
+
 test('S10 native strategic dispatch preserves review versions and cannot accept forged authority', async () => {
   const f = fixture(),
     request_id = '11111111-1111-4111-8111-111111111111',
@@ -223,6 +262,8 @@ test('native CoS exposes only its fixed approved tools and dispatches validated 
     'cos_calendar_read',
     'cos_mail_search',
     'cos_mail_thread_get',
+    'cos_mail_draft_create',
+    'cos_mail_draft_status',
     'cos_work_change_propose',
     'cos_brief_schedule_propose',
     'cos_work_read',

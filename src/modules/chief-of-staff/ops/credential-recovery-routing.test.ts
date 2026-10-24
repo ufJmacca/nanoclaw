@@ -166,12 +166,14 @@ it('allows only explicit derived denial metadata to have no physical recovery de
   };
   expect(() => makeRoutedCredentialRecoveryManifest(owner, [source])).not.toThrow();
 });
-it.each(['calendar_reader', 'calendar_owned_event_writer', 'mail_reader'] as const)(
+it.each(['calendar_reader', 'calendar_owned_event_writer', 'mail_reader', 'mail_draft_writer'] as const)(
   'maps complete %s configuration only to its fixed profile',
   (kind) => {
-    const mail = kind === 'mail_reader',
+    const mail = kind === 'mail_reader' || kind === 'mail_draft_writer',
       writer = kind === 'calendar_owned_event_writer';
-    const base = mail ? 'google/calendar/mail-reader' : 'google/calendar';
+    const base = mail
+      ? 'google/calendar/' + (kind === 'mail_draft_writer' ? 'mail-draft-writer' : 'mail-reader')
+      : 'google/calendar';
     const files = [
       {
         name: 'oauth-client.json',
@@ -184,13 +186,26 @@ it.each(['calendar_reader', 'calendar_owned_event_writer', 'mail_reader'] as con
           '/' +
           (writer ? 'writer-credentials' : 'credentials') +
           '/' +
-          credentialRootMarker(mail ? 'mail_reader' : writer ? 'owned_event_writer' : 'reader').name,
+          credentialRootMarker(
+            kind === 'mail_draft_writer'
+              ? 'mail_draft_writer'
+              : mail
+                ? 'mail_reader'
+                : writer
+                  ? 'owned_event_writer'
+                  : 'reader',
+          ).name,
       },
       {
         name: 'denial-profile.txt',
         destination: base + '/' + (writer ? 'writer-access-denials' : 'access-denials') + '/.cos-calendar-fences',
       },
-      { name: 'profile-proof.json', destination: mail ? base + '/.cos-mail-reader' : null },
+      {
+        name: 'profile-proof.json',
+        destination: mail
+          ? base + (kind === 'mail_draft_writer' ? '/.cos-mail-draft-writer' : '/.cos-mail-reader')
+          : null,
+      },
     ];
     const event = makeCredentialEvent(
       {

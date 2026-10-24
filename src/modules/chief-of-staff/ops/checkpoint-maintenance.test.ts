@@ -26,7 +26,7 @@ const binding = {
   installationRoot: '/home/pi/nano',
   dataRoot: '/home/pi/nano/data',
 };
-function fixture(slice: 'G02' | 'G03' | 'G04' = 'G02') {
+function fixture(slice: 'G02' | 'G03' | 'G04' | 'G05' = 'G02') {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-checkpoint-maintenance-'));
   roots.push(base);
   const root = path.join(base, 'target');
@@ -91,7 +91,7 @@ function fixture(slice: 'G02' | 'G03' | 'G04' = 'G02') {
   const invoke = () => checkpointMaintenance({ root, binding, requestId, effects });
   return { root, manifest, requestId, effects, native, readNative, events, snapshot, invoke };
 }
-it.each(['G02', 'G03', 'G04'] as const)(
+it.each(['G02', 'G03', 'G04', 'G05'] as const)(
   '%s captures under owned maintenance and restarts healthy admission without changing context, pause, counters or messages',
   async (slice) => {
     const f = fixture(slice),

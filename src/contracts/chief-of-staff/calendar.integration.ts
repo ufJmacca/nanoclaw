@@ -1,3 +1,4 @@
+import { createFixtureDatabase, createFixturePool } from './fixture-database-readiness.js';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { before, after, test } from 'node:test';
@@ -41,8 +42,8 @@ before(async () => {
   admin = await connectFixtureDatabase(process.env, 'migration');
   assert.equal((await admin.query('SELECT pg_try_advisory_lock(73101002) AS locked')).rows[0].locked, true);
   assert.equal(await migrate(admin, fixtureRuntimeUser()), SCHEMA_VERSION);
-  pool = new pg.Pool(await fixtureDatabaseConfig());
-  store = new CalendarStore(BoundedDatabase.fromConfig(await fixtureDatabaseConfig()));
+  pool = await createFixturePool(await fixtureDatabaseConfig());
+  store = new CalendarStore(await createFixtureDatabase(await fixtureDatabaseConfig()));
   await pool.query(
     "INSERT INTO cos.scopes(id,owner_id,instance_id,channel_id,agent_group_id,status) VALUES($1,'fixture-owner','fixture-instance',$1,$1,'active')",
     [scope],
@@ -209,7 +210,7 @@ test('S03-PG01/PG02: actual connection loss during publication rolls back retire
   s.fixture.replace('selected', [event('alpha', 'Recovered')]);
   const c = await capture(s);
   const relay = await connectionFault(await fixtureDatabaseConfig());
-  const database = new BoundedDatabase(new pg.Pool(relay.config), 350);
+  const database = new BoundedDatabase(await createFixturePool(relay.config), 350);
   let inject = true;
   const fault = new CalendarStore(database, {
     beforePublishCommit: async () => {
@@ -246,7 +247,7 @@ test('S04 refresh cancellation fences a real transaction before COMMIT and prese
     s.fixture.replace('selected', [event('alpha', 'Cancelled refresh fixture')]);
     const c = await capture(s),
       abort = new AbortController();
-    const database = BoundedDatabase.fromConfig(await fixtureDatabaseConfig());
+    const database = await createFixtureDatabase(await fixtureDatabaseConfig());
     const fault = new CalendarStore(
       database,
       phase === 'before'
@@ -280,7 +281,7 @@ test('S04 refresh cancellation fences a real transaction before COMMIT and prese
 test('S03-PG02: a lost acknowledgement reconciles a committed stable identity without duplicate revisions', async () => {
   const s = await setup();
   const c = await capture(s);
-  const database = BoundedDatabase.fromConfig(await fixtureDatabaseConfig());
+  const database = await createFixtureDatabase(await fixtureDatabaseConfig());
   const uncertain = new CalendarStore(database, {
     afterPublishCommit: async () => {
       throw new Error('fixture_lost_ack');
@@ -413,7 +414,7 @@ test('S03-T05/PG01: access denial survives reconstruction when the database part
   fs.chmodSync(root, 0o700);
   const fence = CalendarAccessFences.initialize(root);
   const relay = await connectionFault(await fixtureDatabaseConfig());
-  const database = new BoundedDatabase(new pg.Pool(relay.config), 350);
+  const database = new BoundedDatabase(await createFixturePool(relay.config), 350);
   const fault = new CalendarStore(database);
   try {
     const result = await refreshCalendar({

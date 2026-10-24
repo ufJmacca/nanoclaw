@@ -13,6 +13,7 @@ import type { VaultRootArtifactSeal } from './vault-root-artifact.js';
 import { RESTIC_ARTIFACT } from './restic-artifact.js';
 import { recoveryReleaseForManifest } from './recovery-manifest.js';
 import { MAIL_CHECKSUM } from '../store/mail-schema.js';
+import { MAIL_DRAFT_CHECKSUM } from '../store/mail-draft-schema.js';
 const sha = 'a'.repeat(40),
   tree = 'b'.repeat(40),
   image = 'sha256:' + 'c'.repeat(64),
@@ -74,6 +75,7 @@ function vaultManifest() {
   };
 }
 const mailChecks = ['mail_credentials', 'mail_capture', 'mail_evidence', 'mail_retention', 'mail_recovery'];
+const draftChecks = ['draft_credentials', 'draft_policy', 'draft_transport', 'draft_reconciliation', 'draft_recovery'];
 function mailManifest() {
   const value = backupManifest('G03');
   value.slice = 'G04';
@@ -89,6 +91,70 @@ function mailManifest() {
     };
   return value;
 }
+function draftManifest() {
+  const value = mailManifest();
+  value.slice = 'G05';
+  value.postgres = { minimum: 20, maximum: 20 };
+  value.migrations = MIGRATIONS.slice(0, 20).map(({ version, checksum }) => ({ version, checksum }));
+  value.previousReleaseIds = ['release-reviewed-g04'];
+  for (const name of draftChecks)
+    value.checks[name] = {
+      status: 'passed',
+      at: '2026-10-23T00:00:00Z',
+      sourceCommit: sha,
+      imageIds: name === 'draft_transport' ? [image, agent] : [image],
+    };
+  return value;
+}
+it('G05 requires exact schema20 and every inherited and draft image gate without widening G04 rollback compatibility', () => {
+  const value = draftManifest(),
+    accepted = validateReleaseManifest(value);
+  expect(requiredReleaseChecks(accepted.slice)).toEqual([...requiredReleaseChecks('G04'), ...draftChecks]);
+  expect(accepted.migrations[19]).toEqual({ version: 20, checksum: MAIL_DRAFT_CHECKSUM });
+  expect(supportsReleaseSchema(accepted, 20, 22)).toBe(true);
+  expect(supportsReleaseSchema(accepted, 19, 22)).toBe(false);
+  expect(supportsReleaseSchema(validateReleaseManifest(mailManifest()), 20, 22)).toBe(false);
+  expect(recoveryReleaseForManifest(accepted).software.schemaVersion).toBe(20);
+});
+it.each(draftChecks)('G05 rejects missing, failed, wrong-source or wrongly bound %s proof', (name) => {
+  const invalidImages =
+    name === 'draft_transport' ? [[], [image], [agent], [image, image]] : [[], [agent], [image, image], [image, agent]];
+  for (const patch of [
+    { status: 'failed' },
+    { sourceCommit: '0'.repeat(40) },
+    ...invalidImages.map((imageIds) => ({ imageIds })),
+  ]) {
+    const value = draftManifest();
+    Object.assign(value.checks[name], patch);
+    expect(() => validateReleaseManifest(value)).toThrow('release_not_transferable');
+  }
+  const value = draftManifest();
+  delete value.checks[name];
+  expect(() => validateReleaseManifest(value)).toThrow('release_not_transferable');
+});
+it.each([
+  'schema19',
+  'mixed-schema',
+  'missing-migration',
+  'wrong-checksum',
+  'missing-vault',
+  'missing-backup',
+  'missing-inherited-check',
+  'missing-mail-check',
+  'G06',
+] as const)('G05 refuses %s admission', (failure) => {
+  const value = draftManifest();
+  if (failure === 'schema19') value.postgres = { minimum: 19, maximum: 19 };
+  if (failure === 'mixed-schema') value.postgres.minimum = 19;
+  if (failure === 'missing-migration') value.migrations.pop();
+  if (failure === 'wrong-checksum' && value.migrations[19]) value.migrations[19].checksum = '0'.repeat(64);
+  if (failure === 'missing-vault') Object.assign(value, { vaultArtifact: undefined });
+  if (failure === 'missing-backup') Object.assign(value, { backupArtifact: undefined });
+  if (failure === 'missing-inherited-check') delete value.checks.backup_recovery;
+  if (failure === 'missing-mail-check') delete value.checks.mail_retention;
+  if (failure === 'G06') value.slice = 'G06';
+  expect(() => validateReleaseManifest(value)).toThrow('release_not_transferable');
+});
 it('G04 admits only exact schema19 with sealed mail migration and every inherited and mail image gate', () => {
   const value = mailManifest(),
     checked = validateReleaseManifest(value);

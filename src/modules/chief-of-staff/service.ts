@@ -140,6 +140,7 @@ export class CosService {
     if (!old) return;
     // Retain uncertainty until the old connections actually close. Never connect a replacement over it.
     this.retiringStore = old;
+    await old.mailDraftHost?.close();
     await old.mail?.close();
     await old.database.pool.end();
     if (this.store === old) this.store = undefined;
@@ -157,6 +158,7 @@ export class CosService {
           if (!boundary.restricted || !boundary.identity || digest(boundary.identity) !== digest(identity)) continue;
         }
         d.stop(identity.sessionId);
+        // eslint-disable-next-line no-catch-all/no-catch-all -- Retain each durable denial while attempting every independent local stop.
       } catch {
         // Retain each durable denial; one uncertain stop must not leave other specialists admitted.
       }
@@ -173,6 +175,7 @@ export class CosService {
           if (!boundary.restricted || !boundary.binding || digest(boundary.binding) !== digest(binding)) continue;
         }
         d.stop(binding.sessionId);
+        // eslint-disable-next-line no-catch-all/no-catch-all -- One uncertain local stop cannot leave the remaining owner bindings admitted.
       } catch {
         // One uncertain local stop must not prevent fencing the remaining CoS bindings.
       }
@@ -255,6 +258,7 @@ export class CosService {
           this.componentFailure = null;
           this.reportedFailure = undefined;
         }
+        // eslint-disable-next-line no-catch-all/no-catch-all -- Close admission and retain fenced owners for reconciliation; private failures never escape into unrelated channel startup.
       } catch (error) {
         // Close the actual grant before waiting for any potentially uncertain native cleanup.
         this.status = 'reconciling';
@@ -266,6 +270,7 @@ export class CosService {
         this.fenceExecutions();
         try {
           await this.closeSpecialists();
+          // eslint-disable-next-line no-catch-all/no-catch-all -- Keep the fenced lifecycle and pool until a later cleanup attempt confirms retirement.
         } catch {
           // Keep the fenced lifecycle and pool for a later cleanup retry.
         }

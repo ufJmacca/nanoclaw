@@ -1,13 +1,13 @@
 import { validateReleaseManifest, type ReleaseManifest } from './release-manifest.js';
 import path from 'node:path';
 import { readPrivate, writeAtomic } from './target-state.js';
-import { readExtensionRelease, checkpointExtensionRelease } from './extension-release.js';
+import { readExtensionRelease, checkpointExtensionRelease, type ExtensionReleaseState } from './extension-release.js';
 export function readReleaseExecution(
   root: string,
-  slice: ReleaseManifest['slice'],
+  slice: ReleaseManifest['slice'] | ExtensionReleaseState['active_slice'],
   forRelease = false,
 ): { active_slice: string } {
-  if (slice === 'G01' || slice === 'G02' || slice === 'G03' || slice === 'G04') {
+  if (slice === 'G01' || slice === 'G02' || slice === 'G03' || slice === 'G04' || slice === 'G05') {
     const ledger = readExtensionRelease(root, forRelease);
     if (ledger.active_slice !== slice) throw Error('active_slice_required');
     return ledger;
@@ -18,11 +18,12 @@ export function readReleaseExecution(
 }
 export function checkpointReleaseExecution(
   root: string,
-  slice: ReleaseManifest['slice'],
+  slice: ReleaseManifest['slice'] | ExtensionReleaseState['active_slice'],
   patch: Record<string, unknown>,
 ): void {
   readReleaseExecution(root, slice);
-  if (slice === 'G01' || slice === 'G02' || slice === 'G03' || slice === 'G04') checkpointExtensionRelease(root, patch);
+  if (slice === 'G01' || slice === 'G02' || slice === 'G03' || slice === 'G04' || slice === 'G05')
+    checkpointExtensionRelease(root, patch);
   else checkpointLocalExecution(root, patch);
 }
 

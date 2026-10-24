@@ -7,6 +7,7 @@ import { stopFixtureWorkers } from './fixture-workers.js';
 import { parseFixtureArguments, fixtureFiles } from './arguments.js';
 import { assertRuntimeFixtureGuard, selectedFixtureEnvironment } from './fixture-database.js';
 import { selectedBackupFixtureEnvironment } from './backup-fixture-environment.js';
+import { fixtureSuiteDeadline } from './fixture-deadline.js';
 
 try {
   const args = parseFixtureArguments(process.argv.slice(2)),
@@ -51,15 +52,7 @@ try {
       env: { ...safeHostEnvironment('docker'), ...selected, ...fixtures, ...backup },
       stdio: 'inherit',
       // Complete native scenarios and actual database-time expiry use a bounded suite deadline.
-      timeout: ['G02', 'G03', 'G04'].includes(args.slice)
-        ? 1200000
-        : ['S10', 'S11', 'G01'].includes(args.slice) && !args.demo
-          ? 900000
-          : ['S06', 'S07', 'S08', 'S09', 'S10', 'S11', 'G01'].includes(args.slice)
-            ? 600000
-            : args.slice === 'S05'
-              ? 300000
-              : 120000,
+      timeout: fixtureSuiteDeadline(args),
     },
   );
   if (result.error)
@@ -72,7 +65,7 @@ try {
             : 'fixture_suite_process_failed',
       }),
     );
-  if (['S05', 'S06', 'S07', 'S08', 'S09', 'S10', 'S11', 'G01', 'G02', 'G03', 'G04'].includes(args.slice))
+  if (['S05', 'S06', 'S07', 'S08', 'S09', 'S10', 'S11', 'G01', 'G02', 'G03', 'G04', 'G05'].includes(args.slice))
     await stopFixtureWorkers(fixtures.COS_FIXTURE_HOST_ROOT, fixtures.COS_FIXTURE_IMAGE);
   process.exitCode = result.status ?? 1;
   // eslint-disable-next-line no-catch-all/no-catch-all -- The fixture CLI reports its bounded configuration failure and exits without admission.

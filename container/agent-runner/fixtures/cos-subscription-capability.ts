@@ -988,6 +988,8 @@ try {
               'cos_change_propose',
               'cos_context_get',
               'cos_knowledge_search',
+              'cos_mail_draft_create',
+              'cos_mail_draft_status',
               'cos_mail_search',
               'cos_mail_thread_get',
               'cos_mandate_activity',
@@ -1033,7 +1035,13 @@ try {
         .sort();
     assert.deepEqual(declared(requests[5]), ['clock__curr_time', ...s01Tools, ...mcpResourceTools].sort());
     const expected = ['clock__curr_time', ...cosDynamicTools.map((tool) => tool.name), ...mcpResourceTools].sort();
-    for (const name of ['cos_status', 'cos_mail_search', 'cos_mail_thread_get'])
+    for (const name of [
+      'cos_status',
+      'cos_mail_search',
+      'cos_mail_thread_get',
+      'cos_mail_draft_create',
+      'cos_mail_draft_status',
+    ])
       assert.ok(expected.includes(name), 'the refreshed catalogue includes ' + name);
     assert.deepEqual(declared(requests[6]), expected);
     assert.deepEqual(declared(requests.at(-1)), expected);

@@ -5,7 +5,8 @@ import type { StorageInspection } from '../calendar/storage-protection.js';
 import { checkedClient } from '../calendar/oauth-core.js';
 import { credentialRootMarker, credentialProfileMetadata } from '../calendar/credential-core.js';
 import { accessFenceRootMarker } from '../calendar/access-fences.js';
-import { withMailReaderStorage, MAIL_READER_ROOT_MARKER } from '../mail/storage.js';
+import { withMailProfileStorage } from '../mail/storage.js';
+import { mailProfile, type MailCredentialProfile } from '../mail/profile.js';
 import { digest } from '../domain/contracts.js';
 import { verifyVaultStorage, withVaultDirectory } from './vault-storage.js';
 import { verifyVaultMemory } from './vault-memory.js';
@@ -81,8 +82,8 @@ export async function withVaultCredentialSnapshot<T>(
           roots,
           'backup-credentials',
           async (backup, backupCurrent) => {
-            let mailCurrent = () => {},
-              total = 0;
+            let total = 0;
+            const mailCurrent: Array<() => void> = [];
             const directories: Array<{ fd: number; file: string; dev: number; ino: number }> = [],
               files: Array<{ fd: number; file: string; identity: string; immutable: boolean }> = [],
               inventories: Array<{ directory: string; names: string[] }> = [],
@@ -95,7 +96,7 @@ export async function withVaultCredentialSnapshot<T>(
                 memory();
                 googleCurrent();
                 backupCurrent();
-                mailCurrent();
+                for (const check of mailCurrent) check();
                 for (const directory of directories) {
                   for (const stat of [fs.fstatSync(directory.fd), fs.lstatSync(directory.file)])
                     if (
@@ -201,22 +202,26 @@ export async function withVaultCredentialSnapshot<T>(
               'writer-credentials',
               'writer-access-denials',
               'mail-reader',
+              'mail-draft-writer',
             ];
             if (googleNames.some((name) => !allowed.includes(name))) throw Error('unknown_google_state');
-            const profiles = (['reader', 'owned_event_writer', 'mail_reader'] as const).filter((profile) => {
-              const required =
-                profile === 'reader'
-                  ? ['oauth-client.json', 'credentials', 'access-denials']
-                  : profile === 'owned_event_writer'
-                    ? ['writer-oauth-client.json', 'writer-credentials', 'writer-access-denials']
-                    : ['mail-reader'];
-              const count = required.filter((name) => googleNames.includes(name)).length;
-              if (count && count !== required.length) throw Error('partial_google_profile');
-              return count > 0;
-            });
+            const profiles = (['reader', 'owned_event_writer', 'mail_reader', 'mail_draft_writer'] as const).filter(
+              (profile) => {
+                const required =
+                  profile === 'reader'
+                    ? ['oauth-client.json', 'credentials', 'access-denials']
+                    : profile === 'owned_event_writer'
+                      ? ['writer-oauth-client.json', 'writer-credentials', 'writer-access-denials']
+                      : [mailProfile(profile).directory];
+                const count = required.filter((name) => googleNames.includes(name)).length;
+                if (count && count !== required.length) throw Error('partial_google_profile');
+                return count > 0;
+              },
+            );
             let openChecks = 0;
             const clientIds = new Set<string>();
-            const collect = async (index: number, mailDirectory?: string): Promise<T> => {
+            const mailDirectories = new Map<MailCredentialProfile, string>();
+            const collect = async (index: number): Promise<T> => {
               if (index === profiles.length) {
                 const names = inventory(backup),
                   allowed = [
@@ -299,10 +304,13 @@ export async function withVaultCredentialSnapshot<T>(
                 return result;
               }
               const profile = profiles[index],
-                mail = profile === 'mail_reader',
+                selectedMail =
+                  profile === 'mail_reader' || profile === 'mail_draft_writer' ? mailProfile(profile) : null,
+                mail = selectedMail !== null,
                 writer = profile === 'owned_event_writer';
-              const root = mail ? mailDirectory! : google,
-                base = mail ? 'google/calendar/mail-reader' : 'google/calendar',
+              const root =
+                  profile === 'mail_reader' || profile === 'mail_draft_writer' ? mailDirectories.get(profile)! : google,
+                base = selectedMail ? 'google/calendar/' + selectedMail.directory : 'google/calendar',
                 credentialName = writer ? 'writer-credentials' : 'credentials',
                 denialName = writer ? 'writer-access-denials' : 'access-denials',
                 clientName = writer ? 'writer-oauth-client.json' : 'oauth-client.json',
@@ -322,7 +330,7 @@ export async function withVaultCredentialSnapshot<T>(
               )
                 throw Error('foreign_profile_marker');
               const proof = mail
-                ? read(root, MAIL_READER_ROOT_MARKER, 4096, true)
+                ? read(root, selectedMail!.marker, 4096, true)
                 : derived({
                     contract: 'cos-google-recovery-configuration/v1',
                     targetDigest: policy.targetDigest,
@@ -331,7 +339,10 @@ export async function withVaultCredentialSnapshot<T>(
                   });
               const configurationSource = mail
                 ? digest({
-                    contract: 'cos-mail-recovery-configuration/v1',
+                    contract:
+                      profile === 'mail_draft_writer'
+                        ? 'cos-mail-draft-recovery-configuration/v1'
+                        : 'cos-mail-recovery-configuration/v1',
                     targetDigest: policy.targetDigest,
                     profileProofSha256: hash(proof),
                   })
@@ -345,7 +356,7 @@ export async function withVaultCredentialSnapshot<T>(
               add({ sourceKind, sourceKey: configurationSource, generation: 1, phase: 'ready' }, [
                 {
                   name: 'profile-proof.json',
-                  destination: mail ? base + '/' + MAIL_READER_ROOT_MARKER : null,
+                  destination: mail ? base + '/' + selectedMail!.marker : null,
                   bytes: proof,
                 },
                 { name: 'oauth-client.json', destination: base + '/' + clientName, bytes: clientBytes },
@@ -388,7 +399,12 @@ export async function withVaultCredentialSnapshot<T>(
                 )
                   throw Error('invalid_denial');
                 const identity = derived({
-                  contract: mail ? 'cos-mail-denial-recovery/v1' : 'cos-google-denial-recovery/v1',
+                  contract:
+                    profile === 'mail_draft_writer'
+                      ? 'cos-mail-draft-denial-recovery/v1'
+                      : mail
+                        ? 'cos-mail-denial-recovery/v1'
+                        : 'cos-google-denial-recovery/v1',
                   configurationSource,
                   filename: name,
                   sha256: hash(bytes),
@@ -397,7 +413,12 @@ export async function withVaultCredentialSnapshot<T>(
                   {
                     sourceKind,
                     sourceKey: digest({
-                      contract: mail ? 'cos-mail-recovery-denial/v1' : 'cos-google-recovery-denial/v1',
+                      contract:
+                        profile === 'mail_draft_writer'
+                          ? 'cos-mail-draft-recovery-denial/v1'
+                          : mail
+                            ? 'cos-mail-recovery-denial/v1'
+                            : 'cos-google-recovery-denial/v1',
                       configurationSource,
                       filename: name,
                     }),
@@ -432,21 +453,30 @@ export async function withVaultCredentialSnapshot<T>(
                     });
                   }
                   if (total > BACKUP_LIMITS.credentials || sources.length > 1024) throw Error('snapshot_bounds');
-                  return collect(index + 1, mailDirectory);
+                  return collect(index + 1);
                 },
               );
             };
-            if (profiles.includes('mail_reader'))
-              return withMailReaderStorage(
+            const configuredMail = profiles.filter(
+              (profile): profile is MailCredentialProfile =>
+                profile === 'mail_reader' || profile === 'mail_draft_writer',
+            );
+            const holdMailProfiles = (index: number): Promise<T> => {
+              if (index === configuredMail.length) return collect(0);
+              const profile = configuredMail[index];
+              return withMailProfileStorage(
+                profile,
                 roots,
                 async (storage) => {
-                  mailCurrent = storage.assertCurrent;
-                  return collect(0, storage.directory);
+                  mailCurrent.push(storage.assertCurrent);
+                  mailDirectories.set(profile, storage.directory);
+                  return holdMailProfiles(index + 1);
                 },
                 inspect,
                 memory,
               );
-            return collect(0);
+            };
+            return holdMailProfiles(0);
           },
           inspect,
           memory,

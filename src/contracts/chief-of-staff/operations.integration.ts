@@ -1,3 +1,4 @@
+import { createFixtureDatabase, createFixturePool } from './fixture-database-readiness.js';
 /** Synthetic scopes in the explicitly admitted external test target; no live transports. */
 import assert from 'node:assert/strict';
 import { after, before, test } from 'node:test';
@@ -46,7 +47,7 @@ before(async () => {
   await migrate(admin, fixtureRuntimeUser());
   artifactRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-s11-operations-'));
   for (const name of ['artifacts', 'staging']) fs.mkdirSync(path.join(artifactRoot, name), { mode: 0o700 });
-  const database = BoundedDatabase.fromConfig(await fixtureDatabaseConfig(process.env));
+  const database = await createFixtureDatabase(await fixtureDatabaseConfig(process.env));
   knowledge = new KnowledgeStore(
     database,
     new KnowledgeArtifacts(path.join(artifactRoot, 'artifacts'), path.join(artifactRoot, 'staging')),
@@ -239,7 +240,7 @@ test('S11-T01 queued/running/review/blocked/partial/cancelled remain distinct an
 });
 test('S11-T08 a controlled test-route partition withholds status rather than reporting an empty healthy scope', async () => {
   const relay = await connectionFault(await fixtureDatabaseConfig(process.env)),
-    pool = new pg.Pool(relay.config);
+    pool = await createFixturePool(relay.config);
   const interrupted = new PriorityStore(new BoundedDatabase(pool, 500));
   try {
     assert.equal((await interrupted.operatorStatus(context, {})).status, 'ok');
@@ -278,7 +279,7 @@ test('S11-T06 status denies foreign owners/groups, automatic tasks and extra aut
 });
 test('S11-T02/UI01 a durable scoped cancellation survives a test-route outage and reconciles exactly once', async () => {
   const relay = await connectionFault(await fixtureDatabaseConfig(process.env)),
-    pool = new pg.Pool(relay.config),
+    pool = await createFixturePool(relay.config),
     interrupted = new PriorityStore(new BoundedDatabase(pool, 500));
   const db = new Database(':memory:'),
     binding: CosBinding = {
@@ -773,7 +774,7 @@ test('S11-T06 a late authority callback cannot publish after the bounded databas
 test('S11-T06 denied retention releases its transaction and leaves the bounded pool reusable', async () => {
   const root = path.join(artifactRoot, 'denied-retention');
   fs.mkdirSync(root, { mode: 0o700 });
-  const pool = new pg.Pool({ ...(await fixtureDatabaseConfig(process.env)), max: 1 }),
+  const pool = await createFixturePool({ ...(await fixtureDatabaseConfig(process.env)), max: 1 }),
     database = new BoundedDatabase(pool);
   try {
     const result = await purgeOwnerExports({

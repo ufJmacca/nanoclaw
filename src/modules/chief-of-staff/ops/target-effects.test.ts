@@ -617,7 +617,7 @@ it('prepares a stopped-service recovery baseline without adopting a failed candi
   }
 });
 
-async function vaultDeploymentFixture(maintain = true, slice: 'G02' | 'G03' | 'G04' = 'G02') {
+async function vaultDeploymentFixture(maintain = true, slice: 'G02' | 'G03' | 'G04' | 'G05' = 'G02') {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-g02-deployment-'));
   fs.chmodSync(root, 0o700);
   const settings: DeploymentSettings = {
@@ -642,8 +642,9 @@ async function vaultDeploymentFixture(maintain = true, slice: 'G02' | 'G03' | 'G
     initial = initializeTarget(settings.stateRoot, binding),
     manifest = fixtureVaultRelease(slice),
     previous = {
-      ...fixtureVaultRelease(slice === 'G04' ? 'G03' : 'G01'),
-      releaseId: slice === 'G04' ? 'release-reviewed-g03' : 'release-reviewed-g01',
+      ...fixtureVaultRelease(slice === 'G05' ? 'G04' : slice === 'G04' ? 'G03' : 'G01'),
+      releaseId:
+        slice === 'G05' ? 'release-reviewed-g04' : slice === 'G04' ? 'release-reviewed-g03' : 'release-reviewed-g01',
     },
     recovery = recoveryReleaseForManifest(previous),
     receipt = settings.stateRoot + '/releases/' + manifest.releaseId;
@@ -769,12 +770,36 @@ it('the current helper verifies a historical G02 vault checkpoint but refuses it
     s.close();
   }
 });
-it('G04 captures its installed G03 predecessor in the encrypted slot and rechecks that exact snapshot before additive schema-19 migration', async () => {
+it('the schema20 helper preserves a G04 predecessor checkpoint but rejects an obsolete schema19 migration manifest', async () => {
   const s = await vaultDeploymentFixture(true, 'G04');
   try {
     await s.effects.backup();
     expect(s.capture).toHaveBeenCalledWith(s.settings, s.manifest.releaseId, undefined, s.recovery);
     expect(s.recovery.software.schemaVersion).toBe(18);
+    expect(readPrivate(s.receipt + '/vault-state.json')).toEqual(s.snapshot);
+    await expect(s.effects.migrate()).rejects.toThrow('migration_manifest_mismatch');
+    expect(s.verify).toHaveBeenCalledWith(
+      s.settings,
+      s.manifest.releaseId,
+      undefined,
+      s.recovery,
+      s.snapshot.snapshotDigest,
+    );
+    expect(s.migrate).not.toHaveBeenCalled();
+    expect(s.legacy).not.toHaveBeenCalled();
+    expect(s.nativeBackup).not.toHaveBeenCalled();
+    expect(s.calendarBackup).not.toHaveBeenCalled();
+    expect(fs.existsSync(s.receipt + '/native-state.json')).toBe(false);
+  } finally {
+    s.close();
+  }
+});
+it('G05 captures its installed G04 schema19 predecessor and rechecks that exact encrypted checkpoint before schema20 migration', async () => {
+  const s = await vaultDeploymentFixture(true, 'G05');
+  try {
+    await s.effects.backup();
+    expect(s.capture).toHaveBeenCalledWith(s.settings, s.manifest.releaseId, undefined, s.recovery);
+    expect(s.recovery.software.schemaVersion).toBe(19);
     expect(readPrivate(s.receipt + '/vault-state.json')).toEqual(s.snapshot);
     await s.effects.migrate();
     expect(s.verify).toHaveBeenCalledWith(

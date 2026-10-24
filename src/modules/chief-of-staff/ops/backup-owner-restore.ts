@@ -17,6 +17,7 @@ import { withSeparateBackupTestDatabase } from './backup-test-database.js';
 import { restoreTargetVaultBackupTestScope } from './backup-target-restore.js';
 import { restoreVaultCredentialCapture } from './backup-upload.js';
 import { routedCredentialRecoveryFiles } from './credential-recovery-routing.js';
+import { restoreOwnerMailDraftBaseline } from './mail-draft-recovery-admin.js';
 import {
   parseBackupOwnerRestoreArguments,
   type BackupOwnerRestoreArguments,
@@ -38,11 +39,14 @@ export async function restoreOwnerVaultBackup(input: {
       settings = deploymentSettings(readPrivate(settingsFile)),
       settingsDigest = digest(settings),
       argsDigest = digest(args),
-      stateArgs = args.command === 'backup-restore-check' ? args : null;
+      draftArgs = args.command === 'mail-draft-restore-check' ? args : null,
+      stateArgs = args.command !== 'backup-credentials-restore-check' ? args : null;
     if (
       Object.keys(args).sort().join(',') !==
         (stateArgs
-          ? 'backupReleaseId,command,queueOperationId,requestId,scopeId,snapshotDigest'
+          ? draftArgs
+            ? 'backupReleaseId,captureOperationId,command,credentialRequestId,queueOperationId,requestId,scopeId,snapshotDigest,writerBindingId'
+            : 'backupReleaseId,command,queueOperationId,requestId,scopeId,snapshotDigest'
           : 'captureOperationId,command,requestId,scopeId') ||
       (!stateArgs && testEnvironmentFile !== undefined) ||
       (stateArgs && typeof testEnvironmentFile !== 'string') ||
@@ -61,6 +65,16 @@ export async function restoreOwnerVaultBackup(input: {
                 stateArgs.backupReleaseId,
                 '--snapshot-digest',
                 stateArgs.snapshotDigest,
+                ...(draftArgs
+                  ? [
+                      '--writer-binding',
+                      draftArgs.writerBindingId,
+                      '--capture-operation-id',
+                      draftArgs.captureOperationId,
+                      '--credential-request-id',
+                      draftArgs.credentialRequestId,
+                    ]
+                  : []),
               ]
             : [
                 '--capture-operation-id',
@@ -84,12 +98,12 @@ export async function restoreOwnerVaultBackup(input: {
         recoveryDigest = digest(recovery),
         deadline = performance.now() + 45 * 60 * 1000;
       if (
-        !(stateArgs ? ['G02', 'G03', 'G04'] : ['G04']).includes(manifest.slice) ||
+        !(draftArgs ? ['G05'] : stateArgs ? ['G02', 'G03', 'G04'] : ['G04']).includes(manifest.slice) ||
         state.lifecycle !== 'protected' ||
         state.releaseId !== manifest.releaseId ||
         generation === null ||
         (stateArgs &&
-          !['G02', 'G03', 'G04'].includes(
+          !(draftArgs ? ['G05'] : ['G02', 'G03', 'G04']).includes(
             validateReleaseManifest(
               readPrivate(path.join(settings.releaseRoot, stateArgs.backupReleaseId, 'release.json')),
             ).slice,
@@ -216,6 +230,21 @@ export async function restoreOwnerVaultBackup(input: {
             await check();
             await effects.mount(current);
             await check();
+            if (draftArgs)
+              return restoreOwnerMailDraftBaseline({
+                target: {
+                  settings,
+                  binding: owner,
+                  witness,
+                  queueOperationId: draftArgs.queueOperationId,
+                  recovery,
+                  expectedSnapshotDigest: draftArgs.snapshotDigest,
+                  current,
+                },
+                args: draftArgs,
+                sandbox,
+                checkDatabase: check,
+              });
             const result = await restoreTargetVaultBackupTestScope(
               {
                 settings,
