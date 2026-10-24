@@ -5,6 +5,7 @@ import type { KnowledgeContext } from './store.js';
 import { isArtifactIdentity, type ArtifactLease, type KnowledgeArtifacts } from './artifacts.js';
 import type { CalendarAnswerNotice, CalendarContextCheck } from '../calendar/answer-notice.js';
 import type { MailAnswerNotice, MailContextCheck } from '../mail/answer-notice.js';
+import type { MailDraftAnswerNotice } from '../mail-drafts/answer-notice.js';
 import {
   citationKey,
   renderAnswer,
@@ -35,6 +36,8 @@ type Metadata = {
     calendar_window_notice_digest?: string;
     mail_notice_digest?: string;
     mail_notice?: MailAnswerNotice;
+    mail_draft_request?: NonNullable<AnswerDraft['mail_draft']>;
+    mail_draft_notice_digest?: string;
   };
 };
 const references = (draft: AnswerDraft) => [
@@ -63,12 +66,17 @@ function checkedText(
   calendar: CalendarAnswerNotice | null,
   emptyCalendar: CalendarAnswerNotice | null,
   mail: MailAnswerNotice | null = null,
+  mailDraft: MailDraftAnswerNotice | null = null,
 ): string {
   if (draft.calendar_window) {
     if (!emptyCalendar) throw Error('calendar_window_notice_required');
     return emptyCalendar.text + (mail ? '\n\n' + mail.text : '');
   }
-  return renderAnswer(draft, resolved) + (calendar ? '\n\n' + calendar.text : '') + (mail ? '\n\n' + mail.text : '');
+  return (
+    renderAnswer(draft, resolved, mailDraft) +
+    (calendar ? '\n\n' + calendar.text : '') +
+    (mail ? '\n\n' + mail.text : '')
+  );
 }
 
 /** Candidate answers are local artifacts with checked references, never approved strategic records. */
@@ -85,6 +93,11 @@ export class KnowledgeAnswers {
       calendarContext(client: PoolClient, context: KnowledgeContext, register?: boolean): Promise<CalendarContextCheck>;
       mailNotice?(client: PoolClient, context: KnowledgeContext): Promise<MailAnswerNotice>;
       mailContext?(client: PoolClient, context: KnowledgeContext, register?: boolean): Promise<MailContextCheck>;
+      mailDraftNotice?(
+        client: PoolClient,
+        context: KnowledgeContext,
+        request: NonNullable<AnswerDraft['mail_draft']>,
+      ): Promise<MailDraftAnswerNotice | null>;
       calendarEmptyWindow?(
         client: PoolClient,
         context: KnowledgeContext,
@@ -229,9 +242,18 @@ export class KnowledgeAnswers {
                 [context.scopeId, context.sessionId, context.generation, context.provider],
               )
             ).rowCount;
-          const mail = await d.mailContext?.(client, context, Boolean(exposedMail));
+          const mail = await d.mailContext?.(client, context, Boolean(exposedMail || draft.mail_draft));
+          const mailDraft = draft.mail_draft ? await d.mailDraftNotice?.(client, context, draft.mail_draft) : null;
+          if (draft.mail_draft && (!mailDraft || mail?.status !== 'ok' || !mail.notice)) return { status: 'denied' };
           return dependency.status === 'ok' && mail?.status !== 'denied'
-            ? { status: 'ok', resolved, calendar: dependency.notice, emptyCalendar, mail: mail?.notice ?? null }
+            ? {
+                status: 'ok',
+                resolved,
+                calendar: dependency.notice,
+                emptyCalendar,
+                mail: mail?.notice ?? null,
+                mailDraft,
+              }
             : { status: 'denied' };
         },
         Boolean(draft.calendar) || Boolean(d.mailContext),
@@ -240,11 +262,12 @@ export class KnowledgeAnswers {
       const resolved = before.resolved as ResolvedCitation[],
         calendar = before.calendar as CalendarAnswerNotice | null,
         emptyCalendar = before.emptyCalendar as CalendarAnswerNotice | null,
-        mail = before.mail as MailAnswerNotice | null;
+        mail = before.mail as MailAnswerNotice | null,
+        mailDraft = before.mailDraft as MailDraftAnswerNotice | null;
       let text: string;
       try {
         this.verifyBytes(resolved);
-        text = checkedText(draft, resolved, calendar, emptyCalendar, mail);
+        text = checkedText(draft, resolved, calendar, emptyCalendar, mail, mailDraft);
         // eslint-disable-next-line no-catch-all/no-catch-all -- Invalid citations or inaccessible private files deny preparation without disclosing paths or bytes.
       } catch {
         return { status: 'denied' };
@@ -256,6 +279,7 @@ export class KnowledgeAnswers {
         ...(calendar ? { calendar } : {}),
         ...(emptyCalendar ? { calendar_window_notice: emptyCalendar } : {}),
         ...(mail ? { mail_notice: mail } : {}),
+        ...(mailDraft ? { mail_draft_notice: mailDraft } : {}),
       });
       const namespace = digest({
         scope: context.scopeId,
@@ -274,6 +298,8 @@ export class KnowledgeAnswers {
         if (calendar && digest(await d.calendarNotice(client, context)) !== digest(calendar))
           return { status: 'denied' };
         if (mail && digest(await d.mailNotice?.(client, context)) !== digest(mail)) return { status: 'denied' };
+        if (mailDraft && digest(await d.mailDraftNotice?.(client, context, draft.mail_draft!)) !== digest(mailDraft))
+          return { status: 'denied' };
         if (
           emptyCalendar &&
           digest(await d.calendarEmptyWindow?.(client, context, draft.calendar_window!)) !== digest(emptyCalendar)
@@ -306,6 +332,7 @@ export class KnowledgeAnswers {
           output_digest: digest(text),
           ...(calendar ? { calendar_notice_digest: digest(calendar) } : {}),
           ...(mail ? { mail_notice: mail, mail_notice_digest: digest(mail) } : {}),
+          ...(mailDraft ? { mail_draft_request: draft.mail_draft, mail_draft_notice_digest: digest(mailDraft) } : {}),
           ...(emptyCalendar
             ? { calendar_window: draft.calendar_window, calendar_window_notice_digest: digest(emptyCalendar) }
             : {}),
@@ -352,6 +379,7 @@ export class KnowledgeAnswers {
     calendar: CalendarAnswerNotice | null;
     emptyCalendar: CalendarAnswerNotice | null;
     mail: MailAnswerNotice | null;
+    mailDraft: MailDraftAnswerNotice | null;
   } | null> {
     if (!(await this.dependencies.current(client, context))) return null;
     const metadata = (
@@ -424,7 +452,12 @@ export class KnowledgeAnswers {
       )
         return null;
     }
-    return { metadata, resolved, calendar, emptyCalendar, mail };
+    const draftRequest = metadata.provenance.mail_draft_request;
+    if (Boolean(draftRequest) !== Boolean(metadata.provenance.mail_draft_notice_digest)) return null;
+    const mailDraft = draftRequest ? await this.dependencies.mailDraftNotice?.(client, context, draftRequest) : null;
+    if (draftRequest && (!mailDraft || !mail || digest(mailDraft) !== metadata.provenance.mail_draft_notice_digest))
+      return null;
+    return { metadata, resolved, calendar, emptyCalendar, mail, mailDraft: mailDraft ?? null };
   }
   async get(context: KnowledgeContext, id: string): Promise<Result> {
     if (!isArtifactIdentity(id)) return { status: 'denied' };
@@ -438,7 +471,8 @@ export class KnowledgeAnswers {
       resolved = before.resolved as ResolvedCitation[],
       calendar = before.calendar as CalendarAnswerNotice | null,
       emptyCalendar = before.emptyCalendar as CalendarAnswerNotice | null,
-      mail = before.mail as MailAnswerNotice | null;
+      mail = before.mail as MailAnswerNotice | null,
+      mailDraft = before.mailDraft as MailDraftAnswerNotice | null;
     let text: string;
     try {
       this.verifyBytes(resolved);
@@ -446,7 +480,16 @@ export class KnowledgeAnswers {
       if (
         !body ||
         Object.keys(body).some(
-          (key) => !['format', 'draft', 'text', 'calendar', 'calendar_window_notice', 'mail_notice'].includes(key),
+          (key) =>
+            ![
+              'format',
+              'draft',
+              'text',
+              'calendar',
+              'calendar_window_notice',
+              'mail_notice',
+              'mail_draft_notice',
+            ].includes(key),
         ) ||
         body.format !== 'cos-answer/v1' ||
         !validAnswerDraft(body.draft) ||
@@ -456,10 +499,12 @@ export class KnowledgeAnswers {
         digest(body.calendar ?? null) !== digest(calendar) ||
         digest(body.draft.calendar_window ?? null) !== digest(metadata.provenance.calendar_window ?? null) ||
         digest(body.calendar_window_notice ?? null) !== digest(emptyCalendar) ||
-        digest(body.mail_notice ?? null) !== digest(mail)
+        digest(body.mail_notice ?? null) !== digest(mail) ||
+        digest(body.draft.mail_draft ?? null) !== digest(metadata.provenance.mail_draft_request ?? null) ||
+        digest(body.mail_draft_notice ?? null) !== digest(mailDraft)
       )
         return { status: 'denied' };
-      text = checkedText(body.draft, resolved, calendar, emptyCalendar, mail);
+      text = checkedText(body.draft, resolved, calendar, emptyCalendar, mail, mailDraft);
       if (text !== body.text) return { status: 'denied' };
       await d.hooks.beforeAnswerDisclosure?.();
       // eslint-disable-next-line no-catch-all/no-catch-all -- Unreadable or corrupt private artifacts cannot be redisplayed or leak diagnostic paths.
@@ -468,7 +513,7 @@ export class KnowledgeAnswers {
     }
     const final = await d.transaction(async (client) => {
       const fresh = await this.snapshot(client, context, id);
-      if (!fresh || digest(fresh) !== digest({ metadata, resolved, calendar, emptyCalendar, mail }))
+      if (!fresh || digest(fresh) !== digest({ metadata, resolved, calendar, emptyCalendar, mail, mailDraft }))
         return { status: 'denied' };
       if (calendar) {
         const dependency = await d.calendarContext(client, context, true);

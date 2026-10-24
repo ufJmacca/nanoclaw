@@ -364,6 +364,34 @@ export async function runMailNativeFixture(drafts = false): Promise<void> {
       assert.equal(first.result.draft_status, 'verified');
       firstDraftOperation = first.result.operation_id;
       assert.equal((await createDraft('aa01', requestId)).result.operation_id, firstDraftOperation);
+      const confirmed = await client!.call('cos_answer_prepare', {
+        request_id: randomUUID(),
+        draft: {
+          kind: 'answer',
+          coverage: 'limited',
+          mail_draft: { operation_id: firstDraftOperation },
+          claims: [
+            {
+              kind: 'inference',
+              text: 'The Pilot Alpha launch is scheduled for Friday.',
+              citations: [{ kind: 'source', evidence_id: evidence.evidence_id }],
+            },
+          ],
+        },
+      });
+      assert.equal(confirmed.status, 'ok');
+      assert.match(confirmed.result.text, /verified as unsent/);
+      assert.match(confirmed.result.text, /Last successful refresh/);
+      assert.match(confirmed.result.text, /\[1\]/);
+      await client!.reply(confirmed.result.text, sub.messagingGroup.platform_id);
+      const confirmedDeadline = Date.now() + 4000;
+      while (Date.now() < confirmedDeadline && !host!.delivered.some((reply) => reply.text === confirmed.result.text))
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      assert(
+        host!.delivered.some(
+          (reply) => reply.text === confirmed.result.text && reply.platform === sub.messagingGroup.platform_id,
+        ),
+      );
       const saved = await host!.request('mail-draft-fixture-state');
       assert.equal(saved.writes, 1);
       assert.equal(saved.sends, 0);
@@ -419,11 +447,38 @@ export async function runMailNativeFixture(drafts = false): Promise<void> {
       assert.notEqual(denied.status, 'ok');
       assert.equal(denied.result.reason, 'mail_draft_daily_limit');
       assert.equal((await host!.request('mail-draft-fixture-state')).writes, 5);
+      const lastConfirmed = await client!.call('cos_answer_prepare', {
+        request_id: randomUUID(),
+        draft: {
+          kind: 'answer',
+          coverage: 'limited',
+          claims: [],
+          mail_draft: { operation_id: last!.result.operation_id },
+        },
+      });
+      assert.equal(lastConfirmed.status, 'ok');
+      assert.match(lastConfirmed.result.text, /verified as unsent/);
       await host!.request('mail-draft-fixture-mode', 'edited');
       assert.equal(
         (await client!.call('cos_mail_draft_status', { operation_id: last!.result.operation_id })).result.draft_status,
         'edited',
       );
+      assert.notEqual(
+        (await client!.call('cos_answer_get', { artifact_id: lastConfirmed.result.artifact_id })).status,
+        'ok',
+      );
+      const editedNotice = await client!.call('cos_answer_prepare', {
+        request_id: randomUUID(),
+        draft: {
+          kind: 'answer',
+          coverage: 'limited',
+          claims: [],
+          mail_draft: { operation_id: last!.result.operation_id },
+        },
+      });
+      assert.equal(editedNotice.status, 'ok');
+      assert.match(editedNotice.result.text, /recorded as edited/);
+      assert.doesNotMatch(editedNotice.result.text, /verified as unsent/);
       const editedReplay = await createDraft('aa14');
       if (editedReplay.status !== 'ok' || editedReplay.result?.draft_status !== 'edited') {
         const [diagnostics, provider] = await Promise.all([

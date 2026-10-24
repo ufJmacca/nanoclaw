@@ -191,28 +191,27 @@ export function googleMailDraftWriter(options: MailDraftWriterOptions) {
     }
     return session;
   };
-  const inventory = async (session: Session, correlation?: string): Promise<Metadata[]> => {
+  const inventory = async (session: Session): Promise<Metadata[]> => {
     const result: Metadata[] = [],
       seen = new Set<string>(),
       ids = new Set<string>();
     let page: string | undefined;
     for (let index = 0; index < 5; index++) {
       const body = await perform(session, '/drafts', {
-        maxResults: correlation ? '10' : '100',
+        maxResults: '100',
         includeSpamTrash: 'false',
         fields: 'drafts(id,message(id,threadId)),nextPageToken,resultSizeEstimate',
-        ...(correlation ? { q: 'rfc822msgid:<cos-draft-' + correlation + '@nanoclaw.invalid>' } : {}),
         ...(page ? { pageToken: page } : {}),
       });
       if (!body) return fail('mail_draft_invalid_response');
       const entries = body.drafts ?? [];
       if (
         !Array.isArray(entries) ||
-        entries.length > (correlation ? 10 : 100) ||
+        entries.length > 100 ||
         (body.resultSizeEstimate !== undefined &&
           (!Number.isSafeInteger(body.resultSizeEstimate) ||
             Number(body.resultSizeEstimate) < 0 ||
-            Number(body.resultSizeEstimate) > (correlation ? 10 : 500)))
+            Number(body.resultSizeEstimate) > 500))
       )
         return fail('mail_draft_inventory_incomplete');
       for (const entry of entries) {
@@ -227,7 +226,7 @@ export function googleMailDraftWriter(options: MailDraftWriterOptions) {
           return fail('mail_draft_inventory_incomplete');
         ids.add(entry.id);
         result.push({ id: entry.id, messageId: entry.message.id, threadId: entry.message.threadId });
-        if (result.length > (correlation ? 10 : 500)) return fail('mail_draft_inventory_incomplete');
+        if (result.length > 500) return fail('mail_draft_inventory_incomplete');
       }
       if (body.nextPageToken === undefined) return result;
       if (!printable(body.nextPageToken, 2048) || seen.has(body.nextPageToken))
@@ -246,9 +245,9 @@ export function googleMailDraftWriter(options: MailDraftWriterOptions) {
     if (candidates.length > 10) return fail('mail_draft_inventory_incomplete');
     const found: Metadata[] = [];
     for (const candidate of candidates) {
-      // Search by the submitted Message-ID is only an optimisation. A provider
-      // rewrite requires a bounded header-only read of this source thread; no
-      // unrelated draft body is needed to locate our opaque correlation.
+      // Providers can rewrite Message-ID independently for each copy. Inspect
+      // every bounded source-thread candidate's headers so a mixed-ID duplicate
+      // cannot be hidden by a narrower search. No unrelated draft body is read.
       const body = await perform(session, '/drafts/' + candidate.id, {
         format: 'metadata',
         fields: 'id,message(id,threadId,payload(headers))',
@@ -322,8 +321,7 @@ export function googleMailDraftWriter(options: MailDraftWriterOptions) {
         ? outcome(record)
         : outcome(options.journal.observe(record.operationId, { state: 'missing' }, now()));
     }
-    const searched = await inventory(session, record.correlation),
-      entries = searched.length ? searched : await correlatedThreadDrafts(record, session);
+    const entries = await correlatedThreadDrafts(record, session);
     if (entries.length === 0) return outcome(record);
     if (entries.length !== 1 || entries[0].threadId !== record.threadId)
       return outcome(options.journal.observe(record.operationId, { state: 'collision' }, now()));

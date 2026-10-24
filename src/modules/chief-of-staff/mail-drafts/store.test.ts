@@ -141,7 +141,12 @@ function fixture() {
     sourceMessageId: 'aa01',
     threadId: 'bb02',
     mailboxDigest: body.mailboxDigest,
+    state: 'verified',
+    observedAt: '2026-10-24T05:00:00.000Z',
+    reservedAt: '2026-10-24T04:59:00.000Z',
+    operationId,
   };
+
   const journal = {
     assertCurrent: vi.fn(),
     generation: body.journalGeneration,
@@ -196,6 +201,35 @@ function fixture() {
     },
   };
 }
+
+it('renders an as-of draft notice only from the current scoped independent witness without a provider call', async () => {
+  const f = fixture();
+  const client = { query: f.query } as unknown as PoolClient;
+  const notice = await f.store.answerNotice(client, context, { operation_id: operationId });
+  expect(notice?.state).toBe('verified');
+  expect(notice?.text).toContain('verified as unsent');
+  expect(notice?.text).toContain(f.record.observedAt);
+  expect(JSON.stringify(notice)).not.toContain(input.reply_text);
+  expect(f.writer).not.toHaveBeenCalled();
+  f.record.state = 'edited';
+  const edited = await f.store.answerNotice(client, context, { operation_id: operationId });
+  expect(edited?.state).toBe('edited');
+  expect(edited?.text).not.toContain('verified as unsent');
+  expect(edited?.effectDigest).not.toBe(notice?.effectDigest);
+  f.readable(false);
+  expect(await f.store.answerNotice(client, context, { operation_id: operationId })).toBeNull();
+});
+it.each(['scope', 'retained', 'host', 'active'] as const)(
+  'withholds a draft answer notice after losing %s authority',
+  async (boundary) => {
+    const f = fixture();
+    f[boundary](false);
+    expect(
+      await f.store.answerNotice({ query: f.query } as unknown as PoolClient, context, { operation_id: operationId }),
+    ).toBeNull();
+    expect(f.writer).not.toHaveBeenCalled();
+  },
+);
 
 it('commits stable request identity before contacting a provider and stores no reply body', async () => {
   const f = fixture();

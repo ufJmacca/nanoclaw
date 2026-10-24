@@ -131,6 +131,10 @@ it('G05 wires the installed draft host to the existing reader and retains its se
   expect(f.draftOpen).toHaveBeenCalledWith(env, roots, expect.any(Function), authority, reader);
   expect(store.mailDraftHost).toBe(draft);
   expect(store.mailDrafts.dependencies).toBe(draft.dependencies);
+  const notice = vi.spyOn(store.mailDrafts, 'answerNotice').mockResolvedValue(null);
+  const request = { operation_id: 'a'.repeat(64) };
+  await store.knowledge!.answers.dependencies.mailDraftNotice!({} as never, {} as never, request);
+  expect(notice).toHaveBeenCalledWith({}, {}, request);
   await store.mailDraftHost!.close();
   await store.mail!.close();
 });

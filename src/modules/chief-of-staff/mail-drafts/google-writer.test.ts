@@ -204,9 +204,7 @@ it('reconciles an accepted POST with a lost response without blindly creating ag
   expect(f.journal.find(result.operationId)?.state).toBe('reserved');
   expect((await f.writer.status(result.operationId)).status).toBe('verified');
   expect(f.posts()).toHaveLength(1);
-  expect(
-    f.fetch.mock.calls.some(([url]) => new URL(url).searchParams.get('q')?.startsWith('rfc822msgid:<cos-draft-')),
-  ).toBe(true);
+  expect(f.fetch.mock.calls.some(([url]) => new URL(url).searchParams.get('format') === 'metadata')).toBe(true);
 });
 it.each([false, true])('verifies a provider-rewritten Message-ID with lost POST response %s', async (lost) => {
   const f = fixture(),
@@ -252,21 +250,26 @@ it('uses only source-thread headers to locate a rewritten ID and never reads unr
   ).toEqual(['metadata']);
   expect(f.posts()).toHaveLength(0);
 });
-it('fences duplicate correlations instead of choosing a draft or retrying a lost POST', async () => {
-  const f = fixture();
-  f.losePost();
-  const result = await f.writer.create(request);
-  if (!('operationId' in result)) throw Error('fixture_missing_operation');
-  const own = [...f.drafts.values()][0];
-  own.message.payload.headers.find((h) => h.name === 'Message-ID')!.value = '<provider@mail.gmail.com>';
-  const duplicate = structuredClone(own);
-  duplicate.id = 'duplicate';
-  duplicate.message.id = 'ee05';
-  f.drafts.set(duplicate.id, duplicate);
-  expect((await f.writer.status(result.operationId)).status).toBe('collision');
-  expect(f.posts()).toHaveLength(1);
-  expect(f.journal.find(result.operationId)?.state).toBe('collision');
-});
+it.each([false, true])(
+  'fences duplicate correlations even when one retains its submitted Message-ID: %s',
+  async (retained) => {
+    const f = fixture();
+    f.losePost();
+    const result = await f.writer.create(request);
+    if (!('operationId' in result)) throw Error('fixture_missing_operation');
+    const own = [...f.drafts.values()][0];
+    if (!retained)
+      own.message.payload.headers.find((h) => h.name === 'Message-ID')!.value = '<provider@mail.gmail.com>';
+    const duplicate = structuredClone(own);
+    duplicate.id = 'duplicate';
+    duplicate.message.id = 'ee05';
+    duplicate.message.payload.headers.find((h) => h.name === 'Message-ID')!.value = '<second-provider@mail.gmail.com>';
+    f.drafts.set(duplicate.id, duplicate);
+    expect((await f.writer.status(result.operationId)).status).toBe('collision');
+    expect(f.posts()).toHaveLength(1);
+    expect(f.journal.find(result.operationId)?.state).toBe('collision');
+  },
+);
 it.each([400, 401, 403, 429, 500, 503])(
   'never retries a %s create response or releases its daily reservation',
   async (status) => {

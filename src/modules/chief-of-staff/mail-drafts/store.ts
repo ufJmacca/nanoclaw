@@ -15,6 +15,7 @@ import { validMailDraftBinding, type MailDraftBinding } from './binding.js';
 import type { MailDraftAuthority, MailDraftAuthorityResolver } from './authority.js';
 import type { DraftJournal } from './journal.js';
 import { MailDraftWriteError, type googleMailDraftWriter, type MailDraftResult } from './google-writer.js';
+import { mailDraftAnswerNotice, type MailDraftAnswerNotice } from './answer-notice.js';
 
 export type MailDraftSelection = {
   id: string;
@@ -253,6 +254,27 @@ export class MailDraftStore {
       record.sourceMessageId === messageId &&
       record.threadId === pinned.source.thread_id &&
       record.mailboxDigest === pinned.binding.body.mailboxDigest
+    );
+  }
+  /** Reuse the answer transaction, current source/policy and independent witness.
+   * No nested pool lease, provider call, token refresh or effect mutation occurs. */
+  async answerNotice(
+    client: PoolClient,
+    context: KnowledgeContext,
+    input: MailDraftStatusInput,
+  ): Promise<MailDraftAnswerNotice | null> {
+    if (!validMailDraftStatusInput(input) || !this.native(context)) return null;
+    const record = this.dependencies!.journal.find(input.operation_id);
+    if (!record || record.scopeId !== context.scopeId) return null;
+    const pinned = await this.admission(client, context, record.bindingId, record.sourceMessageId);
+    if (!pinned || !this.effectMatches(input.operation_id, context, pinned, record.sourceMessageId)) return null;
+    const current = this.dependencies!.journal.find(input.operation_id);
+    if (!current || digest(current) !== digest(record) || digest(this.native(context)) !== digest(pinned.authority))
+      return null;
+    const { current_capture: _capture, ...source } = pinned.source;
+    return mailDraftAnswerNotice(
+      current,
+      digest({ binding: pinned.binding.digest, authority: pinned.authority, source }),
     );
   }
   async create(context: KnowledgeContext, requestId: string, input: MailDraftCreateInput): Promise<Result> {

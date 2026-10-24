@@ -59,6 +59,23 @@ it('accepts only a request for host-verified calendar coverage, never model-supp
   for (const calendar of ['complete', { last_success_at: '2026-10-01T00:00:00Z' }, true, null])
     expect(validAnswerDraft({ ...draft, calendar })).toBe(false);
 });
+it('admits only an opaque draft-operation reference for a host-rendered saved-draft notice', () => {
+  const value = { ...draft, mail_draft: { operation_id: 'a'.repeat(64) } };
+  expect(validAnswerDraft(value)).toBe(true);
+  expect(validAnswerDraft({ ...value, claims: [] })).toBe(true);
+  if (!validAnswerDraft(value)) throw Error('invalid fixture');
+  expect(() => renderAnswer(value, [source])).toThrow('mail_draft_notice_required');
+  for (const mail_draft of [
+    { operation_id: 'bad' },
+    { operation_id: 'a'.repeat(64), status: 'verified' },
+    { operation_id: 'a'.repeat(64), text: 'Saved successfully' },
+    { operation_id: 'a'.repeat(64), observed_at: '2026-10-24T00:00:00Z' },
+    { operation_id: 'a'.repeat(64), scope_id: 'foreign' },
+  ])
+    expect(validAnswerDraft({ ...value, mail_draft })).toBe(false);
+  expect(validAnswerDraft({ ...value, kind: 'summary' })).toBe(false);
+  expect(validAnswerDraft({ ...value, coverage: 'not_applicable', claims: [], questions: ['Saved?'] })).toBe(false);
+});
 it('accepts bounded source and approved-record claims, including explicitly insufficient coverage', () => {
   expect(validAnswerDraft(draft)).toBe(true);
   expect(

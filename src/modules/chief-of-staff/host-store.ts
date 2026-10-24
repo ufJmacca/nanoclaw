@@ -165,13 +165,14 @@ export async function connectCosHostStore(
         return true;
       },
       mailEnabled: () => !!mail?.active() && admitted(),
+      mailDraftNotice: (client, context, request) => priorities.mailDrafts.answerNotice(client, context, request),
       mailAccess: (scopeId, bindingId) => {
         if (!mail?.active() || !admitted()) return false;
         mail.connector!.assertOpen(scopeId, bindingId);
         return true;
       },
     });
-    return new PriorityStore(
+    const priorities: PriorityStore = new PriorityStore(
       database,
       knowledge,
       calendar,
@@ -206,6 +207,7 @@ export async function connectCosHostStore(
       draftHost?.dependencies,
       draftHost,
     );
+    return priorities;
   } catch (error) {
     try {
       await draftHost?.close();

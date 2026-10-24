@@ -164,6 +164,7 @@ async function start(input: {
             return true;
           },
           mailEnabled: () => !!input.mail,
+          mailDraftNotice: (client, context, request) => store.mailDrafts.answerNotice(client, context, request),
           mailAccess: (scope, binding) => {
             if (!mailFences) return false;
             mailFences.assertOpen(scope, binding);
@@ -262,7 +263,7 @@ async function start(input: {
   const mailDrafts = input.mailDrafts
     ? createMailDraftFixtureHost(input.knowledgeRoot!, db, input.binding, input.mailDrafts, mailFences)
     : undefined;
-  const store = new PriorityStore(
+  const store: PriorityStore = new PriorityStore(
     database,
     knowledge,
     connector,

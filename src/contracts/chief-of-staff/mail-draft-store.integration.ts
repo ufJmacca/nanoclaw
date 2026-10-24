@@ -320,7 +320,18 @@ async function fixture() {
   const captureId = randomUUID();
   assert.equal((await mail.start(context, readerId, captureId, capture.window)).status, 'ok');
   assert.equal((await mail.publish(context, readerId, captureId, capture)).status, 'ok');
-  const knowledge = new KnowledgeStore(database, artifacts, {}, { mailEnabled: () => true, mailAccess: () => true }),
+  let currentDraftStore: MailDraftStore | undefined;
+  const knowledge = new KnowledgeStore(
+      database,
+      artifacts,
+      {},
+      {
+        mailEnabled: () => true,
+        mailAccess: () => true,
+        mailDraftNotice: (client, retained, request) =>
+          currentDraftStore?.answerNotice(client, retained, request) ?? Promise.resolve(null),
+      },
+    ),
     authority = {
       bindingDigest: digest('fixture native ' + scope),
       contextGeneration: context.generation,
@@ -363,7 +374,7 @@ async function fixture() {
     posts = 0,
     draft: ReturnType<typeof saved> | null = null;
   const createStore = () =>
-    new MailDraftStore(database, knowledge, {
+    (currentDraftStore = new MailDraftStore(database, knowledge, {
       journal,
       authority: () => (active ? authority : null),
       matches: (_context, selected) => digest(selected.body) === digest(binding),
@@ -436,7 +447,7 @@ async function fixture() {
             return draft ? new Response(JSON.stringify(draft)) : new Response('{}', { status: 404 });
           },
         }),
-    });
+    }));
   const input = { writer_binding_id: writerId, source_message_id: 'aa01', reply_text: 'PRIVATE_FIXTURE_REPLY' };
   return {
     scope,
@@ -446,6 +457,7 @@ async function fixture() {
     writerId,
     binding,
     journal,
+    knowledge,
     store: createStore(),
     rebuild: createStore,
     posts: () => posts,
@@ -536,6 +548,56 @@ test('G05 concurrent retries and an older PostgreSQL request snapshot cannot era
   assert.equal(replay.existing, true);
   assert.equal(f.posts(), 1);
   assert.equal(f.journal.findSource(f.binding.mailboxDigest, 'aa01')?.operationId, results[0].operation_id);
+});
+test('G05 checked draft answers preserve the exact host receipt and stop publication after an observed edit', async () => {
+  const f = await fixture();
+  const created = await f.store.create(f.context, randomUUID(), f.input);
+  assert.equal(created.draft_status, 'verified');
+  const draft = { kind: 'answer', coverage: 'limited', claims: [], mail_draft: { operation_id: created.operation_id } };
+  const answer = await f.knowledge.answers.prepare(f.context, randomUUID(), draft);
+  assert.equal(answer.status, 'ok');
+  assert.match(String(answer.text), /verified as unsent/);
+  assert.match(String(answer.text), /Last successful refresh/);
+  assert.equal((await f.knowledge.answers.authorizePublication(f.context, String(answer.text))).status, 'ok');
+  assert.equal(
+    (await f.knowledge.answers.authorizePublication(f.context, String(answer.text) + '\nInvented confirmation.'))
+      .status,
+    'denied',
+  );
+  f.edit();
+  assert.equal(
+    (await f.store.status(f.context, { operation_id: String(created.operation_id) })).draft_status,
+    'edited',
+  );
+  assert.equal((await f.knowledge.answers.get(f.context, String(answer.artifact_id))).status, 'denied');
+  assert.equal((await f.knowledge.answers.authorizePublication(f.context, String(answer.text))).status, 'denied');
+  const edited = await f.knowledge.answers.prepare(f.context, randomUUID(), draft);
+  assert.equal(edited.status, 'ok');
+  assert.match(String(edited.text), /recorded as edited/);
+  assert.doesNotMatch(String(edited.text), /verified as unsent/);
+  assert.equal(f.posts(), 1);
+  f.active(false);
+  assert.equal((await f.knowledge.answers.get(f.context, String(edited.artifact_id))).status, 'denied');
+});
+test('G05 a draft changing during answer publication denies the staged success rather than publishing stale confirmation', async () => {
+  const f = await fixture();
+  const created = await f.store.create(f.context, randomUUID(), f.input);
+  assert.equal(created.draft_status, 'verified');
+  f.knowledge.hooks.afterAnswerPublication = async () => {
+    f.edit();
+    assert.equal(
+      (await f.store.status(f.context, { operation_id: String(created.operation_id) })).draft_status,
+      'edited',
+    );
+  };
+  const answer = await f.knowledge.answers.prepare(f.context, randomUUID(), {
+    kind: 'answer',
+    coverage: 'limited',
+    claims: [],
+    mail_draft: { operation_id: created.operation_id },
+  });
+  assert.equal(answer.status, 'denied');
+  assert.equal(f.posts(), 1);
 });
 for (const boundary of [
   'disabled_policy',

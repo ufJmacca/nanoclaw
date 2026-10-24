@@ -70,6 +70,10 @@ The outer coordinator `request_id` is a valid UUID. The returned draft `operatio
 
 `pending`, `unavailable`, `denied` and `conflict` are not saved-draft confirmations. A timeout after submission does not prove that Gmail rejected the write. Do not invent a new operation to retry an uncertain save. The corrected request-ID validation error explicitly says when no operation was submitted; it contains no private arguments.
 
+For a checked confirmation, pass `mail_draft: { operation_id }` to `cos_answer_prepare` with kind `answer` and coverage `limited`. Cite the source email in the claims when requested. The host supplies the recorded draft status and observation time alongside Mail's freshness and coverage notice. Publish only the returned text unchanged. A pending answer preparation must be reconciled using that answer's request UUID, which differs from the draft-create request UUID and the draft operation identity.
+
+Gmail may assign a different RFC Message-ID to a newly saved draft. Verification uses the independent opaque correlation header, exact reply envelope/content and acknowledged provider identities. A lost create response can be reconciled with bounded header-only reads in the original source thread. This does not permit a second create, reading unrelated draft bodies, changing a human-edited draft or resetting independent history. See the evidence receipt for the deployed version and validation status of these corrections.
+
 ## Disable and recover
 
 To stop draft writes, pause admission and use the held owner-maintenance procedure, then disable the selected writer:
