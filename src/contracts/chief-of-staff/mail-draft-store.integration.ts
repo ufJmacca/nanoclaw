@@ -1,3 +1,4 @@
+import { createFixtureDatabase } from './fixture-database-readiness.js';
 import assert from 'node:assert/strict';
 import { before, after, test } from 'node:test';
 import fs from 'node:fs';
@@ -54,7 +55,7 @@ before(async () => {
   admin = await connectFixtureDatabase(process.env, 'migration');
   assert.equal((await admin.query('SELECT pg_try_advisory_lock(73101002) AS locked')).rows[0].locked, true);
   assert.equal(await migrate(admin, fixtureRuntimeUser()), 20);
-  database = BoundedDatabase.fromConfig(await fixtureDatabaseConfig());
+  database = await createFixtureDatabase(await fixtureDatabaseConfig());
   baseline = await stateDigest();
 });
 after(async () => {

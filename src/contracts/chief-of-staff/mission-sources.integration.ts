@@ -1,3 +1,4 @@
+import { createFixtureDatabase } from './fixture-database-readiness.js';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { before, after, test } from 'node:test';
@@ -7,7 +8,6 @@ import path from 'node:path';
 import pg from 'pg';
 import { connectFixtureDatabase, fixtureDatabaseConfig, fixtureRuntimeUser } from './fixture-database.js';
 import { migrate } from '../../modules/chief-of-staff/store/migrations.js';
-import { BoundedDatabase } from '../../modules/chief-of-staff/store/client.js';
 import { KnowledgeStore, type KnowledgeContext } from '../../modules/chief-of-staff/knowledge/store.js';
 import { KnowledgeArtifacts } from '../../modules/chief-of-staff/knowledge/artifacts.js';
 import type { MissionSource } from '../../modules/chief-of-staff/contracts/mission-protocol.js';
@@ -33,7 +33,7 @@ before(async () => {
   base = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-mission-sources-'));
   for (const dir of ['artifacts', 'staging']) fs.mkdirSync(path.join(base, dir), { mode: 0o700 });
   knowledge = new KnowledgeStore(
-    BoundedDatabase.fromConfig(await fixtureDatabaseConfig()),
+    await createFixtureDatabase(await fixtureDatabaseConfig()),
     new KnowledgeArtifacts(path.join(base, 'artifacts'), path.join(base, 'staging')),
     {},
     { retrievalEnabled: () => enabled },

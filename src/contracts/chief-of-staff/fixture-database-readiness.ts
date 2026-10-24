@@ -1,5 +1,23 @@
 import { setTimeout as delay } from 'node:timers/promises';
-import { DatabaseUnavailable, type BoundedDatabase } from '../../modules/chief-of-staff/store/client.js';
+import type { PoolConfig } from 'pg';
+import { DatabaseUnavailable, BoundedDatabase } from '../../modules/chief-of-staff/store/client.js';
+
+/** Complete read-only setup before a fixture installs faults or invokes domain behavior. */
+export async function createFixtureDatabase(config: PoolConfig): Promise<BoundedDatabase> {
+  const database = BoundedDatabase.fromConfig(config);
+  try {
+    await readyFixtureDatabase(database);
+    return database;
+  } catch (error) {
+    await database.pool.end().catch(() => undefined);
+    throw error;
+  }
+}
+
+/** Keep the selected pool and connection policy for direct SQL or custom deadline fixtures. */
+export async function createFixturePool(config: PoolConfig) {
+  return (await createFixtureDatabase(config)).pool;
+}
 
 /** Establish the existing selected pool before fixture behavior or mutations. */
 export async function readyFixtureDatabase(database: Pick<BoundedDatabase, 'run'>): Promise<void> {

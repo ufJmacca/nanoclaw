@@ -1,3 +1,4 @@
+import { createFixtureDatabase } from './fixture-database-readiness.js';
 /** Full owner/worker/review flow using native containers and an admitted external test database. */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
@@ -60,7 +61,7 @@ test(
       admin = await connectFixtureDatabase(process.env, 'migration');
       assert.equal((await admin.query('SELECT pg_try_advisory_lock(73101002) AS locked')).rows[0].locked, true);
       await migrate(admin, fixtureRuntimeUser());
-      database = BoundedDatabase.fromConfig(await fixtureDatabaseConfig());
+      database = await createFixtureDatabase(await fixtureDatabaseConfig());
       const knowledge = new KnowledgeStore(
           database,
           new KnowledgeArtifacts(path.join(knowledgeRoot, 'artifacts'), path.join(knowledgeRoot, 'staging')),

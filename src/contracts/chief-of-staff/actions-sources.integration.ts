@@ -1,3 +1,4 @@
+import { createFixtureDatabase } from './fixture-database-readiness.js';
 /** Action resource permissions use the existing source policy and retained main context on real PostgreSQL. */
 import assert from 'node:assert/strict';
 import { before, after, test } from 'node:test';
@@ -8,7 +9,6 @@ import { randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import { connectFixtureDatabase, fixtureDatabaseConfig, fixtureRuntimeUser } from './fixture-database.js';
 import { migrate } from '../../modules/chief-of-staff/store/migrations.js';
-import { BoundedDatabase } from '../../modules/chief-of-staff/store/client.js';
 import { PriorityStore } from '../../modules/chief-of-staff/store/priorities.js';
 import { KnowledgeStore } from '../../modules/chief-of-staff/knowledge/store.js';
 import { KnowledgeArtifacts } from '../../modules/chief-of-staff/knowledge/artifacts.js';
@@ -120,7 +120,7 @@ before(async () => {
   await admin.query('COMMIT');
   base = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-action-resources-'));
   for (const name of ['artifacts', 'staging']) fs.mkdirSync(path.join(base, name), { mode: 0o700 });
-  const database = BoundedDatabase.fromConfig(await fixtureDatabaseConfig());
+  const database = await createFixtureDatabase(await fixtureDatabaseConfig());
   knowledge = new KnowledgeStore(database, new KnowledgeArtifacts(base + '/artifacts', base + '/staging'));
   const installation = digest('fixture installation'),
     root = base + '/effects',

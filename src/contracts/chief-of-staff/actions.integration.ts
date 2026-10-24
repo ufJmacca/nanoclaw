@@ -1,3 +1,4 @@
+import { createFixtureDatabase, createFixturePool } from './fixture-database-readiness.js';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { before, after, test } from 'node:test';
@@ -155,7 +156,7 @@ before(async () => {
     owner = initializeActionWitness(root, installation);
   witness = new ActionWitness(root, installation, owner.generation);
   store = new PriorityStore(
-    BoundedDatabase.fromConfig(await fixtureDatabaseConfig()),
+    await createFixtureDatabase(await fixtureDatabaseConfig()),
     undefined,
     undefined,
     undefined,
@@ -457,7 +458,7 @@ test('S09-PG02 loss of a real request-start COMMIT acknowledgement returns pendi
     claimed = await store.actions.runs.claim(context, action.id, randomUUID());
   assert.equal(claimed.status, 'ok');
   const lease = claimed.lease as import('../../modules/chief-of-staff/actions/run-store.js').ActionLease;
-  const pool = new pg.Pool(await fixtureDatabaseConfig()),
+  const pool = await createFixturePool(await fixtureDatabaseConfig()),
     connection = await pool.connect(),
     original = connection.query.bind(connection);
   let inserted = false,
@@ -695,7 +696,7 @@ test('S09-PG02 executor loses the real request-start COMMIT acknowledgement with
   const action = await queued(33),
     beforeWrites = writes,
     beforeReads = reads;
-  const pool = new pg.Pool(await fixtureDatabaseConfig()),
+  const pool = await createFixturePool(await fixtureDatabaseConfig()),
     connection = await pool.connect(),
     original = connection.query.bind(connection);
   let inserted = false,
@@ -740,7 +741,7 @@ test('S09-PG01 actual PostgreSQL loss after fixture creation reconciles the orig
   const action = await queued(35),
     beforeWrites = writes;
   const relay = await connectionFault(await fixtureDatabaseConfig()),
-    pool = new pg.Pool(relay.config);
+    pool = await createFixturePool(relay.config);
   const partitioningWriter: CalendarActionWriter = {
     ...writer,
     create: async (...args) => {

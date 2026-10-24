@@ -1,3 +1,4 @@
+import { createFixtureDatabase, createFixturePool } from './fixture-database-readiness.js';
 import assert from 'node:assert/strict';
 import { before, after, test } from 'node:test';
 import { randomUUID } from 'node:crypto';
@@ -130,7 +131,7 @@ before(async () => {
   await migrate(admin, fixtureRuntimeUser());
   root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-strategy-missions-'));
   for (const name of ['staging', 'artifacts']) fs.mkdirSync(path.join(root, name), { mode: 0o700 });
-  const database = BoundedDatabase.fromConfig(await fixtureDatabaseConfig());
+  const database = await createFixtureDatabase(await fixtureDatabaseConfig());
   knowledge = new KnowledgeStore(
     database,
     new KnowledgeArtifacts(path.join(root, 'artifacts'), path.join(root, 'staging')),
@@ -317,7 +318,7 @@ test('S10 configured mission results require an adapter and never yield a comple
 });
 test('S10 mission evidence readers start after capture releases its connection and a real partition yields no partial snapshot', async () => {
   const relay = await connectionFault(await fixtureDatabaseConfig());
-  const database = new BoundedDatabase(new pg.Pool(relay.config), 350);
+  const database = new BoundedDatabase(await createFixturePool(relay.config), 350);
   const remoteKnowledge = new KnowledgeStore(database, knowledge.artifacts);
   let reached = false;
   const remote = new ReviewCollector({

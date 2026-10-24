@@ -1,3 +1,4 @@
+import { createFixtureDatabase, createFixturePool } from './fixture-database-readiness.js';
 import assert from 'node:assert/strict';
 import { after, before, test } from 'node:test';
 import { randomUUID } from 'node:crypto';
@@ -71,7 +72,7 @@ before(async () => {
   await migrate(admin, fixtureRuntimeUser());
   root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-strategy-calendar-'));
   for (const name of ['staging', 'artifacts']) fs.mkdirSync(path.join(root, name), { mode: 0o700 });
-  const database = BoundedDatabase.fromConfig(await fixtureDatabaseConfig());
+  const database = await createFixtureDatabase(await fixtureDatabaseConfig());
   knowledge = new KnowledgeStore(
     database,
     new KnowledgeArtifacts(path.join(root, 'artifacts'), path.join(root, 'staging')),
@@ -258,7 +259,7 @@ test('S10 a required calendar adapter cannot be omitted to claim an empty alloca
 });
 test('S10-PG01 a real partition between core capture and calendar evidence yields incomplete without disclosing the partial core', async () => {
   const relay = await connectionFault(await fixtureDatabaseConfig()),
-    database = new BoundedDatabase(new pg.Pool(relay.config), 350);
+    database = new BoundedDatabase(await createFixturePool(relay.config), 350);
   const remoteKnowledge = new KnowledgeStore(
     database,
     knowledge.artifacts,

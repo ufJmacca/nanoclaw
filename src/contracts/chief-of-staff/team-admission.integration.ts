@@ -1,3 +1,4 @@
+import { createFixtureDatabase, createFixturePool } from './fixture-database-readiness.js';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
 import { createRpcHandler } from '../../modules/chief-of-staff/bridge/rpc.js';
@@ -10,7 +11,6 @@ import { setTimeout as delay } from 'node:timers/promises';
 import pg from 'pg';
 import { connectionFault } from './connection-fault.js';
 import { connectFixtureDatabase, fixtureDatabaseConfig, fixtureRuntimeUser } from './fixture-database.js';
-import { readyFixtureDatabase } from './fixture-database-readiness.js';
 import { migrate } from '../../modules/chief-of-staff/store/migrations.js';
 import { BoundedDatabase } from '../../modules/chief-of-staff/store/client.js';
 import { KnowledgeStore } from '../../modules/chief-of-staff/knowledge/store.js';
@@ -67,8 +67,7 @@ before(async () => {
   await migrate(admin, fixtureRuntimeUser());
   base = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-team-admission-'));
   for (const dir of ['artifacts', 'staging']) fs.mkdirSync(path.join(base, dir), { mode: 0o700 });
-  database = BoundedDatabase.fromConfig(await fixtureDatabaseConfig());
-  await readyFixtureDatabase(database);
+  database = await createFixtureDatabase(await fixtureDatabaseConfig());
   knowledge = new KnowledgeStore(
     database,
     new KnowledgeArtifacts(path.join(base, 'artifacts'), path.join(base, 'staging')),
@@ -2804,7 +2803,7 @@ test('S06-PG01 a real TLS-preserving LAN partition grants no child or budget res
   // Replace the single fixture-host pool; no worker receives a pool or credentials.
   await store.database.pool.end();
   const relay = await connectionFault(await fixtureDatabaseConfig());
-  const database = new BoundedDatabase(new pg.Pool(relay.config), 350);
+  const database = new BoundedDatabase(await createFixturePool(relay.config), 350);
   knowledge = new KnowledgeStore(database, knowledge.artifacts);
   store = new PriorityStore(
     database,
@@ -2847,7 +2846,7 @@ test('S06-PG01 a real TLS-preserving LAN partition grants no child or budget res
     relay.restore();
     await database.pool.end();
     await relay.close();
-    const restored = BoundedDatabase.fromConfig(await fixtureDatabaseConfig());
+    const restored = await createFixtureDatabase(await fixtureDatabaseConfig());
     knowledge = new KnowledgeStore(restored, knowledge.artifacts);
     store = new PriorityStore(
       restored,

@@ -1,3 +1,4 @@
+import { createFixtureDatabase } from './fixture-database-readiness.js';
 /** Scripted conversation through real routing, MCP, RPC, approval and private delivery.
  * This is an offline fixture provider, not a live-model quality evaluation.
  */
@@ -9,7 +10,6 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { connectFixtureDatabase, fixtureDatabaseConfig, fixtureRuntimeUser } from './fixture-database.js';
 import { migrate } from '../../modules/chief-of-staff/store/migrations.js';
-import { BoundedDatabase } from '../../modules/chief-of-staff/store/client.js';
 import type { PriorityStore } from '../../modules/chief-of-staff/store/priorities.js';
 import { KnowledgeStore, type Evidence } from '../../modules/chief-of-staff/knowledge/store.js';
 import { KnowledgeArtifacts } from '../../modules/chief-of-staff/knowledge/artifacts.js';
@@ -49,7 +49,7 @@ test(
       admin = await connectFixtureDatabase(process.env, 'migration');
       assert.equal((await admin.query('SELECT pg_try_advisory_lock(73101002) AS locked')).rows[0].locked, true);
       await migrate(admin, fixtureRuntimeUser());
-      const database = BoundedDatabase.fromConfig(await fixtureDatabaseConfig());
+      const database = await createFixtureDatabase(await fixtureDatabaseConfig());
       const knowledge = new KnowledgeStore(database, artifacts);
       store = new PriorityStore(database, knowledge);
       const db = initDb(root + '/central.db');

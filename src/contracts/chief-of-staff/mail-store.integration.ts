@@ -1,3 +1,4 @@
+import { createFixtureDatabase } from './fixture-database-readiness.js';
 import assert from 'node:assert/strict';
 import { before, after, test } from 'node:test';
 import fs from 'node:fs';
@@ -35,7 +36,7 @@ before(async () => {
   admin = await connectFixtureDatabase(process.env, 'migration');
   assert.equal((await admin.query('SELECT pg_try_advisory_lock(73101002) AS locked')).rows[0].locked, true);
   await migrate(admin, fixtureRuntimeUser());
-  database = BoundedDatabase.fromConfig(await fixtureDatabaseConfig());
+  database = await createFixtureDatabase(await fixtureDatabaseConfig());
 });
 after(async () => {
   if (admin) {
@@ -386,7 +387,7 @@ test('G04 losing the publish response reconciles the committed receipt without d
   await f.store.start(f.context, f.binding.id, id, prepared.window);
   assert.equal((await f.store.publish(f.context, f.binding.id, id, prepared)).status, 'pending');
   await database.pool.end();
-  database = BoundedDatabase.fromConfig(await fixtureDatabaseConfig());
+  database = await createFixtureDatabase(await fixtureDatabaseConfig());
   const rebuilt = new MailStore(database, f.artifacts);
   assert.equal((await rebuilt.publish(f.context, f.binding.id, id, prepared)).status, 'ok');
   assert.equal((await rebuilt.fail(f.context, f.binding.id, id, 'mail_unavailable')).status, 'conflict');
@@ -535,7 +536,7 @@ test('G04 global-off owner tightens real paused mail storage without a source co
   assert((exposed.items as unknown[]).length > 0);
   await f.store.setAuth(f.context, f.binding.id, 'revoked');
   await admin.query("UPDATE cos.scopes SET status='paused' WHERE id=$1", [f.scope]);
-  const ownedDatabase = BoundedDatabase.fromConfig(await fixtureDatabaseConfig());
+  const ownedDatabase = await createFixtureDatabase(await fixtureDatabaseConfig());
   const host = new MailHost({ store: new MailStore(ownedDatabase, f.artifacts) });
   const maintenance = new MailMaintenance({
     admitted: () => true,
@@ -675,7 +676,7 @@ test('G04 a capture rollback admits neither mail evidence nor its cursor and rec
     null,
   );
   await database.pool.end();
-  database = BoundedDatabase.fromConfig(await fixtureDatabaseConfig());
+  database = await createFixtureDatabase(await fixtureDatabaseConfig());
   const store = new MailStore(database, f.artifacts);
   assert.equal((await store.publish(f.context, f.binding.id, id, prepared)).status, 'ok');
   assert.equal((await store.publish(f.context, f.binding.id, id, prepared)).status, 'ok');
@@ -1124,7 +1125,7 @@ test('G04 host refresh reconciles the exact committed capture after losing publi
   assert(first.prepared);
   // Reconstruct the runtime pool after the lost acknowledgement, like host recovery.
   await database.pool.end();
-  database = BoundedDatabase.fromConfig(await fixtureDatabaseConfig());
+  database = await createFixtureDatabase(await fixtureDatabaseConfig());
   const restored = new MailConnector({
     ...options,
     store: new MailStore(database, f.artifacts),

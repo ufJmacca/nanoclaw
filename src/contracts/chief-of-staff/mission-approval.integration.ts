@@ -1,3 +1,4 @@
+import { createFixtureDatabase, createFixturePool } from './fixture-database-readiness.js';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { before, after, test } from 'node:test';
@@ -54,7 +55,7 @@ before(async () => {
   await migrate(admin, fixtureRuntimeUser());
   base = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-mission-approval-'));
   for (const dir of ['artifacts', 'staging']) fs.mkdirSync(path.join(base, dir), { mode: 0o700 });
-  const database = BoundedDatabase.fromConfig(await fixtureDatabaseConfig());
+  const database = await createFixtureDatabase(await fixtureDatabaseConfig());
   knowledge = new KnowledgeStore(
     database,
     new KnowledgeArtifacts(path.join(base, 'artifacts'), path.join(base, 'staging')),
@@ -390,7 +391,7 @@ test('S05-T09 an elapsed sealed deadline cannot be extended through replay or ap
   assert.ok(!(await rows('mission_attempts')).some((a) => a.mission_id === p.mission_id));
 });
 async function faultStore(fail: (sql: string, after: boolean) => boolean) {
-  const pool = new pg.Pool(await fixtureDatabaseConfig()),
+  const pool = await createFixturePool(await fixtureDatabaseConfig()),
     connection = await pool.connect();
   const original = connection.query.bind(connection);
   let fired = false;

@@ -1,3 +1,4 @@
+import { createFixtureDatabase } from './fixture-database-readiness.js';
 import assert from 'node:assert/strict';
 import { after, before, test } from 'node:test';
 import crypto, { randomUUID } from 'node:crypto';
@@ -8,7 +9,6 @@ import path from 'node:path';
 import type pg from 'pg';
 import { connectFixtureDatabase, fixtureDatabaseConfig, fixtureRuntimeUser } from './fixture-database.js';
 import { migrate } from '../../modules/chief-of-staff/store/migrations.js';
-import { BoundedDatabase } from '../../modules/chief-of-staff/store/client.js';
 import { PriorityStore } from '../../modules/chief-of-staff/store/priorities.js';
 import { KnowledgeArtifacts } from '../../modules/chief-of-staff/knowledge/artifacts.js';
 import { KnowledgeStore, type Evidence, type KnowledgeContext } from '../../modules/chief-of-staff/knowledge/store.js';
@@ -96,7 +96,7 @@ for (const evolution of ['revised', 'deselected', 'revoked', 'deleted', 'capped-
     };
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-strategy-evolution-'));
     for (const name of ['staging', 'artifacts']) fs.mkdirSync(path.join(root, name), { mode: 0o700 });
-    const database = BoundedDatabase.fromConfig(await fixtureDatabaseConfig());
+    const database = await createFixtureDatabase(await fixtureDatabaseConfig());
     const knowledge = new KnowledgeStore(
       database,
       new KnowledgeArtifacts(path.join(root, 'artifacts'), path.join(root, 'staging')),

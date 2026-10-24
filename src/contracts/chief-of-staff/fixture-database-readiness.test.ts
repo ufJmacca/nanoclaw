@@ -1,12 +1,15 @@
 import type pg from 'pg';
 import { afterEach, expect, it, vi } from 'vitest';
 import { BoundedDatabase, DatabaseUnavailable } from '../../modules/chief-of-staff/store/client.js';
-import { readyFixtureDatabase } from './fixture-database-readiness.js';
+import { createFixtureDatabase, createFixturePool, readyFixtureDatabase } from './fixture-database-readiness.js';
 
-afterEach(() => vi.useRealTimers());
+afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
 function fixture() {
   const client = { query: vi.fn().mockResolvedValue({ rows: [{ fixture_ready: 1 }] }), release: vi.fn() },
-    pool = { on: vi.fn(), connect: vi.fn().mockResolvedValue(client) },
+    pool = { on: vi.fn(), connect: vi.fn().mockResolvedValue(client), end: vi.fn().mockResolvedValue(undefined) },
     database = new BoundedDatabase(pool as unknown as pg.Pool);
   return { database, pool, client };
 }
@@ -70,4 +73,46 @@ it('rejects an invalid readiness response without retrying', async () => {
   f.client.query.mockResolvedValue({ rows: [{ fixture_ready: 0 }] });
   await expect(readyFixtureDatabase(f.database)).rejects.toThrow('fixture_database_readiness_unverified');
   expect(f.pool.connect).toHaveBeenCalledTimes(1);
+});
+
+it('returns the same configured database only after its read-only fixture setup succeeds', async () => {
+  const f = fixture(),
+    config = { host: 'selected', max: 2, connectionTimeoutMillis: 3000 },
+    construct = vi.spyOn(BoundedDatabase, 'fromConfig').mockReturnValue(f.database);
+  expect(await createFixtureDatabase(config)).toBe(f.database);
+  expect(construct).toHaveBeenCalledExactlyOnceWith(config);
+  expect(f.client.query.mock.calls).toEqual([['SELECT 1 AS fixture_ready']]);
+  expect(f.pool.end).not.toHaveBeenCalled();
+});
+
+it('returns the prepared pool for fixtures that install their own bounded deadline or client faults', async () => {
+  const f = fixture(),
+    config = { host: 'selected', connectionTimeoutMillis: 3000 };
+  vi.spyOn(BoundedDatabase, 'fromConfig').mockReturnValue(f.database);
+  expect(await createFixturePool(config)).toBe(f.pool);
+  expect(f.client.release).toHaveBeenCalledWith(false);
+  expect(f.database.inspectPool().admitted).toBe(0);
+  expect(f.pool.end).not.toHaveBeenCalled();
+});
+
+it('closes an unready fixture pool once and preserves the original readiness failure', async () => {
+  const f = fixture();
+  vi.spyOn(BoundedDatabase, 'fromConfig').mockReturnValue(f.database);
+  f.client.query.mockResolvedValue({ rows: [{ fixture_ready: 0 }] });
+  f.pool.end.mockRejectedValue(Error('synthetic close failure'));
+  await expect(createFixtureDatabase({ host: 'selected' })).rejects.toThrow('fixture_database_readiness_unverified');
+  expect(f.pool.end).toHaveBeenCalledTimes(1);
+});
+
+it('does not expose or keep a fixture pool when a persistent connection outage prevents setup', async () => {
+  vi.useFakeTimers();
+  const f = fixture();
+  vi.spyOn(BoundedDatabase, 'fromConfig').mockReturnValue(f.database);
+  f.pool.connect.mockRejectedValue(Error('synthetic persistent outage'));
+  const outcome = expect(createFixturePool({ host: 'selected' })).rejects.toBeInstanceOf(DatabaseUnavailable);
+  await vi.advanceTimersByTimeAsync(1000);
+  await outcome;
+  expect(f.pool.connect).toHaveBeenCalledTimes(2);
+  expect(f.client.query).not.toHaveBeenCalled();
+  expect(f.pool.end).toHaveBeenCalledTimes(1);
 });
