@@ -1,8 +1,14 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { afterEach, expect, it, vi } from 'vitest';
-import { macReleaseCommand, releaseCheckImageIds, assertCleanCandidateSource } from './mac-release-cli.js';
+import {
+  macReleaseCommand,
+  releaseCheckImageIds,
+  assertCleanCandidateSource,
+  observeCandidateSource,
+} from './mac-release-cli.js';
 import { BACKUP_RELEASE_CHECKS, MAIL_RELEASE_CHECKS, MAIL_DRAFT_RELEASE_CHECKS } from './release-manifest.js';
 import { fixtureRelease } from '../../../contracts/chief-of-staff/release-fixture.js';
 import { writeAtomic } from './target-state.js';
@@ -20,6 +26,48 @@ afterEach(() => {
   vi.restoreAllMocks();
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
+
+function sourceFixture() {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-readonly-source-'));
+  roots.push(root);
+  const git = (...args: string[]) => execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();
+  git('init', '-q');
+  git('config', 'user.name', 'Source fixture');
+  git('config', 'user.email', 'source@example.test');
+  const file = path.join(root, 'candidate.txt');
+  fs.writeFileSync(file, 'committed candidate\n');
+  git('add', 'candidate.txt');
+  git('commit', '-qm', 'fixture');
+  return { root, git, file, index: path.join(root, '.git/index'), commit: git('rev-parse', 'HEAD') };
+}
+
+it('observes a clean candidate without rewriting an index whose cached stat data needs refresh', () => {
+  const f = sourceFixture();
+  const stat = fs.statSync(f.file);
+  fs.utimesSync(f.file, stat.atime, new Date(stat.mtimeMs + 5000));
+  const before = fs.readFileSync(f.index);
+  expect(observeCandidateSource(f.root)).toEqual({ commit: f.commit, dirty: false });
+  expect(fs.readFileSync(f.index)).toEqual(before);
+});
+
+it.each(['modified', 'staged', 'deleted', 'staged-deletion', 'untracked'])(
+  'still denies a %s candidate and preserves the existing index',
+  (kind) => {
+    const f = sourceFixture();
+    if (kind === 'modified' || kind === 'staged') fs.writeFileSync(f.file, 'owner change\n');
+    if (kind === 'staged') f.git('add', 'candidate.txt');
+    if (kind === 'deleted') fs.unlinkSync(f.file);
+    if (kind === 'staged-deletion') f.git('rm', '-q', 'candidate.txt');
+    if (kind === 'untracked') fs.writeFileSync(path.join(f.root, 'untracked.txt'), 'not committed\n');
+    const before = fs.readFileSync(f.index);
+    const observation = observeCandidateSource(f.root);
+    expect(observation).toEqual({ commit: f.commit, dirty: true });
+    expect(() => assertCleanCandidateSource(f.commit, observation.commit, observation.dirty)).toThrow(
+      'candidate_worktree_dirty',
+    );
+    expect(fs.readFileSync(f.index)).toEqual(before);
+  },
+);
 
 it('measures a completed bundle from its validated manifest without requiring the old checkout or a new build', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-complete-bundle-timing-'));

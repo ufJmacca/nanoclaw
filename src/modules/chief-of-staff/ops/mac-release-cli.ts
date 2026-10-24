@@ -92,14 +92,18 @@ export function assertCleanCandidateSource(expected: string, observed: string, d
   if (expected !== observed) throw new Error('candidate_source_changed');
   if (dirty) throw new Error('candidate_worktree_dirty');
 }
+export function observeCandidateSource(repository = process.cwd()): { commit: string; dirty: boolean } {
+  const git = (args: string[]) => execFileSync('git', args, { cwd: repository, encoding: 'utf8' }).trim();
+  // Background admission checks must not rewrite the shared Mac/container index.
+  return { commit: git(['rev-parse', 'HEAD']), dirty: git(['--no-optional-locks', 'status', '--porcelain']) !== '' };
+}
 function checkedPlan(id: string): { root: string; plan: Plan } {
   const root = releaseRoot(id),
     plan = readPrivate<Plan>(path.join(root, 'plan.json'));
-  const current = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
-  const dirty = execFileSync('git', ['status', '--porcelain'], { encoding: 'utf8' }).trim();
+  const { commit: current, dirty } = observeCandidateSource();
   if (plan.slice !== readReleaseExecution(path.resolve('.cos-plan-state'), plan.slice).active_slice)
     throw new Error('active_slice_required');
-  assertCleanCandidateSource(plan.source.commit, current, dirty !== '');
+  assertCleanCandidateSource(plan.source.commit, current, dirty);
   const target = deploymentSettings(readPrivate(path.resolve('.cos-plan-state/deployment-target.json')));
   if (digest(target) !== plan.targetDigest) throw new Error('deployment_target_changed');
   return { root, plan };
