@@ -241,6 +241,38 @@ export function googleMailDraftWriter(options: MailDraftWriterOptions) {
     status: record.state === 'reserved' ? 'uncertain' : record.state,
     operationId: record.operationId,
   });
+  const correlatedThreadDrafts = async (record: DraftEffect, session: Session): Promise<Metadata[]> => {
+    const candidates = (await inventory(session)).filter((entry) => entry.threadId === record.threadId);
+    if (candidates.length > 10) return fail('mail_draft_inventory_incomplete');
+    const found: Metadata[] = [];
+    for (const candidate of candidates) {
+      // Search by the submitted Message-ID is only an optimisation. A provider
+      // rewrite requires a bounded header-only read of this source thread; no
+      // unrelated draft body is needed to locate our opaque correlation.
+      const body = await perform(session, '/drafts/' + candidate.id, {
+        format: 'metadata',
+        fields: 'id,message(id,threadId,payload(headers))',
+      });
+      if (!body) continue;
+      if (
+        body.id !== candidate.id ||
+        !object(body.message) ||
+        body.message.id !== candidate.messageId ||
+        body.message.threadId !== record.threadId ||
+        !object(body.message.payload) ||
+        !Array.isArray(body.message.payload.headers) ||
+        body.message.payload.headers.length > 100
+      )
+        return fail('mail_draft_inventory_incomplete');
+      const headers = body.message.payload.headers;
+      if (headers.some((h) => !object(h) || typeof h.name !== 'string' || typeof h.value !== 'string'))
+        return fail('mail_draft_inventory_incomplete');
+      const correlation = headers.filter((h) => h.name.toLowerCase() === 'x-nanoclaw-correlation');
+      if (correlation.length > 1) return fail('mail_draft_inventory_incomplete');
+      if (correlation[0]?.value === record.correlation) found.push(candidate);
+    }
+    return found;
+  };
   const readCandidate = async (record: DraftEffect, id: string, session: Session): Promise<MailDraftEffectResult> => {
     if (!draftId(id)) return fail('mail_draft_invalid_response');
     const body = await perform(session, '/drafts/' + id, {
@@ -290,7 +322,8 @@ export function googleMailDraftWriter(options: MailDraftWriterOptions) {
         ? outcome(record)
         : outcome(options.journal.observe(record.operationId, { state: 'missing' }, now()));
     }
-    const entries = await inventory(session, record.correlation);
+    const searched = await inventory(session, record.correlation),
+      entries = searched.length ? searched : await correlatedThreadDrafts(record, session);
     if (entries.length === 0) return outcome(record);
     if (entries.length !== 1 || entries[0].threadId !== record.threadId)
       return outcome(options.journal.observe(record.operationId, { state: 'collision' }, now()));

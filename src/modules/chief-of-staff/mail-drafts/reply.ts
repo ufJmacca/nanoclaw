@@ -291,12 +291,15 @@ export function verifySavedReply(
     }
     if (
       headers.get('x-nanoclaw-correlation') !== expected.correlation ||
-      headers.get('message-id') !== '<cos-draft-' + expected.correlation + '@nanoclaw.invalid>' ||
       headers.get('mime-version') !== '1.0' ||
       !/^text\/plain(?:\s*;\s*charset=(?:utf-8|"utf-8"))?$/i.test(headers.get('content-type') ?? '') ||
       !headers.has('subject')
     )
       return null;
+    // Gmail can replace the submitted RFC Message-ID even on the first readback.
+    // The opaque correlation header and exact envelope/body digest bind our save;
+    // the caller separately pins the acknowledged provider draft/message IDs.
+    messageId(headers.get('message-id') ?? '');
     const inReplyTo = messageId(headers.get('in-reply-to') ?? ''),
       references = (headers.get('references') ?? '').split(/ +/).filter(Boolean).map(messageId);
     if (!references.includes(inReplyTo) || references.length > 32 || new Set(references).size !== references.length)

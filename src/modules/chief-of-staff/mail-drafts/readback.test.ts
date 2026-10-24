@@ -69,13 +69,18 @@ it('preserves an actual leading Unicode BOM character in the authored plaintext'
   const f = fixture('Subject', '\uFEFFHello');
   expect(verifySavedReply(f.draft, f.expected)).toEqual({ draftId: 'r-123456', messageId: 'dd04' });
 });
+it('verifies a provider-assigned RFC Message-ID using the independent correlation and exact reply content', () => {
+  const f = fixture();
+  f.header('Message-ID', '<provider-generated@mail.gmail.com>');
+  expect(verifySavedReply(f.draft, f.expected)).toEqual({ draftId: 'r-123456', messageId: 'dd04' });
+});
 it.each([
   ['To', 'other@example.test'],
   ['From', 'other@example.test'],
   ['Subject', 'Human changed subject'],
   ['In-Reply-To', '<other@example.test>'],
   ['References', '<other@example.test>'],
-  ['Message-ID', '<human@example.test>'],
+  ['Message-ID', 'malformed-provider-id'],
   ['X-NanoClaw-Correlation', 'b'.repeat(64)],
   ['Cc', 'other@example.test'],
   ['Bcc', 'other@example.test'],

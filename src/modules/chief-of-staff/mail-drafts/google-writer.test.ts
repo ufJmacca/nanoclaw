@@ -208,6 +208,65 @@ it('reconciles an accepted POST with a lost response without blindly creating ag
     f.fetch.mock.calls.some(([url]) => new URL(url).searchParams.get('q')?.startsWith('rfc822msgid:<cos-draft-')),
   ).toBe(true);
 });
+it.each([false, true])('verifies a provider-rewritten Message-ID with lost POST response %s', async (lost) => {
+  const f = fixture(),
+    original = f.fetch.getMockImplementation()!;
+  f.fetch.mockImplementation(async (url, init) => {
+    if (init.method !== 'POST') return original(url, init);
+    const response = await original(url, init);
+    const draft = [...f.drafts.values()][0];
+    draft.message.payload.headers = draft.message.payload.headers.map((h) =>
+      h.name === 'Message-ID' ? { ...h, value: '<provider-generated@mail.gmail.com>' } : h,
+    );
+    if (lost) throw Error('PRIVATE_LOST_RESPONSE');
+    return response;
+  });
+  const created = await f.writer.create(request);
+  expect(created.status).toBe(lost ? 'uncertain' : 'verified');
+  if (!('operationId' in created)) throw Error('fixture_missing_operation');
+  expect((await f.writer.status(created.operationId)).status).toBe('verified');
+  expect(f.posts()).toHaveLength(1);
+});
+it('uses only source-thread headers to locate a rewritten ID and never reads unrelated draft bodies', async () => {
+  const f = fixture();
+  f.losePost();
+  const result = await f.writer.create(request);
+  if (!('operationId' in result)) throw Error('fixture_missing_operation');
+  const own = [...f.drafts.values()][0];
+  own.message.payload.headers.find((h) => h.name === 'Message-ID')!.value = '<provider@mail.gmail.com>';
+  const other = structuredClone(own);
+  other.id = 'human-same-thread';
+  other.message.id = 'ee05';
+  other.message.payload.headers.find((h) => h.name === 'X-NanoClaw-Correlation')!.value = 'b'.repeat(64);
+  f.drafts.set(other.id, other);
+  const unrelated = structuredClone(other);
+  unrelated.id = 'unrelated-thread';
+  unrelated.message.threadId = 'ff06';
+  f.drafts.set(unrelated.id, unrelated);
+  f.fetch.mockClear();
+  expect((await f.writer.status(result.operationId)).status).toBe('verified');
+  const reads = f.fetch.mock.calls.map(([url]) => new URL(url));
+  expect(reads.some((u) => u.pathname.endsWith('/unrelated-thread'))).toBe(false);
+  expect(
+    reads.filter((u) => u.pathname.endsWith('/human-same-thread')).map((u) => u.searchParams.get('format')),
+  ).toEqual(['metadata']);
+  expect(f.posts()).toHaveLength(0);
+});
+it('fences duplicate correlations instead of choosing a draft or retrying a lost POST', async () => {
+  const f = fixture();
+  f.losePost();
+  const result = await f.writer.create(request);
+  if (!('operationId' in result)) throw Error('fixture_missing_operation');
+  const own = [...f.drafts.values()][0];
+  own.message.payload.headers.find((h) => h.name === 'Message-ID')!.value = '<provider@mail.gmail.com>';
+  const duplicate = structuredClone(own);
+  duplicate.id = 'duplicate';
+  duplicate.message.id = 'ee05';
+  f.drafts.set(duplicate.id, duplicate);
+  expect((await f.writer.status(result.operationId)).status).toBe('collision');
+  expect(f.posts()).toHaveLength(1);
+  expect(f.journal.find(result.operationId)?.state).toBe('collision');
+});
 it.each([400, 401, 403, 429, 500, 503])(
   'never retries a %s create response or releases its daily reservation',
   async (status) => {
