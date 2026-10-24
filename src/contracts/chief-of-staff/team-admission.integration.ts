@@ -10,6 +10,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import pg from 'pg';
 import { connectionFault } from './connection-fault.js';
 import { connectFixtureDatabase, fixtureDatabaseConfig, fixtureRuntimeUser } from './fixture-database.js';
+import { readyFixtureDatabase } from './fixture-database-readiness.js';
 import { migrate } from '../../modules/chief-of-staff/store/migrations.js';
 import { BoundedDatabase } from '../../modules/chief-of-staff/store/client.js';
 import { KnowledgeStore } from '../../modules/chief-of-staff/knowledge/store.js';
@@ -56,6 +57,7 @@ const authority = {
 };
 let enabled = true,
   admin: pg.Client,
+  database: BoundedDatabase,
   store: PriorityStore,
   knowledge: KnowledgeStore,
   base: string;
@@ -65,7 +67,8 @@ before(async () => {
   await migrate(admin, fixtureRuntimeUser());
   base = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-team-admission-'));
   for (const dir of ['artifacts', 'staging']) fs.mkdirSync(path.join(base, dir), { mode: 0o700 });
-  const database = BoundedDatabase.fromConfig(await fixtureDatabaseConfig());
+  database = BoundedDatabase.fromConfig(await fixtureDatabaseConfig());
+  await readyFixtureDatabase(database);
   knowledge = new KnowledgeStore(
     database,
     new KnowledgeArtifacts(path.join(base, 'artifacts'), path.join(base, 'staging')),
@@ -130,7 +133,7 @@ after(async () => {
     }
     await admin.query('DELETE FROM cos.scopes WHERE id=$1', [scope]);
   }
-  await store?.database.pool.end();
+  await (store?.database ?? database)?.pool.end();
   await admin?.end();
   if (base) fs.rmSync(base, { recursive: true, force: true });
 });
