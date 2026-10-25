@@ -98,12 +98,14 @@ export async function restoreOwnerVaultBackup(input: {
         recoveryDigest = digest(recovery),
         deadline = performance.now() + 45 * 60 * 1000;
       if (
-        !(draftArgs ? ['G05'] : stateArgs ? ['G02', 'G03', 'G04'] : ['G04']).includes(manifest.slice) ||
+        !(draftArgs ? ['G05'] : stateArgs ? ['G02', 'G03', 'G04', 'G05'] : ['G04', 'G05']).includes(manifest.slice) ||
         state.lifecycle !== 'protected' ||
         state.releaseId !== manifest.releaseId ||
         generation === null ||
         (stateArgs &&
-          !(draftArgs ? ['G05'] : ['G02', 'G03', 'G04']).includes(
+          !(
+            draftArgs ? ['G05'] : manifest.slice === 'G05' ? ['G02', 'G03', 'G04', 'G05'] : ['G02', 'G03', 'G04']
+          ).includes(
             validateReleaseManifest(
               readPrivate(path.join(settings.releaseRoot, stateArgs.backupReleaseId, 'release.json')),
             ).slice,
