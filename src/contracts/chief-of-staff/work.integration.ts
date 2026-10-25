@@ -1,3 +1,4 @@
+import { createFixtureDatabase, createFixturePool } from './fixture-database-readiness.js';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { before, after, test } from 'node:test';
@@ -39,10 +40,10 @@ before(async () => {
   admin = await connectFixtureDatabase(process.env, 'migration');
   assert.equal((await admin.query('SELECT pg_try_advisory_lock(73101002) AS locked')).rows[0].locked, true);
   await migrate(admin, fixtureRuntimeUser());
-  pool = new pg.Pool(await fixtureDatabaseConfig());
+  pool = await createFixturePool(await fixtureDatabaseConfig());
   base = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-work-fixture-'));
   for (const dir of ['artifacts', 'staging']) fs.mkdirSync(path.join(base, dir), { mode: 0o700 });
-  const database = BoundedDatabase.fromConfig(await fixtureDatabaseConfig());
+  const database = await createFixtureDatabase(await fixtureDatabaseConfig());
   knowledge = new KnowledgeStore(
     database,
     new KnowledgeArtifacts(path.join(base, 'artifacts'), path.join(base, 'staging')),
@@ -284,7 +285,7 @@ test('S04-PG02 lost apply-commit acknowledgement reconciles the original confirm
     (await store.decide(owner, String(p.proposal_id), String(p.confirmation_token), 'approve')).status,
     'ok',
   );
-  const faultyPool = new pg.Pool(await fixtureDatabaseConfig()),
+  const faultyPool = await createFixturePool(await fixtureDatabaseConfig()),
     connection = await faultyPool.connect(),
     original = connection.query.bind(connection);
   let dropped = false;

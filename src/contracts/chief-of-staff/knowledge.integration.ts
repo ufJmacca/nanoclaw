@@ -1,3 +1,4 @@
+import { createFixtureDatabase, createFixturePool } from './fixture-database-readiness.js';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -68,11 +69,11 @@ before(async () => {
   admin = await connectFixtureDatabase(process.env, 'migration');
   assert.equal((await admin.query('SELECT pg_try_advisory_lock(73101002) AS locked')).rows[0].locked, true);
   assert.equal(await migrate(admin, fixtureRuntimeUser()), SCHEMA_VERSION);
-  pool = new pg.Pool(await fixtureDatabaseConfig());
+  pool = await createFixturePool(await fixtureDatabaseConfig());
   base = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-knowledge-integration-'));
   for (const directory of ['artifacts', 'staging']) fs.mkdirSync(path.join(base, directory), { mode: 0o700 });
   artifacts = new KnowledgeArtifacts(path.join(base, 'artifacts'), path.join(base, 'staging'));
-  store = new KnowledgeStore(BoundedDatabase.fromConfig(await fixtureDatabaseConfig()), artifacts);
+  store = new KnowledgeStore(await createFixtureDatabase(await fixtureDatabaseConfig()), artifacts);
   for (const id of [scope, other])
     await pool.query(
       "INSERT INTO cos.scopes(id,owner_id,instance_id,channel_id,agent_group_id,status) VALUES($1,'fixture-owner','fixture-instance',$1,$1,'active')",
@@ -195,7 +196,7 @@ test('S02-T10: correction fences exposed context; a new context retrieves only t
 });
 test('S02-PG01: real connection loss after byte publication admits nothing and retries one revision', async () => {
   const relay = await connectionFault(await fixtureDatabaseConfig()),
-    database = new BoundedDatabase(new pg.Pool(relay.config), 350);
+    database = new BoundedDatabase(await createFixturePool(relay.config), 350);
   let fail = true;
   const fault = new KnowledgeStore(database, artifacts, {
     afterPublication: async () => {
@@ -235,7 +236,7 @@ test('S02-PG01: real connection loss after byte publication admits nothing and r
 });
 test('S02-PG02: database-policy outage blocks cached private search and source redisplay', async () => {
   const relay = await connectionFault(await fixtureDatabaseConfig()),
-    database = new BoundedDatabase(new pg.Pool(relay.config), 350),
+    database = new BoundedDatabase(await createFixturePool(relay.config), 350),
     fault = new KnowledgeStore(database, artifacts);
   try {
     const a = await imported(note('outage', 'OutageCanary private source.')),
@@ -697,7 +698,7 @@ test('S02-PG02: artifact cleanup never deletes from an unavailable reference sna
   );
   fs.utimesSync(path.join(artifacts.root, orphan.id + '.blob'), 0, 0);
   const relay = await connectionFault(await fixtureDatabaseConfig()),
-    database = new BoundedDatabase(new pg.Pool(relay.config), 350);
+    database = new BoundedDatabase(await createFixturePool(relay.config), 350);
   const fault = new KnowledgeStore(database, artifacts);
   try {
     await database.run((client) => client.query('SELECT 1'));
@@ -904,7 +905,7 @@ test('S02-PG02: a database outage blocks purge before byte removal and reconcile
     artifacts.publishText(randomUUID(), 'PurgeOutageCanary unpublished answer.', lease),
   );
   const relay = await connectionFault(await fixtureDatabaseConfig()),
-    database = new BoundedDatabase(new pg.Pool(relay.config), 350);
+    database = new BoundedDatabase(await createFixturePool(relay.config), 350);
   let fail = true;
   const purge = new KnowledgeStore(
     database,
@@ -1200,7 +1201,7 @@ test('S02-PG02: historical answer redisplay fails closed when current database p
   });
   assert.equal(prepared.status, 'ok');
   const relay = await connectionFault(await fixtureDatabaseConfig()),
-    database = new BoundedDatabase(new pg.Pool(relay.config), 350),
+    database = new BoundedDatabase(await createFixturePool(relay.config), 350),
     fault = new KnowledgeStore(database, artifacts);
   try {
     assert.equal((await fault.answers.get(ctx, String(prepared.artifact_id))).status, 'ok');
@@ -1270,7 +1271,7 @@ test('S02-T07: priority summaries cite approved record versions without changing
 });
 test('S02-PG01: answer publication losing database access admits no artifact and reconciles one retry', async () => {
   const relay = await connectionFault(await fixtureDatabaseConfig()),
-    database = new BoundedDatabase(new pg.Pool(relay.config), 350);
+    database = new BoundedDatabase(await createFixturePool(relay.config), 350);
   let fail = true;
   const fault = new KnowledgeStore(database, artifacts, {
     afterAnswerPublication: async () => {

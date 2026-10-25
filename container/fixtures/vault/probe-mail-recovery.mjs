@@ -6,6 +6,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { verifyVaultMemory } from '/code/modules/chief-of-staff/ops/vault-memory.js';
 import { withVaultDirectory, verifyVaultStorage } from '/code/modules/chief-of-staff/ops/vault-storage.js';
 import { selectedFixtureEnvironment, fixtureDatabaseConfig } from '/code/contracts/chief-of-staff/fixture-database.js';
+import { verifyMailDraftFixtureReport } from '/code/contracts/chief-of-staff/mail-draft-fixture-report.js';
 import { verifyMailFixtureReport } from '/code/contracts/chief-of-staff/mail-fixture-report.js';
 import { CalendarCredentialCore } from '/code/modules/chief-of-staff/calendar/credential-core.js';
 import { CalendarAccessFences } from '/code/modules/chief-of-staff/calendar/access-fences.js';
@@ -52,6 +53,7 @@ assert.equal(process.arch, 'arm64');
 assert.equal(process.version, 'v22.23.2');
 verifyVaultMemory();
 assert.equal(process.env.COS_FIXTURE_DATABASE_PROFILE, 'test');
+const drafts = process.env.NANOCLAW_COS_MAIL_DRAFT_FIXTURE === '1';
 const roots = {
   targetRoot: '/home/fixture/.config/nanoclaw-cos/state',
   installationRoot: '/case/application',
@@ -85,7 +87,7 @@ await withVaultDirectory(roots, 'staging', async (directory, vaultCurrent) => {
   vaultCurrent();
   const physical = fs.realpathSync(directory);
   assert.equal(physical, '/case/vault/staging');
-  const temporary = fs.mkdtempSync(physical + '/g04-mail-checkpoint-'),
+  const temporary = fs.mkdtempSync(physical + (drafts ? '/g05-draft-checkpoint-' : '/g04-mail-checkpoint-')),
     initial = fs.lstatSync(temporary);
   assert.equal(initial.dev, fs.statSync('/case/vault').dev);
   assert.equal(initial.uid, 1000);
@@ -97,7 +99,9 @@ await withVaultDirectory(roots, 'staging', async (directory, vaultCurrent) => {
         '--test',
         '--test-concurrency=1',
         '--test-reporter=tap',
-        '/release/dist/contracts/chief-of-staff/mail-checkpoint.integration.js',
+        drafts
+          ? '/release/dist/contracts/chief-of-staff/mail-draft-checkpoint.integration.js'
+          : '/release/dist/contracts/chief-of-staff/mail-checkpoint.integration.js',
       ],
       {
         cwd: '/release',
@@ -121,10 +125,13 @@ await withVaultDirectory(roots, 'staging', async (directory, vaultCurrent) => {
       assert.equal(result.signal, null);
       assert.equal(result.status, 0);
       const tap = new TextDecoder('utf8', { fatal: true }).decode(result.stdout);
-      assert.deepEqual(verifyMailFixtureReport(tap, 'checkpoint'), { suite: 'checkpoint', actualCases: 2 });
+      assert.deepEqual((drafts ? verifyMailDraftFixtureReport : verifyMailFixtureReport)(tap, 'checkpoint'), {
+        suite: 'checkpoint',
+        actualCases: 2,
+      });
       console.log(
         JSON.stringify({
-          encryptedMailCheckpoint: 'passed',
+          [drafts ? 'encryptedMailDraftCheckpoint' : 'encryptedMailCheckpoint']: 'passed',
           sourceCommit: source.commit,
           sourceTree: source.tree,
           actualDatabaseCases: 2,
@@ -317,7 +324,7 @@ await withVaultDirectory(roots, 'cache', async (cacheDirectory, cacheCurrent) =>
             generation: state.generation,
             assertAuthority,
           });
-          assert.equal(page.recorded, 8);
+          assert.equal(page.recorded, drafts ? 10 : 8);
           assert.equal(page.next_after, null);
           assert.equal(page.open_checks, 0);
           const pending = digest(await queue.pending('credentials'));
@@ -332,7 +339,7 @@ await withVaultDirectory(roots, 'cache', async (cacheDirectory, cacheCurrent) =>
           cycle.setUTCMinutes(0, 0, 0);
           stage('complete_primary_snapshot');
           const measured = await withVaultCredentialSnapshot(roots, { assertAuthority }, async (snapshot) => {
-            assert.equal(snapshot.sources.length, 11);
+            assert.equal(snapshot.sources.length, drafts ? 14 : 11);
             assert.equal(snapshot.openChecks, 0);
             const set = makeRoutedCredentialRecoveryManifest(snapshot.ownerDigest, snapshot.sources),
               capture = makeCredentialCapture(snapshot.ownerDigest, cycle.toISOString(), set);
@@ -423,7 +430,7 @@ await withVaultDirectory(roots, 'cache', async (cacheDirectory, cacheCurrent) =>
             const files = routedCredentialRecoveryFiles(capture.set, capture.ownerDigest).filter(
               (file) => file.name !== 'credential-set.json',
             );
-            assert.equal(files.length, 25);
+            assert.equal(files.length, drafts ? 32 : 25);
             for (const file of files) {
               const actual = workspace.inspectFile(file.name);
               assert.equal(actual.bytes, file.bytes);
@@ -445,11 +452,11 @@ await withVaultDirectory(roots, 'cache', async (cacheDirectory, cacheCurrent) =>
           assertAuthority();
           console.log(
             JSON.stringify({
-              completeMailCredentialRecovery: 'passed',
+              [drafts ? 'completeMailDraftCredentialRecovery' : 'completeMailCredentialRecovery']: 'passed',
               sourceCommit: source.commit,
               sourceTree: source.tree,
               actualSources: capture.set.contents.sources.length,
-              actualProfiles: 3,
+              actualProfiles: drafts ? 4 : 3,
               actualPayloadFiles: recoveredFiles,
               actualScheduledPageSources: page.recorded,
               actualFixedProducer: true,

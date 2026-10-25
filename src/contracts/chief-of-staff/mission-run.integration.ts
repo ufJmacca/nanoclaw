@@ -1,3 +1,4 @@
+import { createFixtureDatabase, createFixturePool } from './fixture-database-readiness.js';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { before, after, test } from 'node:test';
@@ -65,7 +66,7 @@ before(async () => {
   await migrate(admin, fixtureRuntimeUser());
   base = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-mission-run-'));
   for (const dir of ['artifacts', 'staging']) fs.mkdirSync(path.join(base, dir), { mode: 0o700 });
-  const database = BoundedDatabase.fromConfig(await fixtureDatabaseConfig());
+  const database = await createFixtureDatabase(await fixtureDatabaseConfig());
   knowledge = new KnowledgeStore(
     database,
     new KnowledgeArtifacts(path.join(base, 'artifacts'), path.join(base, 'staging')),
@@ -251,7 +252,7 @@ test(
   { timeout: 10000 },
   async () => {
     const { identity, input } = await mission();
-    const pool = new pg.Pool(await fixtureDatabaseConfig()),
+    const pool = await createFixturePool(await fixtureDatabaseConfig()),
       connection = await pool.connect(),
       original = connection.query.bind(connection);
     let enumerated!: () => void, proceed!: () => void;
@@ -1115,7 +1116,7 @@ test('S05-PG03 lost coordinator-call acknowledgement stays charged and cannot au
   const runs = new MissionReviewRuns(f.reviews),
     claimed = await runs.claim(f.k, f.identity.missionId, f.review.submission_id, 'review-host');
   assert.equal(claimed.status, 'ok');
-  const pool = new pg.Pool(await fixtureDatabaseConfig()),
+  const pool = await createFixturePool(await fixtureDatabaseConfig()),
     connection = await pool.connect(),
     original = connection.query.bind(connection);
   let dropped = false;
@@ -1311,7 +1312,7 @@ test('S05-PG03 lost notification-reservation acknowledgement cannot grant a late
   const f = await submitted();
   const reviewed = await f.reviews.review(f.k, randomUUID(), f.review),
     reviewId = String(reviewed.review_id);
-  const pool = new pg.Pool(await fixtureDatabaseConfig()),
+  const pool = await createFixturePool(await fixtureDatabaseConfig()),
     connection = await pool.connect(),
     original = connection.query.bind(connection);
   let dropped = false;
@@ -1748,7 +1749,7 @@ test('S05-T07 revoked source and unavailable host authority deny new usage but s
 test('S05-PG03 a lost usage-commit acknowledgement consumes the reservation without granting a second invocation', async () => {
   const { identity } = await mission();
   await running(identity);
-  const pool = new pg.Pool(await fixtureDatabaseConfig()),
+  const pool = await createFixturePool(await fixtureDatabaseConfig()),
     connection = await pool.connect(),
     original = connection.query.bind(connection);
   let dropped = false;

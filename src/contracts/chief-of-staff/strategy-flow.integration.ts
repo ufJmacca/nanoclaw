@@ -1,3 +1,4 @@
+import { createFixtureDatabase } from './fixture-database-readiness.js';
 /** Scripted native owner conversation: real private routing, isolated tools, PostgreSQL and exact approvals.
  * No live model, Mattermost account, calendar write or specialist invocation is authorised by this fixture. */
 import assert from 'node:assert/strict';
@@ -47,7 +48,7 @@ test(
       admin = await connectFixtureDatabase(process.env, 'migration');
       assert.equal((await admin.query('SELECT pg_try_advisory_lock(73101002) AS locked')).rows[0].locked, true);
       await migrate(admin, fixtureRuntimeUser());
-      database = BoundedDatabase.fromConfig(await fixtureDatabaseConfig());
+      database = await createFixtureDatabase(await fixtureDatabaseConfig());
       const knowledge = new KnowledgeStore(
           database,
           new KnowledgeArtifacts(path.join(knowledgeRoot, 'artifacts'), path.join(knowledgeRoot, 'staging')),

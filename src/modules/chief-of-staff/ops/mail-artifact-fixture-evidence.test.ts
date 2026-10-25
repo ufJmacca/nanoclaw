@@ -7,12 +7,21 @@ import {
   MAIL_NATIVE_CASES,
 } from '../../../contracts/chief-of-staff/mail-fixture-report.js';
 import {
+  MAIL_DRAFT_DATABASE_CASES,
+  MAIL_DRAFT_NATIVE_CASES,
+} from '../../../contracts/chief-of-staff/mail-draft-fixture-report.js';
+import {
   verifyMailArtifactFixtureEvidence,
   mailArtifactFixtureCertificate,
   verifyMailReleaseEvidence,
   readMailArtifactFixtureText,
   readMailCredentialFixtureText,
   readMailRecoveryFixtureText,
+  verifyMailDraftArtifactFixtureEvidence,
+  verifyMailDraftReleaseEvidence,
+  readMailDraftArtifactFixtureText,
+  readMailDraftCredentialFixtureText,
+  readMailDraftRecoveryFixtureText,
 } from './mail-artifact-fixture-evidence.js';
 const roots: string[] = [];
 afterEach(() => {
@@ -26,18 +35,20 @@ const identity = {
   workerImages: ['sha256:' + 'e'.repeat(64), 'sha256:' + 'f'.repeat(64)],
   certificateFile: '/private/mail-test/ca.pem',
 };
-const volume = 'cos-g04-mail-aaaaaaaa-10000000-0000-4000-8000-000000000001',
-  fixtureRoot = '/var/lib/docker/volumes/' + volume + '/_data';
-function fixture() {
+const volume = 'cos-g04-mail-aaaaaaaa-10000000-0000-4000-8000-000000000001';
+function fixture(drafts = false) {
+  const caseVolume = drafts ? volume.replace('g04-mail', 'g05-draft') : volume,
+    caseRoot = '/var/lib/docker/volumes/' + caseVolume + '/_data',
+    contract = drafts ? 'cos-g05-draft' : 'cos-g04-mail';
   const header = {
-    contract: 'cos-g04-mail-artifact-set/v1',
+    contract: contract + '-artifact-set/v1',
     sourceCommit: identity.sourceCommit,
     sourceTree: identity.sourceTree,
     workerAssetsDigest: identity.workerAssetsDigest,
     hostImage: identity.hostImage,
     workerImages: identity.workerImages,
-    fixtureVolume: volume,
-    fixtureRoot,
+    fixtureVolume: caseVolume,
+    fixtureRoot: caseRoot,
   };
   const runs = [null, ...identity.workerImages].map((worker) => {
     const suite = worker ? 'native' : 'database',
@@ -45,7 +56,7 @@ function fixture() {
         { Type: 'bind', Source: identity.certificateFile, Target: '/fixture/ca.pem', ReadOnly: true },
         {
           Type: 'volume',
-          Source: volume,
+          Source: caseVolume,
           Target: '/release/.cos-plan-state',
           VolumeOptions: { Subpath: '.cos-plan-state', DriverConfig: {} },
         },
@@ -63,8 +74,8 @@ function fixture() {
         },
         {
           Type: 'volume',
-          Name: volume,
-          Source: fixtureRoot,
+          Name: caseVolume,
+          Source: caseRoot,
           Destination: '/release/.cos-plan-state',
           Driver: 'local',
           RW: true,
@@ -83,7 +94,7 @@ function fixture() {
           : []),
       ];
     const scope = {
-      contract: 'cos-g04-mail-container-scope/v1',
+      contract: contract + '-container-scope/v1',
       image: identity.hostImage,
       user: '1000:1000',
       workingDirectory: '/release',
@@ -119,7 +130,7 @@ function fixture() {
       mounts,
     };
     const binding = {
-      contract: 'cos-g04-mail-host-run/v1',
+      contract: contract + '-host-run/v1',
       suite,
       hostImage: identity.hostImage,
       workerImage: worker,
@@ -139,7 +150,13 @@ function fixture() {
       installedAcceptance: false,
       storageAdmission: 'fixture',
     };
-    const names: readonly string[] = worker ? MAIL_NATIVE_CASES : [...MAIL_STORE_CASES, ...MAIL_CHECKPOINT_CASES],
+    const names: readonly string[] = drafts
+        ? worker
+          ? MAIL_DRAFT_NATIVE_CASES
+          : MAIL_DRAFT_DATABASE_CASES
+        : worker
+          ? MAIL_NATIVE_CASES
+          : [...MAIL_STORE_CASES, ...MAIL_CHECKPOINT_CASES],
       count = names.length;
     const report = [
       'TAP version 13',
@@ -162,6 +179,60 @@ const serialize = (f: ReturnType<typeof fixture>) =>
     JSON.stringify(f.header),
     ...f.runs.flatMap((run) => [JSON.stringify(run.scope), JSON.stringify(run.binding), run.report]),
   ].join('\n');
+it('binds G05 policy, transport and reconciliation to the complete sealed host/two-worker execution', () => {
+  const text = serialize(fixture(true));
+  expect(verifyMailDraftArtifactFixtureEvidence(text, identity)).toMatchObject({
+    status: 'passed',
+    actualDatabaseCases: 16,
+    actualNativeRuns: 2,
+    sourceOverrides: false,
+    installedAcceptance: false,
+  });
+  for (const gate of ['draft_policy', 'draft_transport', 'draft_reconciliation'])
+    expect(verifyMailDraftReleaseEvidence(gate, text, identity)).toMatchObject({ status: 'passed' });
+  expect(() => verifyMailDraftArtifactFixtureEvidence(serialize(fixture()), identity)).toThrow(
+    'mail_draft_artifact_release_evidence_unavailable',
+  );
+  expect(() => verifyMailArtifactFixtureEvidence(text, identity)).toThrow('mail_artifact_release_evidence_unavailable');
+});
+it.each([
+  'source',
+  'worker',
+  'missing-worker',
+  'override',
+  'scope',
+  'certificate',
+  'volume',
+  'database-report',
+  'native-report',
+  'credentials',
+  'foreign-mode',
+] as const)('rejects %s as G05 artifact evidence', (reason) => {
+  const f = fixture(true),
+    run = f.runs[0];
+  if (reason === 'source') f.header.sourceCommit = 'f'.repeat(40);
+  if (reason === 'worker') f.runs[1].binding.workerImage = identity.hostImage;
+  if (reason === 'missing-worker') f.runs.pop();
+  if (reason === 'override') f.runs[1].binding.workerSourceOverrides = true;
+  if (reason === 'scope') run.scope.host.Privileged = true;
+  if (reason === 'certificate') run.scope.host.Mounts[0].Source = '/foreign/ca.pem';
+  if (reason === 'volume') run.scope.mounts[1].Source = '/foreign';
+  if (reason === 'database-report') run.report = fixture().runs[0].report;
+  if (reason === 'native-report') f.runs[1].report = fixture().runs[1].report;
+  if (reason === 'credentials') run.binding.ownerCredentialsUsed = true;
+  if (reason === 'foreign-mode') f.header.contract = 'cos-g04-mail-artifact-set/v1';
+  expect(() => verifyMailDraftArtifactFixtureEvidence(serialize(f), identity)).toThrow(
+    'mail_draft_artifact_release_evidence_unavailable',
+  );
+});
+it('requires its own bounded private G05 artifact log filename', () => {
+  const f = privateReport(),
+    file = f.root + '/draft_artifacts.log';
+  fs.renameSync(f.file, file);
+  expect(readMailDraftArtifactFixtureText(file)).toBe(f.text);
+  expect(() => readMailArtifactFixtureText(file)).toThrow();
+  expect(() => readMailDraftArtifactFixtureText(f.root + '/mail_artifacts.log')).toThrow();
+});
 function privateReport() {
   const root = fs.mkdtempSync(os.tmpdir() + '/cos-mail-evidence-');
   roots.push(root);
@@ -171,6 +242,20 @@ function privateReport() {
   fs.writeFileSync(file, text, { mode: 0o600 });
   return { root, file, text };
 }
+it.each([
+  ['draft_credentials.log', readMailDraftCredentialFixtureText],
+  ['draft_recovery.log', readMailDraftRecoveryFixtureText],
+] as const)('keeps %s private and distinct from the reader and artifact reports', (name, read) => {
+  const f = privateReport(),
+    file = f.root + '/' + name;
+  fs.renameSync(f.file, file);
+  expect(read(file)).toBe(f.text);
+  expect(() => readMailArtifactFixtureText(file)).toThrow();
+  expect(() => readMailCredentialFixtureText(file)).toThrow();
+  expect(() => readMailRecoveryFixtureText(file)).toThrow();
+  fs.linkSync(file, file + '.alias');
+  expect(() => read(file)).toThrow();
+});
 it('reads only the private canonical bounded report used by the release coordinator', () => {
   const f = privateReport();
   expect(readMailArtifactFixtureText(f.file)).toBe(f.text);

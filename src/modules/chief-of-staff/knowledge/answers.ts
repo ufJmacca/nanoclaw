@@ -1,4 +1,5 @@
 import { citationKey, validAnswerDraft, type AnswerDraft } from '../contracts/answer-protocol.js';
+import type { MailDraftAnswerNotice } from '../mail-drafts/answer-notice.js';
 export {
   citationKey,
   validAnswerCitation,
@@ -34,9 +35,16 @@ const label = (value: string) =>
     .join('')
     .replace(/[\\`*_{}[\]<>]/g, (character) => '\\' + character);
 /** Reference correctness is blocking; whether an inference follows is a separate quality judgement. */
-export function renderAnswer(draft: AnswerDraft, resolved: ResolvedCitation[]): string {
+export function renderAnswer(
+  draft: AnswerDraft,
+  resolved: ResolvedCitation[],
+  mailDraft: MailDraftAnswerNotice | null = null,
+): string {
   if (!validAnswerDraft(draft)) throw new Error('invalid_answer_draft');
   if (draft.calendar_window) throw new Error('calendar_window_notice_required');
+  if (draft.mail_draft && mailDraft?.operationId !== draft.mail_draft.operation_id)
+    throw new Error('mail_draft_notice_required');
+  if (!draft.mail_draft && mailDraft) throw new Error('mail_draft_notice_unexpected');
   const conversation = [
     ...(draft.notice === 'approval_required'
       ? ['Proposed changes require your approval before they take effect.']
@@ -92,5 +100,6 @@ export function renderAnswer(draft: AnswerDraft, resolved: ResolvedCitation[]): 
     ...sections,
     ...footnotes,
     ...conversation,
+    ...(mailDraft ? [mailDraft.text] : []),
   ].join('\n\n');
 }

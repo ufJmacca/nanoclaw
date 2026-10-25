@@ -142,7 +142,7 @@ export async function prepareTargetArtifacts(
     fs.copyFileSync(manifestFile, destination, fs.constants.COPYFILE_EXCL);
     fs.chmodSync(destination, 0o600);
   }
-  if (['G02', 'G03', 'G04'].includes(manifest.slice)) {
+  if (['G02', 'G03', 'G04', 'G05'].includes(manifest.slice)) {
     const check = () => {
       privateDirectory(release);
       if (digest(validateReleaseManifest(readPrivate(manifestFile))) !== digest(manifest))

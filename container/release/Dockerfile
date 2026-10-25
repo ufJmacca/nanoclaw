@@ -29,7 +29,7 @@ RUN pnpm build && bun build src/modules/chief-of-staff/ops/target-bootstrap.ts -
 ARG RELEASE_SLICE=S11
 ARG SOURCE_COMMIT
 ARG SOURCE_TREE
-RUN if [ "$RELEASE_SLICE" = G01 ] || [ "$RELEASE_SLICE" = G02 ] || [ "$RELEASE_SLICE" = G03 ] || [ "$RELEASE_SLICE" = G04 ]; then \
+RUN if [ "$RELEASE_SLICE" = G01 ] || [ "$RELEASE_SLICE" = G02 ] || [ "$RELEASE_SLICE" = G03 ] || [ "$RELEASE_SLICE" = G04 ] || [ "$RELEASE_SLICE" = G05 ]; then \
       bun build src/modules/chief-of-staff/ops/vault-root-entry.ts --target=node --format=esm --packages=external --outfile=/build/vault-gateway.mjs && \
       node --input-type=module -e 'import {packageVaultRootArtifact} from "./dist/modules/chief-of-staff/ops/vault-root-package.js";packageVaultRootArtifact({sourceCommit:process.argv[1],sourceTree:process.argv[2],gateway:"/build/vault-gateway.mjs",output:"/build/vault-artifacts"})' "$SOURCE_COMMIT" "$SOURCE_TREE" && \
       rm /build/vault-gateway.mjs; \
@@ -47,12 +47,14 @@ RUN node --input-type=module -e 'import {verifyResticReleasePayload} from "./dis
 FROM host-build-${RELEASE_FLAVOUR} AS host-build-selected
 ARG RELEASE_SLICE=S11
 RUN case "$RELEASE_SLICE" in \
-      G02|G03|G04) node --input-type=module -e 'import {verifyResticReleasePayload} from "./dist/modules/chief-of-staff/ops/restic-release-payload.js";verifyResticReleasePayload("/build/libexec")' ;; \
+      G02|G03|G04|G05) node --input-type=module -e 'import {verifyResticReleasePayload} from "./dist/modules/chief-of-staff/ops/restic-release-payload.js";verifyResticReleasePayload("/build/libexec")' ;; \
       G01|S11) test ! -e /build/libexec/restic ;; \
       *) exit 1 ;; \
     esac
 RUN if [ "$RELEASE_SLICE" = G04 ]; then \
       node --input-type=module -e 'import {SCHEMA_VERSION,MIGRATIONS} from "./dist/modules/chief-of-staff/store/migrations.js";import {MAIL_CHECKSUM} from "./dist/modules/chief-of-staff/store/mail-schema.js";if(SCHEMA_VERSION!==19||MIGRATIONS.length!==19||MIGRATIONS[18].version!==19||MIGRATIONS[18].checksum!==MAIL_CHECKSUM)process.exit(1)'; \
+    elif [ "$RELEASE_SLICE" = G05 ]; then \
+      node --input-type=module -e 'import {SCHEMA_VERSION,MIGRATIONS} from "./dist/modules/chief-of-staff/store/migrations.js";import {MAIL_DRAFT_CHECKSUM} from "./dist/modules/chief-of-staff/store/mail-draft-schema.js";if(SCHEMA_VERSION!==20||MIGRATIONS.length!==20||MIGRATIONS[19].version!==20||MIGRATIONS[19].checksum!==MAIL_DRAFT_CHECKSUM)process.exit(1)'; \
     fi
 
 FROM tooling AS host

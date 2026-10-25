@@ -16,6 +16,7 @@ export type AnswerDraft = {
   notice?: 'approval_required';
   calendar?: 'coverage';
   calendar_window?: CalendarEmptyWindow;
+  mail_draft?: { operation_id: string };
 };
 /** Provider guidance; validAnswerDraft additionally enforces byte, Unicode and cross-field limits. */
 export const answerDraftSchema = {
@@ -23,6 +24,14 @@ export const answerDraftSchema = {
   additionalProperties: false,
   required: ['kind', 'coverage', 'claims'],
   properties: {
+    mail_draft: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['operation_id'],
+      properties: { operation_id: { type: 'string', pattern: '^[a-f0-9]{64}$' } },
+      description:
+        'Append the host-checked, as-of saved-draft receipt for the original operation_id from cos_mail_draft_create/status. Use kind answer and coverage limited. Cite the source email in claims when requested. The host supplies the actual status and verification time; never add your own save confirmation to the returned text.',
+    },
     calendar_window: {
       type: 'object',
       additionalProperties: false,
@@ -149,7 +158,7 @@ export function validAnswerCitation(citation: unknown): citation is AnswerCitati
 export function validAnswerDraft(value: unknown): value is AnswerDraft {
   if (
     !object(value) ||
-    !keys(value, ['kind', 'coverage', 'claims', 'questions', 'notice', 'calendar', 'calendar_window']) ||
+    !keys(value, ['kind', 'coverage', 'claims', 'questions', 'notice', 'calendar', 'calendar_window', 'mail_draft']) ||
     !['answer', 'summary'].includes(String(value.kind)) ||
     !['limited', 'conflicting', 'insufficient', 'not_applicable'].includes(String(value.coverage)) ||
     !Array.isArray(value.claims) ||
@@ -158,6 +167,17 @@ export function validAnswerDraft(value: unknown): value is AnswerDraft {
     return false;
   if (value.notice !== undefined && value.notice !== 'approval_required') return false;
   if (value.calendar !== undefined && value.calendar !== 'coverage') return false;
+  if (
+    value.mail_draft !== undefined &&
+    (!object(value.mail_draft) ||
+      !keys(value.mail_draft, ['operation_id']) ||
+      typeof value.mail_draft.operation_id !== 'string' ||
+      !/^[a-f0-9]{64}$/.test(value.mail_draft.operation_id) ||
+      value.kind !== 'answer' ||
+      value.coverage !== 'limited' ||
+      value.calendar_window !== undefined)
+  )
+    return false;
   if (
     value.calendar_window !== undefined &&
     (!validCalendarEmptyWindow(value.calendar_window) ||
@@ -190,7 +210,7 @@ export function validAnswerDraft(value: unknown): value is AnswerDraft {
   if (
     value.calendar_window !== undefined || value.coverage === 'insufficient' || value.coverage === 'not_applicable'
       ? value.claims.length !== 0
-      : value.claims.length < (value.coverage === 'conflicting' ? 2 : 1)
+      : value.claims.length < (value.coverage === 'conflicting' ? 2 : value.mail_draft ? 0 : 1)
   )
     return false;
   for (const claim of value.claims) {

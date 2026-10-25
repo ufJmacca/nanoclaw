@@ -99,6 +99,7 @@ export class KnowledgeStore {
       calendarEnabled?(): boolean;
       mailAccess?(scopeId: string, bindingId: string): boolean;
       mailEnabled?(): boolean;
+      mailDraftNotice?: KnowledgeAnswers['dependencies']['mailDraftNotice'];
     } = {},
   ) {
     this.retrievalEnabled = options.retrievalEnabled ?? (() => true);
@@ -125,6 +126,7 @@ export class KnowledgeStore {
       sourcesReadable: (client, context, ids) => this.sourcesReadable(client, context, ids),
       retrievalEnabled: this.retrievalEnabled,
       calendarNotice: this.calendarNotice,
+      ...(options.mailDraftNotice ? { mailDraftNotice: options.mailDraftNotice } : {}),
       ...(this.mailNotice
         ? {
             mailNotice: this.mailNotice,

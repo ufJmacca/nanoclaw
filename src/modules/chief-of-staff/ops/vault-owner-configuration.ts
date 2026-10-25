@@ -18,7 +18,7 @@ export function vaultOwnerConfiguration(input: {
       operationId = maintenance.owner.slice('operations-'.length),
       uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
     if (
-      !['G01', 'G02', 'G03', 'G04'].includes(release.slice) ||
+      !['G01', 'G02', 'G03', 'G04', 'G05'].includes(release.slice) ||
       !release.vaultArtifact ||
       target.lifecycle !== 'protected' ||
       target.releaseId !== release.releaseId ||
@@ -32,7 +32,7 @@ export function vaultOwnerConfiguration(input: {
     )
       throw Error('owner_configuration_scope_conflict');
     const previous = input.previous ? vaultRootConfiguration(input.previous) : undefined;
-    if (['G02', 'G03', 'G04'].includes(release.slice) && !previous)
+    if (['G02', 'G03', 'G04', 'G05'].includes(release.slice) && !previous)
       throw Error('owner_configuration_predecessor_required');
     if (
       previous &&

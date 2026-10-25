@@ -5,6 +5,7 @@ const f = vi.hoisted(() => ({
   connect: vi.fn(),
   authority: vi.fn(),
   actionAuthority: vi.fn(),
+  draftAuthority: vi.fn(),
   mailPoll: vi.fn(),
   mailRetention: vi.fn(),
   tick: vi.fn(async () => {}),
@@ -48,6 +49,7 @@ vi.mock('./mail/maintenance.js', () => ({
 vi.mock('./missions/authority.js', () => ({
   createMissionAuthorityResolver: () => f.authority,
   createActionAuthorityResolver: () => f.actionAuthority,
+  createMailDraftAuthorityResolver: () => f.draftAuthority,
 }));
 vi.mock('./mail/authority.js', () => ({
   createMailAuthorities: () => ({ poll: f.mailPoll, retention: f.mailRetention }),
@@ -120,7 +122,17 @@ it('S05 production bootstrap creates specialists from the checked service store 
     undefined,
     f.actionAuthority,
     f.mailPoll,
+    f.draftAuthority,
   );
+});
+it('G05 selects its separate disabled-by-default switch and passes only native main draft authority', async () => {
+  vi.stubEnv('COS_MAIL_ENABLED', 'true');
+  vi.stubEnv('COS_MAIL_DRAFTS_ENABLED', 'true');
+  host = startCosHostModule(vi.fn());
+  const options = f.service.mock.calls[0][0];
+  await options.connect();
+  expect(f.connect.mock.calls[0][0].COS_MAIL_DRAFTS_ENABLED).toBe('true');
+  expect(f.connect.mock.calls[0][9]).toBe(f.draftAuthority);
 });
 it('G04 selects the mail switch and separates native poll and retention authority without model consent', async () => {
   vi.stubEnv('COS_MAIL_ENABLED', 'true');

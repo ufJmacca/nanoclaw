@@ -5,6 +5,7 @@ import Database from 'better-sqlite3';
 import { safeHostEnvironment } from '../../host-environment.js';
 import { selectedFixtureEnvironment } from './fixture-database.js';
 import { verifyMailFixtureReport } from './mail-fixture-report.js';
+import { verifyMailDraftFixtureReport } from './mail-draft-fixture-report.js';
 import { verifyVaultMemory } from '../../modules/chief-of-staff/ops/vault-memory.js';
 import { stopFixtureWorkers } from './fixture-workers.js';
 type Selection = {
@@ -14,12 +15,13 @@ type Selection = {
   sourceCommit: string;
   sourceTree: string;
   workerAssetsDigest: string;
+  slice?: 'G05';
 };
 export function parseMailArtifactFixtureArguments(args: string[]): Selection {
   const [suite, hostImage, workerImage, sourceCommit, sourceTree, workerAssetsDigest] = args,
     image = /^sha256:[a-f0-9]{64}$/;
   if (
-    args.length !== 6 ||
+    (args.length !== 6 && (args.length !== 7 || args[6] !== 'G05')) ||
     !['database', 'native'].includes(suite) ||
     !image.test(hostImage) ||
     (suite === 'database' ? workerImage !== '-' : !image.test(workerImage) || workerImage === hostImage) ||
@@ -35,6 +37,7 @@ export function parseMailArtifactFixtureArguments(args: string[]): Selection {
     sourceCommit,
     sourceTree,
     workerAssetsDigest,
+    ...(args.length === 7 ? { slice: 'G05' as const } : {}),
   };
 }
 /** This entry cannot run against checkout overrides or an owner profile. The
@@ -74,11 +77,12 @@ export async function runMailArtifactFixture(args: string[]): Promise<void> {
   )
     throw Error('mail_fixture_source_unverified');
   const fixtureRoot = process.env.COS_FIXTURE_HOST_ROOT,
-    fixtureImage = process.env.COS_FIXTURE_IMAGE;
+    fixtureImage = process.env.COS_FIXTURE_IMAGE,
+    contract = selected.slice === 'G05' ? 'cos-g05-draft' : 'cos-g04-mail';
   if (
     selected.suite === 'native'
       ? !fixtureRoot ||
-        !/^\/var\/lib\/docker\/volumes\/cos-g04-mail-[a-f0-9-]+\/_data$/.test(fixtureRoot) ||
+        !new RegExp('^/var/lib/docker/volumes/' + contract + '-[a-f0-9-]+/_data$').test(fixtureRoot) ||
         fixtureImage !== selected.workerImage
       : fixtureRoot !== undefined || fixtureImage !== undefined
   )
@@ -90,10 +94,11 @@ export async function runMailArtifactFixture(args: string[]): Promise<void> {
   } finally {
     db.close();
   }
+  const { slice: _slice, ...binding } = selected;
   console.log(
     JSON.stringify({
-      contract: 'cos-g04-mail-host-run/v1',
-      ...selected,
+      contract: contract + '-host-run/v1',
+      ...binding,
       actualRuntime: true,
       actualNativeSqlite: true,
       actualMemoryProtection: true,
@@ -109,9 +114,13 @@ export async function runMailArtifactFixture(args: string[]): Promise<void> {
     }),
   );
   const files =
-    selected.suite === 'database'
-      ? ['mail-store.integration', 'mail-checkpoint.integration']
-      : ['mail-flow.integration'];
+    selected.slice === 'G05'
+      ? selected.suite === 'database'
+        ? ['mail-draft-store.integration']
+        : ['mail-draft-flow.integration']
+      : selected.suite === 'database'
+        ? ['mail-store.integration', 'mail-checkpoint.integration']
+        : ['mail-flow.integration'];
   const result = spawnSync(
     process.execPath,
     [
@@ -140,7 +149,8 @@ export async function runMailArtifactFixture(args: string[]): Promise<void> {
   verifyVaultMemory();
   if (result.stdout) process.stdout.write(result.stdout);
   if (result.error || result.signal || result.status !== 0) throw Error('mail_fixture_process_failed');
-  verifyMailFixtureReport(result.stdout, selected.suite);
+  if (selected.slice === 'G05') verifyMailDraftFixtureReport(result.stdout, selected.suite);
+  else verifyMailFixtureReport(result.stdout, selected.suite);
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href)
   runMailArtifactFixture(process.argv.slice(2)).catch(() => {

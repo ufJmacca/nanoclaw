@@ -1,3 +1,4 @@
+import { createFixtureDatabase, readyFixtureDatabase } from './fixture-database-readiness.js';
 import assert from 'node:assert/strict';
 import { before, after, test } from 'node:test';
 import { randomUUID } from 'node:crypto';
@@ -81,7 +82,7 @@ before(async () => {
   await migrate(admin, fixtureRuntimeUser());
   root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-strategy-directions-'));
   for (const name of ['staging', 'artifacts']) fs.mkdirSync(path.join(root, name), { mode: 0o700 });
-  const database = BoundedDatabase.fromConfig(await fixtureDatabaseConfig());
+  const database = await createFixtureDatabase(await fixtureDatabaseConfig());
   knowledge = new KnowledgeStore(
     database,
     new KnowledgeArtifacts(path.join(root, 'artifacts'), path.join(root, 'staging')),
@@ -477,6 +478,7 @@ test('S10-PG02 losing the real accepted-decision commit reply preserves one choi
       return (original as (...args: unknown[]) => Promise<unknown>)(...args);
     }) as typeof client.query;
   });
+  await readyFixtureDatabase(new BoundedDatabase(pool));
   const database = new BoundedDatabase(pool, 350);
   const remoteKnowledge = new KnowledgeStore(database, knowledge.artifacts);
   const faulty = new PriorityStore(database, remoteKnowledge, undefined, undefined, () => authority);

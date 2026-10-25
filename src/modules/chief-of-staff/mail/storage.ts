@@ -7,19 +7,26 @@ import type { StorageInspection } from '../calendar/storage-protection.js';
 import { withVaultDirectory, verifyVaultStorage } from '../ops/vault-storage.js';
 import { verifyVaultMemory } from '../ops/vault-memory.js';
 import { readPrivate } from '../ops/target-state.js';
+import { mailProfile, type MailCredentialProfile } from './profile.js';
 export const MAIL_READER_ROOT_MARKER = '.cos-mail-reader';
 export type MailReaderRootProof = {
   filesystemUuid: string;
   directoryInodes: { profile: number; credentials: number; accessDenials: number };
   clientSha256: string;
 };
-export const mailReaderRootIdentity = (roots: CalendarStorageRoots, proof: MailReaderRootProof) => ({
-  contract: 'cos-mail-reader-root/v1',
+export const mailProfileRootIdentity = (
+  profile: MailCredentialProfile,
+  roots: CalendarStorageRoots,
+  proof: MailReaderRootProof,
+) => ({
+  contract: mailProfile(profile).contract,
   targetDigest: digest(roots.targetRoot),
   filesystemUuid: proof.filesystemUuid,
   directoryInodes: proof.directoryInodes,
   clientSha256: proof.clientSha256,
 });
+export const mailReaderRootIdentity = (roots: CalendarStorageRoots, proof: MailReaderRootProof) =>
+  mailProfileRootIdentity('mail_reader', roots, proof);
 export type PinnedMailStorage = { root: string; directory: string; readClient(): unknown; assertCurrent(): void };
 const privateDirectory = (file: string, device: number) => {
   const stat = fs.lstatSync(file);
@@ -53,10 +60,20 @@ export async function withMailReaderStorage<T>(
   inspect?: StorageInspection,
   memory: () => void = verifyVaultMemory,
 ): Promise<T> {
+  return withMailProfileStorage('mail_reader', roots, operation, inspect, memory);
+}
+export async function withMailProfileStorage<T>(
+  profile: MailCredentialProfile,
+  roots: CalendarStorageRoots,
+  operation: (storage: PinnedMailStorage) => Promise<T>,
+  inspect?: StorageInspection,
+  memory: () => void = verifyVaultMemory,
+): Promise<T> {
+  const selected = mailProfile(profile);
   const captured = Object.freeze({ ...roots });
   memory();
   const policy = verifyVaultStorage(captured, inspect),
-    root = path.join(policy.vaultRoot, 'google/calendar/mail-reader');
+    root = path.join(policy.vaultRoot, 'google/calendar', selected.directory);
   return withVaultDirectory(
     captured,
     'google/calendar',
@@ -72,7 +89,7 @@ export async function withMailReaderStorage<T>(
           const named = relative ? path.join(root, relative) : root,
             stat = privateDirectory(named, parentStat.dev);
           const fd = fs.openSync(
-            relative ? '/proc/self/fd/' + handles[0] + '/' + relative : parent + '/mail-reader',
+            relative ? '/proc/self/fd/' + handles[0] + '/' + relative : parent + '/' + selected.directory,
             fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW,
           );
           handles.push(fd);
@@ -82,7 +99,7 @@ export async function withMailReaderStorage<T>(
         });
         const directory = '/proc/self/fd/' + handles[0];
         const files = [
-          [MAIL_READER_ROOT_MARKER, 4096],
+          [selected.marker, 4096],
           ['oauth-client.json', 16384],
         ].map(([name, maximum]) => {
           const fd = fs.openSync(
@@ -110,7 +127,7 @@ export async function withMailReaderStorage<T>(
           current();
           if (
             fs.readdirSync(directory).sort().join(',') !==
-            '.cos-mail-reader,access-denials,credentials,oauth-client.json'
+            selected.marker + ',access-denials,credentials,oauth-client.json'
           )
             throw Error('mail_configuration_shape');
           for (const { named, stat, fd } of directories) {
@@ -159,9 +176,9 @@ export async function withMailReaderStorage<T>(
         if (Object.values(directoryInodes).some((ino) => !Number.isSafeInteger(ino) || ino < 1))
           throw Error('mail_directory_identity');
         if (
-          digest(readPrivate(directory + '/' + MAIL_READER_ROOT_MARKER, 4096)) !==
+          digest(readPrivate(directory + '/' + selected.marker, 4096)) !==
           digest(
-            mailReaderRootIdentity(captured, {
+            mailProfileRootIdentity(profile, captured, {
               filesystemUuid: policy.volume.filesystemUuid,
               directoryInodes,
               clientSha256,

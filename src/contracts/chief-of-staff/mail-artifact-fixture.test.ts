@@ -18,6 +18,10 @@ it.each(['database', 'native'])('admits only fixed %s suite and immutable artifa
     workerAssetsDigest: args()[5],
   });
 });
+it.each(['database', 'native'])('admits G05 %s only through the separate fixed compiled fixture profile', (suite) => {
+  expect(parseMailArtifactFixtureArguments([...args(suite), 'G05'])).toMatchObject({ suite, slice: 'G05' });
+  expect(() => parseMailArtifactFixtureArguments([...args(suite), 'G06'])).toThrow('mail_artifact_fixture_arguments');
+});
 it.each(['suite', 'host', 'worker', 'same-image', 'commit', 'tree', 'assets', 'extra', 'missing'])(
   'rejects unbound %s before running any fixture',
   (reason) => {

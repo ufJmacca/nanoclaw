@@ -11,7 +11,7 @@ afterEach(() => {
   vi.restoreAllMocks();
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
-function fixture(slice: 'G02' | 'G03' | 'G04' = 'G02') {
+function fixture(slice: 'G02' | 'G03' | 'G04' | 'G05' = 'G02') {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-job-install-'));
   roots.push(home);
   fs.chmodSync(home, 0o700);
@@ -62,7 +62,7 @@ function fixture(slice: 'G02' | 'G03' | 'G04' = 'G02') {
   const installer = createBackupJobInstaller(settings, manifest, controls);
   return { home, settings, config, units, manifest, controls, installer, events, manager };
 }
-it.each(['G02', 'G03', 'G04'] as const)(
+it.each(['G02', 'G03', 'G04', 'G05'] as const)(
   '%s publishes only the private settings and four fixed units before compile/reload/enable, then activates separately',
   async (slice) => {
     const f = fixture(slice);

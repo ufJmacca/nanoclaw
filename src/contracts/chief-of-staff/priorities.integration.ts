@@ -1,3 +1,4 @@
+import { createFixtureDatabase, createFixturePool } from './fixture-database-readiness.js';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { after, before, test } from 'node:test';
@@ -37,7 +38,7 @@ const change: Change = {
 
 test('S01-PG04 actual connection partition is bounded and reconnects to the external target', async () => {
   const relay = await connectionFault(await fixtureDatabaseConfig(process.env));
-  const partitionPool = new pg.Pool(relay.config);
+  const partitionPool = await createFixturePool(relay.config);
   const database = new BoundedDatabase(partitionPool, 350);
   try {
     assert.equal((await database.run((client) => client.query('SELECT 1 AS value'))).rows[0].value, 1);
@@ -72,8 +73,8 @@ before(async () => {
   } finally {
     await runtime.end();
   }
-  pool = new pg.Pool(await fixtureDatabaseConfig(process.env));
-  store = new PriorityStore(BoundedDatabase.fromConfig(await fixtureDatabaseConfig(process.env)));
+  pool = await createFixturePool(await fixtureDatabaseConfig(process.env));
+  store = new PriorityStore(await createFixtureDatabase(await fixtureDatabaseConfig(process.env)));
   await pool.query(
     `INSERT INTO cos.scopes(id,owner_id,instance_id,channel_id,agent_group_id,status)
     VALUES($1,$2,'fixture-instance',$1,$1,'active')`,
@@ -231,7 +232,7 @@ test('S01-T05 retry after projection loss recovers the original operation result
   const request = randomUUID();
   const first = await store.propose(context, request, change);
   assert.equal(first.status, 'ok');
-  const restarted = new PriorityStore(BoundedDatabase.fromConfig(await fixtureDatabaseConfig(process.env)));
+  const restarted = new PriorityStore(await createFixtureDatabase(await fixtureDatabaseConfig(process.env)));
   try {
     assert.deepEqual(await restarted.propose(context, request, change), first);
   } finally {
@@ -324,7 +325,7 @@ test('S01-T04 expiry and replaying a decision event across proposals deny mutati
 });
 
 test('S01-PG05 loss of COMMIT acknowledgement returns pending, then reconciles the same request', async () => {
-  const faultyPool = new pg.Pool(await fixtureDatabaseConfig(process.env));
+  const faultyPool = await createFixturePool(await fixtureDatabaseConfig(process.env));
   const connection = await faultyPool.connect();
   const original = connection.query.bind(connection);
   let dropped = false;
@@ -356,7 +357,12 @@ test('S01-PG05 loss of COMMIT acknowledgement returns pending, then reconciles t
 
 test('S01-PG02 a real maintenance lease excludes runtime operations across independent connections', async () => {
   const maintenance = await connectFixtureDatabase(process.env);
-  const runtime = new BoundedDatabase(new pg.Pool(await fixtureDatabaseConfig(process.env)), 2000, 2, () => true);
+  const runtime = new BoundedDatabase(
+    await createFixturePool(await fixtureDatabaseConfig(process.env)),
+    2000,
+    2,
+    () => true,
+  );
   let finish!: () => void;
   let entered!: () => void;
   const entering = new Promise<void>((resolve) => {

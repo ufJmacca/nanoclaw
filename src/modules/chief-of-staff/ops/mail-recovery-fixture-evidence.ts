@@ -1,11 +1,19 @@
 import { verifyMailFixtureReport } from '../../../contracts/chief-of-staff/mail-fixture-report.js';
-import { verifyMailVaultFixtureEvidence } from './mail-vault-fixture-evidence.js';
+import { verifyMailVaultFixtureEvidence, verifyMailDraftVaultFixtureEvidence } from './mail-vault-fixture-evidence.js';
+import { verifyMailDraftFixtureReport } from '../../../contracts/chief-of-staff/mail-draft-fixture-report.js';
 type Identity = { sourceCommit: string; sourceTree: string; fixtureImage: string };
 /** Recovery requires both exact schema cases and the full actual encrypted
  * credential composition. A successful exit or token-only archive is insufficient. */
 export function verifyMailRecoveryFixtureEvidence(text: string, identity: Identity) {
+  return verifyMailProfileRecoveryEvidence(text, identity, false);
+}
+export function verifyMailDraftRecoveryFixtureEvidence(text: string, identity: Identity) {
+  return verifyMailProfileRecoveryEvidence(text, identity, true);
+}
+function verifyMailProfileRecoveryEvidence(text: string, identity: Identity, drafts: boolean) {
   try {
-    verifyMailVaultFixtureEvidence(text, identity, 'mail-recovery-kernel');
+    if (drafts) verifyMailDraftVaultFixtureEvidence(text, identity, 'draft-recovery-kernel');
+    else verifyMailVaultFixtureEvidence(text, identity, 'mail-recovery-kernel');
     const records = text
       .trim()
       .split('\n')
@@ -18,10 +26,15 @@ export function verifyMailRecoveryFixtureEvidence(text: string, identity: Identi
     const match = (record: Record<string, unknown>, expected: Record<string, unknown>) => {
       for (const [key, value] of Object.entries(expected)) if (record[key] !== value) throw Error('recovery_field');
     };
-    const checkpoint = one('encryptedMailCheckpoint'),
-      credentials = one('completeMailCredentialRecovery');
+    const checkpointKey = drafts ? 'encryptedMailDraftCheckpoint' : 'encryptedMailCheckpoint',
+      credentialKey = drafts ? 'completeMailDraftCredentialRecovery' : 'completeMailCredentialRecovery',
+      checkpoint = one(checkpointKey),
+      credentials = one(credentialKey),
+      sources = drafts ? 14 : 11,
+      profiles = drafts ? 4 : 3,
+      files = drafts ? 32 : 25;
     match(checkpoint, {
-      encryptedMailCheckpoint: 'passed',
+      [checkpointKey]: 'passed',
       sourceCommit: identity.sourceCommit,
       sourceTree: identity.sourceTree,
       actualDatabaseCases: 2,
@@ -37,15 +50,16 @@ export function verifyMailRecoveryFixtureEvidence(text: string, identity: Identi
       liveAccountAcceptance: false,
       installedAcceptance: false,
     });
-    verifyMailFixtureReport(checkpoint.tap as string, 'checkpoint');
+    if (drafts) verifyMailDraftFixtureReport(checkpoint.tap as string, 'checkpoint');
+    else verifyMailFixtureReport(checkpoint.tap as string, 'checkpoint');
     match(credentials, {
-      completeMailCredentialRecovery: 'passed',
+      [credentialKey]: 'passed',
       sourceCommit: identity.sourceCommit,
       sourceTree: identity.sourceTree,
-      actualSources: 11,
-      actualProfiles: 3,
-      actualPayloadFiles: 25,
-      actualScheduledPageSources: 8,
+      actualSources: sources,
+      actualProfiles: profiles,
+      actualPayloadFiles: files,
+      actualScheduledPageSources: drafts ? 10 : 8,
       actualFixedProducer: true,
       actualPinnedRestic: true,
       actualEncryptedJournal: true,
@@ -71,9 +85,9 @@ export function verifyMailRecoveryFixtureEvidence(text: string, identity: Identi
       installedAcceptance: false,
       compiledProductionPayload: true,
     });
-    return { actualDatabaseCases: 2, actualSources: 11, actualProfiles: 3, actualPayloadFiles: 25 };
+    return { actualDatabaseCases: 2, actualSources: sources, actualProfiles: profiles, actualPayloadFiles: files };
   } catch {
     // eslint-disable-next-line preserve-caught-error -- Private fixture and credential diagnostics do not become release authority.
-    throw Error('mail_recovery_evidence_unavailable');
+    throw Error(drafts ? 'mail_draft_recovery_evidence_unavailable' : 'mail_recovery_evidence_unavailable');
   }
 }

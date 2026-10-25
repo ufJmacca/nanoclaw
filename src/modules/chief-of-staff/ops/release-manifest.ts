@@ -17,6 +17,7 @@ import { ACTION_CHECKSUM } from '../store/action-schema.js';
 import { STRATEGY_CHECKSUM } from '../store/strategy-schema.js';
 import { STRATEGY_CHAIN_CHECKSUM } from '../store/strategy-chain-schema.js';
 import { MAIL_CHECKSUM } from '../store/mail-schema.js';
+import { MAIL_DRAFT_CHECKSUM } from '../store/mail-draft-schema.js';
 import { digest } from '../domain/contracts.js';
 import { vaultRootArtifactSeal, type VaultRootArtifactSeal } from './vault-root-artifact.js';
 import { validateResticArtifactSeal, type RESTIC_ARTIFACT } from './restic-artifact.js';
@@ -54,7 +55,22 @@ export const MAIL_RELEASE_CHECKS = [
   'mail_retention',
   'mail_recovery',
 ] as const;
+export const MAIL_DRAFT_RELEASE_CHECKS = [
+  'draft_credentials',
+  'draft_policy',
+  'draft_transport',
+  'draft_reconciliation',
+  'draft_recovery',
+] as const;
 export function requiredReleaseChecks(slice: ReleaseManifest['slice']): readonly string[] {
+  if (slice === 'G05')
+    return [
+      ...REQUIRED_RELEASE_CHECKS,
+      ...VAULT_RELEASE_CHECKS,
+      ...BACKUP_RELEASE_CHECKS,
+      ...MAIL_RELEASE_CHECKS,
+      ...MAIL_DRAFT_RELEASE_CHECKS,
+    ];
   if (slice === 'G04')
     return [...REQUIRED_RELEASE_CHECKS, ...VAULT_RELEASE_CHECKS, ...BACKUP_RELEASE_CHECKS, ...MAIL_RELEASE_CHECKS];
   if (slice === 'G02' || slice === 'G03')
@@ -79,7 +95,8 @@ export type ReleaseManifest = {
     | 'G01'
     | 'G02'
     | 'G03'
-    | 'G04';
+    | 'G04'
+    | 'G05';
   vaultArtifact?: { digest: string; seal: VaultRootArtifactSeal };
   backupArtifact?: typeof RESTIC_ARTIFACT;
   platform: 'linux/arm64';
@@ -114,9 +131,24 @@ export function validateReleaseManifest(value: unknown): ReleaseManifest {
     !object(value) ||
     value.contract !== 'cos-release/v1' ||
     typeof value.slice !== 'string' ||
-    !['S01', 'S02', 'S03', 'S04', 'S05', 'S06', 'S07', 'S08', 'S09', 'S10', 'S11', 'G01', 'G02', 'G03', 'G04'].includes(
-      value.slice,
-    ) ||
+    ![
+      'S01',
+      'S02',
+      'S03',
+      'S04',
+      'S05',
+      'S06',
+      'S07',
+      'S08',
+      'S09',
+      'S10',
+      'S11',
+      'G01',
+      'G02',
+      'G03',
+      'G04',
+      'G05',
+    ].includes(value.slice) ||
     value.platform !== 'linux/arm64' ||
     value.rpc !== 'cos-rpc/v1' ||
     !matches(value.releaseId, /^release-[a-zA-Z0-9_-]{1,120}$/) ||
@@ -156,9 +188,11 @@ export function validateReleaseManifest(value: unknown): ReleaseManifest {
                       ? 15
                       : value.slice === 'S09'
                         ? 16
-                        : value.slice === 'G04'
-                          ? 19
-                          : 18;
+                        : value.slice === 'G05'
+                          ? 20
+                          : value.slice === 'G04'
+                            ? 19
+                            : 18;
   const checksums = [
     INITIAL_CHECKSUM,
     KNOWLEDGE_CHECKSUM,
@@ -179,6 +213,7 @@ export function validateReleaseManifest(value: unknown): ReleaseManifest {
     STRATEGY_CHECKSUM,
     STRATEGY_CHAIN_CHECKSUM,
     MAIL_CHECKSUM,
+    MAIL_DRAFT_CHECKSUM,
   ];
   if (
     !object(postgres) ||
@@ -223,7 +258,7 @@ export function validateReleaseManifest(value: unknown): ReleaseManifest {
     if (image.role === 'host') hosts++;
   }
   if (hosts !== 1 || !object(value.checks)) return reject();
-  if (value.slice === 'G02' || value.slice === 'G03' || value.slice === 'G04') {
+  if (value.slice === 'G02' || value.slice === 'G03' || value.slice === 'G04' || value.slice === 'G05') {
     try {
       validateResticArtifactSeal(value.backupArtifact);
       // eslint-disable-next-line no-catch-all/no-catch-all -- Invalid pinned executable identity denies release admission.
@@ -231,7 +266,13 @@ export function validateReleaseManifest(value: unknown): ReleaseManifest {
       return reject();
     }
   }
-  if (value.slice === 'G01' || value.slice === 'G02' || value.slice === 'G03' || value.slice === 'G04') {
+  if (
+    value.slice === 'G01' ||
+    value.slice === 'G02' ||
+    value.slice === 'G03' ||
+    value.slice === 'G04' ||
+    value.slice === 'G05'
+  ) {
     try {
       const artifact = value.vaultArtifact;
       if (
@@ -270,12 +311,13 @@ export function validateReleaseManifest(value: unknown): ReleaseManifest {
     if (
       (name.startsWith('vault_') ||
         name.startsWith('backup_') ||
-        (name.startsWith('mail_') && name !== 'mail_evidence')) &&
+        (name.startsWith('mail_') && name !== 'mail_evidence') ||
+        (name.startsWith('draft_') && name !== 'draft_transport')) &&
       (check.imageIds.length !== 1 || check.imageIds[0] !== host?.id)
     )
       return reject();
     if (
-      (name === 'protected_state' || name === 'mail_evidence') &&
+      (name === 'protected_state' || name === 'mail_evidence' || name === 'draft_transport') &&
       (check.imageIds.length !== images.size || new Set(check.imageIds).size !== images.size)
     )
       return reject();

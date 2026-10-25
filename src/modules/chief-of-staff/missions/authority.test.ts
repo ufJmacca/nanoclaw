@@ -157,6 +157,41 @@ it('S09 calendar authority uses the retained main coordinator without specialist
   t.db.exec('UPDATE cos_identity_boundaries SET paused=1');
   expect(resolver(t.context)).toBeNull();
 });
+it('G05 draft authority uses the retained owner main context without delegation, sign-in renewal or new model usage', () => {
+  const t = fixture();
+  fs.unlinkSync(path.join(t.root, 'mission-delegation-' + digest(t.binding.scopeId) + '.json'));
+  const resolver = nativeAuthority.createMailDraftAuthorityResolver({
+    targetRoot: t.root,
+    db: t.db,
+    admitted: t.admitted,
+    assertHostAuthority: t.assertHostAuthority,
+  });
+  const before = t.db.serialize(),
+    files = fs.readdirSync(t.root, { recursive: true });
+  expect(resolver(t.context)).toEqual({
+    bindingDigest: digest(t.binding),
+    contextGeneration: t.retained.generation,
+    draftProfileDigest: digest('cos-mail-draft/v1'),
+    provider: { profile: 'codex-subscription/coordinator-v1', model: t.policy.model, policyDigest: digest(t.policy) },
+  });
+  expect(resolver({ ...t.context, origin: { kind: 'schedule', runId: 'fixture', generation: 1 } })).toBeNull();
+  expect(
+    resolver({
+      ...t.context,
+      origin: {
+        kind: 'mission_review',
+        runId: 'fixture',
+        generation: 1,
+        submissionId: 'fixture',
+        owner: 'fixture',
+        fence: 1,
+      },
+    }),
+  ).toBeNull();
+  expect(t.db.serialize()).toEqual(before);
+  expect(fs.readdirSync(t.root, { recursive: true })).toEqual(files);
+  expect(t.owner.prepare).not.toHaveBeenCalled();
+});
 it('S05-T03 derives only current host-owned mission pins without preparing context or reserving model use', () => {
   const t = fixture();
   const before = t.db.serialize(),
@@ -242,6 +277,14 @@ it.each([
   });
   if (['no-delegation', 'disabled'].includes(kind)) expect(actionResolver(t.context)).not.toBeNull();
   else expect(actionResolver(t.context)).toBeNull();
+  const draftResolver = nativeAuthority.createMailDraftAuthorityResolver({
+    targetRoot: t.root,
+    db: t.db,
+    admitted: t.admitted,
+    assertHostAuthority: t.assertHostAuthority,
+  });
+  if (['no-delegation', 'disabled'].includes(kind)) expect(draftResolver(t.context)).not.toBeNull();
+  else expect(draftResolver(t.context)).toBeNull();
   expect(t.db.serialize()).toEqual(before);
   expect(fs.readdirSync(t.root, { recursive: true })).toEqual(files);
 });

@@ -1,3 +1,4 @@
+import { createFixturePool } from './fixture-database-readiness.js';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { before, after, test } from 'node:test';
@@ -64,7 +65,7 @@ before(async () => {
   admin = await connectFixtureDatabase(process.env, 'migration');
   assert.equal((await admin.query('SELECT pg_try_advisory_lock(73101002) AS locked')).rows[0].locked, true);
   assert.equal(await migrate(admin, fixtureRuntimeUser()), SCHEMA_VERSION);
-  pool = new pg.Pool(await fixtureDatabaseConfig());
+  pool = await createFixturePool(await fixtureDatabaseConfig());
   base = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-proactive-fixture-'));
   for (const dir of ['artifacts', 'staging']) fs.mkdirSync(path.join(base, dir), { mode: 0o700 });
   const database = new BoundedDatabase(pool);
@@ -409,7 +410,7 @@ test('S07-PG01 lost dismissal commit acknowledgement remains unresolved until th
     (await store.decide(owner, String(preview.proposal_id), String(preview.confirmation_token), 'approve')).status,
     'ok',
   );
-  const faultyPool = new pg.Pool(await fixtureDatabaseConfig()),
+  const faultyPool = await createFixturePool(await fixtureDatabaseConfig()),
     connection = await faultyPool.connect();
   const query = connection.query.bind(connection);
   let dropped = false;
@@ -459,7 +460,7 @@ test('S07-PG01 a real partition cannot acknowledge acceptance, invent empty hist
   });
   assert.equal(preview.status, 'ok');
   const relay = await connectionFault(await fixtureDatabaseConfig()),
-    faultyPool = new pg.Pool(relay.config),
+    faultyPool = await createFixturePool(relay.config),
     database = new BoundedDatabase(faultyPool, 350);
   const faulty = new PriorityStore(database, knowledge),
     owner = { ...context, ingressId: randomUUID() };

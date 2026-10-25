@@ -1,0 +1,155 @@
+/** Synthetic verifier inputs only; never execution or release evidence. */
+import { MAIL_CHECKPOINT_CASES } from './mail-fixture-report.js';
+export const identity = {
+  sourceCommit: 'a'.repeat(40),
+  sourceTree: 'b'.repeat(40),
+  fixtureImage: 'sha256:' + 'c'.repeat(64),
+};
+export const tap = [
+  'TAP version 13',
+  ...MAIL_CHECKPOINT_CASES.map((name, index) => `ok ${index + 1} - ${name}`),
+  '1..2',
+  '# tests 2',
+  '# suites 0',
+  '# pass 2',
+  '# fail 0',
+  '# cancelled 0',
+  '# skipped 0',
+  '# todo 0',
+].join('\n');
+export function mailRecoveryEvidenceFixture(drafts = false): Record<string, unknown>[] {
+  const rows: Record<string, unknown>[] = [
+    { vaultFixtureImage: identity.fixtureImage, sourceCommit: identity.sourceCommit, mode: 'mail-recovery-kernel' },
+    { rootOrchestration: 'passed', managerActivation: 'modeled', targetLeases: 'not_exercised' },
+    { rootRecoveryWire: 'passed', liveOwnerProof: 'verified', realRecoverySlot: 'verified', recoveryKeyOnDisk: false },
+    {
+      kernelVault: 'passed',
+      volumeBytes: 1073741824,
+      bootKeyRemoved: true,
+      recoveredCanary: true,
+      wrongKeyDenied: true,
+      mountRaceDenied: true,
+      plaintextFallback: false,
+      memoryProtection: 'verified',
+      recoveryKeyOnDisk: false,
+      keychainRecovery: 'verified',
+    },
+    {
+      contract: 'cos-g04-mail-vault-fixture/v1',
+      sourceCommit: identity.sourceCommit,
+      sourceTree: identity.sourceTree,
+      compiledProductionPayload: true,
+      actualKernelVault: true,
+      actualMemoryProtection: true,
+      storageOverrides: false,
+      memoryOverrides: false,
+      journalOverrides: false,
+      ownerCredentialsUsed: false,
+      oauthTransport: 'fixture',
+      setupAuthority: 'fixture',
+      liveAccountAcceptance: false,
+      installedAcceptance: false,
+    },
+    {
+      mailVaultStage: 'install',
+      separateClient: true,
+      retryPreserved: true,
+      credentialGeneration: 2,
+      actualEncryptedJournal: true,
+      journalEvents: 3,
+      deniedCrossAccount: true,
+      denialPreserved: true,
+    },
+    { mailVaultStage: 'directory_races', deniedCases: 7, replacementWrites: 0 },
+    {
+      mailVaultStage: 'mount_loss',
+      heldHostDenied: true,
+      tokenDenied: true,
+      denialWriteDenied: true,
+      journalDenied: true,
+      setupDenied: true,
+      closeSettled: true,
+    },
+    { mailVaultStage: 'recovered', credentialsPreserved: true, denialPreserved: true, journalPreserved: true },
+    { mailVaultStage: 'unavailable', openDenied: true, setupDenied: true, plaintextWrites: 0 },
+    {
+      encryptedMailCheckpoint: 'passed',
+      sourceCommit: identity.sourceCommit,
+      sourceTree: identity.sourceTree,
+      actualDatabaseCases: 2,
+      tap,
+      actualKernelVault: true,
+      actualPinnedStaging: true,
+      actualMemoryProtection: true,
+      compiledProductionPayload: true,
+      sourceOverrides: false,
+      databaseProfile: 'test',
+      databaseTls: 'verify-full',
+      runtimeProfileUsed: false,
+      ownerCredentialsUsed: false,
+      liveAccountAcceptance: false,
+      installedAcceptance: false,
+    },
+    {
+      completeMailCredentialRecovery: 'passed',
+      sourceCommit: identity.sourceCommit,
+      sourceTree: identity.sourceTree,
+      actualSources: 11,
+      actualProfiles: 3,
+      actualPayloadFiles: 25,
+      actualScheduledPageSources: 8,
+      actualFixedProducer: true,
+      actualPinnedRestic: true,
+      actualEncryptedJournal: true,
+      actualKernelWriter: true,
+      actualIsolatedRestore: true,
+      actualMemoryProtection: true,
+      actualKernelVault: true,
+      productionStorageOverrides: false,
+      productionMemoryOverrides: false,
+      offlinePendingPreserved: true,
+      repeatedUploadReconciled: true,
+      unchangedPageReused: true,
+      pendingRetired: false,
+      completeArchiveStaged: false,
+      protectedAuthorityUnchanged: true,
+      restoredAuthorityActivated: false,
+      privateWorkspaceRemoved: true,
+      targetAndServiceAdmission: 'fixture',
+      repositoryAdmission: 'fixture',
+      liveNasAcceptance: false,
+      ownerCredentialsUsed: false,
+      liveAccountAcceptance: false,
+      installedAcceptance: false,
+      compiledProductionPayload: true,
+    },
+    {
+      mailVaultStage: 'unrelated_worker_mount',
+      actualKernelChange: true,
+      actualNamespaceBind: true,
+      namespaceRootObserved: true,
+      credentialsUsableAcrossNamespaceChanges: true,
+      sameHeldMailHost: true,
+      credentialsUsableMountedAndUnmounted: true,
+      ownerCredentialsUsed: false,
+    },
+  ];
+  if (drafts) {
+    rows[0].mode = 'draft-recovery-kernel';
+    rows[4].contract = 'cos-g05-draft-vault-fixture/v1';
+    rows[4].credentialProfile = 'mail_draft_writer';
+    Object.assign(rows[5], { readerProfilePreserved: true, readerOnlyScope: true, readerJournalEvents: 1 });
+    delete rows[10].encryptedMailCheckpoint;
+    rows[10].encryptedMailDraftCheckpoint = 'passed';
+    rows[10].tap = tap.replaceAll('G04 schema-18', 'G05 schema-19').replaceAll('G04 schema-19', 'G05 schema-20');
+    delete rows[11].completeMailCredentialRecovery;
+    Object.assign(rows[11], {
+      completeMailDraftCredentialRecovery: 'passed',
+      actualSources: 14,
+      actualProfiles: 4,
+      actualPayloadFiles: 32,
+      actualScheduledPageSources: 10,
+    });
+  }
+  return rows;
+}

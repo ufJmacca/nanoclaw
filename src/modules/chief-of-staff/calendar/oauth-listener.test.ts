@@ -3,9 +3,10 @@ import http from 'node:http';
 import {
   startCalendarAuthorization,
   startMailAuthorization,
+  startMailDraftAuthorization,
   type CalendarAuthorizationListener,
 } from './oauth-listener.js';
-import { GOOGLE_MAIL_READ_SCOPE } from './oauth-core.js';
+import { GOOGLE_MAIL_READ_SCOPE, GOOGLE_MAIL_DRAFT_SCOPE } from './oauth-core.js';
 import { GOOGLE_EVENT_READ_SCOPE } from './reader.js';
 const client = { clientId: 'fixture-client.apps.googleusercontent.com' };
 const listeners: CalendarAuthorizationListener[] = [];
@@ -22,6 +23,47 @@ const reply = () =>
       scope: GOOGLE_EVENT_READ_SCOPE,
     }),
   );
+it.each([
+  GOOGLE_MAIL_DRAFT_SCOPE,
+  GOOGLE_MAIL_READ_SCOPE,
+  GOOGLE_MAIL_DRAFT_SCOPE + ' https://www.googleapis.com/auth/gmail.send',
+])('keeps the separate Mail draft listener on its exact compose grant: %s', async (scope) => {
+  const provider = vi.fn(
+    async () =>
+      new Response(
+        JSON.stringify({
+          access_token: 'FIXTURE_DRAFT_ACCESS',
+          refresh_token: 'FIXTURE_DRAFT_REFRESH',
+          expires_in: 3600,
+          token_type: 'Bearer',
+          scope,
+        }),
+      ),
+  );
+  const listener = await startMailDraftAuthorization(client, { fetch: provider });
+  listeners.push(listener);
+  const authorization = new URL(listener.authorizationUrl);
+  expect(authorization.searchParams.get('scope')).toBe(GOOGLE_MAIL_DRAFT_SCOPE);
+  expect(authorization.searchParams.get('include_granted_scopes')).not.toBe('true');
+  expect(authorization.searchParams.get('code_challenge_method')).toBe('S256');
+  const callback = new URL(authorization.searchParams.get('redirect_uri')!);
+  expect(callback.hostname).toBe('127.0.0.1');
+  callback.searchParams.set('code', 'fixture-code');
+  callback.searchParams.set('state', authorization.searchParams.get('state')!);
+  const result = listener.result.catch((error: Error) => error),
+    response = await fetch(callback),
+    text = await response.text();
+  expect(text).not.toContain('FIXTURE_');
+  if (scope === GOOGLE_MAIL_DRAFT_SCOPE) {
+    expect(response.status).toBe(200);
+    expect(await result).toMatchObject({ scopes: [GOOGLE_MAIL_DRAFT_SCOPE] });
+    expect(text).toContain('Mail');
+  } else {
+    expect(response.status).toBe(400);
+    expect(await result).toBeInstanceOf(Error);
+  }
+  expect(provider).toHaveBeenCalledOnce();
+});
 it.each([
   GOOGLE_MAIL_READ_SCOPE,
   GOOGLE_EVENT_READ_SCOPE,

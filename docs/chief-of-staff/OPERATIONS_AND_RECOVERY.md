@@ -121,7 +121,6 @@ It restarts ordinary NanoClaw operation while the CoS binding remains paused;
 
 ## Install the G01 vault
 
-G01 remains a draft candidate; its target installation and acceptance are pending.
 Use this procedure only after the exact Mac-tested G01 bundle has been verified,
 deployed and recorded healthy on the existing protected target. The S11 payload
 cannot run these vault commands. Capacity must cover release staging, pinned
@@ -335,6 +334,18 @@ pruning. These operations do not unlock stale Restic locks, repair corruption,
 initialize a repository or restore data.
 Neither the saved capture claim nor a queue status grants permission to restore
 primary state or remove a completed pending backup.
+
+## Saved Gmail reply drafts (G05)
+
+Use [the saved-draft operating guide](MAIL_DRAFTS.md) for the separate writer
+client/consent, fixed five-per-Sydney-day policy, independent effect history,
+local disable and combined schema-20/credential restore check. Linking a writer
+does not enable it. A runtime switch, restored checkpoint or successful backup
+cannot grant draft authority or replenish the model allowance.
+
+Retain the original operation ID after an uncertain draft submission and
+reconcile its status. Preserve edited, missing, sent and collision observations;
+never clear or recreate independent history to obtain another save.
 
 ## Rotate credentials
 

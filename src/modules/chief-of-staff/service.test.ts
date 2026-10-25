@@ -63,6 +63,48 @@ it('G04 retires actual mail work and pinned credentials before releasing the sha
   await retiring;
   expect(f.end).toHaveBeenCalledOnce();
 });
+it('G05 drains draft work before closing its shared reader and database pool', async () => {
+  const f = fixture(true);
+  let release!: () => void;
+  const draftClose = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+    ),
+    mailClose = vi.fn(async () => {});
+  Object.assign(f.store, { mailDraftHost: { close: draftClose }, mail: { close: mailClose } });
+  await f.service.tick();
+  f.admission.mockReturnValue(false);
+  const retiring = f.service.tick();
+  await vi.waitFor(() => expect(draftClose).toHaveBeenCalledOnce());
+  expect(mailClose).not.toHaveBeenCalled();
+  expect(f.end).not.toHaveBeenCalled();
+  release();
+  await retiring;
+  expect(mailClose).toHaveBeenCalledOnce();
+  expect(f.end).toHaveBeenCalledOnce();
+  expect(draftClose.mock.invocationCallOrder[0]).toBeLessThan(mailClose.mock.invocationCallOrder[0]);
+  expect(mailClose.mock.invocationCallOrder[0]).toBeLessThan(f.end.mock.invocationCallOrder[0]);
+});
+it('G05 cannot open a replacement reader or pool while draft retirement is uncertain', async () => {
+  const f = fixture(true),
+    draftClose = vi.fn(async () => {}),
+    mailClose = vi.fn(async () => {});
+  Object.assign(f.store, { mailDraftHost: { close: draftClose }, mail: { close: mailClose } });
+  await f.service.tick();
+  draftClose.mockRejectedValue(Error('PRIVATE_DRAFT_RETIREMENT'));
+  f.admission.mockReturnValue(false);
+  await f.service.tick();
+  f.admission.mockReturnValue(true);
+  await f.service.tick();
+  expect(f.connect).toHaveBeenCalledOnce();
+  expect(mailClose).not.toHaveBeenCalled();
+  expect(f.end).not.toHaveBeenCalled();
+  draftClose.mockResolvedValue();
+  await f.service.tick();
+  expect(f.connect).toHaveBeenCalledTimes(2);
+});
 it('G04 retains uncertain mail retirement and never opens a replacement owner over it', async () => {
   const f = fixture(true),
     close = vi.fn(async () => {});

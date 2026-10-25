@@ -1,3 +1,4 @@
+import { createFixtureDatabase, createFixturePool } from './fixture-database-readiness.js';
 import assert from 'node:assert/strict';
 import { after, before, test } from 'node:test';
 import { randomUUID } from 'node:crypto';
@@ -63,7 +64,7 @@ before(async () => {
   await migrate(admin, fixtureRuntimeUser());
   root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-strategy-collection-'));
   for (const name of ['staging', 'artifacts']) fs.mkdirSync(path.join(root, name), { mode: 0o700 });
-  const database = BoundedDatabase.fromConfig(await fixtureDatabaseConfig());
+  const database = await createFixtureDatabase(await fixtureDatabaseConfig());
   knowledge = new KnowledgeStore(
     database,
     new KnowledgeArtifacts(path.join(root, 'artifacts'), path.join(root, 'staging')),
@@ -275,7 +276,7 @@ test('S10 excludes foreign and unselected records, work and sources from every r
 });
 test('S10-PG01 an actual TCP partition after reading priorities returns incomplete without a partial review or local fallback', async () => {
   const relay = await connectionFault(await fixtureDatabaseConfig()),
-    database = new BoundedDatabase(new pg.Pool(relay.config), 350),
+    database = new BoundedDatabase(await createFixturePool(relay.config), 350),
     remoteKnowledge = new KnowledgeStore(database, knowledge.artifacts),
     remoteStore = new PriorityStore(database, remoteKnowledge);
   let reached = false;

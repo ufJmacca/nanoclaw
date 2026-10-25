@@ -7,7 +7,7 @@ beforeEach(() => {
   vi.mocked(verifyResticBinary).mockReset();
 });
 
-it.each(['G02', 'G03', 'G04'])('admits only the explicitly verified public executable for %s', (slice) => {
+it.each(['G02', 'G03', 'G04', 'G05'])('admits only the explicitly verified public executable for %s', (slice) => {
   expect(
     selectedBackupFixtureEnvironment(slice, {
       COS_BACKUP_FIXTURE_BINARY: '/backup-artifact/restic',
@@ -17,11 +17,14 @@ it.each(['G02', 'G03', 'G04'])('admits only the explicitly verified public execu
   ).toEqual({ COS_BACKUP_FIXTURE_BINARY: '/backup-artifact/restic' });
   expect(verifyResticBinary).toHaveBeenCalledExactlyOnceWith('/backup-artifact/restic');
 });
-it.each(['G02', 'G03', 'G04'])('%s requires an explicit executable without a source or runtime fallback', (slice) => {
-  expect(() => selectedBackupFixtureEnvironment(slice, {})).toThrow('backup_fixture_artifact_required');
-  expect(verifyResticBinary).not.toHaveBeenCalled();
-});
-it.each(['G02', 'G03', 'G04'])('%s refuses an unverified executable before any fixture is started', (slice) => {
+it.each(['G02', 'G03', 'G04', 'G05'])(
+  '%s requires an explicit executable without a source or runtime fallback',
+  (slice) => {
+    expect(() => selectedBackupFixtureEnvironment(slice, {})).toThrow('backup_fixture_artifact_required');
+    expect(verifyResticBinary).not.toHaveBeenCalled();
+  },
+);
+it.each(['G02', 'G03', 'G04', 'G05'])('%s refuses an unverified executable before any fixture is started', (slice) => {
   vi.mocked(verifyResticBinary).mockImplementation(() => {
     throw Error('backup_artifact_unverified');
   });

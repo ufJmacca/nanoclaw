@@ -20,6 +20,7 @@ import { readDelegation } from './delegation.js';
 import { RESEARCH_TEMPLATE } from './work-order.js';
 import type { MissionAuthorityResolver } from './proposal-store.js';
 import type { ActionAuthorityResolver } from '../actions/authority.js';
+import type { MailDraftAuthorityResolver } from '../mail-drafts/authority.js';
 
 type AuthorityOptions = {
   targetRoot: string;
@@ -34,11 +35,18 @@ export function createMissionAuthorityResolver(options: AuthorityOptions): Missi
 export function createActionAuthorityResolver(options: AuthorityOptions): ActionAuthorityResolver {
   return createNativeAuthorityResolver(options, 'calendar_action') as ActionAuthorityResolver;
 }
+/** Main identity only; this does not grant consent, database policy, a draft reservation or model usage. */
+export function createMailDraftAuthorityResolver(options: AuthorityOptions): MailDraftAuthorityResolver {
+  return createNativeAuthorityResolver(options, 'mail_draft') as MailDraftAuthorityResolver;
+}
 
 /** Read-only local authority. Callers must separately verify current remote private membership,
  * source access and (for new requests) owner ingress. Historical ingress never renews model consent.
  */
-function createNativeAuthorityResolver(options: AuthorityOptions, profile: 'mission' | 'calendar_action') {
+function createNativeAuthorityResolver(
+  options: AuthorityOptions,
+  profile: 'mission' | 'calendar_action' | 'mail_draft',
+) {
   return (context: Context) => {
     try {
       options.assertHostAuthority();
@@ -114,7 +122,9 @@ function createNativeAuthorityResolver(options: AuthorityOptions, profile: 'miss
       };
       return profile === 'mission'
         ? { ...common, delegationDigest: digest(delegation) }
-        : { ...common, actionProfileDigest: digest('cos-calendar-action/v1') };
+        : profile === 'mail_draft'
+          ? { ...common, draftProfileDigest: digest('cos-mail-draft/v1') }
+          : { ...common, actionProfileDigest: digest('cos-calendar-action/v1') };
       // eslint-disable-next-line no-catch-all/no-catch-all -- Native and credential diagnostics cannot cross the private authority boundary.
     } catch {
       // Missing/corrupt native, private or credential state denies authority without repair or secret output.

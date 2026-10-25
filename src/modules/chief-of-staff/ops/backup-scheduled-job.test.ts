@@ -16,7 +16,7 @@ afterEach(() => {
   vi.restoreAllMocks();
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
-function fixture(slice: 'G02' | 'G03' | 'G04' = 'G02') {
+function fixture(slice: 'G02' | 'G03' | 'G04' | 'G05' = 'G02') {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-backup-schedule-'));
   roots.push(base);
   fs.chmodSync(base, 0o700);
@@ -73,7 +73,7 @@ function fixture(slice: 'G02' | 'G03' | 'G04' = 'G02') {
   const invoke = (job: 'capture' | 'upload' = 'capture') => scheduledBackupJob({ root, binding, job, effects });
   return { root, manifest, binding, effects, invoke, events };
 }
-it.each(['G02', 'G03', 'G04'] as const)(
+it.each(['G02', 'G03', 'G04', 'G05'] as const)(
   '%s reconciles the same maintenance lease after interrupted stop, captures once and dispatches after restart',
   async (slice) => {
     const f = fixture(slice);
@@ -178,6 +178,114 @@ it('starts a new scheduled ID only after the previous checkpoint is durably comp
     next = await f.invoke();
   expect(first.requestId).not.toBe(next.requestId);
   expect(f.effects.capture).toHaveBeenCalledTimes(2);
+});
+function upgradeRelease(f: ReturnType<typeof fixture>) {
+  f.manifest.releaseId = 'release-upgraded-fixture';
+  writeAtomic(f.root, 'state.json', { ...readTarget(f.root, f.binding), releaseId: f.manifest.releaseId });
+}
+it.each(['G02', 'G03', 'G04', 'G05'] as const)(
+  '%s starts a fresh current-release capture after a completed predecessor request',
+  async (slice) => {
+    const f = fixture(slice),
+      first = await f.invoke();
+    upgradeRelease(f);
+    const next = await f.invoke();
+    expect(next).toMatchObject({
+      status: 'backup_schedule_complete',
+      releaseId: f.manifest.releaseId,
+      checkpointStatus: 'backup_queued',
+      uploadDispatched: true,
+    });
+    expect(next.requestId).not.toBe(first.requestId);
+    expect(f.effects.capture.mock.calls.map(([id]) => id)).toEqual([first.requestId, next.requestId]);
+    expect(readPrivate(f.root + '/backup-scheduled-request.json')).toMatchObject({
+      phase: 'complete',
+      requestId: next.requestId,
+      releaseId: f.manifest.releaseId,
+      manifestDigest: digest(f.manifest),
+    });
+  },
+);
+it('never replaces or replays an unfinished predecessor request after an upgrade', async () => {
+  const f = fixture('G05');
+  f.effects.capture.mockRejectedValueOnce(Error('interrupted'));
+  await expect(f.invoke()).rejects.toThrow('backup_schedule_unavailable');
+  const file = f.root + '/backup-scheduled-request.json',
+    before = fs.readFileSync(file);
+  upgradeRelease(f);
+  await expect(f.invoke()).rejects.toThrow('backup_schedule_unavailable');
+  expect(fs.readFileSync(file).equals(before)).toBe(true);
+  expect(f.effects.capture).toHaveBeenCalledOnce();
+  expect(f.effects.dispatchUpload).not.toHaveBeenCalled();
+});
+it.each(['unhealthy', 'admission_closed', 'changed_marker'] as const)(
+  'preserves a completed predecessor marker when the current handoff is %s',
+  async (reason) => {
+    const f = fixture('G05');
+    await f.invoke();
+    upgradeRelease(f);
+    const file = f.root + '/backup-scheduled-request.json';
+    let expected = fs.readFileSync(file);
+    if (reason === 'unhealthy') f.effects.healthy.mockResolvedValue(false);
+    if (reason === 'admission_closed')
+      writeAtomic(f.root, 'state.json', { ...readTarget(f.root, f.binding), maintenance: true });
+    if (reason === 'changed_marker')
+      f.effects.healthy.mockImplementationOnce(async () => {
+        writeAtomic(f.root, 'backup-scheduled-request.json', {
+          ...readPrivate<Record<string, unknown>>(file),
+          requestId: randomUUID(),
+        });
+        expected = fs.readFileSync(file);
+        return true;
+      });
+    await expect(f.invoke()).rejects.toThrow('backup_schedule_unavailable');
+    expect(fs.readFileSync(file).equals(expected)).toBe(true);
+    expect(f.effects.capture).toHaveBeenCalledOnce();
+    expect(f.effects.dispatchUpload).toHaveBeenCalledOnce();
+  },
+);
+it.each([
+  'foreign_binding',
+  'invalid_manifest',
+  'invalid_release',
+  'manifest_array',
+  'release_array',
+  'request_array',
+] as const)('does not rotate completed predecessor evidence with %s', async (reason) => {
+  const f = fixture('G05');
+  await f.invoke();
+  const file = f.root + '/backup-scheduled-request.json',
+    marker = readPrivate<Record<string, unknown>>(file);
+  upgradeRelease(f);
+  writeAtomic(f.root, 'backup-scheduled-request.json', {
+    ...marker,
+    ...(reason === 'foreign_binding' ? { bindingDigest: 'f'.repeat(64) } : {}),
+    ...(reason === 'invalid_manifest' ? { manifestDigest: 'invalid' } : {}),
+    ...(reason === 'invalid_release' ? { releaseId: '../other' } : {}),
+    ...(reason === 'manifest_array' ? { manifestDigest: [marker.manifestDigest] } : {}),
+    ...(reason === 'release_array' ? { releaseId: [marker.releaseId] } : {}),
+    ...(reason === 'request_array' ? { requestId: [marker.requestId] } : {}),
+  });
+  const before = fs.readFileSync(file);
+  await expect(f.invoke()).rejects.toThrow('backup_schedule_unavailable');
+  expect(fs.readFileSync(file).equals(before)).toBe(true);
+  expect(f.effects.capture).toHaveBeenCalledOnce();
+  expect(f.effects.dispatchUpload).toHaveBeenCalledOnce();
+});
+it.each(['pending', 'complete'] as const)('rejects a changed current manifest in a %s marker', async (phase) => {
+  const f = fixture('G05');
+  await f.invoke();
+  const file = f.root + '/backup-scheduled-request.json';
+  writeAtomic(f.root, 'backup-scheduled-request.json', {
+    ...readPrivate<Record<string, unknown>>(file),
+    phase,
+    manifestDigest: 'f'.repeat(64),
+  });
+  const before = fs.readFileSync(file);
+  await expect(f.invoke()).rejects.toThrow('backup_schedule_unavailable');
+  expect(fs.readFileSync(file).equals(before)).toBe(true);
+  expect(f.effects.capture).toHaveBeenCalledOnce();
+  expect(f.effects.dispatchUpload).toHaveBeenCalledOnce();
 });
 it('keeps a completed local checkpoint when the independent upload dispatch fails', async () => {
   const f = fixture();

@@ -4,10 +4,11 @@ import type { StorageInspection } from '../calendar/storage-protection.js';
 import { verifyVaultMemory } from '../ops/vault-memory.js';
 import { CalendarAccessFences } from '../calendar/access-fences.js';
 import { MailCredentialOwner } from './credentials.js';
-import type { GoogleOAuthClient } from '../calendar/oauth-core.js';
+import { checkedClient, type GoogleOAuthClient } from '../calendar/oauth-core.js';
 import type { CredentialJournal } from '../ops/backup-credential-event.js';
 import { createVaultCredentialJournal } from '../ops/backup-credential-journal.js';
-import { withMailReaderStorage, type PinnedMailStorage } from './storage.js';
+import { withMailProfileStorage, type PinnedMailStorage } from './storage.js';
+import type { MailCredentialProfile } from './profile.js';
 export function mailSettings(env: NodeJS.ProcessEnv): { enabled: boolean } {
   const enabled = env.COS_MAIL_ENABLED ?? 'false';
   if (!['true', 'false'].includes(enabled)) throw new DatabaseConfigurationError('COS_MAIL_ENABLED');
@@ -20,7 +21,7 @@ export type MailHostFences = {
   /** Terminal lifetime settlement, including a lost-proof close diagnostic. */
   closed(): boolean;
 };
-export type MailHostCredentials = MailHostFences & { credentials: MailCredentialOwner };
+export type MailHostCredentials = MailHostFences & { readonly clientId: string; credentials: MailCredentialOwner };
 /** The credential core can persist denial after an awaited token exchange, so
  * its fence object must enforce the same held vault proof on every operation. */
 class ProtectedMailFences extends CalendarAccessFences {
@@ -55,7 +56,8 @@ class ProtectedMailFences extends CalendarAccessFences {
  * the cheap kernel guard stay live until explicit close, including awaited token
  * refreshes. Startup never initializes directories or grants account access.
  * Inspection, memory and journal arguments are code-only fixture seams. */
-async function openProfile<T extends object>(
+export async function openMailProfile<T extends object>(
+  profile: MailCredentialProfile,
   roots: CalendarStorageRoots,
   construct: (storage: PinnedMailStorage, fences: CalendarAccessFences) => T,
   inspect?: StorageInspection,
@@ -67,7 +69,8 @@ async function openProfile<T extends object>(
     accept = resolve;
     reject = fail;
   });
-  const lifetime = withMailReaderStorage(
+  const lifetime = withMailProfileStorage(
+    profile,
     roots,
     async (storage) => {
       const fences = new ProtectedMailFences(storage.root + '/access-denials', storage.assertCurrent);
@@ -115,7 +118,7 @@ export function openMailFences(
   inspect?: StorageInspection,
   memory: () => void = verifyVaultMemory,
 ): Promise<MailHostFences> {
-  return openProfile(roots, () => ({}), inspect, memory);
+  return openMailProfile('mail_reader', roots, () => ({}), inspect, memory);
 }
 export function openMailCredentials(
   roots: CalendarStorageRoots,
@@ -125,9 +128,11 @@ export function openMailCredentials(
 ): Promise<MailHostCredentials> {
   if (journal !== undefined && typeof journal !== 'function')
     return Promise.reject(Error('mail_configuration_unavailable'));
-  return openProfile(
+  return openMailProfile(
+    'mail_reader',
     roots,
     (storage, fences) => ({
+      clientId: checkedClient(storage.readClient() as GoogleOAuthClient).clientId,
       credentials: new MailCredentialOwner(
         storage.root + '/credentials',
         storage.readClient() as GoogleOAuthClient,

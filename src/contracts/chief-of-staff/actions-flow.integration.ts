@@ -1,3 +1,4 @@
+import { createFixtureDatabase } from './fixture-database-readiness.js';
 /** Scripted owner conversation through native routing, isolated MCP, approval and the existing action pump. */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
@@ -52,7 +53,7 @@ test(
       admin = await connectFixtureDatabase(process.env, 'migration');
       assert.equal((await admin.query('SELECT pg_try_advisory_lock(73101002) AS locked')).rows[0].locked, true);
       await migrate(admin, fixtureRuntimeUser());
-      database = BoundedDatabase.fromConfig(await fixtureDatabaseConfig());
+      database = await createFixtureDatabase(await fixtureDatabaseConfig());
       const priorities = new PriorityStore(database),
         db = initDb(path.join(root, 'central.db'));
       runMigrations(db);
@@ -211,6 +212,14 @@ test(
         const selected = input ?? { ...request, start: at(86400000 + offset), end: at(90000000 + offset) };
         await ingress('Find an hour tomorrow for Pilot Alpha.');
         const result = await client!.call('cos_action_propose', { request_id: requestId, request: selected });
+        if (result.status !== 'ok')
+          t.diagnostic(
+            JSON.stringify({
+              proposalStatus: result.status,
+              reason: result.result?.reason ?? null,
+              host: await host!.request('action-diagnostics'),
+            }),
+          );
         assert.equal(result.status, 'ok');
         await complete();
         await pump();
@@ -402,6 +411,7 @@ test(
           );
         },
       );
+      t.diagnostic(JSON.stringify({ finalActionDiagnostics: await host!.request('action-diagnostics') }));
       const preserved = initDb(path.join(root, 'central.db'));
       assert.equal(
         (

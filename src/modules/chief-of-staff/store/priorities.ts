@@ -49,6 +49,7 @@ import {
   type CalendarActionRequest,
 } from '../contracts/action-protocol.js';
 import { ActionStore, type ActionDependencies, type PreparedAction } from '../actions/store.js';
+import { MailDraftStore, type MailDraftDependencies } from '../mail-drafts/store.js';
 import { StrategyApprovalStore, validStrategyChange } from '../strategy/approval-store.js';
 import { DirectionStore, type PreparedDirection } from '../strategy/direction-store.js';
 import {
@@ -92,6 +93,7 @@ export class PriorityStore {
   readonly directions?: DirectionStore;
   readonly reviewArtifacts?: ReviewArtifacts;
   readonly actions: ActionStore;
+  readonly mailDrafts: MailDraftStore;
   readonly work: WorkStore;
   readonly schedules = new BriefScheduleStore();
   readonly proactive: ProactiveStore;
@@ -117,9 +119,12 @@ export class PriorityStore {
     actionDependencies?: ActionDependencies,
     readonly mailView?: MailView,
     readonly mail?: MailHost,
+    mailDraftDependencies?: MailDraftDependencies,
+    readonly mailDraftHost?: { close(): Promise<void> },
   ) {
     this.strategy = new StrategyApprovalStore(knowledge, () => this.directions);
     this.actions = new ActionStore(database, knowledge, actionDependencies);
+    this.mailDrafts = new MailDraftStore(database, knowledge, mailDraftDependencies);
     this.mandates = new MandateStore(database, knowledge, missionAuthority, () => this.missions);
     this.teams = new TeamProposalStore(knowledge, teamAuthority);
     this.teamRuns = new TeamRunStore(database, this.teams, knowledge);

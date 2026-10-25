@@ -1,3 +1,4 @@
+import { createFixtureDatabase } from './fixture-database-readiness.js';
 import assert from 'node:assert/strict';
 import { before, after, test } from 'node:test';
 import fs from 'node:fs';
@@ -7,6 +8,8 @@ import { randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import { connectFixtureDatabase, fixtureDatabaseConfig, fixtureRuntimeUser } from './fixture-database.js';
 import { migrate, SCHEMA_VERSION } from '../../modules/chief-of-staff/store/migrations.js';
+import { MAIL_CHECKSUM } from '../../modules/chief-of-staff/store/mail-schema.js';
+import { checkpointSchema } from '../../modules/chief-of-staff/ops/checkpoint-schema.js';
 import { CHECKPOINT_TABLES } from '../../modules/chief-of-staff/ops/coordinated-backup.js';
 import { BoundedDatabase } from '../../modules/chief-of-staff/store/client.js';
 import { KnowledgeArtifacts } from '../../modules/chief-of-staff/knowledge/artifacts.js';
@@ -33,7 +36,7 @@ before(async () => {
   admin = await connectFixtureDatabase(process.env, 'migration');
   assert.equal((await admin.query('SELECT pg_try_advisory_lock(73101002) AS locked')).rows[0].locked, true);
   await migrate(admin, fixtureRuntimeUser());
-  database = BoundedDatabase.fromConfig(await fixtureDatabaseConfig());
+  database = await createFixtureDatabase(await fixtureDatabaseConfig());
 });
 after(async () => {
   if (admin) {
@@ -271,9 +274,15 @@ test('G04 only one concurrent host claims a due poll; claims never fabricate a c
   assert.equal((await f.store.claimPoll(f.context, f.binding.id)).claimed, false);
 });
 test('G04 mailbox schema is additive, constrained and included in coordinated checkpoints', async () => {
-  assert.equal(SCHEMA_VERSION, 19);
-  for (const table of ['mail_bindings', 'mail_states', 'mail_captures', 'mail_messages'])
+  assert(Number(SCHEMA_VERSION) >= 19);
+  assert.equal(
+    (await admin.query('SELECT checksum FROM cos.schema_migrations WHERE version=19')).rows[0].checksum,
+    MAIL_CHECKSUM,
+  );
+  for (const table of ['mail_bindings', 'mail_states', 'mail_captures', 'mail_messages']) {
+    assert(checkpointSchema(19).tables.includes(table));
     assert(CHECKPOINT_TABLES.includes(table));
+  }
   const f = await fixture();
   assert.equal((await f.store.bind(f.context, f.binding)).status, 'ok');
   await assert.rejects(
@@ -378,7 +387,7 @@ test('G04 losing the publish response reconciles the committed receipt without d
   await f.store.start(f.context, f.binding.id, id, prepared.window);
   assert.equal((await f.store.publish(f.context, f.binding.id, id, prepared)).status, 'pending');
   await database.pool.end();
-  database = BoundedDatabase.fromConfig(await fixtureDatabaseConfig());
+  database = await createFixtureDatabase(await fixtureDatabaseConfig());
   const rebuilt = new MailStore(database, f.artifacts);
   assert.equal((await rebuilt.publish(f.context, f.binding.id, id, prepared)).status, 'ok');
   assert.equal((await rebuilt.fail(f.context, f.binding.id, id, 'mail_unavailable')).status, 'conflict');
@@ -527,7 +536,7 @@ test('G04 global-off owner tightens real paused mail storage without a source co
   assert((exposed.items as unknown[]).length > 0);
   await f.store.setAuth(f.context, f.binding.id, 'revoked');
   await admin.query("UPDATE cos.scopes SET status='paused' WHERE id=$1", [f.scope]);
-  const ownedDatabase = BoundedDatabase.fromConfig(await fixtureDatabaseConfig());
+  const ownedDatabase = await createFixtureDatabase(await fixtureDatabaseConfig());
   const host = new MailHost({ store: new MailStore(ownedDatabase, f.artifacts) });
   const maintenance = new MailMaintenance({
     admitted: () => true,
@@ -667,7 +676,7 @@ test('G04 a capture rollback admits neither mail evidence nor its cursor and rec
     null,
   );
   await database.pool.end();
-  database = BoundedDatabase.fromConfig(await fixtureDatabaseConfig());
+  database = await createFixtureDatabase(await fixtureDatabaseConfig());
   const store = new MailStore(database, f.artifacts);
   assert.equal((await store.publish(f.context, f.binding.id, id, prepared)).status, 'ok');
   assert.equal((await store.publish(f.context, f.binding.id, id, prepared)).status, 'ok');
@@ -1116,7 +1125,7 @@ test('G04 host refresh reconciles the exact committed capture after losing publi
   assert(first.prepared);
   // Reconstruct the runtime pool after the lost acknowledgement, like host recovery.
   await database.pool.end();
-  database = BoundedDatabase.fromConfig(await fixtureDatabaseConfig());
+  database = await createFixtureDatabase(await fixtureDatabaseConfig());
   const restored = new MailConnector({
     ...options,
     store: new MailStore(database, f.artifacts),

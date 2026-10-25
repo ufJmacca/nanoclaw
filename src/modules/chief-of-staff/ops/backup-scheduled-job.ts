@@ -41,7 +41,7 @@ export async function scheduledBackupJob(input: {
       const assertScope = (reopened: boolean) => {
         const state = readTarget(root, binding);
         if (
-          !['G02', 'G03', 'G04'].includes(manifest.slice) ||
+          !['G02', 'G03', 'G04', 'G05'].includes(manifest.slice) ||
           state.lifecycle !== 'protected' ||
           state.releaseId !== manifest.releaseId ||
           (reopened && admittedGeneration(root, binding) === null)
@@ -75,16 +75,27 @@ export async function scheduledBackupJob(input: {
           !value ||
           Object.keys(value).sort().join(',') !== 'bindingDigest,contract,manifestDigest,phase,releaseId,requestId' ||
           value.contract !== 'cos-backup-scheduled-request/v1' ||
+          typeof value.requestId !== 'string' ||
           !uuid.test(value.requestId) ||
           value.bindingDigest !== digest(binding) ||
-          value.manifestDigest !== digest(manifest) ||
-          value.releaseId !== manifest.releaseId ||
-          !['pending', 'complete'].includes(value.phase)
+          typeof value.manifestDigest !== 'string' ||
+          !/^[a-f0-9]{64}$/.test(value.manifestDigest) ||
+          typeof value.releaseId !== 'string' ||
+          !/^release-[a-zA-Z0-9_-]{1,120}$/.test(value.releaseId) ||
+          !['pending', 'complete'].includes(value.phase) ||
+          ((value.phase === 'pending' || value.releaseId === manifest.releaseId) &&
+            (value.manifestDigest !== digest(manifest) || value.releaseId !== manifest.releaseId))
         )
           throw Error('backup_schedule_unavailable');
         return value;
       };
       let marker = fs.lstatSync(file, { throwIfNoEntry: false }) ? readMarker() : undefined;
+      if (marker?.phase === 'complete' && marker.releaseId !== manifest.releaseId) {
+        // This is only a completed cursor. The installed healthy release must
+        // authorize a fresh request; unfinished predecessor work stays sealed.
+        await current();
+        if (digest(readMarker()) !== digest(marker)) throw Error('backup_schedule_unavailable');
+      }
       if (!marker || marker.phase === 'complete') {
         marker = {
           contract: 'cos-backup-scheduled-request/v1',
