@@ -39,7 +39,7 @@ afterEach(() => {
   for (const close of cleanup.splice(0).reverse()) close();
   vi.resetAllMocks();
 });
-function fixture(slice: 'G02' | 'G04' | 'G05' = 'G02') {
+function fixture(slice: 'G01' | 'G02' | 'G03' | 'G04' | 'G05' = 'G02') {
   const root = fs.mkdtempSync(os.tmpdir() + '/cos-owner-restore-');
   fs.chmodSync(root, 0o700);
   cleanup.push(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -172,6 +172,68 @@ function fixture(slice: 'G02' | 'G04' | 'G05' = 'G02') {
     });
   return { root, settings, manifest, binding, owner, native, args, order, checkDatabase, receiptRoot, invoke };
 }
+function selectCapture(f: ReturnType<typeof fixture>, slice: 'G01' | 'G02' | 'G03' | 'G04' | 'G05') {
+  const manifest = { ...fixtureVaultRelease(slice), releaseId: 'release-capture-' + slice.toLowerCase() },
+    directory = f.settings.releaseRoot + '/' + manifest.releaseId,
+    receiptRoot = f.settings.stateRoot + '/releases/' + manifest.releaseId,
+    receipt = readPrivate<Record<string, unknown>>(f.receiptRoot + '/deployment.json');
+  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  fs.mkdirSync(receiptRoot, { recursive: true, mode: 0o700 });
+  writeAtomic(directory, 'release.json', manifest);
+  writeAtomic(receiptRoot, 'deployment.json', {
+    ...receipt,
+    releaseId: manifest.releaseId,
+    manifestDigest: digest(manifest),
+  });
+  f.args.backupReleaseId = manifest.releaseId;
+}
+it.each(['G02', 'G03', 'G04', 'G05'] as const)(
+  'admits an ordinary %s state capture through G05 without draft setup or live activation',
+  async (slice) => {
+    const f = fixture('G05'),
+      native = f.native.serialize(),
+      state = readTarget(f.settings.stateRoot, f.binding);
+    selectCapture(f, slice);
+    await expect(f.invoke()).resolves.toMatchObject({
+      status: 'backup_test_restore_verified',
+      admission_restored: false,
+      event_journal_restored: false,
+      credentials_activated: false,
+      writer_activated: false,
+    });
+    expect(f.order).toEqual(['database', 'mount', 'restore']);
+    expect(ports.restore).toHaveBeenCalledOnce();
+    expect(ports.drafts).not.toHaveBeenCalled();
+    expect(ports.credentials).not.toHaveBeenCalled();
+    expect(fs.existsSync(f.settings.stateRoot + '/mail-drafts')).toBe(false);
+    expect(f.native.serialize()).toEqual(native);
+    expect(readTarget(f.settings.stateRoot, f.binding)).toEqual(state);
+  },
+);
+it('refuses an unsupported G01 state capture through G05 before test database or NAS access', async () => {
+  const f = fixture('G05');
+  selectCapture(f, 'G01');
+  await expect(f.invoke()).rejects.toThrow('backup_owner_restore_unavailable');
+  expect(ports.separate).not.toHaveBeenCalled();
+  expect(ports.mount).not.toHaveBeenCalled();
+  expect(ports.restore).not.toHaveBeenCalled();
+});
+it('keeps a G05 capture outside an older G04 helper recovery boundary', async () => {
+  const f = fixture('G04');
+  selectCapture(f, 'G05');
+  await expect(f.invoke()).rejects.toThrow('backup_owner_restore_unavailable');
+  expect(ports.separate).not.toHaveBeenCalled();
+  expect(ports.mount).not.toHaveBeenCalled();
+  expect(ports.restore).not.toHaveBeenCalled();
+});
+it('does not admit an ordinary state restore through a G01 helper', async () => {
+  const f = fixture('G01');
+  selectCapture(f, 'G02');
+  await expect(f.invoke()).rejects.toThrow('backup_owner_restore_unavailable');
+  expect(ports.separate).not.toHaveBeenCalled();
+  expect(ports.mount).not.toHaveBeenCalled();
+  expect(ports.restore).not.toHaveBeenCalled();
+});
 it('routes G05 combined draft recovery through the same healthy protected owner and separate marked test database lifetime', async () => {
   const f = fixture('G05'),
     args = {
@@ -231,7 +293,7 @@ it('does not admit the draft recovery command through a G04 retained helper', as
   expect(ports.drafts).not.toHaveBeenCalled();
   expect(ports.mount).not.toHaveBeenCalled();
 });
-function credentialFixture(slice: 'G02' | 'G04' = 'G04') {
+function credentialFixture(slice: 'G02' | 'G04' | 'G05' = 'G04') {
   const f = fixture(slice),
     owner = digest('vault owner'),
     bytes = Buffer.from('SYNTHETIC_RESTORED_CREDENTIAL'),
@@ -294,30 +356,35 @@ function credentialFixture(slice: 'G02' | 'G04' = 'G04') {
     });
   return { ...f, args, capture, inspect, payloadCurrent, invoke };
 }
-it('checks complete credential recovery for the current owner without a database profile, live activation or model use', async () => {
-  const f = credentialFixture(),
-    before = f.native.serialize(),
-    state = readTarget(f.settings.stateRoot, f.binding);
-  await expect(f.invoke()).resolves.toEqual({
-    status: 'backup_credentials_restore_verified',
-    request_id: f.args.requestId,
-    capture_operation_id: f.capture.operationId,
-    source_count: 1,
-    file_count: 1,
-    credential_set_digest: digest(f.capture.set),
-    credentials_activated: false,
-    admission_restored: false,
-    event_journal_restored: false,
-    writer_activated: false,
-  });
-  expect(f.inspect).toHaveBeenCalledOnce();
-  expect(f.payloadCurrent).toHaveBeenCalled();
-  expect(ports.mount).toHaveBeenCalledOnce();
-  expect(ports.separate).not.toHaveBeenCalled();
-  expect(ports.restore).not.toHaveBeenCalled();
-  expect(f.native.serialize()).toEqual(before);
-  expect(readTarget(f.settings.stateRoot, f.binding)).toEqual(state);
-});
+it.each(['G04', 'G05'] as const)(
+  'checks complete %s credential recovery without draft setup, a database profile or live activation',
+  async (slice) => {
+    const f = credentialFixture(slice),
+      before = f.native.serialize(),
+      state = readTarget(f.settings.stateRoot, f.binding);
+    await expect(f.invoke()).resolves.toEqual({
+      status: 'backup_credentials_restore_verified',
+      request_id: f.args.requestId,
+      capture_operation_id: f.capture.operationId,
+      source_count: 1,
+      file_count: 1,
+      credential_set_digest: digest(f.capture.set),
+      credentials_activated: false,
+      admission_restored: false,
+      event_journal_restored: false,
+      writer_activated: false,
+    });
+    expect(f.inspect).toHaveBeenCalledOnce();
+    expect(f.payloadCurrent).toHaveBeenCalled();
+    expect(ports.mount).toHaveBeenCalledOnce();
+    expect(ports.separate).not.toHaveBeenCalled();
+    expect(ports.restore).not.toHaveBeenCalled();
+    expect(ports.drafts).not.toHaveBeenCalled();
+    expect(fs.existsSync(f.settings.stateRoot + '/mail-drafts')).toBe(false);
+    expect(f.native.serialize()).toEqual(before);
+    expect(readTarget(f.settings.stateRoot, f.binding)).toEqual(state);
+  },
+);
 it.each(['slice', 'scope', 'health', 'payload', 'helper', 'evidence', 'args'])(
   'denies complete credential recovery on changed %s with no state import',
   async (reason) => {
