@@ -30,6 +30,7 @@ import { MailMaintenance } from '../../modules/chief-of-staff/mail/maintenance.j
 import { setTimeout as delay } from 'node:timers/promises';
 import { checkMailContext, mailAnswerNotice } from '../../modules/chief-of-staff/mail/answer-notice.js';
 import type { MailReviewReadScope } from '../../modules/chief-of-staff/automation/mail-review-access.js';
+import { loadMailReviewRecords } from '../../modules/chief-of-staff/automation/mail-review-records.js';
 const scopes: string[] = [],
   roots: string[] = [];
 let admin: pg.Client, database: BoundedDatabase;
@@ -483,6 +484,36 @@ async function publishFixture(ageMs = 1000) {
   );
   return { ...f, prepared, id, knowledge, context: { ...f.context, generation: randomUUID() } };
 }
+test('G06 preparation loads only current published owner Mail records and refuses corrupt stored content', async () => {
+  const f = await publishFixture();
+  const load = (ctx = f.context, capture = f.id) =>
+    database.run((client) => loadMailReviewRecords(client, ctx, f.binding.id, capture));
+  const records = await load();
+  assert.equal(records.length, 1);
+  assert.equal(records[0].message.id, 'aa01');
+  assert.equal(records[0].message.trust, 'untrusted_mail_evidence');
+  assert.match(records[0].message.text, /project alpha/);
+  assert.ok(records[0].revision_digest);
+  assert.deepEqual(await load({ ...f.context, ownerId: 'another-owner' }), []);
+  assert.deepEqual(await load(f.context, randomUUID()), []);
+  await assert.rejects(
+    loadMailReviewRecords(
+      admin,
+      { ...f.context, origin: { kind: 'schedule', runId: 'a'.repeat(64), generation: 1 } },
+      f.binding.id,
+      f.id,
+    ),
+    /mail_review_source_unavailable/,
+  );
+  await admin.query("UPDATE cos.sources SET status='revoked' WHERE scope_id=$1", [f.scope]);
+  assert.deepEqual(await load(), []);
+  await admin.query("UPDATE cos.sources SET status='current' WHERE scope_id=$1", [f.scope]);
+  await admin.query('UPDATE cos.mail_messages SET content_digest=$2 WHERE scope_id=$1', [
+    f.scope,
+    digest('corrupt stored content'),
+  ]);
+  await assert.rejects(loadMailReviewRecords(admin, f.context, f.binding.id, f.id), /mail_review_source_unavailable/);
+});
 async function eventually(check: () => Promise<boolean>): Promise<void> {
   const until = performance.now() + 3000;
   while (!(await check())) {
