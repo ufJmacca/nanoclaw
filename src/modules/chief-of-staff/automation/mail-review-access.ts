@@ -7,6 +7,7 @@ import { GOOGLE_MAIL_READ_SCOPE } from '../calendar/oauth-core.js';
 import { validMailReviewBinding, type MailReviewBinding } from './mail-review-binding.js';
 import { validMailReviewInputs, type MailReviewInputs } from './mail-review-inputs.js';
 import { mailReviewSchedulePolicy } from './mail-review-policy.js';
+import { contextGenerationPattern } from '../ops/conversation-ownership.js';
 
 export type MailReviewSelection = {
   id: string;
@@ -15,6 +16,7 @@ export type MailReviewSelection = {
   body: MailReviewBinding;
   inputs: MailReviewInputs;
 };
+export type MailReviewReadScope = { binding_id: string | null; thread_ids: string[] };
 type Identity = Pick<MailDraftAuthority, 'bindingDigest' | 'contextGeneration'>;
 type QueryClient = Pick<PoolClient, 'query'>;
 
@@ -28,6 +30,61 @@ export class MailReviewAccess {
       matches(context: KnowledgeContext, selection: MailReviewSelection): boolean;
     },
   ) {}
+
+  private identity(context: KnowledgeContext): Identity | null {
+    const origin = context.origin;
+    if (
+      context.provider !== 'codex' ||
+      origin?.kind !== 'schedule' ||
+      !/^[a-f0-9]{64}$/.test(origin.runId) ||
+      !Number.isSafeInteger(origin.generation) ||
+      origin.generation < 1 ||
+      origin.generation > 2147483647 ||
+      context.ingressId !== `brief:${origin.runId}:${origin.generation}` ||
+      !contextGenerationPattern.test(context.generation)
+    )
+      return null;
+    const identity = this.options.authority(context);
+    return identity?.contextGeneration === context.generation && /^[a-f0-9]{64}$/.test(identity.bindingDigest)
+      ? structuredClone(identity)
+      : null;
+  }
+
+  /** null is reserved for ordinary owner reads or a separately verified generic scheduled brief.
+   * Every missing, revoked or expired review returns an empty Mail scope, never an owner fallback. */
+  async scopeForReads(client: QueryClient, context: KnowledgeContext): Promise<MailReviewReadScope | null> {
+    if (context.origin?.kind !== 'schedule') return null;
+    const ctx = structuredClone(context),
+      identity = this.identity(ctx);
+    if (!identity) return { binding_id: null, thread_ids: [] };
+    const selected = await this.check(client, ctx, 'read');
+    if (selected)
+      return {
+        binding_id: selected.body.readerBindingId,
+        thread_ids: selected.inputs.candidates.map((c) => c.thread_id),
+      };
+    const generic = await client.query(
+      `SELECT 1 FROM cos.brief_runs br
+      JOIN cos.scopes sc ON sc.id=br.scope_id AND sc.status='active' AND sc.owner_id=$4 AND sc.agent_group_id=$6
+      JOIN cos.brief_schedules bs ON bs.scope_id=br.scope_id AND bs.id=br.schedule_id AND bs.version=br.schedule_version
+      WHERE br.scope_id=$1 AND br.id=$2 AND br.generation=$3 AND br.owner_id=$4 AND br.session_id=$5 AND br.agent_group_id=$6
+       AND bs.owner_id=$4 AND bs.session_id=$5 AND bs.agent_group_id=$6 AND bs.purpose='brief' AND bs.policy->>'state'='active'
+       AND br.state IN ('dispatched','prepared') AND br.lease_owner=$7 AND br.lease_until>clock_timestamp() AND br.deadline_at>clock_timestamp()
+       AND br.model_calls<=(br.limits->>'max_turns')::integer AND br.tool_calls<=(br.limits->>'max_tool_calls')::integer`,
+      [
+        ctx.scopeId,
+        ctx.origin!.runId,
+        ctx.origin!.generation,
+        ctx.ownerId,
+        ctx.sessionId,
+        ctx.agentGroupId,
+        'cos-native-' + identity.bindingDigest,
+      ],
+    );
+    return generic.rowCount === 1 && digest(this.identity(ctx)) === digest(identity)
+      ? null
+      : { binding_id: null, thread_ids: [] };
+  }
 
   async check(
     client: QueryClient,
@@ -49,9 +106,8 @@ export class MailReviewAccess {
       (mode === 'draft' && (typeof threadId !== 'string' || !/^[a-f0-9]{1,128}$/.test(threadId)))
     )
       return null;
-    const identity = this.options.authority(ctx);
-    if (!identity || identity.contextGeneration !== ctx.generation || !/^[a-f0-9]{64}$/.test(identity.bindingDigest))
-      return null;
+    const identity = this.identity(ctx);
+    if (!identity) return null;
     const pinnedIdentity = structuredClone(identity);
     const row = (
       await client.query(
@@ -76,7 +132,7 @@ export class MailReviewAccess {
         AND sc.owner_id=$4 AND sc.agent_group_id=$6
         AND bs.owner_id=$4 AND bs.session_id=$5 AND bs.agent_group_id=$6 AND bs.purpose='mail_review' AND bs.policy->>'state'='active'
         AND p.owner_id=$4 AND p.session_id=$5 AND p.agent_group_id=$6 AND w.owner_id=$4 AND w.session_id=$5
-        AND br.state='dispatched' AND br.lease_owner=$7 AND br.lease_until>clock_timestamp() AND br.deadline_at>clock_timestamp()
+        AND br.state=ANY($8::text[]) AND br.lease_owner=$7 AND br.lease_until>clock_timestamp() AND br.deadline_at>clock_timestamp()
         AND br.model_calls<=3 AND br.tool_calls<=16
         AND mb.permission_scopes=ARRAY['${GOOGLE_MAIL_READ_SCOPE}']::text[] AND 'codex'=ANY(mb.processing_providers)
         AND br.review_inputs->>'capture_id'=mc.id::text`,
@@ -88,6 +144,7 @@ export class MailReviewAccess {
           ctx.sessionId,
           ctx.agentGroupId,
           'cos-native-' + pinnedIdentity.bindingDigest,
+          mode === 'draft' ? ['dispatched'] : ['dispatched', 'prepared'],
         ],
       )
     ).rows[0];

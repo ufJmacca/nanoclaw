@@ -226,6 +226,8 @@ test('G06 migration preserves the generic schedule and admits only two owner-bou
       });
       assert.equal((await access.check(admin, context, 'read'))?.id, policy);
       assert.equal((await access.check(admin, context, 'draft', 'aa01'))?.inputs.candidates.length, 1);
+      assert.deepEqual(await access.scopeForReads(admin, context), { binding_id: reader, thread_ids: ['aa01'] });
+      assert.equal(await access.scopeForReads(admin, { ...context, origin: undefined }), null);
       assert.equal(await access.check(admin, context, 'draft', 'aa02'), null);
       assert.equal(await access.check(admin, { ...context, origin: undefined }, 'read'), null);
       assert.equal(
@@ -298,6 +300,7 @@ test('G06 migration preserves the generic schedule and admits only two owner-bou
           try {
             await admin.query(sql, values);
             assert.equal(await access.check(admin, context, 'read'), null);
+            assert.deepEqual(await access.scopeForReads(admin, context), { binding_id: null, thread_ids: [] });
           } finally {
             await admin.query('ROLLBACK TO SAVEPOINT access_denied');
             await admin.query('RELEASE SAVEPOINT access_denied');
@@ -328,6 +331,21 @@ test('G06 migration preserves the generic schedule and admits only two owner-bou
           await admin.query('RELEASE SAVEPOINT no_model_reservation');
         }
       });
+      await t.test(
+        'prepared brief publication retains selected reads while further draft saves stay closed',
+        async () => {
+          await admin.query('SAVEPOINT prepared_review');
+          try {
+            await admin.query("UPDATE cos.brief_runs SET state='prepared' WHERE scope_id=$1", [scope]);
+            assert.equal((await access.check(admin, context, 'read'))?.id, policy);
+            assert.deepEqual(await access.scopeForReads(admin, context), { binding_id: reader, thread_ids: ['aa01'] });
+            assert.equal(await access.check(admin, context, 'draft', 'aa01'), null);
+          } finally {
+            await admin.query('ROLLBACK TO SAVEPOINT prepared_review');
+            await admin.query('RELEASE SAVEPOINT prepared_review');
+          }
+        },
+      );
     });
     await t.test('the runtime can read but cannot grant or alter review authority', async () => {
       const privileges = await runtime.query(
@@ -390,6 +408,13 @@ test('G06 migration preserves the generic schedule and admits only two owner-bou
         } as unknown as BoundedDatabase;
         let clock = '2026-10-26T05:00:00.000Z';
         const runs = new BriefRunStore(database, { clock: () => new Date(clock) });
+        const readAccess = new MailReviewAccess({
+          authority: () => ({
+            bindingDigest: binding.nativeBindingDigest,
+            contextGeneration: binding.contextGeneration,
+          }),
+          matches: () => true,
+        });
         const ctx = {
           scopeId: scope,
           ownerId: 'owner',
@@ -407,10 +432,20 @@ test('G06 migration preserves the generic schedule and admits only two owner-bou
           seen.add(run.schedule_id);
           const same = await runs.reserveDue(ctx);
           assert.equal((same.run as { id: string }).id, run.id);
-          const claimed = await runs.claim(ctx, run.id, 'fixture-host');
+          const claimed = await runs.claim(ctx, run.id, 'cos-native-' + binding.nativeBindingDigest);
           assert.equal(claimed.status, 'ok');
           assert.equal((await runs.authorize(ctx, run.id, Number(claimed.generation))).status, 'ok');
           assert.equal(run.provenance.purpose, run.schedule_id === generic ? 'brief' : 'mail_review');
+          assert.deepEqual(
+            await readAccess.scopeForReads(admin, {
+              ...ctx,
+              provider: 'codex',
+              generation: binding.contextGeneration,
+              ingressId: `brief:${run.id}:${claimed.generation}`,
+              origin: { kind: 'schedule', runId: run.id, generation: Number(claimed.generation) },
+            }),
+            run.schedule_id === generic ? null : { binding_id: null, thread_ids: [] },
+          );
           assert.equal((await runs.cancel(ctx, run.id, Number(claimed.generation))).status, 'ok');
         }
         assert.deepEqual(seen, new Set([generic, binding.morningScheduleId, binding.afternoonScheduleId]));

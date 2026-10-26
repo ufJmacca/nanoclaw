@@ -23,7 +23,11 @@ export class MailView {
   constructor(
     private readonly options: {
       store: Pick<MailStore, 'evidenceSnapshot' | 'coverage'>;
-      knowledge: Pick<KnowledgeStore, 'recordMailContext' | 'contextReady' | 'retrievalEnabled' | 'searchMail' | 'get'>;
+      knowledge: Pick<
+        KnowledgeStore,
+        'recordMailContext' | 'contextReady' | 'retrievalEnabled' | 'searchMail' | 'get'
+      > &
+        Partial<Pick<KnowledgeStore, 'readSourcesCurrent'>>;
       assertOpen(scope: string, binding: string): void;
       enabled(): boolean;
     },
@@ -147,6 +151,18 @@ export class MailView {
     if (digest(fresh) !== digest(snapshot) || !(await this.unchanged(ctx, ready))) return { status: 'conflict' };
     const current = await d.knowledge.contextReady(ctx);
     if (current.status !== 'ok') return { status: current.status };
+    if (ctx.origin?.kind === 'schedule') {
+      if (!d.knowledge.readSourcesCurrent) return { status: 'denied' };
+      const disclosed = await d.knowledge.readSourcesCurrent(ctx, [
+        ...new Set(
+          items.flatMap((item) => {
+            const evidence = item.evidence as Evidence | Evidence[];
+            return (Array.isArray(evidence) ? evidence : [evidence]).map((chunk) => chunk.source_id);
+          }),
+        ),
+      ]);
+      if (disclosed.status !== 'ok') return { status: disclosed.status };
+    }
     if (!this.open(ctx, input.binding_id)) return { status: 'unavailable' };
     return {
       status: 'ok',

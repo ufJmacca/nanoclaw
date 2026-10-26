@@ -34,6 +34,7 @@ function fixture() {
     retrievalEnabled: () => true,
     recordMailContext: vi.fn(async () => ({ status: 'ok' as const, notice })),
     contextReady: vi.fn(async () => ({ status: 'ok' as const })),
+    readSourcesCurrent: vi.fn(async () => ({ status: 'ok' as 'ok' | 'denied' })),
     searchMail: vi.fn(async () => ({
       status: 'ok' as const,
       items: [{ source_id: 'source', revision_id: binding, text: 'Untrusted mail' }],
@@ -47,6 +48,14 @@ function fixture() {
   return { row, snapshot, store, knowledge, options, view: new MailView(options) };
 }
 describe('G04 bounded captured-mail view', () => {
+  it('G06 rechecks selected source access after its final metadata awaits', async () => {
+    const f = fixture(),
+      runId = 'a'.repeat(64),
+      ctx = { ...context, ingressId: `brief:${runId}:1`, origin: { kind: 'schedule' as const, runId, generation: 1 } };
+    f.knowledge.readSourcesCurrent.mockResolvedValue({ status: 'denied' });
+    expect(await f.view.thread(ctx, { binding_id: binding, thread_id: 'b1' })).toEqual({ status: 'denied' });
+    expect(f.knowledge.readSourcesCurrent).toHaveBeenCalledWith(ctx, ['source']);
+  });
   it('pages messages independently of chunk continuations and never reads more than five messages', async () => {
     const f = fixture();
     f.snapshot.items = Array.from({ length: 7 }, (_, i) => ({ ...f.row, message_id: i.toString(16) }));

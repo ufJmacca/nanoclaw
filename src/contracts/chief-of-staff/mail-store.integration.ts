@@ -29,6 +29,7 @@ import { MailHost } from '../../modules/chief-of-staff/mail/host.js';
 import { MailMaintenance } from '../../modules/chief-of-staff/mail/maintenance.js';
 import { setTimeout as delay } from 'node:timers/promises';
 import { checkMailContext, mailAnswerNotice } from '../../modules/chief-of-staff/mail/answer-notice.js';
+import type { MailReviewReadScope } from '../../modules/chief-of-staff/automation/mail-review-access.js';
 const scopes: string[] = [],
   roots: string[] = [];
 let admin: pg.Client, database: BoundedDatabase;
@@ -637,6 +638,92 @@ const rehashCapture = (value: Awaited<ReturnType<typeof capture>>) => {
   value.digest = digest(content);
   return value;
 };
+test('G06 restricts new scheduled Mail reads and citations while preserving earlier owner context', async () => {
+  const f = await fixture();
+  await f.store.bind(f.context, f.binding);
+  const prepared = await capture(),
+    { digest: _digest, ...first } = prepared.messages[0];
+  const second = { ...first, id: 'aa02', threadId: 'bb02' };
+  prepared.messages.push({ ...second, digest: digest(second) });
+  prepared.textBytes *= 2;
+  rehashCapture(prepared);
+  const id = randomUUID();
+  assert.equal((await f.store.start(f.context, f.binding.id, id, prepared.window)).status, 'ok');
+  assert.equal((await f.store.publish(f.context, f.binding.id, id, prepared)).status, 'ok');
+  let selected: MailReviewReadScope | null = { binding_id: f.binding.id, thread_ids: ['bb01'] };
+  let revokeOnDisclosure = false;
+  const knowledge = new KnowledgeStore(
+    database,
+    f.artifacts,
+    {
+      beforeDisclosure: async () => {
+        if (revokeOnDisclosure) selected = { binding_id: null, thread_ids: [] };
+      },
+    },
+    {
+      mailEnabled: () => true,
+      mailAccess: () => true,
+      mailReviewAccess: { scopeForReads: async (_client, ctx) => (ctx.origin?.kind === 'schedule' ? selected : null) },
+    },
+  );
+  const owner = { ...f.context, generation: randomUUID() },
+    runId = 'a'.repeat(64),
+    scheduled = {
+      ...owner,
+      ingressId: `brief:${runId}:1`,
+      origin: { kind: 'schedule' as const, runId, generation: 1 },
+    };
+  const old = await knowledge.search(owner, { query: 'alpha' });
+  assert.equal(old.status, 'ok');
+  assert.equal((old.items as unknown[]).length, 2);
+  const outside = (
+    await admin.query(
+      "SELECT mm.source_id,s.current_revision_id FROM cos.mail_messages mm JOIN cos.sources s ON s.scope_id=mm.scope_id AND s.id=mm.source_id WHERE mm.scope_id=$1 AND mm.provider_thread_id='bb02'",
+      [f.scope],
+    )
+  ).rows[0];
+  const inside = (
+    await admin.query("SELECT source_id FROM cos.mail_messages WHERE scope_id=$1 AND provider_thread_id='bb01'", [
+      f.scope,
+    ])
+  ).rows[0];
+  const found = await knowledge.search(scheduled, { query: 'alpha' });
+  assert.equal(found.status, 'ok');
+  assert.equal((found.items as unknown[]).length, 1);
+  assert.equal((await knowledge.get(scheduled, outside.source_id, outside.current_revision_id, 0)).status, 'denied');
+  assert.equal((await knowledge.contextReady(scheduled)).status, 'ok');
+  assert.equal((await knowledge.contextReady(owner)).status, 'ok');
+  const oldEvidence = (old.items as Array<{ source_id: string; text: string; evidence_id: string }>).find(
+    (item) => item.source_id === outside.source_id,
+  )!;
+  assert.equal(
+    (
+      await knowledge.answers.prepare(scheduled, randomUUID(), {
+        kind: 'answer',
+        coverage: 'limited',
+        claims: [
+          {
+            kind: 'quote',
+            text: oldEvidence.text,
+            citations: [{ kind: 'source', evidence_id: oldEvidence.evidence_id }],
+          },
+        ],
+      })
+    ).status,
+    'denied',
+  );
+  assert.equal((await knowledge.readSourcesCurrent(scheduled, [inside.source_id])).status, 'ok');
+  selected = { binding_id: null, thread_ids: [] };
+  assert.deepEqual((await knowledge.search(scheduled, { query: 'alpha' })).items, []);
+  assert.equal((await knowledge.readSourcesCurrent(scheduled, [inside.source_id])).status, 'denied');
+  assert.equal((await knowledge.contextReady(owner)).status, 'ok');
+  // Only the separately checked generic schedule path may return an unrestricted read scope.
+  selected = null;
+  assert.equal(((await knowledge.search(scheduled, { query: 'alpha' })).items as unknown[]).length, 2);
+  selected = { binding_id: f.binding.id, thread_ids: ['bb01'] };
+  revokeOnDisclosure = true;
+  assert.equal((await knowledge.search(scheduled, { query: 'alpha' })).status, 'denied');
+});
 test('G04 publishes mail as cited untrusted evidence in the same committed capture and cursor', async () => {
   const f = await publishFixture();
   const row = (
