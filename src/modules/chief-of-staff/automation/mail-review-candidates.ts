@@ -1,5 +1,6 @@
 import { MAIL_MESSAGE_TEXT_BYTES, type MailMessage } from '../mail/normalization.js';
 import { MAIL_CAPTURE_MESSAGES, MAIL_CAPTURE_TEXT_BYTES } from '../mail/capture.js';
+import { mailReviewNoReply } from '../mail/review-source.js';
 import type { MailReviewCandidate } from './mail-review-inputs.js';
 import { MAIL_REVIEW_LIMITS } from './mail-review-policy.js';
 
@@ -9,7 +10,6 @@ export type MailReviewRecord = Pick<
 > & {
   message: MailMessage;
 };
-const noReply = /(?:no[-_.]?reply|do[-_.]?not[-_.]?reply|mailer-daemon|postmaster)(?:[+.][^@\s<>]*)?@/i;
 const bulkSubject =
   /\b(?:newsletter|digest|changelog|roundup)\b|\b(?:automatic|automated|payment|order|purchase|delivery)\s+(?:confirmation|receipt)\b/i;
 const automaticText =
@@ -33,7 +33,7 @@ function reason(message: MailMessage): MailReviewCandidate['reason'] | null {
     ['SPAM', 'TRASH', 'DRAFT', 'CATEGORY_PROMOTIONS', 'CATEGORY_SOCIAL', 'CATEGORY_FORUMS'].some((label) =>
       labels.has(label),
     ) ||
-    noReply.test(message.from) ||
+    mailReviewNoReply(message.from) ||
     bulkSubject.test(message.subject) ||
     automaticText.test(text)
   )
