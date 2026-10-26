@@ -34,7 +34,7 @@ type StateProof = {
   sandboxDatabaseFingerprint: string;
   restoredStateDigest: string;
   inserted: boolean;
-  schemaVersion: 20;
+  schemaVersion: 20 | 21;
   schemaDigest: string;
   admissionRestored: false;
   eventJournalRestored: false;
@@ -115,8 +115,8 @@ function stateValid(value: unknown): value is StateProof {
     Number(value.archiveBytes) > 0 &&
     Number(value.archiveBytes) <= BACKUP_LIMITS.staging &&
     typeof value.inserted === 'boolean' &&
-    value.schemaVersion === 20 &&
-    value.schemaDigest === checkpointSchema(20).digest &&
+    (value.schemaVersion === 20 || value.schemaVersion === 21) &&
+    value.schemaDigest === checkpointSchema(value.schemaVersion).digest &&
     value.admissionRestored === false &&
     value.eventJournalRestored === false &&
     value.credentialsActivated === false &&
@@ -213,7 +213,7 @@ function proofValid(value: unknown): value is MailDraftRecoveryProof {
     typeof software.sourceTree === 'string' &&
     /^[a-f0-9]{40}$/.test(software.sourceTree) &&
     hash(software.hostPayloadSha256) &&
-    software.schemaVersion === 20 &&
+    software.schemaVersion === value.state.schemaVersion &&
     software.nativeSchemaVersion === 22
   );
 }
@@ -249,6 +249,7 @@ export async function produceMailDraftRecoveryProof(input: {
       databaseCheck = input.checkDatabase,
       client = input.sandbox.client,
       journal = input.journal,
+      schemaVersion = target.recovery.software.schemaVersion,
       roots = {
         targetRoot: settings.stateRoot,
         installationRoot: settings.installationRoot,
@@ -275,7 +276,7 @@ export async function produceMailDraftRecoveryProof(input: {
       !uuid(input.credentialCaptureOperationId) ||
       !uuid(input.credentialRequestId) ||
       !hash(target.expectedSnapshotDigest) ||
-      target.recovery.software.schemaVersion !== 20 ||
+      (schemaVersion !== 20 && schemaVersion !== 21) ||
       target.recovery.software.nativeSchemaVersion !== 22 ||
       typeof caller !== 'function' ||
       typeof databaseCheck !== 'function'
@@ -328,8 +329,8 @@ export async function produceMailDraftRecoveryProof(input: {
       sandboxDatabaseFingerprint: restored.sandboxDatabaseFingerprint,
       restoredStateDigest: restored.restoredStateDigest,
       inserted: restored.inserted,
-      schemaVersion: 20,
-      schemaDigest: checkpointSchema(20).digest,
+      schemaVersion,
+      schemaDigest: checkpointSchema(schemaVersion).digest,
       admissionRestored: restored.admissionRestored,
       eventJournalRestored: restored.eventJournalRestored,
       credentialsActivated: restored.credentialsActivated,

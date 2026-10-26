@@ -17,6 +17,7 @@ import type { MailDraftHostGrant } from './profile.js';
 import type { MailDraftCredentialRecoveryIdentity } from './credential-recovery.js';
 import { GOOGLE_MAIL_DRAFT_SCOPE } from './oauth.js';
 import { writeAtomic } from '../ops/target-state.js';
+import { checkpointSchema } from '../ops/checkpoint-schema.js';
 import { produceMailDraftRecoveryProof, readMailDraftRecoveryProof } from './recovery.js';
 const backend = vi.hoisted(() => ({
   state: vi.fn<typeof import('../ops/backup-target-restore.js').restoreTargetVaultBackupTestScope>(),
@@ -33,7 +34,7 @@ afterEach(() => {
   for (const journal of journals.splice(0)) journal.close();
   for (const root of cleanup.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
-function fixture() {
+function fixture(slice: 'G05' | 'G06' = 'G05') {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-draft-recovery-'));
   cleanup.push(root);
   const settings: DeploymentSettings = {
@@ -82,7 +83,7 @@ function fixture() {
       settings,
       binding,
       queueOperationId: randomUUID(),
-      recovery: recoveryReleaseForManifest(fixtureVaultRelease('G05')),
+      recovery: recoveryReleaseForManifest(fixtureVaultRelease(slice)),
       expectedSnapshotDigest: digest('actual encrypted state snapshot'),
       witness: {} as RecoveredTargetVaultIdentity['witness'],
       current: vi.fn(),
@@ -206,26 +207,40 @@ function fixture() {
     save,
   };
 }
-it('requires both real recovery compositions and pins an offline owner/journal-bound metadata proof without activating anything', async () => {
-  const f = fixture(),
-    proof = await produceMailDraftRecoveryProof(f.input),
-    grant = f.grantFor(proof);
-  expect(backend.state).toHaveBeenCalledTimes(1);
-  expect(backend.credentials).toHaveBeenCalledTimes(1);
-  expect(proof).toMatchObject({
-    format: 'cos-mail-draft-recovery/v1',
-    installationDigest: f.installation,
-    nativeBindingDigest: digest(f.target.binding),
-    journalGeneration: f.journal.generation,
-    backupOperationId: 'release-action-' + f.target.queueOperationId,
-    admissionRestored: false,
-    draftJournalRestored: false,
-    writerActivated: false,
-  });
-  expect(proof.state.schemaVersion).toBe(20);
+it.each(['G05', 'G06'] as const)(
+  '%s requires both recovery compositions and pins its exact epoch without activating anything',
+  async (slice) => {
+    const f = fixture(slice),
+      proof = await produceMailDraftRecoveryProof(f.input),
+      grant = f.grantFor(proof);
+    expect(backend.state).toHaveBeenCalledTimes(1);
+    expect(backend.credentials).toHaveBeenCalledTimes(1);
+    expect(proof).toMatchObject({
+      format: 'cos-mail-draft-recovery/v1',
+      installationDigest: f.installation,
+      nativeBindingDigest: digest(f.target.binding),
+      journalGeneration: f.journal.generation,
+      backupOperationId: 'release-action-' + f.target.queueOperationId,
+      admissionRestored: false,
+      draftJournalRestored: false,
+      writerActivated: false,
+    });
+    expect(proof.state.schemaVersion).toBe(slice === 'G06' ? 21 : 20);
+    f.save(proof);
+    expect(readMailDraftRecoveryProof(f.settings.stateRoot, f.installation, f.journal, grant)).toEqual(proof);
+    expect(JSON.stringify(proof)).not.toMatch(/runtimeEnvironment|password|\/tmp\/|\/state\//);
+  },
+);
+it('rejects a proof whose recovered state epoch differs from its sealed release epoch', async () => {
+  const f = fixture('G06'),
+    proof = await produceMailDraftRecoveryProof(f.input);
+  proof.state.schemaVersion = 20;
+  proof.state.schemaDigest = checkpointSchema(20).digest;
+  const grant = f.grantFor(proof);
   f.save(proof);
-  expect(readMailDraftRecoveryProof(f.settings.stateRoot, f.installation, f.journal, grant)).toEqual(proof);
-  expect(JSON.stringify(proof)).not.toMatch(/runtimeEnvironment|password|\/tmp\/|\/state\//);
+  expect(() => readMailDraftRecoveryProof(f.settings.stateRoot, f.installation, f.journal, grant)).toThrow(
+    'mail_draft_recovery_unavailable',
+  );
 });
 it.each([
   'wrong_snapshot',

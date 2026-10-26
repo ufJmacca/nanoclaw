@@ -21,7 +21,7 @@ const binding = {
   installationRoot: '/home/pi/nano',
   dataRoot: '/home/pi/nano/data',
 };
-function fixture(slice: 'S11' | 'G01' | 'G02' | 'G03' | 'G04' = 'S11') {
+function fixture(slice: 'S11' | 'G01' | 'G02' | 'G03' | 'G04' | 'G05' | 'G06' = 'S11') {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-owner-maintenance-'));
   roots.push(base);
   const root = path.join(base, 'target');
@@ -85,7 +85,7 @@ it('uses a fresh G01 request ID on the protected installed release and restores 
   });
   expect(activeMaintenanceLease(f.root, binding).owner).toBe('operations-' + requestId);
 });
-it.each(['G02', 'G03', 'G04'] as const)(
+it.each(['G02', 'G03', 'G04', 'G05', 'G06'] as const)(
   'holds and releases fresh %s maintenance under all required gates while preserving protection and paused CoS',
   async (slice) => {
     const f = fixture(slice);
