@@ -8,6 +8,10 @@ import { mailReviewSchedulePolicy } from '../../modules/chief-of-staff/automatio
 import type { MailReviewBinding } from '../../modules/chief-of-staff/automation/mail-review-binding.js';
 import type { MailReviewInputs } from '../../modules/chief-of-staff/automation/mail-review-inputs.js';
 import { MailReviewAccess } from '../../modules/chief-of-staff/automation/mail-review-access.js';
+import type { PoolClient } from 'pg';
+import type { BoundedDatabase } from '../../modules/chief-of-staff/store/client.js';
+import { BriefRunStore } from '../../modules/chief-of-staff/automation/brief-store.js';
+import { BriefScheduleStore } from '../../modules/chief-of-staff/automation/schedule-store.js';
 
 test('G06 migration preserves the generic schedule and admits only two owner-bound mail-review slots', async (t) => {
   assert.equal(process.env.COS_FIXTURE_DATABASE_PROFILE, 'test');
@@ -342,6 +346,145 @@ test('G06 migration preserves the generic schedule and admits only two owner-bou
       });
       await runtime.query('SELECT * FROM cos.mail_review_policies LIMIT 0');
     });
+    await t.test('three schedules share one active run and retain independent daily occurrence keys', async () => {
+      await admin.query('SAVEPOINT queue_fixture');
+      try {
+        await admin.query('DELETE FROM cos.brief_runs WHERE scope_id=$1', [scope]);
+        const generic = (
+          await admin.query("SELECT id FROM cos.brief_schedules WHERE scope_id=$1 AND purpose='brief'", [scope])
+        ).rows[0].id;
+        const proposal = randomUUID();
+        await admin.query(
+          `INSERT INTO cos.proposals(id,scope_id,session_id,ingress_id,owner_id,change,payload_hash,challenge_hash,state,expires_at,applied_record_id)
+          VALUES($1,$2,'session','fixture-ingress','owner','{}',$3,$3,'applied',clock_timestamp()+interval '1 day',$4)`,
+          [proposal, scope, digest('fixture proposal'), generic],
+        );
+        await admin.query(
+          `INSERT INTO cos.brief_schedule_revisions(scope_id,schedule_id,version,body,proposal_id,mail_review_policy_id,mail_review_policy_version)
+          SELECT scope_id,id,version,to_jsonb(s),CASE WHEN purpose='brief' THEN $2 ELSE NULL END,mail_review_policy_id,mail_review_policy_version
+          FROM cos.brief_schedules s WHERE scope_id=$1 AND id<>$3`,
+          [scope, proposal, binding.morningScheduleId],
+        );
+        await admin.query("UPDATE cos.brief_schedules SET activated_at='2026-10-25T00:00:00Z' WHERE scope_id=$1", [
+          scope,
+        ]);
+        // Actual SQL on the admitted target, enclosed by savepoints so all synthetic rows roll back.
+        // Only transaction envelopes are adapted; no scheduling query or result is mocked.
+        const database = {
+          run: async <T>(operation: (client: PoolClient) => Promise<T>) => {
+            await admin.query('SAVEPOINT store_call');
+            const client = {
+              query: async (sql: string, values?: unknown[]) =>
+                ['BEGIN', 'COMMIT'].includes(sql) ? { rows: [], rowCount: 0 } : admin.query(sql, values),
+            } as unknown as PoolClient;
+            try {
+              const result = await operation(client);
+              await admin.query('RELEASE SAVEPOINT store_call');
+              return result;
+            } catch (error) {
+              await admin.query('ROLLBACK TO SAVEPOINT store_call');
+              await admin.query('RELEASE SAVEPOINT store_call');
+              throw error;
+            }
+          },
+        } as unknown as BoundedDatabase;
+        let clock = '2026-10-26T05:00:00.000Z';
+        const runs = new BriefRunStore(database, { clock: () => new Date(clock) });
+        const ctx = {
+          scopeId: scope,
+          ownerId: 'owner',
+          sessionId: 'session',
+          agentGroupId: scope,
+          ingressId: 'fixture-host',
+        };
+        const seen = new Set<string>();
+        for (let n = 0; n < 3; n++) {
+          const reserved = await runs.reserveDue(ctx);
+          assert.equal(reserved.status, 'ok');
+          const run = reserved.run as { id: string; schedule_id: string; provenance: { purpose: string } };
+          assert.ok(run);
+          assert.equal(seen.has(run.schedule_id), false);
+          seen.add(run.schedule_id);
+          const same = await runs.reserveDue(ctx);
+          assert.equal((same.run as { id: string }).id, run.id);
+          const claimed = await runs.claim(ctx, run.id, 'fixture-host');
+          assert.equal(claimed.status, 'ok');
+          assert.equal((await runs.authorize(ctx, run.id, Number(claimed.generation))).status, 'ok');
+          assert.equal(run.provenance.purpose, run.schedule_id === generic ? 'brief' : 'mail_review');
+          assert.equal((await runs.cancel(ctx, run.id, Number(claimed.generation))).status, 'ok');
+        }
+        assert.deepEqual(seen, new Set([generic, binding.morningScheduleId, binding.afternoonScheduleId]));
+        assert.equal((await runs.reserveDue(ctx)).run, null);
+        assert.equal(
+          (
+            await admin.query('SELECT count(DISTINCT local_date)::int AS n FROM cos.brief_runs WHERE scope_id=$1', [
+              scope,
+            ])
+          ).rows[0].n,
+          1,
+        );
+        // Both mail slots close on revocation while the generic brief stays independent.
+        clock = '2026-10-27T05:00:00.000Z';
+        await admin.query(
+          "UPDATE cos.brief_schedules SET policy=jsonb_set(policy,'{state}','\"paused\"') WHERE scope_id=$1 AND purpose='brief'",
+          [scope],
+        );
+        const pending = (await runs.reserveDue(ctx)).run as { id: string };
+        assert.ok(pending);
+        const claim = await runs.claim(ctx, pending.id, 'fixture-host');
+        assert.equal(claim.status, 'ok');
+        await admin.query("UPDATE cos.mail_review_policies SET state='revoked' WHERE scope_id=$1", [scope]);
+        assert.equal((await runs.authorize(ctx, pending.id, Number(claim.generation))).status, 'denied');
+        assert.equal((await runs.reserveDue(ctx)).run, null);
+        assert.equal(
+          (await runs.inspect(ctx, pending.id)).run &&
+            ((await runs.inspect(ctx, pending.id)).run as { state: string }).state,
+          'cancelled',
+        );
+      } finally {
+        await admin.query('ROLLBACK TO SAVEPOINT queue_fixture');
+        await admin.query('RELEASE SAVEPOINT queue_fixture');
+      }
+    });
+    await t.test(
+      'generic schedule discovery and proposals cannot read or change the mail-review schedules',
+      async () => {
+        const schedules = new BriefScheduleStore(),
+          ctx = {
+            scopeId: scope,
+            ownerId: 'owner',
+            sessionId: 'session',
+            agentGroupId: scope,
+            ingressId: 'fixture-ingress',
+          };
+        await admin.query('SAVEPOINT generic_schedule_boundary');
+        try {
+          await admin.query(
+            "UPDATE cos.brief_schedules SET owner_id='other-owner' WHERE scope_id=$1 AND purpose='brief'",
+            [scope],
+          );
+          assert.deepEqual(await schedules.read(admin as unknown as PoolClient, ctx), []);
+          const changed = await schedules.applyApproved(
+            admin as unknown as PoolClient,
+            ctx,
+            { id: 'fixture-proposal', decision_ingress_id: 'fixture-decision' },
+            {
+              kind: 'brief_schedule',
+              record_id: binding.morningScheduleId,
+              title: 'Changed generic schedule',
+              reason: 'Fixture boundary',
+              expected_version: 1,
+              policy: mailReviewSchedulePolicy('morning'),
+              limits,
+            },
+          );
+          assert.equal(changed.status, 'conflict');
+        } finally {
+          await admin.query('ROLLBACK TO SAVEPOINT generic_schedule_boundary');
+          await admin.query('RELEASE SAVEPOINT generic_schedule_boundary');
+        }
+      },
+    );
   } finally {
     await admin.query('ROLLBACK').catch(() => {});
     await Promise.allSettled([admin.end(), runtime.end()]);

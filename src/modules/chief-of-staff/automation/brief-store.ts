@@ -8,6 +8,21 @@ import { randomUUID } from 'node:crypto';
 import { snapshotWindow } from '../calendar/normalization.js';
 import { hasCalendarReadScope } from '../calendar/reader.js';
 import type { BriefRefreshPlan, BriefRefreshTarget } from './brief-refresh.js';
+import type { BriefSchedulePolicy, BriefLimits } from '../contracts/schedule-protocol.js';
+type ScheduleRow = {
+  id: string;
+  version: number;
+  purpose: 'brief' | 'mail_review';
+  policy: BriefSchedulePolicy;
+  limits: BriefLimits;
+  provenance: { proposal_id?: string };
+  activated_at: Date;
+  local_date_text: string | null;
+  authority_current: boolean;
+  mail_review_policy_id: string | null;
+  mail_review_policy_version: number | null;
+  mail_review_slot: string | null;
+};
 const instant = (value: unknown) => (value instanceof Date ? value : new Date(String(value))).toISOString();
 const safeRun = (run: Record<string, unknown>) => ({
   ...run,
@@ -78,13 +93,30 @@ export class BriefRunStore {
       throw error;
     }
   }
-  private async schedule(client: PoolClient, context: Context) {
+  private async schedules(client: PoolClient, context: Context, runId?: string): Promise<ScheduleRow[]> {
     return (
       await client.query(
-        'SELECT *,last_local_date::text AS local_date_text FROM cos.brief_schedules WHERE scope_id=$1 AND owner_id=$2 AND session_id=$3 AND agent_group_id=$4 FOR UPDATE',
-        [context.scopeId, context.ownerId, context.sessionId, context.agentGroupId],
+        `SELECT bs.*,bs.last_local_date::text AS local_date_text,
+         (bs.purpose='brief' OR EXISTS(
+           SELECT 1 FROM cos.mail_review_policies p
+           JOIN cos.mail_review_policy_revisions r ON r.scope_id=p.scope_id AND r.binding_id=p.id AND r.version=p.version
+           JOIN cos.mail_draft_writer_bindings w ON w.scope_id=r.scope_id AND w.id=r.writer_binding_id
+             AND w.version=r.writer_version AND w.reader_binding_id=r.reader_binding_id AND w.state='enabled'
+           JOIN cos.mail_bindings mb ON mb.scope_id=r.scope_id AND mb.id=r.reader_binding_id AND mb.auth='ready'
+           WHERE p.scope_id=bs.scope_id AND p.id=bs.mail_review_policy_id AND p.version=bs.mail_review_policy_version
+             AND p.state='enabled' AND p.owner_id=bs.owner_id AND p.session_id=bs.session_id AND p.agent_group_id=bs.agent_group_id
+             AND w.owner_id=bs.owner_id AND w.session_id=bs.session_id AND 'codex'=ANY(mb.processing_providers)
+             AND bs.id::text=r.body->>CASE bs.mail_review_slot WHEN 'morning' THEN 'morningScheduleId' ELSE 'afternoonScheduleId' END
+         )) AS authority_current
+         FROM cos.brief_schedules bs WHERE bs.scope_id=$1 AND bs.owner_id=$2 AND bs.session_id=$3 AND bs.agent_group_id=$4
+         AND ($5::text IS NULL OR EXISTS(SELECT 1 FROM cos.brief_runs br WHERE br.scope_id=bs.scope_id AND br.id=$5 AND br.schedule_id=bs.id))
+         ORDER BY bs.id LIMIT 4 FOR UPDATE OF bs`,
+        [context.scopeId, context.ownerId, context.sessionId, context.agentGroupId, runId ?? null],
       )
-    ).rows[0];
+    ).rows as ScheduleRow[];
+  }
+  private async schedule(client: PoolClient, context: Context, runId: string) {
+    return (await this.schedules(client, context, runId))[0];
   }
   private async settle(client: PoolClient, scopeId: string, runId: string, state: 'failed' | 'cancelled') {
     const notification = (
@@ -110,58 +142,97 @@ export class BriefRunStore {
   }
   async reserveDue(context: Context): Promise<Result> {
     return this.transaction(context, async (client) => {
-      const schedule = await this.schedule(client, context);
-      if (!schedule) return { status: 'ok', run: null, next_wake_at: null };
-      const obsolete = (
-        await client.query(
-          "SELECT id FROM cos.brief_runs WHERE scope_id=$1 AND schedule_id=$2 AND (schedule_version<>$3 OR $4::boolean) AND state IN ('queued','dispatched','prepared') ORDER BY created_at LIMIT 20 FOR UPDATE",
-          [context.scopeId, schedule.id, schedule.version, schedule.policy.state !== 'active'],
-        )
-      ).rows;
-      for (const run of obsolete) await this.settle(client, context.scopeId, run.id, 'cancelled');
-      if (schedule.policy.state !== 'active') return { status: 'ok', run: null, next_wake_at: null };
+      // Lock every owned schedule in a stable order before reserving any scope run.
+      const schedules = await this.schedules(client, context);
+      if (schedules.length > 3) return { status: 'conflict' };
+      if (!schedules.length) return { status: 'ok', run: null, next_wake_at: null };
+      for (const schedule of schedules) {
+        const obsolete = (
+          await client.query(
+            "SELECT id FROM cos.brief_runs WHERE scope_id=$1 AND schedule_id=$2 AND (schedule_version<>$3 OR $4::boolean) AND state IN ('queued','dispatched','prepared') ORDER BY created_at LIMIT 20 FOR UPDATE",
+            [
+              context.scopeId,
+              schedule.id,
+              schedule.version,
+              schedule.policy.state !== 'active' || !schedule.authority_current,
+            ],
+          )
+        ).rows;
+        for (const run of obsolete) await this.settle(client, context.scopeId, run.id, 'cancelled');
+      }
       const now = (await client.query('SELECT clock_timestamp() AS at')).rows[0].at as Date;
       const existing = (
         await client.query(
-          "SELECT * FROM cos.brief_runs WHERE scope_id=$1 AND schedule_id=$2 AND schedule_version=$3 AND state IN ('queued','dispatched','prepared') ORDER BY created_at DESC LIMIT 1 FOR UPDATE",
-          [context.scopeId, schedule.id, schedule.version],
+          "SELECT * FROM cos.brief_runs WHERE scope_id=$1 AND owner_id=$2 AND session_id=$3 AND agent_group_id=$4 AND state IN ('queued','dispatched','prepared') ORDER BY created_at,id LIMIT 4 FOR UPDATE",
+          [context.scopeId, context.ownerId, context.sessionId, context.agentGroupId],
         )
-      ).rows[0];
-      if (existing && existing.deadline_at > now) return { status: 'ok', run: safeRun(existing), next_wake_at: null };
-      if (existing) await this.settle(client, context.scopeId, existing.id, 'failed');
-      const plan = planBriefOccurrence(
-        schedule.policy,
-        {
-          scopeId: context.scopeId,
-          scheduleId: schedule.id,
-          revision: schedule.version,
-          activatedAt: schedule.activated_at.toISOString(),
-          lastLocalDate: schedule.local_date_text,
-        },
-        (this.options.clock?.() ?? now).toISOString(),
-      );
-      if (!plan.due) return { status: 'ok', run: null, next_wake_at: plan.nextWakeAt };
+      ).rows;
+      if (existing.length === 4) return { status: 'conflict' };
+      for (const run of existing)
+        if (run.deadline_at <= now) await this.settle(client, context.scopeId, run.id, 'failed');
+      const live = existing.filter((run) => run.deadline_at > now);
+      if (live.length > 1) return { status: 'conflict' };
+      if (live.length) return { status: 'ok', run: safeRun(live[0]), next_wake_at: null };
+      const planningNow = (this.options.clock?.() ?? now).toISOString();
+      const plans = schedules
+        .filter((schedule) => schedule.policy.state === 'active' && schedule.authority_current)
+        .map((schedule) => ({
+          schedule,
+          plan: planBriefOccurrence(
+            schedule.policy,
+            {
+              scopeId: context.scopeId,
+              scheduleId: schedule.id,
+              revision: schedule.version,
+              activatedAt: schedule.activated_at.toISOString(),
+              lastLocalDate: schedule.local_date_text,
+            },
+            planningNow,
+          ),
+        }));
+      const nextWake =
+        plans
+          .map((entry) => entry.plan.nextWakeAt)
+          .filter((at): at is string => at !== null)
+          .sort()[0] ?? null;
+      const due = plans
+        .filter((entry) => entry.plan.due !== null)
+        .sort(
+          (a, b) =>
+            a.plan.due!.intendedAt.localeCompare(b.plan.due!.intendedAt) || a.schedule.id.localeCompare(b.schedule.id),
+        );
+      if (!due.length) return { status: 'ok', run: null, next_wake_at: nextWake };
+      const { schedule, plan } = due[0],
+        occurrence = plan.due!;
       const run = (
         await client.query(
           `INSERT INTO cos.brief_runs(scope_id,id,schedule_id,schedule_version,owner_id,session_id,agent_group_id,intended_at,local_date,state,limits,deadline_at,provenance)
         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'queued',$10,clock_timestamp()+($11*interval '1 second'),$12) ON CONFLICT DO NOTHING RETURNING *`,
           [
             context.scopeId,
-            plan.due.key,
+            occurrence.key,
             schedule.id,
             schedule.version,
             context.ownerId,
             context.sessionId,
             context.agentGroupId,
-            plan.due.intendedAt,
-            plan.due.localDate,
+            occurrence.intendedAt,
+            occurrence.localDate,
             JSON.stringify(schedule.limits),
             schedule.limits.deadline_seconds,
             JSON.stringify({
+              purpose: schedule.purpose,
+              ...(schedule.purpose === 'mail_review'
+                ? {
+                    mail_review_policy_id: schedule.mail_review_policy_id,
+                    mail_review_policy_version: schedule.mail_review_policy_version,
+                    mail_review_slot: schedule.mail_review_slot,
+                  }
+                : {}),
               schedule_revision: schedule.version,
               schedule_proposal: schedule.provenance.proposal_id,
               time_zone: schedule.policy.time_zone,
-              intended_local_date: plan.due.intendedLocalDate,
+              intended_local_date: occurrence.intendedLocalDate,
             }),
           ],
         )
@@ -174,14 +245,14 @@ export class BriefRunStore {
       ]);
       await client.query(
         'UPDATE cos.brief_schedules SET last_local_date=$3,updated_at=clock_timestamp() WHERE scope_id=$1 AND id=$2',
-        [context.scopeId, schedule.id, plan.due.localDate],
+        [context.scopeId, schedule.id, occurrence.localDate],
       );
-      return { status: 'ok', run: safeRun(run), next_wake_at: plan.nextWakeAt };
+      return { status: 'ok', run: safeRun(run), next_wake_at: due.length > 1 ? planningNow : nextWake };
     });
   }
   private async currentRun(client: PoolClient, context: Context, runId: string) {
-    const schedule = await this.schedule(client, context);
-    if (!schedule || schedule.policy.state !== 'active') return null;
+    const schedule = await this.schedule(client, context, runId);
+    if (!schedule || schedule.policy.state !== 'active' || !schedule.authority_current) return null;
     return (
       (
         await client.query(
@@ -238,7 +309,7 @@ export class BriefRunStore {
   async cancel(context: Context, runId: string, generation: number): Promise<Result> {
     if (!id(runId) || !Number.isSafeInteger(generation) || generation < 1) return { status: 'denied' };
     return this.transaction(context, async (client) => {
-      await this.schedule(client, context); // Same lock order as reservation, even when paused.
+      await this.schedule(client, context, runId); // Schedule before run, even when paused.
       const run = (
         await client.query(
           'SELECT state FROM cos.brief_runs WHERE scope_id=$1 AND id=$2 AND generation=$3 AND owner_id=$4 AND session_id=$5 AND agent_group_id=$6 FOR UPDATE',
@@ -393,7 +464,7 @@ export class BriefRunStore {
       return { status: 'denied' };
     const receipt = structuredClone(outcome);
     return this.transaction(context, async (client) => {
-      await this.schedule(client, context);
+      await this.schedule(client, context, runId);
       const run = (
         await client.query(
           'SELECT id FROM cos.brief_runs WHERE scope_id=$1 AND id=$2 AND generation=$3 AND owner_id=$4 AND session_id=$5 AND agent_group_id=$6 FOR UPDATE',
