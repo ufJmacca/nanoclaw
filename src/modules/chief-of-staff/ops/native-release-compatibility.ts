@@ -15,7 +15,8 @@ export function assertNativeReleaseCompatibility(db: Database.Database, candidat
     candidate?.slice !== 'G02' &&
     candidate?.slice !== 'G03' &&
     candidate?.slice !== 'G04' &&
-    candidate?.slice !== 'G05'
+    candidate?.slice !== 'G05' &&
+    candidate?.slice !== 'G06'
   ) {
     const entry = db.prepare('SELECT type FROM sqlite_master WHERE name=?').get('cos_operator_denials') as
       | { type: string }
@@ -25,7 +26,9 @@ export function assertNativeReleaseCompatibility(db: Database.Database, candidat
   }
   if (
     candidate &&
-    ['S05', 'S06', 'S07', 'S08', 'S09', 'S10', 'S11', 'G01', 'G02', 'G03', 'G04', 'G05'].includes(candidate.slice)
+    ['S05', 'S06', 'S07', 'S08', 'S09', 'S10', 'S11', 'G01', 'G02', 'G03', 'G04', 'G05', 'G06'].includes(
+      candidate.slice,
+    )
   )
     return;
   for (const name of specialistTables) {
