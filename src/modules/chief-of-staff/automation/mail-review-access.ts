@@ -8,6 +8,7 @@ import { validMailReviewBinding, type MailReviewBinding } from './mail-review-bi
 import { validMailReviewInputs, type MailReviewInputs } from './mail-review-inputs.js';
 import { mailReviewSchedulePolicy } from './mail-review-policy.js';
 import { contextGenerationPattern } from '../ops/conversation-ownership.js';
+import { MAIL_RETENTION_MS } from '../mail/normalization.js';
 
 export type MailReviewSelection = {
   id: string;
@@ -17,6 +18,14 @@ export type MailReviewSelection = {
   inputs: MailReviewInputs;
 };
 export type MailReviewReadScope = { binding_id: string | null; thread_ids: string[] };
+export type MailReviewPreparation = Omit<MailReviewSelection, 'inputs'> & {
+  inputs: MailReviewInputs | null;
+  captureId: string;
+  captureDigest: string;
+  capturedAt: string;
+  lastSuccessAt: string | null;
+  coverage: MailReviewInputs['coverage'];
+};
 type Identity = Pick<MailDraftAuthority, 'bindingDigest' | 'contextGeneration'>;
 type QueryClient = Pick<PoolClient, 'query'>;
 
@@ -26,8 +35,10 @@ export class MailReviewAccess {
     private readonly options: {
       /** Trusted native resolver, including the actual local scheduled origin. No model-supplied identity. */
       authority(context: KnowledgeContext): Identity | null;
+      /** Retained owner identity for host preparation only, before any scheduled origin/model use. */
+      ownerAuthority?(context: KnowledgeContext): Identity | null;
       /** Separately owned, current review profile. SQL checkpoints cannot enable it. */
-      matches(context: KnowledgeContext, selection: MailReviewSelection): boolean;
+      matches(context: KnowledgeContext, selection: Omit<MailReviewSelection, 'inputs'>): boolean;
     },
   ) {}
 
@@ -47,6 +58,14 @@ export class MailReviewAccess {
     const identity = this.options.authority(context);
     return identity?.contextGeneration === context.generation && /^[a-f0-9]{64}$/.test(identity.bindingDigest)
       ? structuredClone(identity)
+      : null;
+  }
+  private ownerIdentity(context: KnowledgeContext): Identity | null {
+    if (context.origin || context.provider !== 'codex' || !contextGenerationPattern.test(context.generation))
+      return null;
+    const value = this.options.ownerAuthority?.(context);
+    return value?.contextGeneration === context.generation && /^[a-f0-9]{64}$/.test(value.bindingDigest)
+      ? structuredClone(value)
       : null;
   }
 
@@ -92,28 +111,60 @@ export class MailReviewAccess {
     mode: 'read' | 'draft',
     threadId?: string,
   ): Promise<MailReviewSelection | null> {
+    if (!['read', 'draft'].includes(mode)) return null;
+    const selected = await this.selection(client, context, mode, threadId);
+    return selected?.inputs
+      ? {
+          id: selected.id,
+          version: selected.version,
+          digest: selected.digest,
+          body: selected.body,
+          inputs: selected.inputs,
+        }
+      : null;
+  }
+  /** Host-only metadata. This never installs an origin, changes a selection, reserves model use or reads mail bodies. */
+  async preparation(
+    client: QueryClient,
+    context: KnowledgeContext,
+    runId: string,
+    generation: number,
+  ): Promise<MailReviewPreparation | null> {
+    return this.selection(client, context, 'prepare', undefined, { runId, generation });
+  }
+  private async selection(
+    client: QueryClient,
+    context: KnowledgeContext,
+    mode: 'read' | 'draft' | 'prepare',
+    threadId?: string,
+    preparation?: { runId: string; generation: number },
+  ): Promise<MailReviewPreparation | null> {
     const ctx = structuredClone(context),
-      origin = ctx.origin;
+      preparing = mode === 'prepare',
+      origin = preparing ? preparation : ctx.origin?.kind === 'schedule' ? ctx.origin : undefined;
     if (
       ctx.provider !== 'codex' ||
-      origin?.kind !== 'schedule' ||
+      !origin ||
       !/^[a-f0-9]{64}$/.test(origin.runId) ||
       !Number.isSafeInteger(origin.generation) ||
       origin.generation < 1 ||
       origin.generation > 2147483647 ||
-      ctx.ingressId !== `brief:${origin.runId}:${origin.generation}` ||
-      !['read', 'draft'].includes(mode) ||
+      (preparing ? !!ctx.origin : ctx.ingressId !== `brief:${origin.runId}:${origin.generation}`) ||
+      !['read', 'draft', 'prepare'].includes(mode) ||
       (mode === 'draft' && (typeof threadId !== 'string' || !/^[a-f0-9]{1,128}$/.test(threadId)))
     )
       return null;
-    const identity = this.identity(ctx);
+    const identity = preparing ? this.ownerIdentity(ctx) : this.identity(ctx);
     if (!identity) return null;
     const pinnedIdentity = structuredClone(identity);
     const row = (
       await client.query(
         `SELECT p.id,p.version,pr.body,pr.digest,br.review_inputs AS inputs,bs.id AS schedule_id,bs.mail_review_slot AS slot,
-       bs.policy,bs.limits,br.limits AS run_limits,br.model_calls,wr.body AS writer_body,wr.digest AS writer_digest,
+       bs.policy,bs.limits,br.limits AS run_limits,br.model_calls,br.tool_calls,wr.body AS writer_body,wr.digest AS writer_digest,
        wr.consent_ref,mb.provider AS reader_provider,mb.mailbox_email,mc.capture_window,ms.last_success_at,
+       ms.current_capture AS capture_id,mc.content_digest AS capture_digest,mc.metadata->>'contract' AS capture_contract,
+       mc.metadata->'complete'='true'::jsonb AS capture_complete,mc.metadata->'limitations'='[]'::jsonb AS capture_unlimited,
+       ms.current_capture=ms.last_attempt AS latest_capture,
        clock_timestamp() AS now
        FROM cos.brief_runs br
        JOIN cos.scopes sc ON sc.id=br.scope_id AND sc.status='active'
@@ -135,7 +186,7 @@ export class MailReviewAccess {
         AND br.state=ANY($8::text[]) AND br.lease_owner=$7 AND br.lease_until>clock_timestamp() AND br.deadline_at>clock_timestamp()
         AND br.model_calls<=3 AND br.tool_calls<=16
         AND mb.permission_scopes=ARRAY['${GOOGLE_MAIL_READ_SCOPE}']::text[] AND 'codex'=ANY(mb.processing_providers)
-        AND br.review_inputs->>'capture_id'=mc.id::text`,
+        AND ($9::boolean OR br.review_inputs->>'capture_id'=mc.id::text)`,
         [
           ctx.scopeId,
           origin.runId,
@@ -144,21 +195,24 @@ export class MailReviewAccess {
           ctx.sessionId,
           ctx.agentGroupId,
           'cos-native-' + pinnedIdentity.bindingDigest,
-          mode === 'draft' ? ['dispatched'] : ['dispatched', 'prepared'],
+          mode === 'read' ? ['dispatched', 'prepared'] : ['dispatched'],
+          preparing,
         ],
       )
     ).rows[0];
     if (
       !row ||
       !validMailReviewBinding(row.body) ||
-      !validMailReviewInputs(row.inputs) ||
+      ((!preparing || row.inputs !== null) && !validMailReviewInputs(row.inputs)) ||
       !validMailDraftBinding(row.writer_body) ||
       digest(row.body) !== row.digest ||
       digest(row.writer_body) !== row.writer_digest
     )
       return null;
     const body: MailReviewBinding = row.body,
-      inputs: MailReviewInputs = row.inputs;
+      inputs: MailReviewInputs | null = validMailReviewInputs(row.inputs) ? row.inputs : null;
+    const lastSuccess = row.last_success_at?.toISOString() ?? null,
+      stale = !lastSuccess || row.now.getTime() - Date.parse(lastSuccess) > 600000;
     const limits = { max_turns: 3, max_tool_calls: 16, deadline_seconds: 300, refresh_seconds: 30 };
     if (
       !['morning', 'afternoon'].includes(row.slot) ||
@@ -176,29 +230,52 @@ export class MailReviewAccess {
       body.mailboxDigest !== digest(row.mailbox_email.toLowerCase()) ||
       body.provider !== row.reader_provider ||
       body.provider !== row.writer_body.provider ||
-      inputs.policy_id !== row.id ||
-      inputs.policy_version !== row.version ||
-      inputs.policy_digest !== row.digest ||
-      inputs.context_generation !== ctx.generation ||
-      inputs.reader_binding_id !== body.readerBindingId ||
-      inputs.writer_binding_id !== body.writerBindingId ||
-      Date.parse(inputs.captured_at) !== row.capture_window?.capturedAt ||
-      Date.parse(inputs.captured_at) > row.now.getTime() ||
-      inputs.last_success_at !== (row.last_success_at?.toISOString() ?? null) ||
+      !contextGenerationPattern.test(row.capture_id) ||
+      !/^[a-f0-9]{64}$/.test(row.capture_digest) ||
+      !Number.isSafeInteger(row.capture_window?.capturedAt) ||
+      row.capture_window.capturedAt <= MAIL_RETENTION_MS ||
+      row.capture_window.since !== row.capture_window.capturedAt - MAIL_RETENTION_MS ||
+      row.capture_window.capturedAt > row.now.getTime() ||
+      (preparing && !inputs && (row.model_calls !== 0 || row.tool_calls !== 0)) ||
+      (inputs &&
+        (inputs.policy_id !== row.id ||
+          inputs.policy_version !== row.version ||
+          inputs.policy_digest !== row.digest ||
+          inputs.context_generation !== ctx.generation ||
+          inputs.reader_binding_id !== body.readerBindingId ||
+          inputs.writer_binding_id !== body.writerBindingId ||
+          Date.parse(inputs.captured_at) !== row.capture_window?.capturedAt ||
+          Date.parse(inputs.captured_at) > row.now.getTime() ||
+          inputs.last_success_at !== lastSuccess)) ||
       (mode === 'draft' &&
-        (row.model_calls < 1 ||
+        (!inputs ||
+          row.model_calls < 1 ||
+          stale ||
           inputs.coverage === 'stale' ||
           !inputs.candidates.some((c) => c.thread_id === threadId)))
     )
       return null;
-    const selected: MailReviewSelection = {
+    const selected: MailReviewPreparation = {
       id: row.id,
       version: row.version,
       digest: row.digest,
       body: structuredClone(body),
       inputs: structuredClone(inputs),
+      captureId: row.capture_id,
+      captureDigest: row.capture_digest,
+      capturedAt: new Date(row.capture_window.capturedAt).toISOString(),
+      lastSuccessAt: lastSuccess,
+      coverage: stale
+        ? 'stale'
+        : row.capture_contract === 'cos-mail-capture/v1' &&
+            row.capture_complete &&
+            row.capture_unlimited &&
+            row.latest_capture
+          ? 'stored_selection'
+          : 'incomplete',
     };
-    return this.options.matches(ctx, selected) && digest(this.options.authority(ctx)) === digest(pinnedIdentity)
+    return this.options.matches(ctx, selected) &&
+      digest(preparing ? this.ownerIdentity(ctx) : this.identity(ctx)) === digest(pinnedIdentity)
       ? selected
       : null;
   }

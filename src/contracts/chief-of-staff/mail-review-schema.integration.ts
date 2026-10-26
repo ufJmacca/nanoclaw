@@ -349,6 +349,50 @@ test('G06 migration preserves the generic schedule and admits only two owner-bou
           }
         },
       );
+      await t.test(
+        'selection preparation uses retained owner identity before installing a scheduled origin',
+        async () => {
+          const owner = { ...context, origin: undefined, ingressId: 'fixture-owner-event' };
+          const prepareAccess = new MailReviewAccess({
+            authority: () => identity,
+            ownerAuthority: () => identity,
+            matches: () => true,
+          });
+          assert.equal((await prepareAccess.preparation(admin, owner, runId, 1))?.inputs?.capture_id, captureId);
+          assert.equal(await access.preparation(admin, owner, runId, 1), null);
+          assert.equal(await prepareAccess.preparation(admin, context, runId, 1), null);
+          assert.equal(await prepareAccess.preparation(admin, owner, runId, 2), null);
+          await admin.query('SAVEPOINT initial_review_preparation');
+          try {
+            await admin.query('UPDATE cos.brief_runs SET model_calls=0,review_inputs=NULL WHERE scope_id=$1', [scope]);
+            const initial = await prepareAccess.preparation(admin, owner, runId, 1);
+            assert.equal(initial?.captureId, captureId);
+            assert.equal(initial?.inputs, null);
+            assert.equal(await prepareAccess.check(admin, context, 'read'), null);
+            await admin.query('UPDATE cos.brief_runs SET model_calls=1 WHERE scope_id=$1', [scope]);
+            assert.equal(await prepareAccess.preparation(admin, owner, runId, 1), null);
+          } finally {
+            await admin.query('ROLLBACK TO SAVEPOINT initial_review_preparation');
+            await admin.query('RELEASE SAVEPOINT initial_review_preparation');
+          }
+        },
+      );
+      await t.test('a formerly fresh selection cannot save a draft after its last sync becomes stale', async () => {
+        await admin.query('SAVEPOINT review_freshness');
+        try {
+          const old = new Date(Date.now() - 601000).toISOString();
+          await admin.query('UPDATE cos.mail_states SET last_success_at=$2 WHERE scope_id=$1', [scope, old]);
+          await admin.query(
+            "UPDATE cos.brief_runs SET review_inputs=jsonb_set(review_inputs,'{last_success_at}',to_jsonb($2::text)) WHERE scope_id=$1",
+            [scope, old],
+          );
+          assert.equal((await access.check(admin, context, 'read'))?.id, policy);
+          assert.equal(await access.check(admin, context, 'draft', 'aa01'), null);
+        } finally {
+          await admin.query('ROLLBACK TO SAVEPOINT review_freshness');
+          await admin.query('RELEASE SAVEPOINT review_freshness');
+        }
+      });
     });
     await t.test('the runtime can read but cannot grant or alter review authority', async () => {
       const privileges = await runtime.query(
