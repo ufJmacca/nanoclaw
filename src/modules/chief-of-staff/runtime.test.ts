@@ -1233,110 +1233,133 @@ it.each([
   }
 });
 
-it('S04 wires shared-context scheduled admission and model budgets while withholding ordinary chat publication', async () => {
-  const db = initTestDb();
-  const binding: CosBinding = {
-    scopeId: 'scope',
-    agentGroupId: 'group',
-    messagingGroupId: 'mg',
-    sessionId: 'session',
-    provider: 'codex',
-    instanceId: 'fixture',
-    channelId: 'private',
-    ownerId: 'owner',
-    botId: 'bot',
-  };
-  const session = {
-    id: 'session',
-    agent_group_id: 'group',
-    messaging_group_id: 'mg',
-    thread_id: null,
-    status: 'active',
-    agent_provider: 'codex',
-  } as Session;
-  installCosBoundary(binding, db);
-  db.exec('UPDATE cos_identity_boundaries SET paused=0');
-  ensureConversationSchema(db);
-  const generation = randomUUID();
-  db.prepare(
-    "INSERT INTO cos_conversation_states(scope_id,binding_digest,account_fingerprint,generation,status,updated_at) VALUES(?,?,?,?,'active',?)",
-  ).run(binding.scopeId, digest(binding), 'a'.repeat(64), generation, new Date().toISOString());
-  const lease = {
-    runId: 'b'.repeat(64),
-    generation: 1,
-    hostId: 'host',
-    deadlineAt: new Date(Date.now() + 120000).toISOString(),
-  };
-  expect(installScheduledOrigin(db, binding, session, lease)).toBe(true);
-  const briefs = {
-    authorize: vi.fn().mockResolvedValue({ status: 'ok' }),
-    reserveCall: vi.fn().mockResolvedValue({ status: 'ok' }),
-  };
-  const knowledge = {
-    contextReady: vi.fn().mockResolvedValue({ status: 'ok' }),
-    answers: { authorizePublication: vi.fn().mockResolvedValue({ status: 'ok' }) },
-  };
-  const proactive = { scheduledBatch: vi.fn().mockResolvedValue({ status: 'ok' }) };
-  let authorize!: TurnAuthorization;
-  runtime = createCosRuntime({
-    db,
-    enabled: true,
-    store: {
-      briefs,
-      knowledge,
-      proactive,
-      context: vi.fn().mockResolvedValue({ status: 'ok' }),
-    } as unknown as PriorityStore,
-    facts: async () => ({
-      id: 'private',
-      type: 'P',
-      delete_at: 0,
-      members: ['bot', 'owner'],
-      activeSubscription: true,
-    }),
-    session: () => session,
-    destination: () => undefined,
-    stop: vi.fn(),
-    wake: vi.fn(),
-    launcher: {
-      ready: () => true,
-      prepare: async (_binding, _session, check) => {
-        authorize = check;
-        return {} as CosLaunch;
-      },
-    },
-  });
-  await prepareCosLaunch(session);
-  expect(await authorize()).toBe(`brief:${lease.runId}:1`);
-  expect(knowledge.contextReady).toHaveBeenCalledWith(expect.objectContaining({ sessionId: 'session', generation }));
-  expect(proactive.scheduledBatch).toHaveBeenCalledWith(
-    expect.objectContaining({ generation, origin: { kind: 'schedule', runId: lease.runId, generation: 1 } }),
-  );
-  proactive.scheduledBatch.mockResolvedValue({ status: 'unavailable' });
-  expect(await authorize()).toBeNull();
-  expect(await authorize.reserve!('outage-before-model')).toBe(false);
-  expect(briefs.reserveCall).not.toHaveBeenCalled();
-  proactive.scheduledBatch.mockResolvedValue({ status: 'ok' });
-  expect(await authorize.reserve!('attempt')).toBe(true);
-  expect(briefs.reserveCall).toHaveBeenCalledWith(
-    expect.objectContaining({ origin: { kind: 'schedule', runId: lease.runId, generation: 1 } }),
-    lease.runId,
-    1,
-    'model',
-    'attempt',
-  );
-  briefs.reserveCall.mockResolvedValue({ status: 'pending' });
-  expect(await authorize.reserve!('lost')).toBe(false);
-  expect(
-    await permitCosOutbound(session, {
-      kind: 'chat',
-      channel_type: 'mattermost',
-      platform_id: 'mattermost:fixture:private',
+it.each(['brief', 'mail-review'] as const)(
+  'S04 wires shared-context %s admission and model budgets while withholding ordinary chat publication',
+  async (purpose) => {
+    const db = initTestDb();
+    const binding: CosBinding = {
+      scopeId: 'scope',
+      agentGroupId: 'group',
+      messagingGroupId: 'mg',
+      sessionId: 'session',
+      provider: 'codex',
+      instanceId: 'fixture',
+      channelId: 'private',
+      ownerId: 'owner',
+      botId: 'bot',
+    };
+    const session = {
+      id: 'session',
+      agent_group_id: 'group',
+      messaging_group_id: 'mg',
       thread_id: null,
-      content: JSON.stringify({ text: 'Untracked scheduled brief' }),
-    }),
-  ).toBe(false);
-  expect(knowledge.answers.authorizePublication).not.toHaveBeenCalled();
-  briefs.authorize.mockResolvedValue({ status: 'denied' });
-  expect(await authorize()).toBeNull();
-});
+      status: 'active',
+      agent_provider: 'codex',
+    } as Session;
+    installCosBoundary(binding, db);
+    db.exec('UPDATE cos_identity_boundaries SET paused=0');
+    ensureConversationSchema(db);
+    const generation = randomUUID();
+    db.prepare(
+      "INSERT INTO cos_conversation_states(scope_id,binding_digest,account_fingerprint,generation,status,updated_at) VALUES(?,?,?,?,'active',?)",
+    ).run(binding.scopeId, digest(binding), 'a'.repeat(64), generation, new Date().toISOString());
+    const lease = {
+      runId: 'b'.repeat(64),
+      generation: 1,
+      hostId: 'host',
+      deadlineAt: new Date(Date.now() + 120000).toISOString(),
+    };
+    expect(installScheduledOrigin(db, binding, session, lease)).toBe(true);
+    const briefs = {
+      authorize: vi.fn().mockResolvedValue({ status: 'ok' }),
+      reserveCall: vi.fn().mockResolvedValue({ status: 'ok' }),
+    };
+    const knowledge = {
+      contextReady: vi.fn().mockResolvedValue({ status: 'ok' }),
+      answers: { authorizePublication: vi.fn().mockResolvedValue({ status: 'ok' }) },
+    };
+    const proactive = { scheduledBatch: vi.fn().mockResolvedValue({ status: 'ok' }) };
+    const mailReviewAccess = {
+      scopeForReads: vi.fn().mockResolvedValue({ binding_id: 'selected-reader', thread_ids: ['bb01'] }),
+    };
+    let authorize!: TurnAuthorization;
+    runtime = createCosRuntime({
+      db,
+      enabled: true,
+      store: {
+        briefs,
+        knowledge,
+        proactive,
+        ...(purpose === 'mail-review'
+          ? {
+              database: { run: async (operation: (client: string) => unknown) => operation('fixture-client') },
+              mailReviewAccess,
+            }
+          : {}),
+        context: vi.fn().mockResolvedValue({ status: 'ok' }),
+      } as unknown as PriorityStore,
+      facts: async () => ({
+        id: 'private',
+        type: 'P',
+        delete_at: 0,
+        members: ['bot', 'owner'],
+        activeSubscription: true,
+      }),
+      session: () => session,
+      destination: () => undefined,
+      stop: vi.fn(),
+      wake: vi.fn(),
+      launcher: {
+        ready: () => true,
+        prepare: async (_binding, _session, check) => {
+          authorize = check;
+          return {} as CosLaunch;
+        },
+      },
+    });
+    await prepareCosLaunch(session);
+    expect(await authorize()).toBe(`brief:${lease.runId}:1`);
+    expect(knowledge.contextReady).toHaveBeenCalledWith(expect.objectContaining({ sessionId: 'session', generation }));
+    const retained = expect.objectContaining({
+      generation,
+      origin: { kind: 'schedule', runId: lease.runId, generation: 1 },
+    });
+    if (purpose === 'mail-review') {
+      expect(mailReviewAccess.scopeForReads).toHaveBeenCalledWith('fixture-client', retained);
+      expect(proactive.scheduledBatch).not.toHaveBeenCalled();
+      mailReviewAccess.scopeForReads.mockResolvedValue({ binding_id: 'selected-reader', thread_ids: [] });
+      expect(await authorize()).toBe(`brief:${lease.runId}:1`);
+      mailReviewAccess.scopeForReads.mockResolvedValue({ binding_id: null, thread_ids: [] });
+    } else {
+      expect(proactive.scheduledBatch).toHaveBeenCalledWith(retained);
+      proactive.scheduledBatch.mockResolvedValue({ status: 'unavailable' });
+    }
+    expect(await authorize()).toBeNull();
+    expect(await authorize.reserve!('outage-before-model')).toBe(false);
+    expect(briefs.reserveCall).not.toHaveBeenCalled();
+    proactive.scheduledBatch.mockResolvedValue({ status: 'ok' });
+    mailReviewAccess.scopeForReads.mockResolvedValue({ binding_id: 'selected-reader', thread_ids: ['bb01'] });
+    expect(await authorize.reserve!('attempt')).toBe(true);
+    expect(briefs.reserveCall).toHaveBeenCalledWith(
+      expect.objectContaining({ origin: { kind: 'schedule', runId: lease.runId, generation: 1 } }),
+      lease.runId,
+      1,
+      'model',
+      'attempt',
+    );
+    briefs.reserveCall.mockResolvedValue({ status: 'pending' });
+    expect(await authorize.reserve!('lost')).toBe(false);
+    expect(
+      await permitCosOutbound(session, {
+        kind: 'chat',
+        channel_type: 'mattermost',
+        platform_id: 'mattermost:fixture:private',
+        thread_id: null,
+        content: JSON.stringify({ text: 'Untracked scheduled brief' }),
+      }),
+    ).toBe(false);
+    expect(knowledge.answers.authorizePublication).not.toHaveBeenCalled();
+    briefs.authorize.mockResolvedValue({ status: 'denied' });
+    expect(await authorize()).toBeNull();
+  },
+);

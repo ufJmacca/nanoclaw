@@ -533,7 +533,14 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
               return null;
             if (context.origin?.kind === 'schedule') {
               const retained = resolveKnowledgeContext(session, context, d.db);
-              if (!retained || (await d.store.proactive.scheduledBatch(retained)).status !== 'ok') return null;
+              if (!retained) return null;
+              const access = d.store.mailReviewAccess;
+              const reviewScope = access
+                ? await d.store.database.run((client) => access.scopeForReads(client, retained))
+                : null;
+              if (reviewScope === null) {
+                if ((await d.store.proactive.scheduledBatch(retained)).status !== 'ok') return null;
+              } else if (reviewScope.binding_id === null) return null;
             }
             return context;
           },
