@@ -6,6 +6,7 @@ import { safeHostEnvironment } from '../../host-environment.js';
 import { selectedFixtureEnvironment } from './fixture-database.js';
 import { verifyMailFixtureReport } from './mail-fixture-report.js';
 import { verifyMailDraftFixtureReport } from './mail-draft-fixture-report.js';
+import { verifyMailReviewFixtureReport } from './mail-review-fixture-report.js';
 import { verifyVaultMemory } from '../../modules/chief-of-staff/ops/vault-memory.js';
 import { stopFixtureWorkers } from './fixture-workers.js';
 type Selection = {
@@ -15,13 +16,13 @@ type Selection = {
   sourceCommit: string;
   sourceTree: string;
   workerAssetsDigest: string;
-  slice?: 'G05';
+  slice?: 'G05' | 'G06';
 };
 export function parseMailArtifactFixtureArguments(args: string[]): Selection {
   const [suite, hostImage, workerImage, sourceCommit, sourceTree, workerAssetsDigest] = args,
     image = /^sha256:[a-f0-9]{64}$/;
   if (
-    (args.length !== 6 && (args.length !== 7 || args[6] !== 'G05')) ||
+    (args.length !== 6 && (args.length !== 7 || !['G05', 'G06'].includes(args[6]))) ||
     !['database', 'native'].includes(suite) ||
     !image.test(hostImage) ||
     (suite === 'database' ? workerImage !== '-' : !image.test(workerImage) || workerImage === hostImage) ||
@@ -37,7 +38,7 @@ export function parseMailArtifactFixtureArguments(args: string[]): Selection {
     sourceCommit,
     sourceTree,
     workerAssetsDigest,
-    ...(args.length === 7 ? { slice: 'G05' as const } : {}),
+    ...(args.length === 7 ? { slice: args[6] as 'G05' | 'G06' } : {}),
   };
 }
 /** This entry cannot run against checkout overrides or an owner profile. The
@@ -78,7 +79,8 @@ export async function runMailArtifactFixture(args: string[]): Promise<void> {
     throw Error('mail_fixture_source_unverified');
   const fixtureRoot = process.env.COS_FIXTURE_HOST_ROOT,
     fixtureImage = process.env.COS_FIXTURE_IMAGE,
-    contract = selected.slice === 'G05' ? 'cos-g05-draft' : 'cos-g04-mail';
+    contract =
+      selected.slice === 'G06' ? 'cos-g06-review' : selected.slice === 'G05' ? 'cos-g05-draft' : 'cos-g04-mail';
   if (
     selected.suite === 'native'
       ? !fixtureRoot ||
@@ -114,13 +116,17 @@ export async function runMailArtifactFixture(args: string[]): Promise<void> {
     }),
   );
   const files =
-    selected.slice === 'G05'
+    selected.slice === 'G06'
       ? selected.suite === 'database'
-        ? ['mail-draft-store.integration']
-        : ['mail-draft-flow.integration']
-      : selected.suite === 'database'
-        ? ['mail-store.integration', 'mail-checkpoint.integration']
-        : ['mail-flow.integration'];
+        ? ['mail-review-schema.integration']
+        : ['mail-review-flow.integration']
+      : selected.slice === 'G05'
+        ? selected.suite === 'database'
+          ? ['mail-draft-store.integration']
+          : ['mail-draft-flow.integration']
+        : selected.suite === 'database'
+          ? ['mail-store.integration', 'mail-checkpoint.integration']
+          : ['mail-flow.integration'];
   const result = spawnSync(
     process.execPath,
     [
@@ -149,7 +155,8 @@ export async function runMailArtifactFixture(args: string[]): Promise<void> {
   verifyVaultMemory();
   if (result.stdout) process.stdout.write(result.stdout);
   if (result.error || result.signal || result.status !== 0) throw Error('mail_fixture_process_failed');
-  if (selected.slice === 'G05') verifyMailDraftFixtureReport(result.stdout, selected.suite);
+  if (selected.slice === 'G06') verifyMailReviewFixtureReport(result.stdout, selected.suite);
+  else if (selected.slice === 'G05') verifyMailDraftFixtureReport(result.stdout, selected.suite);
   else verifyMailFixtureReport(result.stdout, selected.suite);
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href)

@@ -2,6 +2,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { verifyMailFixtureReport } from '../../../contracts/chief-of-staff/mail-fixture-report.js';
 import { verifyMailDraftFixtureReport } from '../../../contracts/chief-of-staff/mail-draft-fixture-report.js';
+import { verifyMailReviewFixtureReport } from '../../../contracts/chief-of-staff/mail-review-fixture-report.js';
 import { verifyMailVaultFixtureEvidence, verifyMailDraftVaultFixtureEvidence } from './mail-vault-fixture-evidence.js';
 import {
   verifyMailRecoveryFixtureEvidence,
@@ -23,6 +24,9 @@ export function readMailArtifactFixtureText(file: string): string {
 export function readMailDraftArtifactFixtureText(file: string): string {
   return readMailFixtureText(file, 'draft_artifacts.log');
 }
+export function readMailReviewArtifactFixtureText(file: string): string {
+  return readMailFixtureText(file, 'mail_review_artifacts.log');
+}
 export function readMailCredentialFixtureText(file: string): string {
   return readMailFixtureText(file, 'mail_credentials.log');
 }
@@ -42,6 +46,7 @@ function readMailFixtureText(
     | 'mail_credentials.log'
     | 'mail_recovery.log'
     | 'draft_artifacts.log'
+    | 'mail_review_artifacts.log'
     | 'draft_credentials.log'
     | 'draft_recovery.log',
 ): string {
@@ -154,6 +159,11 @@ export function verifyMailDraftReleaseEvidence(gate: string, text: string, ident
   if (!['draft_policy', 'draft_transport', 'draft_reconciliation'].includes(gate) || !('workerImages' in identity))
     throw Error('mail_draft_release_check_unavailable');
   return verifyMailDraftArtifactFixtureEvidence(text, identity);
+}
+export function verifyMailReviewReleaseEvidence(gate: string, text: string, identity: Identity) {
+  if (!['mail_review_policy', 'mail_review_schedule', 'mail_review_flow'].includes(gate))
+    throw Error('mail_review_release_check_unavailable');
+  return verifyMailReviewArtifactFixtureEvidence(text, identity);
 }
 function object(value: unknown): RecordValue {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw Error('object');
@@ -300,9 +310,17 @@ export function verifyMailDraftArtifactFixtureEvidence(text: string, identity: I
     throw Error('mail_draft_artifact_release_evidence_unavailable');
   }
 }
-function verifyBoundMailArtifactEvidence(text: string, identity: Identity, profile: 'G04' | 'G05') {
+export function verifyMailReviewArtifactFixtureEvidence(text: string, identity: Identity) {
   try {
-    const contract = profile === 'G05' ? 'cos-g05-draft' : 'cos-g04-mail';
+    return verifyBoundMailArtifactEvidence(text, identity, 'G06');
+  } catch {
+    // eslint-disable-next-line preserve-caught-error -- A review gate cannot substitute a prior reader/draft execution or expose private nested diagnostics.
+    throw Error('mail_review_artifact_release_evidence_unavailable');
+  }
+}
+function verifyBoundMailArtifactEvidence(text: string, identity: Identity, profile: 'G04' | 'G05' | 'G06') {
+  try {
+    const contract = profile === 'G06' ? 'cos-g06-review' : profile === 'G05' ? 'cos-g05-draft' : 'cos-g04-mail';
     if (typeof text !== 'string' || Buffer.byteLength(text) > 2 * 1024 ** 2) throw Error('bounds');
     keys(object(identity), 'sourceCommit,sourceTree,workerAssetsDigest,hostImage,workerImages,certificateFile');
     if (
@@ -381,7 +399,11 @@ function verifyBoundMailArtifactEvidence(text: string, identity: Identity, profi
         end = next < 0 ? lines.length : next,
         report = lines.splice(0, end).join('\n');
       const verified =
-        profile === 'G05' ? verifyMailDraftFixtureReport(report, suite) : verifyMailFixtureReport(report, suite);
+        profile === 'G06'
+          ? verifyMailReviewFixtureReport(report, suite)
+          : profile === 'G05'
+            ? verifyMailDraftFixtureReport(report, suite)
+            : verifyMailFixtureReport(report, suite);
       if (suite === 'database') actualDatabaseCases = verified.actualCases;
     }
     if (lines.some((line) => line.trim())) throw Error('extra');

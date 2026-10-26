@@ -2,12 +2,15 @@
 # Mac driver: compiled host plus each immutable worker, selected test profile only.
 set -euo pipefail
 umask 077
-[[ "$(uname -s)" == Darwin && ( $# == 5 || ( $# == 6 && "${6:-}" == --drafts ) ) ]] || exit 1
+[[ "$(uname -s)" == Darwin && ( $# == 5 || ( $# == 6 && ( "${6:-}" == --drafts || "${6:-}" == --mail-reviews ) ) ) ]] || exit 1
 [[ -z "${DOCKER_HOST:-}${DOCKER_CONTEXT:-}${DOCKER_TLS_VERIFY:-}${DOCKER_CERT_PATH:-}" ]] || exit 1
 host=$1 standard=$2 documents=$3 test_environment=$4 certificate=$5
 fixture_contract=cos-g04-mail
 artifact_selection=()
-if [[ $# == 6 ]]; then
+if [[ "${6:-}" == --mail-reviews ]]; then
+  fixture_contract=cos-g06-review
+  artifact_selection=(G06)
+elif [[ $# == 6 ]]; then
   fixture_contract=cos-g05-draft
   artifact_selection=(G05)
 fi
