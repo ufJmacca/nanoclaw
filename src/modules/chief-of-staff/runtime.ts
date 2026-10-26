@@ -387,6 +387,13 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
           const readable = await d.store.knowledge.contextReady(retained);
           if (!current()) return { status: 'denied' };
           if (readable.status !== 'ok') return readable;
+          if (run.provenance?.purpose === 'mail_review') {
+            if (!(await briefAdmission(binding)) || !current()) return { status: 'denied' };
+            const prepared = await d.store.prepareMailReview(retained, run.id, run.generation, current);
+            if (prepared.status !== 'ok') return prepared;
+            const same = resolveKnowledgeContext(session, ownerContext, d.db);
+            return current() && !!same && digest(same) === digest(retained) ? { status: 'ok' } : { status: 'denied' };
+          }
           const refreshed = await new BriefRefresh({
             runs: d.store.briefs,
             connector: d.store.calendar,
