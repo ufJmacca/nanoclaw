@@ -23,6 +23,11 @@ import { initializeDraftJournal } from '../../modules/chief-of-staff/mail-drafts
 import { GOOGLE_MAIL_DRAFT_SCOPE } from '../../modules/chief-of-staff/mail-drafts/oauth.js';
 import type { MailDraftFixtureConfiguration } from './mail-draft-fixture-host.js';
 import { draftReplayFailureMetadata } from './draft-fixture-diagnostics.js';
+import {
+  exerciseMailReviewNativeFlow,
+  mailReviewFixtureClock,
+  seedMailReviewFixture,
+} from './mail-review-native-scenario.js';
 
 function replyHeaders(id: string) {
   return [
@@ -33,7 +38,12 @@ function replyHeaders(id: string) {
   ];
 }
 
-export async function runMailNativeFixture(drafts = false): Promise<void> {
+export async function runMailReviewNativeFixture(): Promise<void> {
+  return runMailNativeFixture(true, true);
+}
+
+export async function runMailNativeFixture(drafts = false, review = false): Promise<void> {
+  assert(!review || drafts);
   const repository = process.cwd(),
     hostRepository = process.env.COS_FIXTURE_HOST_ROOT,
     image = process.env.COS_FIXTURE_IMAGE;
@@ -41,7 +51,9 @@ export async function runMailNativeFixture(drafts = false): Promise<void> {
   assert.ok(image);
   const parent = path.join(repository, '.cos-plan-state/fixtures');
   fs.mkdirSync(parent, { recursive: true });
-  const root = fs.mkdtempSync(path.join(parent, drafts ? 'flow-g05-drafts-' : 'flow-g04-mail-')),
+  const root = fs.mkdtempSync(
+      path.join(parent, review ? 'flow-g06-review-' : drafts ? 'flow-g05-drafts-' : 'flow-g04-mail-'),
+    ),
     knowledgeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-knowledge-demo-')),
     scope = 'demo-mail-' + randomUUID();
   for (const name of ['artifacts', 'staging', 'mail-fences'])
@@ -192,14 +204,24 @@ export async function runMailNativeFixture(drafts = false): Promise<void> {
         { id: 'aa05', labels: ['INBOX'], text: 'EXCLUDED_OLD_PRIVATE_CANARY', age: 31 * 86400000 },
       ];
     if (drafts)
-      for (let i = 11; i <= 15; i++)
+      for (let i = 11; i <= (review ? 22 : 15); i++)
         raw.push({
           id: 'aa' + i,
           threadId: 'bb' + i,
           labels: ['INBOX'],
-          text: 'Harmless draft request ' + i,
+          text: review
+            ? 'Could you please review the harmless fixture request ' + i + '?'
+            : 'Harmless draft request ' + i,
           age: 3000 + i,
         });
+    if (review)
+      raw.push({
+        id: 'aa30',
+        threadId: 'bb30',
+        labels: ['INBOX'],
+        text: 'EXCLUDED_NEWSLETTER_PRIVATE_CANARY: unsubscribe from this newsletter',
+        age: 500,
+      });
     const captured = await collectMail({
       mailboxEmail: 'owner@example.invalid',
       capturedAt: observed,
@@ -239,13 +261,21 @@ export async function runMailNativeFixture(drafts = false): Promise<void> {
     assert.equal((await mail.publish(owner, mailBinding, captureId, captured)).status, 'ok');
     assert.deepEqual(
       captured.messages.map((m) => m.id).sort(),
-      drafts ? ['aa01', 'aa02', 'aa11', 'aa12', 'aa13', 'aa14', 'aa15'] : ['aa01', 'aa02'],
+      review
+        ? raw
+            .filter((r) => !['aa03', 'aa04', 'aa05'].includes(r.id))
+            .map((r) => r.id)
+            .sort()
+        : drafts
+          ? ['aa01', 'aa02', 'aa11', 'aa12', 'aa13', 'aa14', 'aa15']
+          : ['aa01', 'aa02'],
     );
     if (drafting) {
       drafting.sources = captured.messages.map((m) => ({
         id: m.id,
         threadId: m.threadId,
         internalDate: observed - raw.find((r) => r.id === m.id)!.age,
+        historyId: m.historyId,
         headers: replyHeaders(m.id),
       }));
       await admin.query(
@@ -262,6 +292,7 @@ export async function runMailNativeFixture(drafts = false): Promise<void> {
           digest('explicit synthetic fixture grant only'),
         ],
       );
+      if (review) await seedMailReviewFixture(admin, binding, drafting, knowledgeRoot);
     }
     const start = async () => {
       host = new HostFixture();
@@ -272,6 +303,7 @@ export async function runMailNativeFixture(drafts = false): Promise<void> {
         knowledgeRoot,
         mail: true,
         ...(drafting ? { mailDrafts: drafting } : {}),
+        ...(review ? { mailReviewClock: mailReviewFixtureClock('morning') } : {}),
       });
       client = new McpFixture(
         repository,
@@ -292,6 +324,25 @@ export async function runMailNativeFixture(drafts = false): Promise<void> {
         .sort(),
       ['cos_mail_draft_create', 'cos_mail_draft_status', 'cos_mail_search', 'cos_mail_thread_get'],
     );
+    if (review) {
+      await exerciseMailReviewNativeFlow({
+        admin,
+        binding,
+        drafting: drafting!,
+        generation,
+        platform: sub.messagingGroup.platform_id,
+        host: () => host!,
+        client: () => client!,
+        restart: async () => {
+          await client!.close();
+          client = undefined;
+          await host!.close(true);
+          host = undefined;
+          await start();
+        },
+      });
+      return;
+    }
     await host!.request('ingress', { text: 'What did the Pilot Alpha thread say about launch?', id: randomUUID() });
     const found = await client!.call('cos_mail_search', { binding_id: mailBinding, query: 'Pilot Alpha' });
     assert.equal(found.status, 'ok');
@@ -573,6 +624,13 @@ export async function runMailNativeFixture(drafts = false): Promise<void> {
         ]);
         await admin.query('UPDATE cos.sources SET current_revision_id=NULL WHERE scope_id=$1', [scope]);
         for (const table of [
+          'brief_notifications',
+          'brief_call_reservations',
+          'brief_runs',
+          'brief_schedule_revisions',
+          'brief_schedules',
+          'mail_review_policy_revisions',
+          'mail_review_policies',
           'mail_draft_writer_revisions',
           'mail_draft_writer_bindings',
           'mail_messages',

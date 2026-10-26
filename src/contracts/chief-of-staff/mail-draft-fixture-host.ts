@@ -14,6 +14,12 @@ import { DraftJournal } from '../../modules/chief-of-staff/mail-drafts/journal.j
 import { googleMailDraftWriter } from '../../modules/chief-of-staff/mail-drafts/google-writer.js';
 import { GOOGLE_MAIL_DRAFT_SCOPE } from '../../modules/chief-of-staff/mail-drafts/oauth.js';
 import { subscriptionActivation } from '../../modules/chief-of-staff/bridge/model-policy.js';
+import { scheduledContext } from '../../modules/chief-of-staff/automation/scheduled-origin.js';
+import {
+  validMailReviewBinding,
+  type MailReviewBinding,
+} from '../../modules/chief-of-staff/automation/mail-review-binding.js';
+import type { MailReviewAccess } from '../../modules/chief-of-staff/automation/mail-review-access.js';
 import {
   privateConversationDirectory,
   readConversationOwner,
@@ -25,10 +31,12 @@ export type MailDraftFixtureConfiguration = {
   writerId: string;
   policy: MailDraftBinding;
   mailboxEmail: string;
+  review?: { id: string; version: 1; binding: MailReviewBinding };
   sources: Array<{
     id: string;
     threadId: string;
     internalDate: number;
+    historyId?: string;
     headers: Array<{ name: string; value: string }>;
   }>;
 };
@@ -60,6 +68,7 @@ export function createMailDraftFixtureHost(
   binding: CosBinding,
   input: MailDraftFixtureConfiguration,
   readerFences?: CalendarAccessFences,
+  reviewAccess?: MailReviewAccess,
 ) {
   assert.equal(process.env.COS_FIXTURE_HOST_PROCESS, 'S01');
   assert.equal(input.policy.provider, 'fixture');
@@ -71,6 +80,15 @@ export function createMailDraftFixtureHost(
   assert.equal(input.policy.readerClientDigest, digest('reader-fixture.apps.googleusercontent.com'));
   assert.equal(input.policy.writerClientDigest, digest('writer-fixture.apps.googleusercontent.com'));
   assert(input.sources.length > 0 && input.sources.length <= 20);
+  if (input.review) {
+    assert(reviewAccess);
+    assert.equal(input.review.version, 1);
+    assert(validMailReviewBinding(input.review.binding));
+    assert.equal(input.review.binding.provider, 'fixture');
+    assert.equal(input.review.binding.writerBindingId, input.writerId);
+    assert.equal(input.review.binding.writerDigest, digest(input.policy));
+    assert.equal(input.review.binding.nativeBindingDigest, digest(binding));
+  }
   privateConversationDirectory(root);
   const directory = path.join(root, 'mail-draft-fixture');
   privateConversationDirectory(directory);
@@ -89,6 +107,7 @@ export function createMailDraftFixtureHost(
       journal.assertCurrent();
       const session = getSession(context.sessionId),
         boundary = session && cosBoundary(session, native),
+        scheduled = context.origin && session && scheduledContext(session, native),
         retained = native
           .prepare(
             'SELECT generation,status,binding_digest,account_fingerprint FROM cos_conversation_states WHERE scope_id=?',
@@ -106,7 +125,12 @@ export function createMailDraftFixtureHost(
         retained.status !== 'active' ||
         retained.binding_digest !== digest(binding) ||
         retained.account_fingerprint !== 'a'.repeat(64) ||
-        context.origin ||
+        (context.origin &&
+          (!input.review ||
+            !reviewAccess ||
+            !scheduled ||
+            digest(scheduled.origin) !== digest(context.origin) ||
+            scheduled.ingressId !== context.ingressId)) ||
         retained.generation !== input.authority.contextGeneration ||
         context.scopeId !== binding.scopeId ||
         context.ownerId !== binding.ownerId ||
@@ -141,6 +165,7 @@ export function createMailDraftFixtureHost(
   const dependencies: MailDraftDependencies = {
     journal,
     authority,
+    ...(reviewAccess ? { reviewAccess } : {}),
     matches: (context, selected) =>
       !!authority(context) &&
       selected.id === input.writerId &&

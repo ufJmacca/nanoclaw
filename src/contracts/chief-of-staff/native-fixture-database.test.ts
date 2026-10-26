@@ -60,3 +60,13 @@ it('preserves the existing mission fixture budget', async () => {
   expect(f.outcome).toEqual({ result: { status: 'ok' } });
   expect(f.client.release).toHaveBeenCalledExactlyOnceWith(false);
 });
+
+it('lets a checked ten-thread Mail review finish within the existing complex fixture deadline', async () => {
+  const f = await delayedMutation({ mailDrafts: { review: {} } });
+  expect(f.outcome).toEqual({ result: { status: 'ok' } });
+  expect(f.client.release).toHaveBeenCalledExactlyOnceWith(false);
+});
+it('keeps ordinary Mail draft fixtures on their short outage deadline', async () => {
+  const f = await delayedMutation({ mailDrafts: {} });
+  expect(f.outcome).toEqual({ failure: 'pending' });
+});
