@@ -11,20 +11,14 @@ import { mailReviewSchedulePolicy } from '../../modules/chief-of-staff/automatio
 import type { MailDraftFixtureConfiguration } from './mail-draft-fixture-host.js';
 import type { HostFixture } from './host-fixture-client.js';
 import type { McpFixture } from './mcp-fixture.js';
-
-export function mailReviewFixtureClock(slot: 'morning' | 'afternoon', days = 1): string {
-  return Temporal.Now.zonedDateTimeISO('Australia/Sydney')
-    .add({ days })
-    .with({ hour: slot === 'morning' ? 8 : 15, minute: 1, second: 0, millisecond: 0, microsecond: 0, nanosecond: 0 })
-    .toInstant()
-    .toString();
-}
+import type { mailReviewFixtureTiming } from './mail-review-fixture-timing.js';
 
 export async function seedMailReviewFixture(
   admin: Pick<PoolClient, 'query'>,
   binding: CosBinding,
   input: MailDraftFixtureConfiguration,
   knowledgeRoot: string,
+  activatedAt: string,
 ): Promise<void> {
   assert.equal(process.env.COS_FIXTURE_DATABASE_PROFILE, 'test');
   assert.equal(input.policy.provider, 'fixture');
@@ -68,8 +62,8 @@ export async function seedMailReviewFixture(
   );
   for (const slot of ['morning', 'afternoon'] as const) {
     await admin.query(
-      `INSERT INTO cos.brief_schedules(scope_id,id,owner_id,session_id,agent_group_id,title,policy,limits,version,provenance,purpose,mail_review_policy_id,mail_review_policy_version,mail_review_slot)
-      VALUES($1,$2,$3,$4,$5,'Synthetic mail review',$6,$7,1,'{}','mail_review',$8,1,$9)`,
+      `INSERT INTO cos.brief_schedules(scope_id,id,owner_id,session_id,agent_group_id,title,policy,limits,version,provenance,purpose,mail_review_policy_id,mail_review_policy_version,mail_review_slot,activated_at)
+      VALUES($1,$2,$3,$4,$5,'Synthetic mail review',$6,$7,1,'{}','mail_review',$8,1,$9,$10)`,
       [
         binding.scopeId,
         slot === 'morning' ? review.binding.morningScheduleId : review.binding.afternoonScheduleId,
@@ -80,6 +74,7 @@ export async function seedMailReviewFixture(
         JSON.stringify({ max_turns: 3, max_tool_calls: 16, deadline_seconds: 300, refresh_seconds: 30 }),
         review.id,
         slot,
+        activatedAt,
       ],
     );
   }
@@ -120,6 +115,7 @@ export async function exerciseMailReviewNativeFlow(options: {
   drafting: MailDraftFixtureConfiguration;
   generation: string;
   platform: string;
+  timing: ReturnType<typeof mailReviewFixtureTiming>;
   host(): HostFixture;
   client(): McpFixture;
   restart(): Promise<void>;
@@ -142,7 +138,7 @@ export async function exerciseMailReviewNativeFlow(options: {
   await complete();
   let firstOperation = '';
   for (const [index, slot] of (['morning', 'afternoon'] as const).entries()) {
-    await options.host().request('clock', mailReviewFixtureClock(slot));
+    await options.host().request('clock', options.timing.clock(slot));
     await options.host().request('pump');
     const current = (await rows())[index];
     assert(current, JSON.stringify(await options.host().request('mail-draft-diagnostics')));
@@ -237,7 +233,7 @@ export async function exerciseMailReviewNativeFlow(options: {
   // Fresh header exclusions can leave no useful candidates without withdrawing prior sources
   // or replacing the retained main context. The already saved draft is preserved.
   await options.host().request('mail-review-fixture-no-useful-candidates');
-  await options.host().request('clock', mailReviewFixtureClock('morning', 2));
+  await options.host().request('clock', options.timing.clock('morning', 2));
   await options.host().request('pump');
   await options.host().request('pump');
   const emptyRun = (await rows())[2];
@@ -265,7 +261,7 @@ export async function exerciseMailReviewNativeFlow(options: {
   assert.equal((await options.host().request('mail-draft-fixture-state')).writes, 1);
   assert.equal(await options.host().request('main-context-generation'), generation);
   await options.host().request('mail-review-fixture-exhaust-allowance');
-  await options.host().request('clock', mailReviewFixtureClock('afternoon', 2));
+  await options.host().request('clock', options.timing.clock('afternoon', 2));
   await options.host().request('pump');
   await options.host().request('pump');
   const exhausted = (await rows())[3];

@@ -23,11 +23,8 @@ import { initializeDraftJournal } from '../../modules/chief-of-staff/mail-drafts
 import { GOOGLE_MAIL_DRAFT_SCOPE } from '../../modules/chief-of-staff/mail-drafts/oauth.js';
 import type { MailDraftFixtureConfiguration } from './mail-draft-fixture-host.js';
 import { draftReplayFailureMetadata } from './draft-fixture-diagnostics.js';
-import {
-  exerciseMailReviewNativeFlow,
-  mailReviewFixtureClock,
-  seedMailReviewFixture,
-} from './mail-review-native-scenario.js';
+import { exerciseMailReviewNativeFlow, seedMailReviewFixture } from './mail-review-native-scenario.js';
+import { mailReviewFixtureTiming } from './mail-review-fixture-timing.js';
 
 function replyHeaders(id: string) {
   return [
@@ -44,6 +41,7 @@ export async function runMailReviewNativeFixture(): Promise<void> {
 
 export async function runMailNativeFixture(drafts = false, review = false): Promise<void> {
   assert(!review || drafts);
+  const reviewTiming = mailReviewFixtureTiming();
   const repository = process.cwd(),
     hostRepository = process.env.COS_FIXTURE_HOST_ROOT,
     image = process.env.COS_FIXTURE_IMAGE;
@@ -292,7 +290,7 @@ export async function runMailNativeFixture(drafts = false, review = false): Prom
           digest('explicit synthetic fixture grant only'),
         ],
       );
-      if (review) await seedMailReviewFixture(admin, binding, drafting, knowledgeRoot);
+      if (review) await seedMailReviewFixture(admin, binding, drafting, knowledgeRoot, reviewTiming.activatedAt);
     }
     const start = async () => {
       host = new HostFixture();
@@ -303,7 +301,7 @@ export async function runMailNativeFixture(drafts = false, review = false): Prom
         knowledgeRoot,
         mail: true,
         ...(drafting ? { mailDrafts: drafting } : {}),
-        ...(review ? { mailReviewClock: mailReviewFixtureClock('morning') } : {}),
+        ...(review ? { mailReviewClock: reviewTiming.clock('morning') } : {}),
       });
       client = new McpFixture(
         repository,
@@ -331,6 +329,7 @@ export async function runMailNativeFixture(drafts = false, review = false): Prom
         drafting: drafting!,
         generation,
         platform: sub.messagingGroup.platform_id,
+        timing: reviewTiming,
         host: () => host!,
         client: () => client!,
         restart: async () => {
