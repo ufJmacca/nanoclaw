@@ -45,7 +45,7 @@ it.skipIf(!process.env.COS_BACKUP_PACKAGE_FIXTURE_BINARY)(
     expect(fs.statSync(file).ino).toBe(inode);
   },
 );
-it.skipIf(!process.env.COS_BACKUP_PACKAGE_FIXTURE_BINARY).each(['G03', 'G04', 'G05'] as const)(
+it.skipIf(!process.env.COS_BACKUP_PACKAGE_FIXTURE_BINARY).each(['G03', 'G04', 'G05', 'G06'] as const)(
   '%s verifies the same pinned utility at its fixed runtime location without replacing it',
   async (slice) => {
     const f = officialFixture();

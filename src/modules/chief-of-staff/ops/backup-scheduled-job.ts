@@ -41,7 +41,7 @@ export async function scheduledBackupJob(input: {
       const assertScope = (reopened: boolean) => {
         const state = readTarget(root, binding);
         if (
-          !['G02', 'G03', 'G04', 'G05'].includes(manifest.slice) ||
+          !['G02', 'G03', 'G04', 'G05', 'G06'].includes(manifest.slice) ||
           state.lifecycle !== 'protected' ||
           state.releaseId !== manifest.releaseId ||
           (reopened && admittedGeneration(root, binding) === null)

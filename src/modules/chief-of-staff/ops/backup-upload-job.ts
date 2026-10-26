@@ -107,13 +107,13 @@ export async function uploadBackupJob(input: {
         generation = admittedGeneration(root, binding),
         deadline = performance.now() + 45 * 60 * 1000;
       if (
-        !['G02', 'G03', 'G04', 'G05'].includes(manifest.slice) ||
+        !['G02', 'G03', 'G04', 'G05', 'G06'].includes(manifest.slice) ||
         state.lifecycle !== 'protected' ||
         state.releaseId !== manifest.releaseId ||
         generation === null
       )
         throw Error('backup_upload_job_unavailable');
-      const complete = manifest.slice === 'G04' || manifest.slice === 'G05';
+      const complete = ['G04', 'G05', 'G06'].includes(manifest.slice);
       if (
         complete &&
         (typeof effects.journalCredentials !== 'function' || typeof effects.captureCredentials !== 'function')

@@ -31,7 +31,7 @@ function fixture() {
     owner: { uid: 1000, gid: 1000, home: '/home/fixture', targetRoot: '/home/fixture/.config/nanoclaw-cos/state' },
   };
 }
-function backupUpgrade(slice: 'G02' | 'G03' | 'G04' | 'G05' = 'G02') {
+function backupUpgrade(slice: 'G02' | 'G03' | 'G04' | 'G05' | 'G06' = 'G02') {
   const input = fixture(),
     previous = vaultOwnerConfiguration(input),
     nonce = randomUUID(),
@@ -72,7 +72,7 @@ it('G02 refuses to create a fresh vault when the existing configuration is absen
   const { previous: _previous, ...input } = backupUpgrade();
   expect(() => vaultOwnerConfiguration(input)).toThrow('vault_owner_configuration_unavailable');
 });
-it.each(['G03', 'G04', 'G05'] as const)(
+it.each(['G03', 'G04', 'G05', 'G06'] as const)(
   '%s advances only the sealed helper and current lease while preserving every existing vault identity',
   (slice) => {
     const input = backupUpgrade(slice),
