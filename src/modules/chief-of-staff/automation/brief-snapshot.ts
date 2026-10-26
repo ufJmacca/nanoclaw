@@ -2,6 +2,7 @@ import { Temporal } from '@js-temporal/polyfill';
 import type { WorkDue } from '../contracts/protocol.js';
 import type { AnswerCitation } from '../contracts/answer-protocol.js';
 import type { CalendarTime } from '../calendar/normalization.js';
+import type { MailReviewBriefSnapshot } from './mail-review-brief.js';
 export type BriefWork = {
   id: string;
   version: number;
@@ -103,6 +104,7 @@ export type BriefSnapshot = {
   events: BriefEvent[];
   calendar_coverage: BriefCalendarCoverage[];
   suggested_work: ProactiveSummary[];
+  mail_review?: MailReviewBriefSnapshot;
 };
 const dueInstant = (due: WorkDue) =>
   due.kind === 'instant'
@@ -229,6 +231,7 @@ const dueLabel = (due: WorkDue | null) =>
       : `${due.at} (${due.time_zone})`
     : 'No deadline recorded';
 export function renderBrief(snapshot: BriefSnapshot): string {
+  if (snapshot.mail_review) return renderMailReview(snapshot, snapshot.mail_review);
   const coverage = snapshot.coverage;
   return [
     `CoS brief — generated ${snapshot.generated_at} (${label(snapshot.time_zone)})`,
@@ -272,5 +275,50 @@ export function renderBrief(snapshot: BriefSnapshot): string {
           'Ask CoS to accept, defer until an exact time, or dismiss a suggestion with a reason. Confirm the resulting exact approval preview. A suggestion grants no permission to execute work or change a commitment/project.',
         ]
       : ['Suggested delegated work: none. Any follow-up still requires an owner-approved proposal.']),
+  ].join('\n');
+}
+function renderMailReview(snapshot: BriefSnapshot, review: MailReviewBriefSnapshot): string {
+  const reasons = { request: 'Request', follow_up: 'Follow-up', attention: 'Attention' };
+  return [
+    `CoS mail review — generated ${snapshot.generated_at} (${label(snapshot.time_zone)})`,
+    `Mail last refreshed: ${review.last_success_at ?? 'never'}. Capture: ${review.captured_at}. Recorded capture coverage: ${review.coverage.replaceAll('_', ' ')}.`,
+    `${review.excluded_threads} threads excluded; ${review.unexamined_threads} additional eligible threads not examined.`,
+    'Limited to selected Inbox/Sent captures from the last 30 days; attachments are excluded. An empty view does not establish that the inbox is empty or that all mail has been reviewed.',
+    'Needs attention:',
+    ...(review.attention.length
+      ? review.attention.map(
+          (item) => `- ${reasons[item.reason]}: ${label(item.subject)} [${reference(item.citation)}]`,
+        )
+      : ['No useful candidate changes in this selected view.']),
+    ...snapshot.attention
+      .filter((item) => item.reason !== 'upcoming_event')
+      .map((item) => `- ${reason[item.reason]}: ${label(item.title)} [${reference(item.reference)}]`),
+    'Drafts ready:',
+    ...(review.drafts.length
+      ? review.drafts.map((item) => {
+          const source = review.attention.find((candidate) => candidate.source_message_id === item.source_message_id)!;
+          return `- ${item.notice.state === 'verified' ? 'Verified unsent draft' : 'Draft not confirmed ready'} for ${label(source.subject)} [${reference(source.citation)}]. ${item.notice.text}`;
+        })
+      : [
+          'No verified saved drafts recorded for this selected review. Other existing drafts are not inventoried here.',
+        ]),
+    'Upcoming meetings:',
+    ...(snapshot.events.length
+      ? snapshot.events.map(
+          (event) =>
+            `- ${label(event.summary)} — ${event.start.kind === 'date' ? event.start.date + ' (all day)' : event.start.instant} [${reference(event.evidence)}]`,
+        )
+      : ['No visible events in the recorded window.']),
+    `Calendar: ${snapshot.coverage.calendar.replaceAll('_', ' ')}. Window: ${snapshot.window.time_min} to ${snapshot.window.time_max} (end exclusive).`,
+    ...snapshot.calendar_coverage.map(
+      (calendar) =>
+        `Calendar ${label(calendar.calendar_id)} (${label(calendar.time_zone)}): ${label(calendar.coverage)}${calendar.warning ? ' — ' + label(calendar.warning) : ''}. Last successful refresh: ${calendar.last_success_at ?? 'never'}. Last attempt: ${calendar.last_attempt_at ?? 'never'}.`,
+    ),
+    'Calendar information is a stored snapshot. An empty or incomplete result does not establish that nothing is scheduled.',
+    ...(snapshot.coverage.truncated ? ['Some eligible items are not shown.'] : []),
+    ...(snapshot.coverage.withheld
+      ? [`${snapshot.coverage.withheld} items withheld because their current evidence could not be verified.`]
+      : []),
+    'Review and send unsent drafts yourself in Gmail. Draft text does not confirm a commitment or reserve Calendar time.',
   ].join('\n');
 }

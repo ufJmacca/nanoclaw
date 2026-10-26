@@ -1,5 +1,6 @@
 import { expect, it } from 'vitest';
 import { buildBriefSnapshot, renderBrief, type BriefInputs, type BriefWork } from './brief-snapshot.js';
+import { digest } from '../domain/contracts.js';
 const base: BriefInputs = {
   generatedAt: '2026-10-03T23:00:00Z',
   timeZone: 'Australia/Sydney',
@@ -25,6 +26,71 @@ const work = (id: string, patch: Partial<BriefWork> = {}): BriefWork => ({
   defer_until: null,
   evidence: [],
   ...patch,
+});
+function mailReviewSnapshot() {
+  return {
+    ...buildBriefSnapshot(base),
+    mail_review: {
+      format: 'cos-mail-review-brief/v1' as const,
+      run_id: 'a'.repeat(64),
+      run_generation: 1,
+      policy_id: '11111111-1111-4111-8111-111111111111',
+      policy_version: 1,
+      selection_digest: digest('selection'),
+      captured_at: base.generatedAt,
+      last_success_at: base.generatedAt,
+      coverage: 'stored_selection' as const,
+      excluded_threads: 4,
+      unexamined_threads: 2,
+      attention: [
+        {
+          source_message_id: 'aa',
+          subject: 'Please review @all <plan>',
+          reason: 'request' as const,
+          citation: { kind: 'source' as const, evidence_id: '22222222-2222-4222-8222-222222222222' },
+        },
+      ],
+      drafts: [] as {
+        source_message_id: string;
+        notice: {
+          operationId: string;
+          state: 'verified' | 'edited';
+          effectDigest: string;
+          identityDigest: string;
+          text: string;
+        };
+      }[],
+    },
+  };
+}
+it('G06 renders the three review sections with bounded source labels, Mail freshness and explicit limits', () => {
+  const text = renderBrief(mailReviewSnapshot());
+  for (const heading of ['Needs attention:', 'Drafts ready:', 'Upcoming meetings:']) expect(text).toContain(heading);
+  expect(text).toContain('Mail last refreshed: ' + base.generatedAt);
+  expect(text).toContain('4 threads excluded; 2 additional eligible threads not examined');
+  expect(text).toContain('source evidence 22222222-2222-4222-8222-222222222222');
+  expect(text).not.toContain('@all');
+  expect(text).toContain('＠all');
+  expect(text).toContain('does not establish that the inbox is empty');
+  expect(text).toContain('does not confirm a commitment or reserve Calendar time');
+});
+it('G06 distinguishes a verified unsent draft from an edited draft and preserves its observation wording', () => {
+  const snapshot = mailReviewSnapshot();
+  const notice = {
+    operationId: 'b'.repeat(64),
+    state: 'verified' as const,
+    effectDigest: digest('effect'),
+    identityDigest: digest('identity'),
+    text: 'Saved in Gmail and verified as unsent at the recorded observation.',
+  };
+  snapshot.mail_review.drafts.push({ source_message_id: 'aa', notice });
+  expect(renderBrief(snapshot)).toContain('Verified unsent draft');
+  snapshot.mail_review.drafts[0].notice.state = 'edited';
+  snapshot.mail_review.drafts[0].notice.text = 'The draft is recorded as edited; it has not been recreated.';
+  const edited = renderBrief(snapshot);
+  expect(edited).not.toContain('Verified unsent draft');
+  expect(edited).toContain('recorded as edited');
+  expect(edited).toContain('not been recreated');
 });
 it('S04 selects at most three stable attention items, excludes resolved/deferred work and never confirms suggestions', () => {
   const input = {
