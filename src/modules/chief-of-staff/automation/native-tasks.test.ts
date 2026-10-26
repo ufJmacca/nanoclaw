@@ -4,7 +4,7 @@ import { INBOUND_SCHEMA } from '../../../db/schema.js';
 import { countDueMessages } from '../../../db/session-db.js';
 import { insertTask } from '../../scheduling/db.js';
 import type { CosBinding } from '../../../cos-boundary.js';
-import { NativeBriefTasks } from './native-tasks.js';
+import { NativeBriefTasks, type NativeBriefRun } from './native-tasks.js';
 const databases: Database.Database[] = [];
 afterEach(() => {
   for (const db of databases.splice(0)) db.close();
@@ -32,6 +32,57 @@ function fixture() {
   db.exec(INBOUND_SCHEMA);
   return { db, tasks: new NativeBriefTasks(db) };
 }
+it('G06 stages a fixed Mail review task for the retained main conversation without another reply surface', () => {
+  const { db, tasks } = fixture();
+  const occurrence: NativeBriefRun = {
+    ...run,
+    provenance: {
+      purpose: 'mail_review',
+      time_zone: 'Australia/Sydney',
+      mail_review_policy_id: '11111111-1111-4111-8111-111111111111',
+      mail_review_policy_version: 1,
+      mail_review_slot: 'morning',
+    },
+  };
+  const id = tasks.stage(binding, occurrence);
+  expect(id).toBeTruthy();
+  const saved = db.prepare('SELECT content,thread_id,platform_id FROM messages_in WHERE id=?').get(id) as {
+    content: string;
+    thread_id: string | null;
+    platform_id: string;
+  };
+  const content = JSON.parse(saved.content);
+  expect(content.prompt).toContain('cos_context_get');
+  expect(content.prompt).toContain('cos_mail_draft_create');
+  expect(content.prompt).toContain('cos_brief_request');
+  expect(content.prompt).toContain('Never send email');
+  expect(content.prompt).toContain('existing main conversation');
+  expect(content.prompt).toContain('do not send a separate chat reply');
+  expect(saved.thread_id).toBeNull();
+  expect(saved.platform_id).toBe('mattermost:fixture:private');
+  expect(new NativeBriefTasks(db).stage(binding, occurrence)).toBe(id);
+  expect(
+    tasks.stage(binding, { ...occurrence, provenance: { ...occurrence.provenance, purpose: 'brief' } }),
+  ).toBeNull();
+  expect(countDueMessages(db)).toBe(0);
+});
+it('G06 refuses a review task without its fixed Sydney slot and policy provenance', () => {
+  const { tasks } = fixture();
+  const provenance = {
+    purpose: 'mail_review' as const,
+    time_zone: 'Australia/Sydney',
+    mail_review_policy_id: '11111111-1111-4111-8111-111111111111',
+    mail_review_policy_version: 1,
+    mail_review_slot: 'morning' as const,
+  };
+  for (const patch of [
+    { time_zone: 'UTC' },
+    { mail_review_policy_id: 'unsafe' },
+    { mail_review_policy_version: 0 },
+    { mail_review_slot: 'night' },
+  ])
+    expect(tasks.stage(binding, { ...run, provenance: { ...provenance, ...patch } } as NativeBriefRun)).toBeNull();
+});
 it('S04 makes an admitted occurrence runnable using its stable reservation time', async () => {
   const { db, tasks } = fixture();
   const occurrence = {
