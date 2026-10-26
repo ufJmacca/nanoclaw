@@ -393,6 +393,80 @@ test('G06 migration preserves the generic schedule and admits only two owner-bou
           await admin.query('RELEASE SAVEPOINT review_freshness');
         }
       });
+      await t.test(
+        'freezes one verified selection and cannot replace it or start selection after model use',
+        async () => {
+          const owner = { ...context, origin: undefined, ingressId: 'fixture-owner-event' };
+          const prepareAccess = new MailReviewAccess({
+            authority: () => identity,
+            ownerAuthority: () => identity,
+            matches: () => true,
+          });
+          await admin.query('SAVEPOINT freeze_review_selection');
+          try {
+            await admin.query(
+              'UPDATE cos.brief_runs SET model_calls=0,tool_calls=0,review_inputs=NULL WHERE scope_id=$1',
+              [scope],
+            );
+            const prepared = await prepareAccess.preparation(admin, owner, runId, 1);
+            assert.ok(prepared);
+            const selected = { ...inputs, coverage: prepared.coverage, candidates: [] };
+            // The synthetic policy fixture has no published messages: invented source references are rejected.
+            assert.equal(
+              await prepareAccess.freeze(admin, owner, runId, 1, prepared, {
+                ...selected,
+                candidates: inputs.candidates,
+              }),
+              false,
+            );
+            assert.equal(await prepareAccess.freeze(admin, owner, runId, 1, prepared, selected), true);
+            const version = (await admin.query('SELECT version FROM cos.brief_runs WHERE scope_id=$1', [scope])).rows[0]
+              .version;
+            await admin.query('UPDATE cos.brief_runs SET model_calls=1 WHERE scope_id=$1', [scope]);
+            assert.equal(await prepareAccess.freeze(admin, owner, runId, 1, prepared, selected), true);
+            assert.equal(
+              (await admin.query('SELECT version FROM cos.brief_runs WHERE scope_id=$1', [scope])).rows[0].version,
+              version,
+            );
+            assert.equal(
+              await prepareAccess.freeze(admin, owner, runId, 1, prepared, { ...selected, excluded_threads: 1 }),
+              false,
+            );
+            assert.equal(await prepareAccess.freeze(admin, context, runId, 1, prepared, selected), false);
+            await admin.query('UPDATE cos.brief_runs SET review_inputs=NULL WHERE scope_id=$1', [scope]);
+            assert.equal(await prepareAccess.freeze(admin, owner, runId, 1, prepared, selected), false);
+          } finally {
+            await admin.query('ROLLBACK TO SAVEPOINT freeze_review_selection');
+            await admin.query('RELEASE SAVEPOINT freeze_review_selection');
+          }
+        },
+      );
+      await t.test(
+        'a different current capture cannot adopt frozen inputs even when its window is identical',
+        async () => {
+          const owner = { ...context, origin: undefined, ingressId: 'fixture-owner-event' };
+          const prepareAccess = new MailReviewAccess({
+            authority: () => identity,
+            ownerAuthority: () => identity,
+            matches: () => true,
+          });
+          await admin.query('SAVEPOINT frozen_capture_identity');
+          try {
+            const replacement = randomUUID();
+            await admin.query(
+              `INSERT INTO cos.mail_captures(scope_id,binding_id,id,binding_version,status,capture_window,content_digest,metadata,result)
+            SELECT scope_id,binding_id,$3,binding_version,status,capture_window,content_digest,metadata,result FROM cos.mail_captures
+            WHERE scope_id=$1 AND id=$2`,
+              [scope, captureId, replacement],
+            );
+            await admin.query('UPDATE cos.mail_states SET current_capture=$2 WHERE scope_id=$1', [scope, replacement]);
+            assert.equal(await prepareAccess.preparation(admin, owner, runId, 1), null);
+          } finally {
+            await admin.query('ROLLBACK TO SAVEPOINT frozen_capture_identity');
+            await admin.query('RELEASE SAVEPOINT frozen_capture_identity');
+          }
+        },
+      );
     });
     await t.test('the runtime can read but cannot grant or alter review authority', async () => {
       const privileges = await runtime.query(

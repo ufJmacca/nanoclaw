@@ -9,6 +9,7 @@ import { validMailReviewInputs, type MailReviewInputs } from './mail-review-inpu
 import { mailReviewSchedulePolicy } from './mail-review-policy.js';
 import { contextGenerationPattern } from '../ops/conversation-ownership.js';
 import { MAIL_RETENTION_MS } from '../mail/normalization.js';
+import { mailSourceAccess } from '../mail/source-access.js';
 
 export type MailReviewSelection = {
   id: string;
@@ -132,6 +133,87 @@ export class MailReviewAccess {
   ): Promise<MailReviewPreparation | null> {
     return this.selection(client, context, 'prepare', undefined, { runId, generation });
   }
+  /** Caller owns the preparation transaction. Freeze once, before model/tool use; an identical
+   * acknowledged selection can be reconciled but never replaced with another set of threads. */
+  async freeze(
+    client: QueryClient,
+    context: KnowledgeContext,
+    runId: string,
+    generation: number,
+    prepared: MailReviewPreparation,
+    inputs: MailReviewInputs,
+  ): Promise<boolean> {
+    if (!validMailReviewInputs(inputs)) return false;
+    const inputDigest = digest(inputs),
+      preparationDigest = digest(prepared),
+      contextDigest = digest(context),
+      captured = structuredClone(inputs),
+      ctx = structuredClone(context),
+      stable = () =>
+        digest(inputs) === inputDigest && digest(prepared) === preparationDigest && digest(context) === contextDigest;
+    const current = await this.preparation(client, ctx, runId, generation);
+    if (!current || !stable()) return false;
+    if (current.inputs) return digest(current.inputs) === inputDigest;
+    if (
+      digest(current) !== preparationDigest ||
+      captured.policy_id !== current.id ||
+      captured.policy_version !== current.version ||
+      captured.policy_digest !== current.digest ||
+      captured.context_generation !== ctx.generation ||
+      captured.reader_binding_id !== current.body.readerBindingId ||
+      captured.writer_binding_id !== current.body.writerBindingId ||
+      captured.capture_id !== current.captureId ||
+      captured.captured_at !== current.capturedAt ||
+      captured.last_success_at !== current.lastSuccessAt ||
+      captured.coverage !== current.coverage
+    )
+      return false;
+    const sources = await client.query(
+      `SELECT c.source_message_id FROM jsonb_to_recordset($4::jsonb) AS c(
+      source_message_id text,thread_id text,source_id text,source_version integer,revision_id text,revision_digest text,internal_date_ms double precision,subject text)
+      JOIN cos.mail_messages mm ON mm.scope_id=$1 AND mm.binding_id=$2 AND mm.provider_message_id=c.source_message_id
+       AND mm.provider_thread_id=c.thread_id AND mm.source_id=c.source_id
+      JOIN cos.mail_states ms ON ms.scope_id=mm.scope_id AND ms.binding_id=mm.binding_id AND ms.current_capture=$3
+      JOIN cos.sources s ON s.scope_id=mm.scope_id AND s.id=mm.source_id AND s.version=c.source_version
+      JOIN cos.source_revisions r ON r.scope_id=s.scope_id AND r.source_id=s.id AND r.id=s.current_revision_id AND r.id=c.revision_id AND r.digest=c.revision_digest
+      JOIN cos.artifacts a ON a.scope_id=r.scope_id AND a.id=r.artifact_id AND a.kind='source' AND a.lifecycle='published' AND a.digest=r.digest
+      WHERE s.status IN ('current','stale') AND $5=ANY(s.processing_providers) AND s.provenance->>'origin'='mail_message'
+       AND s.access_policy->>'scope_owner_only'='true' AND mm.message->>'subject'=c.subject
+       AND floor(extract(epoch FROM mm.internal_date)*1000)::double precision=c.internal_date_ms
+       AND NOT EXISTS(SELECT 1 FROM cos.revocation_tombstones t WHERE t.scope_id=s.scope_id AND t.source_id=s.id)
+       AND ${mailSourceAccess("ARRAY['mail:'||$2::text]")} FOR SHARE OF mm,ms,s,r,a`,
+      [ctx.scopeId, current.body.readerBindingId, current.captureId, JSON.stringify(captured.candidates), ctx.provider],
+    );
+    if (sources.rowCount !== captured.candidates.length || !stable()) return false;
+    const saved = await client.query(
+      `UPDATE cos.brief_runs br SET review_inputs=$4,version=br.version+1,updated_at=clock_timestamp()
+      FROM cos.brief_schedules bs,cos.mail_review_policies p,cos.mail_review_policy_revisions pr,cos.scopes sc
+      WHERE br.scope_id=$1 AND br.id=$2 AND br.generation=$3 AND br.review_inputs IS NULL AND br.model_calls=0 AND br.tool_calls=0
+       AND br.state='dispatched' AND br.deadline_at>clock_timestamp() AND br.lease_until>clock_timestamp() AND br.lease_owner=$5
+       AND br.owner_id=$6 AND br.session_id=$7 AND br.agent_group_id=$8
+       AND sc.id=br.scope_id AND sc.owner_id=$6 AND sc.agent_group_id=$8 AND sc.status='active'
+       AND bs.scope_id=br.scope_id AND bs.id=br.schedule_id AND bs.version=br.schedule_version
+       AND bs.purpose='mail_review' AND bs.policy->>'state'='active' AND bs.mail_review_policy_id=$9 AND bs.mail_review_policy_version=$10
+       AND p.scope_id=bs.scope_id AND p.id=bs.mail_review_policy_id AND p.version=bs.mail_review_policy_version AND p.state='enabled'
+       AND pr.scope_id=p.scope_id AND pr.binding_id=p.id AND pr.version=p.version AND pr.digest=$11`,
+      [
+        ctx.scopeId,
+        runId,
+        generation,
+        JSON.stringify(captured),
+        'cos-native-' + current.body.nativeBindingDigest,
+        ctx.ownerId,
+        ctx.sessionId,
+        ctx.agentGroupId,
+        current.id,
+        current.version,
+        current.digest,
+      ],
+    );
+    if (saved.rowCount !== 1 || !stable()) return false;
+    const final = await this.preparation(client, ctx, runId, generation);
+    return stable() && !!final?.inputs && digest(final.inputs) === inputDigest;
+  }
   private async selection(
     client: QueryClient,
     context: KnowledgeContext,
@@ -238,7 +320,8 @@ export class MailReviewAccess {
       row.capture_window.capturedAt > row.now.getTime() ||
       (preparing && !inputs && (row.model_calls !== 0 || row.tool_calls !== 0)) ||
       (inputs &&
-        (inputs.policy_id !== row.id ||
+        (inputs.capture_id !== row.capture_id ||
+          inputs.policy_id !== row.id ||
           inputs.policy_version !== row.version ||
           inputs.policy_digest !== row.digest ||
           inputs.context_generation !== ctx.generation ||
