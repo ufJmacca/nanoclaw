@@ -487,7 +487,7 @@ async function runProtectedNasAdmin<C extends NasAdminCommand, R>(
       ]),
       release = validateReleaseManifest(input.release);
     if (
-      !['G02', 'G03', 'G04', 'G05'].includes(release.slice) ||
+      !['G02', 'G03', 'G04', 'G05', 'G06'].includes(release.slice) ||
       !release.vaultArtifact ||
       input.maintenance.owner !== 'operations-' + args.requestId ||
       input.maintenance.purpose !== 'deployment'
