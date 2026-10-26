@@ -1,5 +1,4 @@
 import { Temporal } from '@js-temporal/polyfill';
-import { nextRecurrenceAt } from '../../scheduling/next-occurrence.js';
 import { digest } from '../contracts/protocol.js';
 import { validBriefSchedulePolicy, type BriefSchedulePolicy } from '../contracts/schedule-protocol.js';
 export { validBriefSchedulePolicy, type BriefSchedulePolicy } from '../contracts/schedule-protocol.js';
@@ -80,9 +79,23 @@ export function planBriefOccurrence(
   const at = Temporal.Instant.from(now),
     activated = Temporal.Instant.from(identity.activatedAt),
     today = at.toZonedDateTimeISO(policy.time_zone).toPlainDate();
-  const cron = briefRecurrence(policy);
-  const next = (after: Temporal.Instant) =>
-    Temporal.Instant.from(nextRecurrenceAt(cron, policy.time_zone, new Date(after.epochMilliseconds)));
+  const next = (after: Temporal.Instant): Temporal.Instant => {
+    const first = after.toZonedDateTimeISO(policy.time_zone).toPlainDate();
+    for (let offset = 0; offset <= 7; offset++) {
+      const date = first.add({ days: offset });
+      if (!policy.weekdays.includes(date.dayOfWeek)) continue;
+      const candidate = date
+        .toPlainDateTime(policy.local_time)
+        .toZonedDateTime(policy.time_zone, { disambiguation: 'compatible' })
+        .toInstant();
+      if (
+        candidate.toZonedDateTimeISO(policy.time_zone).toPlainDate().equals(date) &&
+        Temporal.Instant.compare(candidate, after) > 0
+      )
+        return candidate;
+    }
+    throw Error('invalid_brief_schedule');
+  };
   const dayStart = (date: Temporal.PlainDate) => date.toZonedDateTime(policy.time_zone).toInstant();
   const maximum = (a: Temporal.Instant, b: Temporal.Instant) => (Temporal.Instant.compare(a, b) >= 0 ? a : b);
   const snooze = policy.snooze_until ? Temporal.Instant.from(policy.snooze_until) : at;

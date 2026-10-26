@@ -115,4 +115,15 @@ describe('S04-T05 approved brief occurrence policy', () => {
       planBriefOccurrence(repeated, { ...identity, activatedAt: '2026-03-01T00:00:00Z' }, '2026-04-04T16:00:00Z'),
     ).toEqual({ due: null, nextWakeAt: '2026-04-04T16:15:00.000Z' });
   });
+  it.each([
+    ['08:00', '2026-10-03T21:00:00.000Z'],
+    ['15:00', '2026-10-04T04:00:00.000Z'],
+  ])('does not skip the spring clock-change day for a valid %s local time', (local_time, intendedAt) => {
+    const daily = { ...policy, weekdays: [1, 2, 3, 4, 5, 6, 7], local_time, quiet_hours: null };
+    expect(planBriefOccurrence(daily, identity, '2026-10-04T04:00:00Z').due).toMatchObject({
+      intendedAt,
+      intendedLocalDate: '2026-10-04',
+      localDate: '2026-10-04',
+    });
+  });
 });
