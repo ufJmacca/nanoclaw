@@ -7,6 +7,7 @@ import type { KnowledgeStore, KnowledgeContext, Evidence } from '../knowledge/st
 import type { CalendarView } from '../calendar/view.js';
 import type { ProactiveStore } from './proactive-store.js';
 import { digest, type Result } from '../domain/contracts.js';
+import type { MailReviewBrief, MailReviewBriefSnapshot } from './mail-review-brief.js';
 import {
   buildBriefSnapshot,
   renderBrief,
@@ -39,6 +40,7 @@ export class BriefCollector {
       calendarView?: CalendarView;
       clock?: () => Date;
       proactive?: Pick<ProactiveStore, 'validateDigest'>;
+      mailReview?: MailReviewBrief;
     },
   ) {}
   private async transaction(operation: (client: PoolClient) => Promise<Result>): Promise<Result> {
@@ -66,12 +68,24 @@ export class BriefCollector {
       k = d.knowledge.answers.dependencies;
     if (!(await k.current(client, context))) return false;
     if (
+      (snapshot.mail_review && !d.mailReview) ||
+      (d.mailReview && !(await d.mailReview.validate(client, context, snapshot.mail_review)))
+    )
+      return false;
+    if (
       snapshot.suggested_work.length &&
       (!d.proactive || !(await d.proactive.validateDigest(client, context, snapshot.suggested_work, historical)))
     )
       return false;
     if (!historical && context.origin) {
-      const refresh = await briefRefreshCoverage(client, context, snapshot.time_zone, true);
+      const refresh = await briefRefreshCoverage(
+        client,
+        context,
+        snapshot.time_zone,
+        true,
+        undefined,
+        d.mailReview?.access,
+      );
       if (
         !refresh ||
         snapshot.coverage.refresh !== refresh.refresh ||
@@ -138,10 +152,12 @@ export class BriefCollector {
       if (error instanceof RangeError) return { status: 'denied' };
       throw error;
     }
+    const review = await d.mailReview?.collect(context);
+    if (review && review.status !== 'ok') return { status: review.status };
     const before = await this.transaction(async (client) => {
       const k = d.knowledge.answers.dependencies;
       if (!(await k.current(client, context))) return { status: 'denied' };
-      const refresh = await briefRefreshCoverage(client, context, timeZone);
+      const refresh = await briefRefreshCoverage(client, context, timeZone, false, undefined, d.mailReview?.access);
       if (!refresh) return { status: 'denied' };
       const calendar = await k.calendarContext(client, context, true);
       if (calendar.status !== 'ok') return { status: 'denied' };
@@ -270,6 +286,7 @@ export class BriefCollector {
       calendarCoverage,
       coverage,
     });
+    if (review) snapshot.mail_review = review.snapshot as MailReviewBriefSnapshot;
     const final = await this.transaction(async (client) => ({
       status: (await this.validateSnapshot(client, context, snapshot, String(before.calendar_digest)))
         ? 'ok'

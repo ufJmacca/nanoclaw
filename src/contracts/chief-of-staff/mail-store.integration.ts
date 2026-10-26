@@ -36,6 +36,9 @@ import { MailReviewPreparer } from '../../modules/chief-of-staff/automation/mail
 import { mailReviewSchedulePolicy } from '../../modules/chief-of-staff/automation/mail-review-policy.js';
 import type { MailReviewBinding } from '../../modules/chief-of-staff/automation/mail-review-binding.js';
 import { PriorityStore } from '../../modules/chief-of-staff/store/priorities.js';
+import { MailReviewBrief } from '../../modules/chief-of-staff/automation/mail-review-brief.js';
+import { BriefCollector } from '../../modules/chief-of-staff/automation/brief-collector.js';
+import { BriefArtifacts } from '../../modules/chief-of-staff/automation/brief-artifacts.js';
 const scopes: string[] = [],
   roots: string[] = [];
 let admin: pg.Client, database: BoundedDatabase;
@@ -137,8 +140,30 @@ async function capture(capturedAt?: number, ageMs = 1000, review = false) {
     capturedAt: at,
     reader: {
       profile: async () => ({ mailboxEmail: 'owner@example.invalid', historyId: '100' }),
-      list: async () => ({ messages: [{ id: 'aa01', threadId: 'bb01' }], nextPageToken: null, resultSizeEstimate: 1 }),
-      message: async (_id: string, window: MailWindow) => normalizeMailMessage(raw, window),
+      list: async () => ({
+        messages: [{ id: 'aa01', threadId: 'bb01' }, ...(review ? [{ id: 'cc02', threadId: 'dd02' }] : [])],
+        nextPageToken: null,
+        resultSizeEstimate: review ? 2 : 1,
+      }),
+      message: async (id: string, window: MailWindow) =>
+        normalizeMailMessage(
+          id === 'cc02'
+            ? {
+                ...raw,
+                id: 'cc02',
+                threadId: 'dd02',
+                payload: {
+                  mimeType: 'text/plain',
+                  headers: [
+                    { name: 'Subject', value: 'Weekly newsletter' },
+                    { name: 'From', value: 'list@example.invalid' },
+                  ],
+                  body: { data: Buffer.from('An older owner-only mail observation.').toString('base64url') },
+                },
+              }
+            : raw,
+          window,
+        ),
       history: async () => ({ changedIds: [], deletedIds: [], historyId: '200', nextPageToken: null }),
       thread: async () => ({ messages: [], excluded: 0, unsupported: 0 }),
     },
@@ -702,6 +727,31 @@ test('G06 preparation freezes a real published source through runtime SQL and re
     assert.equal(displayed.candidates.length, 1);
     assert.match(displayed.candidates[0].excerpt, /Could you review project alpha/);
     assert.match(displayed.candidates[0].citation.evidence_id, /^[a-f0-9-]{36}$/);
+    assert.equal((await scopedKnowledge.contextReady(f.context)).status, 'ok');
+    const other = (await database.run((client) => loadMailReviewRecords(client, f.context, f.binding.id, f.id))).find(
+      (row) => row.message.id === 'cc02',
+    )!;
+    assert.equal((await f.knowledge.get(f.context, other.source_id, other.revision_id, 1)).status, 'ok');
+    assert.equal((await scopedKnowledge.get(scheduled, other.source_id, other.revision_id, 1)).status, 'denied');
+    // This source/publication fixture has no draft provider or effects. Draft-status behavior is verified separately.
+    const mailBrief = new MailReviewBrief({
+      database,
+      access,
+      view: priorities.mailReviewContext!,
+      knowledge: scopedKnowledge,
+      drafts: { reviewNotices: async () => ({ status: 'ok', drafts: [] }), reviewNoticesCurrent: async () => true },
+    });
+    const collected = await mailBrief.collect(scheduled);
+    assert.equal(collected?.status, 'ok');
+    const artifacts = new BriefArtifacts(
+      new BriefCollector({ database, work: priorities.work, knowledge: scopedKnowledge, mailReview: mailBrief }),
+      priorities.proactive,
+    );
+    const briefing = await artifacts.prepare(scheduled, randomUUID(), 'Australia/Sydney');
+    assert.equal(briefing.status, 'ok');
+    for (const heading of ['Needs attention:', 'Drafts ready:', 'Upcoming meetings:'])
+      assert.ok(String(briefing.text).includes(heading));
+    assert.equal(String(briefing.text).includes('Weekly newsletter'), false);
     assert.equal((await scopedKnowledge.contextReady(f.context)).status, 'ok');
     await admin.query("UPDATE cos.mail_review_policies SET state='revoked' WHERE scope_id=$1", [f.scope]);
     assert.equal((await priorities.context(scheduled, scheduled)).status, 'denied');

@@ -43,7 +43,16 @@ export class BriefArtifacts {
     timeZone: string,
     preparedArtifactId?: string,
   ): Promise<boolean> {
-    return (await briefRefreshCoverage(client, context, timeZone, false, preparedArtifactId)) !== null;
+    return (
+      (await briefRefreshCoverage(
+        client,
+        context,
+        timeZone,
+        false,
+        preparedArtifactId,
+        this.collector.options.mailReview?.access,
+      )) !== null
+    );
   }
 
   private async receipt(context: KnowledgeContext, request: string, hash: string, timeZone: string): Promise<Result> {
@@ -94,7 +103,7 @@ export class BriefArtifacts {
     if (collected.status !== 'ok') return collected;
     const snapshot = collected.snapshot as BriefSnapshot,
       calendarDigest = String(collected.calendar_digest);
-    if (this.proactive) {
+    if (this.proactive && !snapshot.mail_review) {
       const suggestions = await this.proactive.digest(context, proactiveRequestId('brief-digest', request));
       if (suggestions.status !== 'ok') return suggestions;
       snapshot.suggested_work = suggestions.items as BriefSnapshot['suggested_work'];
@@ -150,10 +159,19 @@ export class BriefArtifacts {
             "INSERT INTO cos.artifacts(id,scope_id,kind,digest,byte_length,lifecycle,provenance) VALUES($1,$2,'summary',$3,$4,'published',$5)",
             [captured.id, context.scopeId, captured.digest, captured.byteLength, JSON.stringify(provenance)],
           );
-          // Keep implicit context dependencies as well as the evidence shown in the brief.
+          // Generic briefs retain implicit context dependencies. Deterministic Mail review text
+          // depends on its checked Mail, calendar and work references rather than other owner mail.
+          const explicit = snapshot.mail_review
+            ? [
+                ...snapshot.mail_review.attention.map((item) => item.citation),
+                ...snapshot.events.map((item) => item.evidence),
+                ...snapshot.commitments.flatMap((item) => item.evidence),
+                ...snapshot.decisions.flatMap((item) => item.evidence),
+              ].flatMap((ref) => (ref.kind === 'source' ? [ref.evidence_id] : []))
+            : null;
           await client.query(
-            `INSERT INTO cos.derivation_links(scope_id,artifact_id,evidence_id) SELECT scope_id,$1,id FROM cos.evidence_refs WHERE scope_id=$2 AND session_id=$3 AND context_generation=$4 AND processing_provider=$5 ON CONFLICT DO NOTHING`,
-            [captured.id, context.scopeId, context.sessionId, context.generation, context.provider],
+            `INSERT INTO cos.derivation_links(scope_id,artifact_id,evidence_id) SELECT scope_id,$1,id FROM cos.evidence_refs WHERE scope_id=$2 AND session_id=$3 AND context_generation=$4 AND processing_provider=$5 AND ($6::text[] IS NULL OR id::text=ANY($6)) ON CONFLICT DO NOTHING`,
+            [captured.id, context.scopeId, context.sessionId, context.generation, context.provider, explicit],
           );
           const receipt = { status: 'ok', artifact_id: captured.id };
           await client.query('UPDATE cos.operations SET result=$3 WHERE session_id=$1 AND request_id=$2', [
