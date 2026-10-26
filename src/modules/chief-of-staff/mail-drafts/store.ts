@@ -16,6 +16,7 @@ import type { MailDraftAuthority, MailDraftAuthorityResolver } from './authority
 import type { DraftJournal } from './journal.js';
 import { MailDraftWriteError, type googleMailDraftWriter, type MailDraftResult } from './google-writer.js';
 import { mailDraftAnswerNotice, type MailDraftAnswerNotice } from './answer-notice.js';
+import type { MailReviewAccess, MailReviewSelection } from '../automation/mail-review-access.js';
 
 export type MailDraftSelection = {
   id: string;
@@ -39,10 +40,17 @@ export type MailDraftSourceSelection = {
   current_capture: string;
   internal_date_ms: number;
 };
-type Admission = { binding: MailDraftSelection; source: MailDraftSourceSelection; authority: MailDraftAuthority };
+type Admission = {
+  binding: MailDraftSelection;
+  source: MailDraftSourceSelection;
+  authority: MailDraftAuthority;
+  review?: MailReviewSelection;
+};
 export type MailDraftDependencies = {
   journal: DraftJournal;
   authority: MailDraftAuthorityResolver;
+  /** Additional current policy/run fence, installed only with the separate trusted scheduled identity resolver. */
+  reviewAccess?: Pick<MailReviewAccess, 'check'>;
   /** Current host-owned policy, independent journal, credential fences and actual recovery proof. No OAuth calls. */
   matches(context: KnowledgeContext, binding: MailDraftSelection): boolean;
   /** The adapter must invoke current() before/after provider awaits, including immediately before its single POST. */
@@ -76,7 +84,11 @@ export class MailDraftStore {
     readonly dependencies?: MailDraftDependencies,
   ) {}
   private native(context: KnowledgeContext): MailDraftAuthority | null {
-    if (context.origin || context.provider !== 'codex' || !contextGenerationPattern.test(context.generation))
+    if (
+      (context.origin && (context.origin.kind !== 'schedule' || !this.dependencies?.reviewAccess)) ||
+      context.provider !== 'codex' ||
+      !contextGenerationPattern.test(context.generation)
+    )
       return null;
     const authority = this.dependencies?.authority(context);
     return authority?.contextGeneration === context.generation &&
@@ -108,12 +120,14 @@ export class MailDraftStore {
     client: PoolClient,
     context: KnowledgeContext,
     bindingId: string,
-  ): Promise<Pick<Admission, 'binding' | 'authority'> | null> {
+  ): Promise<Pick<Admission, 'binding' | 'authority' | 'review'> | null> {
     const authority = this.native(context),
       dependencies = this.dependencies;
     if (!authority || !dependencies || !this.knowledge) return null;
     dependencies.journal.assertCurrent();
     if (!(await this.retained(client, context))) return null;
+    const review = context.origin ? await dependencies.reviewAccess!.check(client, context, 'read') : undefined;
+    if (context.origin && !review) return null;
     const row = (
       await client.query(
         `SELECT b.id,b.version,r.body,r.digest,r.consent_ref,mb.provider AS reader_provider,mb.mailbox_email,
@@ -146,11 +160,17 @@ export class MailDraftStore {
       !Array.isArray(row.processing_providers) ||
       !row.processing_providers.includes(context.provider) ||
       !dependencies.matches(context, row) ||
+      (review &&
+        (review.body.writerBindingId !== row.id ||
+          review.body.writerVersion !== row.version ||
+          review.body.writerDigest !== row.digest ||
+          review.body.writerConsentRef !== row.consent_ref ||
+          review.body.readerBindingId !== row.body.readerBindingId)) ||
       digest(this.native(context)) !== digest(authority)
     )
       return null;
     dependencies.journal.assertCurrent();
-    return { binding: structuredClone(row), authority };
+    return { binding: structuredClone(row), authority, ...(review ? { review: structuredClone(review) } : {}) };
   }
   private async admission(
     client: PoolClient,
@@ -189,7 +209,11 @@ export class MailDraftStore {
       digest(this.native(context)) !== digest(authority)
     )
       return null;
-    return { binding: structuredClone(row), source: structuredClone(source), authority };
+    if (policy.review) {
+      const current = await dependencies.reviewAccess!.check(client, context, 'draft', source.thread_id);
+      if (!current || digest(current) !== digest(policy.review)) return null;
+    }
+    return { ...policy, source: structuredClone(source) };
   }
   /** Current main-owner metadata only. Discovery reads no message, token, body or provider resource. */
   async bindings(context: KnowledgeContext): Promise<Result> {
@@ -290,6 +314,7 @@ export class MailDraftStore {
         group: retained.agentGroupId,
         scope: retained.scopeId,
         generation: retained.generation,
+        ...(retained.origin ? { scheduled_origin: retained.origin } : {}),
       });
     try {
       const prepared = await this.transaction(async (client) => {
