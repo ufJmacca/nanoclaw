@@ -12,6 +12,14 @@ const identities = (activatedAt = '2026-09-01T00:00:00Z'): MailReviewIdentities 
 });
 
 describe('G06 fixed Sydney mail-review schedules', () => {
+  it("admits the next morning without proposing yesterday's completed afternoon occurrence again", () => {
+    const ids = identities();
+    ids.morning.lastLocalDate = ids.afternoon.lastLocalDate = '2026-10-27';
+    const next = planMailReviewOccurrences(ids, '2026-10-27T21:01:00Z');
+    expect(next.morning.due?.intendedLocalDate).toBe('2026-10-28');
+    expect(next.afternoon.due).toBeNull();
+    expect(next.afternoon.nextWakeAt).toBe('2026-10-28T04:00:00.000Z');
+  });
   it('defines separate daily schedules and the agreed shared limits', () => {
     expect(mailReviewSchedulePolicy('morning')).toEqual({
       state: 'active',

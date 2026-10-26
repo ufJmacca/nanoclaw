@@ -21,6 +21,12 @@ const identity: ScheduleIdentity = {
   lastLocalDate: null,
 };
 describe('S04-T05 approved brief occurrence policy', () => {
+  it('does not replay an already coalesced or completed date before the next scheduled time', () => {
+    const last = { ...identity, lastLocalDate: '2026-10-02' };
+    expect(planBriefOccurrence(policy, last, '2026-10-02T23:00:00Z').due).toBeNull(); // Saturday
+    expect(planBriefOccurrence(policy, last, '2026-10-04T21:15:00Z').due).toBeNull(); // Monday before 09:00
+    expect(planBriefOccurrence(policy, last, '2026-10-04T22:00:00Z').due?.intendedLocalDate).toBe('2026-10-05');
+  });
   it('validates a narrow explicit local schedule and refuses malformed or expanded authority', () => {
     expect(validBriefSchedulePolicy(policy)).toBe(true);
     for (const patch of [

@@ -580,6 +580,23 @@ test('G06 migration preserves the generic schedule and admits only two owner-bou
           1,
         );
         // Both mail slots close on revocation while the generic brief stays independent.
+        // Before the next afternoon slot, neither completed previous-day afternoon
+        // may collide with its old key and starve the two newly due morning schedules.
+        clock = '2026-10-26T21:01:00.000Z';
+        const nextMorning = new Set<string>();
+        for (let n = 0; n < 2; n++) {
+          const reserved = await runs.reserveDue(ctx);
+          assert.equal(reserved.status, 'ok');
+          const run = reserved.run as { id: string; schedule_id: string };
+          assert.ok(run);
+          assert.notEqual(run.schedule_id, binding.afternoonScheduleId);
+          nextMorning.add(run.schedule_id);
+          const claim = await runs.claim(ctx, run.id, 'fixture-next-morning');
+          assert.equal(claim.status, 'ok');
+          assert.equal((await runs.cancel(ctx, run.id, Number(claim.generation))).status, 'ok');
+        }
+        assert.deepEqual(nextMorning, new Set([generic, binding.morningScheduleId]));
+        assert.equal((await runs.reserveDue(ctx)).run, null);
         clock = '2026-10-27T05:00:00.000Z';
         await admin.query(
           "UPDATE cos.brief_schedules SET policy=jsonb_set(policy,'{state}','\"paused\"') WHERE scope_id=$1 AND purpose='brief'",

@@ -113,6 +113,9 @@ export function planBriefOccurrence(
     // At least one weekday is selected. Seven days of downtime collapse to the latest occurrence; older backlog is never enumerated.
     for (let back = 0; back <= 7; back++) {
       const date = today.subtract({ days: back });
+      // The recorded actual date also covers older occurrences coalesced into it.
+      // Re-proposing one would collide with its run key and block another due schedule.
+      if (identity.lastLocalDate !== null && date.toString() <= identity.lastLocalDate) break;
       if (!policy.weekdays.includes(date.dayOfWeek)) continue;
       const intended = next(dayStart(date).subtract({ milliseconds: 1 }));
       if (
