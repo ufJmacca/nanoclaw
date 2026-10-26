@@ -97,47 +97,57 @@ it('G05 requires separate native draft authority before enabling its installed h
   expect(f.connect).not.toHaveBeenCalled();
   expect(f.draftOpen).not.toHaveBeenCalled();
 });
-it('G05 wires the installed draft host to the existing reader and retains its separate retirement owner', async () => {
-  fixture();
-  const reader = {
-      clientId: 'reader.apps.googleusercontent.com',
-      credentials: {},
-      fences: {},
-      verifyStorage: vi.fn(),
-      close: vi.fn(async () => {}),
-      closed: () => true,
-    },
-    draft = {
-      dependencies: { journal: {}, authority: () => null, matches: () => false, writer: () => null },
-      close: vi.fn(async () => {}),
-    },
-    env = { COS_MAIL_ENABLED: 'true', COS_MAIL_DRAFTS_ENABLED: 'true' },
-    roots = { targetRoot: '/state', installationRoot: '/install', dataRoot: '/install/data' },
-    authority = vi.fn(() => null);
-  f.mailOpen.mockResolvedValue(reader);
-  f.draftOpen.mockResolvedValue(draft);
-  const store = await connectCosHostStore(
-    env,
-    roots,
-    () => true,
-    {},
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    authority,
-  );
-  expect(f.draftOpen).toHaveBeenCalledWith(env, roots, expect.any(Function), authority, reader);
-  expect(store.mailDraftHost).toBe(draft);
-  expect(store.mailDrafts.dependencies).toBe(draft.dependencies);
-  const notice = vi.spyOn(store.mailDrafts, 'answerNotice').mockResolvedValue(null);
-  const request = { operation_id: 'a'.repeat(64) };
-  await store.knowledge!.answers.dependencies.mailDraftNotice!({} as never, {} as never, request);
-  expect(notice).toHaveBeenCalledWith({}, {}, request);
-  await store.mailDraftHost!.close();
-  await store.mail!.close();
-});
+it.each([false, true])(
+  'G05/G06 wires the installed draft host and explicit scheduled identity=%s',
+  async (reviewEnabled) => {
+    fixture();
+    const reader = {
+        clientId: 'reader.apps.googleusercontent.com',
+        credentials: {},
+        fences: {},
+        verifyStorage: vi.fn(),
+        close: vi.fn(async () => {}),
+        closed: () => true,
+      },
+      draft = {
+        dependencies: { journal: {}, authority: () => null, matches: () => false, writer: () => null },
+        close: vi.fn(async () => {}),
+      },
+      env = { COS_MAIL_ENABLED: 'true', COS_MAIL_DRAFTS_ENABLED: 'true' },
+      roots = { targetRoot: '/state', installationRoot: '/install', dataRoot: '/install/data' },
+      authority = vi.fn(() => null),
+      reviewAuthority = reviewEnabled ? vi.fn(() => null) : undefined;
+    f.mailOpen.mockResolvedValue(reader);
+    f.draftOpen.mockResolvedValue(draft);
+    const store = await connectCosHostStore(
+      env,
+      roots,
+      () => true,
+      {},
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      authority,
+      reviewAuthority,
+    );
+    if (reviewEnabled) {
+      expect(f.draftOpen).toHaveBeenCalledWith(env, roots, expect.any(Function), authority, reader, {
+        review: { authority: reviewAuthority, access: store.mailReviewAccess },
+      });
+      expect(store.mailReviewContext).toBeDefined();
+    } else expect(f.draftOpen).toHaveBeenCalledWith(env, roots, expect.any(Function), authority, reader);
+    expect(store.mailDraftHost).toBe(draft);
+    expect(store.mailDrafts.dependencies).toBe(draft.dependencies);
+    const notice = vi.spyOn(store.mailDrafts, 'answerNotice').mockResolvedValue(null);
+    const request = { operation_id: 'a'.repeat(64) };
+    await store.knowledge!.answers.dependencies.mailDraftNotice!({} as never, {} as never, request);
+    expect(notice).toHaveBeenCalledWith({}, {}, request);
+    await store.mailDraftHost!.close();
+    await store.mail!.close();
+  },
+);
 it('G04 global-off maintenance rejects lost host admission before or during database verification', async () => {
   fixture();
   const roots = { targetRoot: '/state', installationRoot: '/install', dataRoot: '/install/data' };

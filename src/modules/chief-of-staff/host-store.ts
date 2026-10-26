@@ -28,6 +28,8 @@ import type { MailMaintenanceResources } from './mail/maintenance.js';
 import { mailDraftSettings } from './mail-drafts/config.js';
 import { openMailDraftHost } from './mail-drafts/open-host.js';
 import type { MailDraftAuthorityResolver } from './mail-drafts/authority.js';
+import { MailReviewAccess } from './automation/mail-review-access.js';
+import { mailReviewProfileMatches } from './automation/mail-review-profile.js';
 async function optionalGoogleHost<T>(open: () => T | Promise<T>, unavailable: string): Promise<T | undefined> {
   try {
     return await open();
@@ -103,6 +105,7 @@ export async function connectCosHostStore(
   actionAuthority?: ActionAuthorityResolver,
   mailAuthority?: (context: Context & { provider: string }) => boolean,
   draftAuthority?: MailDraftAuthorityResolver,
+  reviewAuthority?: MailDraftAuthorityResolver,
 ): Promise<PriorityStore> {
   const settings = knowledgeSettings(env);
   const calendarConfig = calendarSettings(env);
@@ -126,6 +129,20 @@ export async function connectCosHostStore(
     mail: MailHost | undefined,
     draftHost: Awaited<ReturnType<typeof openMailDraftHost>>;
   try {
+    const mailReviewAccess = new MailReviewAccess({
+      authority: (context) => (admitted() ? (reviewAuthority?.(context) ?? null) : null),
+      ownerAuthority: (context) => (admitted() ? (draftAuthority?.(context) ?? null) : null),
+      matches: (context, selection) =>
+        !!draftHost &&
+        admitted() &&
+        mailReviewProfileMatches(
+          roots.targetRoot,
+          draftHost.dependencies.journal.installationDigest,
+          draftHost.dependencies.journal,
+          context,
+          selection,
+        ),
+    });
     const mailOwner = mailConfig.enabled
       ? await optionalGoogleHost(() => openMailCredentials(roots), 'mail_configuration_unavailable')
       : undefined;
@@ -142,7 +159,12 @@ export async function connectCosHostStore(
     mail = new MailHost({ store: mailStore, connector: mailConnector, resource: mailResource });
     draftHost = draftConfig.enabled
       ? await optionalGoogleHost(
-          () => openMailDraftHost(env, roots, admitted, draftAuthority!, mailOwner),
+          () =>
+            reviewAuthority
+              ? openMailDraftHost(env, roots, admitted, draftAuthority!, mailOwner, {
+                  review: { authority: reviewAuthority, access: mailReviewAccess },
+                })
+              : openMailDraftHost(env, roots, admitted, draftAuthority!, mailOwner),
           'mail_draft_host_unavailable',
         )
       : undefined;
@@ -165,6 +187,7 @@ export async function connectCosHostStore(
         return true;
       },
       mailEnabled: () => !!mail?.active() && admitted(),
+      mailReviewAccess,
       mailDraftNotice: (client, context, request) => priorities.mailDrafts.answerNotice(client, context, request),
       mailAccess: (scopeId, bindingId) => {
         if (!mail?.active() || !admitted()) return false;
@@ -206,6 +229,7 @@ export async function connectCosHostStore(
       mail,
       draftHost?.dependencies,
       draftHost,
+      mailReviewAccess,
     );
     return priorities;
   } catch (error) {

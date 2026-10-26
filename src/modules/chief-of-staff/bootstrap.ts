@@ -24,6 +24,7 @@ import {
   createActionAuthorityResolver,
   createMissionAuthorityResolver,
   createMailDraftAuthorityResolver,
+  createMailReviewAuthorityResolver,
 } from './missions/authority.js';
 import { createTeamAuthorityResolver } from './missions/team-authority.js';
 import { MissionHost } from './missions/host.js';
@@ -174,6 +175,7 @@ export function startCosHostModule(assertHostAuthority: () => void): { service: 
   const missionAuthority = createMissionAuthorityResolver({ targetRoot, db: getDb(), admitted, assertHostAuthority });
   const actionAuthority = createActionAuthorityResolver({ targetRoot, db: getDb(), admitted, assertHostAuthority });
   const draftAuthority = createMailDraftAuthorityResolver({ targetRoot, db: getDb(), admitted, assertHostAuthority });
+  const reviewAuthority = createMailReviewAuthorityResolver({ targetRoot, db: getDb(), admitted, assertHostAuthority });
   const teamAuthority = createTeamAuthorityResolver({ targetRoot, db: getDb(), missionAuthority });
   const mailAuthority = createMailAuthorities({ db: getDb(), admitted, assertHostAuthority });
   const facts = guardConversationAccess({
@@ -228,6 +230,7 @@ export function startCosHostModule(assertHostAuthority: () => void): { service: 
         actionAuthority,
         mailAuthority.poll,
         draftAuthority,
+        reviewAuthority,
       ),
   });
   // PostgreSQL availability never holds up unrelated channel startup.
