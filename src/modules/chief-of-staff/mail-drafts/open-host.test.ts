@@ -176,6 +176,27 @@ it('opens only the existing independent history and validated proofs, then owns 
   expect(f.writer.close).toHaveBeenCalledTimes(1);
   expect(f.reader.close).not.toHaveBeenCalled();
 });
+it('G06 passes an explicitly supplied scheduled identity and SQL review fence through the installed opener', async () => {
+  const f = fixture(),
+    review = { authority: vi.fn(() => f.authority), access: { check: vi.fn(async () => null) } };
+  const host = await openMailDraftHost(
+    { COS_MAIL_ENABLED: 'true', COS_MAIL_DRAFTS_ENABLED: 'true' },
+    f.roots,
+    () => true,
+    () => f.authority,
+    f.reader as unknown as MailHostCredentials,
+    { review },
+  );
+  hosts.push(host!);
+  const scheduled = {
+    ...context,
+    ingressId: `brief:${'a'.repeat(64)}:1`,
+    origin: { kind: 'schedule' as const, runId: 'a'.repeat(64), generation: 1 },
+  };
+  expect(host!.dependencies.reviewAccess).toBe(review.access);
+  expect(host!.dependencies.matches(scheduled, f.selected)).toBe(true);
+  expect(review.authority).toHaveBeenCalledWith(scheduled);
+});
 it.each(['maintenance', 'target', 'profile', 'proof', 'reader_reference', 'admission'])(
   'offline request admission closes after installed %s changes',
   async (failure) => {

@@ -10,6 +10,7 @@ import { readMailDraftHostProfile } from './profile.js';
 import type { MailDraftAuthorityResolver } from './authority.js';
 import { readMailDraftRecoveryProof } from './recovery.js';
 import { createMailDraftHost } from './host.js';
+import type { MailReviewAccess } from '../automation/mail-review-access.js';
 
 /** Installed runtime only. Read existing owned history, sealed owner policy and proofs;
  * never initialize a profile, consent, baseline, model allowance or replacement history.
@@ -20,7 +21,11 @@ export async function openMailDraftHost(
   admitted: () => boolean,
   authority: MailDraftAuthorityResolver,
   reader: MailHostCredentials | undefined,
-  adapters: { fetch?: (url: string, init: RequestInit) => Promise<Response>; now?: () => number } = {},
+  adapters: {
+    fetch?: (url: string, init: RequestInit) => Promise<Response>;
+    now?: () => number;
+    review?: { authority: MailDraftAuthorityResolver; access: Pick<MailReviewAccess, 'check'> };
+  } = {},
 ): Promise<ReturnType<typeof createMailDraftHost> | undefined> {
   const settings = mailDraftSettings(env);
   if (!settings.enabled) return undefined;
@@ -59,6 +64,7 @@ export async function openMailDraftHost(
       reader,
       writer,
       authority,
+      review: adapters.review,
       enabled: () => settings.enabled && admitted(),
       assertProfile,
       assertRecovery: (grant, selected) => {
