@@ -961,6 +961,7 @@ it.each([
   'refresh',
   'mail-review',
   'mail-review-denied',
+  'mail-review-budget-empty',
   'review-fence',
   'review-corrupt',
   'proactive-unavailable',
@@ -1164,15 +1165,21 @@ it.each([
       wake,
       running: () => false,
       withBriefTasks: (_session, operation) => operation(tasks),
-      launcher: { ready: () => true, prepare: vi.fn(), renewBriefContext },
+      launcher: {
+        ready: () => true,
+        canBeginMailReview: () => mode !== 'mail-review-budget-empty',
+        prepare: vi.fn(),
+        renewBriefContext,
+      },
     });
     await runtime.pump(binding);
-    if (mode === 'mail-review-denied') {
-      expect(prepareMailReview).toHaveBeenCalledOnce();
+    if (mode === 'mail-review-denied' || mode === 'mail-review-budget-empty') {
+      expect(prepareMailReview).toHaveBeenCalledTimes(mode === 'mail-review-denied' ? 1 : 0);
       expect(wake).not.toHaveBeenCalled();
       expect(renewBriefContext).not.toHaveBeenCalled();
       expect(calendar.refresh).not.toHaveBeenCalled();
       expect(proactive.scheduledBatch).not.toHaveBeenCalled();
+      expect(inbound.prepare('SELECT * FROM messages_in').all()).toHaveLength(0);
       return;
     }
     if (mode.startsWith('proactive-')) {
