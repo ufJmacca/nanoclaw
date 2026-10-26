@@ -40,12 +40,13 @@ for (const root of [config, units, settings.stateRoot, settings.installationRoot
 // Only release authority is synthetic. Code, executable, fixed unit compiler,
 // installation effects and the isolated user manager are the selected host's.
 const releaseSlice = process.env.COS_BACKUP_FIXTURE_SLICE;
-assert(['G02', 'G03', 'G04', 'G05'].includes(releaseSlice));
+assert(['G02', 'G03', 'G04', 'G05', 'G06'].includes(releaseSlice));
 const drafts = releaseSlice === 'G05',
-  upgrade = drafts || releaseSlice === 'G04';
+  reviews = releaseSlice === 'G06',
+  upgrade = drafts || reviews || releaseSlice === 'G04';
 const manifest = fixtureVaultRelease(releaseSlice);
 manifest.releaseId = 'release-fixture-' + releaseSlice.toLowerCase();
-assert.equal(manifest.postgres.minimum, drafts ? 20 : releaseSlice === 'G04' ? 19 : 18);
+assert.equal(manifest.postgres.minimum, reviews ? 21 : drafts ? 20 : releaseSlice === 'G04' ? 19 : 18);
 assert.equal(manifest.postgres.maximum, manifest.postgres.minimum);
 const payloadFor = (release) => settings.releaseRoot + '/' + release.releaseId + '/payload';
 // The installed command runs actual retained files. A symlinked entry has a
@@ -77,10 +78,15 @@ assert.deepEqual(await controls.inspectManager(), {
 const installer = createBackupJobInstaller(settings, manifest, controls);
 let priorSettings,
   actualG03ToG04Upgrade = false,
-  actualG04ToG05Upgrade = false;
+  actualG04ToG05Upgrade = false,
+  actualG05ToG06Upgrade = false;
 if (upgrade) {
-  const prior = fixtureVaultRelease(drafts ? 'G04' : 'G03');
-  prior.releaseId = drafts ? 'release-fixture-prior-g04' : 'release-fixture-prior-g03';
+  const prior = fixtureVaultRelease(reviews ? 'G05' : drafts ? 'G04' : 'G03');
+  prior.releaseId = reviews
+    ? 'release-fixture-prior-g05'
+    : drafts
+      ? 'release-fixture-prior-g04'
+      : 'release-fixture-prior-g03';
   preparePayload(prior);
   const priorInstaller = createBackupJobInstaller(settings, prior, controls);
   await priorInstaller.install();
@@ -109,8 +115,9 @@ if (upgrade) {
   );
   assert.deepEqual(fs.readFileSync(config + '/backup-jobs-target.json'), priorSettings);
   assert.equal(readPrivate(settings.stateRoot + '/backup-job-installation.json').releaseId, manifest.releaseId);
-  actualG03ToG04Upgrade = !drafts;
+  actualG03ToG04Upgrade = releaseSlice === 'G04';
   actualG04ToG05Upgrade = drafts;
+  actualG05ToG06Upgrade = reviews;
 }
 for (const name of ['nanoclaw-cos-backup-capture.timer', 'nanoclaw-cos-backup-upload.timer']) {
   const link = units + '/timers.target.wants/' + name;
@@ -159,13 +166,18 @@ assert(!(await createBackupJobManagerControls(settings, async () => {}).inspectM
 assert.equal(fs.readFileSync(units + '/unrelated.service', 'utf8'), '[Service]\nExecStart=/usr/bin/true\n');
 console.log(
   JSON.stringify({
-    contract: drafts ? 'cos-backup-job-release-fixture/v3' : 'cos-backup-job-release-fixture/v2',
+    contract: reviews
+      ? 'cos-backup-job-release-fixture/v4'
+      : drafts
+        ? 'cos-backup-job-release-fixture/v3'
+        : 'cos-backup-job-release-fixture/v2',
     status: 'passed',
     cases: upgrade ? 8 : 7,
     releaseSlice,
     schemaVersion: manifest.postgres.minimum,
     actualG03ToG04Upgrade,
     ...(drafts ? { actualG04ToG05Upgrade } : {}),
+    ...(reviews ? { actualG05ToG06Upgrade } : {}),
     sealedSourceCommit: source.commit,
     sealedSourceTree: source.tree,
     backupArtifact,

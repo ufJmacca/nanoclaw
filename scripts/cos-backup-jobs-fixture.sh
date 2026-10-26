@@ -6,7 +6,7 @@ umask 077
 [[ -z "${DOCKER_HOST:-}${DOCKER_CONTEXT:-}${DOCKER_TLS_VERIFY:-}${DOCKER_CERT_PATH:-}" ]] || exit 1
 image=$1
 slice=$2
-[[ "$slice" == G02 || "$slice" == G03 || "$slice" == G04 || "$slice" == G05 ]] || exit 1
+[[ "$slice" == G02 || "$slice" == G03 || "$slice" == G04 || "$slice" == G05 || "$slice" == G06 ]] || exit 1
 [[ "$image" =~ ^sha256:[a-f0-9]{64}$ ]] || exit 1
 [[ "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$image")" == linux/arm64 ]] || exit 1
 [[ "$(docker image inspect --format '{{index .Config.Labels "nanoclaw.release-role"}}' "$image")" == backup-job-manager-fixture ]] || exit 1

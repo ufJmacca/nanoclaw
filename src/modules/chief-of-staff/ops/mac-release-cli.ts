@@ -714,7 +714,7 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
         sourceTree: plan.source.tree,
         hostImage: imageIds[0],
         fixtureImage: fixture.image,
-        releaseSlice: plan.slice as 'G02' | 'G03' | 'G04' | 'G05',
+        releaseSlice: plan.slice as 'G02' | 'G03' | 'G04' | 'G05' | 'G06',
       });
     }
     plan.checks[name] = {
