@@ -118,7 +118,7 @@ export async function runMailArtifactFixture(args: string[]): Promise<void> {
   const files =
     selected.slice === 'G06'
       ? selected.suite === 'database'
-        ? ['mail-review-schema.integration']
+        ? ['mail-review-schema.integration', 'mail-review-checkpoint.integration']
         : ['mail-review-flow.integration']
       : selected.slice === 'G05'
         ? selected.suite === 'database'

@@ -5,6 +5,7 @@ it('G06 inherits all protected reader/draft/storage contracts and adds review po
   expect(fixtureFiles(args)).toEqual([
     ...fixtureFiles({ slice: 'G05', demo: false }),
     'mail-review-schema.integration',
+    'mail-review-checkpoint.integration',
     'mail-review-flow.integration',
   ]);
   const demo = parseFixtureArguments(['--slice', 'G06', '--db-profile', 'test', '--demo', '--fixture']);

@@ -9,7 +9,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import Database from 'better-sqlite3';
 import type pg from 'pg';
 import { connectFixtureDatabase, fixtureDatabaseConfig, fixtureRuntimeUser } from './fixture-database.js';
-import { migrate } from '../../modules/chief-of-staff/store/migrations.js';
+import { migrate, SCHEMA_VERSION } from '../../modules/chief-of-staff/store/migrations.js';
 import { checkpointSchema } from '../../modules/chief-of-staff/ops/checkpoint-schema.js';
 import {
   restoreCoordinatedSandbox,
@@ -26,13 +26,23 @@ import { normalizeMailMessage, MAIL_RETENTION_MS } from '../../modules/chief-of-
 import { GOOGLE_MAIL_READ_SCOPE } from '../../modules/chief-of-staff/mail/oauth.js';
 import { GOOGLE_MAIL_DRAFT_SCOPE } from '../../modules/chief-of-staff/mail-drafts/oauth.js';
 import { DraftJournal, initializeDraftJournal } from '../../modules/chief-of-staff/mail-drafts/journal.js';
+import { validMailDraftBinding } from '../../modules/chief-of-staff/mail-drafts/binding.js';
+import {
+  validMailReviewBinding,
+  type MailReviewBinding,
+} from '../../modules/chief-of-staff/automation/mail-review-binding.js';
+import {
+  validMailReviewInputs,
+  type MailReviewInputs,
+} from '../../modules/chief-of-staff/automation/mail-review-inputs.js';
+import { mailReviewSchedulePolicy } from '../../modules/chief-of-staff/automation/mail-review-policy.js';
 
 let admin: pg.Client, client: pg.Client, baseline: string;
 const scopes: string[] = [],
   roots: string[] = [];
 async function existingState() {
   const state: Record<string, unknown> = {};
-  for (const table of checkpointSchema(20).tables) {
+  for (const table of checkpointSchema(SCHEMA_VERSION).tables) {
     assert.match(table, /^[a-z_]+$/);
     state[table] = (
       await admin.query(
@@ -53,7 +63,18 @@ before(async () => {
 after(async () => {
   try {
     if (admin) {
-      for (const table of ['mail_draft_writer_revisions', 'mail_draft_writer_bindings', 'mail_messages'])
+      for (const table of [
+        'brief_notifications',
+        'brief_call_reservations',
+        'brief_runs',
+        'brief_schedule_revisions',
+        'brief_schedules',
+        'mail_review_policy_revisions',
+        'mail_review_policies',
+        'mail_draft_writer_revisions',
+        'mail_draft_writer_bindings',
+        'mail_messages',
+      ])
         await admin.query('DELETE FROM cos.' + table + ' WHERE scope_id=ANY($1)', [scopes]);
       await admin.query('UPDATE cos.mail_states SET current_capture=NULL,last_attempt=NULL WHERE scope_id=ANY($1)', [
         scopes,
@@ -71,7 +92,8 @@ after(async () => {
         await admin.query('DELETE FROM cos.' + table + ' WHERE scope_id=ANY($1)', [scopes]);
       await admin.query('DELETE FROM cos.records WHERE scope_id=ANY($1)', [scopes]);
       await admin.query('DELETE FROM cos.scopes WHERE id=ANY($1)', [scopes]);
-      if (baseline) assert.equal(await existingState(), baseline, 'existing81_table_records_preserved');
+      if (baseline)
+        assert.equal(await existingState(), baseline, 'all_existing_current_schema_table_records_preserved');
     }
   } finally {
     await client?.end();
@@ -320,7 +342,7 @@ async function fixture(version: number, danglingRevision = false, drafts = false
       },
     ];
   }
-  if (version === 20) {
+  if (version >= 20) {
     assert(draftOwner);
     const writer = randomUUID(),
       body = {
@@ -365,7 +387,7 @@ async function fixture(version: number, danglingRevision = false, drafts = false
     ];
   }
   const sourceId = 'source-' + scope,
-    revisionId = 'revision-' + scope,
+    revisionId = version === 21 ? randomUUID() : 'revision-' + scope,
     sourceText =
       version >= 19
         ? (rows.mail_messages[0].message as { text: string }).text
@@ -500,6 +522,170 @@ async function fixture(version: number, danglingRevision = false, drafts = false
     completed_at: storedAt,
   }));
   if (version >= 19) rows.mail_messages[0].source_id = sourceId;
+  if (version === 21) {
+    assert(draftOwner);
+    const writer = rows.mail_draft_writer_bindings[0],
+      writerRevision = rows.mail_draft_writer_revisions[0],
+      writerBody = writerRevision.body;
+    assert(validMailDraftBinding(writerBody));
+    assert.equal(typeof writer.id, 'string');
+    assert.equal(typeof writerRevision.consent_ref, 'string');
+    const policyId = randomUUID(),
+      limits = { max_turns: 3, max_tool_calls: 16, deadline_seconds: 300, refresh_seconds: 30 };
+    const body: MailReviewBinding = {
+      format: 'cos-mail-review-binding/v1',
+      provider: 'fixture',
+      readerBindingId: writerBody.readerBindingId,
+      writerBindingId: String(writer.id),
+      writerVersion: 1,
+      writerDigest: digest(writerBody),
+      writerConsentRef: String(writerRevision.consent_ref),
+      nativeBindingDigest: writerBody.nativeBindingDigest,
+      mailboxDigest: writerBody.mailboxDigest,
+      contextGeneration: reservation.contextGeneration,
+      morningScheduleId: randomUUID(),
+      afternoonScheduleId: randomUUID(),
+      timeZone: 'Australia/Sydney',
+      maxCandidateThreads: 10,
+      maxModelAttempts: 3,
+      maxDraftsPerDay: 5,
+    };
+    assert(validMailReviewBinding(body));
+    rows.mail_review_policies = [
+      {
+        scope_id: scope,
+        id: policyId,
+        owner_id: context.ownerId,
+        session_id: context.sessionId,
+        agent_group_id: context.agentGroupId,
+        version: 1,
+        state: 'enabled',
+        created_at: storedAt,
+        updated_at: storedAt,
+      },
+    ];
+    rows.mail_review_policy_revisions = [
+      {
+        scope_id: scope,
+        binding_id: policyId,
+        version: 1,
+        reader_binding_id: body.readerBindingId,
+        writer_binding_id: body.writerBindingId,
+        writer_version: 1,
+        body,
+        digest: digest(body),
+        owner_config_ref: digest('synthetic review owner'),
+        created_at: storedAt,
+      },
+    ];
+    rows.brief_schedules = (['morning', 'afternoon'] as const).map((slot) => ({
+      scope_id: scope,
+      id: slot === 'morning' ? body.morningScheduleId : body.afternoonScheduleId,
+      owner_id: context.ownerId,
+      session_id: context.sessionId,
+      agent_group_id: context.agentGroupId,
+      title: 'Synthetic ' + slot + ' review',
+      policy: mailReviewSchedulePolicy(slot),
+      limits,
+      version: 1,
+      provenance: {},
+      activated_at: storedAt,
+      last_local_date: null,
+      purpose: 'mail_review',
+      mail_review_policy_id: policyId,
+      mail_review_policy_version: 1,
+      mail_review_slot: slot,
+      created_at: storedAt,
+      updated_at: storedAt,
+    }));
+    rows.brief_schedule_revisions = rows.brief_schedules.map((s) => ({
+      scope_id: scope,
+      schedule_id: s.id,
+      version: 1,
+      body: s,
+      proposal_id: null,
+      mail_review_policy_id: policyId,
+      mail_review_policy_version: 1,
+      created_at: storedAt,
+    }));
+    const window = rows.mail_captures[1].capture_window as { capturedAt: number },
+      inputs: MailReviewInputs = {
+        format: 'cos-mail-review-inputs/v1',
+        policy_id: policyId,
+        policy_version: 1,
+        policy_digest: digest(body),
+        context_generation: reservation.contextGeneration,
+        reader_binding_id: body.readerBindingId,
+        writer_binding_id: body.writerBindingId,
+        capture_id: String(rows.mail_captures[1].id),
+        captured_at: new Date(window.capturedAt).toISOString(),
+        last_success_at: new Date(storedAt).toISOString(),
+        coverage: 'stored_selection',
+        excluded_threads: 2,
+        unexamined_threads: 1,
+        candidates: [
+          {
+            thread_id: 'bb01',
+            source_message_id: 'aa01',
+            source_id: sourceId,
+            source_version: 1,
+            revision_id: revisionId,
+            revision_digest: sourceArtifact.digest,
+            internal_date_ms: window.capturedAt - 1000,
+            subject: 'Synthetic review request',
+            reason: 'request',
+          },
+        ],
+      };
+    assert(validMailReviewInputs(inputs));
+    const runId = digest({ fixture: scope, schedule: body.morningScheduleId }),
+      deadline = (
+        await client.query('SELECT to_jsonb($1::timestamptz) AS value', [new Date(Date.now() + 300000).toISOString()])
+      ).rows[0].value;
+    rows.brief_runs = [
+      {
+        scope_id: scope,
+        id: runId,
+        schedule_id: body.morningScheduleId,
+        schedule_version: 1,
+        owner_id: context.ownerId,
+        session_id: context.sessionId,
+        agent_group_id: context.agentGroupId,
+        intended_at: storedAt,
+        local_date: new Intl.DateTimeFormat('en-CA', { timeZone: 'Australia/Sydney' }).format(new Date(at)),
+        state: 'prepared',
+        limits,
+        model_calls: 1,
+        tool_calls: 1,
+        generation: 1,
+        lease_owner: 'cos-native-' + body.nativeBindingDigest,
+        lease_until: deadline,
+        deadline_at: deadline,
+        snapshot: null,
+        version: 1,
+        provenance: { purpose: 'mail_review' },
+        review_inputs: inputs,
+        created_at: storedAt,
+        updated_at: storedAt,
+      },
+    ];
+    const history = new DraftJournal(draftRoot, installationDigest, draftOwner.generation);
+    try {
+      const pin = { scopeId: scope, policyId, policyVersion: 1, profileDigest: digest('synthetic review profile') };
+      history.publishReviewPolicyPin({ requestId: randomUUID(), expectedRevision: 0, enabled: true, pin }, () => {});
+      history.publishReviewPolicyPin(
+        {
+          requestId: randomUUID(),
+          expectedRevision: 1,
+          enabled: false,
+          pin,
+        },
+        () => {},
+      );
+    } finally {
+      history.close();
+    }
+  }
   const checkpoint: ScopeCheckpoint = {
     format: 'cos-scoped-checkpoint/v1',
     scopeId: scope,
@@ -560,7 +746,7 @@ async function fixture(version: number, danglingRevision = false, drafts = false
           generation: draftOwner.generation,
           reservation,
           now: draftNow,
-          before: beforeDrafts,
+          before: version === 21 ? draftSnapshot() : beforeDrafts,
           snapshot: draftSnapshot,
         }
       : null,
@@ -573,16 +759,20 @@ async function fixture(version: number, danglingRevision = false, drafts = false
     }),
   };
 }
-export function registerMailCheckpointFixtures(slice: 'G04' | 'G05') {
-  for (const version of slice === 'G05' ? [19, 20] : [18, 19])
+export function registerMailReviewCheckpointFixture() {
+  registerMailCheckpointFixtures('G06');
+}
+export function registerMailCheckpointFixtures(slice: 'G04' | 'G05' | 'G06') {
+  const trustedDrafts = slice === 'G05' || slice === 'G06';
+  for (const version of slice === 'G06' ? [21] : slice === 'G05' ? [19, 20] : [18, 19])
     test(`${slice} schema-${version} synthetic checkpoint restores insert-only into the actual current test database`, async () => {
-      const f = await fixture(version, false, slice === 'G05'),
+      const f = await fixture(version, false, trustedDrafts),
         sandbox = {
-          client: slice === 'G05' ? admin : client,
-          config: await fixtureDatabaseConfig(process.env, slice === 'G05' ? 'migration' : 'runtime'),
+          client: trustedDrafts ? admin : client,
+          config: await fixtureDatabaseConfig(process.env, trustedDrafts ? 'migration' : 'runtime'),
           testTargetId: process.env.COS_TEST_TARGET_ID!,
         };
-      if (slice === 'G05') {
+      if (trustedDrafts) {
         // Match the trusted owner restore controller's explicit TEST migration
         // login. Ordinary runtime retains SELECT-only standing-policy access.
         const rights = await client.query(
@@ -657,7 +847,7 @@ export function registerMailCheckpointFixtures(slice: 'G04' | 'G05') {
           '200',
         );
       }
-      if (version === 20) {
+      if (version >= 20) {
         for (const table of ['mail_draft_writer_bindings', 'mail_draft_writer_revisions']) {
           const actual = (await admin.query('SELECT * FROM cos.' + table + ' WHERE scope_id=$1', [f.scope])).rows;
           assert.equal(actual.length, 1);
@@ -669,11 +859,34 @@ export function registerMailCheckpointFixtures(slice: 'G04' | 'G05') {
           }
         }
       }
+      if (version === 21) {
+        for (const table of [
+          'mail_review_policies',
+          'mail_review_policy_revisions',
+          'brief_schedules',
+          'brief_schedule_revisions',
+          'brief_runs',
+        ]) {
+          const actual = (await admin.query('SELECT * FROM cos.' + table + ' WHERE scope_id=$1', [f.scope])).rows;
+          assert.equal(actual.length, f.checkpoint.rows[table].length);
+          if (table === 'brief_runs')
+            assert.deepEqual(actual[0].review_inputs, f.checkpoint.rows.brief_runs[0].review_inputs);
+          if (table === 'mail_review_policies') assert.equal(actual[0].state, 'enabled');
+        }
+      }
       if (f.draftHistory) {
         const h = f.draftHistory;
         assert.deepEqual(h.snapshot(), h.before);
         const history = new DraftJournal(h.draftRoot, h.installationDigest, h.generation);
         try {
+          if (version === 21) {
+            assert.equal(
+              history.reviewPolicyPin(f.scope)?.enabled,
+              false,
+              'restored_SQL_cannot_erase_newer_independent_review_disable',
+            );
+            assert.equal(history.reviewPolicyPin(f.scope)?.revision, 2);
+          }
           assert.equal(history.reserve(h.reservation, h.now + 1).created, false);
           assert.throws(
             () => history.reserve({ ...h.reservation, sourceMessageId: 'aa06', threadId: 'bb06' }, h.now + 1),
@@ -685,7 +898,7 @@ export function registerMailCheckpointFixtures(slice: 'G04' | 'G05') {
         assert.deepEqual(h.snapshot(), h.before);
       }
       assert.deepEqual(fs.readFileSync(f.options.witness.root + '/owner.json'), journal);
-      const invalid = await fixture(version, true, slice === 'G05');
+      const invalid = await fixture(version, true, trustedDrafts);
       await assert.rejects(
         restoreCoordinatedTestScope(invalid.options, invalid.root + '/restore', sandbox, async () => {}),
         /^Error: coordinated_test_restore_unavailable$/,

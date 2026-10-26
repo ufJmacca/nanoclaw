@@ -70,7 +70,7 @@ export function fixtureFiles(args: Pick<FixtureArguments, 'slice' | 'demo'>): st
       ...fixtureFiles({ slice: 'G05', demo: args.demo }),
       ...(args.demo
         ? ['mail-review-flow.integration']
-        : ['mail-review-schema.integration', 'mail-review-flow.integration']),
+        : ['mail-review-schema.integration', 'mail-review-checkpoint.integration', 'mail-review-flow.integration']),
     ];
   if (args.slice === 'G05')
     return [
