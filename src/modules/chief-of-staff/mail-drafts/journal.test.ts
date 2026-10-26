@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { digest } from '../domain/contracts.js';
 import { DraftJournal, initializeDraftJournal } from './journal.js';
 
@@ -54,6 +54,89 @@ function child(code: string): Promise<{ code: number | null; signal: string | nu
 }
 const childImport = `import {DraftJournal} from ${JSON.stringify(new URL('./journal.ts', import.meta.url).href)};`;
 describe('independent Gmail draft effect journal', () => {
+  it('G06 keeps review policy pins independent of restored profiles and existing draft counters', () => {
+    const f = fixture(),
+      pin = {
+        scopeId: 'chief-of-staff',
+        policyId: '44444444-4444-4444-8444-444444444444',
+        policyVersion: 1,
+        profileDigest: digest('review profile'),
+      };
+    const first = f.journal.reserve(input(), now),
+      request = { requestId: '55555555-5555-4555-8555-555555555555', expectedRevision: 0, pin, enabled: true };
+    expect(f.journal.reviewPolicyPin(pin.scopeId)).toBeNull();
+    const authority = vi.fn();
+    const head = f.journal.publishReviewPolicyPin(request, authority);
+    expect(head).toEqual({ ...pin, revision: 1, enabled: true });
+    expect(f.open().reviewPolicyPin(pin.scopeId)).toEqual(head);
+    expect(f.journal.publishReviewPolicyPin(request, authority)).toEqual(head);
+    expect(authority).toHaveBeenCalled();
+    const disabled = f.journal.publishReviewPolicyPin(
+      { ...request, requestId: '66666666-6666-4666-8666-666666666666', expectedRevision: 1, enabled: false },
+      authority,
+    );
+    expect(disabled).toMatchObject({ revision: 2, enabled: false });
+    expect(() => f.journal.publishReviewPolicyPin(request, authority)).toThrow('mail_review_pin_request_stale');
+    expect(f.open().reviewPolicyPin(pin.scopeId)).toEqual(disabled);
+    expect(f.journal.find(first.record.operationId)).toEqual(first.record);
+    for (let n = 2; n <= 5; n++) expect(f.journal.reserve(input(n), now).created).toBe(true);
+    expect(() => f.journal.reserve(input(6), now)).toThrow('mail_draft_daily_limit');
+  });
+  it('G06 pin publication rejects lost authority, conflicting requests and stale expected revisions', () => {
+    const f = fixture(),
+      request = {
+        requestId: '55555555-5555-4555-8555-555555555555',
+        expectedRevision: 0,
+        pin: {
+          scopeId: 'chief-of-staff',
+          policyId: '44444444-4444-4444-8444-444444444444',
+          policyVersion: 1,
+          profileDigest: digest('review profile'),
+        },
+        enabled: true,
+      };
+    expect(() =>
+      f.journal.publishReviewPolicyPin(request, () => {
+        throw Error('lost authority');
+      }),
+    ).toThrow('lost authority');
+    expect(f.journal.reviewPolicyPin(request.pin.scopeId)).toBeNull();
+    f.journal.publishReviewPolicyPin(request, () => {});
+    expect(() => f.journal.publishReviewPolicyPin({ ...request, enabled: false }, () => {})).toThrow(
+      'mail_review_pin_request_conflict',
+    );
+    expect(() =>
+      f.journal.publishReviewPolicyPin({ ...request, requestId: '66666666-6666-4666-8666-666666666666' }, () => {}),
+    ).toThrow('mail_review_pin_revision_conflict');
+    expect(f.journal.reviewPolicyPin(request.pin.scopeId)?.revision).toBe(1);
+  });
+  it('G06 rolls back pin publication if authority is lost after the write and rejects mutated inputs', () => {
+    const f = fixture(),
+      request = {
+        requestId: '55555555-5555-4555-8555-555555555555',
+        expectedRevision: 0,
+        pin: {
+          scopeId: 'chief-of-staff',
+          policyId: '44444444-4444-4444-8444-444444444444',
+          policyVersion: 1,
+          profileDigest: digest('review profile'),
+        },
+        enabled: true,
+      };
+    let checks = 0;
+    expect(() =>
+      f.journal.publishReviewPolicyPin(request, () => {
+        if (++checks === 3) throw Error('authority lost after write');
+      }),
+    ).toThrow('authority lost after write');
+    expect(f.open().reviewPolicyPin(request.pin.scopeId)).toBeNull();
+    expect(() =>
+      f.journal.publishReviewPolicyPin(request, () => {
+        request.enabled = false;
+      }),
+    ).toThrow('mail_review_pin_inputs_changed');
+    expect(f.journal.reviewPolicyPin(request.pin.scopeId)).toBeNull();
+  });
   it('records a provider candidate as uncertain metadata without promoting it to verified success', () => {
     const f = fixture(),
       first = f.journal.reserve(input(), now);
