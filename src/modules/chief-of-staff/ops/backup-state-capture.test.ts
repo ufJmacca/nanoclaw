@@ -447,7 +447,7 @@ it.each([18, 19, SCHEMA_VERSION])(
     expect(checkpoint.sqlite).toHaveLength(1);
     expect(checkpoint.schemaVersion).toBe(schemaVersion);
     expect(Object.keys(JSON.parse(fs.readFileSync(data + '/coordinated/remote.json', 'utf8')).rows)).toHaveLength(
-      schemaVersion === 18 ? 75 : schemaVersion === 19 ? 79 : 81,
+      schemaVersion === 18 ? 75 : schemaVersion === 19 ? 79 : schemaVersion === 20 ? 81 : 83,
     );
     expect(operations.coordinatedDigest).toBe(digest(checkpoint));
     expect(header.operations.manifestDigest).toBe(digest(operations));
