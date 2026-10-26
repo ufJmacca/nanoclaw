@@ -91,11 +91,10 @@ ok 16 - G05 real admission denies native_paused without any provider draft write
 # skipped 0
 # todo 0`;
 
-it('accepts the actual compiled database report including both checked-draft publication regressions', () => {
-  expect(verifyMailDraftFixtureReport(capturedCompiledDraftDatabaseReport, 'database')).toEqual({
-    suite: 'database',
-    actualCases: 16,
-  });
+it('requires the review regressions before a historical sixteen-case database report can supply current release evidence', () => {
+  expect(() => verifyMailDraftFixtureReport(capturedCompiledDraftDatabaseReport, 'database')).toThrow(
+    'mail_draft_fixture_report_unverified',
+  );
 });
 
 it('requires both checked-draft publication cases rather than accepting the old fourteen-case inventory', () => {

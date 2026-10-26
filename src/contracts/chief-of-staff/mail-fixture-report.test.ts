@@ -5,6 +5,17 @@ import {
   MAIL_NATIVE_CASES,
   verifyMailFixtureReport,
 } from './mail-fixture-report.js';
+it('requires the current published-record, frozen-selection and retained-context Mail review regressions', () => {
+  expect(MAIL_STORE_CASES).toContain(
+    'G06 preparation loads only current published owner Mail records and refuses corrupt stored content',
+  );
+  expect(MAIL_STORE_CASES).toContain(
+    'G06 preparation freezes a real published source through runtime SQL and reuses it without another metadata read',
+  );
+  expect(MAIL_STORE_CASES).toContain(
+    'G06 restricts new scheduled Mail reads and citations while preserving earlier owner context',
+  );
+});
 const cases = (suite: 'database' | 'native' | 'all' | 'checkpoint') =>
   suite === 'native'
     ? [...MAIL_NATIVE_CASES]

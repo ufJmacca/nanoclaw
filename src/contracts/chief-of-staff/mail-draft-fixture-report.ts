@@ -1,5 +1,7 @@
 import { verifyExactFlatTap } from './flat-tap-report.js';
 export const MAIL_DRAFT_DATABASE_CASES = [
+  'G06 real Mail publication, frozen selection and independent unsent draft reach one checked fixture briefing without a duplicate save',
+  'G06 an observed owner edit withholds the prepared draft confirmation and fixture delivery without recreating it',
   'G05 actual owner policy transaction installs one immutable revision and reconciles identical metadata',
   'G05 actual owner policy rollback preserves a failed final authority check without creating policy rows',
   'G05 actual owner policy refuses a changed reader and never enables another scope',
