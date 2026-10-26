@@ -12,6 +12,9 @@ import type { PoolClient } from 'pg';
 import type { BoundedDatabase } from '../../modules/chief-of-staff/store/client.js';
 import { BriefRunStore } from '../../modules/chief-of-staff/automation/brief-store.js';
 import { BriefScheduleStore } from '../../modules/chief-of-staff/automation/schedule-store.js';
+import type { CosBinding } from '../../cos-boundary.js';
+import type { MailReviewHostProfile } from '../../modules/chief-of-staff/automation/mail-review-profile.js';
+import { writeMailReviewStandingPolicy } from '../../modules/chief-of-staff/ops/mail-review-policy-store.js';
 
 test('G06 migration preserves the generic schedule and admits only two owner-bound mail-review slots', async (t) => {
   assert.equal(process.env.COS_FIXTURE_DATABASE_PROFILE, 'test');
@@ -517,6 +520,165 @@ test('G06 migration preserves the generic schedule and admits only two owner-bou
         } finally {
           await admin.query('ROLLBACK TO SAVEPOINT generic_schedule_boundary');
           await admin.query('RELEASE SAVEPOINT generic_schedule_boundary');
+        }
+      },
+    );
+    await t.test(
+      'trusted review setup creates two bound schedules and replays without changing activation',
+      async () => {
+        await admin.query('SAVEPOINT trusted_policy_fixture');
+        try {
+          await admin.query('DELETE FROM cos.brief_runs WHERE scope_id=$1', [scope]);
+          await admin.query(
+            'DELETE FROM cos.brief_schedule_revisions WHERE scope_id=$1 AND mail_review_policy_id IS NOT NULL',
+            [scope],
+          );
+          await admin.query("DELETE FROM cos.brief_schedules WHERE scope_id=$1 AND purpose='mail_review'", [scope]);
+          await admin.query('DELETE FROM cos.mail_review_policy_revisions WHERE scope_id=$1', [scope]);
+          await admin.query('DELETE FROM cos.mail_review_policies WHERE scope_id=$1', [scope]);
+          const native: CosBinding = {
+            scopeId: scope,
+            ownerId: 'owner',
+            sessionId: 'session',
+            agentGroupId: scope,
+            messagingGroupId: 'fixture-group',
+            instanceId: scope,
+            channelId: scope,
+            botId: 'fixture-bot',
+            provider: 'codex',
+          };
+          const writerBodyGoogle = { ...writerBody, provider: 'google', nativeBindingDigest: digest(native) };
+          await admin.query("UPDATE cos.mail_bindings SET provider='google',credential_ref=$2 WHERE scope_id=$1", [
+            scope,
+            randomUUID(),
+          ]);
+          await admin.query('UPDATE cos.mail_draft_writer_revisions SET body=$2,digest=$3 WHERE scope_id=$1', [
+            scope,
+            JSON.stringify(writerBodyGoogle),
+            digest(writerBodyGoogle),
+          ]);
+          const profile: MailReviewHostProfile = {
+            format: 'cos-mail-review-host/v1',
+            installationDigest: digest('fixture installation'),
+            journalGeneration: writerBody.journalGeneration,
+            scopeId: scope,
+            ownerId: 'owner',
+            sessionId: 'session',
+            agentGroupId: scope,
+            id: randomUUID(),
+            version: 1,
+            binding: {
+              ...binding,
+              provider: 'google',
+              writerDigest: digest(writerBodyGoogle),
+              nativeBindingDigest: digest(native),
+              morningScheduleId: randomUUID(),
+              afternoonScheduleId: randomUUID(),
+            },
+          };
+          const invoke = async (value = profile, ready: () => Promise<void> = async () => {}) => {
+            await admin.query('SAVEPOINT policy_write_call');
+            const client = {
+              query: async (sql: string, values?: unknown[]) => {
+                if (sql === 'BEGIN' || sql === 'COMMIT') return { rows: [], rowCount: 0 };
+                if (sql === 'ROLLBACK') return admin.query('ROLLBACK TO SAVEPOINT policy_write_call');
+                return admin.query(sql, values);
+              },
+            } as unknown as Pick<PoolClient, 'query'>;
+            try {
+              await writeMailReviewStandingPolicy(client, native, value, ready);
+              await admin.query('RELEASE SAVEPOINT policy_write_call');
+            } catch (error) {
+              await admin.query('ROLLBACK TO SAVEPOINT policy_write_call');
+              await admin.query('RELEASE SAVEPOINT policy_write_call');
+              throw error;
+            }
+          };
+          const before = (await admin.query('SELECT clock_timestamp() AS now')).rows[0].now;
+          let initialChecks = 0;
+          await assert.rejects(
+            invoke(profile, async () => {
+              if (++initialChecks === 2) throw Error('fixture initial readiness lost');
+            }),
+            /fixture initial readiness lost/,
+          );
+          assert.equal(
+            (await admin.query('SELECT count(*)::int AS n FROM cos.mail_review_policies WHERE scope_id=$1', [scope]))
+              .rows[0].n,
+            0,
+          );
+          assert.equal(
+            (
+              await admin.query(
+                "SELECT count(*)::int AS n FROM cos.brief_schedules WHERE scope_id=$1 AND purpose='mail_review'",
+                [scope],
+              )
+            ).rows[0].n,
+            0,
+          );
+          const genericId = (
+            await admin.query("SELECT id FROM cos.brief_schedules WHERE scope_id=$1 AND purpose='brief'", [scope])
+          ).rows[0].id;
+          await assert.rejects(
+            invoke({ ...profile, binding: { ...profile.binding, morningScheduleId: genericId } }),
+            /mail_review_policy_schedule_changed/,
+          );
+          assert.equal(
+            (await admin.query('SELECT count(*)::int AS n FROM cos.mail_review_policies WHERE scope_id=$1', [scope]))
+              .rows[0].n,
+            0,
+          );
+          await invoke();
+          const first = (
+            await admin.query(
+              "SELECT id,version,activated_at,policy FROM cos.brief_schedules WHERE scope_id=$1 AND purpose='mail_review' ORDER BY id",
+              [scope],
+            )
+          ).rows;
+          assert.equal(first.length, 2);
+          assert.ok(first.every((row) => row.activated_at >= before));
+          await invoke();
+          assert.deepEqual(
+            (
+              await admin.query(
+                "SELECT id,version,activated_at,policy FROM cos.brief_schedules WHERE scope_id=$1 AND purpose='mail_review' ORDER BY id",
+                [scope],
+              )
+            ).rows,
+            first,
+          );
+          assert.equal(
+            (await admin.query('SELECT count(*)::int AS n FROM cos.brief_schedules WHERE scope_id=$1', [scope])).rows[0]
+              .n,
+            3,
+          );
+          assert.equal(
+            (await admin.query('SELECT count(*)::int AS n FROM cos.mail_review_policies WHERE scope_id=$1', [scope]))
+              .rows[0].n,
+            1,
+          );
+          await assert.rejects(
+            invoke({ ...profile, binding: { ...profile.binding, writerDigest: digest('wrong writer') } }),
+            /mail_review_policy_writer_changed/,
+          );
+          let checks = 0;
+          await assert.rejects(
+            invoke(profile, async () => {
+              if (++checks === 2) throw Error('fixture readiness lost');
+            }),
+            /fixture readiness lost/,
+          );
+          assert.equal(
+            (
+              await admin.query('SELECT count(*)::int AS n FROM cos.mail_review_policy_revisions WHERE scope_id=$1', [
+                scope,
+              ])
+            ).rows[0].n,
+            1,
+          );
+        } finally {
+          await admin.query('ROLLBACK TO SAVEPOINT trusted_policy_fixture');
+          await admin.query('RELEASE SAVEPOINT trusted_policy_fixture');
         }
       },
     );
