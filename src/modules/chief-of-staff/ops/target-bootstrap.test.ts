@@ -122,7 +122,7 @@ it('refuses incomplete local checks before loading an archive', async () => {
   expect(docker).not.toHaveBeenCalled();
 });
 
-it.each(['G02', 'G03', 'G04'] as const)(
+it.each(['G02', 'G03', 'G04', 'G05', 'G06'] as const)(
   '%s preparation delivers the pinned utility before acknowledgement and refuses a busy independent uploader',
   async (slice) => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-g02-preparation-'));

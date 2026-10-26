@@ -617,7 +617,11 @@ it('prepares a stopped-service recovery baseline without adopting a failed candi
   }
 });
 
-async function vaultDeploymentFixture(maintain = true, slice: 'G02' | 'G03' | 'G04' | 'G05' = 'G02') {
+async function vaultDeploymentFixture(
+  maintain = true,
+  slice: 'G02' | 'G03' | 'G04' | 'G05' | 'G06' = 'G02',
+  priorSlice?: 'G06',
+) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-g02-deployment-'));
   fs.chmodSync(root, 0o700);
   const settings: DeploymentSettings = {
@@ -642,12 +646,23 @@ async function vaultDeploymentFixture(maintain = true, slice: 'G02' | 'G03' | 'G
     initial = initializeTarget(settings.stateRoot, binding),
     manifest = fixtureVaultRelease(slice),
     previous = {
-      ...fixtureVaultRelease(slice === 'G05' ? 'G04' : slice === 'G04' ? 'G03' : 'G01'),
+      ...fixtureVaultRelease(
+        priorSlice ?? (slice === 'G06' ? 'G05' : slice === 'G05' ? 'G04' : slice === 'G04' ? 'G03' : 'G01'),
+      ),
       releaseId:
-        slice === 'G05' ? 'release-reviewed-g04' : slice === 'G04' ? 'release-reviewed-g03' : 'release-reviewed-g01',
+        priorSlice === 'G06'
+          ? 'release-reviewed-g06'
+          : slice === 'G06'
+            ? 'release-reviewed-g05'
+            : slice === 'G05'
+              ? 'release-reviewed-g04'
+              : slice === 'G04'
+                ? 'release-reviewed-g03'
+                : 'release-reviewed-g01',
     },
     recovery = recoveryReleaseForManifest(previous),
     receipt = settings.stateRoot + '/releases/' + manifest.releaseId;
+  if (priorSlice) manifest.previousReleaseIds = [previous.releaseId];
   writeAtomic(settings.stateRoot, 'protected.json', { bindingDigest: digest(binding), generation: 1 });
   writeAtomic(settings.stateRoot, 'state.json', {
     ...initial,
@@ -770,7 +785,7 @@ it('the current helper verifies a historical G02 vault checkpoint but refuses it
     s.close();
   }
 });
-it('the schema20 helper preserves a G04 predecessor checkpoint but rejects an obsolete schema19 migration manifest', async () => {
+it('the schema21 helper preserves a G04 predecessor checkpoint but rejects an obsolete schema19 migration manifest', async () => {
   const s = await vaultDeploymentFixture(true, 'G04');
   try {
     await s.effects.backup();
@@ -794,14 +809,14 @@ it('the schema20 helper preserves a G04 predecessor checkpoint but rejects an ob
     s.close();
   }
 });
-it('G05 captures its installed G04 schema19 predecessor and rechecks that exact encrypted checkpoint before schema20 migration', async () => {
+it('the schema21 helper preserves a G05 predecessor checkpoint but refuses its obsolete schema20 migration manifest', async () => {
   const s = await vaultDeploymentFixture(true, 'G05');
   try {
     await s.effects.backup();
     expect(s.capture).toHaveBeenCalledWith(s.settings, s.manifest.releaseId, undefined, s.recovery);
     expect(s.recovery.software.schemaVersion).toBe(19);
     expect(readPrivate(s.receipt + '/vault-state.json')).toEqual(s.snapshot);
-    await s.effects.migrate();
+    await expect(s.effects.migrate()).rejects.toThrow('migration_manifest_mismatch');
     expect(s.verify).toHaveBeenCalledWith(
       s.settings,
       s.manifest.releaseId,
@@ -809,7 +824,7 @@ it('G05 captures its installed G04 schema19 predecessor and rechecks that exact 
       s.recovery,
       s.snapshot.snapshotDigest,
     );
-    expect(s.migrate).toHaveBeenCalledOnce();
+    expect(s.migrate).not.toHaveBeenCalled();
     expect(s.legacy).not.toHaveBeenCalled();
     expect(s.nativeBackup).not.toHaveBeenCalled();
     expect(s.calendarBackup).not.toHaveBeenCalled();
@@ -818,6 +833,36 @@ it('G05 captures its installed G04 schema19 predecessor and rechecks that exact 
     s.close();
   }
 });
+it.each([
+  ['G05', 20],
+  ['G06', 21],
+] as const)(
+  'G06 rechecks its exact encrypted %s schema%s predecessor before current migration',
+  async (prior, schema) => {
+    const s = await vaultDeploymentFixture(true, 'G06', prior === 'G06' ? 'G06' : undefined);
+    try {
+      await s.effects.backup();
+      expect(s.capture).toHaveBeenCalledWith(s.settings, s.manifest.releaseId, undefined, s.recovery);
+      expect(s.recovery.software.schemaVersion).toBe(schema);
+      expect(readPrivate(s.receipt + '/vault-state.json')).toEqual(s.snapshot);
+      await s.effects.migrate();
+      expect(s.verify).toHaveBeenCalledWith(
+        s.settings,
+        s.manifest.releaseId,
+        undefined,
+        s.recovery,
+        s.snapshot.snapshotDigest,
+      );
+      expect(s.migrate).toHaveBeenCalledOnce();
+      expect(s.legacy).not.toHaveBeenCalled();
+      expect(s.nativeBackup).not.toHaveBeenCalled();
+      expect(s.calendarBackup).not.toHaveBeenCalled();
+      expect(fs.existsSync(s.receipt + '/native-state.json')).toBe(false);
+    } finally {
+      s.close();
+    }
+  },
+);
 it('G04 denies a changed encrypted checkpoint before either native or PostgreSQL migration', async () => {
   const s = await vaultDeploymentFixture(true, 'G04');
   try {
