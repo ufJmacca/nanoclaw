@@ -66,7 +66,7 @@ function fixture() {
   const source = {
     source_id: 'source',
     source_version: 1,
-    revision_id: 'revision',
+    revision_id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
     revision_digest: digest('source'),
     thread_id: 'bb02',
     current_capture: 'capture',
@@ -152,6 +152,7 @@ function fixture() {
     assertCurrent: vi.fn(),
     generation: body.journalGeneration,
     find: vi.fn(() => record),
+    findSource: vi.fn(() => record),
   } as unknown as DraftJournal;
   const matches = vi.fn(() => host);
   let current: () => Promise<boolean> = async () => false;
@@ -287,6 +288,77 @@ it('admits a selected scheduled thread through both current review and existing 
   expect(await f.current()).toBe(true);
   f.reviewCurrent(false);
   expect(await f.current()).toBe(false);
+});
+it('G06 briefing refreshes known draft observations without creating or replaying a save', async () => {
+  const f = reviewFixture();
+  f.status.mockResolvedValue({ status: 'verified' as never, operationId });
+  const result = await f.store.reviewNotices(f.scheduled);
+  expect(result).toMatchObject({
+    status: 'ok',
+    drafts: [{ source_message_id: 'aa01', notice: { operationId, state: 'verified' } }],
+  });
+  expect(f.status).toHaveBeenCalledOnce();
+  expect(f.create).not.toHaveBeenCalled();
+  expect(
+    await f.store.reviewNoticesCurrent(
+      { query: f.query } as unknown as PoolClient,
+      f.scheduled,
+      result.drafts as never,
+    ),
+  ).toBe(true);
+  f.record.state = 'edited';
+  expect(
+    await f.store.reviewNoticesCurrent(
+      { query: f.query } as unknown as PoolClient,
+      f.scheduled,
+      result.drafts as never,
+    ),
+  ).toBe(false);
+});
+it('G06 briefing records an observed edit and never describes it as a ready verified draft', async () => {
+  const f = reviewFixture();
+  f.status.mockImplementation(async () => {
+    f.record.state = 'edited';
+    return { status: 'edited', operationId };
+  });
+  expect(await f.store.reviewNotices(f.scheduled)).toMatchObject({
+    status: 'ok',
+    drafts: [{ notice: { state: 'edited', text: expect.stringContaining('recorded as edited') } }],
+  });
+  expect(f.create).not.toHaveBeenCalled();
+});
+it('G06 briefing withholds draft discovery after review revocation and ignores effects in another scope', async () => {
+  const f = reviewFixture();
+  f.reviewCurrent(false);
+  expect(await f.store.reviewNotices(f.scheduled)).toEqual({ status: 'denied' });
+  expect(f.status).not.toHaveBeenCalled();
+  f.reviewCurrent(true);
+  f.record.scopeId = 'another-scope';
+  expect(await f.store.reviewNotices(f.scheduled)).toEqual({ status: 'ok', drafts: [] });
+  expect(f.status).not.toHaveBeenCalled();
+});
+it('G06 prepared brief readback can check an existing draft while further draft creation stays denied', async () => {
+  const f = reviewFixture();
+  vi.mocked(f.check).mockImplementation(async (_client, _context, mode) =>
+    mode === 'read' ? structuredClone(f.selection) : null,
+  );
+  f.status.mockImplementation(async () => {
+    f.record.state = 'edited';
+    return { status: 'edited', operationId };
+  });
+  expect(await f.store.reviewNotices(f.scheduled)).toMatchObject({
+    status: 'ok',
+    drafts: [{ notice: { state: 'edited' } }],
+  });
+  expect(await f.store.create(f.scheduled, requestId, input)).toEqual({ status: 'denied' });
+  expect(f.create).not.toHaveBeenCalled();
+});
+it.each(['message', 'revision'])('G06 refuses a changed frozen %s even in the same selected thread', async (field) => {
+  const f = reviewFixture();
+  if (field === 'message') f.selection.inputs.candidates[0].source_message_id = 'ff01';
+  else f.selection.inputs.candidates[0].revision_digest = digest('different revision');
+  expect(await f.store.create(f.scheduled, requestId, input)).toEqual({ status: 'denied' });
+  expect(f.create).not.toHaveBeenCalled();
 });
 it('review revocation before or during a provider call closes the existing save path', async () => {
   const f = reviewFixture();

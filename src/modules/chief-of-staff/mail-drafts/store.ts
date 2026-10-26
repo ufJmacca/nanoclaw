@@ -61,6 +61,7 @@ export type MailDraftDependencies = {
     source: MailDraftSourceSelection,
   ): ReturnType<typeof googleMailDraftWriter> | null;
 };
+export type MailReviewDraftNotice = { source_message_id: string; notice: MailDraftAnswerNotice };
 const hash = (value: unknown): value is string => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 const draftStates = new Set(['verified', 'uncertain', 'edited', 'missing', 'sent', 'collision']);
 function receipt(value: MailDraftResult): Result {
@@ -177,6 +178,7 @@ export class MailDraftStore {
     context: KnowledgeContext,
     bindingId: string,
     messageId: string,
+    mode: 'read' | 'draft' = 'draft',
   ): Promise<Admission | null> {
     const policy = await this.policy(client, context, bindingId);
     if (!policy) return null;
@@ -210,8 +212,22 @@ export class MailDraftStore {
     )
       return null;
     if (policy.review) {
-      const current = await dependencies.reviewAccess!.check(client, context, 'draft', source.thread_id);
-      if (!current || digest(current) !== digest(policy.review)) return null;
+      const current = await dependencies.reviewAccess!.check(client, context, mode, source.thread_id);
+      if (
+        !current ||
+        digest(current) !== digest(policy.review) ||
+        !current.inputs.candidates.some(
+          (candidate) =>
+            candidate.source_message_id === messageId &&
+            candidate.thread_id === source.thread_id &&
+            candidate.source_id === source.source_id &&
+            candidate.source_version === source.source_version &&
+            candidate.revision_id === source.revision_id &&
+            candidate.revision_digest === source.revision_digest &&
+            candidate.internal_date_ms === source.internal_date_ms,
+        )
+      )
+        return null;
     }
     return { ...policy, source: structuredClone(source) };
   }
@@ -259,10 +275,15 @@ export class MailDraftStore {
       return { status: 'unavailable', items: [] };
     }
   }
-  private async current(context: KnowledgeContext, pinned: Admission, messageId: string): Promise<boolean> {
+  private async current(
+    context: KnowledgeContext,
+    pinned: Admission,
+    messageId: string,
+    mode: 'read' | 'draft' = 'draft',
+  ): Promise<boolean> {
     try {
       return await this.transaction(async (client) => {
-        const current = await this.admission(client, context, pinned.binding.id, messageId);
+        const current = await this.admission(client, context, pinned.binding.id, messageId, mode);
         return current !== null && digest(current) === digest(pinned);
       });
       // eslint-disable-next-line no-catch-all/no-catch-all -- Current authority cannot be inferred after a private database/profile failure.
@@ -290,7 +311,7 @@ export class MailDraftStore {
     if (!validMailDraftStatusInput(input) || !this.native(context)) return null;
     const record = this.dependencies!.journal.find(input.operation_id);
     if (!record || record.scopeId !== context.scopeId) return null;
-    const pinned = await this.admission(client, context, record.bindingId, record.sourceMessageId);
+    const pinned = await this.admission(client, context, record.bindingId, record.sourceMessageId, 'read');
     if (!pinned || !this.effectMatches(input.operation_id, context, pinned, record.sourceMessageId)) return null;
     const current = this.dependencies!.journal.find(input.operation_id);
     if (!current || digest(current) !== digest(record) || digest(this.native(context)) !== digest(pinned.authority))
@@ -300,6 +321,92 @@ export class MailDraftStore {
       current,
       digest({ binding: pinned.binding.digest, authority: pinned.authority, source }),
     );
+  }
+  /** Host briefing only. Recheck known independent effects through the read-only status path;
+   * this method has no create/retry port and does not discover unrelated provider drafts. */
+  async reviewNotices(context: KnowledgeContext): Promise<Result> {
+    if (context.origin?.kind !== 'schedule' || !this.dependencies?.reviewAccess || !this.native(context))
+      return { status: 'denied' };
+    const retained = structuredClone(context),
+      original = digest(context),
+      dependencies = this.dependencies;
+    try {
+      const selection = await this.transaction(async (client) => {
+        const selected = await dependencies.reviewAccess!.check(client, retained, 'read');
+        if (!selected) return null;
+        const policy = await this.policy(client, retained, selected.body.writerBindingId);
+        return policy?.review && digest(policy.review) === digest(selected) ? selected : null;
+      });
+      if (!selection || selection.inputs.candidates.length > 10) return { status: 'denied' };
+      const drafts: MailReviewDraftNotice[] = [];
+      for (const candidate of selection.inputs.candidates) {
+        const record = dependencies.journal.findSource(selection.body.mailboxDigest, candidate.source_message_id);
+        if (!record || record.scopeId !== retained.scopeId || record.bindingId !== selection.body.writerBindingId)
+          continue;
+        if (record.threadId !== candidate.thread_id || !hash(record.operationId)) return { status: 'denied' };
+        const result = await this.status(retained, { operation_id: record.operationId });
+        if (result.status !== 'ok') return { status: result.status };
+        const notice = await this.transaction((client) =>
+          this.answerNotice(client, retained, { operation_id: record.operationId }),
+        );
+        if (!notice || notice.state !== (result.draft_status === 'uncertain' ? 'reserved' : result.draft_status))
+          return { status: 'denied' };
+        drafts.push({ source_message_id: candidate.source_message_id, notice });
+      }
+      return await this.transaction(async (client) => {
+        const selected = await dependencies.reviewAccess!.check(client, retained, 'read');
+        return digest(context) === original &&
+          digest(retained) === original &&
+          digest(selected) === digest(selection) &&
+          (await this.reviewNoticesCurrent(client, retained, drafts))
+          ? { status: 'ok', drafts }
+          : { status: 'denied' };
+      });
+      // eslint-disable-next-line no-catch-all/no-catch-all -- Private status, journal and provider failures must not leak through a briefing.
+    } catch {
+      return { status: 'unavailable' };
+    }
+  }
+  /** Caller-owned transaction; compare recorded observations, never contact a provider or mutate an effect. */
+  async reviewNoticesCurrent(
+    client: PoolClient,
+    context: KnowledgeContext,
+    drafts: MailReviewDraftNotice[],
+  ): Promise<boolean> {
+    if (
+      context.origin?.kind !== 'schedule' ||
+      !this.dependencies?.reviewAccess ||
+      !Array.isArray(drafts) ||
+      drafts.length > 10
+    )
+      return false;
+    const selection = await this.dependencies.reviewAccess.check(client, context, 'read');
+    if (!selection || !(await this.policy(client, context, selection.body.writerBindingId))) return false;
+    const seen = new Set<string>();
+    for (const item of drafts) {
+      if (
+        !item ||
+        !item.notice ||
+        !hash(item.notice.operationId) ||
+        seen.has(item.source_message_id) ||
+        !selection.inputs.candidates.some((candidate) => candidate.source_message_id === item.source_message_id)
+      )
+        return false;
+      seen.add(item.source_message_id);
+      const record = this.dependencies.journal.find(item.notice.operationId);
+      if (
+        !record ||
+        record.sourceMessageId !== item.source_message_id ||
+        record.bindingId !== selection.body.writerBindingId
+      )
+        return false;
+      if (
+        digest(await this.answerNotice(client, context, { operation_id: item.notice.operationId })) !==
+        digest(item.notice)
+      )
+        return false;
+    }
+    return true;
   }
   async create(context: KnowledgeContext, requestId: string, input: MailDraftCreateInput): Promise<Result> {
     if (!validMailDraftCreateInput(input) || !contextGenerationPattern.test(requestId) || !this.native(context))
@@ -401,11 +508,11 @@ export class MailDraftStore {
       const record = this.dependencies!.journal.find(operationId);
       if (!record || record.scopeId !== retained.scopeId) return { status: 'denied' };
       const pinned = await this.transaction((client) =>
-        this.admission(client, retained, record.bindingId, record.sourceMessageId),
+        this.admission(client, retained, record.bindingId, record.sourceMessageId, 'read'),
       );
       if (!pinned || !this.effectMatches(operationId, retained, pinned, record.sourceMessageId))
         return { status: 'denied' };
-      const current = () => this.current(retained, pinned, record.sourceMessageId),
+      const current = () => this.current(retained, pinned, record.sourceMessageId, 'read'),
         writer = this.dependencies!.writer(retained, pinned.binding, current, pinned.source);
       if (!writer || !(await current())) return { status: 'denied' };
       const result = receipt(await writer.status(operationId));
