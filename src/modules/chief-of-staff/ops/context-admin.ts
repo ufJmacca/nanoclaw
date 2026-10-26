@@ -69,6 +69,9 @@ import { isMailDraftAccountCommand, type MailDraftAccountArguments } from './mai
 import { runMailDraftAccountAdmin } from './mail-draft-account-admin.js';
 import { isMailDraftAdminCommand, type MailDraftAdminArguments } from './mail-draft-admin-arguments.js';
 import { runMailDraftAdmin } from './mail-draft-admin.js';
+import { isMailReviewAdminCommand, type MailReviewAdminArguments } from './mail-review-admin-arguments.js';
+import { runMailReviewAdmin } from './mail-review-admin.js';
+import { mailReviewContextCurrent } from './mail-review-context-current.js';
 import { isMissionCommand, runMissionAdmin, type MissionAdminArguments } from './mission-admin.js';
 import { isOwnerExportCommand, runOwnerExportAdmin, type OwnerExportArguments } from './owner-export-admin.js';
 import {
@@ -104,6 +107,7 @@ export type ContextAdminArguments =
   | MailAccountArguments
   | MailDraftAccountArguments
   | MailDraftAdminArguments
+  | MailReviewAdminArguments
   | { command: 'context-status'; scopeId: string }
   | { command: 'operator-status'; scopeId: string; input: StatusInput }
   | { command: 'operator-control'; scopeId: string; requestId: string; text: string }
@@ -252,6 +256,7 @@ export async function contextAdminCommand(
       'mail-draft-link',
       'mail-draft-configure',
       'mail-draft-disable',
+      'mail-review-configure',
     ].includes(args.command)
   )
     return { status: 'disabled', live_model: 'not_verified' };
@@ -392,7 +397,8 @@ export async function contextAdminCommand(
   }
   const mailReleaseId =
     (isMailAccountCommand(args) && ['G04', 'G05'].includes(vaultRelease?.release.slice ?? '')) ||
-    ((isMailDraftAccountCommand(args) || isMailDraftAdminCommand(args)) && vaultRelease?.release.slice === 'G05')
+    ((isMailDraftAccountCommand(args) || isMailDraftAdminCommand(args)) && vaultRelease?.release.slice === 'G05') ||
+    (isMailReviewAdminCommand(args) && vaultRelease?.release.slice === 'G06')
       ? vaultRelease!.release.releaseId
       : null;
   const unlock = acquireTargetLock(root);
@@ -413,13 +419,18 @@ export async function contextAdminCommand(
       const assertAuthority = () => {
         const currentTarget = assertMaintenanceLease(root, target.binding, maintenance);
         if (
-          (isMailAccountCommand(args) || isMailDraftAccountCommand(args) || isMailDraftAdminCommand(args)) &&
+          (isMailAccountCommand(args) ||
+            isMailDraftAccountCommand(args) ||
+            isMailDraftAdminCommand(args) ||
+            isMailReviewAdminCommand(args)) &&
           (!mailReleaseId || currentTarget.lifecycle !== 'protected' || currentTarget.releaseId !== mailReleaseId)
         )
           throw Error(
-            isMailDraftAccountCommand(args) || isMailDraftAdminCommand(args)
-              ? 'mail_draft_account_operation_unavailable'
-              : 'mail_account_operation_unavailable',
+            isMailReviewAdminCommand(args)
+              ? 'mail_review_configuration_unavailable'
+              : isMailDraftAccountCommand(args) || isMailDraftAdminCommand(args)
+                ? 'mail_draft_account_operation_unavailable'
+                : 'mail_account_operation_unavailable',
           );
         assertHostExecutionLease(native, lease);
         if (!nativeBinding(binding)) throw new Error('context_binding_changed');
@@ -434,6 +445,24 @@ export async function contextAdminCommand(
         assertAuthority();
       };
       await check();
+      if (isMailReviewAdminCommand(args)) {
+        if (!vaultRelease || vaultRelease.release.slice !== 'G06') throw Error('mail_review_configuration_unavailable');
+        return runMailReviewAdmin({
+          args,
+          env,
+          roots: {
+            targetRoot: root,
+            installationRoot: target.binding.installationRoot,
+            dataRoot: target.binding.dataRoot,
+          },
+          binding,
+          release: vaultRelease.release,
+          check,
+          assertAuthority,
+          contextCurrent: (generation) =>
+            mailReviewContextCurrent(native, root, binding, generation, accountBinding(root) ?? ''),
+        });
+      }
       if (isMailDraftAdminCommand(args)) {
         if (!vaultRelease || vaultRelease.release.slice !== 'G05') throw Error('mail_draft_configuration_unavailable');
         return runMailDraftAdmin({
