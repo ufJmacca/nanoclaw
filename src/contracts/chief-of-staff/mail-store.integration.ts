@@ -35,6 +35,7 @@ import { MailReviewAccess } from '../../modules/chief-of-staff/automation/mail-r
 import { MailReviewPreparer } from '../../modules/chief-of-staff/automation/mail-review-preparation.js';
 import { mailReviewSchedulePolicy } from '../../modules/chief-of-staff/automation/mail-review-policy.js';
 import type { MailReviewBinding } from '../../modules/chief-of-staff/automation/mail-review-binding.js';
+import { PriorityStore } from '../../modules/chief-of-staff/store/priorities.js';
 const scopes: string[] = [],
   roots: string[] = [];
 let admin: pg.Client, database: BoundedDatabase;
@@ -669,7 +670,41 @@ test('G06 preparation freezes a real published source through runtime SQL and re
     assert.equal(await database.run((client) => access.check(client, scheduled, 'draft', 'bb01')), null);
     await admin.query('UPDATE cos.brief_runs SET model_calls=1 WHERE scope_id=$1 AND id=$2', [f.scope, runId]);
     assert.equal((await database.run((client) => access.check(client, scheduled, 'draft', 'bb01')))?.id, policy);
+    const scopedKnowledge = new KnowledgeStore(
+      database,
+      f.artifacts,
+      {},
+      {
+        mailEnabled: () => true,
+        mailAccess: () => true,
+        mailReviewAccess: access,
+      },
+    );
+    const priorities = new PriorityStore(
+      database,
+      scopedKnowledge,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      access,
+    );
+    const reviewContext = await priorities.context(scheduled, scheduled);
+    assert.equal(reviewContext.status, 'ok');
+    const displayed = reviewContext.mail_review as {
+      candidates: { excerpt: string; citation: { evidence_id: string } }[];
+    };
+    assert.equal(displayed.candidates.length, 1);
+    assert.match(displayed.candidates[0].excerpt, /Could you review project alpha/);
+    assert.match(displayed.candidates[0].citation.evidence_id, /^[a-f0-9-]{36}$/);
+    assert.equal((await scopedKnowledge.contextReady(f.context)).status, 'ok');
     await admin.query("UPDATE cos.mail_review_policies SET state='revoked' WHERE scope_id=$1", [f.scope]);
+    assert.equal((await priorities.context(scheduled, scheduled)).status, 'denied');
     assert.equal((await preparer.execute(f.context, runId, 1)).status, 'denied');
     assert.equal(metadataReads, 1);
   } finally {
