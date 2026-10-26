@@ -31,6 +31,10 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { checkMailContext, mailAnswerNotice } from '../../modules/chief-of-staff/mail/answer-notice.js';
 import type { MailReviewReadScope } from '../../modules/chief-of-staff/automation/mail-review-access.js';
 import { loadMailReviewRecords } from '../../modules/chief-of-staff/automation/mail-review-records.js';
+import { MailReviewAccess } from '../../modules/chief-of-staff/automation/mail-review-access.js';
+import { MailReviewPreparer } from '../../modules/chief-of-staff/automation/mail-review-preparation.js';
+import { mailReviewSchedulePolicy } from '../../modules/chief-of-staff/automation/mail-review-policy.js';
+import type { MailReviewBinding } from '../../modules/chief-of-staff/automation/mail-review-binding.js';
 const scopes: string[] = [],
   roots: string[] = [];
 let admin: pg.Client, database: BoundedDatabase;
@@ -102,7 +106,7 @@ async function fixture(hooks: ConstructorParameters<typeof MailStore>[2] = {}) {
   };
   return { scope, root, artifacts, store, context, binding };
 }
-async function capture(capturedAt?: number, ageMs = 1000) {
+async function capture(capturedAt?: number, ageMs = 1000, review = false) {
   // Production polling and retention both use the selected PostgreSQL clock.
   const at: number = capturedAt ?? (await admin.query('SELECT clock_timestamp() AS now')).rows[0].now.getTime();
   const raw = {
@@ -113,7 +117,18 @@ async function capture(capturedAt?: number, ageMs = 1000) {
     labelIds: ['INBOX'],
     payload: {
       mimeType: 'text/plain',
-      body: { data: Buffer.from('Fixture mail asks about project alpha.').toString('base64url') },
+      headers: review
+        ? [
+            { name: 'Subject', value: 'Please review project alpha' },
+            { name: 'From', value: 'person@example.invalid' },
+            { name: 'To', value: 'owner@example.invalid' },
+          ]
+        : [],
+      body: {
+        data: Buffer.from(
+          review ? 'Could you review project alpha?' : 'Fixture mail asks about project alpha.',
+        ).toString('base64url'),
+      },
     },
   };
   return collectMail({
@@ -469,10 +484,10 @@ test('G04 reconstructs only the current capture and preserves the original selec
   assert.equal(coverage.status, 'ok');
   assert.equal(JSON.stringify(coverage).includes('Fixture mail asks'), false);
 });
-async function publishFixture(ageMs = 1000) {
+async function publishFixture(ageMs = 1000, review = false) {
   const f = await fixture();
   await f.store.bind(f.context, f.binding);
-  const prepared = await capture(undefined, ageMs),
+  const prepared = await capture(undefined, ageMs, review),
     id = randomUUID();
   await f.store.start(f.context, f.binding.id, id, prepared.window);
   assert.equal((await f.store.publish(f.context, f.binding.id, id, prepared)).status, 'ok');
@@ -513,6 +528,162 @@ test('G06 preparation loads only current published owner Mail records and refuse
     digest('corrupt stored content'),
   ]);
   await assert.rejects(loadMailReviewRecords(admin, f.context, f.binding.id, f.id), /mail_review_source_unavailable/);
+});
+test('G06 preparation freezes a real published source through runtime SQL and reuses it without another metadata read', async () => {
+  const f = await publishFixture(1000, true),
+    writer = randomUUID(),
+    policy = randomUUID();
+  const writerBody = {
+    format: 'cos-mail-draft-binding/v1',
+    provider: 'fixture',
+    readerBindingId: f.binding.id,
+    mailboxDigest: digest(f.binding.mailboxEmail),
+    writerClientDigest: digest('writer'),
+    readerClientDigest: digest('reader'),
+    credentialReference: randomUUID(),
+    nativeBindingDigest: digest('fixture native'),
+    journalGeneration: randomUUID(),
+    maxPerDay: 5,
+    timeZone: 'Australia/Sydney',
+    replyMode: 'plain_text_reply',
+    permissionScopes: ['https://www.googleapis.com/auth/gmail.compose'],
+    recoveryProofDigest: digest('fixture recovery'),
+  };
+  const binding: MailReviewBinding = {
+    format: 'cos-mail-review-binding/v1',
+    provider: 'fixture',
+    readerBindingId: f.binding.id,
+    writerBindingId: writer,
+    writerVersion: 1,
+    writerDigest: digest(writerBody),
+    writerConsentRef: digest('fixture consent'),
+    nativeBindingDigest: writerBody.nativeBindingDigest,
+    mailboxDigest: writerBody.mailboxDigest,
+    contextGeneration: f.context.generation,
+    morningScheduleId: randomUUID(),
+    afternoonScheduleId: randomUUID(),
+    timeZone: 'Australia/Sydney',
+    maxCandidateThreads: 10,
+    maxModelAttempts: 3,
+    maxDraftsPerDay: 5,
+  };
+  const runId = digest(randomUUID()),
+    limits = { max_turns: 3, max_tool_calls: 16, deadline_seconds: 300, refresh_seconds: 30 };
+  try {
+    await admin.query(
+      "INSERT INTO cos.mail_draft_writer_bindings(scope_id,id,reader_binding_id,owner_id,session_id,version,state) VALUES($1,$2,$3,$4,$5,1,'enabled')",
+      [f.scope, writer, f.binding.id, f.context.ownerId, f.context.sessionId],
+    );
+    await admin.query(
+      'INSERT INTO cos.mail_draft_writer_revisions(scope_id,binding_id,version,body,digest,consent_ref) VALUES($1,$2,1,$3,$4,$5)',
+      [f.scope, writer, JSON.stringify(writerBody), digest(writerBody), binding.writerConsentRef],
+    );
+    await admin.query(
+      "INSERT INTO cos.mail_review_policies(scope_id,id,owner_id,session_id,agent_group_id,version,state) VALUES($1,$2,$3,$4,$1,1,'enabled')",
+      [f.scope, policy, f.context.ownerId, f.context.sessionId],
+    );
+    await admin.query(
+      'INSERT INTO cos.mail_review_policy_revisions(scope_id,binding_id,version,reader_binding_id,writer_binding_id,writer_version,body,digest,owner_config_ref) VALUES($1,$2,1,$3,$4,1,$5,$6,$7)',
+      [f.scope, policy, f.binding.id, writer, JSON.stringify(binding), digest(binding), digest('fixture config')],
+    );
+    await admin.query(
+      "INSERT INTO cos.brief_schedules(scope_id,id,owner_id,session_id,agent_group_id,title,policy,limits,version,provenance,purpose,mail_review_policy_id,mail_review_policy_version,mail_review_slot) VALUES($1,$2,$3,$4,$1,'Fixture morning review',$5,$6,1,'{}','mail_review',$7,1,'morning')",
+      [
+        f.scope,
+        binding.morningScheduleId,
+        f.context.ownerId,
+        f.context.sessionId,
+        JSON.stringify(mailReviewSchedulePolicy('morning')),
+        JSON.stringify(limits),
+        policy,
+      ],
+    );
+    await admin.query(
+      `INSERT INTO cos.brief_schedule_revisions(scope_id,schedule_id,version,body,proposal_id,mail_review_policy_id,mail_review_policy_version)
+       SELECT scope_id,id,version,to_jsonb(s),NULL,mail_review_policy_id,mail_review_policy_version FROM cos.brief_schedules s WHERE scope_id=$1 AND id=$2`,
+      [f.scope, binding.morningScheduleId],
+    );
+    await admin.query(
+      "INSERT INTO cos.brief_runs(scope_id,id,schedule_id,schedule_version,owner_id,session_id,agent_group_id,intended_at,local_date,state,limits,model_calls,generation,lease_owner,lease_until,deadline_at,provenance) VALUES($1,$2,$3,1,$4,$5,$1,clock_timestamp(),CURRENT_DATE,'dispatched',$6,0,1,$7,clock_timestamp()+interval '5 minutes',clock_timestamp()+interval '5 minutes','{}')",
+      [
+        f.scope,
+        runId,
+        binding.morningScheduleId,
+        f.context.ownerId,
+        f.context.sessionId,
+        JSON.stringify(limits),
+        'cos-native-' + binding.nativeBindingDigest,
+      ],
+    );
+    const identity = { bindingDigest: binding.nativeBindingDigest, contextGeneration: f.context.generation };
+    const access = new MailReviewAccess({
+      authority: () => identity,
+      ownerAuthority: () => identity,
+      matches: () => true,
+    });
+    let metadataReads = 0;
+    const preparer = new MailReviewPreparer({
+      database,
+      access,
+      knowledge: f.knowledge,
+      current: () => true,
+      connector: {
+        reviewSource: async (_ctx, _binding, message, _window, current) => {
+          assert.equal(await current(), true);
+          metadataReads++;
+          const stored = f.prepared.messages.find((m) => m.id === message)!;
+          return {
+            id: stored.id,
+            threadId: stored.threadId,
+            historyId: stored.historyId,
+            internalDate: stored.internalDate,
+            observedAt: Date.now(),
+            excluded: null,
+          };
+        },
+      },
+    });
+    assert.equal((await preparer.execute(f.context, runId, 1)).status, 'ok');
+    assert.equal(metadataReads, 1);
+    const frozen = (
+      await admin.query('SELECT review_inputs,model_calls,tool_calls FROM cos.brief_runs WHERE scope_id=$1 AND id=$2', [
+        f.scope,
+        runId,
+      ])
+    ).rows[0];
+    assert.equal(frozen.review_inputs.candidates.length, 1);
+    assert.equal(frozen.review_inputs.candidates[0].source_message_id, 'aa01');
+    assert.equal(frozen.model_calls, 0);
+    assert.equal(frozen.tool_calls, 0);
+    assert.equal((await preparer.execute(f.context, runId, 1)).status, 'ok');
+    assert.equal(metadataReads, 1);
+    const scheduled = {
+      ...f.context,
+      ingressId: `brief:${runId}:1`,
+      origin: { kind: 'schedule' as const, runId, generation: 1 },
+    };
+    assert.equal(
+      (await database.run((client) => access.check(client, scheduled, 'read')))?.inputs.candidates.length,
+      1,
+    );
+    assert.equal(await database.run((client) => access.check(client, scheduled, 'draft', 'bb01')), null);
+    await admin.query('UPDATE cos.brief_runs SET model_calls=1 WHERE scope_id=$1 AND id=$2', [f.scope, runId]);
+    assert.equal((await database.run((client) => access.check(client, scheduled, 'draft', 'bb01')))?.id, policy);
+    await admin.query("UPDATE cos.mail_review_policies SET state='revoked' WHERE scope_id=$1", [f.scope]);
+    assert.equal((await preparer.execute(f.context, runId, 1)).status, 'denied');
+    assert.equal(metadataReads, 1);
+  } finally {
+    for (const table of [
+      'brief_runs',
+      'brief_schedule_revisions',
+      'brief_schedules',
+      'mail_review_policy_revisions',
+      'mail_review_policies',
+      'mail_draft_writer_revisions',
+      'mail_draft_writer_bindings',
+    ])
+      await admin.query('DELETE FROM cos.' + table + ' WHERE scope_id=$1', [f.scope]);
+  }
 });
 async function eventually(check: () => Promise<boolean>): Promise<void> {
   const until = performance.now() + 3000;
