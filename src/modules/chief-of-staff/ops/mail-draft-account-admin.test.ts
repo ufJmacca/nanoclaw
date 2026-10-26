@@ -33,7 +33,7 @@ afterEach(() => {
   for (const p of cleanup.splice(0)) fs.rmSync(p, { recursive: true, force: true });
 });
 
-async function fixture() {
+async function fixture(slice: 'G05' | 'G06' = 'G05') {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-draft-account-'));
   cleanup.push(base);
   const roots = { targetRoot: base + '/target', installationRoot: base + '/app', dataRoot: base + '/data' },
@@ -47,7 +47,7 @@ async function fixture() {
   };
   initializeTarget(roots.targetRoot, targetBinding);
   const target = protectTarget(roots.targetRoot, targetBinding),
-    release = fixtureVaultRelease('G05');
+    release = fixtureVaultRelease(slice);
   writeAtomic(roots.targetRoot, 'state.json', { ...target, lifecycle: 'protected', releaseId: release.releaseId });
   for (const p of [
     roots.installationRoot,
@@ -215,92 +215,98 @@ async function fixture() {
     assertAuthority,
   };
 }
-it('configures the separate encrypted writer and independent witness without granting account or draft policy', async () => {
-  const f = await fixture(),
-    readerBefore = fs.readFileSync(f.readerRoot + '/credentials/' + f.reference + '.json');
-  expect(await f.configure()).toEqual({
-    status: 'configured_paused',
-    scope_id: 'fixture',
-    paused: true,
-    live_model: 'not_invoked',
-    write_enabled: false,
-  });
-  const witness = openTargetDraftJournal(f.roots.targetRoot, digest(f.targetBinding)),
-    generation = witness.generation;
-  witness.close();
-  expect(await f.configure()).toMatchObject({ status: 'configured_paused', write_enabled: false });
-  const reopened = openTargetDraftJournal(f.roots.targetRoot, digest(f.targetBinding));
-  expect(reopened.generation).toBe(generation);
-  reopened.close();
-  expect(fs.readFileSync(f.readerRoot + '/credentials/' + f.reference + '.json')).toEqual(readerBefore);
-  expect(f.connect).not.toHaveBeenCalled();
-  expect(f.provider).not.toHaveBeenCalled();
-  expect(f.display).not.toHaveBeenCalled();
-  expect(fs.existsSync(f.roots.targetRoot + '/mail-drafts/writer-profile.json')).toBe(false);
-  expect(backupCalendarState).toHaveBeenCalledTimes(4);
-});
-it('links only the exact compose grant for the existing ready reader mailbox, journals it and remains write-disabled on retry', async () => {
-  const f = await fixture();
-  await f.configure();
-  const result = {
-    status: 'linked_paused',
-    scope_id: 'fixture',
-    reader_binding_id: f.link.readerBindingId,
-    writer_binding_id: f.link.writerBindingId,
-    paused: true,
-    live_model: 'not_invoked',
-    write_enabled: false,
-  };
-  expect(await runMailDraftAccountAdmin({ ...f.options, args: f.link }, f.dependencies)).toEqual(result);
-  const history = openTargetDraftJournal(f.roots.targetRoot, digest(f.targetBinding));
-  try {
-    const consent = readMailDraftAccountConsent(
-      f.roots.targetRoot,
-      digest(f.targetBinding),
-      f.options.binding,
-      f.link.writerBindingId,
-      history,
+it.each(['G05', 'G06'] as const)(
+  '%s configures the separate encrypted writer and independent witness without granting account or draft policy',
+  async (slice) => {
+    const f = await fixture(slice),
+      readerBefore = fs.readFileSync(f.readerRoot + '/credentials/' + f.reference + '.json');
+    expect(await f.configure()).toEqual({
+      status: 'configured_paused',
+      scope_id: 'fixture',
+      paused: true,
+      live_model: 'not_invoked',
+      write_enabled: false,
+    });
+    const witness = openTargetDraftJournal(f.roots.targetRoot, digest(f.targetBinding)),
+      generation = witness.generation;
+    witness.close();
+    expect(await f.configure()).toMatchObject({ status: 'configured_paused', write_enabled: false });
+    const reopened = openTargetDraftJournal(f.roots.targetRoot, digest(f.targetBinding));
+    expect(reopened.generation).toBe(generation);
+    reopened.close();
+    expect(fs.readFileSync(f.readerRoot + '/credentials/' + f.reference + '.json')).toEqual(readerBefore);
+    expect(f.connect).not.toHaveBeenCalled();
+    expect(f.provider).not.toHaveBeenCalled();
+    expect(f.display).not.toHaveBeenCalled();
+    expect(fs.existsSync(f.roots.targetRoot + '/mail-drafts/writer-profile.json')).toBe(false);
+    expect(backupCalendarState).toHaveBeenCalledTimes(4);
+  },
+);
+it.each(['G05', 'G06'] as const)(
+  '%s links only the exact compose grant for the existing ready reader mailbox, journals it and remains write-disabled on retry',
+  async (slice) => {
+    const f = await fixture(slice);
+    await f.configure();
+    const result = {
+      status: 'linked_paused',
+      scope_id: 'fixture',
+      reader_binding_id: f.link.readerBindingId,
+      writer_binding_id: f.link.writerBindingId,
+      paused: true,
+      live_model: 'not_invoked',
+      write_enabled: false,
+    };
+    expect(await runMailDraftAccountAdmin({ ...f.options, args: f.link }, f.dependencies)).toEqual(result);
+    const history = openTargetDraftJournal(f.roots.targetRoot, digest(f.targetBinding));
+    try {
+      const consent = readMailDraftAccountConsent(
+        f.roots.targetRoot,
+        digest(f.targetBinding),
+        f.options.binding,
+        f.link.writerBindingId,
+        history,
+      );
+      expect(consent).toMatchObject({
+        nativeBindingDigest: digest(f.options.binding),
+        selection: {
+          readerBindingId: f.link.readerBindingId,
+          writerBindingId: f.link.writerBindingId,
+          readerReference: f.reference,
+          writerReference: f.link.writerBindingId,
+          mailboxDigest: digest(f.selection.mailboxEmail),
+          readerClientDigest: digest('reader-fixture.apps.googleusercontent.com'),
+          writerClientDigest: digest(f.client.clientId),
+        },
+      });
+      expect(JSON.stringify(consent)).not.toMatch(/PRIVATE|owner@example/);
+    } finally {
+      history.close();
+    }
+    const host = await openMailDraftCredentials(f.roots, f.dependencies.inspect, f.dependencies.memory, f.journal);
+    try {
+      expect(await host.credentials.inspect('fixture', f.link.writerBindingId, f.link.writerBindingId)).toMatchObject({
+        scopes: [GOOGLE_MAIL_DRAFT_SCOPE],
+        auth: 'ready',
+      });
+    } finally {
+      await host.close();
+    }
+    expect(f.journal).toHaveBeenCalledWith(
+      expect.objectContaining({ sourceKind: 'mail_draft_writer', generation: 1, phase: 'ready' }),
+      expect.any(Function),
     );
-    expect(consent).toMatchObject({
-      nativeBindingDigest: digest(f.options.binding),
-      selection: {
-        readerBindingId: f.link.readerBindingId,
-        writerBindingId: f.link.writerBindingId,
-        readerReference: f.reference,
-        writerReference: f.link.writerBindingId,
-        mailboxDigest: digest(f.selection.mailboxEmail),
-        readerClientDigest: digest('reader-fixture.apps.googleusercontent.com'),
-        writerClientDigest: digest(f.client.clientId),
-      },
-    });
-    expect(JSON.stringify(consent)).not.toMatch(/PRIVATE|owner@example/);
-  } finally {
-    history.close();
-  }
-  const host = await openMailDraftCredentials(f.roots, f.dependencies.inspect, f.dependencies.memory, f.journal);
-  try {
-    expect(await host.credentials.inspect('fixture', f.link.writerBindingId, f.link.writerBindingId)).toMatchObject({
-      scopes: [GOOGLE_MAIL_DRAFT_SCOPE],
-      auth: 'ready',
-    });
-  } finally {
-    await host.close();
-  }
-  expect(f.journal).toHaveBeenCalledWith(
-    expect.objectContaining({ sourceKind: 'mail_draft_writer', generation: 1, phase: 'ready' }),
-    expect.any(Function),
-  );
-  expect(await runMailDraftAccountAdmin({ ...f.options, args: f.link }, f.dependencies)).toEqual(result);
-  expect(f.display).toHaveBeenCalledOnce();
-  expect(f.provider.mock.calls.filter(([u]) => u === 'https://oauth2.googleapis.com/token')).toHaveLength(1);
-  expect(
-    f.provider.mock.calls.every(
-      ([u]) => u === 'https://oauth2.googleapis.com/token' || new URL(u).pathname.endsWith('/profile'),
-    ),
-  ).toBe(true);
-  expect(f.store.database.pool.end).toHaveBeenCalledTimes(2);
-  expect(fs.existsSync(f.roots.targetRoot + '/mail-drafts/writer-profile.json')).toBe(false);
-});
+    expect(await runMailDraftAccountAdmin({ ...f.options, args: f.link }, f.dependencies)).toEqual(result);
+    expect(f.display).toHaveBeenCalledOnce();
+    expect(f.provider.mock.calls.filter(([u]) => u === 'https://oauth2.googleapis.com/token')).toHaveLength(1);
+    expect(
+      f.provider.mock.calls.every(
+        ([u]) => u === 'https://oauth2.googleapis.com/token' || new URL(u).pathname.endsWith('/profile'),
+      ),
+    ).toBe(true);
+    expect(f.store.database.pool.end).toHaveBeenCalledTimes(2);
+    expect(fs.existsSync(f.roots.targetRoot + '/mail-drafts/writer-profile.json')).toBe(false);
+  },
+);
 it.each(['old-release', 'wrong-schema', 'wrong-owner', 'authority', 'backup'] as const)(
   'rejects %s before profile setup',
   async (reason) => {

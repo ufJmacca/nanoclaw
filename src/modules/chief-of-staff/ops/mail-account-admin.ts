@@ -110,7 +110,8 @@ export async function runMailAccountAdmin(o: Options, d: Dependencies = {}): Pro
             o.args.manifestFile,
           ],
     );
-    const schema = o.release.slice === 'G04' ? 19 : o.release.slice === 'G05' ? 20 : null;
+    const schema =
+      o.release.slice === 'G06' ? 21 : o.release.slice === 'G04' ? 19 : o.release.slice === 'G05' ? 20 : null;
     if (
       args.scopeId !== o.binding.scopeId ||
       o.binding.provider !== 'codex' ||

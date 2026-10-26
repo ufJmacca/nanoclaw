@@ -87,12 +87,13 @@ export async function runMailDraftAccountAdmin(o: Options, d: Dependencies = {})
             o.args.manifestFile,
           ],
     );
+    const schema = o.release.slice === 'G06' ? 21 : o.release.slice === 'G05' ? 20 : null;
     if (
       args.scopeId !== o.binding.scopeId ||
       o.binding.provider !== 'codex' ||
-      o.release.slice !== 'G05' ||
-      o.release.postgres.minimum !== 20 ||
-      o.release.postgres.maximum !== 20
+      schema === null ||
+      o.release.postgres.minimum !== schema ||
+      o.release.postgres.maximum !== schema
     )
       throw Error('mail_draft_account_operation_unavailable');
     const memory = d.memory ?? verifyVaultMemory,

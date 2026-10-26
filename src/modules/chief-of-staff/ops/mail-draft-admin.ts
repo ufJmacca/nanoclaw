@@ -73,12 +73,13 @@ export async function runMailDraftAdmin(o: Options, inspect?: StorageInspection)
           ? ['--manifest', o.args.manifestFile]
           : ['--binding', o.args.bindingId]),
       ]);
+    const schema = o.release.slice === 'G06' ? 21 : o.release.slice === 'G05' ? 20 : null;
     if (
       args.scopeId !== binding.scopeId ||
       binding.provider !== 'codex' ||
-      o.release.slice !== 'G05' ||
-      o.release.postgres.minimum !== 20 ||
-      o.release.postgres.maximum !== 20
+      schema === null ||
+      o.release.postgres.minimum !== schema ||
+      o.release.postgres.maximum !== schema
     )
       throw Error('draft_policy_owner_required');
     const target = localTarget(roots.targetRoot, roots.installationRoot, roots.dataRoot),
@@ -239,7 +240,7 @@ export async function runMailDraftAdmin(o: Options, inspect?: StorageInspection)
         if (
           (await databaseFingerprint(client, parseDatabaseConfig(o.env, 'runtime', 'migration'))) !==
             target.binding.databaseFingerprint ||
-          (await migrationStatus(client)) !== 20
+          (await migrationStatus(client)) !== schema
         )
           throw Error('draft_policy_database_changed');
         await writeMailDraftStandingPolicy(client, binding, grant, consent, ready);

@@ -396,8 +396,9 @@ export async function contextAdminCommand(
     }
   }
   const mailReleaseId =
-    (isMailAccountCommand(args) && ['G04', 'G05'].includes(vaultRelease?.release.slice ?? '')) ||
-    ((isMailDraftAccountCommand(args) || isMailDraftAdminCommand(args)) && vaultRelease?.release.slice === 'G05') ||
+    (isMailAccountCommand(args) && ['G04', 'G05', 'G06'].includes(vaultRelease?.release.slice ?? '')) ||
+    ((isMailDraftAccountCommand(args) || isMailDraftAdminCommand(args)) &&
+      ['G05', 'G06'].includes(vaultRelease?.release.slice ?? '')) ||
     (isMailReviewAdminCommand(args) && vaultRelease?.release.slice === 'G06')
       ? vaultRelease!.release.releaseId
       : null;
@@ -464,7 +465,8 @@ export async function contextAdminCommand(
         });
       }
       if (isMailDraftAdminCommand(args)) {
-        if (!vaultRelease || vaultRelease.release.slice !== 'G05') throw Error('mail_draft_configuration_unavailable');
+        if (!vaultRelease || !['G05', 'G06'].includes(vaultRelease.release.slice))
+          throw Error('mail_draft_configuration_unavailable');
         return runMailDraftAdmin({
           args,
           env,
@@ -480,7 +482,7 @@ export async function contextAdminCommand(
         });
       }
       if (isMailDraftAccountCommand(args)) {
-        if (!vaultRelease || vaultRelease.release.slice !== 'G05')
+        if (!vaultRelease || !['G05', 'G06'].includes(vaultRelease.release.slice))
           throw Error('mail_draft_account_operation_unavailable');
         return runMailDraftAccountAdmin({
           args,
@@ -497,7 +499,7 @@ export async function contextAdminCommand(
         });
       }
       if (isMailAccountCommand(args)) {
-        if (!vaultRelease || !['G04', 'G05'].includes(vaultRelease.release.slice))
+        if (!vaultRelease || !['G04', 'G05', 'G06'].includes(vaultRelease.release.slice))
           throw Error('mail_account_operation_unavailable');
         return runMailAccountAdmin({
           args,

@@ -996,10 +996,14 @@ it.each(['old-release', 'retired-release', 'unpaused', 'membership'] as const)(
     expect(runMailReviewAdmin).not.toHaveBeenCalled();
   },
 );
-it.each(['mail-draft-configure', 'mail-draft-disable'] as const)(
-  '%s requires the exact current G05 helper and paused private owner without activating a model',
-  async (command) => {
-    const release = await currentMailRelease(true, 'G05'),
+it.each(
+  (['G05', 'G06'] as const).flatMap((slice) =>
+    (['mail-draft-configure', 'mail-draft-disable'] as const).map((command) => ({ slice, command })),
+  ),
+)(
+  '$command uses the exact current $slice helper with paused private owner authority and no model activation',
+  async ({ command, slice }) => {
+    const release = await currentMailRelease(true, slice),
       run = vi.mocked(runMailDraftAdmin);
     let retained!: () => Promise<void>;
     run.mockImplementation(async (o) => {
@@ -1064,10 +1068,14 @@ it.each(['old-release', 'retired-release', 'unpaused', 'membership'] as const)(
     expect(runMailDraftAdmin).not.toHaveBeenCalled();
   },
 );
-it.each(['mail-draft-setup', 'mail-draft-link'] as const)(
-  '%s uses only the current protected G05 release and paused owner authority with no model activation',
-  async (command) => {
-    const release = await currentMailRelease(true, 'G05'),
+it.each(
+  (['G05', 'G06'] as const).flatMap((slice) =>
+    (['mail-draft-setup', 'mail-draft-link'] as const).map((command) => ({ slice, command })),
+  ),
+)(
+  '$command uses the exact current $slice helper with paused private owner authority and no model activation',
+  async ({ command, slice }) => {
+    const release = await currentMailRelease(true, slice),
       run = vi.mocked(runMailDraftAccountAdmin);
     let retained!: () => Promise<void>;
     run.mockImplementation(async (o) => {
@@ -1132,7 +1140,7 @@ it.each(['old-release', 'retired-release', 'membership', 'running', 'unpaused', 
   },
 );
 it.each(
-  (['G04', 'G05'] as const).flatMap((slice) =>
+  (['G04', 'G05', 'G06'] as const).flatMap((slice) =>
     (['mail-setup', 'mail-link'] as const).map((command) => ({ slice, command })),
   ),
 )(
