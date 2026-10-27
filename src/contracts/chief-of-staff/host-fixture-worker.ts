@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { KnowledgeStore } from '../../modules/chief-of-staff/knowledge/store.js';
 import { KnowledgeArtifacts } from '../../modules/chief-of-staff/knowledge/artifacts.js';
 import pg from 'pg';
-import type { CosBinding } from '../../cos-boundary.js';
+import { cosBoundary, type CosBinding } from '../../cos-boundary.js';
 import { fixtureDatabaseConfig, connectFixtureDatabase } from './fixture-database.js';
 import { createNativeFixtureDatabase } from './native-fixture-database.js';
 import type { PriorityStore } from '../../modules/chief-of-staff/store/priorities.js';
@@ -22,6 +22,7 @@ import { MailHost } from '../../modules/chief-of-staff/mail/host.js';
 import { MailConnector } from '../../modules/chief-of-staff/mail/connector.js';
 import { MAIL_REVIEW_HEADERS, mailReviewHeaderExclusion } from '../../modules/chief-of-staff/mail/review-source.js';
 import { MailReviewAccess } from '../../modules/chief-of-staff/automation/mail-review-access.js';
+import { automationContext } from '../../modules/chief-of-staff/automation/origin.js';
 import type { KnowledgeContext } from '../../modules/chief-of-staff/knowledge/store.js';
 import { digest } from '../../modules/chief-of-staff/domain/contracts.js';
 import { renewBriefContext } from '../../modules/chief-of-staff/bridge/brief-context-renewal.js';
@@ -568,6 +569,30 @@ async function start(input: {
         outbound.close();
       }
       return true;
+    }
+    if (input.mailDrafts?.review && command === 'mail-review-fixture-clear-owner-ingress') {
+      const boundary = cosBoundary(session, db);
+      if (
+        !boundary.restricted ||
+        !boundary.binding ||
+        boundary.paused ||
+        digest(boundary.binding) !== digest(binding) ||
+        automationContext(session, db) !== undefined
+      )
+        return false;
+      const inbound = openInboundDb(path.join(sessionDir(session.agent_group_id, session.id), 'inbound.db'));
+      try {
+        if (inbound.prepare("SELECT 1 FROM messages_in WHERE status IN ('pending','processing') LIMIT 1").get())
+          return false;
+        // Synthetic resume condition only: preserve the main context, allowance and all completed inputs.
+        return (
+          db
+            .prepare('UPDATE cos_identity_boundaries SET ingress_id=NULL,ingress_at=NULL WHERE scope_id=? AND paused=0')
+            .run(binding.scopeId).changes === 1
+        );
+      } finally {
+        inbound.close();
+      }
     }
     if (input.mission && command === 'mission-review-ready') {
       return (await runtime.controller.context(session))?.origin?.kind === 'mission_review';

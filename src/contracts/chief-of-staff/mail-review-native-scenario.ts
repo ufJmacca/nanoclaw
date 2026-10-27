@@ -133,9 +133,14 @@ export async function exerciseMailReviewNativeFlow(options: {
   assert(drafting.review);
   // A pending owner conversation takes precedence over both due automatic schedules.
   await options.host().request('ingress', { id: randomUUID(), text: 'Harmless synthetic owner conversation' });
+  assert.equal(await options.host().request('mail-review-fixture-clear-owner-ingress'), false);
   await options.host().request('pump');
   assert.equal((await rows()).length, 0);
   await complete();
+  // Normal native resume clears the last owner-message marker. Both schedules must
+  // still use the retained main context without another owner chat as a prerequisite.
+  assert.equal(await options.host().request('mail-review-fixture-clear-owner-ingress'), true);
+  assert.equal(await options.host().request('main-context-generation'), generation);
   let firstOperation = '';
   for (const [index, slot] of (['morning', 'afternoon'] as const).entries()) {
     await options.host().request('clock', options.timing.clock(slot));
