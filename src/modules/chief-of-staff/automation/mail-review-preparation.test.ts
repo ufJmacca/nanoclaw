@@ -6,6 +6,7 @@ import type { MailReviewPreparation } from './mail-review-access.js';
 import type { MailReviewInputs } from './mail-review-inputs.js';
 import type { MailReviewRecord } from './mail-review-candidates.js';
 import { MailReviewPreparer } from './mail-review-preparation.js';
+import { log } from '../../../log.js';
 
 function fixture() {
   const uuid = '11111111-1111-4111-8111-111111111111',
@@ -170,4 +171,73 @@ it('rolls back and withholds success when the final freeze loses authority', asy
   f.access.freeze.mockResolvedValue(false);
   expect(await f.execute()).toEqual({ status: 'denied' });
   expect(f.client.query).toHaveBeenCalledWith('ROLLBACK');
+});
+
+it.each(['context', 'selection', 'provider_revision', 'capture_changed', 'freeze'] as const)(
+  'records only the fixed %s stage when scheduled preparation is denied',
+  async (stage) => {
+    const f = fixture(),
+      warning = vi.spyOn(log, 'warn').mockImplementation(() => {});
+    try {
+      if (stage === 'context') f.knowledge.actionContextCurrent.mockResolvedValue(false);
+      if (stage === 'selection') f.access.preparation.mockResolvedValue(null as never);
+      if (stage === 'provider_revision')
+        f.connector.reviewSource.mockImplementation(async () => ({
+          id: 'aa',
+          threadId: 'bb',
+          historyId: 'changed',
+          internalDate: f.record.message.internalDate,
+          observedAt: Date.now(),
+          excluded: null,
+        }));
+      if (stage === 'capture_changed') {
+        const original = f.connector.reviewSource.getMockImplementation()!;
+        f.connector.reviewSource.mockImplementation(async (...args) => {
+          const result = await original(...args);
+          f.prepared.captureId = '22222222-2222-4222-8222-222222222222';
+          return result;
+        });
+      }
+      if (stage === 'freeze') f.access.freeze.mockResolvedValue(false);
+      expect(await f.execute()).toEqual({ status: 'denied' });
+      expect(warning).toHaveBeenCalledExactlyOnceWith('CoS Mail review preparation closed', {
+        stage,
+        status: 'denied',
+      });
+      if (stage === 'context' || stage === 'freeze') expect(f.client.query).toHaveBeenCalledWith('ROLLBACK');
+      if (stage !== 'freeze') expect(f.access.freeze).not.toHaveBeenCalled();
+    } finally {
+      warning.mockRestore();
+    }
+  },
+);
+
+it('withholds private provider errors from preparation diagnostics and preserves an unavailable outcome', async () => {
+  const f = fixture(),
+    warning = vi.spyOn(log, 'warn').mockImplementation(() => {});
+  try {
+    f.connector.reviewSource.mockRejectedValue(new Error('private mailbox and credential diagnostic'));
+    expect(await f.execute()).toEqual({ status: 'unavailable' });
+    expect(warning).toHaveBeenCalledExactlyOnceWith('CoS Mail review preparation closed', {
+      stage: 'provider_metadata',
+      status: 'unavailable',
+    });
+    expect(f.access.freeze).not.toHaveBeenCalled();
+  } finally {
+    warning.mockRestore();
+  }
+});
+
+it('keeps preparation denied even if diagnostic output fails', async () => {
+  const f = fixture(),
+    warning = vi.spyOn(log, 'warn').mockImplementation(() => {
+      throw Error('logger unavailable');
+    });
+  try {
+    f.knowledge.actionContextCurrent.mockResolvedValue(false);
+    expect(await f.execute()).toEqual({ status: 'denied' });
+    expect(f.access.freeze).not.toHaveBeenCalled();
+  } finally {
+    warning.mockRestore();
+  }
 });

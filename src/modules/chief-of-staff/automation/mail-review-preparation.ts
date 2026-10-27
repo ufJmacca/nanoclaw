@@ -8,6 +8,7 @@ import type { MailReviewAccess, MailReviewPreparation } from './mail-review-acce
 import { planMailReviewCandidates } from './mail-review-candidates.js';
 import { validMailReviewInputs, type MailReviewInputs } from './mail-review-inputs.js';
 import { loadMailReviewRecords } from './mail-review-records.js';
+import { log } from '../../../log.js';
 
 type Dependencies = {
   database: Pick<BoundedDatabase, 'run'>;
@@ -18,7 +19,22 @@ type Dependencies = {
   /** Trusted loader seam for isolated fixtures; runtime uses the published-source loader. */
   records?: typeof loadMailReviewRecords;
 };
-class PreparationDenied extends Error {}
+type PreparationStage =
+  | 'currentness'
+  | 'owner_origin'
+  | 'context'
+  | 'selection'
+  | 'capture_changed'
+  | 'source_records'
+  | 'provider_metadata'
+  | 'provider_revision'
+  | 'input_validation'
+  | 'freeze';
+class PreparationDenied extends Error {
+  constructor(readonly stage: PreparationStage) {
+    super('mail_review_preparation_denied');
+  }
+}
 
 /** Preparation has no model or draft port. Provider awaits never hold a database transaction. */
 export class MailReviewPreparer {
@@ -31,9 +47,10 @@ export class MailReviewPreparer {
     const controller = new AbortController();
     const combined = AbortSignal.any([controller.signal, ...(signal ? [signal] : [])]);
     const timer = setTimeout(() => controller.abort(), 30000);
+    let stage: PreparationStage = 'currentness';
     const active = () => !combined.aborted && d.current() && digest(context) === original && digest(ctx) === original;
     const requireActive = () => {
-      if (!active()) throw new PreparationDenied();
+      if (!active()) throw new PreparationDenied('currentness');
     };
     const transaction = <T>(operation: (client: PoolClient) => Promise<T>, mutation = false) =>
       d.database.run(
@@ -41,7 +58,7 @@ export class MailReviewPreparer {
           requireActive();
           await client.query('BEGIN');
           try {
-            if (!(await d.knowledge.actionContextCurrent(client, ctx))) throw new PreparationDenied();
+            if (!(await d.knowledge.actionContextCurrent(client, ctx))) throw new PreparationDenied('context');
             requireActive();
             const value = await operation(client);
             requireActive();
@@ -58,9 +75,10 @@ export class MailReviewPreparer {
       );
     try {
       requireActive();
-      if (ctx.origin) throw new PreparationDenied();
+      if (ctx.origin) throw new PreparationDenied('owner_origin');
+      stage = 'selection';
       const prepared = await transaction((client) => d.access.preparation(client, ctx, runId, generation));
-      if (!prepared) throw new PreparationDenied();
+      if (!prepared) throw new PreparationDenied('selection');
       // Reconciliation never loads bodies, refreshes provider metadata or changes the frozen selection.
       if (prepared.inputs) return { status: 'ok' };
       const same = (value: MailReviewPreparation | null) => !!value && digest(value) === digest(prepared);
@@ -68,15 +86,18 @@ export class MailReviewPreparer {
         if (!active()) return false;
         return transaction(async (client) => same(await d.access.preparation(client, ctx, runId, generation)));
       };
+      stage = 'source_records';
       const records = await transaction(async (client) => {
-        if (!same(await d.access.preparation(client, ctx, runId, generation))) throw new PreparationDenied();
+        if (!same(await d.access.preparation(client, ctx, runId, generation)))
+          throw new PreparationDenied('capture_changed');
         const rows = await (d.records ?? loadMailReviewRecords)(
           client,
           ctx,
           prepared.body.readerBindingId,
           prepared.captureId,
         );
-        if (!same(await d.access.preparation(client, ctx, runId, generation))) throw new PreparationDenied();
+        if (!same(await d.access.preparation(client, ctx, runId, generation)))
+          throw new PreparationDenied('capture_changed');
         return rows;
       });
       const plan = planMailReviewCandidates(records),
@@ -87,8 +108,9 @@ export class MailReviewPreparer {
       else
         for (const candidate of plan.candidates) {
           requireActive();
-          if (!(await current())) throw new PreparationDenied();
+          if (!(await current())) throw new PreparationDenied('capture_changed');
           const capturedAt = Date.now();
+          stage = 'provider_metadata';
           const fresh = await d.connector.reviewSource(
             ctx,
             prepared.body.readerBindingId,
@@ -98,7 +120,7 @@ export class MailReviewPreparer {
             combined,
           );
           requireActive();
-          if (!(await current())) throw new PreparationDenied();
+          if (!(await current())) throw new PreparationDenied('capture_changed');
           const stored = records.find((row) => row.message.id === candidate.source_message_id)!.message;
           if (
             fresh.id !== stored.id ||
@@ -110,7 +132,7 @@ export class MailReviewPreparer {
             fresh.observedAt > Date.now() ||
             ![null, 'bulk_mail', 'automated_mail', 'no_reply'].includes(fresh.excluded)
           )
-            throw new PreparationDenied();
+            throw new PreparationDenied('provider_revision');
           if (fresh.excluded) excluded++;
           else candidates.push(candidate);
         }
@@ -130,14 +152,28 @@ export class MailReviewPreparer {
         unexamined_threads: unexamined,
         candidates,
       };
-      if (!validMailReviewInputs(inputs)) throw new PreparationDenied();
+      if (!validMailReviewInputs(inputs)) throw new PreparationDenied('input_validation');
+      stage = 'freeze';
       await transaction(async (client) => {
-        if (!(await d.access.freeze(client, ctx, runId, generation, prepared, inputs))) throw new PreparationDenied();
+        if (!(await d.access.freeze(client, ctx, runId, generation, prepared, inputs)))
+          throw new PreparationDenied('freeze');
       }, true);
       return { status: 'ok' };
       // eslint-disable-next-line no-catch-all/no-catch-all -- Provider, database and private source failures are withheld from model-facing preparation results.
     } catch (error) {
-      return { status: error instanceof PreparationDenied || !active() ? 'denied' : 'unavailable' };
+      const interrupted = !(error instanceof PreparationDenied) && !active(),
+        status = error instanceof PreparationDenied || interrupted ? 'denied' : 'unavailable';
+      // Fixed stages distinguish a failed gate without exposing errors, source data or credentials.
+      try {
+        log.warn('CoS Mail review preparation closed', {
+          stage: error instanceof PreparationDenied ? error.stage : interrupted ? 'currentness' : stage,
+          status,
+        });
+        // eslint-disable-next-line no-catch-all/no-catch-all -- Diagnostics must not change the already-decided result or expose private errors.
+      } catch {
+        // A diagnostic failure cannot change the original preparation outcome.
+      }
+      return { status };
     } finally {
       clearTimeout(timer);
     }

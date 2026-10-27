@@ -8,6 +8,7 @@ import type { Result } from '../domain/contracts.js';
 import { NativeBriefTasks } from './native-tasks.js';
 import { readScheduledLease, scheduledContext } from './scheduled-origin.js';
 import { BriefDispatch } from './brief-dispatch.js';
+import { log } from '../../../log.js';
 
 const inputs: Database.Database[] = [];
 afterEach(() => {
@@ -198,4 +199,50 @@ it('S04 owner preemption takes precedence over a pending preparation result', as
   expect((await f.dispatch.drain(f.binding)).status).toBe('denied');
   expect(f.runs.cancel).toHaveBeenCalledOnce();
   expect(f.wake).not.toHaveBeenCalled();
+});
+
+it.each(['prepare', 'after_prepare', 'after_claim', 'before_stage'] as const)(
+  'identifies the %s cancellation gate without logging the run or message',
+  async (stage) => {
+    const f = fixture(),
+      warning = vi.spyOn(log, 'warn').mockImplementation(() => {});
+    try {
+      const change = () => f.db.exec("UPDATE cos_identity_boundaries SET ingress_id='new-owner'");
+      if (stage === 'prepare') f.prepare.mockResolvedValue({ status: 'denied', private_detail: 'must not be logged' });
+      if (stage === 'after_prepare')
+        f.prepare.mockImplementation(async () => {
+          change();
+          return { status: 'ok' };
+        });
+      if (stage === 'after_claim')
+        f.runs.claim.mockImplementation(async () => {
+          change();
+          return { status: 'ok', generation: 1, deadline_at: f.run.deadline_at };
+        });
+      if (stage === 'before_stage') f.admitted.mockResolvedValueOnce(true).mockResolvedValue(false);
+      expect((await f.dispatch.drain(f.binding)).status).toBe('denied');
+      expect(warning).toHaveBeenCalledExactlyOnceWith('CoS scheduled review dispatch closed', { stage });
+      expect(f.wake).not.toHaveBeenCalled();
+      expect(f.runs.cancel).toHaveBeenCalledOnce();
+      expect(readScheduledLease(f.db, f.binding)).toBeNull();
+    } finally {
+      warning.mockRestore();
+    }
+  },
+);
+
+it('still cancels a denied run when diagnostic output fails', async () => {
+  const f = fixture(),
+    warning = vi.spyOn(log, 'warn').mockImplementation(() => {
+      throw Error('logger unavailable');
+    });
+  try {
+    f.prepare.mockResolvedValue({ status: 'denied' });
+    expect((await f.dispatch.drain(f.binding)).status).toBe('denied');
+    expect(f.runs.cancel).toHaveBeenCalledOnce();
+    expect(f.wake).not.toHaveBeenCalled();
+    expect(readScheduledLease(f.db, f.binding)).toBeNull();
+  } finally {
+    warning.mockRestore();
+  }
 });

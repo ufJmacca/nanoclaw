@@ -5,6 +5,7 @@ import { digest, type Context, type Result } from '../domain/contracts.js';
 import type { BriefRunStore } from './brief-store.js';
 import type { NativeBriefRun, NativeBriefTasks } from './native-tasks.js';
 import { installScheduledOrigin, readScheduledLease, scheduledContext } from './scheduled-origin.js';
+import { log } from '../../../log.js';
 
 export type DispatchBriefRun = NativeBriefRun & {
   state: string;
@@ -78,26 +79,35 @@ export class BriefDispatch {
           hostId: host,
           deadlineAt: String(claimed.deadline_at),
         };
-        const cancel = async (): Promise<Result> => {
+        const cancel = async (
+          stage: 'after_claim' | 'after_prepare' | 'prepare' | 'before_stage' | 'stage' | 'activate' | 'before_wake',
+        ): Promise<Result> => {
+          try {
+            log.warn('CoS scheduled review dispatch closed', { stage });
+            // eslint-disable-next-line no-catch-all/no-catch-all -- Logging failure must not prevent the original cancellation.
+          } catch {
+            // Logging cannot prevent cancellation or authorize a staged task.
+          }
           const settled = await d.runs.cancel(context, run.id, lease.generation);
           // Even if the cancellation acknowledgement is lost, the staged task must remain non-runnable.
           tasks.pause(binding, run);
           if (settled.status === 'ok') tasks.retire(binding, run);
           return settled.status === 'ok' ? { status: 'denied' } : settled;
         };
-        if (!unchanged() || !idle(run.id)) return await cancel();
+        if (!unchanged() || !idle(run.id)) return await cancel('after_claim');
         if (!existing) {
           const prepared = await d.prepare(binding, context, {
             ...run,
             generation: lease.generation,
             deadline_at: lease.deadlineAt,
           });
-          if (!unchanged() || !idle(run.id)) return await cancel();
+          if (!unchanged() || !idle(run.id)) return await cancel('after_prepare');
           if (['pending', 'unavailable'].includes(prepared.status)) return prepared;
-          if (prepared.status !== 'ok') return await cancel();
+          if (prepared.status !== 'ok') return await cancel('prepare');
         }
-        if (!(await d.admitted(binding)) || !unchanged() || !idle(run.id)) return await cancel();
-        if (!tasks.stage(binding, run) || !installScheduledOrigin(d.db, binding, session, lease)) return await cancel();
+        if (!(await d.admitted(binding)) || !unchanged() || !idle(run.id)) return await cancel('before_stage');
+        if (!tasks.stage(binding, run) || !installScheduledOrigin(d.db, binding, session, lease))
+          return await cancel('stage');
         const current = () => {
           const origin = scheduledContext(session, d.db);
           return (
@@ -119,9 +129,9 @@ export class BriefDispatch {
             current,
           ))
         )
-          return await cancel();
+          return await cancel('activate');
         // No await separates the final native fence from wake admission.
-        if (!current()) return await cancel();
+        if (!current()) return await cancel('before_wake');
         await d.wake(session);
         return { status: 'ok', state: 'dispatched', run_id: run.id };
       });

@@ -19,6 +19,7 @@ import { getDeliveryAdapter, setDeliveryAdapter } from '../../delivery.js';
 import { NativeBriefTasks } from './automation/native-tasks.js';
 import Database from 'better-sqlite3';
 import { INBOUND_SCHEMA } from '../../db/schema.js';
+import { log } from '../../log.js';
 import { readScheduledLease } from './automation/scheduled-origin.js';
 import { installReviewOrigin } from './missions/review-origin.js';
 import * as delivery from '../../delivery.js';
@@ -962,6 +963,7 @@ it.each([
   'mail-review',
   'mail-review-denied',
   'mail-review-budget-empty',
+  'mail-review-context-denied',
   'review-fence',
   'review-corrupt',
   'proactive-unavailable',
@@ -1139,6 +1141,8 @@ it.each([
     expect(wake).not.toHaveBeenCalled();
     return { status: mode === 'mail-review-denied' ? 'denied' : 'ok' };
   });
+  if (mode === 'mail-review-context-denied') knowledge.contextReady.mockResolvedValue({ status: 'denied' });
+  const warning = vi.spyOn(log, 'warn').mockImplementation(() => {});
   try {
     runtime = createCosRuntime({
       db,
@@ -1173,13 +1177,17 @@ it.each([
       },
     });
     await runtime.pump(binding);
-    if (mode === 'mail-review-denied' || mode === 'mail-review-budget-empty') {
+    if (mode === 'mail-review-denied' || mode === 'mail-review-budget-empty' || mode === 'mail-review-context-denied') {
       expect(prepareMailReview).toHaveBeenCalledTimes(mode === 'mail-review-denied' ? 1 : 0);
       expect(wake).not.toHaveBeenCalled();
       expect(renewBriefContext).not.toHaveBeenCalled();
       expect(calendar.refresh).not.toHaveBeenCalled();
       expect(proactive.scheduledBatch).not.toHaveBeenCalled();
       expect(inbound.prepare('SELECT * FROM messages_in').all()).toHaveLength(0);
+      if (mode !== 'mail-review-denied')
+        expect(warning).toHaveBeenCalledWith('CoS Mail review admission closed', {
+          stage: mode === 'mail-review-budget-empty' ? 'model_budget' : 'knowledge',
+        });
       return;
     }
     if (mode.startsWith('proactive-')) {
@@ -1229,6 +1237,7 @@ it.each([
     expect(stop).toHaveBeenCalledWith('session');
     expect(readScheduledLease(db, binding)).toBeNull();
   } finally {
+    warning.mockRestore();
     inbound.close();
   }
 });
