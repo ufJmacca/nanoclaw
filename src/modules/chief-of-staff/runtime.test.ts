@@ -959,8 +959,10 @@ it('S02 processes due retention work while paused without admitting ordinary out
 it.each([
   'existing',
   'due',
+  'due-without-owner-ingress',
   'refresh',
   'mail-review',
+  'mail-review-without-owner-ingress',
   'mail-review-denied',
   'mail-review-budget-empty',
   'mail-review-context-denied',
@@ -991,6 +993,8 @@ it.each([
   } as Session;
   installCosBoundary(binding, db);
   db.exec("UPDATE cos_identity_boundaries SET paused=0,ingress_id='owner-before'");
+  if (mode.endsWith('without-owner-ingress'))
+    db.exec('UPDATE cos_identity_boundaries SET ingress_id=NULL,ingress_at=NULL');
   ensureConversationSchema(db);
   const generation = randomUUID();
   db.prepare(
@@ -1205,10 +1209,11 @@ it.each([
       return;
     }
     if (mode !== 'existing') {
+      expect(briefs.cancel).not.toHaveBeenCalled();
       expect(briefs.reserveDue).toHaveBeenCalledOnce();
       expect(wake).toHaveBeenCalledOnce();
-      expect(proactive.scheduledBatch).toHaveBeenCalledTimes(mode === 'mail-review' ? 0 : 1);
-      if (mode === 'mail-review') {
+      expect(proactive.scheduledBatch).toHaveBeenCalledTimes(mode.startsWith('mail-review') ? 0 : 1);
+      if (mode.startsWith('mail-review')) {
         expect(prepareMailReview).toHaveBeenCalledOnce();
         expect(briefs.beginRefresh).not.toHaveBeenCalled();
         expect(
@@ -1236,6 +1241,11 @@ it.each([
     expect(tasks.state(binding, run)).toBe('completed');
     expect(stop).toHaveBeenCalledWith('session');
     expect(readScheduledLease(db, binding)).toBeNull();
+    if (mode.endsWith('without-owner-ingress'))
+      expect(db.prepare('SELECT ingress_id,ingress_at FROM cos_identity_boundaries').get()).toEqual({
+        ingress_id: null,
+        ingress_at: null,
+      });
   } finally {
     warning.mockRestore();
     inbound.close();

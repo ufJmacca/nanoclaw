@@ -12,7 +12,7 @@ import { validPrivateChannel, type ChannelFacts } from './bridge/identity.js';
 import type { PriorityStore } from './store/priorities.js';
 import type { CoordinatorLauncher } from './bridge/coordinator-launcher.js';
 import { createTurnAuthorization } from './bridge/turn-authorization.js';
-import { resolveKnowledgeContext } from './knowledge/context.js';
+import { resolveBriefPreparationContext, resolveKnowledgeContext } from './knowledge/context.js';
 import { digest, type Context, type Result } from './domain/contracts.js';
 import { KnowledgeInvalidation } from './knowledge/invalidation.js';
 import { NativeBriefTasks } from './automation/native-tasks.js';
@@ -402,11 +402,17 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
           if (!d.store?.knowledge) return denied('store');
           const session = d.session(binding.sessionId),
             boundary = session && cosBoundary(session, d.db);
-          if (!session || !boundary?.restricted || !boundary.ingressId) return denied('boundary');
-          const ownerContext = { ...context, ingressId: boundary.ingressId };
+          if (
+            !session ||
+            !boundary?.restricted ||
+            !boundary.binding ||
+            boundary.paused ||
+            digest(boundary.binding) !== digest(binding)
+          )
+            return denied('boundary');
           const current = () =>
             enabled() && digest(cosBoundary(session, d.db)) === digest(boundary) && !(d.running?.(session.id) ?? true);
-          const retained = resolveKnowledgeContext(session, ownerContext, d.db);
+          const retained = resolveBriefPreparationContext(session, context, d.db);
           if (!retained) return denied('context');
           if (!current()) return denied('currentness');
           const readable = await d.store.knowledge.contextReady(retained);
@@ -421,7 +427,7 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
             if (!current()) return denied('currentness');
             const prepared = await d.store.prepareMailReview(retained, run.id, run.generation, current);
             if (prepared.status !== 'ok') return prepared;
-            const same = resolveKnowledgeContext(session, ownerContext, d.db);
+            const same = resolveBriefPreparationContext(session, context, d.db);
             return current() && !!same && digest(same) === digest(retained)
               ? { status: 'ok' }
               : denied('final_context');
@@ -446,7 +452,7 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
           }).execute(context, run.id, run.generation, binding.provider, run.limits.refresh_seconds);
           if (!current()) return { status: 'denied' };
           if (refreshed.status !== 'ok') return refreshed;
-          const fresh = resolveKnowledgeContext(session, ownerContext, d.db);
+          const fresh = resolveBriefPreparationContext(session, context, d.db);
           if (!fresh) return { status: 'denied' };
           const ready = await d.store.knowledge.contextReady(fresh);
           if (ready.status !== 'ok' || !current()) return ready.status === 'ok' ? { status: 'denied' } : ready;
