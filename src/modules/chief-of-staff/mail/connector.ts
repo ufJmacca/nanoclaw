@@ -41,6 +41,14 @@ const lost: Record<string, Closed> = {
   mail_access_changed: 'revoked',
   mail_wrong_account: 'revoked',
 };
+const settledReviewFailures = new Set([
+  'mail_cancelled',
+  'mail_review_not_current',
+  'mail_disabled',
+  'mail_rate_limited',
+  'mail_message_missing',
+]);
+type ReviewReadOutcome = { source: FreshMailReviewSource } | { failure: string };
 /** Five-minute polling calls this host adapter without an inference capability.
  * Google calls occur between short database operations and under the durable access-check journal. */
 export class MailConnector {
@@ -172,20 +180,29 @@ export class MailConnector {
       if (!(await current())) throw new MailReadError('mail_review_not_current');
       this.active(combined, ctx);
     };
-    const run = async (): Promise<FreshMailReviewSource> => {
+    const run = async (): Promise<ReviewReadOutcome> => {
       try {
         await check();
         const binding = await this.connection(ctx, bindingId, combined);
         await check();
         return await this.options.fences.runCheck(ctx.scopeId, bindingId, async () => {
-          await check();
-          const reader = this.reader(ctx, binding, combined, check);
-          if (!reader.reviewSource) throw new MailReadError('mail_review_metadata_unavailable');
-          const result = await reader.reviewSource(messageId, window);
-          await check();
-          await this.current(ctx, binding, combined);
-          await check();
-          return result;
+          try {
+            await check();
+            const reader = this.reader(ctx, binding, combined, check);
+            if (!reader.reviewSource) throw new MailReadError('mail_review_metadata_unavailable');
+            const result = await reader.reviewSource(messageId, window);
+            await check();
+            await this.current(ctx, binding, combined);
+            await check();
+            return { source: result };
+            // eslint-disable-next-line no-catch-all/no-catch-all -- Settle handled cancellation inside the journal; preserve unknown failures and record access loss before its wrapper withholds diagnostics.
+          } catch (error) {
+            const auth = this.observedLoss(error, ctx, bindingId);
+            if (auth) await this.deny(ctx, bindingId, auth);
+            if (auth || (error instanceof MailReadError && settledReviewFailures.has(error.code)))
+              return { failure: failure(error) };
+            throw error;
+          }
         });
       } catch (error) {
         const auth = this.observedLoss(error, ctx, bindingId);
@@ -193,7 +210,10 @@ export class MailConnector {
         throw new MailReadError(failure(error));
       }
     };
-    const work = run();
+    const work = run().then((outcome) => {
+      if ('failure' in outcome) throw new MailReadError(outcome.failure);
+      return outcome.source;
+    });
     this.reviewReads.add(work);
     try {
       return await work;

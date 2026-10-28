@@ -7,6 +7,10 @@ import type { Result, Context } from '../domain/contracts.js';
 import type { MailCapture } from './capture.js';
 import type { MailConnection } from './store.js';
 import { CalendarReadError } from '../calendar/reader.js';
+import { CalendarAccessFences } from '../calendar/access-fences.js';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 const context = {
   scopeId: 'scope',
   ownerId: 'owner',
@@ -78,6 +82,72 @@ function fixture() {
   return { at, window, binding, store, reader, fences, options, connector: new MailConnector(options) };
 }
 describe('G04 host-only mail refresh', () => {
+  it.each(['cancelled', 'not_current', 'disabled', 'rate_limited', 'message_missing'] as const)(
+    'G06 settles a handled %s metadata read without stranding the account access journal',
+    async (failure) => {
+      const f = fixture(),
+        root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-review-fence-')),
+        fences = CalendarAccessFences.initialize(root),
+        connector = new MailConnector({ ...f.options, fences, admitted: () => admitted }),
+        controller = new AbortController();
+      let current = true,
+        admitted = true;
+      try {
+        f.reader.reviewSource.mockImplementationOnce(async () => {
+          if (failure === 'cancelled') controller.abort();
+          else if (failure === 'not_current') current = false;
+          else if (failure === 'disabled') admitted = false;
+          else throw new MailReadError('mail_' + failure);
+          return {
+            id: 'a1',
+            threadId: 'b1',
+            historyId: '101',
+            internalDate: f.at - 1000,
+            observedAt: f.at,
+            excluded: null,
+          };
+        });
+        await expect(
+          connector.reviewSource(context, id, 'a1', f.window, async () => current, controller.signal),
+        ).rejects.toThrow('mail_');
+        expect(() => new CalendarAccessFences(root).assertOpen(context.scopeId, id)).not.toThrow();
+        expect(f.store.setAuth).not.toHaveBeenCalled();
+        current = true;
+        admitted = true;
+        await expect(connector.reviewSource(context, id, 'a1', f.window, async () => current)).resolves.toMatchObject({
+          id: 'a1',
+        });
+      } finally {
+        await connector.close();
+        fs.rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.each(['unknown_failure', 'revoked'] as const)(
+    'G06 preserves a closed real access journal after %s instead of treating it as a handled cancellation',
+    async (failure) => {
+      const f = fixture(),
+        root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-review-fence-')),
+        fences = CalendarAccessFences.initialize(root),
+        connector = new MailConnector({ ...f.options, fences });
+      try {
+        f.reader.reviewSource.mockRejectedValueOnce(
+          failure === 'revoked' ? new MailReadError('mail_auth_revoked') : new Error('PRIVATE_DIAGNOSTIC'),
+        );
+        await expect(connector.reviewSource(context, id, 'a1', f.window, async () => true)).rejects.toThrow('mail_');
+        expect(() => new CalendarAccessFences(root).assertOpen(context.scopeId, id)).toThrow(
+          failure === 'revoked' ? 'calendar_auth_revoked' : 'calendar_access_check_uncertain',
+        );
+        if (failure === 'revoked') expect(f.store.setAuth).toHaveBeenCalledWith(context, id, 'revoked');
+        else expect(f.store.setAuth).not.toHaveBeenCalled();
+      } finally {
+        await connector.close();
+        fs.rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('G06 aborts admission and waits for an actual review metadata read before closing', async () => {
     const f = fixture();
     let release!: () => void;
