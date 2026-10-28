@@ -41,13 +41,8 @@ const lost: Record<string, Closed> = {
   mail_access_changed: 'revoked',
   mail_wrong_account: 'revoked',
 };
-const settledReviewFailures = new Set([
-  'mail_cancelled',
-  'mail_review_not_current',
-  'mail_disabled',
-  'mail_rate_limited',
-  'mail_message_missing',
-]);
+const settledReviewFailures = new Set(['mail_rate_limited', 'mail_message_missing']);
+const cancelledReviewFailures = new Set(['mail_cancelled', 'mail_review_not_current', 'mail_disabled']);
 type ReviewReadOutcome = { source: FreshMailReviewSource } | { failure: string };
 /** Five-minute polling calls this host adapter without an inference capability.
  * Google calls occur between short database operations and under the durable access-check journal. */
@@ -106,6 +101,7 @@ export class MailConnector {
     binding: MailConnection,
     signal: AbortSignal,
     reviewCurrent?: () => Promise<void>,
+    reviewReadCompleted?: () => void,
   ): MailReader & Partial<MailReviewSourceReader> {
     const d = this.options,
       current = async () => {
@@ -114,8 +110,8 @@ export class MailConnector {
         await reviewCurrent?.();
         return value;
       };
-    if (binding.provider === 'google')
-      return googleMailReader({
+    if (binding.provider === 'google') {
+      const reader = googleMailReader({
         fetch: d.fetch,
         signal,
         access: async () => {
@@ -140,6 +136,15 @@ export class MailConnector {
           return token;
         },
       });
+      return {
+        ...reader,
+        reviewSource: async (...args) => {
+          const result = await reader.reviewSource(...args);
+          reviewReadCompleted?.();
+          return result;
+        },
+      };
+    }
     if (binding.provider !== 'fixture' || !d.fixtureReader) throw new MailReadError('mail_provider_unavailable');
     const reader = d.fixtureReader(structuredClone(binding));
     const guard = async <T>(operation: () => Promise<T>): Promise<T> => {
@@ -157,7 +162,11 @@ export class MailConnector {
       ...(reader.reviewSource
         ? {
             reviewSource: (...args: Parameters<MailReviewSourceReader['reviewSource']>) =>
-              guard(() => reader.reviewSource!(...args)),
+              guard(async () => {
+                const result = await reader.reviewSource!(...args);
+                reviewReadCompleted?.();
+                return result;
+              }),
           }
         : {}),
     };
@@ -186,20 +195,31 @@ export class MailConnector {
         const binding = await this.connection(ctx, bindingId, combined);
         await check();
         return await this.options.fences.runCheck(ctx.scopeId, bindingId, async () => {
+          let readStarted = false,
+            readCompleted = false;
           try {
             await check();
-            const reader = this.reader(ctx, binding, combined, check);
+            const reader = this.reader(ctx, binding, combined, check, () => {
+              readCompleted = true;
+            });
             if (!reader.reviewSource) throw new MailReadError('mail_review_metadata_unavailable');
+            readStarted = true;
             const result = await reader.reviewSource(messageId, window);
             await check();
             await this.current(ctx, binding, combined);
             await check();
             return { source: result };
-            // eslint-disable-next-line no-catch-all/no-catch-all -- Settle handled cancellation inside the journal; preserve unknown failures and record access loss before its wrapper withholds diagnostics.
+            // A completed read can lose review authority after its response.
+            // Record access loss here; unknown or interrupted checks stay closed.
           } catch (error) {
             const auth = this.observedLoss(error, ctx, bindingId);
             if (auth) await this.deny(ctx, bindingId, auth);
-            if (auth || (error instanceof MailReadError && settledReviewFailures.has(error.code)))
+            if (
+              auth ||
+              (error instanceof MailReadError &&
+                (settledReviewFailures.has(error.code) ||
+                  (cancelledReviewFailures.has(error.code) && (!readStarted || readCompleted))))
+            )
               return { failure: failure(error) };
             throw error;
           }

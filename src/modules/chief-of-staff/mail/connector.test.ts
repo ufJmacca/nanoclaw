@@ -82,6 +82,53 @@ function fixture() {
   return { at, window, binding, store, reader, fences, options, connector: new MailConnector(options) };
 }
 describe('G04 host-only mail refresh', () => {
+  it('G06 keeps an aborted credential exchange closed until explicit recovery rather than calling it a settled read', async () => {
+    const f = fixture(),
+      root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-review-fence-')),
+      fences = CalendarAccessFences.initialize(root),
+      controller = new AbortController(),
+      fetch = vi.fn(),
+      token = vi.fn(async () => {
+        controller.abort();
+        throw new MailReadError('mail_cancelled');
+      });
+    f.store.connection.mockResolvedValue({
+      status: 'ok',
+      binding: { ...f.binding, provider: 'google', credentialRef: captureId },
+    });
+    const connector = new MailConnector({
+      ...f.options,
+      fences,
+      fetch,
+      credentials: {
+        inspect: async () => ({ auth: 'ready', scopes: [GOOGLE_MAIL_READ_SCOPE], generation: 1 }),
+        token,
+      },
+    });
+    try {
+      const observed = Date.now();
+      await expect(
+        connector.reviewSource(
+          context,
+          id,
+          'a1',
+          { capturedAt: observed, since: observed - MAIL_RETENTION_MS },
+          async () => true,
+          controller.signal,
+        ),
+      ).rejects.toThrow('mail_');
+      expect(token).toHaveBeenCalledOnce();
+      expect(fetch).not.toHaveBeenCalled();
+      expect(() => new CalendarAccessFences(root).assertOpen(context.scopeId, id)).toThrow(
+        'calendar_access_check_uncertain',
+      );
+      expect(f.store.setAuth).not.toHaveBeenCalled();
+    } finally {
+      await connector.close();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it.each(['cancelled', 'not_current', 'disabled', 'rate_limited', 'message_missing'] as const)(
     'G06 settles a handled %s metadata read without stranding the account access journal',
     async (failure) => {
