@@ -173,13 +173,13 @@ function fixture(drafts: boolean | 'review' = false) {
           : worker
             ? MAIL_NATIVE_CASES
             : [...MAIL_STORE_CASES, ...MAIL_CHECKPOINT_CASES],
-      count = review && !worker ? 31 : names.length;
+      count = review && !worker ? 32 : names.length;
     const report = [
       'TAP version 13',
       ...(review && !worker
         ? MAIL_REVIEW_SCHEMA_RESULTS.map(([depth, id, name]) => ' '.repeat(depth) + `ok ${id} - ${name}`)
         : names.map((name, i) => `ok ${i + 1} - ${name}`)),
-      ...(review && !worker ? ['        1..21', '    1..8', '1..2'] : [`1..${count}`]),
+      ...(review && !worker ? ['        1..21', '    1..9', '1..2'] : [`1..${count}`]),
       `# tests ${count}`,
       '# suites 0',
       `# pass ${count}`,
@@ -201,7 +201,7 @@ it('requires the distinct G06 sealed database report and both actual worker conv
   const text = serialize(fixture('review'));
   expect(verifyMailReviewArtifactFixtureEvidence(text, identity)).toMatchObject({
     status: 'passed',
-    actualDatabaseCases: 31,
+    actualDatabaseCases: 32,
     actualNativeRuns: 2,
   });
   for (const gate of ['mail_review_policy', 'mail_review_schedule', 'mail_review_flow'])
