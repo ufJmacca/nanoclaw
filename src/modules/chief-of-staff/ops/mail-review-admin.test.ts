@@ -7,12 +7,17 @@ import { fixtureVaultRelease } from '../../../contracts/chief-of-staff/release-f
 import { digest } from '../domain/contracts.js';
 import { GOOGLE_MAIL_READ_SCOPE, GOOGLE_MAIL_DRAFT_SCOPE } from '../calendar/oauth-core.js';
 import { initializeTargetDraftJournal, openTargetDraftJournal } from '../mail-drafts/host-ownership.js';
-import { readMailReviewHostProfile, type MailReviewHostProfile } from '../automation/mail-review-profile.js';
+import {
+  mailReviewProfileName,
+  readMailReviewHostProfile,
+  type MailReviewHostProfile,
+} from '../automation/mail-review-profile.js';
 import type { MailDraftHostProfile } from '../mail-drafts/profile.js';
 import { initializeTarget, protectTarget, writeAtomic } from './target-state.js';
 import { machineFingerprint } from './target-identity.js';
 import { runMailReviewAdmin } from './mail-review-admin.js';
 import { parseAdminArguments, adminEnvironment } from './admin.js';
+import type { MailReviewAdminArguments } from './mail-review-admin-arguments.js';
 const ports = vi.hoisted(() => ({
   connect: vi.fn(),
   fingerprint: vi.fn(),
@@ -21,6 +26,7 @@ const ports = vi.hoisted(() => ({
   writer: vi.fn(),
   recovery: vi.fn(),
   sql: vi.fn(),
+  rebindSql: vi.fn(),
 }));
 vi.mock('../store/preflight.js', async (original) => ({
   ...(await original<typeof import('../store/preflight.js')>()),
@@ -48,6 +54,7 @@ vi.mock('../mail-drafts/config.js', async (original) => ({
 }));
 vi.mock('../mail-drafts/recovery.js', () => ({ readMailDraftRecoveryProof: ports.recovery }));
 vi.mock('./mail-review-policy-store.js', () => ({ writeMailReviewStandingPolicy: ports.sql }));
+vi.mock('./mail-review-rebind-store.js', () => ({ writeMailReviewReboundPolicy: ports.rebindSql }));
 vi.mock('./vault-memory.js', () => ({ verifyVaultMemory: vi.fn() }));
 const cleanup: string[] = [];
 afterEach(() => {
@@ -204,7 +211,7 @@ function fixture() {
   });
   const options = {
     args: {
-      command: 'mail-review-configure' as const,
+      command: 'mail-review-configure' as MailReviewAdminArguments['command'],
       scopeId: binding.scopeId,
       requestId: randomUUID(),
       manifestFile: manifest,
@@ -216,6 +223,9 @@ function fixture() {
     check: vi.fn(async () => {}),
     assertAuthority: vi.fn(),
     contextCurrent: vi.fn((g: string) => g === mainGeneration),
+    contextRecoveryCurrent: vi.fn(
+      (previous: string, current: string) => previous !== current && current === mainGeneration,
+    ),
   };
   return {
     root,
@@ -233,6 +243,178 @@ function fixture() {
     run: () => runMailReviewAdmin(options),
   };
 }
+function rebindFixture(enabled = true) {
+  const f = fixture(),
+    previous = structuredClone(f.profile);
+  Object.assign(previous.binding, {
+    readerBindingId: randomUUID(),
+    writerBindingId: randomUUID(),
+    writerDigest: digest('old writer'),
+    writerConsentRef: digest('old consent'),
+    contextGeneration: randomUUID(),
+  });
+  f.profile.version = 2;
+  const journal = openTargetDraftJournal(f.roots.targetRoot, f.installation);
+  let head;
+  try {
+    head = journal.publishReviewPolicyPin(
+      {
+        requestId: randomUUID(),
+        expectedRevision: 0,
+        enabled,
+        pin: { scopeId: previous.scopeId, policyId: previous.id, policyVersion: 1, profileDigest: digest(previous) },
+      },
+      () => {},
+    );
+  } finally {
+    journal.close();
+  }
+  writeAtomic(f.roots.targetRoot + '/mail-drafts', mailReviewProfileName(f.binding.scopeId), previous);
+  const manifest = {
+    format: 'cos-mail-review-rebind/v1',
+    expectedRevision: head.revision,
+    expectedPinDigest: digest(head),
+    previousProfileDigest: digest(previous),
+    profile: f.profile,
+  };
+  writeAtomic(f.root, 'review.json', manifest);
+  f.options.args.command = 'mail-review-rebind';
+  ports.rebindSql.mockImplementation(async (_client, _binding, _previous, _manifest, _head, _requestId, ready) => {
+    await ready();
+  });
+  return { ...f, previous, head, rebindManifest: manifest };
+}
+it.each([true, false])(
+  'rebinds only with current reader/writer consent and retained context, preserving enabled=%s',
+  async (enabled) => {
+    const f = rebindFixture(enabled);
+    const writerBefore = fs.readFileSync(f.roots.targetRoot + '/mail-drafts/writer-profile.json');
+    expect(await f.run()).toMatchObject({
+      status: 'rebound_paused',
+      paused: true,
+      live_model: 'not_invoked',
+      main_context_preserved: true,
+      policy_id: f.profile.id,
+      policy_version: 2,
+      review_enabled: enabled,
+    });
+    expect(ports.sql).not.toHaveBeenCalled();
+    expect(ports.rebindSql).toHaveBeenCalledWith(
+      f.client,
+      f.binding,
+      f.previous,
+      f.rebindManifest,
+      f.head,
+      f.options.args.requestId,
+      expect.any(Function),
+    );
+    const journal = openTargetDraftJournal(f.roots.targetRoot, f.installation);
+    try {
+      expect(journal.reviewPolicyPin(f.binding.scopeId)).toMatchObject({ revision: 2, policyVersion: 2, enabled });
+      expect(readMailReviewHostProfile(f.roots.targetRoot, f.installation, journal, f.binding.scopeId)).toEqual(
+        enabled ? f.profile : null,
+      );
+    } finally {
+      journal.close();
+    }
+    expect(fs.readFileSync(f.roots.targetRoot + '/mail-drafts/writer-profile.json')).toEqual(writerBefore);
+    expect(f.reader.credentials.token).not.toHaveBeenCalled();
+    expect(f.writer.credentials.token).not.toHaveBeenCalled();
+    expect(await f.run()).toMatchObject({ status: 'rebound_paused', policy_version: 2, review_enabled: enabled });
+  },
+);
+it.each([
+  'context',
+  'reader-auth',
+  'writer-auth',
+  'reader-scope',
+  'writer-scope',
+  'recovery',
+  'foreign-database',
+  'old-schema',
+  'old-release',
+  'disabled-writer',
+  'reader-fence',
+  'writer-fence',
+])('refuses consent rebind after current %s authority changes', async (failure) => {
+  const f = rebindFixture();
+  if (failure === 'context') f.options.contextCurrent.mockReturnValue(false);
+  if (failure === 'reader-auth')
+    f.reader.credentials.inspect.mockResolvedValue({ auth: 'revoked', scopes: [GOOGLE_MAIL_READ_SCOPE] });
+  if (failure === 'writer-auth')
+    f.writer.credentials.inspect.mockResolvedValue({ auth: 'revoked', scopes: [GOOGLE_MAIL_DRAFT_SCOPE] });
+  if (failure === 'reader-scope')
+    f.reader.credentials.inspect.mockResolvedValue({ auth: 'ready', scopes: [GOOGLE_MAIL_DRAFT_SCOPE] });
+  if (failure === 'writer-scope')
+    f.writer.credentials.inspect.mockResolvedValue({ auth: 'ready', scopes: [GOOGLE_MAIL_READ_SCOPE] });
+  if (failure === 'recovery') ports.recovery.mockReturnValue({ ...f.recovery, changed: true });
+  if (failure === 'foreign-database') ports.fingerprint.mockResolvedValue(digest('another database'));
+  if (failure === 'old-schema') ports.schema.mockResolvedValue(20);
+  if (failure === 'old-release') f.options.release.slice = 'G05';
+  if (failure === 'disabled-writer') {
+    f.draftProfile.grants[0].writeEnabled = false;
+    writeAtomic(f.roots.targetRoot + '/mail-drafts', 'writer-profile.json', f.draftProfile);
+  }
+  if (failure === 'reader-fence')
+    f.reader.fences.assertOpen.mockImplementation(() => {
+      throw Error('fixture_pending_check');
+    });
+  if (failure === 'writer-fence')
+    f.writer.fences.assertOpen.mockImplementation(() => {
+      throw Error('fixture_pending_check');
+    });
+  await expect(f.run()).rejects.toThrow('mail_review_configuration_unavailable');
+  expect(ports.rebindSql).not.toHaveBeenCalled();
+  const journal = openTargetDraftJournal(f.roots.targetRoot, f.installation);
+  try {
+    expect(journal.reviewPolicyPin(f.binding.scopeId)).toEqual(f.head);
+  } finally {
+    journal.close();
+  }
+});
+it('selects migration credentials and strict owner routing for consent rebind', () => {
+  const f = rebindFixture(),
+    args = f.options.args;
+  expect(
+    parseAdminArguments([
+      args.command,
+      '--scope',
+      args.scopeId,
+      '--request-id',
+      args.requestId,
+      '--manifest',
+      args.manifestFile,
+    ]),
+  ).toEqual(args);
+  const env = adminEnvironment('mail-review-rebind' as MailReviewAdminArguments['command'], {
+    COS_PG_MIGRATION_USER: 'selected',
+    COS_PG_MIGRATION_PASSWORD: 'synthetic',
+    COS_TEST_PGPASSWORD: 'excluded',
+  });
+  expect(env.COS_PG_MIGRATION_USER).toBe('selected');
+  expect(env.COS_PG_MIGRATION_PASSWORD).toBe('synthetic');
+  expect(env.COS_TEST_PGPASSWORD).toBeUndefined();
+});
+it.each(['before-sql', 'after-sql'])(
+  'requires current predecessor recovery %s before publishing rebind authority',
+  async (stage) => {
+    const f = rebindFixture();
+    if (stage === 'before-sql') f.options.contextRecoveryCurrent.mockReturnValue(false);
+    else
+      ports.rebindSql.mockImplementation(async (_client, _binding, _previous, _manifest, _head, _requestId, ready) => {
+        await ready();
+        f.options.contextRecoveryCurrent.mockReturnValue(false);
+      });
+    await expect(f.run()).rejects.toThrow('mail_review_configuration_unavailable');
+    if (stage === 'before-sql') expect(ports.rebindSql).not.toHaveBeenCalled();
+    const journal = openTargetDraftJournal(f.roots.targetRoot, f.installation);
+    try {
+      expect(journal.reviewPolicyPin(f.binding.scopeId)).toEqual(f.head);
+    } finally {
+      journal.close();
+    }
+  },
+);
 it('publishes only the initial review policy while paused, reusing existing consent, recovery and credential metadata', async () => {
   const f = fixture(),
     before = fs.readFileSync(f.roots.targetRoot + '/mail-drafts/writer-profile.json');

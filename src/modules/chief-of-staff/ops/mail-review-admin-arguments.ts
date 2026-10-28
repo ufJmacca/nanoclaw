@@ -1,15 +1,15 @@
 import path from 'node:path';
 
 export type MailReviewAdminArguments = {
-  command: 'mail-review-configure';
+  command: 'mail-review-configure' | 'mail-review-rebind';
   scopeId: string;
   requestId: string;
   manifestFile: string;
 };
 export function isMailReviewAdminCommand(args: { command: string }): args is MailReviewAdminArguments {
-  return args.command === 'mail-review-configure';
+  return args.command === 'mail-review-configure' || args.command === 'mail-review-rebind';
 }
-/** Validate before selecting an installed working directory. No setup, disable or resume is inferred. */
+/** Explicit owner setup or consent recovery only. No disable, resume or lease is inferred. */
 export function parseMailReviewAdminArguments(args: string[]): MailReviewAdminArguments {
   const invalid = () => Error('invalid_admin_arguments'),
     values: Record<string, string> = {};
@@ -31,5 +31,5 @@ export function parseMailReviewAdminArguments(args: string[]): MailReviewAdminAr
     /[\0\r\n]/.test(manifestFile)
   )
     throw invalid();
-  return { command: 'mail-review-configure', scopeId, requestId, manifestFile };
+  return { command: args[0] as MailReviewAdminArguments['command'], scopeId, requestId, manifestFile };
 }

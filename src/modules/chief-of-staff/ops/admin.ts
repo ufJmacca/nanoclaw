@@ -467,7 +467,7 @@ export function adminEnvironment(
         ...(isMissionCommand({ command }) ||
         command === 'action-configure' ||
         command === 'mail-draft-configure' ||
-        command === 'mail-review-configure'
+        isMailReviewAdminCommand({ command })
           ? ['COS_PG_MIGRATION_USER', 'COS_PG_MIGRATION_PASSWORD']
           : []),
         ...(recovery ? ['COS_TEST_TARGET_ID'] : []),

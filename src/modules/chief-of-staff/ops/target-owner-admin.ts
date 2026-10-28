@@ -38,6 +38,7 @@ const commands = [
   'mail-draft-configure',
   'mail-draft-disable',
   'mail-review-configure',
+  'mail-review-rebind',
 ];
 export function parseOwnerAdminArguments(args: string[]): {
   settings: string;
@@ -103,7 +104,7 @@ export async function selectedOwnerAdminProfile(
   profiles: { runtime(): NodeJS.ProcessEnv; test(): NodeJS.ProcessEnv; migration?(): NodeJS.ProcessEnv },
 ): Promise<NodeJS.ProcessEnv> {
   if (!commands.includes(command)) throw new Error('invalid_owner_admin_arguments');
-  if (command === 'mail-draft-configure' || command === 'mail-review-configure') {
+  if (command === 'mail-draft-configure' || isMailReviewAdminCommand({ command })) {
     if (!profiles.migration) throw Error('invalid_owner_admin_arguments');
     return profiles.migration();
   }

@@ -71,7 +71,7 @@ import { isMailDraftAdminCommand, type MailDraftAdminArguments } from './mail-dr
 import { runMailDraftAdmin } from './mail-draft-admin.js';
 import { isMailReviewAdminCommand, type MailReviewAdminArguments } from './mail-review-admin-arguments.js';
 import { runMailReviewAdmin } from './mail-review-admin.js';
-import { mailReviewContextCurrent } from './mail-review-context-current.js';
+import { mailReviewContextCurrent, mailReviewContextRecoveryCurrent } from './mail-review-context-current.js';
 import { isMissionCommand, runMissionAdmin, type MissionAdminArguments } from './mission-admin.js';
 import { isOwnerExportCommand, runOwnerExportAdmin, type OwnerExportArguments } from './owner-export-admin.js';
 import {
@@ -257,6 +257,7 @@ export async function contextAdminCommand(
       'mail-draft-configure',
       'mail-draft-disable',
       'mail-review-configure',
+      'mail-review-rebind',
     ].includes(args.command)
   )
     return { status: 'disabled', live_model: 'not_verified' };
@@ -462,6 +463,15 @@ export async function contextAdminCommand(
           assertAuthority,
           contextCurrent: (generation) =>
             mailReviewContextCurrent(native, root, binding, generation, accountBinding(root) ?? ''),
+          contextRecoveryCurrent: (previousGeneration, generation) =>
+            mailReviewContextRecoveryCurrent(
+              native,
+              root,
+              binding,
+              previousGeneration,
+              generation,
+              accountBinding(root) ?? '',
+            ),
         });
       }
       if (isMailDraftAdminCommand(args)) {

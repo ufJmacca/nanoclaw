@@ -18,6 +18,15 @@ it('accepts only an explicit initial owner configuration with a stable request a
   });
   expect(isMailReviewAdminCommand({ command: 'mail-review-configure' })).toBe(true);
 });
+it('accepts an explicit consent rebind with the same strict owner request and manifest arguments', () => {
+  expect(parseMailReviewAdminArguments(['mail-review-rebind', ...args.slice(1)])).toEqual({
+    command: 'mail-review-rebind',
+    scopeId: 'chief-of-staff',
+    requestId: args[4],
+    manifestFile: args[6],
+  });
+  expect(isMailReviewAdminCommand({ command: 'mail-review-rebind' })).toBe(true);
+});
 it.each(
   [
     ['mail-review-resume', ...args.slice(1)],

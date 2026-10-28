@@ -23,6 +23,9 @@ import type { ReleaseManifest } from './release-manifest.js';
 import { parseMailReviewAdminArguments, type MailReviewAdminArguments } from './mail-review-admin-arguments.js';
 import { publishInitialMailReview } from './mail-review-publication.js';
 import { writeMailReviewStandingPolicy } from './mail-review-policy-store.js';
+import { parseMailReviewRebindManifest } from './mail-review-rebind-plan.js';
+import { publishReboundMailReview } from './mail-review-rebind-publication.js';
+import { writeMailReviewReboundPolicy } from './mail-review-rebind-store.js';
 
 type Options = {
   args: MailReviewAdminArguments;
@@ -34,9 +37,11 @@ type Options = {
   assertAuthority(): void;
   /** Actual retained native owner/account/generation, verified without initializing or renewing history. */
   contextCurrent(generation: string): boolean;
+  /** Actual completed recovery from the previous policy's context, with old history retained. */
+  contextRecoveryCurrent(previousGeneration: string, generation: string): boolean;
 };
-/** Installed owner-only setup. Enclosing administration owns fresh paused maintenance/native leases.
- * Reuse the existing writer grant, real consent and recovery; never relink, resume or reserve model use. */
+/** Installed owner-only setup or consent rebind. Enclosing administration owns fresh paused
+ * maintenance/native leases. Require real current consent and recovery; never relink or resume here. */
 export async function runMailReviewAdmin(o: Options, inspect?: StorageInspection): Promise<Record<string, unknown>> {
   try {
     const args = parseMailReviewAdminArguments([
@@ -58,8 +63,11 @@ export async function runMailReviewAdmin(o: Options, inspect?: StorageInspection
       o.release.postgres.maximum !== 21
     )
       throw Error('mail_review_owner_required');
-    const profile = parseMailReviewHostProfile(readPrivate(args.manifestFile)),
-      profileDigest = digest(profile),
+    let predecessorGeneration: string | undefined;
+    const manifest = readPrivate(args.manifestFile),
+      manifestDigest = digest(manifest),
+      rebind = args.command === 'mail-review-rebind' ? parseMailReviewRebindManifest(manifest) : null,
+      profile = rebind ? rebind.profile : parseMailReviewHostProfile(manifest),
       target = localTarget(roots.targetRoot, roots.installationRoot, roots.dataRoot),
       installation = digest(target.binding);
     const authority = () => {
@@ -67,8 +75,10 @@ export async function runMailReviewAdmin(o: Options, inspect?: StorageInspection
       o.assertAuthority();
       if (
         digest({ args: o.args, roots: o.roots, binding: o.binding, release: o.release }) !== original ||
-        digest(readPrivate(args.manifestFile)) !== profileDigest ||
-        !o.contextCurrent(profile.binding.contextGeneration)
+        digest(readPrivate(args.manifestFile)) !== manifestDigest ||
+        !o.contextCurrent(profile.binding.contextGeneration) ||
+        (predecessorGeneration !== undefined &&
+          !o.contextRecoveryCurrent(predecessorGeneration, profile.binding.contextGeneration))
       )
         throw Error('mail_review_owner_changed');
       const current = localTarget(roots.targetRoot, roots.installationRoot, roots.dataRoot);
@@ -149,7 +159,9 @@ export async function runMailReviewAdmin(o: Options, inspect?: StorageInspection
         ),
         request = {
           contract: 'cos-mail-review-policy-admin/v1',
-          requestDigest: digest({ command: args.command, binding, profile }),
+          requestDigest: digest(
+            rebind ? { command: args.command, binding, manifest: rebind } : { command: args.command, binding, profile },
+          ),
         },
         requestFile = directory + '/request.json';
       if (fs.lstatSync(requestFile, { throwIfNoEntry: false })) {
@@ -215,7 +227,7 @@ export async function runMailReviewAdmin(o: Options, inspect?: StorageInspection
       )
         throw Error('mail_review_database_changed');
       const selectedClient = client;
-      await publishInitialMailReview({
+      const publication = {
         targetRoot: roots.targetRoot,
         installationDigest: installation,
         journal,
@@ -224,11 +236,35 @@ export async function runMailReviewAdmin(o: Options, inspect?: StorageInspection
         requestId: args.requestId,
         ready,
         assertAuthority: held,
-        writePolicy: (fence) => writeMailReviewStandingPolicy(selectedClient, binding, profile, fence),
-      });
+      };
+      const head = rebind
+        ? await publishReboundMailReview({
+            ...publication,
+            manifest: rebind,
+            currentGeneration: profile.binding.contextGeneration,
+            writePolicy: async (fence, previous, _profile, previousHead) => {
+              if (predecessorGeneration !== undefined && predecessorGeneration !== previous.binding.contextGeneration)
+                throw Error('mail_review_recovery_changed');
+              predecessorGeneration = previous.binding.contextGeneration;
+              await fence();
+              await writeMailReviewReboundPolicy(
+                selectedClient,
+                binding,
+                previous,
+                rebind,
+                previousHead,
+                args.requestId,
+                fence,
+              );
+            },
+          })
+        : await publishInitialMailReview({
+            ...publication,
+            writePolicy: (fence) => writeMailReviewStandingPolicy(selectedClient, binding, profile, fence),
+          });
       held();
       return {
-        status: 'configured_paused',
+        status: rebind ? 'rebound_paused' : 'configured_paused',
         scope_id: binding.scopeId,
         paused: true,
         live_model: 'not_invoked',
@@ -236,6 +272,7 @@ export async function runMailReviewAdmin(o: Options, inspect?: StorageInspection
         morning_schedule_id: profile.binding.morningScheduleId,
         afternoon_schedule_id: profile.binding.afternoonScheduleId,
         main_context_preserved: true,
+        ...(rebind ? { policy_version: profile.version, review_enabled: head.enabled } : {}),
       };
     } finally {
       try {

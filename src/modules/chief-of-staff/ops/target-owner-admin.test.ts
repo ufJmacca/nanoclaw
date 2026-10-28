@@ -3,7 +3,7 @@ import { parseOwnerAdminArguments, selectedOwnerAdminProfile, ownerDatabasePrefl
 import { fixtureRelease } from '../../../contracts/chief-of-staff/release-fixture.js';
 import { DatabasePreflightError } from '../store/preflight.js';
 const request = ['owner-export', '--scope', 'fixture', '--request-id', '01234567-89ab-4def-8123-456789abcdef'];
-it.each(['mail-draft-configure', 'mail-review-configure'])(
+it.each(['mail-draft-configure', 'mail-review-configure', 'mail-review-rebind'])(
   'selects existing migration credentials only for trusted %s without runtime/test fallback',
   async (command) => {
     const configure = [
