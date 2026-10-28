@@ -15,6 +15,7 @@ import { BriefScheduleStore } from '../../modules/chief-of-staff/automation/sche
 import type { CosBinding } from '../../cos-boundary.js';
 import type { MailReviewHostProfile } from '../../modules/chief-of-staff/automation/mail-review-profile.js';
 import { writeMailReviewStandingPolicy } from '../../modules/chief-of-staff/ops/mail-review-policy-store.js';
+import { runMailReviewRebindSqlFixture } from './mail-review-rebind-fixture.js';
 
 test('G06 migration preserves the generic schedule and admits only two owner-bound mail-review slots', async (t) => {
   assert.equal(process.env.COS_FIXTURE_DATABASE_PROFILE, 'test');
@@ -816,6 +817,10 @@ test('G06 migration preserves the generic schedule and admits only two owner-bou
           await admin.query('RELEASE SAVEPOINT trusted_policy_fixture');
         }
       },
+    );
+    await t.test(
+      'trusted consent rebind versions policy and schedules once without replaying cancelled runs or enabling a disabled owner pin',
+      () => runMailReviewRebindSqlFixture(admin, runtime),
     );
   } finally {
     await admin.query('ROLLBACK').catch(() => {});

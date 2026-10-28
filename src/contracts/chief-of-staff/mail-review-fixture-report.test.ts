@@ -6,13 +6,13 @@ import {
 } from './mail-review-fixture-report.js';
 
 function report(suite: 'database' | 'native') {
-  const count = suite === 'database' ? 31 : 1;
+  const count = suite === 'database' ? 32 : 1;
   return [
     'TAP version 13',
     ...(suite === 'database'
       ? MAIL_REVIEW_SCHEMA_RESULTS.map(([depth, id, name]) => ' '.repeat(depth) + `ok ${id} - ${name}`)
       : [`ok 1 - ${MAIL_REVIEW_NATIVE_CASES[0]}`]),
-    ...(suite === 'database' ? ['        1..21', '    1..8'] : []),
+    ...(suite === 'database' ? ['        1..21', '    1..9'] : []),
     suite === 'database' ? '1..2' : '1..1',
     `# tests ${count}`,
     '# suites 0',
@@ -28,7 +28,7 @@ it.each(['database', 'native'] as const)(
   (suite) => {
     expect(verifyMailReviewFixtureReport(report(suite), suite)).toEqual({
       suite,
-      actualCases: suite === 'database' ? 31 : 1,
+      actualCases: suite === 'database' ? 32 : 1,
     });
   },
 );
@@ -59,7 +59,7 @@ it.each([
   if (mode === 'nested-failed') text += '\n            not ok 1 - hidden';
   if (mode === 'skipped') text = text.replace('revoked policy', 'revoked policy # SKIP');
   if (mode === 'todo') text = text.replace('# todo 0', '# todo 1');
-  if (mode === 'summary') text = text.replace('# tests 31', '# tests 30');
+  if (mode === 'summary') text = text.replace('# tests 32', '# tests 31');
   if (mode === 'plan') text = text.replace('        1..21', '        1..20');
   if (mode === 'extra-plan') text += '\n        1..21';
   if (mode === 'extra-root') text += '\nok 2 - foreign';

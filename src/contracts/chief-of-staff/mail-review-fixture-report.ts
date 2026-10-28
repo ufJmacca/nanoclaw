@@ -36,6 +36,11 @@ export const MAIL_REVIEW_SCHEMA_RESULTS = [
   [4, 6, 'three schedules share one active run and retain independent daily occurrence keys'],
   [4, 7, 'generic schedule discovery and proposals cannot read or change the mail-review schedules'],
   [4, 8, 'trusted review setup creates two bound schedules and replays without changing activation'],
+  [
+    4,
+    9,
+    'trusted consent rebind versions policy and schedules once without replaying cancelled runs or enabling a disabled owner pin',
+  ],
   [0, 2, 'G06 migration preserves the generic schedule and admits only two owner-bound mail-review slots'],
 ] as const;
 
@@ -50,16 +55,16 @@ export function verifyMailReviewFixtureReport(text: string, suite: 'database' | 
       plans = lines.filter((line) => /^\s*\d+\.\.\d+(?:\s|$)/.test(line));
     if (
       records.length !== MAIL_REVIEW_SCHEMA_RESULTS.length ||
-      JSON.stringify(plans) !== JSON.stringify(['        1..21', '    1..8', '1..2'])
+      JSON.stringify(plans) !== JSON.stringify(['        1..21', '    1..9', '1..2'])
     )
       throw Error('coverage');
     for (const [index, [depth, id, name]] of MAIL_REVIEW_SCHEMA_RESULTS.entries())
       if (records[index] !== ' '.repeat(depth) + `ok ${id} - ${name}`) throw Error('case');
     for (const [pattern, expected] of [
       [/^TAP version .*$/, 'TAP version 13'],
-      [/^# tests .*$/, '# tests 31'],
+      [/^# tests .*$/, '# tests 32'],
       [/^# suites .*$/, '# suites 0'],
-      [/^# pass .*$/, '# pass 31'],
+      [/^# pass .*$/, '# pass 32'],
       [/^# fail .*$/, '# fail 0'],
       [/^# cancelled .*$/, '# cancelled 0'],
       [/^# skipped .*$/, '# skipped 0'],
@@ -68,7 +73,7 @@ export function verifyMailReviewFixtureReport(text: string, suite: 'database' | 
       const found = lines.filter((line) => pattern.test(line));
       if (found.length !== 1 || found[0] !== expected) throw Error('summary');
     }
-    return { suite, actualCases: 31 };
+    return { suite, actualCases: 32 };
   } catch {
     // eslint-disable-next-line preserve-caught-error -- Private SQL/native fixture diagnostics never become release authority.
     throw Error('mail_review_fixture_report_unverified');
