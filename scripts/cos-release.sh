@@ -38,6 +38,7 @@ stamp=$(date -u +%Y%m%d%H%M%S)
 id="release-${commit:0:12}-$stamp"
 directory="$root/.cos-plan-state/releases/$id"
 mkdir "$directory"
+directory=$(cd "$directory" && pwd -P)
 docker inspect "$dev" > "$directory/devcontainer.json"
 cli init "$id" "$commit" "$branch" "$slice"
 timing_helper="$directory/context/scripts/cos-stage-timing.sh"
@@ -54,7 +55,7 @@ cli target "$id"
 builder=$(cli field "$id" builder)
 context=$(cli field "$id" context)
 assets=$(cli field "$id" assets)
-test_directory="$root/.cos-plan-state/release-tests/$id"
+test_directory=$(cd "$root/.cos-plan-state/release-tests/$id" && pwd -P)
 if [[ "$profile" == test ]]; then
   certificate=$(cli certificate)
   [[ -f "$certificate" && ! -L "$certificate" ]] || { echo 'The selected test CA file is unavailable.' >&2; exit 1; }

@@ -50,7 +50,7 @@ if [[ "$mode" == draft-credentials-kernel || "$mode" == draft-recovery-kernel ]]
 fi
 if [[ "$mode" == backup-capture-kernel || "$mode" == mail-recovery-kernel || "$mode" == draft-recovery-kernel ]]; then
   [[ $# == 5 ]] || exit 1
-  test_root="$(git rev-parse --show-toplevel)/.cos-plan-state/release-tests"
+  test_root=$(cd "$(git rev-parse --show-toplevel)/.cos-plan-state/release-tests" && pwd -P)
   relative=${4#"$test_root/"}
   [[ "$relative" =~ ^release-[a-f0-9]{12}-[0-9]{14}/test\.env$ && "$5" == "${4%/*}/ca.pem" ]] || exit 1
   [[ "$(cd "${4%/*}" && pwd -P)" == "${4%/*}" ]] || exit 1
