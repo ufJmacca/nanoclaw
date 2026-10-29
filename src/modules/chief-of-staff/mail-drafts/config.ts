@@ -4,7 +4,6 @@ import { checkedClient, type GoogleOAuthClient } from '../calendar/oauth-core.js
 import { DatabaseConfigurationError } from '../store/config.js';
 import { verifyVaultMemory } from '../ops/vault-memory.js';
 import type { CredentialJournal } from '../ops/backup-credential-event.js';
-import { createVaultCredentialJournal } from '../ops/backup-credential-journal.js';
 import { openMailProfile, type MailHostFences } from '../mail/config.js';
 import { MailDraftCredentialOwner } from './credentials.js';
 export function mailDraftSettings(env: NodeJS.ProcessEnv): { enabled: boolean } {
@@ -29,7 +28,7 @@ export function openMailDraftCredentials(
   return openMailProfile(
     'mail_draft_writer',
     roots,
-    (storage, fences) => ({
+    (storage, fences, activeJournal) => ({
       clientId: checkedClient(storage.readClient() as GoogleOAuthClient).clientId,
       credentials: new MailDraftCredentialOwner(
         storage.root + '/credentials',
@@ -37,10 +36,11 @@ export function openMailDraftCredentials(
         fences,
         {},
         storage.assertCurrent,
-        journal ?? createVaultCredentialJournal(roots, memory),
+        activeJournal,
       ),
     }),
     inspect,
     memory,
+    journal ?? 'vault',
   );
 }
