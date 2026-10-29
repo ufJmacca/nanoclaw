@@ -6,7 +6,7 @@ import { CalendarAccessFences } from '../calendar/access-fences.js';
 import { MailCredentialOwner } from './credentials.js';
 import { checkedClient, type GoogleOAuthClient } from '../calendar/oauth-core.js';
 import type { CredentialJournal } from '../ops/backup-credential-event.js';
-import { createVaultCredentialJournal } from '../ops/backup-credential-journal.js';
+import { withVaultCredentialJournal } from '../ops/backup-credential-journal.js';
 import { withMailProfileStorage, type PinnedMailStorage } from './storage.js';
 import type { MailCredentialProfile } from './profile.js';
 export function mailSettings(env: NodeJS.ProcessEnv): { enabled: boolean } {
@@ -59,9 +59,10 @@ class ProtectedMailFences extends CalendarAccessFences {
 export async function openMailProfile<T extends object>(
   profile: MailCredentialProfile,
   roots: CalendarStorageRoots,
-  construct: (storage: PinnedMailStorage, fences: CalendarAccessFences) => T,
+  construct: (storage: PinnedMailStorage, fences: CalendarAccessFences, journal?: CredentialJournal) => T,
   inspect?: StorageInspection,
   memory: () => void = verifyVaultMemory,
+  journal?: CredentialJournal | 'vault',
 ): Promise<T & MailHostFences> {
   let settled = false;
   let accept!: (host: T & MailHostFences) => void, reject!: (error: Error) => void;
@@ -74,28 +75,32 @@ export async function openMailProfile<T extends object>(
     roots,
     async (storage) => {
       const fences = new ProtectedMailFences(storage.root + '/access-denials', storage.assertCurrent);
-      const value = construct(storage, fences);
-      let release!: () => void;
-      const released = new Promise<void>((resolve) => {
-        release = resolve;
-      });
-      storage.assertCurrent();
-      accept({
-        ...value,
-        fences,
-        verifyStorage: storage.assertCurrent,
-        closed: () => settled,
-        close: async () => {
-          release();
-          try {
-            await lifetime;
-          } catch {
-            // eslint-disable-next-line preserve-caught-error -- Close cannot disclose private paths, client material or nested diagnostics.
-            throw Error('mail_configuration_unavailable');
-          }
-        },
-      });
-      await released;
+      const hold = async (activeJournal?: CredentialJournal) => {
+        const value = construct(storage, fences, activeJournal);
+        let release!: () => void;
+        const released = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        storage.assertCurrent();
+        accept({
+          ...value,
+          fences,
+          verifyStorage: storage.assertCurrent,
+          closed: () => settled,
+          close: async () => {
+            release();
+            try {
+              await lifetime;
+            } catch {
+              // eslint-disable-next-line preserve-caught-error -- Close cannot disclose private paths, client material or nested diagnostics.
+              throw Error('mail_configuration_unavailable');
+            }
+          },
+        });
+        await released;
+      };
+      if (journal === 'vault') return withVaultCredentialJournal(roots, hold, inspect, memory);
+      return hold(journal);
     },
     inspect,
     memory,
@@ -131,7 +136,7 @@ export function openMailCredentials(
   return openMailProfile(
     'mail_reader',
     roots,
-    (storage, fences) => ({
+    (storage, fences, activeJournal) => ({
       clientId: checkedClient(storage.readClient() as GoogleOAuthClient).clientId,
       credentials: new MailCredentialOwner(
         storage.root + '/credentials',
@@ -139,10 +144,11 @@ export function openMailCredentials(
         fences,
         {},
         storage.assertCurrent,
-        journal ?? createVaultCredentialJournal(roots, memory),
+        activeJournal,
       ),
     }),
     inspect,
     memory,
+    journal ?? 'vault',
   );
 }

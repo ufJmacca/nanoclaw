@@ -27,7 +27,7 @@ afterEach(() => {
   vi.clearAllMocks();
   for (const root of cleanup.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
-function fixture(slice: 'G04' | 'G05' = 'G04') {
+function fixture(slice: 'G04' | 'G05' | 'G06' = 'G04') {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-mail-account-'));
   cleanup.push(base);
   const roots = { targetRoot: base + '/target', installationRoot: base + '/app', dataRoot: base + '/data' },
@@ -232,7 +232,7 @@ it('configures only the dedicated protected profile and leaves Calendar, runtime
   expect(backupCalendarState).toHaveBeenCalledTimes(4);
   expect(fs.readFileSync(path.dirname(f.root) + '/oauth-client.json', 'utf8')).toContain('PRIVATE_CALENDAR_CANARY');
 });
-it.each(['G04', 'G05'] as const)(
+it.each(['G04', 'G05', 'G06'] as const)(
   '%s verifies the intended provider mailbox before persisting tokens, backs up and binds only read access while paused',
   async (slice) => {
     const f = fixture(slice);

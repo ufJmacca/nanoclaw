@@ -21,6 +21,12 @@ const identity: ScheduleIdentity = {
   lastLocalDate: null,
 };
 describe('S04-T05 approved brief occurrence policy', () => {
+  it('does not replay an already coalesced or completed date before the next scheduled time', () => {
+    const last = { ...identity, lastLocalDate: '2026-10-02' };
+    expect(planBriefOccurrence(policy, last, '2026-10-02T23:00:00Z').due).toBeNull(); // Saturday
+    expect(planBriefOccurrence(policy, last, '2026-10-04T21:15:00Z').due).toBeNull(); // Monday before 09:00
+    expect(planBriefOccurrence(policy, last, '2026-10-04T22:00:00Z').due?.intendedLocalDate).toBe('2026-10-05');
+  });
   it('validates a narrow explicit local schedule and refuses malformed or expanded authority', () => {
     expect(validBriefSchedulePolicy(policy)).toBe(true);
     for (const patch of [
@@ -114,5 +120,16 @@ describe('S04-T05 approved brief occurrence policy', () => {
     expect(
       planBriefOccurrence(repeated, { ...identity, activatedAt: '2026-03-01T00:00:00Z' }, '2026-04-04T16:00:00Z'),
     ).toEqual({ due: null, nextWakeAt: '2026-04-04T16:15:00.000Z' });
+  });
+  it.each([
+    ['08:00', '2026-10-03T21:00:00.000Z'],
+    ['15:00', '2026-10-04T04:00:00.000Z'],
+  ])('does not skip the spring clock-change day for a valid %s local time', (local_time, intendedAt) => {
+    const daily = { ...policy, weekdays: [1, 2, 3, 4, 5, 6, 7], local_time, quiet_hours: null };
+    expect(planBriefOccurrence(daily, identity, '2026-10-04T04:00:00Z').due).toMatchObject({
+      intendedAt,
+      intendedLocalDate: '2026-10-04',
+      localDate: '2026-10-04',
+    });
   });
 });

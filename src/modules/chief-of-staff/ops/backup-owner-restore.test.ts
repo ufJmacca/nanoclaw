@@ -39,7 +39,7 @@ afterEach(() => {
   for (const close of cleanup.splice(0).reverse()) close();
   vi.resetAllMocks();
 });
-function fixture(slice: 'G01' | 'G02' | 'G03' | 'G04' | 'G05' = 'G02') {
+function fixture(slice: 'G01' | 'G02' | 'G03' | 'G04' | 'G05' | 'G06' = 'G02') {
   const root = fs.mkdtempSync(os.tmpdir() + '/cos-owner-restore-');
   fs.chmodSync(root, 0o700);
   cleanup.push(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -172,7 +172,7 @@ function fixture(slice: 'G01' | 'G02' | 'G03' | 'G04' | 'G05' = 'G02') {
     });
   return { root, settings, manifest, binding, owner, native, args, order, checkDatabase, receiptRoot, invoke };
 }
-function selectCapture(f: ReturnType<typeof fixture>, slice: 'G01' | 'G02' | 'G03' | 'G04' | 'G05') {
+function selectCapture(f: ReturnType<typeof fixture>, slice: 'G01' | 'G02' | 'G03' | 'G04' | 'G05' | 'G06') {
   const manifest = { ...fixtureVaultRelease(slice), releaseId: 'release-capture-' + slice.toLowerCase() },
     directory = f.settings.releaseRoot + '/' + manifest.releaseId,
     receiptRoot = f.settings.stateRoot + '/releases/' + manifest.releaseId,
@@ -187,10 +187,17 @@ function selectCapture(f: ReturnType<typeof fixture>, slice: 'G01' | 'G02' | 'G0
   });
   f.args.backupReleaseId = manifest.releaseId;
 }
-it.each(['G02', 'G03', 'G04', 'G05'] as const)(
-  'admits an ordinary %s state capture through G05 without draft setup or live activation',
-  async (slice) => {
-    const f = fixture('G05'),
+it.each(
+  (['G05', 'G06'] as const).flatMap((helper) =>
+    (['G02', 'G03', 'G04', 'G05', ...(helper === 'G06' ? (['G06'] as const) : [])] as const).map((slice) => ({
+      helper,
+      slice,
+    })),
+  ),
+)(
+  'admits an ordinary $slice state capture through $helper without draft setup or live activation',
+  async ({ helper, slice }) => {
+    const f = fixture(helper),
       native = f.native.serialize(),
       state = readTarget(f.settings.stateRoot, f.binding);
     selectCapture(f, slice);
@@ -226,6 +233,14 @@ it('keeps a G05 capture outside an older G04 helper recovery boundary', async ()
   expect(ports.mount).not.toHaveBeenCalled();
   expect(ports.restore).not.toHaveBeenCalled();
 });
+it('keeps a schema21 G06 capture outside an older G05 helper recovery boundary', async () => {
+  const f = fixture('G05');
+  selectCapture(f, 'G06');
+  await expect(f.invoke()).rejects.toThrow('backup_owner_restore_unavailable');
+  expect(ports.separate).not.toHaveBeenCalled();
+  expect(ports.mount).not.toHaveBeenCalled();
+  expect(ports.restore).not.toHaveBeenCalled();
+});
 it('does not admit an ordinary state restore through a G01 helper', async () => {
   const f = fixture('G01');
   selectCapture(f, 'G02');
@@ -234,45 +249,53 @@ it('does not admit an ordinary state restore through a G01 helper', async () => 
   expect(ports.mount).not.toHaveBeenCalled();
   expect(ports.restore).not.toHaveBeenCalled();
 });
-it('routes G05 combined draft recovery through the same healthy protected owner and separate marked test database lifetime', async () => {
-  const f = fixture('G05'),
-    args = {
+it.each([
+  { helper: 'G05', capture: 'G05', schema: 20 },
+  { helper: 'G06', capture: 'G05', schema: 20 },
+  { helper: 'G06', capture: 'G06', schema: 21 },
+] as const)(
+  '$helper routes combined $capture recovery through the protected owner and separate marked test database lifetime',
+  async ({ helper, capture, schema }) => {
+    const f = fixture(helper);
+    selectCapture(f, capture);
+    const args = {
       ...f.args,
       command: 'mail-draft-restore-check' as const,
       writerBindingId: randomUUID(),
       captureOperationId: randomUUID(),
       credentialRequestId: randomUUID(),
     };
-  let retained!: () => void;
-  ports.drafts.mockImplementation(async (input) => {
-    input.target.current();
-    await input.checkDatabase();
-    retained = input.target.current;
-    expect(input.args).toEqual(args);
-    expect(input.target.binding).toEqual(f.owner);
-    expect(input.target.recovery.software.schemaVersion).toBe(20);
-    expect(input.target.expectedSnapshotDigest).toBe(args.snapshotDigest);
-    expect(input.sandbox.testTargetId).toBe('fixture-test');
-    return { status: 'mail_draft_restore_verified', writer_activated: false };
-  });
-  expect(
-    await restoreOwnerVaultBackup({
-      settingsFile: f.root + '/settings.json',
-      testEnvironmentFile: f.root + '/test.env',
-      invokedHelper:
-        f.settings.releaseRoot +
-        '/' +
-        f.manifest.releaseId +
-        '/payload/dist/modules/chief-of-staff/ops/target-helper.js',
-      args,
-    }),
-  ).toEqual({ status: 'mail_draft_restore_verified', writer_activated: false });
-  expect(f.order).toEqual(['database', 'mount']);
-  expect(ports.drafts).toHaveBeenCalledOnce();
-  expect(ports.restore).not.toHaveBeenCalled();
-  expect(ports.credentials).not.toHaveBeenCalled();
-  expect(() => retained()).toThrow();
-});
+    let retained!: () => void;
+    ports.drafts.mockImplementation(async (input) => {
+      input.target.current();
+      await input.checkDatabase();
+      retained = input.target.current;
+      expect(input.args).toEqual(args);
+      expect(input.target.binding).toEqual(f.owner);
+      expect(input.target.recovery.software.schemaVersion).toBe(schema);
+      expect(input.target.expectedSnapshotDigest).toBe(args.snapshotDigest);
+      expect(input.sandbox.testTargetId).toBe('fixture-test');
+      return { status: 'mail_draft_restore_verified', writer_activated: false };
+    });
+    expect(
+      await restoreOwnerVaultBackup({
+        settingsFile: f.root + '/settings.json',
+        testEnvironmentFile: f.root + '/test.env',
+        invokedHelper:
+          f.settings.releaseRoot +
+          '/' +
+          f.manifest.releaseId +
+          '/payload/dist/modules/chief-of-staff/ops/target-helper.js',
+        args,
+      }),
+    ).toEqual({ status: 'mail_draft_restore_verified', writer_activated: false });
+    expect(f.order).toEqual(['database', 'mount']);
+    expect(ports.drafts).toHaveBeenCalledOnce();
+    expect(ports.restore).not.toHaveBeenCalled();
+    expect(ports.credentials).not.toHaveBeenCalled();
+    expect(() => retained()).toThrow();
+  },
+);
 it('does not admit the draft recovery command through a G04 retained helper', async () => {
   const f = fixture('G04'),
     args = {
@@ -293,7 +316,7 @@ it('does not admit the draft recovery command through a G04 retained helper', as
   expect(ports.drafts).not.toHaveBeenCalled();
   expect(ports.mount).not.toHaveBeenCalled();
 });
-function credentialFixture(slice: 'G02' | 'G04' | 'G05' = 'G04') {
+function credentialFixture(slice: 'G02' | 'G04' | 'G05' | 'G06' = 'G04') {
   const f = fixture(slice),
     owner = digest('vault owner'),
     bytes = Buffer.from('SYNTHETIC_RESTORED_CREDENTIAL'),
@@ -356,7 +379,7 @@ function credentialFixture(slice: 'G02' | 'G04' | 'G05' = 'G04') {
     });
   return { ...f, args, capture, inspect, payloadCurrent, invoke };
 }
-it.each(['G04', 'G05'] as const)(
+it.each(['G04', 'G05', 'G06'] as const)(
   'checks complete %s credential recovery without draft setup, a database profile or live activation',
   async (slice) => {
     const f = credentialFixture(slice),

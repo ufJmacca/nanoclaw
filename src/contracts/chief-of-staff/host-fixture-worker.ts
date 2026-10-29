@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { KnowledgeStore } from '../../modules/chief-of-staff/knowledge/store.js';
 import { KnowledgeArtifacts } from '../../modules/chief-of-staff/knowledge/artifacts.js';
 import pg from 'pg';
-import type { CosBinding } from '../../cos-boundary.js';
+import { cosBoundary, type CosBinding } from '../../cos-boundary.js';
 import { fixtureDatabaseConfig, connectFixtureDatabase } from './fixture-database.js';
 import { createNativeFixtureDatabase } from './native-fixture-database.js';
 import type { PriorityStore } from '../../modules/chief-of-staff/store/priorities.js';
@@ -19,6 +19,12 @@ import { fixtureCalendarReader } from '../../modules/chief-of-staff/calendar/fix
 import { MailStore } from '../../modules/chief-of-staff/mail/store.js';
 import { MailView } from '../../modules/chief-of-staff/mail/view.js';
 import { MailHost } from '../../modules/chief-of-staff/mail/host.js';
+import { MailConnector } from '../../modules/chief-of-staff/mail/connector.js';
+import { MAIL_REVIEW_HEADERS, mailReviewHeaderExclusion } from '../../modules/chief-of-staff/mail/review-source.js';
+import { MailReviewAccess } from '../../modules/chief-of-staff/automation/mail-review-access.js';
+import { automationContext } from '../../modules/chief-of-staff/automation/origin.js';
+import type { KnowledgeContext } from '../../modules/chief-of-staff/knowledge/store.js';
+import { digest } from '../../modules/chief-of-staff/domain/contracts.js';
 import { renewBriefContext } from '../../modules/chief-of-staff/bridge/brief-context-renewal.js';
 import {
   reserveSubscriptionAttempt,
@@ -40,6 +46,7 @@ async function start(input: {
   calendar?: boolean;
   mail?: boolean;
   mailDrafts?: MailDraftFixtureConfiguration;
+  mailReviewClock?: string;
   strategy?: true;
   brief?: { clock: string; events: unknown[] };
   mandate?: { events: unknown[] };
@@ -124,6 +131,8 @@ async function start(input: {
 
   if (input.calendar && !input.knowledgeRoot) throw new Error('fixture_calendar_requires_knowledge_root');
   if (input.mail && !input.knowledgeRoot) throw new Error('fixture_mail_requires_knowledge_root');
+  if (input.mailReviewClock && (!input.mailDrafts?.review || !Number.isFinite(Date.parse(input.mailReviewClock))))
+    throw Error('fixture_mail_review_requires_explicit_policy');
   if (input.brief && (!input.calendar || !Number.isFinite(Date.parse(input.brief.clock))))
     throw new Error('fixture_brief_requires_calendar_clock');
   if (
@@ -132,7 +141,27 @@ async function start(input: {
   )
     throw new Error('fixture_mandate_requires_calendar_mission');
   const calendarFixture = input.brief ?? input.mandate;
-  let fixtureClock = input.brief?.clock;
+  let fixtureClock = input.brief?.clock ?? input.mailReviewClock;
+  const mailReviewAccess: MailReviewAccess | undefined = input.mailDrafts?.review
+    ? new MailReviewAccess({
+        authority: (context) => mailDrafts?.dependencies.authority(context) ?? null,
+        ownerAuthority: (context) => (context.origin ? null : (mailDrafts?.dependencies.authority(context) ?? null)),
+        matches: (context, selection) => {
+          const review = input.mailDrafts!.review!,
+            head = mailDrafts?.dependencies.journal.reviewPolicyPin(context.scopeId);
+          return (
+            !!head?.enabled &&
+            head.policyId === review.id &&
+            head.policyVersion === review.version &&
+            head.profileDigest === digest({ fixture: 'mail-review/v1', binding: input.binding, review }) &&
+            selection.id === review.id &&
+            selection.version === review.version &&
+            selection.digest === digest(review.binding) &&
+            digest(selection.body) === digest(review.binding)
+          );
+        },
+      })
+    : undefined;
   const calendar = input.calendar
     ? new CalendarStore(
         database,
@@ -164,6 +193,7 @@ async function start(input: {
             return true;
           },
           mailEnabled: () => !!input.mail,
+          ...(mailReviewAccess ? { mailReviewAccess } : {}),
           mailDraftNotice: (client, context, request) => store.mailDrafts.answerNotice(client, context, request),
           mailAccess: (scope, binding) => {
             if (!mailFences) return false;
@@ -195,10 +225,53 @@ async function start(input: {
   // Explicit synthetic profile admission. Native routing/maintenance is real;
   // encrypted mounts and credential-bearing processes have separate gates.
   let mailClosed = false;
+  let reviewMetadataEmpty = false;
+  const mailConnector =
+    mailReviewAccess && mailStore && mailFences
+      ? new MailConnector({
+          store: mailStore,
+          fences: mailFences,
+          admitted: (context) => !mailClosed && !!mailDrafts?.dependencies.authority(context as KnowledgeContext),
+          verifyStorage() {
+            if (mailClosed) throw Error('fixture_mail_profile_closed');
+          },
+          fixtureReader: () => {
+            const forbidden = async (): Promise<never> => {
+              throw Error('fixture_review_metadata_only');
+            };
+            return {
+              profile: forbidden,
+              list: forbidden,
+              message: forbidden,
+              thread: forbidden,
+              history: forbidden,
+              reviewSource: async (id) => {
+                const source = input.mailDrafts!.sources.find((row) => row.id === id);
+                if (!source?.historyId) throw Error('fixture_review_source_missing');
+                return {
+                  id,
+                  threadId: source.threadId,
+                  historyId: source.historyId,
+                  internalDate: source.internalDate,
+                  observedAt: Date.now(),
+                  excluded: reviewMetadataEmpty
+                    ? 'automated_mail'
+                    : mailReviewHeaderExclusion(
+                        source.headers.filter((h) =>
+                          MAIL_REVIEW_HEADERS.some((name) => name.toLowerCase() === h.name.toLowerCase()),
+                        ),
+                      ),
+                };
+              },
+            };
+          },
+        })
+      : undefined;
   const mailHost =
     mailStore && mailFences
       ? new MailHost({
           store: mailStore,
+          connector: mailConnector,
           resource: {
             fences: mailFences,
             verifyStorage() {
@@ -260,8 +333,15 @@ async function start(input: {
     : undefined;
   if (input.mailDrafts && (!input.mail || !input.knowledgeRoot || !mailFences))
     throw Error('fixture_drafts_require_mail_reader');
-  const mailDrafts = input.mailDrafts
-    ? createMailDraftFixtureHost(input.knowledgeRoot!, db, input.binding, input.mailDrafts, mailFences)
+  const mailDrafts: ReturnType<typeof createMailDraftFixtureHost> | undefined = input.mailDrafts
+    ? createMailDraftFixtureHost(
+        input.knowledgeRoot!,
+        db,
+        input.binding,
+        input.mailDrafts,
+        mailFences,
+        mailReviewAccess,
+      )
     : undefined;
   const store: PriorityStore = new PriorityStore(
     database,
@@ -275,7 +355,9 @@ async function start(input: {
     mailHost,
     mailDrafts?.dependencies,
     mailDrafts,
+    mailReviewAccess,
   );
+  if (input.mailReviewClock) store.briefs.options.clock = () => new Date(fixtureClock!);
   if (input.brief) {
     store.briefs.options.clock = () => new Date(fixtureClock!);
     store.briefArtifacts!.collector.options.clock = () => new Date(fixtureClock!);
@@ -345,11 +427,31 @@ async function start(input: {
       specialists?.stopSession(id);
     },
     wake: async () => {},
-    ...(input.brief || input.mission
+    ...(input.brief || input.mission || input.mailReviewClock
       ? {
           running: () => false,
           launcher: {
             ready: () => true, // Synthetic provider only. prepare cannot launch a real model.
+            canBeginMailReview: () => {
+              const policy = subscriptionActivation(
+                readPrivate(path.join(input.knowledgeRoot!, 'model-activation.json')),
+                input.binding.scopeId,
+                'a'.repeat(64),
+              );
+              const row =
+                policy &&
+                (db
+                  .prepare('SELECT policy_digest,used FROM cos_model_budgets WHERE activation_id=?')
+                  .get(policy.activationId) as { policy_digest: string; used: number } | undefined);
+              return (
+                !!policy &&
+                !!row &&
+                row.policy_digest === digest(policy) &&
+                Number.isSafeInteger(row.used) &&
+                row.used >= 0 &&
+                row.used < policy.maxAttempts
+              );
+            },
             prepare: async () => {
               throw new Error('fixture_native_provider_forbidden');
             },
@@ -451,12 +553,12 @@ async function start(input: {
       );
       return refreshed.result.status === 'ok';
     }
-    if (input.brief && command === 'clock') {
+    if ((input.brief || input.mailReviewClock) && command === 'clock') {
       if (typeof value !== 'string' || !Number.isFinite(Date.parse(value))) throw new Error('fixture_clock_invalid');
       fixtureClock = value;
       return true;
     }
-    if ((input.brief || input.mission || input.actions) && command === 'sync-acks') {
+    if ((input.brief || input.mission || input.actions || input.mailReviewClock) && command === 'sync-acks') {
       const directory = sessionDir(session.agent_group_id, session.id),
         inbound = openInboundDb(path.join(directory, 'inbound.db')),
         outbound = openOutboundDb(path.join(directory, 'outbound.db'));
@@ -467,6 +569,30 @@ async function start(input: {
         outbound.close();
       }
       return true;
+    }
+    if (input.mailDrafts?.review && command === 'mail-review-fixture-clear-owner-ingress') {
+      const boundary = cosBoundary(session, db);
+      if (
+        !boundary.restricted ||
+        !boundary.binding ||
+        boundary.paused ||
+        digest(boundary.binding) !== digest(binding) ||
+        automationContext(session, db) !== undefined
+      )
+        return false;
+      const inbound = openInboundDb(path.join(sessionDir(session.agent_group_id, session.id), 'inbound.db'));
+      try {
+        if (inbound.prepare("SELECT 1 FROM messages_in WHERE status IN ('pending','processing') LIMIT 1").get())
+          return false;
+        // Synthetic resume condition only: preserve the main context, allowance and all completed inputs.
+        return (
+          db
+            .prepare('UPDATE cos_identity_boundaries SET ingress_id=NULL,ingress_at=NULL WHERE scope_id=? AND paused=0')
+            .run(binding.scopeId).changes === 1
+        );
+      } finally {
+        inbound.close();
+      }
     }
     if (input.mission && command === 'mission-review-ready') {
       return (await runtime.controller.context(session))?.origin?.kind === 'mission_review';
@@ -497,6 +623,23 @@ async function start(input: {
       return { database: databaseFailures, pool: database.inspectPool() };
     if (mailDrafts && command === 'mail-draft-fixture-state') return mailDrafts.state();
     if (mailDrafts && command === 'mail-draft-fixture-mode') return mailDrafts.mode(value);
+    if (input.mailDrafts?.review && command === 'mail-review-fixture-no-useful-candidates') {
+      reviewMetadataEmpty = true;
+      return true;
+    }
+    if (input.mailDrafts?.review && command === 'mail-review-fixture-exhaust-allowance') {
+      const policy = subscriptionActivation(
+        readPrivate(path.join(input.knowledgeRoot!, 'model-activation.json')),
+        binding.scopeId,
+        'a'.repeat(64),
+      );
+      if (!policy) throw Error('fixture_review_allowance_missing');
+      const changed = db
+        .prepare('UPDATE cos_model_budgets SET used=? WHERE activation_id=? AND policy_digest=? AND used<?')
+        .run(policy.maxAttempts, policy.activationId, digest(policy), policy.maxAttempts);
+      if (changed.changes !== 1) throw Error('fixture_review_allowance_changed');
+      return true;
+    }
     if (actions && command === 'action-fixture-mode') return actions.mode(value);
     if (actions && command === 'action-fixture-subscription') {
       if (typeof value !== 'boolean') throw Error('invalid_fixture_subscription');
@@ -527,7 +670,7 @@ async function start(input: {
       );
       return result.status === 'ok' && result.reserved === true;
     }
-    if (input.brief && command === 'brief-diagnostics') {
+    if ((input.brief || input.mailReviewClock) && command === 'brief-diagnostics') {
       const directory = sessionDir(session.agent_group_id, session.id);
       if (!fs.existsSync(path.join(directory, 'outbound.db')))
         return {
@@ -549,7 +692,7 @@ async function start(input: {
         outbound.close();
       }
     }
-    if (input.brief && command === 'reserve-fixture-turn') {
+    if ((input.brief || input.mailReviewClock) && command === 'reserve-fixture-turn') {
       const context = await runtime.controller.context(session);
       if (!context?.origin || typeof value !== 'string') return false;
       const reserved = await store.briefs.reserveCall(

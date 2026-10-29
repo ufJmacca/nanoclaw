@@ -18,6 +18,7 @@ import { STRATEGY_CHECKSUM } from '../store/strategy-schema.js';
 import { STRATEGY_CHAIN_CHECKSUM } from '../store/strategy-chain-schema.js';
 import { MAIL_CHECKSUM } from '../store/mail-schema.js';
 import { MAIL_DRAFT_CHECKSUM } from '../store/mail-draft-schema.js';
+import { MAIL_REVIEW_CHECKSUM } from '../store/mail-review-schema.js';
 import { digest } from '../domain/contracts.js';
 import { vaultRootArtifactSeal, type VaultRootArtifactSeal } from './vault-root-artifact.js';
 import { validateResticArtifactSeal, type RESTIC_ARTIFACT } from './restic-artifact.js';
@@ -62,7 +63,9 @@ export const MAIL_DRAFT_RELEASE_CHECKS = [
   'draft_reconciliation',
   'draft_recovery',
 ] as const;
+export const MAIL_REVIEW_RELEASE_CHECKS = ['mail_review_policy', 'mail_review_schedule', 'mail_review_flow'] as const;
 export function requiredReleaseChecks(slice: ReleaseManifest['slice']): readonly string[] {
+  if (slice === 'G06') return [...requiredReleaseChecks('G05'), ...MAIL_REVIEW_RELEASE_CHECKS];
   if (slice === 'G05')
     return [
       ...REQUIRED_RELEASE_CHECKS,
@@ -96,7 +99,8 @@ export type ReleaseManifest = {
     | 'G02'
     | 'G03'
     | 'G04'
-    | 'G05';
+    | 'G05'
+    | 'G06';
   vaultArtifact?: { digest: string; seal: VaultRootArtifactSeal };
   backupArtifact?: typeof RESTIC_ARTIFACT;
   platform: 'linux/arm64';
@@ -148,6 +152,7 @@ export function validateReleaseManifest(value: unknown): ReleaseManifest {
       'G03',
       'G04',
       'G05',
+      'G06',
     ].includes(value.slice) ||
     value.platform !== 'linux/arm64' ||
     value.rpc !== 'cos-rpc/v1' ||
@@ -188,11 +193,13 @@ export function validateReleaseManifest(value: unknown): ReleaseManifest {
                       ? 15
                       : value.slice === 'S09'
                         ? 16
-                        : value.slice === 'G05'
-                          ? 20
-                          : value.slice === 'G04'
-                            ? 19
-                            : 18;
+                        : value.slice === 'G06'
+                          ? 21
+                          : value.slice === 'G05'
+                            ? 20
+                            : value.slice === 'G04'
+                              ? 19
+                              : 18;
   const checksums = [
     INITIAL_CHECKSUM,
     KNOWLEDGE_CHECKSUM,
@@ -214,6 +221,7 @@ export function validateReleaseManifest(value: unknown): ReleaseManifest {
     STRATEGY_CHAIN_CHECKSUM,
     MAIL_CHECKSUM,
     MAIL_DRAFT_CHECKSUM,
+    MAIL_REVIEW_CHECKSUM,
   ];
   if (
     !object(postgres) ||
@@ -258,7 +266,13 @@ export function validateReleaseManifest(value: unknown): ReleaseManifest {
     if (image.role === 'host') hosts++;
   }
   if (hosts !== 1 || !object(value.checks)) return reject();
-  if (value.slice === 'G02' || value.slice === 'G03' || value.slice === 'G04' || value.slice === 'G05') {
+  if (
+    value.slice === 'G02' ||
+    value.slice === 'G03' ||
+    value.slice === 'G04' ||
+    value.slice === 'G05' ||
+    value.slice === 'G06'
+  ) {
     try {
       validateResticArtifactSeal(value.backupArtifact);
       // eslint-disable-next-line no-catch-all/no-catch-all -- Invalid pinned executable identity denies release admission.
@@ -271,7 +285,8 @@ export function validateReleaseManifest(value: unknown): ReleaseManifest {
     value.slice === 'G02' ||
     value.slice === 'G03' ||
     value.slice === 'G04' ||
-    value.slice === 'G05'
+    value.slice === 'G05' ||
+    value.slice === 'G06'
   ) {
     try {
       const artifact = value.vaultArtifact;
@@ -311,13 +326,15 @@ export function validateReleaseManifest(value: unknown): ReleaseManifest {
     if (
       (name.startsWith('vault_') ||
         name.startsWith('backup_') ||
-        (name.startsWith('mail_') && name !== 'mail_evidence') ||
+        (name.startsWith('mail_') && !['mail_evidence', 'mail_review_schedule', 'mail_review_flow'].includes(name)) ||
         (name.startsWith('draft_') && name !== 'draft_transport')) &&
       (check.imageIds.length !== 1 || check.imageIds[0] !== host?.id)
     )
       return reject();
     if (
-      (name === 'protected_state' || name === 'mail_evidence' || name === 'draft_transport') &&
+      ['protected_state', 'mail_evidence', 'draft_transport', 'mail_review_schedule', 'mail_review_flow'].includes(
+        name,
+      ) &&
       (check.imageIds.length !== images.size || new Set(check.imageIds).size !== images.size)
     )
       return reject();

@@ -4,7 +4,7 @@ type Identity = Readonly<{
   sourceTree: string;
   hostImage: string;
   fixtureImage: string;
-  releaseSlice: 'G02' | 'G03' | 'G04' | 'G05';
+  releaseSlice: 'G02' | 'G03' | 'G04' | 'G05' | 'G06';
 }>;
 export function verifyBackupJobFixtureImage(
   value: unknown,
@@ -48,7 +48,7 @@ export function verifyBackupJobFixtureEvidence(records: unknown[], identity: Ide
       records.length !== 3 ||
       !identity ||
       Object.keys(identity).sort().join(',') !== 'fixtureImage,hostImage,releaseSlice,sourceCommit,sourceTree' ||
-      !['G02', 'G03', 'G04', 'G05'].includes(identity.releaseSlice) ||
+      !['G02', 'G03', 'G04', 'G05', 'G06'].includes(identity.releaseSlice) ||
       !/^[a-f0-9]{40}$/.test(identity.sourceCommit) ||
       !/^[a-f0-9]{40}$/.test(identity.sourceTree) ||
       !/^sha256:[a-f0-9]{64}$/.test(identity.hostImage) ||
@@ -98,7 +98,8 @@ export function verifyBackupJobFixtureEvidence(records: unknown[], identity: Ide
       )
         throw Error('ram_scope');
     const drafts = identity.releaseSlice === 'G05',
-      upgrade = drafts || identity.releaseSlice === 'G04';
+      reviews = identity.releaseSlice === 'G06',
+      upgrade = drafts || reviews || identity.releaseSlice === 'G04';
     const required = [
       'actualUserManager',
       'actualStaticCompiler',
@@ -130,15 +131,22 @@ export function verifyBackupJobFixtureEvidence(records: unknown[], identity: Ide
       'schemaVersion',
       'actualG03ToG04Upgrade',
       ...(drafts ? ['actualG04ToG05Upgrade'] : []),
+      ...(reviews ? ['actualG05ToG06Upgrade'] : []),
     ];
     if (
       Object.keys(probe).sort().join(',') !== keys.sort().join(',') ||
-      probe.contract !== (drafts ? 'cos-backup-job-release-fixture/v3' : 'cos-backup-job-release-fixture/v2') ||
+      probe.contract !==
+        (reviews
+          ? 'cos-backup-job-release-fixture/v4'
+          : drafts
+            ? 'cos-backup-job-release-fixture/v3'
+            : 'cos-backup-job-release-fixture/v2') ||
       probe.status !== 'passed' ||
       probe.releaseSlice !== identity.releaseSlice ||
-      probe.schemaVersion !== (drafts ? 20 : identity.releaseSlice === 'G04' ? 19 : 18) ||
+      probe.schemaVersion !== (reviews ? 21 : drafts ? 20 : identity.releaseSlice === 'G04' ? 19 : 18) ||
       probe.actualG03ToG04Upgrade !== (identity.releaseSlice === 'G04') ||
       (drafts && probe.actualG04ToG05Upgrade !== true) ||
+      (reviews && probe.actualG05ToG06Upgrade !== true) ||
       probe.cases !== (upgrade ? 8 : 7) ||
       probe.actualEnablementLinks !== 2 ||
       required.some((key) => probe[key] !== true) ||

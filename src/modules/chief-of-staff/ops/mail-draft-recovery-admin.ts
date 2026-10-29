@@ -31,7 +31,7 @@ export async function restoreOwnerMailDraftBaseline(input: {
       args.queueOperationId !== target.queueOperationId ||
       args.backupReleaseId !== target.recovery.releaseId ||
       args.snapshotDigest !== target.expectedSnapshotDigest ||
-      target.recovery.software.schemaVersion !== 20
+      ![20, 21].includes(target.recovery.software.schemaVersion)
     )
       throw Error('draft_restore_request_changed');
     const journal = openTargetDraftJournal(settings.stateRoot, installation);

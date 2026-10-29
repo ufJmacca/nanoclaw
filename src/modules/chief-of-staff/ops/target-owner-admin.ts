@@ -8,6 +8,7 @@ import { parseBackupOwnerRestoreArguments } from './backup-owner-restore-argumen
 import { isMailAccountCommand, parseMailAccountArguments } from './mail-account-arguments.js';
 import { isMailDraftAccountCommand, parseMailDraftAccountArguments } from './mail-draft-account-arguments.js';
 import { isMailDraftAdminCommand, parseMailDraftAdminArguments } from './mail-draft-admin-arguments.js';
+import { isMailReviewAdminCommand, parseMailReviewAdminArguments } from './mail-review-admin-arguments.js';
 const commands = [
   'vault-status',
   'vault-provision',
@@ -36,6 +37,8 @@ const commands = [
   'mail-draft-restore-check',
   'mail-draft-configure',
   'mail-draft-disable',
+  'mail-review-configure',
+  'mail-review-rebind',
 ];
 export function parseOwnerAdminArguments(args: string[]): {
   settings: string;
@@ -71,6 +74,7 @@ export function parseOwnerAdminArguments(args: string[]): {
   if (isMailAccountCommand({ command: admin[0] })) parseMailAccountArguments(admin);
   if (isMailDraftAccountCommand({ command: admin[0] })) parseMailDraftAccountArguments(admin);
   if (isMailDraftAdminCommand({ command: admin[0] })) parseMailDraftAdminArguments(admin);
+  if (isMailReviewAdminCommand({ command: admin[0] })) parseMailReviewAdminArguments(admin);
   return { settings: flags[1], databaseEnvironment: flags[3], admin };
 }
 export async function ownerDatabasePreflight(
@@ -100,7 +104,7 @@ export async function selectedOwnerAdminProfile(
   profiles: { runtime(): NodeJS.ProcessEnv; test(): NodeJS.ProcessEnv; migration?(): NodeJS.ProcessEnv },
 ): Promise<NodeJS.ProcessEnv> {
   if (!commands.includes(command)) throw new Error('invalid_owner_admin_arguments');
-  if (command === 'mail-draft-configure') {
+  if (command === 'mail-draft-configure' || isMailReviewAdminCommand({ command })) {
     if (!profiles.migration) throw Error('invalid_owner_admin_arguments');
     return profiles.migration();
   }

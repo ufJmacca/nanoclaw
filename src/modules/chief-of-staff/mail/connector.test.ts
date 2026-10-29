@@ -7,6 +7,10 @@ import type { Result, Context } from '../domain/contracts.js';
 import type { MailCapture } from './capture.js';
 import type { MailConnection } from './store.js';
 import { CalendarReadError } from '../calendar/reader.js';
+import { CalendarAccessFences } from '../calendar/access-fences.js';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 const context = {
   scopeId: 'scope',
   ownerId: 'owner',
@@ -44,6 +48,14 @@ function fixture() {
     setAuth: vi.fn(async (): Promise<Result> => ({ status: 'ok' })),
   };
   const reader = {
+    reviewSource: vi.fn(async () => ({
+      id: 'a1',
+      threadId: 'b1',
+      historyId: '101',
+      internalDate: at - 1000,
+      observedAt: at,
+      excluded: null,
+    })),
     profile: vi.fn(async () => ({ mailboxEmail: binding.mailboxEmail, historyId: '100' })),
     list: vi.fn(async () => ({ messages: [{ id: 'a1', threadId: 'b1' }], nextPageToken: null, resultSizeEstimate: 1 })),
     message: vi.fn(async () =>
@@ -70,6 +82,242 @@ function fixture() {
   return { at, window, binding, store, reader, fences, options, connector: new MailConnector(options) };
 }
 describe('G04 host-only mail refresh', () => {
+  it('G06 keeps an aborted credential exchange closed until explicit recovery rather than calling it a settled read', async () => {
+    const f = fixture(),
+      root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-review-fence-')),
+      fences = CalendarAccessFences.initialize(root),
+      controller = new AbortController(),
+      fetch = vi.fn(),
+      token = vi.fn(async () => {
+        controller.abort();
+        throw new MailReadError('mail_cancelled');
+      });
+    f.store.connection.mockResolvedValue({
+      status: 'ok',
+      binding: { ...f.binding, provider: 'google', credentialRef: captureId },
+    });
+    const connector = new MailConnector({
+      ...f.options,
+      fences,
+      fetch,
+      credentials: {
+        inspect: async () => ({ auth: 'ready', scopes: [GOOGLE_MAIL_READ_SCOPE], generation: 1 }),
+        token,
+      },
+    });
+    try {
+      const observed = Date.now();
+      await expect(
+        connector.reviewSource(
+          context,
+          id,
+          'a1',
+          { capturedAt: observed, since: observed - MAIL_RETENTION_MS },
+          async () => true,
+          controller.signal,
+        ),
+      ).rejects.toThrow('mail_');
+      expect(token).toHaveBeenCalledOnce();
+      expect(fetch).not.toHaveBeenCalled();
+      expect(() => new CalendarAccessFences(root).assertOpen(context.scopeId, id)).toThrow(
+        'calendar_access_check_uncertain',
+      );
+      expect(f.store.setAuth).not.toHaveBeenCalled();
+    } finally {
+      await connector.close();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it.each(['cancelled', 'not_current', 'disabled', 'rate_limited', 'message_missing'] as const)(
+    'G06 settles a handled %s metadata read without stranding the account access journal',
+    async (failure) => {
+      const f = fixture(),
+        root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-review-fence-')),
+        fences = CalendarAccessFences.initialize(root),
+        connector = new MailConnector({ ...f.options, fences, admitted: () => admitted }),
+        controller = new AbortController();
+      let current = true,
+        admitted = true;
+      try {
+        f.reader.reviewSource.mockImplementationOnce(async () => {
+          if (failure === 'cancelled') controller.abort();
+          else if (failure === 'not_current') current = false;
+          else if (failure === 'disabled') admitted = false;
+          else throw new MailReadError('mail_' + failure);
+          return {
+            id: 'a1',
+            threadId: 'b1',
+            historyId: '101',
+            internalDate: f.at - 1000,
+            observedAt: f.at,
+            excluded: null,
+          };
+        });
+        await expect(
+          connector.reviewSource(context, id, 'a1', f.window, async () => current, controller.signal),
+        ).rejects.toThrow('mail_');
+        expect(() => new CalendarAccessFences(root).assertOpen(context.scopeId, id)).not.toThrow();
+        expect(f.store.setAuth).not.toHaveBeenCalled();
+        current = true;
+        admitted = true;
+        await expect(connector.reviewSource(context, id, 'a1', f.window, async () => current)).resolves.toMatchObject({
+          id: 'a1',
+        });
+      } finally {
+        await connector.close();
+        fs.rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.each(['unknown_failure', 'revoked'] as const)(
+    'G06 preserves a closed real access journal after %s instead of treating it as a handled cancellation',
+    async (failure) => {
+      const f = fixture(),
+        root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-review-fence-')),
+        fences = CalendarAccessFences.initialize(root),
+        connector = new MailConnector({ ...f.options, fences });
+      try {
+        f.reader.reviewSource.mockRejectedValueOnce(
+          failure === 'revoked' ? new MailReadError('mail_auth_revoked') : new Error('PRIVATE_DIAGNOSTIC'),
+        );
+        await expect(connector.reviewSource(context, id, 'a1', f.window, async () => true)).rejects.toThrow('mail_');
+        expect(() => new CalendarAccessFences(root).assertOpen(context.scopeId, id)).toThrow(
+          failure === 'revoked' ? 'calendar_auth_revoked' : 'calendar_access_check_uncertain',
+        );
+        if (failure === 'revoked') expect(f.store.setAuth).toHaveBeenCalledWith(context, id, 'revoked');
+        else expect(f.store.setAuth).not.toHaveBeenCalled();
+      } finally {
+        await connector.close();
+        fs.rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('G06 aborts admission and waits for an actual review metadata read before closing', async () => {
+    const f = fixture();
+    let release!: () => void;
+    const hold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    f.reader.reviewSource.mockImplementationOnce(async () => {
+      await hold;
+      return {
+        id: 'a1',
+        threadId: 'b1',
+        historyId: '101',
+        internalDate: f.at - 1000,
+        observedAt: f.at,
+        excluded: null,
+      };
+    });
+    const reading = f.connector
+      .reviewSource(context, id, 'a1', f.window, async () => true)
+      .then(
+        () => false,
+        () => true,
+      );
+    await vi.waitFor(() => expect(f.reader.reviewSource).toHaveBeenCalledOnce());
+    let closed = false;
+    const closing = f.connector.close().then(() => {
+      closed = true;
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(closed).toBe(false);
+    release();
+    expect(await reading).toBe(true);
+    await closing;
+    expect(closed).toBe(true);
+  });
+  it('G06 sends no provider request after token acquisition loses the review preparation', async () => {
+    const f = fixture(),
+      binding: MailConnection = { ...f.binding, provider: 'google', credentialRef: captureId };
+    f.store.connection.mockResolvedValue({ status: 'ok', binding });
+    let current = true;
+    const fetch = vi.fn(async () => new Response('{}'));
+    const connector = new MailConnector({
+      ...f.options,
+      fetch,
+      credentials: {
+        inspect: async () => ({ auth: 'ready', scopes: [GOOGLE_MAIL_READ_SCOPE], generation: 1 }),
+        token: async () => {
+          current = false;
+          return 'PRIVATE_FIXTURE_TOKEN';
+        },
+      },
+    });
+    const observed = Date.now();
+    await expect(
+      connector.reviewSource(
+        context,
+        id,
+        'a1',
+        { capturedAt: observed, since: observed - MAIL_RETENTION_MS },
+        async () => current,
+      ),
+    ).rejects.toThrow('mail_review_not_current');
+    expect(fetch).not.toHaveBeenCalled();
+    expect(f.fences.deny).not.toHaveBeenCalled();
+    await connector.close();
+  });
+  it('G06 checks fresh review metadata without starting or publishing another capture', async () => {
+    const f = fixture(),
+      current = vi.fn(async () => true);
+    expect(await f.connector.reviewSource(context, id, 'a1', f.window, current)).toMatchObject({
+      id: 'a1',
+      excluded: null,
+    });
+    expect(f.reader.reviewSource).toHaveBeenCalledWith('a1', f.window);
+    expect(f.fences.runCheck).toHaveBeenCalled();
+    expect(current).toHaveBeenCalled();
+    expect(f.store.start).not.toHaveBeenCalled();
+    expect(f.store.publish).not.toHaveBeenCalled();
+  });
+  it('G06 rejects automatic origins and lost preparation without marking normal capture changes as revoked access', async () => {
+    const f = fixture();
+    await expect(
+      f.connector.reviewSource(
+        { ...context, origin: { kind: 'schedule', runId: 'a'.repeat(64), generation: 1 } },
+        id,
+        'a1',
+        f.window,
+        async () => true,
+      ),
+    ).rejects.toThrow('mail_review_not_current');
+    expect(f.store.connection).not.toHaveBeenCalled();
+    await expect(f.connector.reviewSource(context, id, 'a1', f.window, async () => false)).rejects.toThrow(
+      'mail_review_not_current',
+    );
+    expect(f.reader.reviewSource).not.toHaveBeenCalled();
+    expect(f.fences.deny).not.toHaveBeenCalled();
+  });
+  it('G06 discards metadata after a late preparation change and persists actual account revocation', async () => {
+    const f = fixture();
+    let active = true;
+    f.reader.reviewSource.mockImplementationOnce(async () => {
+      active = false;
+      return {
+        id: 'a1',
+        threadId: 'b1',
+        historyId: '101',
+        internalDate: f.at - 1000,
+        observedAt: f.at,
+        excluded: null,
+      };
+    });
+    await expect(f.connector.reviewSource(context, id, 'a1', f.window, async () => active)).rejects.toThrow(
+      'mail_review_not_current',
+    );
+    expect(f.fences.deny).not.toHaveBeenCalled();
+    active = true;
+    f.reader.reviewSource.mockRejectedValueOnce(new MailReadError('mail_auth_revoked'));
+    await expect(f.connector.reviewSource(context, id, 'a1', f.window, async () => true)).rejects.toThrow(
+      'mail_auth_revoked',
+    );
+    expect(f.fences.deny).toHaveBeenCalledWith(context.scopeId, id, 'revoked');
+    expect(f.store.setAuth).toHaveBeenCalledWith(context, id, 'revoked');
+  });
   it('uses the database observation window and publishes only the owner-filtered capture after checked collection', async () => {
     const f = fixture(),
       result = await f.connector.refresh(context, id, captureId);

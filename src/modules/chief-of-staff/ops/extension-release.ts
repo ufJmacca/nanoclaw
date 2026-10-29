@@ -41,7 +41,7 @@ export type ExtensionReleaseState = {
   goal: 'nanoclaw-google-mail-storage';
   plan_revision: 1;
   published_specification_commit: string;
-  active_slice: 'G01' | 'G02' | 'G03' | 'G04' | 'G05';
+  active_slice: 'G01' | 'G02' | 'G03' | 'G04' | 'G05' | 'G06';
   status: string;
   slices: Record<string, Record<string, unknown>>;
   [key: string]: unknown;
@@ -79,7 +79,7 @@ export function readExtensionRelease(root: string, forRelease = false): Extensio
       ledger.goal !== 'nanoclaw-google-mail-storage' ||
       ledger.plan_revision !== 1 ||
       !/^[a-f0-9]{40}$/.test(ledger.published_specification_commit) ||
-      !['G01', 'G02', 'G03', 'G04', 'G05'].includes(ledger.active_slice) ||
+      !['G01', 'G02', 'G03', 'G04', 'G05', 'G06'].includes(ledger.active_slice) ||
       ledger.status !== 'in_progress' ||
       !ledger.slices ||
       typeof ledger.slices !== 'object' ||
@@ -92,7 +92,7 @@ export function readExtensionRelease(root: string, forRelease = false): Extensio
     )
       throw Error('active_extension_slice_required');
     if (ledger.active_slice !== 'G01') {
-      const predecessorId = { G02: 'G01', G03: 'G02', G04: 'G03', G05: 'G04' }[ledger.active_slice],
+      const predecessorId = { G02: 'G01', G03: 'G02', G04: 'G03', G05: 'G04', G06: 'G05' }[ledger.active_slice],
         predecessor = ledger.slices[predecessorId];
       const object = (value: unknown): value is Record<string, unknown> =>
         !!value && typeof value === 'object' && !Array.isArray(value);
@@ -195,6 +195,41 @@ export function readExtensionRelease(root: string, forRelease = false): Extensio
         )
           throw Error('extension_predecessor_mail_acceptance_required');
       }
+    }
+    if (ledger.active_slice === 'G06') {
+      const predecessor = ledger.slices.G05,
+        live = predecessor.merged_acceptance as Record<string, unknown> | undefined,
+        current = predecessor.current_source as Record<string, unknown>,
+        upload = predecessor.actual_merged_remote_checkpoint as Record<string, unknown> | undefined;
+      const object = (value: unknown): value is Record<string, unknown> =>
+        !!value && typeof value === 'object' && !Array.isArray(value);
+      if (
+        !object(live) ||
+        live.commit !== current.commit ||
+        live.tree !== current.tree ||
+        live.releaseId !== current.releaseId ||
+        live.liveSavedDraftDemonstrationVerified !== true ||
+        live.existingSavedDraftIndependentlyReverified !== true ||
+        live.currentEncryptedCheckpointUploaded !== true ||
+        live.completeCredentialsVerified !== true ||
+        live.originalContextAndCountersPreserved !== true ||
+        live.allProtectedTablesPreserved !== true ||
+        live.actualIsolatedRecoveryApplicable !== true ||
+        !object(upload) ||
+        upload.status !== 'backup_uploaded' ||
+        upload.sourceCommit !== current.commit ||
+        upload.sourceTree !== current.tree ||
+        upload.releaseId !== current.releaseId ||
+        upload.completeCredentialsVerified !== true ||
+        upload.exactStateAcknowledgementVerified !== true ||
+        !object(upload.state) ||
+        upload.state.pending !== 0 ||
+        upload.state.held !== 0 ||
+        !object(upload.credentials) ||
+        upload.credentials.pending !== 0 ||
+        upload.credentials.held !== 0
+      )
+        throw Error('extension_predecessor_saved_draft_acceptance_required');
     }
     return ledger;
   } catch {

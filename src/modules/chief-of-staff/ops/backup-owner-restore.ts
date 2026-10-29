@@ -97,15 +97,28 @@ export async function restoreOwnerVaultBackup(input: {
         recovery = stateArgs ? recordedRelease(settings, stateArgs.backupReleaseId) : null,
         recoveryDigest = digest(recovery),
         deadline = performance.now() + 45 * 60 * 1000;
+      const ownerSlices = draftArgs
+        ? ['G05', 'G06']
+        : stateArgs
+          ? ['G02', 'G03', 'G04', 'G05', 'G06']
+          : ['G04', 'G05', 'G06'];
+      const captureSlices =
+        manifest.slice === 'G06'
+          ? draftArgs
+            ? ['G05', 'G06']
+            : ['G02', 'G03', 'G04', 'G05', 'G06']
+          : draftArgs
+            ? ['G05']
+            : manifest.slice === 'G05'
+              ? ['G02', 'G03', 'G04', 'G05']
+              : ['G02', 'G03', 'G04'];
       if (
-        !(draftArgs ? ['G05'] : stateArgs ? ['G02', 'G03', 'G04', 'G05'] : ['G04', 'G05']).includes(manifest.slice) ||
+        !ownerSlices.includes(manifest.slice) ||
         state.lifecycle !== 'protected' ||
         state.releaseId !== manifest.releaseId ||
         generation === null ||
         (stateArgs &&
-          !(
-            draftArgs ? ['G05'] : manifest.slice === 'G05' ? ['G02', 'G03', 'G04', 'G05'] : ['G02', 'G03', 'G04']
-          ).includes(
+          !captureSlices.includes(
             validateReleaseManifest(
               readPrivate(path.join(settings.releaseRoot, stateArgs.backupReleaseId, 'release.json')),
             ).slice,

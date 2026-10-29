@@ -9,6 +9,7 @@ import { GOOGLE_MAIL_READ_SCOPE } from './oauth.js';
 import { collectMail, type MailCapture } from './capture.js';
 import { validMailCapture } from './store.js';
 import type { MailWindow } from './normalization.js';
+import type { FreshMailReviewSource, MailReviewSourceReader } from './review-source.js';
 type Closed = Exclude<MailConnection['auth'], 'ready'>;
 type MailContext = Context & { provider: string };
 /** Private host recovery material. Never serialize this to a model, chat or operational log. */
@@ -21,7 +22,7 @@ export type MailConnectorOptions = {
   fences: Pick<CalendarAccessFences, 'assertOpen' | 'deny' | 'runCheck'>;
   admitted(context: Context & { provider: string }): boolean;
   verifyStorage(): void;
-  fixtureReader?(binding: MailConnection): MailReader;
+  fixtureReader?(binding: MailConnection): MailReader & Partial<MailReviewSourceReader>;
   fetch?: (url: string, init: RequestInit) => Promise<Response>;
 };
 const uuid = (id: string) => /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(id);
@@ -40,12 +41,16 @@ const lost: Record<string, Closed> = {
   mail_access_changed: 'revoked',
   mail_wrong_account: 'revoked',
 };
+const settledReviewFailures = new Set(['mail_rate_limited', 'mail_message_missing']);
+const cancelledReviewFailures = new Set(['mail_cancelled', 'mail_review_not_current', 'mail_disabled']);
+type ReviewReadOutcome = { source: FreshMailReviewSource } | { failure: string };
 /** Five-minute polling calls this host adapter without an inference capability.
  * Google calls occur between short database operations and under the durable access-check journal. */
 export class MailConnector {
   private readonly denied = new Map<string, Closed>();
   private readonly pending = new Map<string, { request: string; work: Promise<Refresh> }>();
   private readonly shutdown = new AbortController();
+  private readonly reviewReads = new Set<Promise<FreshMailReviewSource>>();
   private closing?: Promise<void>;
   constructor(private readonly options: MailConnectorOptions) {}
   assertOpen(scope: string, binding: string): void {
@@ -91,11 +96,22 @@ export class MailConnector {
     if (digest(fresh) !== digest(binding)) throw new MailReadError('mail_access_changed');
     return fresh;
   }
-  private reader(context: MailContext, binding: MailConnection, signal: AbortSignal): MailReader {
+  private reader(
+    context: MailContext,
+    binding: MailConnection,
+    signal: AbortSignal,
+    reviewCurrent?: () => Promise<void>,
+    reviewReadCompleted?: () => void,
+  ): MailReader & Partial<MailReviewSourceReader> {
     const d = this.options,
-      current = () => this.current(context, binding, signal);
-    if (binding.provider === 'google')
-      return googleMailReader({
+      current = async () => {
+        await reviewCurrent?.();
+        const value = await this.current(context, binding, signal);
+        await reviewCurrent?.();
+        return value;
+      };
+    if (binding.provider === 'google') {
+      const reader = googleMailReader({
         fetch: d.fetch,
         signal,
         access: async () => {
@@ -120,6 +136,15 @@ export class MailConnector {
           return token;
         },
       });
+      return {
+        ...reader,
+        reviewSource: async (...args) => {
+          const result = await reader.reviewSource(...args);
+          reviewReadCompleted?.();
+          return result;
+        },
+      };
+    }
     if (binding.provider !== 'fixture' || !d.fixtureReader) throw new MailReadError('mail_provider_unavailable');
     const reader = d.fixtureReader(structuredClone(binding));
     const guard = async <T>(operation: () => Promise<T>): Promise<T> => {
@@ -134,7 +159,87 @@ export class MailConnector {
       message: (...args) => guard(() => reader.message(...args)),
       history: (...args) => guard(() => reader.history(...args)),
       thread: (...args) => guard(() => reader.thread(...args)),
+      ...(reader.reviewSource
+        ? {
+            reviewSource: (...args: Parameters<MailReviewSourceReader['reviewSource']>) =>
+              guard(async () => {
+                const result = await reader.reviewSource!(...args);
+                reviewReadCompleted?.();
+                return result;
+              }),
+          }
+        : {}),
     };
+  }
+  /** Trusted owner-side preparation only. No body, new capture, model call or draft operation is produced. */
+  async reviewSource(
+    context: MailContext,
+    bindingId: string,
+    messageId: string,
+    window: MailWindow,
+    current: () => Promise<boolean>,
+    signal?: AbortSignal,
+  ): Promise<FreshMailReviewSource> {
+    if (context.origin || !uuid(bindingId) || !/^[a-f0-9]{1,128}$/.test(messageId))
+      throw new MailReadError('mail_review_not_current');
+    const ctx = structuredClone(context),
+      combined = AbortSignal.any([this.shutdown.signal, ...(signal ? [signal] : [])]);
+    const check = async () => {
+      this.active(combined, ctx);
+      if (!(await current())) throw new MailReadError('mail_review_not_current');
+      this.active(combined, ctx);
+    };
+    const run = async (): Promise<ReviewReadOutcome> => {
+      try {
+        await check();
+        const binding = await this.connection(ctx, bindingId, combined);
+        await check();
+        return await this.options.fences.runCheck(ctx.scopeId, bindingId, async () => {
+          let readStarted = false,
+            readCompleted = false;
+          try {
+            await check();
+            const reader = this.reader(ctx, binding, combined, check, () => {
+              readCompleted = true;
+            });
+            if (!reader.reviewSource) throw new MailReadError('mail_review_metadata_unavailable');
+            readStarted = true;
+            const result = await reader.reviewSource(messageId, window);
+            await check();
+            await this.current(ctx, binding, combined);
+            await check();
+            return { source: result };
+            // A completed read can lose review authority after its response.
+            // Record access loss here; unknown or interrupted checks stay closed.
+          } catch (error) {
+            const auth = this.observedLoss(error, ctx, bindingId);
+            if (auth) await this.deny(ctx, bindingId, auth);
+            if (
+              auth ||
+              (error instanceof MailReadError &&
+                (settledReviewFailures.has(error.code) ||
+                  (cancelledReviewFailures.has(error.code) && (!readStarted || readCompleted))))
+            )
+              return { failure: failure(error) };
+            throw error;
+          }
+        });
+      } catch (error) {
+        const auth = this.observedLoss(error, ctx, bindingId);
+        if (auth) await this.deny(ctx, bindingId, auth);
+        throw new MailReadError(failure(error));
+      }
+    };
+    const work = run().then((outcome) => {
+      if ('failure' in outcome) throw new MailReadError(outcome.failure);
+      return outcome.source;
+    });
+    this.reviewReads.add(work);
+    try {
+      return await work;
+    } finally {
+      this.reviewReads.delete(work);
+    }
   }
   async refresh(
     context: MailContext,
@@ -178,7 +283,10 @@ export class MailConnector {
   close(): Promise<void> {
     if (this.closing) return this.closing;
     this.shutdown.abort();
-    this.closing = Promise.allSettled([...this.pending.values()].map((entry) => entry.work)).then((results) => {
+    this.closing = Promise.all([
+      Promise.allSettled([...this.pending.values()].map((entry) => entry.work)),
+      Promise.allSettled([...this.reviewReads]),
+    ]).then(([results]) => {
       if (results.some((result) => result.status === 'rejected')) throw Error('mail_refresh_retirement_unavailable');
     });
     return this.closing;

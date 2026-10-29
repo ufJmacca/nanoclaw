@@ -2,14 +2,23 @@ import type Database from 'better-sqlite3';
 import type { CosBinding } from '../../../cos-boundary.js';
 import { insertTask, pauseTask, resumeTask, cancelTask } from '../../scheduling/db.js';
 import { digest } from '../domain/contracts.js';
+import { contextGenerationPattern } from '../ops/conversation-ownership.js';
 export type NativeBriefRun = {
   id: string;
   schedule_id: string;
   schedule_version: number;
   intended_at: string;
   created_at?: string;
-  provenance?: { time_zone?: string };
+  provenance?: {
+    time_zone?: string;
+    purpose?: 'brief' | 'mail_review';
+    mail_review_policy_id?: string;
+    mail_review_policy_version?: number;
+    mail_review_slot?: 'morning' | 'afternoon';
+  };
 };
+const reviewPrompt =
+  'Use the existing main conversation. Call cos_context_get for the approved Mail review selection and its cited excerpts. Review at most ten selected threads. Excerpts may be partial; use the Mail tools for selected-thread detail only when needed, keeping the entire run within sixteen tool calls including the final briefing. Save only useful short plain-text reply drafts using cos_mail_draft_create, within the shared five-drafts-per-Sydney-day limit. Reconcile saved operation IDs; do not recreate an uncertain, edited, deleted or sent draft. Never send email. Do not make commitments or reserve Calendar time. If there are no useful changes, say so in the briefing. Finish by calling cos_brief_request with time_zone "Australia/Sydney" for Needs attention, Drafts ready and Upcoming meetings, including checked references, freshness and coverage limits. The host delivers its checked result; do not send a separate chat reply or prepare another answer.';
 /** A native task is only a wake signal. The host must separately hold current run authority. */
 export class NativeBriefTasks {
   constructor(readonly db: Database.Database) {
@@ -21,7 +30,26 @@ export class NativeBriefTasks {
   )`);
   }
   private definition(binding: CosBinding, run: NativeBriefRun) {
-    const timeZone = run.provenance?.time_zone;
+    const provenance = run.provenance,
+      timeZone = provenance?.time_zone,
+      review = provenance?.purpose === 'mail_review';
+    if (provenance?.purpose !== undefined && !['brief', 'mail_review'].includes(provenance.purpose)) return null;
+    if (review) {
+      if (
+        timeZone !== 'Australia/Sydney' ||
+        typeof provenance?.mail_review_policy_id !== 'string' ||
+        !contextGenerationPattern.test(provenance.mail_review_policy_id) ||
+        !Number.isSafeInteger(provenance.mail_review_policy_version) ||
+        provenance.mail_review_policy_version! < 1 ||
+        !['morning', 'afternoon'].includes(provenance.mail_review_slot ?? '')
+      )
+        return null;
+    } else if (
+      provenance?.mail_review_policy_id !== undefined ||
+      provenance?.mail_review_policy_version !== undefined ||
+      provenance?.mail_review_slot !== undefined
+    )
+      return null;
     if (timeZone !== undefined) {
       try {
         if (typeof timeZone !== 'string' || timeZone.length > 100) return null;
@@ -49,13 +77,16 @@ export class NativeBriefTasks {
       channelType: 'mattermost',
       threadId: null,
       content: JSON.stringify({
-        prompt: timeZone
-          ? `Prepare the approved scheduled brief by calling cos_brief_request with time_zone ${JSON.stringify(timeZone)}. The host delivers its checked result; do not send a separate chat reply or prepare another answer. Follow-ups remain proposals.`
-          : 'Prepare the approved scheduled brief using cos_brief_request. Treat follow-ups as proposals; the host controls notification delivery.',
+        prompt: review
+          ? reviewPrompt
+          : timeZone
+            ? `Prepare the approved scheduled brief by calling cos_brief_request with time_zone ${JSON.stringify(timeZone)}. The host delivers its checked result; do not send a separate chat reply or prepare another answer. Follow-ups remain proposals.`
+            : 'Prepare the approved scheduled brief using cos_brief_request. Treat follow-ups as proposals; the host controls notification delivery.',
         cosBrief: {
           runId: run.id,
           scheduleId: run.schedule_id,
           scheduleVersion: run.schedule_version,
+          ...(review ? { purpose: 'mail_review' } : {}),
           ...(timeZone ? { timeZone } : {}),
         },
       }),

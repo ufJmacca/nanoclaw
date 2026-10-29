@@ -13,7 +13,7 @@ const roots: string[] = [];
 afterEach(() => {
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
-async function fixture(slice: 'S11' | 'G01' | 'G02' | 'G03' | 'G04' = 'G01') {
+async function fixture(slice: 'S11' | 'G01' | 'G02' | 'G03' | 'G04' | 'G05' | 'G06' = 'G01') {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'retained-admin-'));
   roots.push(root);
   const binding = {
@@ -93,7 +93,7 @@ it('admits the healthy sealed G02 admin payload with all backup gates on the pro
     'programme_completion_unverified',
   );
 });
-it.each(['G03', 'G04'] as const)(
+it.each(['G03', 'G04', 'G05', 'G06'] as const)(
   'admits only a healthy sealed %s admin helper on the protected target without reopening S11 closure',
   async (slice) => {
     const f = await fixture(slice);

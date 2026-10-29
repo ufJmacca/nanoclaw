@@ -29,6 +29,16 @@ import { MailHost } from '../../modules/chief-of-staff/mail/host.js';
 import { MailMaintenance } from '../../modules/chief-of-staff/mail/maintenance.js';
 import { setTimeout as delay } from 'node:timers/promises';
 import { checkMailContext, mailAnswerNotice } from '../../modules/chief-of-staff/mail/answer-notice.js';
+import type { MailReviewReadScope } from '../../modules/chief-of-staff/automation/mail-review-access.js';
+import { loadMailReviewRecords } from '../../modules/chief-of-staff/automation/mail-review-records.js';
+import { MailReviewAccess } from '../../modules/chief-of-staff/automation/mail-review-access.js';
+import { MailReviewPreparer } from '../../modules/chief-of-staff/automation/mail-review-preparation.js';
+import { mailReviewSchedulePolicy } from '../../modules/chief-of-staff/automation/mail-review-policy.js';
+import type { MailReviewBinding } from '../../modules/chief-of-staff/automation/mail-review-binding.js';
+import { PriorityStore } from '../../modules/chief-of-staff/store/priorities.js';
+import { MailReviewBrief } from '../../modules/chief-of-staff/automation/mail-review-brief.js';
+import { BriefCollector } from '../../modules/chief-of-staff/automation/brief-collector.js';
+import { BriefArtifacts } from '../../modules/chief-of-staff/automation/brief-artifacts.js';
 const scopes: string[] = [],
   roots: string[] = [];
 let admin: pg.Client, database: BoundedDatabase;
@@ -100,7 +110,7 @@ async function fixture(hooks: ConstructorParameters<typeof MailStore>[2] = {}) {
   };
   return { scope, root, artifacts, store, context, binding };
 }
-async function capture(capturedAt?: number, ageMs = 1000) {
+async function capture(capturedAt?: number, ageMs = 1000, review = false) {
   // Production polling and retention both use the selected PostgreSQL clock.
   const at: number = capturedAt ?? (await admin.query('SELECT clock_timestamp() AS now')).rows[0].now.getTime();
   const raw = {
@@ -111,7 +121,18 @@ async function capture(capturedAt?: number, ageMs = 1000) {
     labelIds: ['INBOX'],
     payload: {
       mimeType: 'text/plain',
-      body: { data: Buffer.from('Fixture mail asks about project alpha.').toString('base64url') },
+      headers: review
+        ? [
+            { name: 'Subject', value: 'Please review project alpha' },
+            { name: 'From', value: 'person@example.invalid' },
+            { name: 'To', value: 'owner@example.invalid' },
+          ]
+        : [],
+      body: {
+        data: Buffer.from(
+          review ? 'Could you review project alpha?' : 'Fixture mail asks about project alpha.',
+        ).toString('base64url'),
+      },
     },
   };
   return collectMail({
@@ -119,8 +140,30 @@ async function capture(capturedAt?: number, ageMs = 1000) {
     capturedAt: at,
     reader: {
       profile: async () => ({ mailboxEmail: 'owner@example.invalid', historyId: '100' }),
-      list: async () => ({ messages: [{ id: 'aa01', threadId: 'bb01' }], nextPageToken: null, resultSizeEstimate: 1 }),
-      message: async (_id: string, window: MailWindow) => normalizeMailMessage(raw, window),
+      list: async () => ({
+        messages: [{ id: 'aa01', threadId: 'bb01' }, ...(review ? [{ id: 'cc02', threadId: 'dd02' }] : [])],
+        nextPageToken: null,
+        resultSizeEstimate: review ? 2 : 1,
+      }),
+      message: async (id: string, window: MailWindow) =>
+        normalizeMailMessage(
+          id === 'cc02'
+            ? {
+                ...raw,
+                id: 'cc02',
+                threadId: 'dd02',
+                payload: {
+                  mimeType: 'text/plain',
+                  headers: [
+                    { name: 'Subject', value: 'Weekly newsletter' },
+                    { name: 'From', value: 'list@example.invalid' },
+                  ],
+                  body: { data: Buffer.from('An older owner-only mail observation.').toString('base64url') },
+                },
+              }
+            : raw,
+          window,
+        ),
       history: async () => ({ changedIds: [], deletedIds: [], historyId: '200', nextPageToken: null }),
       thread: async () => ({ messages: [], excluded: 0, unsupported: 0 }),
     },
@@ -467,10 +510,10 @@ test('G04 reconstructs only the current capture and preserves the original selec
   assert.equal(coverage.status, 'ok');
   assert.equal(JSON.stringify(coverage).includes('Fixture mail asks'), false);
 });
-async function publishFixture(ageMs = 1000) {
+async function publishFixture(ageMs = 1000, review = false) {
   const f = await fixture();
   await f.store.bind(f.context, f.binding);
-  const prepared = await capture(undefined, ageMs),
+  const prepared = await capture(undefined, ageMs, review),
     id = randomUUID();
   await f.store.start(f.context, f.binding.id, id, prepared.window);
   assert.equal((await f.store.publish(f.context, f.binding.id, id, prepared)).status, 'ok');
@@ -482,6 +525,251 @@ async function publishFixture(ageMs = 1000) {
   );
   return { ...f, prepared, id, knowledge, context: { ...f.context, generation: randomUUID() } };
 }
+test('G06 preparation loads only current published owner Mail records and refuses corrupt stored content', async () => {
+  const f = await publishFixture();
+  const load = (ctx = f.context, capture = f.id) =>
+    database.run((client) => loadMailReviewRecords(client, ctx, f.binding.id, capture));
+  const records = await load();
+  assert.equal(records.length, 1);
+  assert.equal(records[0].message.id, 'aa01');
+  assert.equal(records[0].message.trust, 'untrusted_mail_evidence');
+  assert.match(records[0].message.text, /project alpha/);
+  assert.ok(records[0].revision_digest);
+  assert.deepEqual(await load({ ...f.context, ownerId: 'another-owner' }), []);
+  assert.deepEqual(await load(f.context, randomUUID()), []);
+  await assert.rejects(
+    loadMailReviewRecords(
+      admin,
+      { ...f.context, origin: { kind: 'schedule', runId: 'a'.repeat(64), generation: 1 } },
+      f.binding.id,
+      f.id,
+    ),
+    /mail_review_source_unavailable/,
+  );
+  await admin.query("UPDATE cos.sources SET status='revoked' WHERE scope_id=$1", [f.scope]);
+  assert.deepEqual(await load(), []);
+  await admin.query("UPDATE cos.sources SET status='current' WHERE scope_id=$1", [f.scope]);
+  await admin.query('UPDATE cos.mail_messages SET content_digest=$2 WHERE scope_id=$1', [
+    f.scope,
+    digest('corrupt stored content'),
+  ]);
+  await assert.rejects(loadMailReviewRecords(admin, f.context, f.binding.id, f.id), /mail_review_source_unavailable/);
+});
+test('G06 preparation freezes a real published source through runtime SQL and reuses it without another metadata read', async () => {
+  const f = await publishFixture(1000, true),
+    writer = randomUUID(),
+    policy = randomUUID();
+  const writerBody = {
+    format: 'cos-mail-draft-binding/v1',
+    provider: 'fixture',
+    readerBindingId: f.binding.id,
+    mailboxDigest: digest(f.binding.mailboxEmail),
+    writerClientDigest: digest('writer'),
+    readerClientDigest: digest('reader'),
+    credentialReference: randomUUID(),
+    nativeBindingDigest: digest('fixture native'),
+    journalGeneration: randomUUID(),
+    maxPerDay: 5,
+    timeZone: 'Australia/Sydney',
+    replyMode: 'plain_text_reply',
+    permissionScopes: ['https://www.googleapis.com/auth/gmail.compose'],
+    recoveryProofDigest: digest('fixture recovery'),
+  };
+  const binding: MailReviewBinding = {
+    format: 'cos-mail-review-binding/v1',
+    provider: 'fixture',
+    readerBindingId: f.binding.id,
+    writerBindingId: writer,
+    writerVersion: 1,
+    writerDigest: digest(writerBody),
+    writerConsentRef: digest('fixture consent'),
+    nativeBindingDigest: writerBody.nativeBindingDigest,
+    mailboxDigest: writerBody.mailboxDigest,
+    contextGeneration: f.context.generation,
+    morningScheduleId: randomUUID(),
+    afternoonScheduleId: randomUUID(),
+    timeZone: 'Australia/Sydney',
+    maxCandidateThreads: 10,
+    maxModelAttempts: 3,
+    maxDraftsPerDay: 5,
+  };
+  const runId = digest(randomUUID()),
+    limits = { max_turns: 3, max_tool_calls: 16, deadline_seconds: 300, refresh_seconds: 30 };
+  try {
+    await admin.query(
+      "INSERT INTO cos.mail_draft_writer_bindings(scope_id,id,reader_binding_id,owner_id,session_id,version,state) VALUES($1,$2,$3,$4,$5,1,'enabled')",
+      [f.scope, writer, f.binding.id, f.context.ownerId, f.context.sessionId],
+    );
+    await admin.query(
+      'INSERT INTO cos.mail_draft_writer_revisions(scope_id,binding_id,version,body,digest,consent_ref) VALUES($1,$2,1,$3,$4,$5)',
+      [f.scope, writer, JSON.stringify(writerBody), digest(writerBody), binding.writerConsentRef],
+    );
+    await admin.query(
+      "INSERT INTO cos.mail_review_policies(scope_id,id,owner_id,session_id,agent_group_id,version,state) VALUES($1,$2,$3,$4,$1,1,'enabled')",
+      [f.scope, policy, f.context.ownerId, f.context.sessionId],
+    );
+    await admin.query(
+      'INSERT INTO cos.mail_review_policy_revisions(scope_id,binding_id,version,reader_binding_id,writer_binding_id,writer_version,body,digest,owner_config_ref) VALUES($1,$2,1,$3,$4,1,$5,$6,$7)',
+      [f.scope, policy, f.binding.id, writer, JSON.stringify(binding), digest(binding), digest('fixture config')],
+    );
+    await admin.query(
+      "INSERT INTO cos.brief_schedules(scope_id,id,owner_id,session_id,agent_group_id,title,policy,limits,version,provenance,purpose,mail_review_policy_id,mail_review_policy_version,mail_review_slot) VALUES($1,$2,$3,$4,$1,'Fixture morning review',$5,$6,1,'{}','mail_review',$7,1,'morning')",
+      [
+        f.scope,
+        binding.morningScheduleId,
+        f.context.ownerId,
+        f.context.sessionId,
+        JSON.stringify(mailReviewSchedulePolicy('morning')),
+        JSON.stringify(limits),
+        policy,
+      ],
+    );
+    await admin.query(
+      `INSERT INTO cos.brief_schedule_revisions(scope_id,schedule_id,version,body,proposal_id,mail_review_policy_id,mail_review_policy_version)
+       SELECT scope_id,id,version,to_jsonb(s),NULL,mail_review_policy_id,mail_review_policy_version FROM cos.brief_schedules s WHERE scope_id=$1 AND id=$2`,
+      [f.scope, binding.morningScheduleId],
+    );
+    await admin.query(
+      "INSERT INTO cos.brief_runs(scope_id,id,schedule_id,schedule_version,owner_id,session_id,agent_group_id,intended_at,local_date,state,limits,model_calls,generation,lease_owner,lease_until,deadline_at,provenance) VALUES($1,$2,$3,1,$4,$5,$1,clock_timestamp(),CURRENT_DATE,'dispatched',$6,0,1,$7,clock_timestamp()+interval '5 minutes',clock_timestamp()+interval '5 minutes','{}')",
+      [
+        f.scope,
+        runId,
+        binding.morningScheduleId,
+        f.context.ownerId,
+        f.context.sessionId,
+        JSON.stringify(limits),
+        'cos-native-' + binding.nativeBindingDigest,
+      ],
+    );
+    const identity = { bindingDigest: binding.nativeBindingDigest, contextGeneration: f.context.generation };
+    const access = new MailReviewAccess({
+      authority: () => identity,
+      ownerAuthority: () => identity,
+      matches: () => true,
+    });
+    let metadataReads = 0;
+    const preparer = new MailReviewPreparer({
+      database,
+      access,
+      knowledge: f.knowledge,
+      current: () => true,
+      connector: {
+        reviewSource: async (_ctx, _binding, message, _window, current) => {
+          assert.equal(await current(), true);
+          metadataReads++;
+          const stored = f.prepared.messages.find((m) => m.id === message)!;
+          return {
+            id: stored.id,
+            threadId: stored.threadId,
+            historyId: stored.historyId,
+            internalDate: stored.internalDate,
+            observedAt: Date.now(),
+            excluded: null,
+          };
+        },
+      },
+    });
+    assert.equal((await preparer.execute(f.context, runId, 1)).status, 'ok');
+    assert.equal(metadataReads, 1);
+    const frozen = (
+      await admin.query('SELECT review_inputs,model_calls,tool_calls FROM cos.brief_runs WHERE scope_id=$1 AND id=$2', [
+        f.scope,
+        runId,
+      ])
+    ).rows[0];
+    assert.equal(frozen.review_inputs.candidates.length, 1);
+    assert.equal(frozen.review_inputs.candidates[0].source_message_id, 'aa01');
+    assert.equal(frozen.model_calls, 0);
+    assert.equal(frozen.tool_calls, 0);
+    assert.equal((await preparer.execute(f.context, runId, 1)).status, 'ok');
+    assert.equal(metadataReads, 1);
+    const scheduled = {
+      ...f.context,
+      ingressId: `brief:${runId}:1`,
+      origin: { kind: 'schedule' as const, runId, generation: 1 },
+    };
+    assert.equal(
+      (await database.run((client) => access.check(client, scheduled, 'read')))?.inputs.candidates.length,
+      1,
+    );
+    assert.equal(await database.run((client) => access.check(client, scheduled, 'draft', 'bb01')), null);
+    await admin.query('UPDATE cos.brief_runs SET model_calls=1 WHERE scope_id=$1 AND id=$2', [f.scope, runId]);
+    assert.equal((await database.run((client) => access.check(client, scheduled, 'draft', 'bb01')))?.id, policy);
+    const scopedKnowledge = new KnowledgeStore(
+      database,
+      f.artifacts,
+      {},
+      {
+        mailEnabled: () => true,
+        mailAccess: () => true,
+        mailReviewAccess: access,
+      },
+    );
+    const priorities = new PriorityStore(
+      database,
+      scopedKnowledge,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      access,
+    );
+    const reviewContext = await priorities.context(scheduled, scheduled);
+    assert.equal(reviewContext.status, 'ok');
+    const displayed = reviewContext.mail_review as {
+      candidates: { excerpt: string; citation: { evidence_id: string } }[];
+    };
+    assert.equal(displayed.candidates.length, 1);
+    assert.match(displayed.candidates[0].excerpt, /Could you review project alpha/);
+    assert.match(displayed.candidates[0].citation.evidence_id, /^[a-f0-9-]{36}$/);
+    assert.equal((await scopedKnowledge.contextReady(f.context)).status, 'ok');
+    const other = (await database.run((client) => loadMailReviewRecords(client, f.context, f.binding.id, f.id))).find(
+      (row) => row.message.id === 'cc02',
+    )!;
+    assert.equal((await f.knowledge.get(f.context, other.source_id, other.revision_id, 1)).status, 'ok');
+    assert.equal((await scopedKnowledge.get(scheduled, other.source_id, other.revision_id, 1)).status, 'denied');
+    // This source/publication fixture has no draft provider or effects. Draft-status behavior is verified separately.
+    const mailBrief = new MailReviewBrief({
+      database,
+      access,
+      view: priorities.mailReviewContext!,
+      knowledge: scopedKnowledge,
+      drafts: { reviewNotices: async () => ({ status: 'ok', drafts: [] }), reviewNoticesCurrent: async () => true },
+    });
+    const collected = await mailBrief.collect(scheduled);
+    assert.equal(collected?.status, 'ok');
+    const artifacts = new BriefArtifacts(
+      new BriefCollector({ database, work: priorities.work, knowledge: scopedKnowledge, mailReview: mailBrief }),
+      priorities.proactive,
+    );
+    const briefing = await artifacts.prepare(scheduled, randomUUID(), 'Australia/Sydney');
+    assert.equal(briefing.status, 'ok');
+    for (const heading of ['Needs attention:', 'Drafts ready:', 'Upcoming meetings:'])
+      assert.ok(String(briefing.text).includes(heading));
+    assert.equal(String(briefing.text).includes('Weekly newsletter'), false);
+    assert.equal((await scopedKnowledge.contextReady(f.context)).status, 'ok');
+    await admin.query("UPDATE cos.mail_review_policies SET state='revoked' WHERE scope_id=$1", [f.scope]);
+    assert.equal((await priorities.context(scheduled, scheduled)).status, 'denied');
+    assert.equal((await preparer.execute(f.context, runId, 1)).status, 'denied');
+    assert.equal(metadataReads, 1);
+  } finally {
+    for (const table of [
+      'brief_runs',
+      'brief_schedule_revisions',
+      'brief_schedules',
+      'mail_review_policy_revisions',
+      'mail_review_policies',
+      'mail_draft_writer_revisions',
+      'mail_draft_writer_bindings',
+    ])
+      await admin.query('DELETE FROM cos.' + table + ' WHERE scope_id=$1', [f.scope]);
+  }
+});
 async function eventually(check: () => Promise<boolean>): Promise<void> {
   const until = performance.now() + 3000;
   while (!(await check())) {
@@ -637,6 +925,92 @@ const rehashCapture = (value: Awaited<ReturnType<typeof capture>>) => {
   value.digest = digest(content);
   return value;
 };
+test('G06 restricts new scheduled Mail reads and citations while preserving earlier owner context', async () => {
+  const f = await fixture();
+  await f.store.bind(f.context, f.binding);
+  const prepared = await capture(),
+    { digest: _digest, ...first } = prepared.messages[0];
+  const second = { ...first, id: 'aa02', threadId: 'bb02' };
+  prepared.messages.push({ ...second, digest: digest(second) });
+  prepared.textBytes *= 2;
+  rehashCapture(prepared);
+  const id = randomUUID();
+  assert.equal((await f.store.start(f.context, f.binding.id, id, prepared.window)).status, 'ok');
+  assert.equal((await f.store.publish(f.context, f.binding.id, id, prepared)).status, 'ok');
+  let selected: MailReviewReadScope | null = { binding_id: f.binding.id, thread_ids: ['bb01'] };
+  let revokeOnDisclosure = false;
+  const knowledge = new KnowledgeStore(
+    database,
+    f.artifacts,
+    {
+      beforeDisclosure: async () => {
+        if (revokeOnDisclosure) selected = { binding_id: null, thread_ids: [] };
+      },
+    },
+    {
+      mailEnabled: () => true,
+      mailAccess: () => true,
+      mailReviewAccess: { scopeForReads: async (_client, ctx) => (ctx.origin?.kind === 'schedule' ? selected : null) },
+    },
+  );
+  const owner = { ...f.context, generation: randomUUID() },
+    runId = 'a'.repeat(64),
+    scheduled = {
+      ...owner,
+      ingressId: `brief:${runId}:1`,
+      origin: { kind: 'schedule' as const, runId, generation: 1 },
+    };
+  const old = await knowledge.search(owner, { query: 'alpha' });
+  assert.equal(old.status, 'ok');
+  assert.equal((old.items as unknown[]).length, 2);
+  const outside = (
+    await admin.query(
+      "SELECT mm.source_id,s.current_revision_id FROM cos.mail_messages mm JOIN cos.sources s ON s.scope_id=mm.scope_id AND s.id=mm.source_id WHERE mm.scope_id=$1 AND mm.provider_thread_id='bb02'",
+      [f.scope],
+    )
+  ).rows[0];
+  const inside = (
+    await admin.query("SELECT source_id FROM cos.mail_messages WHERE scope_id=$1 AND provider_thread_id='bb01'", [
+      f.scope,
+    ])
+  ).rows[0];
+  const found = await knowledge.search(scheduled, { query: 'alpha' });
+  assert.equal(found.status, 'ok');
+  assert.equal((found.items as unknown[]).length, 1);
+  assert.equal((await knowledge.get(scheduled, outside.source_id, outside.current_revision_id, 0)).status, 'denied');
+  assert.equal((await knowledge.contextReady(scheduled)).status, 'ok');
+  assert.equal((await knowledge.contextReady(owner)).status, 'ok');
+  const oldEvidence = (old.items as Array<{ source_id: string; text: string; evidence_id: string }>).find(
+    (item) => item.source_id === outside.source_id,
+  )!;
+  assert.equal(
+    (
+      await knowledge.answers.prepare(scheduled, randomUUID(), {
+        kind: 'answer',
+        coverage: 'limited',
+        claims: [
+          {
+            kind: 'quote',
+            text: oldEvidence.text,
+            citations: [{ kind: 'source', evidence_id: oldEvidence.evidence_id }],
+          },
+        ],
+      })
+    ).status,
+    'denied',
+  );
+  assert.equal((await knowledge.readSourcesCurrent(scheduled, [inside.source_id])).status, 'ok');
+  selected = { binding_id: null, thread_ids: [] };
+  assert.deepEqual((await knowledge.search(scheduled, { query: 'alpha' })).items, []);
+  assert.equal((await knowledge.readSourcesCurrent(scheduled, [inside.source_id])).status, 'denied');
+  assert.equal((await knowledge.contextReady(owner)).status, 'ok');
+  // Only the separately checked generic schedule path may return an unrestricted read scope.
+  selected = null;
+  assert.equal(((await knowledge.search(scheduled, { query: 'alpha' })).items as unknown[]).length, 2);
+  selected = { binding_id: f.binding.id, thread_ids: ['bb01'] };
+  revokeOnDisclosure = true;
+  assert.equal((await knowledge.search(scheduled, { query: 'alpha' })).status, 'denied');
+});
 test('G04 publishes mail as cited untrusted evidence in the same committed capture and cursor', async () => {
   const f = await publishFixture();
   const row = (

@@ -1,6 +1,9 @@
 import { verifyExactFlatTap } from './flat-tap-report.js';
 /** Exact flat TAP contracts; aggregate counts and successful exits alone are insufficient. */
 export const MAIL_STORE_CASES = [
+  'G06 preparation loads only current published owner Mail records and refuses corrupt stored content',
+  'G06 preparation freezes a real published source through runtime SQL and reuses it without another metadata read',
+  'G06 restricts new scheduled Mail reads and citations while preserving earlier owner context',
   'G04 host inventory pages all retention bindings without account or message content',
   'G04 mailbox overflow keeps bounded notices and retained context while checking undisplayed access',
   'G04 mailbox legacy context identity remains valid with 1 bindings',

@@ -483,7 +483,7 @@ it('refuses path-shaped page cursors before reading credential state', async () 
   ).rejects.toThrow('credential_recovery_page_unavailable');
   expect(f.authority).not.toHaveBeenCalled();
 });
-it('persists only an encrypted owner/release/generation-bound cursor and wraps completed pages', async () => {
+async function scheduledCursorFixture() {
   const f = await fixture(),
     queue = new BackupQueue(f.owner, async (_kind, operation) => operation(f.vault + '/journals'));
   for (let index = 0; index < 13; index++) f.profiles[0].fences.deny('scope', randomUUID(), 'revoked');
@@ -497,9 +497,12 @@ it('persists only an encrypted owner/release/generation-bound cursor and wraps c
         await queue.recordCredential(change, guard);
       },
     );
+  return { f, run, file: f.vault + '/journals/credential-recovery-page.json' };
+}
+it('persists only an encrypted owner-bound cursor and wraps completed pages', async () => {
+  const { f, run, file } = await scheduledCursorFixture();
   expect(await run()).toMatchObject({ recorded: 10, next_after: expect.any(String) });
-  const file = f.vault + '/journals/credential-recovery-page.json',
-    first = JSON.parse(fs.readFileSync(file, 'utf8'));
+  const first = JSON.parse(fs.readFileSync(file, 'utf8'));
   expect(first).toMatchObject({
     contract: 'cos-credential-recovery-cursor/v1',
     ownerDigest: f.owner,
@@ -511,9 +514,19 @@ it('persists only an encrypted owner/release/generation-bound cursor and wraps c
   expect(await run()).toMatchObject({ recorded: 10 });
   expect(await run()).toMatchObject({ recorded: 1, next_after: null });
   expect(await run()).toMatchObject({ recorded: 10 });
-  expect(await run('release-newer', 8)).toMatchObject({ recorded: 10 });
-  expect(JSON.parse(fs.readFileSync(file, 'utf8'))).toMatchObject({ releaseId: 'release-newer', generation: 8 });
 });
+it.each(['release', 'generation'] as const)(
+  'restarts the scheduled cursor for a changed %s without adopting its old position',
+  async (changed) => {
+    const { run, file } = await scheduledCursorFixture(),
+      first = await run();
+    expect(first).toMatchObject({ recorded: 10, next_after: expect.any(String) });
+    const release = changed === 'release' ? 'release-newer' : 'release-current',
+      generation = changed === 'generation' ? 8 : 7;
+    expect(await run(release, generation)).toEqual(first);
+    expect(JSON.parse(fs.readFileSync(file, 'utf8'))).toMatchObject({ releaseId: release, generation });
+  },
+);
 for (const corruption of ['foreign-owner', 'linked', 'broad', 'extra-field', 'null-value'] as const)
   it(`holds a ${corruption} cursor instead of overwriting it or selecting foreign source paths`, async () => {
     const f = await fixture(),

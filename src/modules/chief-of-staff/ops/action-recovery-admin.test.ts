@@ -499,7 +499,7 @@ it('S11-T03 an operations backup cannot claim an unrecorded release manifest as 
   expect(f.nativeBackup).not.toHaveBeenCalled();
 });
 
-async function checkpointFixture(slice: 'G02' | 'G03' | 'G04' = 'G02') {
+async function checkpointFixture(slice: 'G02' | 'G03' | 'G04' | 'G05' | 'G06' = 'G02') {
   const s = await fixture(),
     manifest = fixtureVaultRelease(slice),
     release = recoveryReleaseForManifest(manifest);
@@ -580,7 +580,7 @@ it('G02 parses the fixed owner checkpoint without any destination or source cont
   });
   expect(() => parseAdminArguments([...args, '--destination', '/tmp/plaintext'])).toThrow('invalid_admin_arguments');
 });
-it.each(['G02', 'G03', 'G04'] as const)(
+it.each(['G02', 'G03', 'G04', 'G05', 'G06'] as const)(
   '%s connects current recorded release and real owner leases to the encrypted checkpoint without plaintext staging',
   async (slice) => {
     const s = await checkpointFixture(slice);

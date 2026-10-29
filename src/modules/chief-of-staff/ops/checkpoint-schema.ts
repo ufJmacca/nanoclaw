@@ -5,7 +5,7 @@ import { MIGRATIONS, SCHEMA_VERSION } from '../store/migrations.js';
  * permissions or schema to the current runtime. Writers select an epoch explicitly
  * and must prove that the database still has that exact migration history. */
 export function checkpointSchema(version: number) {
-  if (![18, 19, 20].includes(version) || version > SCHEMA_VERSION) throw Error('checkpoint_schema_incompatible');
+  if (![18, 19, 20, 21].includes(version) || version > SCHEMA_VERSION) throw Error('checkpoint_schema_incompatible');
   const migrations = MIGRATIONS.filter((migration) => migration.version <= version);
   if (migrations.length !== version) throw Error('checkpoint_schema_incompatible');
   return {

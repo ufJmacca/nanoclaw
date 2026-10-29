@@ -42,11 +42,34 @@ export type DraftEffect = DraftReservation & {
 export type DraftObservation =
   | { state: 'verified'; draftId: string; messageId: string; threadId: string; contentDigest: string }
   | { state: 'edited' | 'missing' | 'sent' | 'collision' };
+export type MailReviewPolicyPin = { scopeId: string; policyId: string; policyVersion: number; profileDigest: string };
+export type MailReviewPolicyHead = MailReviewPolicyPin & { revision: number; enabled: boolean };
+export type MailReviewPinRequest = {
+  requestId: string;
+  expectedRevision: number;
+  pin: MailReviewPolicyPin;
+  enabled: boolean;
+};
 const hash = (value: unknown): value is string => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 const providerId = (value: unknown): value is string => typeof value === 'string' && /^[a-f0-9]{1,128}$/.test(value);
 const draftId = (value: unknown): value is string => typeof value === 'string' && /^[a-zA-Z0-9_-]{1,256}$/.test(value);
 const uuid = (value: unknown): value is string => typeof value === 'string' && contextGenerationPattern.test(value);
 const keys = (value: object, expected: string) => Object.keys(value).sort().join(',') === expected;
+const positiveInt = (value: unknown): value is number =>
+  typeof value === 'number' && Number.isSafeInteger(value) && value > 0 && value <= 2147483647;
+function validReviewPin(pin: MailReviewPolicyPin): boolean {
+  return (
+    !!pin &&
+    typeof pin === 'object' &&
+    !Array.isArray(pin) &&
+    keys(pin, 'policyId,policyVersion,profileDigest,scopeId') &&
+    typeof pin.scopeId === 'string' &&
+    /^[a-zA-Z0-9_-]{1,128}$/.test(pin.scopeId) &&
+    uuid(pin.policyId) &&
+    positiveInt(pin.policyVersion) &&
+    hash(pin.profileDigest)
+  );
+}
 const reservationKeys =
   'bindingId,contentDigest,contextGeneration,mailboxDigest,requestId,scopeId,sourceMessageId,threadId';
 function validReservation(value: DraftReservation): boolean {
@@ -232,6 +255,108 @@ export class DraftJournal {
       | undefined;
     if (!owner || owner.installation !== this.installationDigest || owner.generation !== this.generation)
       throw new Error('unsafe_mail_draft_journal');
+  }
+  private hasReviewPins(): boolean {
+    const rows = this.db
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('mail_review_policy_heads','mail_review_policy_requests')",
+      )
+      .all();
+    if (rows.length !== 0 && rows.length !== 2) throw Error('unsafe_mail_review_pin');
+    return rows.length === 2;
+  }
+  /** A denial pin only. Missing history is never initialized by a runtime read. */
+  reviewPolicyPin(scopeId: string): MailReviewPolicyHead | null {
+    this.assertCurrent();
+    if (typeof scopeId !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(scopeId)) throw Error('unsafe_mail_review_pin');
+    if (!this.hasReviewPins()) return null;
+    const row = this.db.prepare('SELECT record FROM mail_review_policy_heads WHERE scope_id=?').get(scopeId) as
+      | { record: string }
+      | undefined;
+    if (!row) return null;
+    const head = JSON.parse(row.record) as MailReviewPolicyHead;
+    if (
+      !head ||
+      typeof head !== 'object' ||
+      !keys(head, 'enabled,policyId,policyVersion,profileDigest,revision,scopeId') ||
+      !validReviewPin({
+        scopeId: head.scopeId,
+        policyId: head.policyId,
+        policyVersion: head.policyVersion,
+        profileDigest: head.profileDigest,
+      }) ||
+      head.scopeId !== scopeId ||
+      !positiveInt(head.revision) ||
+      typeof head.enabled !== 'boolean'
+    )
+      throw Error('unsafe_mail_review_pin');
+    return structuredClone(head);
+  }
+  /** Trusted owner administration only, after SQL policy/readiness checks. This metadata grants no
+   * provider or model authority; it prevents restored SQL/profile files from reviving older policy. */
+  publishReviewPolicyPin(request: MailReviewPinRequest, assertAuthority: () => void): MailReviewPolicyHead {
+    if (
+      !request ||
+      typeof request !== 'object' ||
+      !keys(request, 'enabled,expectedRevision,pin,requestId') ||
+      !uuid(request.requestId) ||
+      !Number.isSafeInteger(request.expectedRevision) ||
+      request.expectedRevision < 0 ||
+      request.expectedRevision >= 2147483647 ||
+      typeof request.enabled !== 'boolean' ||
+      !validReviewPin(request.pin)
+    )
+      throw Error('unsafe_mail_review_pin');
+    const captured = structuredClone(request),
+      inputDigest = digest(captured);
+    const current = () => {
+      this.assertCurrent();
+      assertAuthority();
+      if (digest(request) !== inputDigest) throw Error('mail_review_pin_inputs_changed');
+    };
+    current();
+    return this.db
+      .transaction(() => {
+        current();
+        if (!this.hasReviewPins())
+          this.db.exec(`CREATE TABLE mail_review_policy_heads(scope_id TEXT PRIMARY KEY,record TEXT NOT NULL);
+        CREATE TABLE mail_review_policy_requests(scope_id TEXT NOT NULL,request_id TEXT NOT NULL,input_digest TEXT NOT NULL,result_digest TEXT NOT NULL,PRIMARY KEY(scope_id,request_id));`);
+        const head = this.reviewPolicyPin(captured.pin.scopeId),
+          prior = this.db
+            .prepare(
+              'SELECT input_digest,result_digest FROM mail_review_policy_requests WHERE scope_id=? AND request_id=?',
+            )
+            .get(captured.pin.scopeId, captured.requestId) as
+            | { input_digest: string; result_digest: string }
+            | undefined;
+        if (prior) {
+          if (prior.input_digest !== inputDigest) throw Error('mail_review_pin_request_conflict');
+          if (!head || digest(head) !== prior.result_digest) throw Error('mail_review_pin_request_stale');
+          current();
+          return head;
+        }
+        if ((head?.revision ?? 0) !== captured.expectedRevision) throw Error('mail_review_pin_revision_conflict');
+        if (head?.policyId === captured.pin.policyId && captured.pin.policyVersion < head.policyVersion)
+          throw Error('mail_review_pin_version_regressed');
+        const next: MailReviewPolicyHead = {
+          ...captured.pin,
+          revision: captured.expectedRevision + 1,
+          enabled: captured.enabled,
+        };
+        this.db
+          .prepare(
+            'INSERT INTO mail_review_policy_heads(scope_id,record) VALUES(?,?) ON CONFLICT(scope_id) DO UPDATE SET record=excluded.record',
+          )
+          .run(next.scopeId, JSON.stringify(next));
+        this.db
+          .prepare(
+            'INSERT INTO mail_review_policy_requests(scope_id,request_id,input_digest,result_digest) VALUES(?,?,?,?)',
+          )
+          .run(next.scopeId, captured.requestId, inputDigest, digest(next));
+        current();
+        return structuredClone(next);
+      })
+      .immediate();
   }
   private identity(mailboxDigest: string, sourceMessageId: string): string {
     return digest({

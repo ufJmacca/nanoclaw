@@ -24,7 +24,7 @@ afterEach(() => {
   for (const close of cleanup.splice(0).reverse()) close();
   vi.resetAllMocks();
 });
-function fixture() {
+function fixture(slice: 'G05' | 'G06' = 'G05') {
   const root = fs.mkdtempSync(os.tmpdir() + '/cos-draft-recovery-owner-');
   fs.chmodSync(root, 0o700);
   cleanup.push(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -90,7 +90,7 @@ function fixture() {
     binding,
     witness: {} as RecoveredTargetVaultIdentity['witness'],
     queueOperationId: randomUUID(),
-    recovery: recoveryReleaseForManifest(fixtureVaultRelease('G05')),
+    recovery: recoveryReleaseForManifest(fixtureVaultRelease(slice)),
     expectedSnapshotDigest: digest('current snapshot'),
     current: vi.fn(),
   };
@@ -206,31 +206,37 @@ it('admits only fixed G05 restore identities through the separate test profile c
   ])
     expect(() => parseBackupOwnerRestoreArguments(changed)).toThrow('invalid_owner_admin_arguments');
 });
-it('uses both fixed recovery compositions, persists an offline proof, and never publishes a writer profile', async () => {
-  const f = fixture(),
-    result = await f.invoke();
-  expect(result).toMatchObject({
-    status: 'mail_draft_restore_verified',
-    writer_binding_id: f.args.writerBindingId,
-    credentials_activated: false,
-    admission_restored: false,
-    draft_journal_restored: false,
-    writer_activated: false,
-  });
-  const file = f.settings.stateRoot + '/mail-drafts/restore-proofs/' + result.recovery_proof_digest + '.json',
-    proof = readPrivate<Record<string, unknown>>(file);
-  expect(digest(proof)).toBe(result.recovery_proof_digest);
-  expect(proof).toMatchObject({
-    selection: f.selection,
-    journalGeneration: f.generation,
-    state: { schemaVersion: 20, schemaDigest: checkpointSchema(20).digest },
-    writerActivated: false,
-  });
-  expect(backend.state).toHaveBeenCalledOnce();
-  expect(backend.credentials).toHaveBeenCalledOnce();
-  expect(fs.existsSync(f.settings.stateRoot + '/mail-drafts/writer-profile.json')).toBe(false);
-  expect(f.checkDatabase).toHaveBeenCalled();
-});
+it.each(['G05', 'G06'] as const)(
+  '%s persists an offline proof from both recoveries without publishing a writer profile',
+  async (slice) => {
+    const f = fixture(slice),
+      result = await f.invoke();
+    expect(result).toMatchObject({
+      status: 'mail_draft_restore_verified',
+      writer_binding_id: f.args.writerBindingId,
+      credentials_activated: false,
+      admission_restored: false,
+      draft_journal_restored: false,
+      writer_activated: false,
+    });
+    const file = f.settings.stateRoot + '/mail-drafts/restore-proofs/' + result.recovery_proof_digest + '.json',
+      proof = readPrivate<Record<string, unknown>>(file);
+    expect(digest(proof)).toBe(result.recovery_proof_digest);
+    expect(proof).toMatchObject({
+      selection: f.selection,
+      journalGeneration: f.generation,
+      state: {
+        schemaVersion: slice === 'G06' ? 21 : 20,
+        schemaDigest: checkpointSchema(slice === 'G06' ? 21 : 20).digest,
+      },
+      writerActivated: false,
+    });
+    expect(backend.state).toHaveBeenCalledOnce();
+    expect(backend.credentials).toHaveBeenCalledOnce();
+    expect(fs.existsSync(f.settings.stateRoot + '/mail-drafts/writer-profile.json')).toBe(false);
+    expect(f.checkDatabase).toHaveBeenCalled();
+  },
+);
 it.each([
   'missing-consent',
   'wrong-request',

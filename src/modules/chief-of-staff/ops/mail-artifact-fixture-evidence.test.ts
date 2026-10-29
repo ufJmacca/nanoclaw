@@ -11,6 +11,10 @@ import {
   MAIL_DRAFT_NATIVE_CASES,
 } from '../../../contracts/chief-of-staff/mail-draft-fixture-report.js';
 import {
+  MAIL_REVIEW_SCHEMA_RESULTS,
+  MAIL_REVIEW_NATIVE_CASES,
+} from '../../../contracts/chief-of-staff/mail-review-fixture-report.js';
+import {
   verifyMailArtifactFixtureEvidence,
   mailArtifactFixtureCertificate,
   verifyMailReleaseEvidence,
@@ -22,6 +26,9 @@ import {
   readMailDraftArtifactFixtureText,
   readMailDraftCredentialFixtureText,
   readMailDraftRecoveryFixtureText,
+  readMailReviewArtifactFixtureText,
+  verifyMailReviewReleaseEvidence,
+  verifyMailReviewArtifactFixtureEvidence,
 } from './mail-artifact-fixture-evidence.js';
 const roots: string[] = [];
 afterEach(() => {
@@ -36,10 +43,15 @@ const identity = {
   certificateFile: '/private/mail-test/ca.pem',
 };
 const volume = 'cos-g04-mail-aaaaaaaa-10000000-0000-4000-8000-000000000001';
-function fixture(drafts = false) {
-  const caseVolume = drafts ? volume.replace('g04-mail', 'g05-draft') : volume,
+function fixture(drafts: boolean | 'review' = false) {
+  const review = drafts === 'review';
+  const caseVolume = review
+      ? volume.replace('g04-mail', 'g06-review')
+      : drafts
+        ? volume.replace('g04-mail', 'g05-draft')
+        : volume,
     caseRoot = '/var/lib/docker/volumes/' + caseVolume + '/_data',
-    contract = drafts ? 'cos-g05-draft' : 'cos-g04-mail';
+    contract = review ? 'cos-g06-review' : drafts ? 'cos-g05-draft' : 'cos-g04-mail';
   const header = {
     contract: contract + '-artifact-set/v1',
     sourceCommit: identity.sourceCommit,
@@ -150,18 +162,24 @@ function fixture(drafts = false) {
       installedAcceptance: false,
       storageAdmission: 'fixture',
     };
-    const names: readonly string[] = drafts
+    const names: readonly string[] = review
         ? worker
-          ? MAIL_DRAFT_NATIVE_CASES
-          : MAIL_DRAFT_DATABASE_CASES
-        : worker
-          ? MAIL_NATIVE_CASES
-          : [...MAIL_STORE_CASES, ...MAIL_CHECKPOINT_CASES],
-      count = names.length;
+          ? MAIL_REVIEW_NATIVE_CASES
+          : []
+        : drafts
+          ? worker
+            ? MAIL_DRAFT_NATIVE_CASES
+            : MAIL_DRAFT_DATABASE_CASES
+          : worker
+            ? MAIL_NATIVE_CASES
+            : [...MAIL_STORE_CASES, ...MAIL_CHECKPOINT_CASES],
+      count = review && !worker ? 32 : names.length;
     const report = [
       'TAP version 13',
-      ...names.map((name, i) => `ok ${i + 1} - ${name}`),
-      `1..${count}`,
+      ...(review && !worker
+        ? MAIL_REVIEW_SCHEMA_RESULTS.map(([depth, id, name]) => ' '.repeat(depth) + `ok ${id} - ${name}`)
+        : names.map((name, i) => `ok ${i + 1} - ${name}`)),
+      ...(review && !worker ? ['        1..21', '    1..9', '1..2'] : [`1..${count}`]),
       `# tests ${count}`,
       '# suites 0',
       `# pass ${count}`,
@@ -179,11 +197,67 @@ const serialize = (f: ReturnType<typeof fixture>) =>
     JSON.stringify(f.header),
     ...f.runs.flatMap((run) => [JSON.stringify(run.scope), JSON.stringify(run.binding), run.report]),
   ].join('\n');
+it('requires the distinct G06 sealed database report and both actual worker conversations for all review gates', () => {
+  const text = serialize(fixture('review'));
+  expect(verifyMailReviewArtifactFixtureEvidence(text, identity)).toMatchObject({
+    status: 'passed',
+    actualDatabaseCases: 32,
+    actualNativeRuns: 2,
+  });
+  for (const gate of ['mail_review_policy', 'mail_review_schedule', 'mail_review_flow'])
+    expect(verifyMailReviewReleaseEvidence(gate, text, identity)).toMatchObject({ status: 'passed' });
+  expect(() => verifyMailReviewArtifactFixtureEvidence(serialize(fixture(true)), identity)).toThrow(
+    'mail_review_artifact_release_evidence_unavailable',
+  );
+  expect(() => verifyMailReviewReleaseEvidence('mail_sending', text, identity)).toThrow(
+    'mail_review_release_check_unavailable',
+  );
+});
+it.each([
+  'source',
+  'worker',
+  'missing-worker',
+  'override',
+  'scope',
+  'certificate',
+  'volume',
+  'database-report',
+  'native-report',
+  'credentials',
+  'foreign-mode',
+] as const)('rejects %s G06 sealed review evidence', (reason) => {
+  const f = fixture('review'),
+    run = f.runs[0];
+  if (reason === 'source') f.header.sourceCommit = 'f'.repeat(40);
+  if (reason === 'worker') f.runs[1].binding.workerImage = identity.hostImage;
+  if (reason === 'missing-worker') f.runs.pop();
+  if (reason === 'override') f.runs[1].binding.workerSourceOverrides = true;
+  if (reason === 'scope') run.scope.host.Privileged = true;
+  if (reason === 'certificate') run.scope.host.Mounts[0].Source = '/foreign/ca.pem';
+  if (reason === 'volume') run.scope.mounts[1].Source = '/foreign';
+  if (reason === 'database-report') run.report = fixture(true).runs[0].report;
+  if (reason === 'native-report') f.runs[1].report = fixture(true).runs[1].report;
+  if (reason === 'credentials') run.binding.ownerCredentialsUsed = true;
+  if (reason === 'foreign-mode') f.header.contract = 'cos-g05-draft-artifact-set/v1';
+  expect(() => verifyMailReviewArtifactFixtureEvidence(serialize(f), identity)).toThrow(
+    'mail_review_artifact_release_evidence_unavailable',
+  );
+});
+it('keeps the G06 private artifact report distinct from inherited reader and draft reports', () => {
+  const f = privateReport(),
+    file = f.root + '/mail_review_artifacts.log';
+  fs.renameSync(f.file, file);
+  expect(readMailReviewArtifactFixtureText(file)).toBe(f.text);
+  expect(() => readMailDraftArtifactFixtureText(file)).toThrow();
+  expect(() => readMailArtifactFixtureText(file)).toThrow();
+  fs.chmodSync(file, 0o644);
+  expect(() => readMailReviewArtifactFixtureText(file)).toThrow();
+});
 it('binds G05 policy, transport and reconciliation to the complete sealed host/two-worker execution', () => {
   const text = serialize(fixture(true));
   expect(verifyMailDraftArtifactFixtureEvidence(text, identity)).toMatchObject({
     status: 'passed',
-    actualDatabaseCases: 16,
+    actualDatabaseCases: 18,
     actualNativeRuns: 2,
     sourceOverrides: false,
     installedAcceptance: false,
@@ -372,6 +446,60 @@ it.each([
     ),
   ).toThrow('mail_fixture_workspace_unverified');
 });
+it.each(['/Users/fixture/project/.cos-plan-state', '/host_mnt/Users/fixture/project/.cos-plan-state'])(
+  'maps an independently registered private state bind for an isolated source workspace: %s',
+  (source) => {
+    expect(
+      mailArtifactFixtureCertificate(
+        [{ Mounts: [{ Type: 'bind', Source: source, Destination: '/workspace/.cos-plan-state', RW: true }] }],
+        'release-aaaaaaaaaaaa-20261016000000',
+      ),
+    ).toBe('/Users/fixture/project/.cos-plan-state/release-tests/release-aaaaaaaaaaaa-20261016000000/ca.pem');
+  },
+);
+it('uses the overlaid private-state bind instead of the source workspace path', () => {
+  expect(
+    mailArtifactFixtureCertificate(
+      [
+        {
+          Mounts: [
+            { Type: 'bind', Source: '/Users/fixture/source', Destination: '/workspace', RW: true },
+            {
+              Type: 'bind',
+              Source: '/Users/fixture/primary/.cos-plan-state',
+              Destination: '/workspace/.cos-plan-state',
+              RW: true,
+            },
+          ],
+        },
+      ],
+      'release-aaaaaaaaaaaa-20261016000000',
+    ),
+  ).toContain('/Users/fixture/primary/.cos-plan-state/');
+});
+it.each(['duplicate', 'volume', 'readonly', 'relative', 'parent', 'root', 'wrong-directory', 'unknown-host-mount'])(
+  'does not fall back to the workspace when its private-state bind is invalid: %s',
+  (reason) => {
+    const state = {
+        Type: 'bind',
+        Source: '/Users/fixture/project/.cos-plan-state',
+        Destination: '/workspace/.cos-plan-state',
+        RW: true,
+      },
+      mounts = [{ Type: 'bind', Source: '/Users/fixture/other', Destination: '/workspace', RW: true }, state];
+    if (reason === 'duplicate') mounts.push({ ...state });
+    if (reason === 'volume') state.Type = 'volume';
+    if (reason === 'readonly') state.RW = false;
+    if (reason === 'relative') state.Source = '.cos-plan-state';
+    if (reason === 'parent') state.Source = '/Users/fixture/../other/.cos-plan-state';
+    if (reason === 'root') state.Source = '/';
+    if (reason === 'wrong-directory') state.Source = '/Users/fixture/project/other';
+    if (reason === 'unknown-host-mount') state.Source = '/host_mnt/private/fixture/.cos-plan-state';
+    expect(() => mailArtifactFixtureCertificate([{ Mounts: mounts }], 'release-aaaaaaaaaaaa-20261016000000')).toThrow(
+      'mail_fixture_workspace_unverified',
+    );
+  },
+);
 it.each(['mail_capture', 'mail_evidence', 'mail_retention'])('requires complete artifact proof for %s', (gate) => {
   expect(verifyMailReleaseEvidence(gate, serialize(fixture()), identity)).toMatchObject({
     status: 'passed',

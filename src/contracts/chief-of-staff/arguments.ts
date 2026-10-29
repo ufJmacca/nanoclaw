@@ -15,7 +15,8 @@ type FixtureArguments = {
     | 'G02'
     | 'G03'
     | 'G04'
-    | 'G05';
+    | 'G05'
+    | 'G06';
   demo: boolean;
   profile: 'test' | 'runtime-disposable';
 };
@@ -48,9 +49,10 @@ export function parseFixtureArguments(args: string[]): FixtureArguments {
       'G03',
       'G04',
       'G05',
+      'G06',
     ].includes(String(values.get('--slice'))) ||
     !['test', 'runtime-disposable'].includes(String(profile)) ||
-    (['G01', 'G02', 'G03', 'G04', 'G05'].includes(String(values.get('--slice'))) && profile !== 'test') ||
+    (['G01', 'G02', 'G03', 'G04', 'G05', 'G06'].includes(String(values.get('--slice'))) && profile !== 'test') ||
     (demo && values.get('--fixture') !== true) ||
     (!demo && values.has('--fixture'))
   )
@@ -63,6 +65,13 @@ export function parseFixtureArguments(args: string[]): FixtureArguments {
 }
 
 export function fixtureFiles(args: Pick<FixtureArguments, 'slice' | 'demo'>): string[] {
+  if (args.slice === 'G06')
+    return [
+      ...fixtureFiles({ slice: 'G05', demo: args.demo }),
+      ...(args.demo
+        ? ['mail-review-flow.integration']
+        : ['mail-review-schema.integration', 'mail-review-checkpoint.integration', 'mail-review-flow.integration']),
+    ];
   if (args.slice === 'G05')
     return [
       ...fixtureFiles({ slice: 'G04', demo: args.demo }),

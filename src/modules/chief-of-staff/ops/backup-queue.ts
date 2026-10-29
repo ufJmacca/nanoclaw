@@ -619,7 +619,7 @@ function retireSlot(
     fs.closeSync(slotFd);
   }
 }
-/** The injected accessor is for synthetic fixtures. Installed construction below always verifies and pins the vault. */
+/** Installed factories supply an actual held vault accessor; fixtures may supply synthetic access. */
 export class BackupQueue {
   constructor(
     private readonly ownerDigest: string,

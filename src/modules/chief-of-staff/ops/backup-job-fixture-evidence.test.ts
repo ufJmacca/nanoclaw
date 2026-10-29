@@ -96,7 +96,7 @@ it('requires actual manager lifecycle and default-entry refusal without claiming
     installedAcceptance: false,
   });
 });
-it.each(['G02', 'G03', 'G04', 'G05'] as const)(
+it.each(['G02', 'G03', 'G04', 'G05', 'G06'] as const)(
   'requires the actual selected %s lifecycle and exact schema in immutable manager evidence',
   (releaseSlice) => {
     const selected = { ...identity, releaseSlice },
@@ -106,24 +106,34 @@ it.each(['G02', 'G03', 'G04', 'G05'] as const)(
         {
           ...probe,
           releaseSlice,
-          contract: releaseSlice === 'G05' ? 'cos-backup-job-release-fixture/v3' : probe.contract,
-          schemaVersion: releaseSlice === 'G05' ? 20 : releaseSlice === 'G04' ? 19 : 18,
+          contract:
+            releaseSlice === 'G06'
+              ? 'cos-backup-job-release-fixture/v4'
+              : releaseSlice === 'G05'
+                ? 'cos-backup-job-release-fixture/v3'
+                : probe.contract,
+          schemaVersion: releaseSlice === 'G06' ? 21 : releaseSlice === 'G05' ? 20 : releaseSlice === 'G04' ? 19 : 18,
           actualG03ToG04Upgrade: releaseSlice === 'G04',
           ...(releaseSlice === 'G05' ? { actualG04ToG05Upgrade: true } : {}),
-          cases: ['G04', 'G05'].includes(releaseSlice) ? 8 : 7,
+          ...(releaseSlice === 'G06' ? { actualG05ToG06Upgrade: true } : {}),
+          cases: ['G04', 'G05', 'G06'].includes(releaseSlice) ? 8 : 7,
         },
       ];
     expect(verifyBackupJobFixtureEvidence(rows, selected)).toMatchObject({
       status: 'passed',
-      cases: ['G04', 'G05'].includes(releaseSlice) ? 8 : 7,
+      cases: ['G04', 'G05', 'G06'].includes(releaseSlice) ? 8 : 7,
     });
     for (const change of [
       { releaseSlice: 'G02' },
       { schemaVersion: 18 },
-      releaseSlice === 'G05' ? { actualG04ToG05Upgrade: false } : { actualG03ToG04Upgrade: false },
+      releaseSlice === 'G06'
+        ? { actualG05ToG06Upgrade: false }
+        : releaseSlice === 'G05'
+          ? { actualG04ToG05Upgrade: false }
+          : { actualG03ToG04Upgrade: false },
       { cases: 7 },
     ])
-      if (['G04', 'G05'].includes(releaseSlice)) {
+      if (['G04', 'G05', 'G06'].includes(releaseSlice)) {
         expect(() => verifyBackupJobFixtureEvidence([rows[0], scope, { ...rows[2], ...change }], selected)).toThrow(
           'backup_job_fixture_evidence_unavailable',
         );

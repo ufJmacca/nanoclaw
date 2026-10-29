@@ -10,9 +10,12 @@ it('adds only writer policy bindings and immutable revisions without installing 
       return { rows: MIGRATIONS.slice(0, 19).map(({ version, checksum }) => ({ version, checksum })) };
     return { rows: [] };
   });
-  expect(await migrate({ query } as unknown as pg.Client, 'fixture_runtime')).toBe(20);
-  expect(SCHEMA_VERSION).toBe(20);
-  expect(MIGRATIONS.at(-1)).toMatchObject({ version: 20, checksum: MAIL_DRAFT_CHECKSUM });
+  expect(await migrate({ query } as unknown as pg.Client, 'fixture_runtime')).toBe(21);
+  expect(SCHEMA_VERSION).toBe(21);
+  expect(MIGRATIONS.find(({ version }) => version === 20)).toMatchObject({
+    version: 20,
+    checksum: MAIL_DRAFT_CHECKSUM,
+  });
   const sql = query.mock.calls.map(([value]) => value).join('\n');
   expect(sql).toContain('CREATE TABLE cos.mail_draft_writer_bindings');
   expect(sql).toContain('CREATE TABLE cos.mail_draft_writer_revisions');

@@ -58,7 +58,7 @@ afterEach(() => {
   vi.resetAllMocks();
   for (const root of cleanup.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
-function fixture() {
+function fixture(slice: 'G05' | 'G06' = 'G05') {
   const root = fs.mkdtempSync(os.tmpdir() + '/cos-draft-policy-');
   fs.chmodSync(root, 0o700);
   cleanup.push(root);
@@ -70,7 +70,7 @@ function fixture() {
       installationRoot: roots.installationRoot,
       dataRoot: roots.dataRoot,
     },
-    release = fixtureVaultRelease('G05');
+    release = fixtureVaultRelease(slice);
   initializeTarget(roots.targetRoot, targetBinding);
   const protectedState = protectTarget(roots.targetRoot, targetBinding);
   writeAtomic(roots.targetRoot, 'state.json', { ...protectedState, releaseId: release.releaseId });
@@ -270,7 +270,7 @@ function fixture() {
   ports.writer.mockResolvedValue(writer);
   ports.recovery.mockReturnValue(proof);
   ports.connect.mockResolvedValue(client);
-  ports.schema.mockResolvedValue(20);
+  ports.schema.mockResolvedValue(slice === 'G06' ? 21 : 20);
   ports.fingerprint.mockResolvedValue(targetBinding.databaseFingerprint);
   const args = {
       command: 'mail-draft-configure' as const,
@@ -357,32 +357,35 @@ it('parses only scoped owner policy configuration and disable, with no token, en
   ])
     expect(() => parseMailDraftAdminArguments(args)).toThrow('invalid_admin_arguments');
 });
-it('installs only the recovered immutable policy through the migration role, then publishes its host grant while paused', async () => {
-  const f = fixture();
-  expect(await f.invoke()).toMatchObject({
-    status: 'configured_paused',
-    binding_id: f.grant.id,
-    writer_enabled: true,
-    live_model: 'not_invoked',
-  });
-  const journal = openTargetDraftJournal(f.roots.targetRoot, f.installation);
-  try {
-    expect(readMailDraftHostProfile(f.roots.targetRoot, f.installation, journal).grants).toEqual([f.grant]);
-  } finally {
-    journal.close();
-  }
-  expect(ports.connect).toHaveBeenCalledWith(f.options.env, 'runtime', 'migration');
-  expect(f.client.query.mock.calls.some(([sql]) => sql === 'COMMIT')).toBe(true);
-  expect(f.installed).toHaveLength(1);
-  expect(f.installed[0]).toMatchObject({ digest: digest(f.grant.binding), consent_ref: digest(f.consent) });
-  expect(f.reader.close).toHaveBeenCalledOnce();
-  expect(f.writer.close).toHaveBeenCalledOnce();
-  expect(f.client.end).toHaveBeenCalledOnce();
-  expect(f.reader.credentials.token).not.toHaveBeenCalled();
-  expect(f.writer.credentials.token).not.toHaveBeenCalled();
-  expect(await f.invoke()).toMatchObject({ status: 'configured_paused' });
-  expect(f.installed).toHaveLength(1);
-});
+it.each(['G05', 'G06'] as const)(
+  '%s installs only the recovered immutable policy through the migration role, then publishes its host grant while paused',
+  async (slice) => {
+    const f = fixture(slice);
+    expect(await f.invoke()).toMatchObject({
+      status: 'configured_paused',
+      binding_id: f.grant.id,
+      writer_enabled: true,
+      live_model: 'not_invoked',
+    });
+    const journal = openTargetDraftJournal(f.roots.targetRoot, f.installation);
+    try {
+      expect(readMailDraftHostProfile(f.roots.targetRoot, f.installation, journal).grants).toEqual([f.grant]);
+    } finally {
+      journal.close();
+    }
+    expect(ports.connect).toHaveBeenCalledWith(f.options.env, 'runtime', 'migration');
+    expect(f.client.query.mock.calls.some(([sql]) => sql === 'COMMIT')).toBe(true);
+    expect(f.installed).toHaveLength(1);
+    expect(f.installed[0]).toMatchObject({ digest: digest(f.grant.binding), consent_ref: digest(f.consent) });
+    expect(f.reader.close).toHaveBeenCalledOnce();
+    expect(f.writer.close).toHaveBeenCalledOnce();
+    expect(f.client.end).toHaveBeenCalledOnce();
+    expect(f.reader.credentials.token).not.toHaveBeenCalled();
+    expect(f.writer.credentials.token).not.toHaveBeenCalled();
+    expect(await f.invoke()).toMatchObject({ status: 'configured_paused' });
+    expect(f.installed).toHaveLength(1);
+  },
+);
 it('leaves an unknown database commit without a host grant and reconciles identical metadata on a later known commit', async () => {
   const f = fixture();
   f.flags.commitUncertain = true;
@@ -432,37 +435,40 @@ it.each([
   expect(fs.existsSync(f.file)).toBe(false);
   expect(f.installed).toHaveLength(0);
 });
-it('disables the local host grant even when database, credentials and recovery are unavailable', async () => {
-  const f = fixture();
-  writeAtomic(f.roots.targetRoot + '/mail-drafts', 'writer-profile.json', {
-    format: 'cos-mail-draft-host/v1',
-    installationDigest: f.installation,
-    journalGeneration: f.generation,
-    grants: [f.grant],
-  });
-  ports.connect.mockRejectedValue(Error('PRIVATE_OFFLINE'));
-  ports.reader.mockRejectedValue(Error('PRIVATE_OFFLINE'));
-  ports.writer.mockRejectedValue(Error('PRIVATE_OFFLINE'));
-  ports.recovery.mockImplementation(() => {
-    throw Error('PRIVATE_OFFLINE');
-  });
-  expect(
-    await runMailDraftAdmin({
-      ...f.options,
-      args: { command: 'mail-draft-disable', scopeId: 'scope', requestId: randomUUID(), bindingId: f.grant.id },
-    }),
-  ).toMatchObject({ status: 'disabled_paused', writer_enabled: false });
-  expect(ports.connect).not.toHaveBeenCalled();
-  expect(ports.reader).not.toHaveBeenCalled();
-  expect(ports.writer).not.toHaveBeenCalled();
-  expect(ports.recovery).not.toHaveBeenCalled();
-  const journal = openTargetDraftJournal(f.roots.targetRoot, f.installation);
-  try {
-    expect(readMailDraftHostProfile(f.roots.targetRoot, f.installation, journal).grants[0].writeEnabled).toBe(false);
-  } finally {
-    journal.close();
-  }
-});
+it.each(['G05', 'G06'] as const)(
+  '%s disables the local host grant even when database, credentials and recovery are unavailable',
+  async (slice) => {
+    const f = fixture(slice);
+    writeAtomic(f.roots.targetRoot + '/mail-drafts', 'writer-profile.json', {
+      format: 'cos-mail-draft-host/v1',
+      installationDigest: f.installation,
+      journalGeneration: f.generation,
+      grants: [f.grant],
+    });
+    ports.connect.mockRejectedValue(Error('PRIVATE_OFFLINE'));
+    ports.reader.mockRejectedValue(Error('PRIVATE_OFFLINE'));
+    ports.writer.mockRejectedValue(Error('PRIVATE_OFFLINE'));
+    ports.recovery.mockImplementation(() => {
+      throw Error('PRIVATE_OFFLINE');
+    });
+    expect(
+      await runMailDraftAdmin({
+        ...f.options,
+        args: { command: 'mail-draft-disable', scopeId: 'scope', requestId: randomUUID(), bindingId: f.grant.id },
+      }),
+    ).toMatchObject({ status: 'disabled_paused', writer_enabled: false });
+    expect(ports.connect).not.toHaveBeenCalled();
+    expect(ports.reader).not.toHaveBeenCalled();
+    expect(ports.writer).not.toHaveBeenCalled();
+    expect(ports.recovery).not.toHaveBeenCalled();
+    const journal = openTargetDraftJournal(f.roots.targetRoot, f.installation);
+    try {
+      expect(readMailDraftHostProfile(f.roots.targetRoot, f.installation, journal).grants[0].writeEnabled).toBe(false);
+    } finally {
+      journal.close();
+    }
+  },
+);
 it.each(['reader-denial', 'consent-change'] as const)(
   'does not publish a new host grant after %s during the final credential await',
   async (reason) => {

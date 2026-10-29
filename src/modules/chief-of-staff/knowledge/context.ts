@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3';
 import type { Session } from '../../../types.js';
-import { cosBoundary } from '../../../cos-boundary.js';
+import { cosBoundary, type CosBinding } from '../../../cos-boundary.js';
 import { hasTable } from '../../../db/connection.js';
 import { digest, type Context } from '../domain/contracts.js';
 import type { KnowledgeContext } from './store.js';
@@ -18,7 +18,36 @@ export function resolveKnowledgeContext(
     const automatic = automationContext(session, db);
     if (!automatic || digest(automatic) !== digest(context)) return null;
   } else if (boundary.ingressId !== context.ingressId || automationContext(session, db) !== undefined) return null;
-  const binding = boundary.binding;
+  return retainedKnowledgeContext(boundary.binding, context, db);
+}
+
+/** Trusted scheduler preparation only, before it installs a claimed run origin.
+ * Resume clears owner ingress. Preparation must still use the retained main context,
+ * without fabricating an owner message or granting model, tool or draft authority.
+ */
+export function resolveBriefPreparationContext(
+  session: Session,
+  context: Context,
+  db: Database.Database,
+): KnowledgeContext | null {
+  const boundary = cosBoundary(session, db);
+  if (
+    context.origin ||
+    context.ingressId !== 'host-brief-reservation' ||
+    !boundary.restricted ||
+    !boundary.binding ||
+    boundary.paused ||
+    automationContext(session, db) !== undefined
+  )
+    return null;
+  return retainedKnowledgeContext(boundary.binding, context, db);
+}
+
+function retainedKnowledgeContext(
+  binding: CosBinding,
+  context: Context,
+  db: Database.Database,
+): KnowledgeContext | null {
   if (
     binding.scopeId !== context.scopeId ||
     binding.ownerId !== context.ownerId ||

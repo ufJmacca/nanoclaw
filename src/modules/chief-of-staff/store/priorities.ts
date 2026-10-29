@@ -59,6 +59,10 @@ import {
 } from '../contracts/strategy-protocol.js';
 import { ReviewCollector } from '../strategy/collector.js';
 import { ReviewArtifacts } from '../strategy/artifacts.js';
+import type { MailReviewAccess } from '../automation/mail-review-access.js';
+import { MailReviewContext } from '../automation/mail-review-context.js';
+import { MailReviewPreparer } from '../automation/mail-review-preparation.js';
+import { MailReviewBrief } from '../automation/mail-review-brief.js';
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const equal = (a: string, b: string) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
@@ -109,6 +113,8 @@ export class PriorityStore {
   readonly missionReviewRuns?: MissionReviewRuns;
   readonly teamFinalReviews?: TeamFinalReviews;
   readonly teamNotifications?: MissionNotifications;
+  readonly mailReviewContext?: MailReviewContext;
+  readonly mailReviewBrief?: MailReviewBrief;
   constructor(
     readonly database: BoundedDatabase,
     readonly knowledge?: KnowledgeStore,
@@ -121,10 +127,21 @@ export class PriorityStore {
     readonly mail?: MailHost,
     mailDraftDependencies?: MailDraftDependencies,
     readonly mailDraftHost?: { close(): Promise<void> },
+    readonly mailReviewAccess?: MailReviewAccess,
   ) {
+    if (knowledge && mailReviewAccess)
+      this.mailReviewContext = new MailReviewContext({ database, knowledge, access: mailReviewAccess });
     this.strategy = new StrategyApprovalStore(knowledge, () => this.directions);
     this.actions = new ActionStore(database, knowledge, actionDependencies);
     this.mailDrafts = new MailDraftStore(database, knowledge, mailDraftDependencies);
+    if (knowledge && mailReviewAccess && this.mailReviewContext)
+      this.mailReviewBrief = new MailReviewBrief({
+        database,
+        knowledge,
+        access: mailReviewAccess,
+        view: this.mailReviewContext,
+        drafts: this.mailDrafts,
+      });
     this.mandates = new MandateStore(database, knowledge, missionAuthority, () => this.missions);
     this.teams = new TeamProposalStore(knowledge, teamAuthority);
     this.teamRuns = new TeamRunStore(database, this.teams, knowledge);
@@ -170,7 +187,14 @@ export class PriorityStore {
     this.briefs = new BriefRunStore(database);
     if (knowledge)
       this.briefArtifacts = new BriefArtifacts(
-        new BriefCollector({ database, work: this.work, knowledge, calendarView, proactive: this.proactive }),
+        new BriefCollector({
+          database,
+          work: this.work,
+          knowledge,
+          calendarView,
+          proactive: this.proactive,
+          mailReview: this.mailReviewBrief,
+        }),
         this.proactive,
       );
   }
@@ -824,7 +848,7 @@ export class PriorityStore {
   }
 
   async context(context: Context, retained?: KnowledgeContext): Promise<Result> {
-    return this.transaction(async (client) => {
+    const result = await this.transaction(async (client) => {
       if (!(await authorised(client, context))) return { status: 'denied' };
       const records = (
         await client.query(
@@ -855,6 +879,31 @@ export class PriorityStore {
         coverage: records.length ? ['approved_records_only'] : ['no_approved_priorities'],
       };
     }, false);
+    if (result.status !== 'ok' || !this.mailReviewContext || context.origin?.kind !== 'schedule') return result;
+    if (
+      !retained ||
+      digest({ ...context, provider: retained.provider, generation: retained.generation }) !== digest(retained)
+    )
+      return { status: 'denied' };
+    const review = await this.mailReviewContext.read(retained);
+    return review ? (review.status === 'ok' ? { ...result, ...review } : review) : result;
+  }
+
+  /** Host dispatch only; no RPC or model port can create a prepared selection. */
+  async prepareMailReview(
+    context: KnowledgeContext,
+    runId: string,
+    generation: number,
+    current: () => boolean,
+  ): Promise<Result> {
+    if (!this.mailReviewAccess || !this.knowledge || !this.mail?.connector) return { status: 'denied' };
+    return new MailReviewPreparer({
+      database: this.database,
+      knowledge: this.knowledge,
+      access: this.mailReviewAccess,
+      connector: this.mail.connector,
+      current,
+    }).execute(context, runId, generation);
   }
 
   async readWork(context: Context, input: WorkRead, retained?: KnowledgeContext): Promise<Result> {

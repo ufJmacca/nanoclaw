@@ -14,6 +14,7 @@ import { RESTIC_ARTIFACT } from './restic-artifact.js';
 import { recoveryReleaseForManifest } from './recovery-manifest.js';
 import { MAIL_CHECKSUM } from '../store/mail-schema.js';
 import { MAIL_DRAFT_CHECKSUM } from '../store/mail-draft-schema.js';
+import { MAIL_REVIEW_CHECKSUM } from '../store/mail-review-schema.js';
 const sha = 'a'.repeat(40),
   tree = 'b'.repeat(40),
   image = 'sha256:' + 'c'.repeat(64),
@@ -106,6 +107,66 @@ function draftManifest() {
     };
   return value;
 }
+const reviewChecks = ['mail_review_policy', 'mail_review_schedule', 'mail_review_flow'];
+function reviewManifest() {
+  const value = draftManifest();
+  value.slice = 'G06';
+  value.postgres = { minimum: 21, maximum: 21 };
+  value.migrations = MIGRATIONS.slice(0, 21).map(({ version, checksum }) => ({ version, checksum }));
+  value.previousReleaseIds = ['release-reviewed-g05'];
+  for (const name of reviewChecks)
+    value.checks[name] = {
+      status: 'passed',
+      at: '2026-10-26T07:00:00Z',
+      sourceCommit: sha,
+      imageIds: name === 'mail_review_policy' ? [image] : [image, agent],
+    };
+  return value;
+}
+it('G06 requires exact schema21 and all inherited gates plus checked policy, schedule and flow gates', () => {
+  const accepted = validateReleaseManifest(reviewManifest());
+  expect(requiredReleaseChecks(accepted.slice)).toEqual([...requiredReleaseChecks('G05'), ...reviewChecks]);
+  expect(requiredReleaseChecks(accepted.slice)).toHaveLength(32);
+  expect(accepted.migrations[20]).toEqual({ version: 21, checksum: MAIL_REVIEW_CHECKSUM });
+  expect(supportsReleaseSchema(accepted, 21, 22)).toBe(true);
+  expect(supportsReleaseSchema(accepted, 20, 22)).toBe(false);
+  expect(supportsReleaseSchema(validateReleaseManifest(draftManifest()), 21, 22)).toBe(false);
+  expect(recoveryReleaseForManifest(accepted).software.schemaVersion).toBe(21);
+});
+it.each(reviewChecks)('G06 rejects missing, failed, stale-source and wrong-image %s evidence', (name) => {
+  const images = name === 'mail_review_policy' ? [[agent], [], [image, agent]] : [[image], [agent], [], [image, image]];
+  for (const patch of [
+    { status: 'failed' },
+    { sourceCommit: '0'.repeat(40) },
+    ...images.map((imageIds) => ({ imageIds })),
+  ]) {
+    const value = reviewManifest();
+    Object.assign(value.checks[name], patch);
+    expect(() => validateReleaseManifest(value)).toThrow('release_not_transferable');
+  }
+  const value = reviewManifest();
+  delete value.checks[name];
+  expect(() => validateReleaseManifest(value)).toThrow('release_not_transferable');
+});
+it.each([
+  'older-schema',
+  'widened-schema',
+  'missing-migration',
+  'wrong-checksum',
+  'missing-backup',
+  'missing-inherited-gate',
+  'future-slice',
+])('G06 refuses %s admission', (failure) => {
+  const value = reviewManifest();
+  if (failure === 'older-schema') value.postgres = { minimum: 20, maximum: 20 };
+  if (failure === 'widened-schema') value.postgres.minimum = 20;
+  if (failure === 'missing-migration') value.migrations.pop();
+  if (failure === 'wrong-checksum') value.migrations[20].checksum = '0'.repeat(64);
+  if (failure === 'missing-backup') Object.assign(value, { backupArtifact: undefined });
+  if (failure === 'missing-inherited-gate') delete value.checks.draft_recovery;
+  if (failure === 'future-slice') value.slice = 'G07';
+  expect(() => validateReleaseManifest(value)).toThrow('release_not_transferable');
+});
 it('G05 requires exact schema20 and every inherited and draft image gate without widening G04 rollback compatibility', () => {
   const value = draftManifest(),
     accepted = validateReleaseManifest(value);

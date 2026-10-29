@@ -1,5 +1,6 @@
 /** Project tooling for the host shell coordinator. This file runs only in the devcontainer. */
 import fs from 'node:fs';
+import { verifyReleaseTestRuntime } from './release-test-runtime.js';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { spawnSync, execFileSync } from 'node:child_process';
@@ -35,6 +36,7 @@ import { verifyBackupSmbFixtureImages, verifyBackupSmbFixtureEvidence } from './
 import { verifyBackupRepositoryFixtureEvidence } from './backup-repository-fixture-evidence.js';
 import { verifyBackupCredentialReleaseEvidence } from './backup-vault-fixture-evidence.js';
 import { verifyBackupCaptureFixtureEvidence } from './backup-capture-fixture-evidence.js';
+import { fixtureSuiteDeadline } from '../../../contracts/chief-of-staff/fixture-deadline.js';
 import {
   mailArtifactFixtureCertificate,
   readMailArtifactFixtureText,
@@ -45,9 +47,32 @@ import {
   readMailRecoveryFixtureText,
   verifyMailReleaseEvidence,
   verifyMailDraftReleaseEvidence,
+  readMailReviewArtifactFixtureText,
+  verifyMailReviewReleaseEvidence,
 } from './mail-artifact-fixture-evidence.js';
 
 export const BUILD_TARGETS = ['host', 'agent-standard', 'agent-documents'] as const;
+export function releaseArtifactFixtureProfile(
+  slice: ReleaseManifest['slice'],
+  name: string,
+): 'mail' | 'draft' | 'review' | null {
+  if (['mail_review_policy', 'mail_review_schedule', 'mail_review_flow'].includes(name)) {
+    if (slice !== 'G06') throw Error('review_release_required');
+    return 'review';
+  }
+  if (['draft_policy', 'draft_transport', 'draft_reconciliation'].includes(name)) {
+    if (!['G05', 'G06'].includes(slice)) throw Error('draft_release_required');
+    return 'draft';
+  }
+  if (['mail_capture', 'mail_evidence', 'mail_retention'].includes(name)) {
+    if (!['G04', 'G05', 'G06'].includes(slice)) throw Error('mail_release_required');
+    return 'mail';
+  }
+  return null;
+}
+export function releaseFixtureDeadline(slice: ReleaseManifest['slice'], mode: 'slice' | 'demo'): number {
+  return fixtureSuiteDeadline({ slice, demo: mode === 'demo' }) + 60000;
+}
 type BuildTarget = (typeof BUILD_TARGETS)[number];
 type Plan = Omit<ReleaseManifest, 'checks'> & {
   checks: ReleaseManifest['checks'];
@@ -62,10 +87,13 @@ export function releaseCheckImageIds(
   const hostOnly =
       name.startsWith('vault_') ||
       name.startsWith('backup_') ||
-      (name.startsWith('mail_') && name !== 'mail_evidence') ||
+      (name.startsWith('mail_') && !['mail_evidence', 'mail_review_schedule', 'mail_review_flow'].includes(name)) ||
       (name.startsWith('draft_') && name !== 'draft_transport'),
     allImages =
-      name.includes('image') || name === 'protected_state' || name === 'mail_evidence' || name === 'draft_transport';
+      name.includes('image') ||
+      ['protected_state', 'mail_evidence', 'draft_transport', 'mail_review_schedule', 'mail_review_flow'].includes(
+        name,
+      );
   if (!hostOnly && !allImages) return [];
   if (
     images.length !== BUILD_TARGETS.length ||
@@ -117,6 +145,10 @@ function inspect(root: string, target: BuildTarget) {
 }
 export async function macReleaseCommand(args: string[]): Promise<string | void> {
   const [operation, id, ...values] = args;
+  if (operation === 'toolchain' && args.length === 1) {
+    verifyReleaseTestRuntime();
+    return 'development_test_runtime_ready';
+  }
   if (operation === 'certificate' && args.length === 1) {
     const file = readEnvFile(['COS_TEST_PGSSLROOTCERT']).COS_TEST_PGSSLROOTCERT;
     if (!file || !path.isAbsolute(file) || /[\0\r\n]/.test(file)) throw new Error('test_certificate_required');
@@ -125,7 +157,10 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
   if (operation === 'init' && values.length === 3) {
     const [commit, fetchRef, slice] = values;
     // Only the current implemented slice may create a new release; historical manifests remain readable.
-    if (!['S11', 'G01', 'G02', 'G03', 'G04', 'G05'].includes(slice) || Number(SCHEMA_VERSION) !== MIGRATIONS.length)
+    if (
+      !['S11', 'G01', 'G02', 'G03', 'G04', 'G05', 'G06'].includes(slice) ||
+      Number(SCHEMA_VERSION) !== MIGRATIONS.length
+    )
       throw new Error('current_release_slice_required');
     if (!/^[a-f0-9]{40}$/.test(commit) || !/^refs\/heads\/[a-zA-Z0-9_./-]+$/.test(fetchRef) || fetchRef.includes('..'))
       throw new Error('invalid_candidate_source');
@@ -159,7 +194,7 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
       images: [],
       checks: {},
       targetDigest: digest(target),
-      ...(['G02', 'G03', 'G04', 'G05'].includes(slice)
+      ...(['G02', 'G03', 'G04', 'G05', 'G06'].includes(slice)
         ? {
             backupArtifact: packageResticReleaseArtifact({
               binary: path.resolve('.cos-plan-state/g02-restic-0.19.1/restic'),
@@ -220,13 +255,13 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
   }
   const { root, plan } = checkedPlan(id);
   if (operation === 'backup-input' && !values.length) {
-    if (!['G02', 'G03', 'G04', 'G05'].includes(plan.slice)) throw Error('backup_release_required');
+    if (!['G02', 'G03', 'G04', 'G05', 'G06'].includes(plan.slice)) throw Error('backup_release_required');
     validateResticArtifactSeal(plan.backupArtifact);
     verifyResticReleaseArtifactInput(path.join(root, 'backup-artifact-input'));
     return;
   }
   if (operation === 'backup-job-fixture' && !values.length) {
-    if (!['G02', 'G03', 'G04', 'G05'].includes(plan.slice)) throw Error('backup_release_required');
+    if (!['G02', 'G03', 'G04', 'G05', 'G06'].includes(plan.slice)) throw Error('backup_release_required');
     const [hostImage] = releaseCheckImageIds(plan.images, 'backup_units');
     const image = verifyBackupJobFixtureImage(
       readPrivate(path.join(root, 'backup-jobs-fixture-inspect.json')),
@@ -238,7 +273,7 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
     return image;
   }
   if (operation === 'backup-smb-fixture' && !values.length) {
-    if (!['G02', 'G03', 'G04', 'G05'].includes(plan.slice)) throw Error('backup_release_required');
+    if (!['G02', 'G03', 'G04', 'G05', 'G06'].includes(plan.slice)) throw Error('backup_release_required');
     const [hostImage] = releaseCheckImageIds(plan.images, 'backup_mount');
     const images = verifyBackupSmbFixtureImages(
       readPrivate(path.join(root, 'backup-smb-server-inspect.json')),
@@ -251,7 +286,7 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
     return images.clientImage;
   }
   if (operation === 'vault-fixture' && !values.length) {
-    if (!['G01', 'G02', 'G03', 'G04', 'G05'].includes(plan.slice) || !plan.vaultArtifact)
+    if (!['G01', 'G02', 'G03', 'G04', 'G05', 'G06'].includes(plan.slice) || !plan.vaultArtifact)
       throw Error('vault_release_required');
     const host = plan.images.find((image) => image.role === 'host');
     if (!host) throw Error('image_identity_required');
@@ -269,7 +304,7 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
     return image;
   }
   if (operation === 'vault-wire' && !values.length) {
-    if (!['G01', 'G02', 'G03', 'G04', 'G05'].includes(plan.slice)) throw Error('vault_release_required');
+    if (!['G01', 'G02', 'G03', 'G04', 'G05', 'G06'].includes(plan.slice)) throw Error('vault_release_required');
     const file = path.join(root, 'vault_kernel.log'),
       stat = fs.lstatSync(file);
     if (
@@ -290,7 +325,7 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
     return;
   }
   if (operation === 'vault-artifact' && !values.length) {
-    if (!['G01', 'G02', 'G03', 'G04', 'G05'].includes(plan.slice)) throw Error('vault_release_required');
+    if (!['G01', 'G02', 'G03', 'G04', 'G05', 'G06'].includes(plan.slice)) throw Error('vault_release_required');
     const seal = vaultRootArtifactSeal(readPrivate(path.join(root, 'vault-artifact.json'), 4096));
     if (
       seal.sourceCommit !== plan.source.commit ||
@@ -382,7 +417,7 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
       !/^[a-zA-Z0-9_.-]+$/.test(volume)
     )
       throw new Error('invalid_fixture_configuration');
-    if (['G02', 'G03', 'G04', 'G05'].includes(plan.slice)) {
+    if (['G02', 'G03', 'G04', 'G05', 'G06'].includes(plan.slice)) {
       validateResticArtifactSeal(plan.backupArtifact);
       verifyResticReleaseArtifactInput(path.join(root, 'backup-artifact-input'));
     }
@@ -406,18 +441,12 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
           COS_FIXTURE_HOST_ROOT: hostRoot,
           COS_FIXTURE_IMAGE: image,
           COS_FIXTURE_RUNNER_VOLUME: volume,
-          ...(['G02', 'G03', 'G04', 'G05'].includes(plan.slice)
+          ...(['G02', 'G03', 'G04', 'G05', 'G06'].includes(plan.slice)
             ? { COS_BACKUP_FIXTURE_BINARY: path.join(root, 'backup-artifact-input/restic') }
             : {}),
         },
         stdio: 'inherit',
-        timeout: ['G02', 'G03', 'G04', 'G05'].includes(plan.slice)
-          ? 1260000
-          : ['S10', 'S11', 'G01'].includes(plan.slice)
-            ? 960000
-            : ['S06', 'S07', 'S08', 'S09'].includes(plan.slice)
-              ? 660000
-              : 180000,
+        timeout: releaseFixtureDeadline(plan.slice, mode as 'slice' | 'demo'),
       },
     );
     if (result.status !== 0) throw new Error('local_fixture_failed');
@@ -458,7 +487,7 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
     const imageIds = releaseCheckImageIds(plan.images, name);
     if (['mail_credentials', 'mail_recovery', 'draft_credentials', 'draft_recovery'].includes(name) && status === '0') {
       const drafts = name.startsWith('draft_');
-      if (drafts && plan.slice !== 'G05') throw Error('draft_release_required');
+      if (drafts && !['G05', 'G06'].includes(plan.slice)) throw Error('draft_release_required');
       const fixture = readPrivate<{
         image: string;
         hostImage: string;
@@ -501,17 +530,16 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
         reportDigest: digest(text),
       });
     }
-    const draftArtifact = ['draft_policy', 'draft_transport', 'draft_reconciliation'].includes(name);
-    if (
-      ((name.startsWith('mail_') && !['mail_credentials', 'mail_recovery'].includes(name)) || draftArtifact) &&
-      status === '0'
-    ) {
+    const artifactProfile = releaseArtifactFixtureProfile(plan.slice, name);
+    if (artifactProfile && status === '0') {
       // All three artifact checks share the same actual database/two-worker run.
       // The Mac CA path comes from the observed devcontainer mount registration.
-      if (draftArtifact && plan.slice !== 'G05') throw Error('draft_release_required');
-      const text = draftArtifact
-          ? readMailDraftArtifactFixtureText(path.join(root, 'draft_artifacts.log'))
-          : readMailArtifactFixtureText(path.join(root, 'mail_artifacts.log')),
+      const text =
+          artifactProfile === 'review'
+            ? readMailReviewArtifactFixtureText(path.join(root, 'mail_review_artifacts.log'))
+            : artifactProfile === 'draft'
+              ? readMailDraftArtifactFixtureText(path.join(root, 'draft_artifacts.log'))
+              : readMailArtifactFixtureText(path.join(root, 'mail_artifacts.log')),
         identity = {
           sourceCommit: plan.source.commit,
           sourceTree: plan.source.tree,
@@ -523,21 +551,35 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
             id,
           ),
         },
-        proof = draftArtifact
-          ? verifyMailDraftReleaseEvidence(name, text, identity)
-          : verifyMailReleaseEvidence(name, text, identity);
-      writeAtomic(root, draftArtifact ? 'draft-artifact-evidence.json' : 'mail-artifact-evidence.json', {
-        ...proof,
-        at: new Date().toISOString(),
-        source: plan.source,
-        hostImage: identity.hostImage,
-        workerImages: identity.workerImages,
-        workerAssetsDigest: identity.workerAssetsDigest,
-        reportDigest: digest(text),
-        gates: draftArtifact
-          ? ['draft_policy', 'draft_transport', 'draft_reconciliation']
-          : ['mail_capture', 'mail_evidence', 'mail_retention'],
-      });
+        proof =
+          artifactProfile === 'review'
+            ? verifyMailReviewReleaseEvidence(name, text, identity)
+            : artifactProfile === 'draft'
+              ? verifyMailDraftReleaseEvidence(name, text, identity)
+              : verifyMailReleaseEvidence(name, text, identity);
+      writeAtomic(
+        root,
+        artifactProfile === 'review'
+          ? 'mail-review-artifact-evidence.json'
+          : artifactProfile === 'draft'
+            ? 'draft-artifact-evidence.json'
+            : 'mail-artifact-evidence.json',
+        {
+          ...proof,
+          at: new Date().toISOString(),
+          source: plan.source,
+          hostImage: identity.hostImage,
+          workerImages: identity.workerImages,
+          workerAssetsDigest: identity.workerAssetsDigest,
+          reportDigest: digest(text),
+          gates:
+            artifactProfile === 'review'
+              ? ['mail_review_policy', 'mail_review_schedule', 'mail_review_flow']
+              : artifactProfile === 'draft'
+                ? ['draft_policy', 'draft_transport', 'draft_reconciliation']
+                : ['mail_capture', 'mail_evidence', 'mail_retention'],
+        },
+      );
     }
     if (name === 'backup_capture' && status === '0') {
       const fixture = readPrivate<{ image: string; hostImage: string; source: ReleaseManifest['source'] }>(
@@ -677,7 +719,7 @@ export async function macReleaseCommand(args: string[]): Promise<string | void> 
         sourceTree: plan.source.tree,
         hostImage: imageIds[0],
         fixtureImage: fixture.image,
-        releaseSlice: plan.slice as 'G02' | 'G03' | 'G04' | 'G05',
+        releaseSlice: plan.slice as 'G02' | 'G03' | 'G04' | 'G05' | 'G06',
       });
     }
     plan.checks[name] = {

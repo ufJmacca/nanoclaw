@@ -7,6 +7,7 @@ import { isCalendarAccountCommand, parseCalendarAccountArguments } from './calen
 import { isMailAccountCommand, parseMailAccountArguments } from './mail-account-arguments.js';
 import { isMailDraftAccountCommand, parseMailDraftAccountArguments } from './mail-draft-account-arguments.js';
 import { isMailDraftAdminCommand, parseMailDraftAdminArguments } from './mail-draft-admin-arguments.js';
+import { isMailReviewAdminCommand, parseMailReviewAdminArguments } from './mail-review-admin-arguments.js';
 import { isMissionCommand, parseMissionArguments } from './mission-admin.js';
 import { isActionAccountCommand, parseActionAccountArguments } from './action-account-admin.js';
 import { isActionAdminCommand, parseActionAdminArguments } from './action-admin.js';
@@ -109,6 +110,7 @@ export function parseAdminArguments(args: string[]): AdminArguments {
   if (isMailAccountCommand({ command: args[0] })) return parseMailAccountArguments(args);
   if (isMailDraftAccountCommand({ command: args[0] })) return parseMailDraftAccountArguments(args);
   if (isMailDraftAdminCommand({ command: args[0] })) return parseMailDraftAdminArguments(args);
+  if (isMailReviewAdminCommand({ command: args[0] })) return parseMailReviewAdminArguments(args);
   if (args.length === 1 && args[0] === 'status') return { command: 'status' };
   if (['context-status', 'context-prepare', 'context-recover', 'model-activate', 'context-resume'].includes(args[0])) {
     const values: Record<string, string> = {};
@@ -462,7 +464,10 @@ export function adminEnvironment(
         'MATTERMOST_URL',
         'MATTERMOST_BOT_TOKEN',
         'MATTERMOST_INSTANCE',
-        ...(isMissionCommand({ command }) || command === 'action-configure' || command === 'mail-draft-configure'
+        ...(isMissionCommand({ command }) ||
+        command === 'action-configure' ||
+        command === 'mail-draft-configure' ||
+        isMailReviewAdminCommand({ command })
           ? ['COS_PG_MIGRATION_USER', 'COS_PG_MIGRATION_PASSWORD']
           : []),
         ...(recovery ? ['COS_TEST_TARGET_ID'] : []),

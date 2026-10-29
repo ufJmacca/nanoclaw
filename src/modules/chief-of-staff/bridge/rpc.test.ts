@@ -140,6 +140,69 @@ it('G05 routes typed draft requests only through the current retained main conte
     ).status,
   ).toBe('denied');
 });
+it.each(['current', 'generic', 'revoked', 'missing', 'mission'])(
+  'G06 reserves a scheduled draft tool only with current Mail review authority: %s',
+  async (mode) => {
+    const f = fixture(),
+      context = {
+        scopeId: 'fixture',
+        ownerId: 'owner',
+        sessionId: 'session',
+        agentGroupId: 'group',
+        ingressId: 'brief:' + 'a'.repeat(64) + ':1',
+        origin:
+          mode === 'mission'
+            ? {
+                kind: 'mission_review',
+                runId: 'run',
+                generation: 1,
+                submissionId: 'submission',
+                owner: 'worker',
+                fence: 1,
+              }
+            : { kind: 'schedule', runId: 'a'.repeat(64), generation: 1 },
+      },
+      retained = { ...context, provider: 'codex', generation: '33333333-3333-4333-8333-333333333333' },
+      create = vi.fn(async () => {
+        expect(reserveTool).toHaveBeenCalledOnce();
+        return { status: 'ok' };
+      }),
+      check = vi.fn().mockResolvedValue(mode === 'current' ? { id: 'current-policy' } : null),
+      reserveTool = vi.fn().mockResolvedValue({ status: 'ok' }),
+      knowledge = { contextReady: vi.fn().mockResolvedValue({ status: 'ok' }) } as unknown as KnowledgeStore,
+      store = {
+        ...f.store,
+        mailDrafts: { create },
+        database: { run: (operation: (client: unknown) => unknown) => operation('fixture-client') },
+        ...(mode === 'missing' ? {} : { mailReviewAccess: { check } }),
+      } as unknown as PriorityStore;
+    f.resolveContext.mockResolvedValue(context);
+    const handler = createRpcHandler({
+      resolveContext: f.resolveContext,
+      store,
+      knowledge,
+      reserveTool,
+      resolveKnowledgeContext: vi.fn().mockResolvedValue(retained),
+    });
+    const createRequest = {
+      ...request,
+      method: 'cos_mail_draft_create',
+      params: {
+        writer_binding_id: '44444444-4444-4444-8444-444444444444',
+        source_message_id: 'aa01',
+        reply_text: 'Fixture reply',
+      },
+    };
+    await handler(
+      { action: 'cos_rpc', request: createRequest, delivery_id: '22222222-2222-4222-8222-222222222222' },
+      { id: 'session' } as Session,
+      f.db,
+    );
+    expect(create).toHaveBeenCalledTimes(mode === 'current' ? 1 : 0);
+    expect(reserveTool).toHaveBeenCalledTimes(mode === 'current' ? 1 : 0);
+    if (mode === 'current') expect(check).toHaveBeenCalledWith('fixture-client', retained, 'read');
+  },
+);
 it('G05 main context exposes only its current draft-writer catalogue through the existing context tool', async () => {
   const f = fixture(),
     retained = {

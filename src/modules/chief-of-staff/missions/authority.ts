@@ -21,6 +21,7 @@ import { RESEARCH_TEMPLATE } from './work-order.js';
 import type { MissionAuthorityResolver } from './proposal-store.js';
 import type { ActionAuthorityResolver } from '../actions/authority.js';
 import type { MailDraftAuthorityResolver } from '../mail-drafts/authority.js';
+import { scheduledContext } from '../automation/scheduled-origin.js';
 
 type AuthorityOptions = {
   targetRoot: string;
@@ -38,6 +39,41 @@ export function createActionAuthorityResolver(options: AuthorityOptions): Action
 /** Main identity only; this does not grant consent, database policy, a draft reservation or model usage. */
 export function createMailDraftAuthorityResolver(options: AuthorityOptions): MailDraftAuthorityResolver {
   return createNativeAuthorityResolver(options, 'mail_draft') as MailDraftAuthorityResolver;
+}
+
+/** Scheduled main identity only. MailReviewAccess must additionally admit the current owner policy,
+ * selected threads and database run; ordinary scheduled briefs never acquire draft permission here. */
+export function createMailReviewAuthorityResolver(options: AuthorityOptions): MailDraftAuthorityResolver {
+  const ownerIdentity = createMailDraftAuthorityResolver(options);
+  return (context: Context) => {
+    try {
+      options.assertHostAuthority();
+      if (!options.admitted() || options.db !== getDb() || context.origin?.kind !== 'schedule') return null;
+      const session = getSession(context.sessionId);
+      if (!session || session.agent_group_id !== context.agentGroupId) return null;
+      const actual = scheduledContext(session, options.db);
+      if (
+        !actual ||
+        digest(actual) !==
+          digest({
+            scopeId: context.scopeId,
+            ownerId: context.ownerId,
+            sessionId: context.sessionId,
+            agentGroupId: context.agentGroupId,
+            ingressId: context.ingressId,
+            origin: context.origin,
+          })
+      )
+        return null;
+      const boundary = cosBoundary(session, options.db);
+      if (!boundary.restricted || boundary.paused || !boundary.binding) return null;
+      const authority = ownerIdentity({ ...actual, origin: undefined, ingressId: boundary.ingressId ?? '' });
+      return authority && digest(scheduledContext(session, options.db)) === digest(actual) ? authority : null;
+      // eslint-disable-next-line no-catch-all/no-catch-all -- Native and credential failures deny identity without repair or private output.
+    } catch {
+      return null;
+    }
+  };
 }
 
 /** Read-only local authority. Callers must separately verify current remote private membership,

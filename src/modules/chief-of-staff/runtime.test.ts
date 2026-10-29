@@ -19,6 +19,7 @@ import { getDeliveryAdapter, setDeliveryAdapter } from '../../delivery.js';
 import { NativeBriefTasks } from './automation/native-tasks.js';
 import Database from 'better-sqlite3';
 import { INBOUND_SCHEMA } from '../../db/schema.js';
+import { log } from '../../log.js';
 import { readScheduledLease } from './automation/scheduled-origin.js';
 import { installReviewOrigin } from './missions/review-origin.js';
 import * as delivery from '../../delivery.js';
@@ -955,237 +956,21 @@ it('S02 processes due retention work while paused without admitting ordinary out
   expect(db.prepare('SELECT paused FROM cos_identity_boundaries').get()).toEqual({ paused: 1 });
 });
 
-it.each(['existing', 'due', 'refresh', 'review-fence', 'review-corrupt', 'proactive-unavailable', 'proactive-denied'])(
-  'S04 wires %s scheduled work, checked delivery and retirement into the host pump',
-  async (mode) => {
-    const db = initTestDb();
-    const binding: CosBinding = {
-      scopeId: 'scope',
-      agentGroupId: 'group',
-      messagingGroupId: 'mg',
-      sessionId: 'session',
-      provider: 'codex',
-      instanceId: 'fixture',
-      channelId: 'private',
-      ownerId: 'owner',
-      botId: 'bot',
-    };
-    const session = {
-      id: 'session',
-      agent_group_id: 'group',
-      messaging_group_id: 'mg',
-      thread_id: null,
-      status: 'active',
-      agent_provider: 'codex',
-    } as Session;
-    installCosBoundary(binding, db);
-    db.exec("UPDATE cos_identity_boundaries SET paused=0,ingress_id='owner-before'");
-    ensureConversationSchema(db);
-    const generation = randomUUID();
-    db.prepare(
-      "INSERT INTO cos_conversation_states(scope_id,binding_digest,account_fingerprint,generation,status,updated_at) VALUES(?,?,?,?,'active',?)",
-    ).run(binding.scopeId, digest(binding), 'a'.repeat(64), generation, new Date().toISOString());
-    const lease = {
-      runId: 'b'.repeat(64),
-      generation: 1,
-      hostId: 'host',
-      deadlineAt: new Date(Date.now() + 120000).toISOString(),
-    };
-    if (mode === 'existing') expect(installScheduledOrigin(db, binding, session, lease)).toBe(true);
-    if (mode.startsWith('review-')) {
-      expect(
-        installReviewOrigin(db, binding, session, {
-          identity: {
-            missionId: 'mission',
-            submissionId: randomUUID(),
-            attemptId: randomUUID(),
-            generation: 1,
-            sessionId: session.id,
-            contextGeneration: generation,
-          },
-          lease: { owner: 'review-host', fence: 1 },
-          deadlineAt: new Date(Date.now() + 30000).toISOString(),
-        }),
-      ).toBe(true);
-      if (mode === 'review-corrupt') db.prepare("UPDATE cos_mission_review_origins SET grant_json='invalid'").run();
-    }
-    const run = {
-      id: lease.runId,
-      generation: 1,
-      lease_owner: 'host',
-      state: mode === 'existing' ? 'prepared' : 'queued',
-      schedule_id: 'schedule',
-      schedule_version: 1,
-      intended_at: new Date().toISOString(),
-      limits: { refresh_seconds: mode === 'refresh' ? 20 : 0 },
-      deadline_at: lease.deadlineAt,
-    };
-    const reference = {
-      artifact_id: 'a'.repeat(64) + '-' + 'b'.repeat(64),
-      output_digest: digest('Checked scheduled brief'),
-      context_generation: generation,
-      provider: 'codex',
-    };
-    const refreshPlan = {
-      version: 1 as const,
-      provider: 'codex',
-      generation: 1,
-      started_at: new Date().toISOString(),
-      deadline_at: lease.deadlineAt,
-      state: 'running',
-      truncated: false,
-      unavailable: 0,
-      targets: [
-        {
-          binding_id: 'calendar',
-          binding_version: 1,
-          calendar_id: 'selected',
-          snapshot_id: randomUUID(),
-          window: { timeMin: new Date().toISOString(), timeMax: lease.deadlineAt, timeZone: 'UTC' },
-          state: 'pending',
-        },
-      ],
-    };
-    const calendar = { refresh: vi.fn().mockResolvedValue({ result: { status: 'ok' } }) };
-    const renewBriefContext = vi.fn((_binding, request) => {
-      expect(request.expectedGeneration).toBe(generation);
-      expect(calendar.refresh).not.toHaveBeenCalled();
-      const next = randomUUID();
-      db.prepare('UPDATE cos_conversation_states SET generation=?').run(next);
-      reference.context_generation = next;
-      return { generation: next };
-    });
-    const briefs = {
-      beginRefresh: vi.fn().mockImplementation(async () => ({
-        status: 'ok',
-        refresh: { ...refreshPlan, state: mode === 'refresh' ? refreshPlan.state : 'not_requested' },
-        remaining_ms: 20000,
-      })),
-      recordRefreshTarget: vi.fn().mockResolvedValue({ status: 'ok' }),
-      finishRefresh: vi.fn().mockImplementation(async () => {
-        refreshPlan.state = 'complete';
-        return { status: 'ok', refresh: refreshPlan };
-      }),
-      reserveDue: vi.fn(async () => ({ status: 'ok', run: { ...run } })),
-      claim: vi.fn(async (_c, _id, host) => {
-        run.state = 'dispatched';
-        run.lease_owner = host;
-        return { status: 'ok', generation: 1, deadline_at: lease.deadlineAt };
-      }),
-      inspect: vi.fn(async () => ({ status: 'ok', run: { ...run }, notification: { state: 'queued' } })),
-      authorize: vi.fn().mockResolvedValue({ status: 'ok' }),
-      cancel: vi.fn().mockResolvedValue({ status: 'ok' }),
-      beginDelivery: vi.fn().mockResolvedValue({ status: 'ok', notification_id: 'brief-' + run.id, reference }),
-      deliveryCurrent: vi.fn().mockResolvedValue({ status: 'ok' }),
-      finishDelivery: vi.fn(async (_c, _r, _g, _a, outcome) => {
-        run.state = outcome.state;
-        return { status: 'ok', state: outcome.state };
-      }),
-    };
-    const knowledge = {
-      contextReady: vi.fn().mockResolvedValue({ status: 'ok' }),
-      pendingInvalidations: vi.fn().mockResolvedValue({ status: 'ok', items: [] }),
-      purgeDue: vi.fn().mockResolvedValue({ status: 'ok' }),
-    };
-    const briefArtifacts = {
-      get: vi
-        .fn()
-        .mockResolvedValue({ status: 'ok', artifact_id: reference.artifact_id, text: 'Checked scheduled brief' }),
-    };
-    const inbound = new Database(':memory:');
-    inbound.exec(INBOUND_SCHEMA);
-    const tasks = new NativeBriefTasks(inbound);
-    if (mode === 'existing') tasks.stage(binding, run);
-    const deliver = vi.fn().mockResolvedValue('verified-post');
-    setDeliveryAdapter({ deliver });
-    const stop = vi.fn(),
-      wake = vi.fn();
-    const proactive = {
-      scheduledBatch: vi.fn(async (context) => {
-        expect(wake).not.toHaveBeenCalled();
-        expect(context.generation).toBe(reference.context_generation);
-        expect(context.ingressId).toBe(`brief:${run.id}:1`);
-        expect(context.origin).toEqual({ kind: 'schedule', runId: run.id, generation: 1 });
-        return {
-          status: mode === 'proactive-unavailable' ? 'unavailable' : mode === 'proactive-denied' ? 'denied' : 'ok',
-          candidates: [],
-        };
-      }),
-    };
-    try {
-      runtime = createCosRuntime({
-        db,
-        enabled: true,
-        store: {
-          briefs,
-          calendar,
-          knowledge,
-          briefArtifacts,
-          proactive,
-          pendingOutbox: vi.fn().mockResolvedValue({ status: 'ok', items: [] }),
-        } as unknown as PriorityStore,
-        facts: async () => ({
-          id: 'private',
-          type: 'P',
-          delete_at: 0,
-          members: ['bot', 'owner'],
-          activeSubscription: true,
-        }),
-        session: () => session,
-        destination: () => undefined,
-        stop,
-        wake,
-        running: () => false,
-        withBriefTasks: (_session, operation) => operation(tasks),
-        launcher: { ready: () => true, prepare: vi.fn(), renewBriefContext },
-      });
-      await runtime.pump(binding);
-      if (mode.startsWith('proactive-')) {
-        expect(proactive.scheduledBatch).toHaveBeenCalledOnce();
-        expect(wake).not.toHaveBeenCalled();
-        expect(inbound.prepare('SELECT * FROM messages_in').all()).toHaveLength(0);
-        return;
-      }
-      if (mode.startsWith('review-')) {
-        expect(briefs.reserveDue).not.toHaveBeenCalled();
-        expect(wake).not.toHaveBeenCalled();
-        expect(renewBriefContext).not.toHaveBeenCalled();
-        expect(calendar.refresh).not.toHaveBeenCalled();
-        expect(deliver).not.toHaveBeenCalled();
-        return;
-      }
-      if (mode !== 'existing') {
-        expect(briefs.reserveDue).toHaveBeenCalledOnce();
-        expect(wake).toHaveBeenCalledOnce();
-        expect(proactive.scheduledBatch).toHaveBeenCalledOnce();
-        expect(renewBriefContext).toHaveBeenCalledTimes(mode === 'refresh' ? 1 : 0);
-        expect(calendar.refresh).toHaveBeenCalledTimes(mode === 'refresh' ? 1 : 0);
-        expect(deliver).not.toHaveBeenCalled();
-        expect(tasks.state(binding, run)).toBe('pending');
-        run.state = 'prepared';
-        await runtime.pump(binding);
-      }
-      expect(deliver).toHaveBeenCalledExactlyOnceWith(
-        'mattermost',
-        'mattermost:fixture:private',
-        null,
-        'chat',
-        JSON.stringify({ text: 'Checked scheduled brief' }),
-        undefined,
-        'brief-' + run.id,
-      );
-      await runtime.pump(binding);
-      expect(deliver).toHaveBeenCalledOnce();
-      expect(tasks.state(binding, run)).toBe('completed');
-      expect(stop).toHaveBeenCalledWith('session');
-      expect(readScheduledLease(db, binding)).toBeNull();
-    } finally {
-      inbound.close();
-    }
-  },
-);
-
-it('S04 wires shared-context scheduled admission and model budgets while withholding ordinary chat publication', async () => {
+it.each([
+  'existing',
+  'due',
+  'due-without-owner-ingress',
+  'refresh',
+  'mail-review',
+  'mail-review-without-owner-ingress',
+  'mail-review-denied',
+  'mail-review-budget-empty',
+  'mail-review-context-denied',
+  'review-fence',
+  'review-corrupt',
+  'proactive-unavailable',
+  'proactive-denied',
+])('S04 wires %s scheduled work, checked delivery and retirement into the host pump', async (mode) => {
   const db = initTestDb();
   const binding: CosBinding = {
     scopeId: 'scope',
@@ -1207,7 +992,9 @@ it('S04 wires shared-context scheduled admission and model budgets while withhol
     agent_provider: 'codex',
   } as Session;
   installCosBoundary(binding, db);
-  db.exec('UPDATE cos_identity_boundaries SET paused=0');
+  db.exec("UPDATE cos_identity_boundaries SET paused=0,ingress_id='owner-before'");
+  if (mode.endsWith('without-owner-ingress'))
+    db.exec('UPDATE cos_identity_boundaries SET ingress_id=NULL,ingress_at=NULL');
   ensureConversationSchema(db);
   const generation = randomUUID();
   db.prepare(
@@ -1219,76 +1006,379 @@ it('S04 wires shared-context scheduled admission and model budgets while withhol
     hostId: 'host',
     deadlineAt: new Date(Date.now() + 120000).toISOString(),
   };
-  expect(installScheduledOrigin(db, binding, session, lease)).toBe(true);
+  if (mode === 'existing') expect(installScheduledOrigin(db, binding, session, lease)).toBe(true);
+  if (mode.startsWith('review-')) {
+    expect(
+      installReviewOrigin(db, binding, session, {
+        identity: {
+          missionId: 'mission',
+          submissionId: randomUUID(),
+          attemptId: randomUUID(),
+          generation: 1,
+          sessionId: session.id,
+          contextGeneration: generation,
+        },
+        lease: { owner: 'review-host', fence: 1 },
+        deadlineAt: new Date(Date.now() + 30000).toISOString(),
+      }),
+    ).toBe(true);
+    if (mode === 'review-corrupt') db.prepare("UPDATE cos_mission_review_origins SET grant_json='invalid'").run();
+  }
+  const run = {
+    id: lease.runId,
+    generation: 1,
+    lease_owner: 'host',
+    state: mode === 'existing' ? 'prepared' : 'queued',
+    schedule_id: 'schedule',
+    schedule_version: 1,
+    intended_at: new Date().toISOString(),
+    limits: { refresh_seconds: mode === 'refresh' ? 20 : 0 },
+    deadline_at: lease.deadlineAt,
+    provenance: mode.startsWith('mail-review')
+      ? {
+          purpose: 'mail_review' as const,
+          time_zone: 'Australia/Sydney',
+          mail_review_policy_id: randomUUID(),
+          mail_review_policy_version: 1,
+          mail_review_slot: 'morning' as const,
+        }
+      : undefined,
+  };
+  const reference = {
+    artifact_id: 'a'.repeat(64) + '-' + 'b'.repeat(64),
+    output_digest: digest('Checked scheduled brief'),
+    context_generation: generation,
+    provider: 'codex',
+  };
+  const refreshPlan = {
+    version: 1 as const,
+    provider: 'codex',
+    generation: 1,
+    started_at: new Date().toISOString(),
+    deadline_at: lease.deadlineAt,
+    state: 'running',
+    truncated: false,
+    unavailable: 0,
+    targets: [
+      {
+        binding_id: 'calendar',
+        binding_version: 1,
+        calendar_id: 'selected',
+        snapshot_id: randomUUID(),
+        window: { timeMin: new Date().toISOString(), timeMax: lease.deadlineAt, timeZone: 'UTC' },
+        state: 'pending',
+      },
+    ],
+  };
+  const calendar = { refresh: vi.fn().mockResolvedValue({ result: { status: 'ok' } }) };
+  const renewBriefContext = vi.fn((_binding, request) => {
+    expect(request.expectedGeneration).toBe(generation);
+    expect(calendar.refresh).not.toHaveBeenCalled();
+    const next = randomUUID();
+    db.prepare('UPDATE cos_conversation_states SET generation=?').run(next);
+    reference.context_generation = next;
+    return { generation: next };
+  });
   const briefs = {
+    beginRefresh: vi.fn().mockImplementation(async () => ({
+      status: 'ok',
+      refresh: { ...refreshPlan, state: mode === 'refresh' ? refreshPlan.state : 'not_requested' },
+      remaining_ms: 20000,
+    })),
+    recordRefreshTarget: vi.fn().mockResolvedValue({ status: 'ok' }),
+    finishRefresh: vi.fn().mockImplementation(async () => {
+      refreshPlan.state = 'complete';
+      return { status: 'ok', refresh: refreshPlan };
+    }),
+    reserveDue: vi.fn(async () => ({ status: 'ok', run: { ...run } })),
+    claim: vi.fn(async (_c, _id, host) => {
+      run.state = 'dispatched';
+      run.lease_owner = host;
+      return { status: 'ok', generation: 1, deadline_at: lease.deadlineAt };
+    }),
+    inspect: vi.fn(async () => ({ status: 'ok', run: { ...run }, notification: { state: 'queued' } })),
     authorize: vi.fn().mockResolvedValue({ status: 'ok' }),
-    reserveCall: vi.fn().mockResolvedValue({ status: 'ok' }),
+    cancel: vi.fn().mockResolvedValue({ status: 'ok' }),
+    beginDelivery: vi.fn().mockResolvedValue({ status: 'ok', notification_id: 'brief-' + run.id, reference }),
+    deliveryCurrent: vi.fn().mockResolvedValue({ status: 'ok' }),
+    finishDelivery: vi.fn(async (_c, _r, _g, _a, outcome) => {
+      run.state = outcome.state;
+      return { status: 'ok', state: outcome.state };
+    }),
   };
   const knowledge = {
     contextReady: vi.fn().mockResolvedValue({ status: 'ok' }),
-    answers: { authorizePublication: vi.fn().mockResolvedValue({ status: 'ok' }) },
+    pendingInvalidations: vi.fn().mockResolvedValue({ status: 'ok', items: [] }),
+    purgeDue: vi.fn().mockResolvedValue({ status: 'ok' }),
   };
-  const proactive = { scheduledBatch: vi.fn().mockResolvedValue({ status: 'ok' }) };
-  let authorize!: TurnAuthorization;
-  runtime = createCosRuntime({
-    db,
-    enabled: true,
-    store: {
-      briefs,
-      knowledge,
-      proactive,
-      context: vi.fn().mockResolvedValue({ status: 'ok' }),
-    } as unknown as PriorityStore,
-    facts: async () => ({
-      id: 'private',
-      type: 'P',
-      delete_at: 0,
-      members: ['bot', 'owner'],
-      activeSubscription: true,
+  const briefArtifacts = {
+    get: vi
+      .fn()
+      .mockResolvedValue({ status: 'ok', artifact_id: reference.artifact_id, text: 'Checked scheduled brief' }),
+  };
+  const inbound = new Database(':memory:');
+  inbound.exec(INBOUND_SCHEMA);
+  const tasks = new NativeBriefTasks(inbound);
+  if (mode === 'existing') tasks.stage(binding, run);
+  const deliver = vi.fn().mockResolvedValue('verified-post');
+  setDeliveryAdapter({ deliver });
+  const stop = vi.fn(),
+    wake = vi.fn();
+  const proactive = {
+    scheduledBatch: vi.fn(async (context) => {
+      expect(wake).not.toHaveBeenCalled();
+      expect(context.generation).toBe(reference.context_generation);
+      expect(context.ingressId).toBe(`brief:${run.id}:1`);
+      expect(context.origin).toEqual({ kind: 'schedule', runId: run.id, generation: 1 });
+      return {
+        status: mode === 'proactive-unavailable' ? 'unavailable' : mode === 'proactive-denied' ? 'denied' : 'ok',
+        candidates: [],
+      };
     }),
-    session: () => session,
-    destination: () => undefined,
-    stop: vi.fn(),
-    wake: vi.fn(),
-    launcher: {
-      ready: () => true,
-      prepare: async (_binding, _session, check) => {
-        authorize = check;
-        return {} as CosLaunch;
-      },
-    },
+  };
+  const prepareMailReview = vi.fn(async (context, id, claimedGeneration, current) => {
+    expect(context.generation).toBe(generation);
+    expect(context.origin).toBeUndefined();
+    expect(id).toBe(run.id);
+    expect(claimedGeneration).toBe(1);
+    expect(current()).toBe(true);
+    expect(wake).not.toHaveBeenCalled();
+    return { status: mode === 'mail-review-denied' ? 'denied' : 'ok' };
   });
-  await prepareCosLaunch(session);
-  expect(await authorize()).toBe(`brief:${lease.runId}:1`);
-  expect(knowledge.contextReady).toHaveBeenCalledWith(expect.objectContaining({ sessionId: 'session', generation }));
-  expect(proactive.scheduledBatch).toHaveBeenCalledWith(
-    expect.objectContaining({ generation, origin: { kind: 'schedule', runId: lease.runId, generation: 1 } }),
-  );
-  proactive.scheduledBatch.mockResolvedValue({ status: 'unavailable' });
-  expect(await authorize()).toBeNull();
-  expect(await authorize.reserve!('outage-before-model')).toBe(false);
-  expect(briefs.reserveCall).not.toHaveBeenCalled();
-  proactive.scheduledBatch.mockResolvedValue({ status: 'ok' });
-  expect(await authorize.reserve!('attempt')).toBe(true);
-  expect(briefs.reserveCall).toHaveBeenCalledWith(
-    expect.objectContaining({ origin: { kind: 'schedule', runId: lease.runId, generation: 1 } }),
-    lease.runId,
-    1,
-    'model',
-    'attempt',
-  );
-  briefs.reserveCall.mockResolvedValue({ status: 'pending' });
-  expect(await authorize.reserve!('lost')).toBe(false);
-  expect(
-    await permitCosOutbound(session, {
-      kind: 'chat',
-      channel_type: 'mattermost',
-      platform_id: 'mattermost:fixture:private',
-      thread_id: null,
-      content: JSON.stringify({ text: 'Untracked scheduled brief' }),
-    }),
-  ).toBe(false);
-  expect(knowledge.answers.authorizePublication).not.toHaveBeenCalled();
-  briefs.authorize.mockResolvedValue({ status: 'denied' });
-  expect(await authorize()).toBeNull();
+  if (mode === 'mail-review-context-denied') knowledge.contextReady.mockResolvedValue({ status: 'denied' });
+  const warning = vi.spyOn(log, 'warn').mockImplementation(() => {});
+  try {
+    runtime = createCosRuntime({
+      db,
+      enabled: true,
+      store: {
+        briefs,
+        calendar,
+        knowledge,
+        briefArtifacts,
+        proactive,
+        prepareMailReview,
+        pendingOutbox: vi.fn().mockResolvedValue({ status: 'ok', items: [] }),
+      } as unknown as PriorityStore,
+      facts: async () => ({
+        id: 'private',
+        type: 'P',
+        delete_at: 0,
+        members: ['bot', 'owner'],
+        activeSubscription: true,
+      }),
+      session: () => session,
+      destination: () => undefined,
+      stop,
+      wake,
+      running: () => false,
+      withBriefTasks: (_session, operation) => operation(tasks),
+      launcher: {
+        ready: () => true,
+        canBeginMailReview: () => mode !== 'mail-review-budget-empty',
+        prepare: vi.fn(),
+        renewBriefContext,
+      },
+    });
+    await runtime.pump(binding);
+    if (mode === 'mail-review-denied' || mode === 'mail-review-budget-empty' || mode === 'mail-review-context-denied') {
+      expect(prepareMailReview).toHaveBeenCalledTimes(mode === 'mail-review-denied' ? 1 : 0);
+      expect(wake).not.toHaveBeenCalled();
+      expect(renewBriefContext).not.toHaveBeenCalled();
+      expect(calendar.refresh).not.toHaveBeenCalled();
+      expect(proactive.scheduledBatch).not.toHaveBeenCalled();
+      expect(inbound.prepare('SELECT * FROM messages_in').all()).toHaveLength(0);
+      if (mode !== 'mail-review-denied')
+        expect(warning).toHaveBeenCalledWith('CoS Mail review admission closed', {
+          stage: mode === 'mail-review-budget-empty' ? 'model_budget' : 'knowledge',
+        });
+      return;
+    }
+    if (mode.startsWith('proactive-')) {
+      expect(proactive.scheduledBatch).toHaveBeenCalledOnce();
+      expect(wake).not.toHaveBeenCalled();
+      expect(inbound.prepare('SELECT * FROM messages_in').all()).toHaveLength(0);
+      return;
+    }
+    if (mode.startsWith('review-')) {
+      expect(briefs.reserveDue).not.toHaveBeenCalled();
+      expect(wake).not.toHaveBeenCalled();
+      expect(renewBriefContext).not.toHaveBeenCalled();
+      expect(calendar.refresh).not.toHaveBeenCalled();
+      expect(deliver).not.toHaveBeenCalled();
+      return;
+    }
+    if (mode !== 'existing') {
+      expect(briefs.cancel).not.toHaveBeenCalled();
+      expect(briefs.reserveDue).toHaveBeenCalledOnce();
+      expect(wake).toHaveBeenCalledOnce();
+      expect(proactive.scheduledBatch).toHaveBeenCalledTimes(mode.startsWith('mail-review') ? 0 : 1);
+      if (mode.startsWith('mail-review')) {
+        expect(prepareMailReview).toHaveBeenCalledOnce();
+        expect(briefs.beginRefresh).not.toHaveBeenCalled();
+        expect(
+          (db.prepare('SELECT generation FROM cos_conversation_states').get() as { generation: string }).generation,
+        ).toBe(generation);
+      }
+      expect(renewBriefContext).toHaveBeenCalledTimes(mode === 'refresh' ? 1 : 0);
+      expect(calendar.refresh).toHaveBeenCalledTimes(mode === 'refresh' ? 1 : 0);
+      expect(deliver).not.toHaveBeenCalled();
+      expect(tasks.state(binding, run)).toBe('pending');
+      run.state = 'prepared';
+      await runtime.pump(binding);
+    }
+    expect(deliver).toHaveBeenCalledExactlyOnceWith(
+      'mattermost',
+      'mattermost:fixture:private',
+      null,
+      'chat',
+      JSON.stringify({ text: 'Checked scheduled brief' }),
+      undefined,
+      'brief-' + run.id,
+    );
+    await runtime.pump(binding);
+    expect(deliver).toHaveBeenCalledOnce();
+    expect(tasks.state(binding, run)).toBe('completed');
+    expect(stop).toHaveBeenCalledWith('session');
+    expect(readScheduledLease(db, binding)).toBeNull();
+    if (mode.endsWith('without-owner-ingress'))
+      expect(db.prepare('SELECT ingress_id,ingress_at FROM cos_identity_boundaries').get()).toEqual({
+        ingress_id: null,
+        ingress_at: null,
+      });
+  } finally {
+    warning.mockRestore();
+    inbound.close();
+  }
 });
+
+it.each(['brief', 'mail-review'] as const)(
+  'S04 wires shared-context %s admission and model budgets while withholding ordinary chat publication',
+  async (purpose) => {
+    const db = initTestDb();
+    const binding: CosBinding = {
+      scopeId: 'scope',
+      agentGroupId: 'group',
+      messagingGroupId: 'mg',
+      sessionId: 'session',
+      provider: 'codex',
+      instanceId: 'fixture',
+      channelId: 'private',
+      ownerId: 'owner',
+      botId: 'bot',
+    };
+    const session = {
+      id: 'session',
+      agent_group_id: 'group',
+      messaging_group_id: 'mg',
+      thread_id: null,
+      status: 'active',
+      agent_provider: 'codex',
+    } as Session;
+    installCosBoundary(binding, db);
+    db.exec('UPDATE cos_identity_boundaries SET paused=0');
+    ensureConversationSchema(db);
+    const generation = randomUUID();
+    db.prepare(
+      "INSERT INTO cos_conversation_states(scope_id,binding_digest,account_fingerprint,generation,status,updated_at) VALUES(?,?,?,?,'active',?)",
+    ).run(binding.scopeId, digest(binding), 'a'.repeat(64), generation, new Date().toISOString());
+    const lease = {
+      runId: 'b'.repeat(64),
+      generation: 1,
+      hostId: 'host',
+      deadlineAt: new Date(Date.now() + 120000).toISOString(),
+    };
+    expect(installScheduledOrigin(db, binding, session, lease)).toBe(true);
+    const briefs = {
+      authorize: vi.fn().mockResolvedValue({ status: 'ok' }),
+      reserveCall: vi.fn().mockResolvedValue({ status: 'ok' }),
+    };
+    const knowledge = {
+      contextReady: vi.fn().mockResolvedValue({ status: 'ok' }),
+      answers: { authorizePublication: vi.fn().mockResolvedValue({ status: 'ok' }) },
+    };
+    const proactive = { scheduledBatch: vi.fn().mockResolvedValue({ status: 'ok' }) };
+    const mailReviewAccess = {
+      scopeForReads: vi.fn().mockResolvedValue({ binding_id: 'selected-reader', thread_ids: ['bb01'] }),
+    };
+    let authorize!: TurnAuthorization;
+    runtime = createCosRuntime({
+      db,
+      enabled: true,
+      store: {
+        briefs,
+        knowledge,
+        proactive,
+        ...(purpose === 'mail-review'
+          ? {
+              database: { run: async (operation: (client: string) => unknown) => operation('fixture-client') },
+              mailReviewAccess,
+            }
+          : {}),
+        context: vi.fn().mockResolvedValue({ status: 'ok' }),
+      } as unknown as PriorityStore,
+      facts: async () => ({
+        id: 'private',
+        type: 'P',
+        delete_at: 0,
+        members: ['bot', 'owner'],
+        activeSubscription: true,
+      }),
+      session: () => session,
+      destination: () => undefined,
+      stop: vi.fn(),
+      wake: vi.fn(),
+      launcher: {
+        ready: () => true,
+        prepare: async (_binding, _session, check) => {
+          authorize = check;
+          return {} as CosLaunch;
+        },
+      },
+    });
+    await prepareCosLaunch(session);
+    expect(await authorize()).toBe(`brief:${lease.runId}:1`);
+    expect(knowledge.contextReady).toHaveBeenCalledWith(expect.objectContaining({ sessionId: 'session', generation }));
+    const retained = expect.objectContaining({
+      generation,
+      origin: { kind: 'schedule', runId: lease.runId, generation: 1 },
+    });
+    if (purpose === 'mail-review') {
+      expect(mailReviewAccess.scopeForReads).toHaveBeenCalledWith('fixture-client', retained);
+      expect(proactive.scheduledBatch).not.toHaveBeenCalled();
+      mailReviewAccess.scopeForReads.mockResolvedValue({ binding_id: 'selected-reader', thread_ids: [] });
+      expect(await authorize()).toBe(`brief:${lease.runId}:1`);
+      mailReviewAccess.scopeForReads.mockResolvedValue({ binding_id: null, thread_ids: [] });
+    } else {
+      expect(proactive.scheduledBatch).toHaveBeenCalledWith(retained);
+      proactive.scheduledBatch.mockResolvedValue({ status: 'unavailable' });
+    }
+    expect(await authorize()).toBeNull();
+    expect(await authorize.reserve!('outage-before-model')).toBe(false);
+    expect(briefs.reserveCall).not.toHaveBeenCalled();
+    proactive.scheduledBatch.mockResolvedValue({ status: 'ok' });
+    mailReviewAccess.scopeForReads.mockResolvedValue({ binding_id: 'selected-reader', thread_ids: ['bb01'] });
+    expect(await authorize.reserve!('attempt')).toBe(true);
+    expect(briefs.reserveCall).toHaveBeenCalledWith(
+      expect.objectContaining({ origin: { kind: 'schedule', runId: lease.runId, generation: 1 } }),
+      lease.runId,
+      1,
+      'model',
+      'attempt',
+    );
+    briefs.reserveCall.mockResolvedValue({ status: 'pending' });
+    expect(await authorize.reserve!('lost')).toBe(false);
+    expect(
+      await permitCosOutbound(session, {
+        kind: 'chat',
+        channel_type: 'mattermost',
+        platform_id: 'mattermost:fixture:private',
+        thread_id: null,
+        content: JSON.stringify({ text: 'Untracked scheduled brief' }),
+      }),
+    ).toBe(false);
+    expect(knowledge.answers.authorizePublication).not.toHaveBeenCalled();
+    briefs.authorize.mockResolvedValue({ status: 'denied' });
+    expect(await authorize()).toBeNull();
+  },
+);

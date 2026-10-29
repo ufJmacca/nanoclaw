@@ -23,8 +23,9 @@ import { STRATEGY_SCHEMA, STRATEGY_CHECKSUM } from './strategy-schema.js';
 import { STRATEGY_CHAIN_SCHEMA, STRATEGY_CHAIN_CHECKSUM } from './strategy-chain-schema.js';
 import { MAIL_SCHEMA, MAIL_CHECKSUM } from './mail-schema.js';
 import { MAIL_DRAFT_SCHEMA, MAIL_DRAFT_CHECKSUM } from './mail-draft-schema.js';
+import { MAIL_REVIEW_SCHEMA, MAIL_REVIEW_CHECKSUM } from './mail-review-schema.js';
 export { INITIAL_SCHEMA, INITIAL_CHECKSUM } from './schema-definition.js';
-export const SCHEMA_VERSION = 20;
+export const SCHEMA_VERSION = 21;
 export const MIGRATIONS = [
   { version: 1, checksum: INITIAL_CHECKSUM, sql: INITIAL_SCHEMA },
   { version: 2, checksum: KNOWLEDGE_CHECKSUM, sql: KNOWLEDGE_SCHEMA },
@@ -46,6 +47,7 @@ export const MIGRATIONS = [
   { version: 18, checksum: STRATEGY_CHAIN_CHECKSUM, sql: STRATEGY_CHAIN_SCHEMA },
   { version: 19, checksum: MAIL_CHECKSUM, sql: MAIL_SCHEMA },
   { version: 20, checksum: MAIL_DRAFT_CHECKSUM, sql: MAIL_DRAFT_SCHEMA },
+  { version: 21, checksum: MAIL_REVIEW_CHECKSUM, sql: MAIL_REVIEW_SCHEMA },
 ] as const;
 const LOCK_ID = 73101001;
 const identifier = (value: string) => '"' + value.replaceAll('"', '""') + '"';
@@ -135,6 +137,12 @@ export async function migrate(client: pg.Client, runtimeRole: string): Promise<n
     );
     await client.query(
       `REVOKE INSERT,UPDATE,DELETE,TRUNCATE ON cos.mail_draft_writer_bindings,cos.mail_draft_writer_revisions FROM ${identifier(runtimeRole)}`,
+    );
+    await client.query(
+      `GRANT SELECT ON cos.mail_review_policies,cos.mail_review_policy_revisions TO ${identifier(runtimeRole)}`,
+    );
+    await client.query(
+      `REVOKE INSERT,UPDATE,DELETE,TRUNCATE ON cos.mail_review_policies,cos.mail_review_policy_revisions FROM ${identifier(runtimeRole)}`,
     );
     await client.query(`GRANT SELECT,INSERT,UPDATE,DELETE ON cos.work_items TO ${identifier(runtimeRole)}`);
     await client.query(`GRANT SELECT,INSERT ON cos.work_revisions TO ${identifier(runtimeRole)}`);

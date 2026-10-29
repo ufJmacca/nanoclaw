@@ -13,6 +13,7 @@ import { parseMailDraftHostGrant, type MailDraftHostProfile, type MailDraftHostG
 import { GOOGLE_MAIL_DRAFT_SCOPE } from './oauth.js';
 import { googleMailDraftWriter, MailDraftWriteError, type MailDraftResult } from './google-writer.js';
 import type { MailDraftDependencies, MailDraftSelection } from './store.js';
+import type { MailReviewAccess } from '../automation/mail-review-access.js';
 
 type Options = {
   profile: MailDraftHostProfile;
@@ -20,6 +21,7 @@ type Options = {
   reader: MailHostCredentials;
   writer: MailDraftHostCredentials;
   authority: MailDraftAuthorityResolver;
+  review?: { authority: MailDraftAuthorityResolver; access: Pick<MailReviewAccess, 'check'> };
   enabled(): boolean;
   /** Installed opener pins the real target/profile and validates actual baseline recovery before assembly. */
   assertProfile(): void;
@@ -75,7 +77,7 @@ export function createMailDraftHost(options: Options): { dependencies: MailDraft
       if (
         shutdown.signal.aborted ||
         !options.enabled() ||
-        context.origin ||
+        (context.origin && (context.origin.kind !== 'schedule' || !options.review)) ||
         context.provider !== 'codex' ||
         reader.closed() ||
         writer.closed()
@@ -86,7 +88,7 @@ export function createMailDraftHost(options: Options): { dependencies: MailDraft
       journal.assertCurrent();
       reader.verifyStorage();
       writer.verifyStorage();
-      const authority = options.authority(context);
+      const authority = context.origin ? options.review!.authority(context) : options.authority(context);
       return authority?.contextGeneration === context.generation &&
         authority.draftProfileDigest === digest('cos-mail-draft/v1') &&
         profile.grants.some(
@@ -138,6 +140,7 @@ export function createMailDraftHost(options: Options): { dependencies: MailDraft
   const dependencies: MailDraftDependencies = {
     journal,
     authority: (context) => native(context as KnowledgeContext),
+    ...(options.review ? { reviewAccess: options.review.access } : {}),
     matches,
     writer(context, selected, checkDatabase, source) {
       const retained = structuredClone(context),

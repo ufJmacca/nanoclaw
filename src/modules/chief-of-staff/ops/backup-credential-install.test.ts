@@ -32,7 +32,12 @@ function fixture() {
   const roots = { targetRoot: root + '/state', installationRoot: root + '/install', dataRoot: root + '/data' };
   const policy = { vaultRoot: root, targetDigest: digest(roots.targetRoot), volume: { filesystemUuid } };
   f.vault.mockReturnValue(policy);
-  f.access.mockImplementation(async (_roots, area, callback) => callback(area === 'journals' ? journals : directory));
+  f.access.mockImplementation(async (_roots, area, callback) =>
+    callback(area === 'journals' ? journals : directory, () => {
+      f.vault();
+      f.memory();
+    }),
+  );
   f.target.mockReturnValue({
     lifecycle: 'protected',
     maintenance: true,

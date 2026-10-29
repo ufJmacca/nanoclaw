@@ -19,7 +19,7 @@ afterEach(() => {
   vi.restoreAllMocks();
   vi.useRealTimers();
 });
-function fixture(slice: 'G02' | 'G03' | 'G04' | 'G05' = 'G02') {
+function fixture(slice: 'G02' | 'G03' | 'G04' | 'G05' | 'G06' = 'G02') {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-upload-job-'));
   fs.chmodSync(base, 0o700);
   cleanup.push(() => fs.rmSync(base, { recursive: true, force: true }));
@@ -134,7 +134,7 @@ function fixture(slice: 'G02' | 'G03' | 'G04' | 'G05' = 'G02') {
   const invoke = (mode?: 'deliver' | 'maintain') => uploadBackupJob({ root, binding, requestId, effects, mode });
   return { root, binding, manifest, queues, effects, events, native, requestId, add, invoke };
 }
-it.each(['G04', 'G05'] as const)(
+it.each(['G04', 'G05', 'G06'] as const)(
   '%s drains existing work, journals a bounded page, delivers newly queued changes, then verifies a complete capture',
   async (slice) => {
     const f = fixture(slice),
@@ -239,7 +239,7 @@ it('G04 maintain-only mode never collects a page or creates another capture', as
   expect(f.effects.journalCredentials).not.toHaveBeenCalled();
   expect(f.effects.captureCredentials).not.toHaveBeenCalled();
 });
-it.each(['G04', 'G05'] as const)(
+it.each(['G04', 'G05', 'G06'] as const)(
   '%s requires installed page and capture ports instead of silently behaving like G03',
   async (slice) => {
     const f = fixture(slice);
@@ -274,7 +274,7 @@ it('G04 rejects malformed completion evidence and closes an escaped job guard af
   expect(f.effects.maintain).not.toHaveBeenCalled();
   expect(() => escaped()).toThrow('backup_upload_job_unavailable');
 });
-it.each(['G04', 'G05'] as const)(
+it.each(['G04', 'G05', 'G06'] as const)(
   '%s preserves a later owner pause, consumed attempts and the shared main context during capture',
   async (slice) => {
     const f = fixture(slice),

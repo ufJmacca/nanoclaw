@@ -2,6 +2,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { verifyMailFixtureReport } from '../../../contracts/chief-of-staff/mail-fixture-report.js';
 import { verifyMailDraftFixtureReport } from '../../../contracts/chief-of-staff/mail-draft-fixture-report.js';
+import { verifyMailReviewFixtureReport } from '../../../contracts/chief-of-staff/mail-review-fixture-report.js';
 import { verifyMailVaultFixtureEvidence, verifyMailDraftVaultFixtureEvidence } from './mail-vault-fixture-evidence.js';
 import {
   verifyMailRecoveryFixtureEvidence,
@@ -23,6 +24,9 @@ export function readMailArtifactFixtureText(file: string): string {
 export function readMailDraftArtifactFixtureText(file: string): string {
   return readMailFixtureText(file, 'draft_artifacts.log');
 }
+export function readMailReviewArtifactFixtureText(file: string): string {
+  return readMailFixtureText(file, 'mail_review_artifacts.log');
+}
 export function readMailCredentialFixtureText(file: string): string {
   return readMailFixtureText(file, 'mail_credentials.log');
 }
@@ -42,6 +46,7 @@ function readMailFixtureText(
     | 'mail_credentials.log'
     | 'mail_recovery.log'
     | 'draft_artifacts.log'
+    | 'mail_review_artifacts.log'
     | 'draft_credentials.log'
     | 'draft_recovery.log',
 ): string {
@@ -94,7 +99,8 @@ export function mailArtifactFixtureCertificate(inspection: unknown, releaseId: s
     if (!Array.isArray(inspection) || inspection.length !== 1 || !/^release-[a-f0-9]{12}-[0-9]{14}$/.test(releaseId))
       throw Error('inspection');
     const mounts = objects(object(inspection[0]).Mounts),
-      root = one(mounts, 'Destination', '/workspace');
+      stateMounted = mounts.some((mount) => mount.Destination === '/workspace/.cos-plan-state'),
+      root = one(mounts, 'Destination', stateMounted ? '/workspace/.cos-plan-state' : '/workspace');
     if (
       root.Type !== 'bind' ||
       root.RW !== true ||
@@ -109,7 +115,15 @@ export function mailArtifactFixtureCertificate(inspection: unknown, releaseId: s
     // the observed Users mapping; never treat an unknown VM path as a Mac root.
     const source = root.Source.startsWith('/host_mnt/Users/') ? root.Source.slice('/host_mnt'.length) : root.Source;
     if (source === '/host_mnt' || source.startsWith('/host_mnt/')) throw Error('workspace_mapping');
-    return path.join(source, '.cos-plan-state/release-tests', releaseId, 'ca.pem');
+    if (stateMounted && path.basename(source) !== '.cos-plan-state') throw Error('state_mapping');
+    // The separately mounted state directory overlays any source-workspace bind.
+    // Its observed Mac path is therefore authoritative for the selected CA.
+    return path.join(
+      stateMounted ? source : path.join(source, '.cos-plan-state'),
+      'release-tests',
+      releaseId,
+      'ca.pem',
+    );
   } catch {
     // eslint-disable-next-line preserve-caught-error -- Inspection may contain unrelated private configuration; return only a fixed mapping failure.
     throw Error('mail_fixture_workspace_unverified');
@@ -154,6 +168,11 @@ export function verifyMailDraftReleaseEvidence(gate: string, text: string, ident
   if (!['draft_policy', 'draft_transport', 'draft_reconciliation'].includes(gate) || !('workerImages' in identity))
     throw Error('mail_draft_release_check_unavailable');
   return verifyMailDraftArtifactFixtureEvidence(text, identity);
+}
+export function verifyMailReviewReleaseEvidence(gate: string, text: string, identity: Identity) {
+  if (!['mail_review_policy', 'mail_review_schedule', 'mail_review_flow'].includes(gate))
+    throw Error('mail_review_release_check_unavailable');
+  return verifyMailReviewArtifactFixtureEvidence(text, identity);
 }
 function object(value: unknown): RecordValue {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw Error('object');
@@ -300,9 +319,17 @@ export function verifyMailDraftArtifactFixtureEvidence(text: string, identity: I
     throw Error('mail_draft_artifact_release_evidence_unavailable');
   }
 }
-function verifyBoundMailArtifactEvidence(text: string, identity: Identity, profile: 'G04' | 'G05') {
+export function verifyMailReviewArtifactFixtureEvidence(text: string, identity: Identity) {
   try {
-    const contract = profile === 'G05' ? 'cos-g05-draft' : 'cos-g04-mail';
+    return verifyBoundMailArtifactEvidence(text, identity, 'G06');
+  } catch {
+    // eslint-disable-next-line preserve-caught-error -- A review gate cannot substitute a prior reader/draft execution or expose private nested diagnostics.
+    throw Error('mail_review_artifact_release_evidence_unavailable');
+  }
+}
+function verifyBoundMailArtifactEvidence(text: string, identity: Identity, profile: 'G04' | 'G05' | 'G06') {
+  try {
+    const contract = profile === 'G06' ? 'cos-g06-review' : profile === 'G05' ? 'cos-g05-draft' : 'cos-g04-mail';
     if (typeof text !== 'string' || Buffer.byteLength(text) > 2 * 1024 ** 2) throw Error('bounds');
     keys(object(identity), 'sourceCommit,sourceTree,workerAssetsDigest,hostImage,workerImages,certificateFile');
     if (
@@ -381,7 +408,11 @@ function verifyBoundMailArtifactEvidence(text: string, identity: Identity, profi
         end = next < 0 ? lines.length : next,
         report = lines.splice(0, end).join('\n');
       const verified =
-        profile === 'G05' ? verifyMailDraftFixtureReport(report, suite) : verifyMailFixtureReport(report, suite);
+        profile === 'G06'
+          ? verifyMailReviewFixtureReport(report, suite)
+          : profile === 'G05'
+            ? verifyMailDraftFixtureReport(report, suite)
+            : verifyMailFixtureReport(report, suite);
       if (suite === 'database') actualDatabaseCases = verified.actualCases;
     }
     if (lines.some((line) => line.trim())) throw Error('extra');

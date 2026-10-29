@@ -20,6 +20,7 @@ import { hasCalendarReadScope } from '../calendar/reader.js';
 import { calendarAnswerNotice, checkCalendarContext, type CalendarAnswerNotice } from '../calendar/answer-notice.js';
 import { calendarEmptyWindowNotice } from '../calendar/empty-window-notice.js';
 import { mailAnswerNotice, checkMailContext, type MailAnswerNotice } from '../mail/answer-notice.js';
+import type { MailReviewAccess, MailReviewReadScope } from '../automation/mail-review-access.js';
 export type KnowledgeContext = Context & { provider: string; generation: string };
 export type ImportSource = {
   sourceKey: string;
@@ -87,6 +88,7 @@ export class KnowledgeStore {
   private readonly mailAccess: (scopeId: string, bindingId: string) => boolean;
   private readonly calendarNotice: (client: PoolClient, context: KnowledgeContext) => Promise<CalendarAnswerNotice>;
   private readonly mailNotice?: (client: PoolClient, context: KnowledgeContext) => Promise<MailAnswerNotice>;
+  private readonly mailReviewAccess?: Pick<MailReviewAccess, 'scopeForReads'>;
   constructor(
     readonly database: BoundedDatabase,
     readonly artifacts: KnowledgeArtifacts,
@@ -100,9 +102,11 @@ export class KnowledgeStore {
       mailAccess?(scopeId: string, bindingId: string): boolean;
       mailEnabled?(): boolean;
       mailDraftNotice?: KnowledgeAnswers['dependencies']['mailDraftNotice'];
+      mailReviewAccess?: Pick<MailReviewAccess, 'scopeForReads'>;
     } = {},
   ) {
     this.retrievalEnabled = options.retrievalEnabled ?? (() => true);
+    this.mailReviewAccess = options.mailReviewAccess;
     this.calendarAccess = options.calendarAccess ?? (() => false);
     this.mailAccess = (scope, binding) =>
       this.retrievalEnabled() && (options.mailEnabled?.() ?? false) && (options.mailAccess?.(scope, binding) ?? false);
@@ -441,6 +445,24 @@ export class KnowledgeStore {
       })
       .map(({ kind, id }) => kind + ':' + id);
   }
+  private async mailReadScope(client: PoolClient, context: KnowledgeContext): Promise<MailReviewReadScope | null> {
+    if (context.origin?.kind !== 'schedule') return null;
+    const denied = { binding_id: null, thread_ids: [] };
+    if (!this.mailReviewAccess) return denied;
+    const scope = await this.mailReviewAccess.scopeForReads(client, context);
+    if (scope === null) return null;
+    if (
+      !scope ||
+      typeof scope !== 'object' ||
+      !uuid.test(scope.binding_id ?? '') ||
+      !Array.isArray(scope.thread_ids) ||
+      scope.thread_ids.length > 10 ||
+      scope.thread_ids.some((id) => typeof id !== 'string' || !/^[a-f0-9]{1,128}$/.test(id)) ||
+      new Set(scope.thread_ids).size !== scope.thread_ids.length
+    )
+      return denied;
+    return structuredClone(scope);
+  }
   private async sourcesReadable(client: PoolClient, context: KnowledgeContext, ids: string[]): Promise<boolean> {
     const unique = [...new Set(ids)];
     if (!unique.length) return true;
@@ -448,8 +470,8 @@ export class KnowledgeStore {
     return (
       (
         await client.query(
-          `SELECT s.id FROM cos.sources s WHERE s.scope_id=$1 AND s.id=ANY($2::text[]) AND ${sourceAccess('$3')}`,
-          [context.scopeId, unique, allowed],
+          `SELECT s.id FROM cos.sources s WHERE s.scope_id=$1 AND s.id=ANY($2::text[]) AND ${sourceAccess('$3', '$4')}`,
+          [context.scopeId, unique, allowed, await this.mailReadScope(client, context)],
         )
       ).rowCount === unique.length
     );
@@ -482,6 +504,21 @@ export class KnowledgeStore {
   }
   async contextReady(context: KnowledgeContext): Promise<Result> {
     return this.transaction(async (client) => ({ status: (await this.current(client, context)) ? 'ok' : 'denied' }));
+  }
+  /** Recheck new disclosures without treating other, previously admitted owner evidence as withdrawn. */
+  async readSourcesCurrent(context: KnowledgeContext, sourceIds: string[]): Promise<Result> {
+    if (
+      !Array.isArray(sourceIds) ||
+      sourceIds.length > 100 ||
+      sourceIds.some((id) => typeof id !== 'string' || !idPattern.test(id))
+    )
+      return { status: 'denied' };
+    return this.transaction(async (client) => ({
+      status:
+        (await this.current(client, context)) && (await this.sourcesReadable(client, context, sourceIds))
+          ? 'ok'
+          : 'denied',
+    }));
   }
   /** Trusted action authority uses the caller's transaction, without holding another client or reading source bytes. */
   async actionContextCurrent(client: PoolClient, context: KnowledgeContext): Promise<boolean> {
@@ -674,7 +711,7 @@ export class KnowledgeStore {
         await client.query(
           `${candidateSelect},ts_rank(c.search,plainto_tsquery('simple',$3)) AS score ${candidateJoin}
         AND c.search @@ plainto_tsquery('simple',$3) AND ($4::text IS NULL OR s.id=$4) AND ($5::text IS NULL OR s.project_id=$5)
-        AND ${sourceAccess('$8')}
+        AND ${sourceAccess('$8', '$10')}
         AND ($9::text IS NULL OR (s.provenance->>'origin'='mail_message' AND s.access_policy->>'mail_binding_id'=$9))
         ORDER BY score DESC,s.id,c.ordinal LIMIT $6 OFFSET $7`,
           [
@@ -687,6 +724,7 @@ export class KnowledgeStore {
             input.offset ?? 0,
             await this.openSourceBindings(client, context),
             mailBinding,
+            await this.mailReadScope(client, context),
           ],
         )
       ).rows;
@@ -709,7 +747,7 @@ export class KnowledgeStore {
       if (!(await this.current(client, context))) return { status: 'denied' };
       const items = (
         await client.query(
-          `${candidateSelect},0 AS score ${candidateJoin} AND s.id=$3 AND r.id=$4 AND c.ordinal=$5 AND ${sourceAccess('$6')}`,
+          `${candidateSelect},0 AS score ${candidateJoin} AND s.id=$3 AND r.id=$4 AND c.ordinal=$5 AND ${sourceAccess('$6', '$7')}`,
           [
             context.scopeId,
             context.provider,
@@ -717,6 +755,7 @@ export class KnowledgeStore {
             revisionId,
             ordinal,
             await this.openSourceBindings(client, context),
+            await this.mailReadScope(client, context),
           ],
         )
       ).rows;
@@ -800,6 +839,14 @@ export class KnowledgeStore {
         items.push({ ...safe, evidence_id: ref.id, locator_format: 'normalized-utf8-lines/v1' });
       }
       if (!this.retrievalEnabled()) return { status: 'unavailable' };
+      if (
+        !(await this.sourcesReadable(
+          client,
+          context,
+          candidates.map((row) => row.source_id),
+        ))
+      )
+        return { status: 'denied' };
       return {
         status: 'ok',
         items,

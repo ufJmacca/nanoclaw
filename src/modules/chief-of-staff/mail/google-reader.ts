@@ -13,6 +13,7 @@ import { GOOGLE_MAIL_READ_SCOPE } from '../calendar/oauth-core.js';
 import { digest } from '../domain/contracts.js';
 import { replyEnvelope, type ReplySource } from '../mail-drafts/reply.js';
 import type { MailReplySourceReader } from '../mail-drafts/source.js';
+import { MAIL_REVIEW_HEADERS, mailReviewHeaderExclusion, type MailReviewSourceReader } from './review-source.js';
 export type GoogleMailReaderOptions = {
   access(): Promise<MailAccess>;
   token(): Promise<string>;
@@ -39,10 +40,33 @@ const pageToken = (x: unknown): string | null =>
   x === undefined ? null : printable(x, 2048) ? x : fail('mail_invalid_response');
 const root = 'https://gmail.googleapis.com/gmail/v1/users/me';
 type Kind = 'profile' | 'list' | 'message' | 'thread' | 'history';
+function messageMetadata(value: unknown) {
+  if (
+    !object(value) ||
+    !validId(value.id) ||
+    !validId(value.threadId) ||
+    typeof value.internalDate !== 'string' ||
+    !/^[1-9][0-9]{0,15}$/.test(value.internalDate) ||
+    !Number.isSafeInteger(Number(value.internalDate)) ||
+    !Array.isArray(value.labelIds) ||
+    value.labelIds.length > 100 ||
+    value.labelIds.some((label) => typeof label !== 'string' || !/^[a-zA-Z0-9_-]{1,200}$/.test(label)) ||
+    new Set(value.labelIds).size !== value.labelIds.length
+  )
+    return fail('mail_invalid_response');
+  return {
+    id: value.id,
+    threadId: value.threadId,
+    internalDate: Number(value.internalDate),
+    labels: (value.labelIds as string[]).slice().sort(),
+  };
+}
 /** Fixed GET endpoints only. A token's mailbox is independently checked before its
  * first content request, then bound to that exact grant and token in memory.
  */
-export function googleMailReader(options: GoogleMailReaderOptions): MailReader & MailReplySourceReader {
+export function googleMailReader(
+  options: GoogleMailReaderOptions,
+): MailReader & MailReplySourceReader & MailReviewSourceReader {
   const fetch = options.fetch ?? globalThis.fetch,
     now = options.now ?? Date.now;
   let verifiedToken: string | null = null;
@@ -228,6 +252,37 @@ export function googleMailReader(options: GoogleMailReaderOptions): MailReader &
     }
   };
   return {
+    async reviewSource(id, window) {
+      if (!validId(id) || !validWindow(window) || window.capturedAt > now() || window.capturedAt < now() - 60000)
+        return fail('mail_request_invalid');
+      const grant = await admit(),
+        url = new URL(root + '/messages/' + id);
+      url.searchParams.set('format', 'metadata');
+      url.searchParams.set('fields', 'id,threadId,historyId,internalDate,labelIds,payload(headers)');
+      for (const header of MAIL_REVIEW_HEADERS) url.searchParams.append('metadataHeaders', header);
+      const body = await request(url, 'message'),
+        selected = messageMetadata(body);
+      if (
+        selected.id !== id ||
+        !mailHistoryId(body.historyId) ||
+        selected.internalDate < window.since ||
+        selected.internalDate > window.capturedAt ||
+        !selected.labels.some((label) => ['INBOX', 'SENT'].includes(label)) ||
+        selected.labels.some((label) => ['SPAM', 'TRASH', 'DRAFT'].includes(label))
+      )
+        return fail('mail_review_source_denied');
+      if (!object(body.payload)) return fail('mail_invalid_response');
+      const excluded = mailReviewHeaderExclusion(body.payload.headers);
+      await admit(grant);
+      return {
+        id: selected.id,
+        threadId: selected.threadId,
+        historyId: body.historyId as string,
+        internalDate: selected.internalDate,
+        observedAt: now(),
+        excluded,
+      };
+    },
     async replySource(id, window) {
       if (!validId(id) || !validWindow(window) || window.capturedAt > now() || window.capturedAt < now() - 60000)
         return fail('mail_request_invalid');
@@ -238,28 +293,7 @@ export function googleMailReader(options: GoogleMailReaderOptions): MailReader &
       for (const header of ['From', 'To', 'Reply-To', 'Subject', 'Message-ID', 'References'])
         sourceUrl.searchParams.append('metadataHeaders', header);
       const body = await request(sourceUrl, 'message');
-      const metadata = (value: unknown) => {
-        if (
-          !object(value) ||
-          !validId(value.id) ||
-          !validId(value.threadId) ||
-          typeof value.internalDate !== 'string' ||
-          !/^[1-9][0-9]{0,15}$/.test(value.internalDate) ||
-          !Number.isSafeInteger(Number(value.internalDate)) ||
-          !Array.isArray(value.labelIds) ||
-          value.labelIds.length > 100 ||
-          value.labelIds.some((label) => typeof label !== 'string' || !/^[a-zA-Z0-9_-]{1,200}$/.test(label)) ||
-          new Set(value.labelIds).size !== value.labelIds.length
-        )
-          return fail('mail_invalid_response');
-        return {
-          id: value.id,
-          threadId: value.threadId,
-          internalDate: Number(value.internalDate),
-          labels: (value.labelIds as string[]).slice().sort(),
-        };
-      };
-      const selected = metadata(body);
+      const selected = messageMetadata(body);
       if (
         selected.id !== id ||
         !mailHistoryId(body.historyId) ||
@@ -291,7 +325,7 @@ export function googleMailReader(options: GoogleMailReaderOptions): MailReader &
         thread.messages.length > 100
       )
         return fail('mail_invalid_response');
-      const members = thread.messages.map(metadata);
+      const members = thread.messages.map(messageMetadata);
       if (
         members.some((member) => member.threadId !== selected.threadId) ||
         new Set(members.map((member) => member.id)).size !== members.length ||

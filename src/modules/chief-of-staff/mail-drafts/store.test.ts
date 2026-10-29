@@ -9,6 +9,7 @@ import { GOOGLE_MAIL_DRAFT_SCOPE } from './oauth.js';
 import type { DraftJournal } from './journal.js';
 import type { MailDraftBinding } from './binding.js';
 import { MailDraftStore } from './store.js';
+import type { MailReviewAccess, MailReviewSelection } from '../automation/mail-review-access.js';
 
 const context = {
   scopeId: 'scope',
@@ -65,7 +66,7 @@ function fixture() {
   const source = {
     source_id: 'source',
     source_version: 1,
-    revision_id: 'revision',
+    revision_id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
     revision_digest: digest('source'),
     thread_id: 'bb02',
     current_capture: 'capture',
@@ -151,6 +152,7 @@ function fixture() {
     assertCurrent: vi.fn(),
     generation: body.journalGeneration,
     find: vi.fn(() => record),
+    findSource: vi.fn(() => record),
   } as unknown as DraftJournal;
   const matches = vi.fn(() => host);
   let current: () => Promise<boolean> = async () => false;
@@ -201,6 +203,208 @@ function fixture() {
     },
   };
 }
+
+function reviewFixture() {
+  const f = fixture();
+  const selection: MailReviewSelection = {
+    id: '99999999-9999-4999-8999-999999999999',
+    version: 1,
+    digest: digest('review policy'),
+    body: {
+      format: 'cos-mail-review-binding/v1',
+      provider: 'fixture',
+      readerBindingId: f.body.readerBindingId,
+      writerBindingId: f.row.id,
+      writerVersion: f.row.version,
+      writerDigest: f.row.digest,
+      writerConsentRef: f.row.consent_ref,
+      nativeBindingDigest: f.body.nativeBindingDigest,
+      mailboxDigest: f.body.mailboxDigest,
+      contextGeneration: context.generation,
+      morningScheduleId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      afternoonScheduleId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+      timeZone: 'Australia/Sydney',
+      maxCandidateThreads: 10,
+      maxModelAttempts: 3,
+      maxDraftsPerDay: 5,
+    },
+    inputs: {
+      format: 'cos-mail-review-inputs/v1',
+      policy_id: '99999999-9999-4999-8999-999999999999',
+      policy_version: 1,
+      policy_digest: digest('review policy'),
+      context_generation: context.generation,
+      reader_binding_id: f.body.readerBindingId,
+      writer_binding_id: f.row.id,
+      capture_id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+      captured_at: '2026-10-24T05:00:00.000Z',
+      last_success_at: '2026-10-24T05:00:00.000Z',
+      coverage: 'stored_selection',
+      excluded_threads: 0,
+      unexamined_threads: 0,
+      candidates: [
+        {
+          thread_id: f.source.thread_id,
+          source_message_id: input.source_message_id,
+          source_id: f.source.source_id,
+          source_version: 1,
+          revision_id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+          revision_digest: f.source.revision_digest,
+          internal_date_ms: f.source.internal_date_ms,
+          subject: 'Fixture request',
+          reason: 'request',
+        },
+      ],
+    },
+  };
+  let current = true;
+  const check: MailReviewAccess['check'] = vi.fn(async (_client, _context, mode, thread) =>
+    current && (mode !== 'draft' || thread === f.source.thread_id) ? structuredClone(selection) : null,
+  );
+  const store = new MailDraftStore(f.database, f.knowledge, { ...f.dependencies, reviewAccess: { check } });
+  const runId = 'e'.repeat(64);
+  const scheduled = {
+    ...context,
+    ingressId: `brief:${runId}:1`,
+    origin: { kind: 'schedule' as const, runId, generation: 1 },
+  };
+  return {
+    ...f,
+    store,
+    selection,
+    scheduled,
+    check,
+    reviewCurrent: (v: boolean) => {
+      current = v;
+    },
+  };
+}
+
+it('admits a selected scheduled thread through both current review and existing draft authority', async () => {
+  const f = reviewFixture();
+  expect(await f.store.create(f.scheduled, requestId, input)).toMatchObject({ status: 'ok', draft_status: 'verified' });
+  expect(f.create).toHaveBeenCalledTimes(1);
+  expect(f.check).toHaveBeenCalledWith(expect.anything(), f.scheduled, 'draft', f.source.thread_id);
+  expect(await f.current()).toBe(true);
+  f.reviewCurrent(false);
+  expect(await f.current()).toBe(false);
+});
+it('G06 briefing refreshes known draft observations without creating or replaying a save', async () => {
+  const f = reviewFixture();
+  f.status.mockResolvedValue({ status: 'verified' as never, operationId });
+  const result = await f.store.reviewNotices(f.scheduled);
+  expect(result).toMatchObject({
+    status: 'ok',
+    drafts: [{ source_message_id: 'aa01', notice: { operationId, state: 'verified' } }],
+  });
+  expect(f.status).toHaveBeenCalledOnce();
+  expect(f.create).not.toHaveBeenCalled();
+  expect(
+    await f.store.reviewNoticesCurrent(
+      { query: f.query } as unknown as PoolClient,
+      f.scheduled,
+      result.drafts as never,
+    ),
+  ).toBe(true);
+  f.record.state = 'edited';
+  expect(
+    await f.store.reviewNoticesCurrent(
+      { query: f.query } as unknown as PoolClient,
+      f.scheduled,
+      result.drafts as never,
+    ),
+  ).toBe(false);
+});
+it('G06 briefing records an observed edit and never describes it as a ready verified draft', async () => {
+  const f = reviewFixture();
+  f.status.mockImplementation(async () => {
+    f.record.state = 'edited';
+    return { status: 'edited', operationId };
+  });
+  expect(await f.store.reviewNotices(f.scheduled)).toMatchObject({
+    status: 'ok',
+    drafts: [{ notice: { state: 'edited', text: expect.stringContaining('recorded as edited') } }],
+  });
+  expect(f.create).not.toHaveBeenCalled();
+});
+it('G06 briefing withholds draft discovery after review revocation and ignores effects in another scope', async () => {
+  const f = reviewFixture();
+  f.reviewCurrent(false);
+  expect(await f.store.reviewNotices(f.scheduled)).toEqual({ status: 'denied' });
+  expect(f.status).not.toHaveBeenCalled();
+  f.reviewCurrent(true);
+  f.record.scopeId = 'another-scope';
+  expect(await f.store.reviewNotices(f.scheduled)).toEqual({ status: 'ok', drafts: [] });
+  expect(f.status).not.toHaveBeenCalled();
+});
+it('G06 prepared brief readback can check an existing draft while further draft creation stays denied', async () => {
+  const f = reviewFixture();
+  vi.mocked(f.check).mockImplementation(async (_client, _context, mode) =>
+    mode === 'read' ? structuredClone(f.selection) : null,
+  );
+  f.status.mockImplementation(async () => {
+    f.record.state = 'edited';
+    return { status: 'edited', operationId };
+  });
+  expect(await f.store.reviewNotices(f.scheduled)).toMatchObject({
+    status: 'ok',
+    drafts: [{ notice: { state: 'edited' } }],
+  });
+  expect(await f.store.create(f.scheduled, requestId, input)).toEqual({ status: 'denied' });
+  expect(f.create).not.toHaveBeenCalled();
+});
+it.each(['message', 'revision'])('G06 refuses a changed frozen %s even in the same selected thread', async (field) => {
+  const f = reviewFixture();
+  if (field === 'message') f.selection.inputs.candidates[0].source_message_id = 'ff01';
+  else f.selection.inputs.candidates[0].revision_digest = digest('different revision');
+  expect(await f.store.create(f.scheduled, requestId, input)).toEqual({ status: 'denied' });
+  expect(f.create).not.toHaveBeenCalled();
+});
+it('review revocation before or during a provider call closes the existing save path', async () => {
+  const f = reviewFixture();
+  f.reviewCurrent(false);
+  expect(await f.store.create(f.scheduled, requestId, input)).toEqual({ status: 'denied' });
+  expect(f.create).not.toHaveBeenCalled();
+  f.reviewCurrent(true);
+  f.create.mockImplementationOnce(async () => {
+    f.reviewCurrent(false);
+    return { status: 'verified', operationId };
+  });
+  expect(await f.store.create(f.scheduled, requestId, input)).toEqual({ status: 'denied' });
+  expect([...f.operations.values()][0].result).toBeNull();
+});
+it.each(['writer', 'revision', 'consent', 'reader'] as const)('denies a review bound to another %s', async (key) => {
+  const f = reviewFixture();
+  if (key === 'writer') f.selection.body.writerBindingId = 'ffffffff-ffff-4fff-8fff-ffffffffffff';
+  if (key === 'revision') f.selection.body.writerDigest = digest('other writer revision');
+  if (key === 'consent') f.selection.body.writerConsentRef = digest('other consent');
+  if (key === 'reader') f.selection.body.readerBindingId = 'ffffffff-ffff-4fff-8fff-ffffffffffff';
+  expect(await f.store.create(f.scheduled, requestId, input)).toEqual({ status: 'denied' });
+  expect(f.writer).not.toHaveBeenCalled();
+});
+it('keeps owner and scheduled request identities distinct and never admits specialist review', async () => {
+  const f = reviewFixture();
+  expect((await f.store.create(context, requestId, input)).status).toBe('ok');
+  expect(await f.store.create(f.scheduled, requestId, input)).toEqual({ status: 'conflict' });
+  expect(
+    await f.store.create(
+      {
+        ...context,
+        origin: {
+          kind: 'mission_review',
+          runId: 'review',
+          generation: 1,
+          submissionId: 'submission',
+          owner: 'specialist',
+          fence: 1,
+        },
+      },
+      requestId,
+      input,
+    ),
+  ).toEqual({ status: 'denied' });
+  expect(f.create).toHaveBeenCalledTimes(1);
+});
 
 it('renders an as-of draft notice only from the current scoped independent witness without a provider call', async () => {
   const f = fixture();

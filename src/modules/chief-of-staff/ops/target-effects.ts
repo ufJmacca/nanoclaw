@@ -233,7 +233,7 @@ export function createTargetEffects(
       recovery = recoveryReleaseForManifest(prior),
       recorded = readPrivate<DeploymentReceipt>(path.join(settings.stateRoot, 'releases', previous, 'deployment.json'));
     if (
-      !['G01', 'G02', 'G03', 'G04', 'G05'].includes(prior.slice) ||
+      !['G01', 'G02', 'G03', 'G04', 'G05', 'G06'].includes(prior.slice) ||
       recovery.releaseId !== previous ||
       recorded.version !== 1 ||
       recorded.releaseId !== previous ||
@@ -334,7 +334,7 @@ export function createTargetEffects(
       verifyTargetPaths(settings, 1024 * 1024 * 1024);
       if (!nativeCompatible(manifest)) throw new Error('specialist_release_required');
       verifyInstalledProfiles(settings, manifest);
-      if (['G02', 'G03', 'G04', 'G05'].includes(manifest.slice)) {
+      if (['G02', 'G03', 'G04', 'G05', 'G06'].includes(manifest.slice)) {
         verifyVaultMemory();
         const slots = await createVaultBackupQueue(vaultRoots).inspect('state');
         if (slots.length) {
@@ -402,7 +402,7 @@ export function createTargetEffects(
     },
     async backup() {
       await verifyQuiescent();
-      if (['G02', 'G03', 'G04', 'G05'].includes(manifest.slice)) {
+      if (['G02', 'G03', 'G04', 'G05', 'G06'].includes(manifest.slice)) {
         if (fs.lstatSync(path.join(receipt, 'vault-state.json'), { throwIfNoEntry: false })) {
           await verifiedVaultBackup();
           return;
@@ -485,7 +485,9 @@ export function createTargetEffects(
     },
     async migrate() {
       await verifyQuiescent();
-      const vaultBackup = ['G02', 'G03', 'G04', 'G05'].includes(manifest.slice) ? await verifiedVaultBackup() : null;
+      const vaultBackup = ['G02', 'G03', 'G04', 'G05', 'G06'].includes(manifest.slice)
+        ? await verifiedVaultBackup()
+        : null;
       if (!vaultBackup) {
         // Revalidate the preserved central backup before either store is changed.
         await backupNativeDatabase(central, receipt);

@@ -24,6 +24,7 @@ import type { TurnAuthorization } from './turn-authorization.js';
 
 export type CoordinatorLauncher = {
   ready(binding: CosBinding): boolean;
+  canBeginMailReview?(binding: CosBinding): boolean;
   renewBriefContext?(
     binding: CosBinding,
     request: BriefContextRenewalRequest,
@@ -98,6 +99,26 @@ export function createCoordinatorLauncher(options: {
       contexts().invalidate(scopeId, 'access_changed');
     },
     ready: (binding: CosBinding) => activation(binding) !== null,
+    canBeginMailReview(binding: CosBinding) {
+      const admitted = activation(binding);
+      if (!admitted) return false;
+      try {
+        // Read the existing allowance without creating, reserving or resetting a counter.
+        const row = options.db
+          .prepare('SELECT policy_digest,used FROM cos_model_budgets WHERE activation_id=?')
+          .get(admitted.policy.activationId) as { policy_digest: string; used: number } | undefined;
+        return (
+          !!row &&
+          row.policy_digest === digest(admitted.policy) &&
+          Number.isSafeInteger(row.used) &&
+          row.used >= 0 &&
+          row.used < admitted.policy.maxAttempts
+        );
+        // eslint-disable-next-line no-catch-all/no-catch-all -- Unreadable allowance state closes new automatic work without altering existing reservations.
+      } catch {
+        return false;
+      }
+    },
     async prepare(binding: CosBinding, session: Session, authorize: TurnAuthorization): Promise<CosLaunch> {
       const admitted = activation(binding),
         release = currentRelease(),

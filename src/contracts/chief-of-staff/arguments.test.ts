@@ -1,5 +1,19 @@
 import { describe, it, expect } from 'vitest';
 import { parseFixtureArguments, fixtureFiles } from './arguments.js';
+it('G06 inherits all protected reader/draft/storage contracts and adds review policy and native scheduling only against test', () => {
+  const args = parseFixtureArguments(['--slice', 'G06', '--db-profile', 'test']);
+  expect(fixtureFiles(args)).toEqual([
+    ...fixtureFiles({ slice: 'G05', demo: false }),
+    'mail-review-schema.integration',
+    'mail-review-checkpoint.integration',
+    'mail-review-flow.integration',
+  ]);
+  const demo = parseFixtureArguments(['--slice', 'G06', '--db-profile', 'test', '--demo', '--fixture']);
+  expect(fixtureFiles(demo)).toEqual([...fixtureFiles({ slice: 'G05', demo: true }), 'mail-review-flow.integration']);
+  expect(() => parseFixtureArguments(['--slice', 'G06', '--db-profile', 'runtime-disposable'])).toThrow(
+    'explicit_supported_slice_and_profile_required',
+  );
+});
 it('G05 inherits every protected Mail/Calendar/storage regression and adds the actual policy/draft native contracts using only test', () => {
   const args = parseFixtureArguments(['--slice', 'G05', '--db-profile', 'test']);
   expect(fixtureFiles(args)).toEqual([
@@ -13,7 +27,7 @@ it('G05 inherits every protected Mail/Calendar/storage regression and adds the a
   expect(() => parseFixtureArguments(['--slice', 'G05', '--db-profile', 'runtime-disposable'])).toThrow(
     'explicit_supported_slice_and_profile_required',
   );
-  expect(() => parseFixtureArguments(['--slice', 'G06', '--db-profile', 'test'])).toThrow(
+  expect(() => parseFixtureArguments(['--slice', 'G07', '--db-profile', 'test'])).toThrow(
     'explicit_supported_slice_and_profile_required',
   );
 });
@@ -177,7 +191,7 @@ it('G01 regresses the completed programme using only the admitted separate test 
   expect(() => parseFixtureArguments(['--slice', 'G01', '--db-profile', 'runtime-disposable'])).toThrow(
     'explicit_supported_slice_and_profile_required',
   );
-  expect(() => parseFixtureArguments(['--slice', 'G06', '--db-profile', 'test'])).toThrow(
+  expect(() => parseFixtureArguments(['--slice', 'G07', '--db-profile', 'test'])).toThrow(
     'explicit_supported_slice_and_profile_required',
   );
 });

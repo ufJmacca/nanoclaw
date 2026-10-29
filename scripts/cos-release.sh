@@ -3,12 +3,12 @@
 set -euo pipefail
 umask 077
 [[ "$(uname -s)" == Darwin ]] || { echo 'cos:release requires the Mac host' >&2; exit 1; }
-[[ ( $# == 6 || ( $# == 7 && "${7:-}" == --local-only ) ) && "$1" == --slice && ( "$2" == S11 || "$2" == G01 || "$2" == G02 || "$2" == G03 || "$2" == G04 || "$2" == G05 ) && "$3" == --target && "$4" == pi && "$5" == --db-profile ]] || {
-  echo 'Usage: cos:release --slice S11|G01|G02|G03|G04|G05 --target pi --db-profile test|runtime-disposable [--local-only]' >&2; exit 1;
+[[ ( $# == 6 || ( $# == 7 && "${7:-}" == --local-only ) ) && "$1" == --slice && ( "$2" == S11 || "$2" == G01 || "$2" == G02 || "$2" == G03 || "$2" == G04 || "$2" == G05 || "$2" == G06 ) && "$3" == --target && "$4" == pi && "$5" == --db-profile ]] || {
+  echo 'Usage: cos:release --slice S11|G01|G02|G03|G04|G05|G06 --target pi --db-profile test|runtime-disposable [--local-only]' >&2; exit 1;
 }
 slice=$2 profile=$6
 [[ "$profile" == test || "$profile" == runtime-disposable ]] || exit 1
-[[ ( "$slice" != G01 && "$slice" != G02 && "$slice" != G03 && "$slice" != G04 && "$slice" != G05 ) || "$profile" == test ]] || { echo "$slice requires the separate admitted test profile." >&2; exit 1; }
+[[ ( "$slice" != G01 && "$slice" != G02 && "$slice" != G03 && "$slice" != G04 && "$slice" != G05 && "$slice" != G06 ) || "$profile" == test ]] || { echo "$slice requires the separate admitted test profile." >&2; exit 1; }
 [[ -z "${DOCKER_HOST:-}${DOCKER_CONTEXT:-}${DOCKER_TLS_VERIFY:-}${DOCKER_CERT_PATH:-}${BUILDX_BUILDER:-}" ]] || {
   echo 'Explicit Docker endpoint overrides are not accepted for releases.' >&2; exit 1;
 }
@@ -19,6 +19,10 @@ commit=$(git rev-parse HEAD)
 tree=$(git rev-parse 'HEAD^{tree}')
 branch=$(git symbolic-ref HEAD)
 [[ "$branch" == refs/heads/* ]] || exit 1
+dev=${COS_DEVCONTAINER_ID:-$(docker compose -f .devcontainer/compose.yaml -p nanoclaw-cos ps -q devcontainer)}
+[[ "$dev" =~ ^[a-zA-Z0-9_.-]+$ ]] || { echo 'The repository devcontainer must be running.' >&2; exit 1; }
+cli() { docker exec -w /workspace "$dev" node --import tsx src/modules/chief-of-staff/ops/mac-release-cli.ts "$@"; }
+cli toolchain
 mkdir -p .cos-plan-state/releases .cos-plan-state/release-tests
 lock="$root/.cos-plan-state/release.lock"
 mkdir "$lock" || { echo 'Another release owns the Mac lock; reconcile it before retrying.' >&2; exit 1; }
@@ -34,10 +38,8 @@ stamp=$(date -u +%Y%m%d%H%M%S)
 id="release-${commit:0:12}-$stamp"
 directory="$root/.cos-plan-state/releases/$id"
 mkdir "$directory"
-dev=${COS_DEVCONTAINER_ID:-$(docker compose -f .devcontainer/compose.yaml -p nanoclaw-cos ps -q devcontainer)}
-[[ "$dev" =~ ^[a-zA-Z0-9_.-]+$ ]] || { echo 'The repository devcontainer must be running.' >&2; exit 1; }
+directory=$(cd "$directory" && pwd -P)
 docker inspect "$dev" > "$directory/devcontainer.json"
-cli() { docker exec -w /workspace "$dev" node --import tsx src/modules/chief-of-staff/ops/mac-release-cli.ts "$@"; }
 cli init "$id" "$commit" "$branch" "$slice"
 timing_helper="$directory/context/scripts/cos-stage-timing.sh"
 [[ -f "$timing_helper" && -r "$timing_helper" ]] || { echo 'Pinned release timing helper is unavailable.' >&2; exit 1; }
@@ -53,7 +55,7 @@ cli target "$id"
 builder=$(cli field "$id" builder)
 context=$(cli field "$id" context)
 assets=$(cli field "$id" assets)
-test_directory="$root/.cos-plan-state/release-tests/$id"
+test_directory=$(cd "$root/.cos-plan-state/release-tests/$id" && pwd -P)
 if [[ "$profile" == test ]]; then
   certificate=$(cli certificate)
   [[ -f "$certificate" && ! -L "$certificate" ]] || { echo 'The selected test CA file is unavailable.' >&2; exit 1; }
@@ -95,7 +97,7 @@ source "$directory/context/scripts/cos-source-fixture.sh"
 source_fixture() {
   local mode=$1
   local backup_selection=()
-  if [[ "$slice" == G02 || "$slice" == G03 || "$slice" == G04 || "$slice" == G05 ]]; then
+  if [[ "$slice" == G02 || "$slice" == G03 || "$slice" == G04 || "$slice" == G05 || "$slice" == G06 ]]; then
     cli backup-input "$id" || return
     backup_selection=(G02)
   fi
@@ -118,7 +120,7 @@ check demo source_fixture demo
 for target in host agent-standard agent-documents; do
   tag=$(cli field "$id" "$target-tag")
   backup_build=()
-  if [[ ( "$slice" == G02 || "$slice" == G03 || "$slice" == G04 || "$slice" == G05 ) && "$target" == host ]]; then
+  if [[ ( "$slice" == G02 || "$slice" == G03 || "$slice" == G04 || "$slice" == G05 || "$slice" == G06 ) && "$target" == host ]]; then
     cli backup-input "$id"
     backup_build=(--build-arg RELEASE_FLAVOUR=backup --build-context "backup-artifact-input=$directory/backup-artifact-input")
   fi
@@ -133,7 +135,7 @@ cli images "$id"
 host_image=$(cli field "$id" host-id)
 standard_image=$(cli field "$id" agent-standard-id)
 documents_image=$(cli field "$id" agent-documents-id)
-if [[ "$slice" == G01 || "$slice" == G02 || "$slice" == G03 || "$slice" == G04 || "$slice" == G05 ]]; then
+if [[ "$slice" == G01 || "$slice" == G02 || "$slice" == G03 || "$slice" == G04 || "$slice" == G05 || "$slice" == G06 ]]; then
   docker run --rm --pull=never --network=none "$host_image" --input-type=module \
     -e 'import fs from "node:fs";const root="/release/vault-artifacts";const names=fs.readdirSync(root);if(names.length!==1)process.exit(1);process.stdout.write(fs.readFileSync(root+"/"+names[0]+"/artifact.json","utf8"))' > "$directory/vault-artifact.json"
   cli vault-artifact "$id"
@@ -154,7 +156,7 @@ if [[ "$slice" == G01 || "$slice" == G02 || "$slice" == G03 || "$slice" == G04 |
   check vault_kernel bash "$directory/context/scripts/cos-vault-fixture.sh" kernel "$vault_image" "$directory/context/scripts/cos-vault-keychain.swift"
   check vault_wire cli vault-wire "$id"
 fi
-if [[ "$slice" == G02 || "$slice" == G03 || "$slice" == G04 || "$slice" == G05 ]]; then
+if [[ "$slice" == G02 || "$slice" == G03 || "$slice" == G04 || "$slice" == G05 || "$slice" == G06 ]]; then
   check backup_capture bash "$directory/context/scripts/cos-vault-fixture.sh" backup-capture-kernel "$vault_image" "$directory/context/scripts/cos-vault-keychain.swift" "$test_directory/test.env" "$test_directory/ca.pem"
   check backup_credentials bash "$directory/context/scripts/cos-vault-fixture.sh" backup-kernel "$vault_image" "$directory/context/scripts/cos-vault-keychain.swift"
   # One complete real repository run supplies the three separately validated
@@ -201,7 +203,7 @@ docker run --rm --pull=never --network=none --user 0:0 --mount "type=volume,src=
   --entrypoint node "$fixture_image" -e 'const f=require("fs");for(const p of ["/fixture","/fixture/.cos-plan-state","/fixture/s"]){f.mkdirSync(p,{recursive:true,mode:448});f.chmodSync(p,448);f.chownSync(p,1000,1000)}'
 host_checks() {
   local backup_host_selection=()
-  if [[ "$slice" == G02 || "$slice" == G03 || "$slice" == G04 || "$slice" == G05 ]]; then backup_host_selection=(-e COS_BACKUP_FIXTURE_BINARY=/release/libexec/restic); fi
+  if [[ "$slice" == G02 || "$slice" == G03 || "$slice" == G04 || "$slice" == G05 || "$slice" == G06 ]]; then backup_host_selection=(-e COS_BACKUP_FIXTURE_BINARY=/release/libexec/restic); fi
   docker run --rm --pull=never --network=none "$host_image" --input-type=module \
     -e 'import {payloadDigest} from "/release/dist/modules/chief-of-staff/ops/payload.js";console.log(await payloadDigest("/release"))' > "$directory/payload.sha256" || return
   local payload_digest
@@ -209,7 +211,7 @@ host_checks() {
   [[ "$payload_digest" =~ ^[a-f0-9]{64}$ ]] || return 1
   docker run --rm --pull=never --network=none --entrypoint /release/node/bin/node "$host_image" \
     --input-type=module -e 'await import("/release/bootstrap.mjs"); const {default:D}=await import("/release/node_modules/better-sqlite3/lib/index.js");const d=new D(":memory:");if(d.prepare("select 1 as n").get().n!==1)process.exit(1);d.close()' || return
-  if [[ "$slice" == G02 || "$slice" == G03 || "$slice" == G04 || "$slice" == G05 ]]; then
+  if [[ "$slice" == G02 || "$slice" == G03 || "$slice" == G04 || "$slice" == G05 || "$slice" == G06 ]]; then
     docker run --rm --pull=never --network=none --read-only --cap-drop=ALL --security-opt=no-new-privileges \
       --user 1000:1000 --memory 256m --memory-swap 256m --ulimit core=0 \
       --tmpfs /tmp:rw,nosuid,nodev,noexec,size=8m,mode=700,uid=1000,gid=1000 \
@@ -272,7 +274,7 @@ isolation_checks() {
 check image_isolation isolation_checks
 check agent_image agent_checks
 check host_image host_checks
-if [[ "$slice" == G04 || "$slice" == G05 ]]; then
+if [[ "$slice" == G04 || "$slice" == G05 || "$slice" == G06 ]]; then
   check mail_credentials bash "$directory/context/scripts/cos-vault-fixture.sh" mail-credentials-kernel "$vault_image" "$directory/context/scripts/cos-vault-keychain.swift"
   check mail_recovery bash "$directory/context/scripts/cos-vault-fixture.sh" mail-recovery-kernel "$vault_image" "$directory/context/scripts/cos-vault-keychain.swift" "$test_directory/test.env" "$test_directory/ca.pem"
   # One actual compiled database run and one native conversation per worker.
@@ -286,7 +288,7 @@ if [[ "$slice" == G04 || "$slice" == G05 ]]; then
     exit 1
   fi
 fi
-if [[ "$slice" == G05 ]]; then
+if [[ "$slice" == G05 || "$slice" == G06 ]]; then
   check draft_credentials bash "$directory/context/scripts/cos-vault-fixture.sh" draft-credentials-kernel "$vault_image" "$directory/context/scripts/cos-vault-keychain.swift"
   check draft_recovery bash "$directory/context/scripts/cos-vault-fixture.sh" draft-recovery-kernel "$vault_image" "$directory/context/scripts/cos-vault-keychain.swift" "$test_directory/test.env" "$test_directory/ca.pem"
   if timed_release_stage check_draft_artifacts draft_artifacts.log bash "$directory/context/scripts/cos-mail-artifact-fixture.sh" "$host_image" "$standard_image" "$documents_image" \
@@ -298,7 +300,17 @@ if [[ "$slice" == G05 ]]; then
     exit 1
   fi
 fi
-if [[ "$slice" == G01 || "$slice" == G02 || "$slice" == G03 || "$slice" == G04 || "$slice" == G05 ]]; then
+if [[ "$slice" == G06 ]]; then
+  if timed_release_stage check_mail_review_artifacts mail_review_artifacts.log bash "$directory/context/scripts/cos-mail-artifact-fixture.sh" "$host_image" "$standard_image" "$documents_image" \
+      "$test_directory/test.env" "$test_directory/ca.pem" --mail-reviews > "$directory/mail_review_artifacts.log" 2>&1; then
+    for gate in mail_review_policy mail_review_schedule mail_review_flow; do cli record "$id" "$gate" 0; done
+  else
+    for gate in mail_review_policy mail_review_schedule mail_review_flow; do cli record "$id" "$gate" 1; done
+    echo 'The immutable Mail review fixture failed; its private report is retained.' >&2
+    exit 1
+  fi
+fi
+if [[ "$slice" == G01 || "$slice" == G02 || "$slice" == G03 || "$slice" == G04 || "$slice" == G05 || "$slice" == G06 ]]; then
   # Actual compiled native state, backed up while WAL pages are committed; no live stores are mounted.
   check protected_state docker run --rm --pull=never --network=none --read-only --user 1000:1000 \
     --tmpfs /tmp:rw,nosuid,nodev "$host_image" --test \

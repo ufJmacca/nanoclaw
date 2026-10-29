@@ -37,7 +37,7 @@ export class BriefScheduleStore {
     const changed = change.record_id
       ? await client.query(
           `UPDATE cos.brief_schedules SET title=$6,policy=$7,limits=$8,provenance=$9,version=version+1,activated_at=clock_timestamp(),updated_at=clock_timestamp()
-        WHERE scope_id=$1 AND id::text=$2 AND owner_id=$3 AND session_id=$4 AND agent_group_id=$5 AND version=$10 RETURNING *`,
+        WHERE scope_id=$1 AND id::text=$2 AND owner_id=$3 AND session_id=$4 AND agent_group_id=$5 AND version=$10 AND purpose='brief' RETURNING *`,
           [...values, change.expected_version],
         )
       : await client.query(
@@ -55,7 +55,7 @@ export class BriefScheduleStore {
   async read(client: PoolClient, context: Context): Promise<unknown[]> {
     return (
       await client.query(
-        'SELECT id,title,version,policy,limits,activated_at,last_local_date::text FROM cos.brief_schedules WHERE scope_id=$1 AND owner_id=$2 AND session_id=$3 AND agent_group_id=$4 LIMIT 1',
+        "SELECT id,title,version,policy,limits,activated_at,last_local_date::text FROM cos.brief_schedules WHERE scope_id=$1 AND owner_id=$2 AND session_id=$3 AND agent_group_id=$4 AND purpose='brief' LIMIT 1",
         [context.scopeId, context.ownerId, context.sessionId, context.agentGroupId],
       )
     ).rows;

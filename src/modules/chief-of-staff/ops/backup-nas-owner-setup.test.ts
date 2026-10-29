@@ -34,7 +34,10 @@ const cli = (a: ReturnType<typeof args>) => [
   '--credential-reference',
   a.credentialReference,
 ];
-function fixture(selectedRoot = os.homedir() + '/.config/nanoclaw-cos/state', slice: 'G02' | 'G03' | 'G04' = 'G02') {
+function fixture(
+  selectedRoot = os.homedir() + '/.config/nanoclaw-cos/state',
+  slice: 'G02' | 'G03' | 'G04' | 'G05' | 'G06' = 'G02',
+) {
   const selected = args(),
     release = fixtureVaultRelease(slice),
     root = selectedRoot,
@@ -208,7 +211,7 @@ it.each([
   if (reason === 'scope') values[2] = '../foreign';
   expect(() => parseBackupNasConfigureArguments(values)).toThrow(/^invalid_admin_arguments$/);
 });
-it.each(['G02', 'G03', 'G04'] as const)(
+it.each(['G02', 'G03', 'G04', 'G05', 'G06'] as const)(
   '%s uses a fresh live setup proof and verifies the exact source-bound root receipt while preserving the accepted owner configuration',
   async (slice) => {
     const f = fixture(undefined, slice),

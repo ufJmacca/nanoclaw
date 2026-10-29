@@ -11,6 +11,7 @@ import { GOOGLE_MAIL_READ_SCOPE } from '../mail/oauth.js';
 import { GOOGLE_MAIL_DRAFT_SCOPE } from './oauth.js';
 import { CalendarAccessFences } from '../calendar/access-fences.js';
 import { createMailDraftHost } from './host.js';
+import type { MailReviewAccess } from '../automation/mail-review-access.js';
 const cleanup: string[] = [],
   hosts: Array<{ close(): Promise<void> }> = [];
 afterEach(async () => {
@@ -75,7 +76,7 @@ function resource(root: string, clientId: string, scope: string, token: string) 
     },
   };
 }
-function fixture() {
+function fixture(review = false) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cos-draft-host-'));
   cleanup.push(root);
   const installation = digest('fixture installation'),
@@ -217,12 +218,14 @@ function fixture() {
     expect(pathname).toMatch(/\/drafts\/r-fixture$/);
     return new Response(JSON.stringify(savedDraft));
   });
+  const reviewAccess: Pick<MailReviewAccess, 'check'> = { check: vi.fn(async () => null) };
   const host = createMailDraftHost({
     profile,
     journal,
     reader: reader as unknown as MailHostCredentials,
     writer: writer as unknown as MailDraftHostCredentials,
     authority: () => (active ? authority : null),
+    review: review ? { authority: () => (active ? authority : null), access: reviewAccess } : undefined,
     enabled: () => enabled,
     assertProfile,
     assertRecovery,
@@ -244,6 +247,7 @@ function fixture() {
     assertProfile,
     assertRecovery,
     journal,
+    reviewAccess,
     authority,
     root,
     installation,
@@ -266,6 +270,42 @@ function fixture() {
   };
 }
 const request = { requestId: '11111111-1111-4111-8111-111111111111', sourceMessageId: 'aa01', text: 'Fixture reply' };
+it('requires explicit installed review identity and database fences for scheduled draft adapters', async () => {
+  const runId = 'a'.repeat(64),
+    ctx = { ...context, ingressId: `brief:${runId}:1`, origin: { kind: 'schedule' as const, runId, generation: 1 } };
+  const ordinary = fixture();
+  expect(ordinary.host.dependencies.authority(ctx)).toBeNull();
+  expect(ordinary.host.dependencies.writer(ctx, ordinary.selected, ordinary.current, ordinary.source)).toBeNull();
+  const f = fixture(true);
+  expect(f.host.dependencies.reviewAccess).toBe(f.reviewAccess);
+  expect(f.host.dependencies.matches(ctx, f.selected)).toBe(true);
+  const adapter = f.host.dependencies.writer(ctx, f.selected, f.current, f.source)!;
+  expect((await adapter.create(request)).status).toBe('verified');
+  expect(f.current).toHaveBeenCalled();
+});
+it('scheduled host admission never bypasses the database run check or admits a specialist origin', async () => {
+  const f = fixture(true),
+    runId = 'a'.repeat(64),
+    ctx = { ...context, ingressId: `brief:${runId}:1`, origin: { kind: 'schedule' as const, runId, generation: 1 } };
+  const adapter = f.host.dependencies.writer(ctx, f.selected, async () => false, f.source)!;
+  await expect(adapter.create(request)).rejects.toThrow();
+  expect(f.fetch).not.toHaveBeenCalled();
+  expect(f.reader.credentials.token).not.toHaveBeenCalled();
+  expect(f.writer.credentials.token).not.toHaveBeenCalled();
+  expect(
+    f.host.dependencies.authority({
+      ...context,
+      origin: {
+        kind: 'mission_review',
+        runId: 'specialist',
+        generation: 1,
+        submissionId: 'submission',
+        owner: 'specialist',
+        fence: 1,
+      },
+    }),
+  ).toBeNull();
+});
 it('uses separate held reader/writer credentials, current PG admission, both denial journals and verified readback', async () => {
   const f = fixture();
   expect(f.host.dependencies.matches(context, f.selected)).toBe(true);

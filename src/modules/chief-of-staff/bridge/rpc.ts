@@ -70,9 +70,22 @@ export function createRpcHandler(dependencies: {
       retainedContext = knowledgeContext;
       const access =
         dependencies.knowledge && knowledgeContext ? await dependencies.knowledge.contextReady(knowledgeContext) : null;
+      const mailDraftMethod = request.method.startsWith('cos_mail_draft_');
+      const scheduledMailDraft =
+        mailDraftMethod &&
+        context?.origin?.kind === 'schedule' &&
+        knowledgeContext &&
+        access?.status === 'ok' &&
+        dependencies.store.mailReviewAccess
+          ? !!(await dependencies.store.database.run((client) =>
+              // Route only an admitted Mail review. The draft store separately checks the
+              // exact source, dispatched state, fresh capture and model reservation before effects.
+              dependencies.store.mailReviewAccess!.check(client, knowledgeContext, 'read'),
+            ))
+          : false;
       let reservation =
         context?.origin &&
-        !request.method.startsWith('cos_mail_draft_') &&
+        (!mailDraftMethod || scheduledMailDraft) &&
         (!dependencies.knowledge || knowledgeContext) &&
         (!access || access.status === 'ok')
           ? ((await dependencies.reserveTool?.(
@@ -101,10 +114,7 @@ export function createRpcHandler(dependencies: {
       else if (dependencies.knowledge && !knowledgeContext) result = { status: 'denied' };
       else if (access && access.status !== 'ok') result = { status: access.status };
       else if (reservation && reservation.status !== 'ok') result = { status: reservation.status };
-      else if (
-        (request.method.startsWith('cos_action_') || request.method.startsWith('cos_mail_draft_')) &&
-        context.origin
-      )
+      else if (context.origin && (request.method.startsWith('cos_action_') || (mailDraftMethod && !scheduledMailDraft)))
         result = { status: 'denied' };
       else if (request.method === 'cos_status')
         result = context.origin

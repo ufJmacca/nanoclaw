@@ -12,7 +12,7 @@ import { validPrivateChannel, type ChannelFacts } from './bridge/identity.js';
 import type { PriorityStore } from './store/priorities.js';
 import type { CoordinatorLauncher } from './bridge/coordinator-launcher.js';
 import { createTurnAuthorization } from './bridge/turn-authorization.js';
-import { resolveKnowledgeContext } from './knowledge/context.js';
+import { resolveBriefPreparationContext, resolveKnowledgeContext } from './knowledge/context.js';
 import { digest, type Context, type Result } from './domain/contracts.js';
 import { KnowledgeInvalidation } from './knowledge/invalidation.js';
 import { NativeBriefTasks } from './automation/native-tasks.js';
@@ -36,6 +36,7 @@ import type { KnowledgeContext } from './knowledge/store.js';
 import { renderOperatorStatus } from './ops/operator-status-render.js';
 import { renderOwnerControl } from './ops/owner-control-render.js';
 import type { MailAuthorities } from './mail/authority.js';
+import { log } from '../../log.js';
 
 export type RuntimeDependencies = {
   db: Database.Database;
@@ -375,18 +376,62 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
           }
         },
         prepare: async (binding, context, run) => {
-          if (!d.store?.knowledge) return { status: 'denied' };
+          const closed = (
+            stage:
+              | 'store'
+              | 'boundary'
+              | 'context'
+              | 'currentness'
+              | 'knowledge'
+              | 'model_budget'
+              | 'channel_admission'
+              | 'final_context',
+          ) => {
+            if (run.provenance?.purpose !== 'mail_review') return;
+            try {
+              log.warn('CoS Mail review admission closed', { stage });
+              // eslint-disable-next-line no-catch-all/no-catch-all -- Diagnostics cannot change a failed admission check.
+            } catch {
+              // Diagnostics cannot change admission or disclose a private failure.
+            }
+          };
+          const denied = (stage: Parameters<typeof closed>[0]): Result => {
+            closed(stage);
+            return { status: 'denied' };
+          };
+          if (!d.store?.knowledge) return denied('store');
           const session = d.session(binding.sessionId),
             boundary = session && cosBoundary(session, d.db);
-          if (!session || !boundary?.restricted || !boundary.ingressId) return { status: 'denied' };
-          const ownerContext = { ...context, ingressId: boundary.ingressId };
+          if (
+            !session ||
+            !boundary?.restricted ||
+            !boundary.binding ||
+            boundary.paused ||
+            digest(boundary.binding) !== digest(binding)
+          )
+            return denied('boundary');
           const current = () =>
             enabled() && digest(cosBoundary(session, d.db)) === digest(boundary) && !(d.running?.(session.id) ?? true);
-          const retained = resolveKnowledgeContext(session, ownerContext, d.db);
-          if (!retained || !current()) return { status: 'denied' };
+          const retained = resolveBriefPreparationContext(session, context, d.db);
+          if (!retained) return denied('context');
+          if (!current()) return denied('currentness');
           const readable = await d.store.knowledge.contextReady(retained);
-          if (!current()) return { status: 'denied' };
-          if (readable.status !== 'ok') return readable;
+          if (!current()) return denied('currentness');
+          if (readable.status !== 'ok') {
+            closed('knowledge');
+            return readable;
+          }
+          if (run.provenance?.purpose === 'mail_review') {
+            if (!d.launcher?.canBeginMailReview?.(binding)) return denied('model_budget');
+            if (!(await briefAdmission(binding))) return denied('channel_admission');
+            if (!current()) return denied('currentness');
+            const prepared = await d.store.prepareMailReview(retained, run.id, run.generation, current);
+            if (prepared.status !== 'ok') return prepared;
+            const same = resolveBriefPreparationContext(session, context, d.db);
+            return current() && !!same && digest(same) === digest(retained)
+              ? { status: 'ok' }
+              : denied('final_context');
+          }
           const refreshed = await new BriefRefresh({
             runs: d.store.briefs,
             connector: d.store.calendar,
@@ -407,7 +452,7 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
           }).execute(context, run.id, run.generation, binding.provider, run.limits.refresh_seconds);
           if (!current()) return { status: 'denied' };
           if (refreshed.status !== 'ok') return refreshed;
-          const fresh = resolveKnowledgeContext(session, ownerContext, d.db);
+          const fresh = resolveBriefPreparationContext(session, context, d.db);
           if (!fresh) return { status: 'denied' };
           const ready = await d.store.knowledge.contextReady(fresh);
           if (ready.status !== 'ok' || !current()) return ready.status === 'ok' ? { status: 'denied' } : ready;
@@ -525,7 +570,14 @@ export function createCosRuntime(dependencies: RuntimeDependencies) {
               return null;
             if (context.origin?.kind === 'schedule') {
               const retained = resolveKnowledgeContext(session, context, d.db);
-              if (!retained || (await d.store.proactive.scheduledBatch(retained)).status !== 'ok') return null;
+              if (!retained) return null;
+              const access = d.store.mailReviewAccess;
+              const reviewScope = access
+                ? await d.store.database.run((client) => access.scopeForReads(client, retained))
+                : null;
+              if (reviewScope === null) {
+                if ((await d.store.proactive.scheduledBatch(retained)).status !== 'ok') return null;
+              } else if (reviewScope.binding_id === null) return null;
             }
             return context;
           },

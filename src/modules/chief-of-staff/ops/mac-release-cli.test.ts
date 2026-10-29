@@ -8,6 +8,8 @@ import {
   releaseCheckImageIds,
   assertCleanCandidateSource,
   observeCandidateSource,
+  releaseArtifactFixtureProfile,
+  releaseFixtureDeadline,
 } from './mac-release-cli.js';
 import { BACKUP_RELEASE_CHECKS, MAIL_RELEASE_CHECKS, MAIL_DRAFT_RELEASE_CHECKS } from './release-manifest.js';
 import { fixtureRelease } from '../../../contracts/chief-of-staff/release-fixture.js';
@@ -109,7 +111,7 @@ const images = [
   { role: 'agent' as const, id: 'sha256:' + 'b'.repeat(64) },
   { role: 'agent' as const, id: 'sha256:' + 'c'.repeat(64) },
 ];
-it('admits G02 through G05 candidate syntax while refusing historical and unimplemented future release creation', async () => {
+it('admits G02 through G06 candidate syntax while refusing historical and unopened future release creation', async () => {
   const args = (slice: string) => [
     'init',
     'release-' + '1'.repeat(12) + '-20261011000000',
@@ -121,7 +123,8 @@ it('admits G02 through G05 candidate syntax while refusing historical and unimpl
   await expect(macReleaseCommand(args('G03'))).rejects.toThrow('invalid_candidate_source');
   await expect(macReleaseCommand(args('G04'))).rejects.toThrow('invalid_candidate_source');
   await expect(macReleaseCommand(args('G05'))).rejects.toThrow('invalid_candidate_source');
-  for (const slice of ['S10', 'G06', 'G07'])
+  await expect(macReleaseCommand(args('G06'))).rejects.toThrow('invalid_candidate_source');
+  for (const slice of ['S10', 'G07'])
     await expect(macReleaseCommand(args(slice))).rejects.toThrow('current_release_slice_required');
 });
 it.each([
@@ -132,6 +135,7 @@ it.each([
   'vault_kernel',
   'vault_wire',
   'vault_units',
+  'mail_review_policy',
 ])('binds %s only to the registered immutable host, refusing partial image sets', (name) => {
   expect(releaseCheckImageIds(images, name)).toEqual([images[0].id]);
   expect(() => releaseCheckImageIds([], name)).toThrow('image_identity_required');
@@ -143,14 +147,38 @@ it.each([
     ),
   ).toThrow('image_identity_required');
 });
-it.each(['protected_state', 'mail_evidence', 'draft_transport', 'host_image', 'agent_image', 'image_isolation'])(
-  'binds the %s gate to the complete immutable host and worker set',
-  (name) => {
-    expect(releaseCheckImageIds(images, name)).toEqual(images.map((image) => image.id));
-    expect(() => releaseCheckImageIds([], name)).toThrow('image_identity_required');
-    expect(() => releaseCheckImageIds(images.slice(0, 2), name)).toThrow('image_identity_required');
-  },
-);
+it.each([
+  'protected_state',
+  'mail_evidence',
+  'draft_transport',
+  'mail_review_schedule',
+  'mail_review_flow',
+  'host_image',
+  'agent_image',
+  'image_isolation',
+])('binds the %s gate to the complete immutable host and worker set', (name) => {
+  expect(releaseCheckImageIds(images, name)).toEqual(images.map((image) => image.id));
+  expect(() => releaseCheckImageIds([], name)).toThrow('image_identity_required');
+  expect(() => releaseCheckImageIds(images.slice(0, 2), name)).toThrow('image_identity_required');
+});
+it('keeps G06 Mail review reports separate from inherited reader and draft artifact reports', () => {
+  for (const name of ['mail_review_policy', 'mail_review_schedule', 'mail_review_flow']) {
+    expect(releaseArtifactFixtureProfile('G06', name)).toBe('review');
+    expect(() => releaseArtifactFixtureProfile('G05', name)).toThrow('review_release_required');
+  }
+  for (const slice of ['G05', 'G06'] as const) {
+    expect(releaseArtifactFixtureProfile(slice, 'draft_policy')).toBe('draft');
+    expect(releaseArtifactFixtureProfile(slice, 'mail_capture')).toBe('mail');
+  }
+  expect(() => releaseArtifactFixtureProfile('G04', 'draft_policy')).toThrow('draft_release_required');
+  expect(() => releaseArtifactFixtureProfile('G03', 'mail_capture')).toThrow('mail_release_required');
+  expect(releaseArtifactFixtureProfile('G06', 'mail_credentials')).toBeNull();
+});
+it('keeps the G06 source wrapper alive through the bounded inherited suite and child shutdown', () => {
+  expect(releaseFixtureDeadline('G06', 'slice')).toBe(1860000);
+  expect(releaseFixtureDeadline('G06', 'demo')).toBe(1260000);
+  expect(releaseFixtureDeadline('G05', 'slice')).toBe(1860000);
+});
 it('keeps source checks distinct from immutable image evidence', () => {
   for (const name of ['root', 'runner', 'slice', 'demo']) expect(releaseCheckImageIds([], name)).toEqual([]);
 });

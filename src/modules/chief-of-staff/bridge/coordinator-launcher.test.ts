@@ -8,7 +8,7 @@ import Database from 'better-sqlite3';
 import type { Session } from '../../../types.js';
 import { installCosBoundary, type CosBinding } from '../../../cos-boundary.js';
 import { issueActivation } from '../ops/model-activation.js';
-import { ensureModelBudget } from './model-policy.js';
+import { ensureModelBudget, reserveSubscriptionAttempt } from './model-policy.js';
 const state = vi.hoisted(() => ({ session: '' }));
 vi.mock('../../../release-runtime.js', () => ({
   releaseMode: () => true,
@@ -71,12 +71,12 @@ describe('S01 coordinator admission', () => {
     try {
       const context = launcher.context(binding);
       const policy = {
-        version: 2,
-        runtime: 'codex-subscription/v1',
+        version: 2 as const,
+        runtime: 'codex-subscription/v1' as const,
         activationId: 'c'.repeat(32),
         consentRef: 'fixture',
         scopeId: binding.scopeId,
-        provider: 'codex',
+        provider: 'codex' as const,
         model: 'fixture-model',
         maxAttempts: 1,
         accountFingerprint: context.accountFingerprint,
@@ -90,6 +90,26 @@ describe('S01 coordinator admission', () => {
       );
       db.exec("UPDATE cos_identity_boundaries SET paused=0,ingress_id='ingress'");
       expect(launcher.ready(binding)).toBe(true);
+      const budgets = () => db.prepare('SELECT * FROM cos_model_budgets').all();
+      const initialBudget = budgets();
+      expect(launcher.canBeginMailReview(binding)).toBe(true);
+      expect(budgets()).toEqual(initialBudget);
+      for (const value of [-1, 0.5, policy.maxAttempts]) {
+        db.prepare('UPDATE cos_model_budgets SET used=?').run(value);
+        const before = budgets();
+        expect(launcher.canBeginMailReview(binding)).toBe(false);
+        expect(budgets()).toEqual(before);
+        expect(launcher.ready(binding)).toBe(true);
+      }
+      db.prepare('UPDATE cos_model_budgets SET used=0,policy_digest=?').run('changed');
+      expect(launcher.canBeginMailReview(binding)).toBe(false);
+      db.prepare('DELETE FROM cos_model_budgets').run();
+      expect(launcher.canBeginMailReview(binding)).toBe(false);
+      expect(budgets()).toEqual([]);
+      db.prepare('INSERT INTO cos_model_budgets(activation_id,policy_digest,used) VALUES(?,?,0)').run(
+        policy.activationId,
+        (initialBudget[0] as { policy_digest: string }).policy_digest,
+      );
       const reserve = vi.fn().mockResolvedValue(false);
       const authorize = Object.assign(
         vi.fn(async (_mode?: 'poll'): Promise<string | null> => 'ingress'),
@@ -134,6 +154,12 @@ describe('S01 coordinator admission', () => {
       expect(launcher.context(binding).generation).toBe(renewed.generation);
       expect(launcher.ready(binding)).toBe(true);
       expect(JSON.parse(fs.readFileSync(path.join(target, 'model-activation.json'), 'utf8'))).toEqual(policy);
+      expect(reserveSubscriptionAttempt(db, policy, 'ingress', randomUUID())).toBe(true);
+      const consumed = budgets();
+      expect(launcher.canBeginMailReview(binding)).toBe(false);
+      expect(budgets()).toEqual(consumed);
+      // The last admitted attempt can still read back and deliver its checked output.
+      expect(launcher.ready(binding)).toBe(true);
       launcher.invalidate(binding.scopeId);
       expect(launcher.ready(binding)).toBe(false);
     } finally {

@@ -2,12 +2,15 @@
 # Mac driver: compiled host plus each immutable worker, selected test profile only.
 set -euo pipefail
 umask 077
-[[ "$(uname -s)" == Darwin && ( $# == 5 || ( $# == 6 && "${6:-}" == --drafts ) ) ]] || exit 1
+[[ "$(uname -s)" == Darwin && ( $# == 5 || ( $# == 6 && ( "${6:-}" == --drafts || "${6:-}" == --mail-reviews ) ) ) ]] || exit 1
 [[ -z "${DOCKER_HOST:-}${DOCKER_CONTEXT:-}${DOCKER_TLS_VERIFY:-}${DOCKER_CERT_PATH:-}" ]] || exit 1
 host=$1 standard=$2 documents=$3 test_environment=$4 certificate=$5
 fixture_contract=cos-g04-mail
 artifact_selection=()
-if [[ $# == 6 ]]; then
+if [[ "${6:-}" == --mail-reviews ]]; then
+  fixture_contract=cos-g06-review
+  artifact_selection=(G06)
+elif [[ $# == 6 ]]; then
   fixture_contract=cos-g05-draft
   artifact_selection=(G05)
 fi
@@ -30,7 +33,7 @@ for worker in "$standard" "$documents"; do
   [[ "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$worker")" == "$source_commit" ]] || exit 1
   [[ "$(docker image inspect --format '{{index .Config.Labels "nanoclaw.worker-assets"}}' "$worker")" == "$assets" ]] || exit 1
 done
-test_root="$(git rev-parse --show-toplevel)/.cos-plan-state/release-tests"
+test_root=$(cd "$(git rev-parse --show-toplevel)/.cos-plan-state/release-tests" && pwd -P)
 relative=${test_environment#"$test_root/"}
 [[ "$relative" =~ ^release-[a-f0-9]{12}-[0-9]{14}/test\.env$ && "$certificate" == "${test_environment%/*}/ca.pem" ]] || exit 1
 [[ "$(cd "${test_environment%/*}" && pwd -P)" == "${test_environment%/*}" ]] || exit 1

@@ -357,6 +357,138 @@ it('does not open G06 by admitting G05 development', () => {
   f.save();
   expect(() => readExtensionRelease(f.root, true)).toThrow('extension_release_not_admitted');
 });
+function completedG05(f: ReturnType<typeof fixture>) {
+  completedG04(f);
+  const commit = '5'.repeat(40),
+    tree = '6'.repeat(40),
+    releaseId = 'release-reviewed-g05';
+  const p = {
+    status: 'complete',
+    depends_on: 'G04',
+    review: { status: 'human_review_and_merge_verified', reviewed: true, merged: true, mergeCommit: commit },
+    current_source: { commit, tree, releaseId },
+    deployed_source_sha: commit,
+    pi_smoke_status: 'passed',
+    merged_release_reconciliation: {
+      status: 'passed',
+      commit,
+      tree,
+      releaseId,
+      humanReview: 'verified',
+      allMandatoryGates: 'passed',
+      actualPiAcceptance: 'passed',
+    },
+    merged_acceptance: {
+      commit,
+      tree,
+      releaseId,
+      liveSavedDraftDemonstrationVerified: true,
+      existingSavedDraftIndependentlyReverified: true,
+      currentEncryptedCheckpointUploaded: true,
+      completeCredentialsVerified: true,
+      originalContextAndCountersPreserved: true,
+      allProtectedTablesPreserved: true,
+      actualIsolatedRecoveryApplicable: true,
+      latestFinalStateCheckpointSQLRestored: false,
+    },
+    actual_merged_remote_checkpoint: {
+      status: 'backup_uploaded',
+      maintenance: { status: 'verified' },
+      state: { pending: 0, held: 0 },
+      credentials: { pending: 0, held: 0 },
+    },
+    retained_history: { keep: true },
+  };
+  Object.assign(p.actual_merged_remote_checkpoint, {
+    sourceCommit: commit,
+    sourceTree: tree,
+    releaseId,
+    completeCredentialsVerified: true,
+    exactStateAcknowledgementVerified: true,
+  });
+  Reflect.deleteProperty(p.actual_merged_remote_checkpoint, 'maintenance');
+  Object.assign(f.extension.slices, {
+    G05: p,
+    G06: { status: 'in_progress', depends_on: 'G05', modelAllowanceRenewed: false, unknown: 'retain-g06' },
+  });
+  f.extension.active_slice = 'G06';
+  f.save();
+  return p;
+}
+it('admits G06 only after exact reviewed G05 draft, recovery and encrypted-checkpoint acceptance, preserving earlier ledgers', () => {
+  const f = fixture(),
+    p = completedG05(f),
+    original = fs.readFileSync(f.root + '/execution.json'),
+    before = structuredClone(p);
+  expect(readReleaseExecution(f.root, 'G06', true)).toEqual(f.extension);
+  checkpointReleaseExecution(f.root, 'G06', { release_status: 'g06_fixture_pending' });
+  const saved = JSON.parse(fs.readFileSync(f.root + '/google-mail-storage-execution.json', 'utf8'));
+  expect(saved.slices.G06).toMatchObject({
+    release_status: 'g06_fixture_pending',
+    modelAllowanceRenewed: false,
+    unknown: 'retain-g06',
+  });
+  expect(saved.slices.G05).toEqual(before);
+  expect(fs.readFileSync(f.root + '/execution.json')).toEqual(original);
+});
+it.each([
+  'review',
+  'current-source',
+  'delivery',
+  'live-demo',
+  'draft-readback',
+  'upload-source',
+  'upload-credentials',
+  'upload-acknowledgement',
+  'credentials',
+  'context',
+  'tables',
+  'recovery',
+  'upload',
+  'pending',
+  'held',
+  'acceptance-source',
+])('G06 refuses missing G05 %s acceptance without changing either ledger', (failure) => {
+  const f = fixture(),
+    p = completedG05(f);
+  if (failure === 'review') p.review.reviewed = false;
+  if (failure === 'current-source') p.current_source.commit = '0'.repeat(40);
+  if (failure === 'delivery') p.merged_release_reconciliation.actualPiAcceptance = 'pending';
+  if (failure === 'live-demo') p.merged_acceptance.liveSavedDraftDemonstrationVerified = false;
+  if (failure === 'draft-readback') p.merged_acceptance.existingSavedDraftIndependentlyReverified = false;
+  if (failure === 'upload-source') Object.assign(p.actual_merged_remote_checkpoint, { sourceCommit: '0'.repeat(40) });
+  if (failure === 'upload-credentials')
+    Object.assign(p.actual_merged_remote_checkpoint, { completeCredentialsVerified: false });
+  if (failure === 'upload-acknowledgement')
+    Object.assign(p.actual_merged_remote_checkpoint, { exactStateAcknowledgementVerified: false });
+  if (failure === 'credentials') p.merged_acceptance.completeCredentialsVerified = false;
+  if (failure === 'context') p.merged_acceptance.originalContextAndCountersPreserved = false;
+  if (failure === 'tables') p.merged_acceptance.allProtectedTablesPreserved = false;
+  if (failure === 'recovery') p.merged_acceptance.actualIsolatedRecoveryApplicable = false;
+  if (failure === 'upload') p.actual_merged_remote_checkpoint.status = 'failed';
+  if (failure === 'pending') p.actual_merged_remote_checkpoint.state.pending = 1;
+  if (failure === 'held') p.actual_merged_remote_checkpoint.credentials.held = 1;
+  if (failure === 'acceptance-source') p.merged_acceptance.commit = '0'.repeat(40);
+  f.save();
+  const original = fs.readFileSync(f.root + '/execution.json'),
+    extension = fs.readFileSync(f.root + '/google-mail-storage-execution.json');
+  expect(() => readReleaseExecution(f.root, 'G06', true)).toThrow();
+  expect(() => checkpointReleaseExecution(f.root, 'G06', { must_not_write: true })).toThrow();
+  expect(fs.readFileSync(f.root + '/execution.json')).toEqual(original);
+  expect(fs.readFileSync(f.root + '/google-mail-storage-execution.json')).toEqual(extension);
+});
+it('does not admit G07 or bypass a G06 human review wait', () => {
+  const f = fixture();
+  completedG05(f);
+  (f.extension.slices as Record<string, { status: string }>).G06.status = 'awaiting_review';
+  f.save();
+  expect(() => readReleaseExecution(f.root, 'G06', true)).toThrow();
+  expect(readReleaseExecution(f.root, 'G06', false)).toEqual(f.extension);
+  f.extension.active_slice = 'G07';
+  Object.assign(f.extension.slices, { G07: { status: 'in_progress', depends_on: 'G06' } });
+  f.save();
+  expect(() => readExtensionRelease(f.root, true)).toThrow();
+});
 it.each(['review', 'source', 'live', 'context', 'checkpoint', 'pending', 'held', 'acceptance-source'])(
   'refuses G04 without G03 %s evidence and preserves both ledgers',
   (boundary) => {

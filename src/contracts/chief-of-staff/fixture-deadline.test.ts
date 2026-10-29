@@ -14,6 +14,8 @@ it('allows the accumulated G05 suite to finish a late native case within its exi
 });
 
 it.each([
+  ['G06', false, 1800000],
+  ['G06', true, 1200000],
   ['G05', true, 1200000],
   ['G04', false, 1200000],
   ['G03', false, 1200000],

@@ -60,9 +60,9 @@ export async function operationsMaintenance(input: {
   const manifest = validateReleaseManifest(await effects.verify()),
     state = readTarget(root, binding);
   if (
-    !['S11', 'G01', 'G02', 'G03', 'G04', 'G05'].includes(manifest.slice) ||
+    !['S11', 'G01', 'G02', 'G03', 'G04', 'G05', 'G06'].includes(manifest.slice) ||
     state.releaseId !== manifest.releaseId ||
-    (['G01', 'G02', 'G03', 'G04', 'G05'].includes(manifest.slice) && state.lifecycle !== 'protected')
+    (['G01', 'G02', 'G03', 'G04', 'G05', 'G06'].includes(manifest.slice) && state.lifecycle !== 'protected')
   )
     unverified();
   const receipts = path.join(root, 'operations-maintenance');
@@ -113,7 +113,7 @@ export async function operationsMaintenance(input: {
     if (
       digest(validateReleaseManifest(await effects.verify())) !== record.manifestDigest ||
       readTarget(root, binding).releaseId !== record.releaseId ||
-      (['G01', 'G02', 'G03', 'G04', 'G05'].includes(manifest.slice) &&
+      (['G01', 'G02', 'G03', 'G04', 'G05', 'G06'].includes(manifest.slice) &&
         readTarget(root, binding).lifecycle !== 'protected')
     )
       unverified();

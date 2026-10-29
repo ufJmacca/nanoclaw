@@ -36,6 +36,7 @@ const { createMissionAuthorityResolver } = nativeAuthority;
 import { createTeamAuthorityResolver } from './team-authority.js';
 import { configureTeamAdmission, TEAM_ADMISSION_POLICY } from './team-admission.js';
 import { TEAM_TEMPLATES } from '../contracts/team-templates.js';
+import { installScheduledOrigin, scheduledContext, interruptScheduledOrigin } from '../automation/scheduled-origin.js';
 beforeEach(() => {
   fs.mkdirSync(f.root, { mode: 0o700 });
   runMigrations(initTestDb());
@@ -190,6 +191,83 @@ it('G05 draft authority uses the retained owner main context without delegation,
   ).toBeNull();
   expect(t.db.serialize()).toEqual(before);
   expect(fs.readdirSync(t.root, { recursive: true })).toEqual(files);
+  expect(t.owner.prepare).not.toHaveBeenCalled();
+});
+it('G06 verifies the installed scheduled identity without creating a main context or reserving allowance', () => {
+  const t = fixture(),
+    session = getSession(t.binding.sessionId)!;
+  const lease = {
+    runId: 'c'.repeat(64),
+    generation: 1,
+    hostId: 'cos-native-' + digest(t.binding),
+    deadlineAt: new Date(Date.now() + 120000).toISOString(),
+  };
+  expect(installScheduledOrigin(t.db, t.binding, session, lease)).toBe(true);
+  const context = scheduledContext(session, t.db)!;
+  const options = { targetRoot: t.root, db: t.db, admitted: t.admitted, assertHostAuthority: t.assertHostAuthority };
+  const resolver = nativeAuthority.createMailReviewAuthorityResolver(options);
+  for (let n = 0; n < t.policy.maxAttempts; n++)
+    expect(reserveSubscriptionAttempt(t.db, t.policy, 'event', randomUUID())).toBe(true);
+  const before = t.db.serialize(),
+    files = fs.readdirSync(t.root, { recursive: true });
+  expect(resolver(context)).toMatchObject({
+    bindingDigest: digest(t.binding),
+    contextGeneration: t.retained.generation,
+    draftProfileDigest: digest('cos-mail-draft/v1'),
+  });
+  expect(nativeAuthority.createMailDraftAuthorityResolver(options)(context)).toBeNull();
+  expect(resolver(t.context)).toBeNull();
+  expect(t.db.serialize()).toEqual(before);
+  expect(fs.readdirSync(t.root, { recursive: true })).toEqual(files);
+  expect(t.owner.prepare).not.toHaveBeenCalled();
+  expect(reserveSubscriptionAttempt(t.db, t.policy, 'event', randomUUID())).toBe(false);
+});
+it.each([
+  'paused',
+  'preempted',
+  'expired-lease',
+  'wrong-run',
+  'wrong-generation',
+  'foreign-owner',
+  'foreign-account',
+  'invalid-context',
+  'expired-policy',
+  'lost-host',
+])('G06 scheduled identity rejects %s', (kind) => {
+  const t = fixture(),
+    session = getSession(t.binding.sessionId)!;
+  const lease = {
+    runId: 'c'.repeat(64),
+    generation: 1,
+    hostId: 'cos-native-' + digest(t.binding),
+    deadlineAt: new Date(Date.now() + 120000).toISOString(),
+  };
+  expect(installScheduledOrigin(t.db, t.binding, session, lease)).toBe(true);
+  const context = scheduledContext(session, t.db)!;
+  const resolver = nativeAuthority.createMailReviewAuthorityResolver({
+    targetRoot: t.root,
+    db: t.db,
+    admitted: t.admitted,
+    assertHostAuthority: t.assertHostAuthority,
+  });
+  if (kind === 'paused') t.db.exec('UPDATE cos_identity_boundaries SET paused=1');
+  if (kind === 'preempted') interruptScheduledOrigin(t.db, t.binding);
+  if (kind === 'expired-lease') t.db.exec("UPDATE cos_scheduled_origins SET deadline_at='2000-01-01T00:00:00.000Z'");
+  if (kind === 'wrong-run') context.origin = { kind: 'schedule', runId: 'd'.repeat(64), generation: 1 };
+  if (kind === 'wrong-generation') context.origin = { kind: 'schedule', runId: lease.runId, generation: 2 };
+  if (kind === 'foreign-owner') context.ownerId = 'someone-else';
+  if (kind === 'foreign-account')
+    t.owner.cached.mockReturnValue({ authJson: JSON.stringify({ tokens: { account_id: 'other' } }) });
+  if (kind === 'invalid-context') t.db.exec("UPDATE cos_conversation_states SET status='invalidated'");
+  if (kind === 'expired-policy')
+    writeAtomic(t.root, 'model-activation.json', { ...t.policy, expiresAt: '2000-01-01T00:00:00Z' });
+  if (kind === 'lost-host')
+    t.assertHostAuthority.mockImplementation(() => {
+      throw Error('lost');
+    });
+  const before = t.db.serialize();
+  expect(resolver(context)).toBeNull();
+  expect(t.db.serialize()).toEqual(before);
   expect(t.owner.prepare).not.toHaveBeenCalled();
 });
 it('S05-T03 derives only current host-owned mission pins without preparing context or reserving model use', () => {
