@@ -99,7 +99,8 @@ export function mailArtifactFixtureCertificate(inspection: unknown, releaseId: s
     if (!Array.isArray(inspection) || inspection.length !== 1 || !/^release-[a-f0-9]{12}-[0-9]{14}$/.test(releaseId))
       throw Error('inspection');
     const mounts = objects(object(inspection[0]).Mounts),
-      root = one(mounts, 'Destination', '/workspace');
+      stateMounted = mounts.some((mount) => mount.Destination === '/workspace/.cos-plan-state'),
+      root = one(mounts, 'Destination', stateMounted ? '/workspace/.cos-plan-state' : '/workspace');
     if (
       root.Type !== 'bind' ||
       root.RW !== true ||
@@ -114,7 +115,10 @@ export function mailArtifactFixtureCertificate(inspection: unknown, releaseId: s
     // the observed Users mapping; never treat an unknown VM path as a Mac root.
     const source = root.Source.startsWith('/host_mnt/Users/') ? root.Source.slice('/host_mnt'.length) : root.Source;
     if (source === '/host_mnt' || source.startsWith('/host_mnt/')) throw Error('workspace_mapping');
-    return path.join(source, '.cos-plan-state/release-tests', releaseId, 'ca.pem');
+    if (stateMounted && path.basename(source) !== '.cos-plan-state') throw Error('state_mapping');
+    // The separately mounted state directory overlays any source-workspace bind.
+    // Its observed Mac path is therefore authoritative for the selected CA.
+    return path.join(stateMounted ? source : path.join(source, '.cos-plan-state'), 'release-tests', releaseId, 'ca.pem');
   } catch {
     // eslint-disable-next-line preserve-caught-error -- Inspection may contain unrelated private configuration; return only a fixed mapping failure.
     throw Error('mail_fixture_workspace_unverified');

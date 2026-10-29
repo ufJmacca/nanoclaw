@@ -33,7 +33,7 @@ for worker in "$standard" "$documents"; do
   [[ "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$worker")" == "$source_commit" ]] || exit 1
   [[ "$(docker image inspect --format '{{index .Config.Labels "nanoclaw.worker-assets"}}' "$worker")" == "$assets" ]] || exit 1
 done
-test_root="$(git rev-parse --show-toplevel)/.cos-plan-state/release-tests"
+test_root=$(cd "$(git rev-parse --show-toplevel)/.cos-plan-state/release-tests" && pwd -P)
 relative=${test_environment#"$test_root/"}
 [[ "$relative" =~ ^release-[a-f0-9]{12}-[0-9]{14}/test\.env$ && "$certificate" == "${test_environment%/*}/ca.pem" ]] || exit 1
 [[ "$(cd "${test_environment%/*}" && pwd -P)" == "${test_environment%/*}" ]] || exit 1
