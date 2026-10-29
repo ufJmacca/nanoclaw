@@ -118,7 +118,12 @@ export function mailArtifactFixtureCertificate(inspection: unknown, releaseId: s
     if (stateMounted && path.basename(source) !== '.cos-plan-state') throw Error('state_mapping');
     // The separately mounted state directory overlays any source-workspace bind.
     // Its observed Mac path is therefore authoritative for the selected CA.
-    return path.join(stateMounted ? source : path.join(source, '.cos-plan-state'), 'release-tests', releaseId, 'ca.pem');
+    return path.join(
+      stateMounted ? source : path.join(source, '.cos-plan-state'),
+      'release-tests',
+      releaseId,
+      'ca.pem',
+    );
   } catch {
     // eslint-disable-next-line preserve-caught-error -- Inspection may contain unrelated private configuration; return only a fixed mapping failure.
     throw Error('mail_fixture_workspace_unverified');

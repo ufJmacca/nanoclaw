@@ -449,22 +449,43 @@ it.each([
 it.each(['/Users/fixture/project/.cos-plan-state', '/host_mnt/Users/fixture/project/.cos-plan-state'])(
   'maps an independently registered private state bind for an isolated source workspace: %s',
   (source) => {
-    expect(mailArtifactFixtureCertificate([{ Mounts: [
-      { Type: 'bind', Source: source, Destination: '/workspace/.cos-plan-state', RW: true },
-    ] }], 'release-aaaaaaaaaaaa-20261016000000')).toBe(
-      '/Users/fixture/project/.cos-plan-state/release-tests/release-aaaaaaaaaaaa-20261016000000/ca.pem',
-    );
+    expect(
+      mailArtifactFixtureCertificate(
+        [{ Mounts: [{ Type: 'bind', Source: source, Destination: '/workspace/.cos-plan-state', RW: true }] }],
+        'release-aaaaaaaaaaaa-20261016000000',
+      ),
+    ).toBe('/Users/fixture/project/.cos-plan-state/release-tests/release-aaaaaaaaaaaa-20261016000000/ca.pem');
   },
 );
 it('uses the overlaid private-state bind instead of the source workspace path', () => {
-  expect(mailArtifactFixtureCertificate([{ Mounts: [
-    { Type: 'bind', Source: '/Users/fixture/source', Destination: '/workspace', RW: true },
-    { Type: 'bind', Source: '/Users/fixture/primary/.cos-plan-state', Destination: '/workspace/.cos-plan-state', RW: true },
-  ] }], 'release-aaaaaaaaaaaa-20261016000000')).toContain('/Users/fixture/primary/.cos-plan-state/');
+  expect(
+    mailArtifactFixtureCertificate(
+      [
+        {
+          Mounts: [
+            { Type: 'bind', Source: '/Users/fixture/source', Destination: '/workspace', RW: true },
+            {
+              Type: 'bind',
+              Source: '/Users/fixture/primary/.cos-plan-state',
+              Destination: '/workspace/.cos-plan-state',
+              RW: true,
+            },
+          ],
+        },
+      ],
+      'release-aaaaaaaaaaaa-20261016000000',
+    ),
+  ).toContain('/Users/fixture/primary/.cos-plan-state/');
 });
 it.each(['duplicate', 'volume', 'readonly', 'relative', 'parent', 'root', 'wrong-directory', 'unknown-host-mount'])(
-  'does not fall back to the workspace when its private-state bind is invalid: %s', (reason) => {
-    const state = { Type: 'bind', Source: '/Users/fixture/project/.cos-plan-state', Destination: '/workspace/.cos-plan-state', RW: true },
+  'does not fall back to the workspace when its private-state bind is invalid: %s',
+  (reason) => {
+    const state = {
+        Type: 'bind',
+        Source: '/Users/fixture/project/.cos-plan-state',
+        Destination: '/workspace/.cos-plan-state',
+        RW: true,
+      },
       mounts = [{ Type: 'bind', Source: '/Users/fixture/other', Destination: '/workspace', RW: true }, state];
     if (reason === 'duplicate') mounts.push({ ...state });
     if (reason === 'volume') state.Type = 'volume';
@@ -474,8 +495,9 @@ it.each(['duplicate', 'volume', 'readonly', 'relative', 'parent', 'root', 'wrong
     if (reason === 'root') state.Source = '/';
     if (reason === 'wrong-directory') state.Source = '/Users/fixture/project/other';
     if (reason === 'unknown-host-mount') state.Source = '/host_mnt/private/fixture/.cos-plan-state';
-    expect(() => mailArtifactFixtureCertificate([{ Mounts: mounts }], 'release-aaaaaaaaaaaa-20261016000000'))
-      .toThrow('mail_fixture_workspace_unverified');
+    expect(() => mailArtifactFixtureCertificate([{ Mounts: mounts }], 'release-aaaaaaaaaaaa-20261016000000')).toThrow(
+      'mail_fixture_workspace_unverified',
+    );
   },
 );
 it.each(['mail_capture', 'mail_evidence', 'mail_retention'])('requires complete artifact proof for %s', (gate) => {
