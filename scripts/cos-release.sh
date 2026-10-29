@@ -19,6 +19,10 @@ commit=$(git rev-parse HEAD)
 tree=$(git rev-parse 'HEAD^{tree}')
 branch=$(git symbolic-ref HEAD)
 [[ "$branch" == refs/heads/* ]] || exit 1
+dev=${COS_DEVCONTAINER_ID:-$(docker compose -f .devcontainer/compose.yaml -p nanoclaw-cos ps -q devcontainer)}
+[[ "$dev" =~ ^[a-zA-Z0-9_.-]+$ ]] || { echo 'The repository devcontainer must be running.' >&2; exit 1; }
+cli() { docker exec -w /workspace "$dev" node --import tsx src/modules/chief-of-staff/ops/mac-release-cli.ts "$@"; }
+cli toolchain
 mkdir -p .cos-plan-state/releases .cos-plan-state/release-tests
 lock="$root/.cos-plan-state/release.lock"
 mkdir "$lock" || { echo 'Another release owns the Mac lock; reconcile it before retrying.' >&2; exit 1; }
@@ -34,10 +38,7 @@ stamp=$(date -u +%Y%m%d%H%M%S)
 id="release-${commit:0:12}-$stamp"
 directory="$root/.cos-plan-state/releases/$id"
 mkdir "$directory"
-dev=${COS_DEVCONTAINER_ID:-$(docker compose -f .devcontainer/compose.yaml -p nanoclaw-cos ps -q devcontainer)}
-[[ "$dev" =~ ^[a-zA-Z0-9_.-]+$ ]] || { echo 'The repository devcontainer must be running.' >&2; exit 1; }
 docker inspect "$dev" > "$directory/devcontainer.json"
-cli() { docker exec -w /workspace "$dev" node --import tsx src/modules/chief-of-staff/ops/mac-release-cli.ts "$@"; }
 cli init "$id" "$commit" "$branch" "$slice"
 timing_helper="$directory/context/scripts/cos-stage-timing.sh"
 [[ -f "$timing_helper" && -r "$timing_helper" ]] || { echo 'Pinned release timing helper is unavailable.' >&2; exit 1; }

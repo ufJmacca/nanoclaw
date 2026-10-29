@@ -1,5 +1,6 @@
 /** Project tooling for the host shell coordinator. This file runs only in the devcontainer. */
 import fs from 'node:fs';
+import { verifyReleaseTestRuntime } from './release-test-runtime.js';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { spawnSync, execFileSync } from 'node:child_process';
@@ -144,6 +145,10 @@ function inspect(root: string, target: BuildTarget) {
 }
 export async function macReleaseCommand(args: string[]): Promise<string | void> {
   const [operation, id, ...values] = args;
+  if (operation === 'toolchain' && args.length === 1) {
+    verifyReleaseTestRuntime();
+    return 'development_test_runtime_ready';
+  }
   if (operation === 'certificate' && args.length === 1) {
     const file = readEnvFile(['COS_TEST_PGSSLROOTCERT']).COS_TEST_PGSSLROOTCERT;
     if (!file || !path.isAbsolute(file) || /[\0\r\n]/.test(file)) throw new Error('test_certificate_required');
